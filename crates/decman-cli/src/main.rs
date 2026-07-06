@@ -6,9 +6,13 @@ mod config;
 mod logo;
 mod ui;
 
+use std::io::stdout;
+
 use anyhow::Result;
 use clap::Parser;
 use ratatui::DefaultTerminal;
+use ratatui::crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use ratatui::crossterm::execute;
 use tracing_subscriber::{EnvFilter, fmt};
 
 use crate::api::AuthSettings;
@@ -43,14 +47,36 @@ fn main() -> Result<()> {
     };
 
     let mut terminal = ratatui::init();
+    enable_mouse();
+    // `ratatui::init` installs a panic hook that restores the terminal; chain it
+    // so a panic also turns mouse capture back off (else the terminal is left
+    // emitting mouse escape codes).
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        disable_mouse();
+        previous_hook(info);
+    }));
+
     let result = match env_session {
         Some((api_url, auth)) => run_env(&mut terminal, api_url, auth),
         None => run_profiles(&mut terminal, profiles),
     };
+    disable_mouse();
     ratatui::restore();
 
     tracing::info!("decman-cli terminal UI exited");
     result
+}
+
+/// Turn on mouse capture so the TUI receives scroll / click events. Best-effort:
+/// a terminal that rejects it just leaves the keyboard-only experience intact.
+fn enable_mouse() {
+    let _ = execute!(stdout(), EnableMouseCapture);
+}
+
+/// Turn mouse capture back off, restoring the terminal's native text selection.
+fn disable_mouse() {
+    let _ = execute!(stdout(), DisableMouseCapture);
 }
 
 /// Run the app against the single profile configured in `.env`.

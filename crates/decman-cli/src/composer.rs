@@ -25,6 +25,42 @@ pub enum FieldKind {
     /// Newline-separated rows, each split on commas into `columns` → a JSON
     /// array of `{ column: value }` objects.
     Rows(Vec<&'static str>),
+    /// A contract id chosen from a live-fetched list (← / → cycles once the
+    /// options load). Falls back to free-text entry while loading or when the
+    /// list is empty, so a cid can still be pasted. `options` / `loaded` are
+    /// filled in asynchronously after the form opens; serializes as a string,
+    /// exactly like [`FieldKind::Text`].
+    Picker {
+        source: PickerSource,
+        options: Vec<PickerOption>,
+        loaded: bool,
+    },
+}
+
+/// Which read endpoint populates a [`FieldKind::Picker`]'s options — the same
+/// lists the web frontend's proposal forms fetch to offer contract dropdowns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PickerSource {
+    Instruments,
+    Vaults,
+    ProviderServices,
+    UserServices,
+    RegistrarServices,
+    CredentialOffers,
+    MintRequests,
+    BurnRequests,
+    TransferInstructions,
+    TransferFactories,
+}
+
+/// One fetched contract offered in a [`FieldKind::Picker`]. Owned, unlike the
+/// `&'static` [`SelectOption`], because the values come from the ledger.
+#[derive(Clone, Debug)]
+pub struct PickerOption {
+    /// The contract id stored in the field's value on selection.
+    pub value: String,
+    /// A human-readable one-line summary shown instead of the raw cid.
+    pub label: String,
 }
 
 /// One option in a [`FieldKind::Select`].
@@ -215,6 +251,24 @@ fn select(
     )
 }
 
+/// A required contract-id field backed by a live-fetched picker. The list is
+/// populated asynchronously; until then (and if it comes back empty) the field
+/// accepts a pasted cid.
+fn picker(key: &'static str, label: &'static str, source: PickerSource) -> ComposerField {
+    field(
+        key,
+        label,
+        FieldKind::Picker {
+            source,
+            options: Vec::new(),
+            loaded: false,
+        },
+        String::new(),
+        false,
+        "←/→ to pick",
+    )
+}
+
 fn rows(key: &'static str, label: &'static str, columns: Vec<&'static str>) -> ComposerField {
     field(
         key,
@@ -328,19 +382,25 @@ pub fn fields_for_action(action_type: &str, ctx: &ComposerContext) -> Vec<Compos
             3_600_000_000,
             "1 hour = 3,600,000,000 µs",
         )],
-        "vault_pause" | "vault_unpause" => vec![text("vault_id", "Vault contract id")],
+        "vault_pause" | "vault_unpause" => {
+            vec![picker(
+                "vault_id",
+                "Vault contract id",
+                PickerSource::Vaults,
+            )]
+        }
         "vault_update_limits" => vec![
-            text("vault_id", "Vault contract id"),
+            picker("vault_id", "Vault contract id", PickerSource::Vaults),
             text_opt("new_limits.max_total_deposit", "Max total deposit"),
             text_opt("new_limits.min_deposit_amount", "Min deposit amount"),
             text_opt("new_limits.min_withdrawal_amount", "Min withdrawal amount"),
         ],
         "vault_update_backend" => vec![
-            text("vault_id", "Vault contract id"),
+            picker("vault_id", "Vault contract id", PickerSource::Vaults),
             text("new_backend_signatory", "New backend signatory"),
         ],
         "vault_update_far_beneficiaries" => vec![
-            text("vault_id", "Vault contract id"),
+            picker("vault_id", "Vault contract id", PickerSource::Vaults),
             rows_required(
                 "new_beneficiaries",
                 "Beneficiaries (party,weight)",
@@ -359,15 +419,23 @@ pub fn fields_for_action(action_type: &str, ctx: &ComposerContext) -> Vec<Compos
                 text_opt("limits.min_deposit_amount", "Min deposit amount"),
                 text_opt("limits.min_withdrawal_amount", "Min withdrawal amount"),
                 text("vault_backend_signatory", "Backend signatory"),
-                text("allocation_factory_cid", "Allocation factory cid"),
-                text("registrar_service_cid", "Registrar service cid"),
+                picker(
+                    "allocation_factory_cid",
+                    "Allocation factory cid",
+                    PickerSource::TransferFactories,
+                ),
+                picker(
+                    "registrar_service_cid",
+                    "Registrar service cid",
+                    PickerSource::RegistrarServices,
+                ),
             ]);
             fields
         }
         "yield_epoch_deployment" => {
             let mut fields = vec![
                 text("vault_rules_cid", "Vault rules cid"),
-                text("vault_cid", "Vault contract id"),
+                picker("vault_cid", "Vault contract id", PickerSource::Vaults),
             ];
             fields.extend(instrument_id("asset_instrument_id", String::new()));
             fields.push(text("vault_backend_signatory", "Backend signatory"));
@@ -376,7 +444,11 @@ pub fn fields_for_action(action_type: &str, ctx: &ComposerContext) -> Vec<Compos
         "processor_deployment_request" => vec![
             text("vault_processor_rules_cid", "Processor rules cid"),
             text("vault_backend_signatory", "Backend signatory"),
-            text("allocation_factory_cid", "Burn/mint factory cid"),
+            picker(
+                "allocation_factory_cid",
+                "Burn/mint factory cid",
+                PickerSource::TransferFactories,
+            ),
             list_required("initial_supported_vaults", "Initial supported vault cids"),
         ],
         "utility_create_provider_request" | "utility_create_user_request" => {
@@ -388,18 +460,34 @@ pub fn fields_for_action(action_type: &str, ctx: &ComposerContext) -> Vec<Compos
         }
         "utility_setup" => vec![
             text_value("operator", "Operator party", ctx.operator_party.clone()),
-            text("provider_service_cid", "Provider service cid"),
-            text("user_service_cid", "User service cid"),
+            picker(
+                "provider_service_cid",
+                "Provider service cid",
+                PickerSource::ProviderServices,
+            ),
+            picker(
+                "user_service_cid",
+                "User service cid",
+                PickerSource::UserServices,
+            ),
         ],
         "utility_accept_holder_service_request" => vec![
             text_value("operator", "Operator party", ctx.operator_party.clone()),
-            text("provider_service_cid", "Provider service cid"),
+            picker(
+                "provider_service_cid",
+                "Provider service cid",
+                PickerSource::ProviderServices,
+            ),
             text("holder_service_request_cid", "Holder service request cid"),
             text("holder", "Holder party"),
         ],
         "credential_offer_free" => vec![
             text_value("operator", "Operator party", ctx.operator_party.clone()),
-            text("user_service_cid", "User service cid"),
+            picker(
+                "user_service_cid",
+                "User service cid",
+                PickerSource::UserServices,
+            ),
             text("holder", "Holder party"),
             text("id", "Credential id"),
             text("description", "Description"),
@@ -411,8 +499,16 @@ pub fn fields_for_action(action_type: &str, ctx: &ComposerContext) -> Vec<Compos
         ],
         "credential_accept_free" => vec![
             text_value("operator", "Operator party", ctx.operator_party.clone()),
-            text("user_service_cid", "User service cid"),
-            text("credential_offer_cid", "Credential offer cid"),
+            picker(
+                "user_service_cid",
+                "User service cid",
+                PickerSource::UserServices,
+            ),
+            picker(
+                "credential_offer_cid",
+                "Credential offer cid",
+                PickerSource::CredentialOffers,
+            ),
         ],
         "dev_net_feature_app" => vec![text("amulet_rules_cid", "Amulet rules cid")],
         _ => Vec::new(),
@@ -436,7 +532,11 @@ pub fn fields_for_proposal(proposal_type: &str, ctx: &ComposerContext) -> Vec<Co
         ],
         "transfer" => {
             let mut fields = vec![
-                text("transfer_factory_cid", "Transfer factory cid"),
+                picker(
+                    "transfer_factory_cid",
+                    "Transfer factory cid",
+                    PickerSource::TransferFactories,
+                ),
                 text("expected_admin", "Expected admin"),
                 text("receiver", "Receiver party"),
                 text("amount", "Amount"),
@@ -450,13 +550,21 @@ pub fn fields_for_proposal(proposal_type: &str, ctx: &ComposerContext) -> Vec<Co
             ));
             fields
         }
-        "accept_transfer" => vec![text("transfer_instruction_cid", "Transfer instruction cid")],
+        "accept_transfer" => vec![picker(
+            "transfer_instruction_cid",
+            "Transfer instruction cid",
+            PickerSource::TransferInstructions,
+        )],
         "create_user_service_request" => vec![operator(), text_value("user", "User party", party)],
         "create_provider_service_request" => {
             vec![operator(), text_value("provider", "Provider party", party)]
         }
         "setup_utility" => vec![
-            text("provider_service_cid", "Provider service cid"),
+            picker(
+                "provider_service_cid",
+                "Provider service cid",
+                PickerSource::ProviderServices,
+            ),
             operator(),
             text("instrument_id_text", "Instrument id"),
             boolean("create_transfer_rule", "Create transfer rule", true),
@@ -467,7 +575,11 @@ pub fn fields_for_proposal(proposal_type: &str, ctx: &ComposerContext) -> Vec<Co
             ),
         ],
         "set_provider_app_reward_beneficiaries" => vec![
-            text("instrument_configuration_cid", "Instrument config cid"),
+            picker(
+                "instrument_configuration_cid",
+                "Instrument config cid",
+                PickerSource::Instruments,
+            ),
             rows(
                 "provider_app_reward_beneficiaries",
                 "Beneficiaries (party,weight) — empty clears",
@@ -475,7 +587,11 @@ pub fn fields_for_proposal(proposal_type: &str, ctx: &ComposerContext) -> Vec<Co
             ),
         ],
         "set_enable_result_contracts" => vec![
-            text("registrar_service_cid", "Registrar service cid"),
+            picker(
+                "registrar_service_cid",
+                "Registrar service cid",
+                PickerSource::RegistrarServices,
+            ),
             select(
                 "enable_result_contracts",
                 "Enable result contracts",
@@ -489,10 +605,18 @@ pub fn fields_for_proposal(proposal_type: &str, ctx: &ComposerContext) -> Vec<Co
         ],
         "create_delegated_batched_markers_proxy" => vec![operator()],
         "mint" => {
-            let mut fields = vec![text("allocation_factory_cid", "Allocation factory cid")];
+            let mut fields = vec![picker(
+                "allocation_factory_cid",
+                "Allocation factory cid",
+                PickerSource::TransferFactories,
+            )];
             fields.extend(instrument_id("instrument_id", party));
             fields.extend([
-                text("instrument_configuration_cid", "Instrument config cid"),
+                picker(
+                    "instrument_configuration_cid",
+                    "Instrument config cid",
+                    PickerSource::Instruments,
+                ),
                 text("recipient", "Recipient party"),
                 text("amount", "Amount"),
                 text("description", "Description"),
@@ -500,10 +624,18 @@ pub fn fields_for_proposal(proposal_type: &str, ctx: &ComposerContext) -> Vec<Co
             fields
         }
         "burn" => {
-            let mut fields = vec![text("allocation_factory_cid", "Allocation factory cid")];
+            let mut fields = vec![picker(
+                "allocation_factory_cid",
+                "Allocation factory cid",
+                PickerSource::TransferFactories,
+            )];
             fields.extend(instrument_id("instrument_id", party));
             fields.extend([
-                text("instrument_configuration_cid", "Instrument config cid"),
+                picker(
+                    "instrument_configuration_cid",
+                    "Instrument config cid",
+                    PickerSource::Instruments,
+                ),
                 text("holder", "Holder party"),
                 text("amount", "Amount"),
                 text("description", "Description"),
@@ -511,17 +643,37 @@ pub fn fields_for_proposal(proposal_type: &str, ctx: &ComposerContext) -> Vec<Co
             fields
         }
         "accept_mint_request" => vec![
-            text("mint_request_cid", "Mint request cid"),
-            text("instrument_configuration_cid", "Instrument config cid"),
+            picker(
+                "mint_request_cid",
+                "Mint request cid",
+                PickerSource::MintRequests,
+            ),
+            picker(
+                "instrument_configuration_cid",
+                "Instrument config cid",
+                PickerSource::Instruments,
+            ),
             text("description", "Description"),
         ],
         "accept_burn_request" => vec![
-            text("burn_request_cid", "Burn request cid"),
-            text("instrument_configuration_cid", "Instrument config cid"),
+            picker(
+                "burn_request_cid",
+                "Burn request cid",
+                PickerSource::BurnRequests,
+            ),
+            picker(
+                "instrument_configuration_cid",
+                "Instrument config cid",
+                PickerSource::Instruments,
+            ),
             text("description", "Description"),
         ],
         "offer_free_credential" => vec![
-            text("user_service_cid", "User service cid"),
+            picker(
+                "user_service_cid",
+                "User service cid",
+                PickerSource::UserServices,
+            ),
             text("holder", "Holder party"),
             text("id", "Credential id"),
             text("description", "Description"),
@@ -532,8 +684,16 @@ pub fn fields_for_proposal(proposal_type: &str, ctx: &ComposerContext) -> Vec<Co
             ),
         ],
         "accept_free_credential" => vec![
-            text("user_service_cid", "User service cid"),
-            text("credential_offer_cid", "Credential offer cid"),
+            picker(
+                "user_service_cid",
+                "User service cid",
+                PickerSource::UserServices,
+            ),
+            picker(
+                "credential_offer_cid",
+                "Credential offer cid",
+                PickerSource::CredentialOffers,
+            ),
         ],
         _ => Vec::new(),
     }
@@ -575,7 +735,7 @@ fn field_value(field: &ComposerField) -> Result<Option<Value>, String> {
         }
     };
     match &field.kind {
-        FieldKind::Text => {
+        FieldKind::Text | FieldKind::Picker { .. } => {
             require()?;
             Ok((!trimmed.is_empty()).then(|| Value::String(trimmed.to_owned())))
         }
@@ -828,5 +988,61 @@ mod tests {
         assert_eq!(field_value(&field), Ok(Some(Value::Null)));
         field.value = "true".to_owned();
         assert_eq!(field_value(&field), Ok(Some(Value::Bool(true))));
+    }
+
+    #[test]
+    fn accept_mint_request_uses_pickers_and_serializes_cids() {
+        let ctx = ComposerContext {
+            party_id: "dec::1".to_owned(),
+            operator_party: String::new(),
+            default_threshold: 1,
+        };
+        let fields = fields_for_proposal("accept_mint_request", &ctx);
+
+        // Both contract-id fields are pickers backed by the right sources.
+        let mint = fields
+            .iter()
+            .find(|field| field.key == "mint_request_cid")
+            .expect("mint_request_cid field");
+        assert!(matches!(
+            mint.kind,
+            FieldKind::Picker {
+                source: PickerSource::MintRequests,
+                ..
+            }
+        ));
+        let instrument = fields
+            .iter()
+            .find(|field| field.key == "instrument_configuration_cid")
+            .expect("instrument_configuration_cid field");
+        assert!(matches!(
+            instrument.kind,
+            FieldKind::Picker {
+                source: PickerSource::Instruments,
+                ..
+            }
+        ));
+
+        // A picker with a chosen value serializes as a plain string, like text.
+        let mut composer = composer("accept_mint_request", fields);
+        for field in &mut composer.fields {
+            field.value = match field.key {
+                "mint_request_cid" => "00mint".to_owned(),
+                "instrument_configuration_cid" => "00inst".to_owned(),
+                _ => "d".to_owned(),
+            };
+        }
+        let payload = match build_payload(&composer) {
+            Ok(payload) => payload,
+            Err(error) => panic!("build_payload failed: {error}"),
+        };
+        assert_eq!(payload["mint_request_cid"], "00mint");
+        assert_eq!(payload["instrument_configuration_cid"], "00inst");
+    }
+
+    #[test]
+    fn empty_required_picker_is_rejected() {
+        let field = picker("vault_id", "Vault", PickerSource::Vaults);
+        assert!(field_value(&field).is_err());
     }
 }

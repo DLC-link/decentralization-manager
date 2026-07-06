@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
@@ -5,7 +6,11 @@ use std::time::Duration;
 use anyhow::Result;
 use base64::prelude::*;
 use ratatui::DefaultTerminal;
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
+};
+use ratatui::layout::Rect;
 use ratatui::widgets::TableState;
 use serde_json::{Value, json};
 
@@ -16,11 +21,12 @@ use common::types::{
 
 use crate::api::{
     AuthSettings, ChainAuditEntry, DecmanClient, DiscoverResult, DomainGovAction, ExecuteParams,
-    FeedItem, GovAction, GovConfirmation, GovState, GovernanceConfirmations, Holding, KnownMember,
-    PartyAuthStatus, PartyConfigView, PeerEntry, PeerView, party_name,
+    FeedItem, GovAction, GovConfirmation, GovState, GovernanceConfirmations, Holding, KeyStatus,
+    KnownMember, NetworkInfo, PartyAuthStatus, PartyConfigView, PeerEntry, PeerView, party_name,
 };
 use crate::composer::{
-    self, Composer, ComposerContext, ComposerSubmit, FieldKind, SelectOption, TypeOption,
+    self, Composer, ComposerContext, ComposerSubmit, FieldKind, PickerOption, PickerSource,
+    SelectOption, TypeOption,
 };
 use crate::config::Profile;
 use crate::ui;
@@ -54,25 +60,32 @@ pub fn run_login(terminal: &mut DefaultTerminal, profiles: &[Profile]) -> Result
     loop {
         terminal.draw(|frame| ui::draw_login(frame, profiles, &mut state))?;
 
-        let Event::Key(key) = event::read()? else {
-            continue;
+        let select_next = |state: &mut TableState| {
+            let next = state.selected().map_or(0, |i| (i + 1) % profiles.len());
+            state.select(Some(next));
         };
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
-        match (key.code, key.modifiers) {
-            (KeyCode::Char('q') | KeyCode::Esc, _) => return Ok(None),
-            (KeyCode::Char('c'), KeyModifiers::CONTROL) => return Ok(None),
-            (KeyCode::Down | KeyCode::Char('j'), _) => {
-                let next = state.selected().map_or(0, |i| (i + 1) % profiles.len());
-                state.select(Some(next));
-            }
-            (KeyCode::Up | KeyCode::Char('k'), _) => {
-                let len = profiles.len();
-                let previous = state.selected().map_or(0, |i| (i + len - 1) % len);
-                state.select(Some(previous));
-            }
-            (KeyCode::Enter, _) => return Ok(profiles.get(state.selected().unwrap_or(0)).cloned()),
+        let select_previous = |state: &mut TableState| {
+            let len = profiles.len();
+            let previous = state.selected().map_or(0, |i| (i + len - 1) % len);
+            state.select(Some(previous));
+        };
+
+        match event::read()? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => match (key.code, key.modifiers) {
+                (KeyCode::Char('q') | KeyCode::Esc, _) => return Ok(None),
+                (KeyCode::Char('c'), KeyModifiers::CONTROL) => return Ok(None),
+                (KeyCode::Down | KeyCode::Char('j'), _) => select_next(&mut state),
+                (KeyCode::Up | KeyCode::Char('k'), _) => select_previous(&mut state),
+                (KeyCode::Enter, _) => {
+                    return Ok(profiles.get(state.selected().unwrap_or(0)).cloned());
+                }
+                _ => {}
+            },
+            Event::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::ScrollDown => select_next(&mut state),
+                MouseEventKind::ScrollUp => select_previous(&mut state),
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -114,6 +127,17 @@ pub enum Request {
         new_threshold: i32,
         previous_threshold: i32,
     },
+    AddParty {
+        party_id: String,
+        participant_id: String,
+        new_threshold: i32,
+        previous_threshold: i32,
+    },
+    ChangeThreshold {
+        party_id: String,
+        new_threshold: i32,
+        previous_threshold: i32,
+    },
     CancelWorkflow(WorkflowKind),
     RetryWorkflow(String),
     ChainAudit(String),
@@ -141,6 +165,12 @@ pub enum Request {
     PartyConfig(String),
     SavePartyConfig(Box<Value>),
     Discover(Box<Value>),
+    NodeInfo,
+    /// Fetch the selectable contracts for the picker fields of an open composer.
+    PickerOptions {
+        party_id: String,
+        sources: Vec<PickerSource>,
+    },
 }
 
 /// A result delivered by a background worker.
@@ -160,6 +190,16 @@ pub enum Update {
     NetworkPeers(Result<Vec<PeerEntry>, String>),
     PartyConfig(Result<Box<PartyConfigForm>, String>),
     Discovered(Result<DiscoverResult, String>),
+    NodeInfo(Box<NodeInfoData>),
+    /// Fetched picker options, keyed by the source they belong to.
+    PickerOptions(Vec<(PickerSource, Result<Vec<PickerOption>, String>)>),
+}
+
+/// This node's key status and DSO network identity, each fetched independently
+/// so one failing (e.g. the DSO API is unreachable) does not hide the other.
+pub struct NodeInfoData {
+    pub key: Result<KeyStatus, String>,
+    pub network: Result<NetworkInfo, String>,
 }
 
 /// A DAR file picked from disk for upload / distribution.
@@ -212,6 +252,31 @@ pub struct KickForm {
     pub selected: usize,
     pub new_threshold: i32,
     /// Highest threshold allowed after the kick (remaining owner count).
+    pub max_threshold: i32,
+}
+
+/// The add-party form: pick a configured peer that is not yet a member, and
+/// set the signing threshold for the party once it has joined.
+pub struct AddPartyForm {
+    pub party_id: String,
+    pub party_name: String,
+    pub previous_threshold: i32,
+    /// Configured peers not already in the party (self excluded).
+    pub candidates: Vec<KickCandidate>,
+    pub selected: usize,
+    pub new_threshold: i32,
+    /// Highest threshold allowed after the add (current members + the new one).
+    pub max_threshold: i32,
+}
+
+/// The change-threshold form: adjust the signing threshold of an existing
+/// party, keeping its membership unchanged.
+pub struct ChangeThresholdForm {
+    pub party_id: String,
+    pub party_name: String,
+    pub previous_threshold: i32,
+    pub new_threshold: i32,
+    /// Highest threshold allowed (the party's member count).
     pub max_threshold: i32,
 }
 
@@ -457,6 +522,10 @@ pub enum Overlay {
     Onboard(OnboardForm),
     /// The kick-participant form.
     Kick(KickForm),
+    /// The add-party form (add a new member to an existing party).
+    AddParty(AddPartyForm),
+    /// The change-threshold form (change a party's signing threshold).
+    ChangeThreshold(ChangeThresholdForm),
     /// A scrollable detail view of a feed item (workflow run or invitation).
     /// Boxed: a feed item (with its workflow run) is large relative to the
     /// other overlay variants.
@@ -488,6 +557,8 @@ pub enum Overlay {
     NetworkEdit(Box<NetworkEditState>),
     /// The per-party IdP configuration editor.
     PartyConfig(Box<PartyConfigForm>),
+    /// This node's key status and DSO network identity.
+    NodeInfo(Box<NodeInfoData>),
 }
 
 /// The selectable top-level views.
@@ -613,6 +684,22 @@ fn validate_prefix(prefix: &str) -> Result<(), String> {
         return Err("Party id prefix may only contain letters, digits, '-' and '_'.".to_owned());
     }
     Ok(())
+}
+
+/// The tab whose label on the panel's top border contains screen column
+/// `column`, mirroring the tab-bar layout in [`ui::tab_block`]: a leading space,
+/// then each tab title separated by a 3-column ` │ `.
+fn tab_at(body: Rect, column: u16) -> Option<Tab> {
+    let mut offset: u16 = 1; // the leading space before the first title
+    for tab in Tab::ALL {
+        let title_len = tab.title().chars().count() as u16;
+        let start = body.x + 1 + offset; // +1 for the top-left border corner
+        if column >= start && column < start + title_len {
+            return Some(tab);
+        }
+        offset += title_len + 3; // advance past the title and the ` │ ` divider
+    }
+    None
 }
 
 /// Keep a table's selection in range after its data changes.
@@ -811,6 +898,18 @@ fn handle_request(client: &mut DecmanClient, request: Request) -> Update {
         Request::Discover(body) => {
             Update::Discovered(client.discover_member_party(*body).map_err(err))
         }
+        Request::NodeInfo => Update::NodeInfo(Box::new(NodeInfoData {
+            key: client.fetch_key_status().map_err(err),
+            network: client.fetch_network_info().map_err(err),
+        })),
+        Request::PickerOptions { party_id, sources } => {
+            let mut options = Vec::with_capacity(sources.len());
+            for source in sources {
+                let result = client.fetch_picker_options(source, &party_id).map_err(err);
+                options.push((source, result));
+            }
+            Update::PickerOptions(options)
+        }
         Request::Onboard { prefix, peer_ids } => Update::Action(
             client
                 .start_onboarding(&prefix, &peer_ids)
@@ -831,6 +930,32 @@ fn handle_request(client: &mut DecmanClient, request: Request) -> Update {
                     previous_threshold,
                 )
                 .map(|()| "Kick started".to_owned())
+                .map_err(err),
+        ),
+        Request::AddParty {
+            party_id,
+            participant_id,
+            new_threshold,
+            previous_threshold,
+        } => Update::Action(
+            client
+                .start_add_party(
+                    &party_id,
+                    &participant_id,
+                    new_threshold,
+                    previous_threshold,
+                )
+                .map(|()| "Add-party started".to_owned())
+                .map_err(err),
+        ),
+        Request::ChangeThreshold {
+            party_id,
+            new_threshold,
+            previous_threshold,
+        } => Update::Action(
+            client
+                .start_change_threshold(&party_id, new_threshold, previous_threshold)
+                .map(|()| "Change-threshold started".to_owned())
                 .map_err(err),
         ),
         Request::CancelWorkflow(kind) => Update::Action(
@@ -1266,6 +1391,26 @@ fn next_select_value(options: &[SelectOption], current: &str, forward: bool) -> 
     options[next].value.to_owned()
 }
 
+/// The picker option value one step forward / back from `current`. When
+/// `current` matches no option (nothing picked yet, or a typed cid), the first
+/// press lands on the first option.
+fn next_picker_value(options: &[PickerOption], current: &str, forward: bool) -> String {
+    match options.iter().position(|option| option.value == current) {
+        None => options
+            .first()
+            .map_or_else(|| current.to_owned(), |o| o.value.clone()),
+        Some(index) => {
+            let len = options.len();
+            let next = if forward {
+                (index + 1) % len
+            } else {
+                (index + len - 1) % len
+            };
+            options[next].value.clone()
+        }
+    }
+}
+
 /// Handle a key in the composer form. Returns `true` when the form was
 /// submitted (Enter on the virtual submit row).
 fn composer_key(composer: &mut Composer, key: KeyEvent) -> bool {
@@ -1331,6 +1476,23 @@ fn composer_key(composer: &mut Composer, key: KeyEvent) -> bool {
                     _ => {}
                 }
             }
+            // ← / → cycle the fetched options; typing / backspace stay available
+            // so a cid can be pasted while the list loads or when it is empty.
+            FieldKind::Picker {
+                options, loaded, ..
+            } => match key.code {
+                KeyCode::Left if *loaded && !options.is_empty() => {
+                    field.value = next_picker_value(options, &field.value, false);
+                }
+                KeyCode::Right if *loaded && !options.is_empty() => {
+                    field.value = next_picker_value(options, &field.value, true);
+                }
+                KeyCode::Char(c) => field.value.push(c),
+                KeyCode::Backspace => {
+                    field.value.pop();
+                }
+                _ => {}
+            },
         }
     }
     false
@@ -1367,6 +1529,9 @@ pub struct App {
     can_logout: bool,
     /// The operator party id, prefetched for composer prefill (empty if unknown).
     operator_party: String,
+    /// The active tab panel's rect from the last frame, used to hit-test mouse
+    /// clicks (tab bar on the top border, table rows inside).
+    body_area: Rect,
     should_quit: bool,
     should_logout: bool,
 }
@@ -1402,9 +1567,16 @@ impl App {
             tick: 0,
             can_logout,
             operator_party: String::new(),
+            body_area: Rect::default(),
             should_quit: false,
             should_logout: false,
         }
+    }
+
+    /// Record the active tab panel's rect (called by the UI each frame) so mouse
+    /// clicks can be mapped back to a tab or table row.
+    pub fn set_body_area(&mut self, area: Rect) {
+        self.body_area = area;
     }
 
     /// Whether the party detail view is open.
@@ -1436,6 +1608,15 @@ impl App {
     /// The currently active tab.
     pub fn active_tab(&self) -> Tab {
         self.active_tab
+    }
+
+    /// The version of the node this session is managing, read off this node's
+    /// own peer row (`/node-config`). `None` until the first peer poll returns.
+    pub fn node_version(&self) -> Option<&str> {
+        self.peers
+            .iter()
+            .find(|peer| peer.is_self)
+            .and_then(|peer| peer.version.as_deref())
     }
 
     /// The active modal overlay (if any).
@@ -1659,6 +1840,33 @@ impl App {
                         }
                     }
                 }
+                Update::NodeInfo(data) => {
+                    if matches!(self.overlay, Overlay::Busy(_)) {
+                        self.overlay = Overlay::NodeInfo(data);
+                    }
+                }
+                // Fill in the open composer's picker fields. A failed fetch is
+                // treated as an empty list: the field is marked loaded and
+                // falls back to free-text cid entry.
+                Update::PickerOptions(results) => {
+                    if let Overlay::Composer(composer) = &mut self.overlay {
+                        for (source, result) in results {
+                            let loaded_options = result.unwrap_or_default();
+                            for field in &mut composer.fields {
+                                if let FieldKind::Picker {
+                                    source: field_source,
+                                    options,
+                                    loaded,
+                                } = &mut field.kind
+                                    && *field_source == source
+                                {
+                                    *options = loaded_options.clone();
+                                    *loaded = true;
+                                }
+                            }
+                        }
+                    }
+                }
                 // Ignore late detail results after the view was closed.
                 Update::Detail(data) if self.detail.is_some() => {
                     self.detail_data = Some(data);
@@ -1673,14 +1881,73 @@ impl App {
 
     /// Poll for the next terminal event (with a tick timeout) and dispatch it.
     fn handle_events(&mut self) -> Result<()> {
-        if event::poll(TICK)?
-            && let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-        {
-            self.on_key(key);
+        if event::poll(TICK)? {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => self.on_key(key),
+                Event::Mouse(mouse) => self.on_mouse(mouse),
+                _ => {}
+            }
         }
 
         Ok(())
+    }
+
+    /// Dispatch a mouse event. The scroll wheel maps to the up/down keys so it
+    /// drives navigation in every context; a left click on the main view selects
+    /// a tab or table row.
+    fn on_mouse(&mut self, mouse: MouseEvent) {
+        match mouse.kind {
+            MouseEventKind::ScrollDown => {
+                self.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            }
+            MouseEventKind::ScrollUp => self.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            // Clicks only act on the plain tab view — overlays, the detail view
+            // and search stay keyboard-driven (scroll still works there).
+            MouseEventKind::Down(MouseButton::Left)
+                if matches!(self.overlay, Overlay::None)
+                    && self.detail.is_none()
+                    && !self.searching =>
+            {
+                self.on_click(mouse.column, mouse.row);
+            }
+            _ => {}
+        }
+    }
+
+    /// Handle a left click at `(column, row)` on the main tab view: a click on
+    /// the tab bar (the panel's top border) switches tabs; a click on a table
+    /// row selects it, and on the Parties tab opens that party's detail.
+    fn on_click(&mut self, column: u16, row: u16) {
+        let body = self.body_area;
+        if body.width == 0 || body.height == 0 {
+            return;
+        }
+        // The tab labels live on the panel's top border line.
+        if row == body.y {
+            if let Some(tab) = tab_at(body, column) {
+                self.switch_to(tab);
+            }
+            return;
+        }
+        // Table rows: the block border + horizontal padding inset the content by
+        // two columns; the header sits on the first inner line, data rows below.
+        let inner_left = body.x + 2;
+        let inner_right = body.x + body.width.saturating_sub(2);
+        let first_row = body.y + 2;
+        let last_row = body.y + body.height.saturating_sub(1); // bottom border
+        if column < inner_left || column >= inner_right || row < first_row || row >= last_row {
+            return;
+        }
+        let visible_index = (row - first_row) as usize;
+        let len = self.current_len();
+        let index = self.current_table_mut().offset() + visible_index;
+        if index >= len {
+            return;
+        }
+        self.current_table_mut().select(Some(index));
+        if self.active_tab == Tab::Parties {
+            self.open_party_detail();
+        }
     }
 
     /// Dispatch a key press: overlay, then detail, then search, then main view.
@@ -1722,6 +1989,8 @@ impl App {
             (KeyCode::Char('n'), _) if self.active_tab == Tab::Parties => self.open_onboard(),
             // Edit the network peer configuration.
             (KeyCode::Char('e'), _) if self.active_tab == Tab::Peers => self.open_network_edit(),
+            // View this node's key status and DSO network identity.
+            (KeyCode::Char('i'), _) if self.active_tab == Tab::Peers => self.open_node_info(),
             // Workflows actions.
             (KeyCode::Char('a'), _) if self.active_tab == Tab::Workflows => {
                 self.invitation_action(true);
@@ -1750,6 +2019,8 @@ impl App {
             Distribute,
             Onboard,
             Kick,
+            AddParty,
+            ChangeThreshold,
             TestAuth,
             GovConfirm,
             GovExecute,
@@ -1826,6 +2097,36 @@ impl App {
                         form.selected += 1;
                     }
                 }
+                KeyCode::Left | KeyCode::Char('-') => {
+                    form.new_threshold = (form.new_threshold - 1).max(1);
+                }
+                KeyCode::Right | KeyCode::Char('+') => {
+                    form.new_threshold = (form.new_threshold + 1).min(form.max_threshold);
+                }
+                _ => {}
+            },
+            Overlay::AddParty(form) => match key.code {
+                KeyCode::Esc => act = Act::Close,
+                KeyCode::Enter => act = Act::AddParty,
+                KeyCode::Up | KeyCode::Char('k') => {
+                    form.selected = form.selected.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if form.selected + 1 < form.candidates.len() {
+                        form.selected += 1;
+                    }
+                }
+                KeyCode::Left | KeyCode::Char('-') => {
+                    form.new_threshold = (form.new_threshold - 1).max(1);
+                }
+                KeyCode::Right | KeyCode::Char('+') => {
+                    form.new_threshold = (form.new_threshold + 1).min(form.max_threshold);
+                }
+                _ => {}
+            },
+            Overlay::ChangeThreshold(form) => match key.code {
+                KeyCode::Esc => act = Act::Close,
+                KeyCode::Enter => act = Act::ChangeThreshold,
                 KeyCode::Left | KeyCode::Char('-') => {
                     form.new_threshold = (form.new_threshold - 1).max(1);
                 }
@@ -2051,7 +2352,7 @@ impl App {
                     _ => {}
                 }
             }
-            Overlay::Message(_) | Overlay::Busy(_) => {
+            Overlay::NodeInfo(_) | Overlay::Message(_) | Overlay::Busy(_) => {
                 if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')) {
                     act = Act::Close;
                 }
@@ -2065,6 +2366,8 @@ impl App {
             Act::Distribute => self.confirm_distribute(),
             Act::Onboard => self.confirm_onboard(),
             Act::Kick => self.confirm_kick(),
+            Act::AddParty => self.confirm_add_party(),
+            Act::ChangeThreshold => self.confirm_change_threshold(),
             Act::TestAuth => self.run_auth_test(),
             Act::GovConfirm => self.gov_confirm(),
             Act::GovExecute => self.gov_execute(),
@@ -2146,6 +2449,10 @@ impl App {
             KeyCode::Enter | KeyCode::Char(' ') => self.open_audit_json(),
             // Kick a participant from this party.
             KeyCode::Char('K') => self.open_kick(),
+            // Add a new member to this party.
+            KeyCode::Char('P') => self.open_add_party(),
+            // Change this party's signing threshold.
+            KeyCode::Char('T') => self.open_change_threshold(),
             // View the on-chain governance audit trail.
             KeyCode::Char('c') => self.open_chain_audit(),
             // Open the governance approvals list (confirm / execute / revoke).
@@ -2329,7 +2636,23 @@ impl App {
                 cursor: 0,
             }
         };
+        // Gather the distinct picker sources this form needs and kick off their
+        // background fetch; options stream in via `Update::PickerOptions`.
+        let party_id = composer.party_id.clone();
+        let mut sources: Vec<PickerSource> = Vec::new();
+        for field in &composer.fields {
+            if let FieldKind::Picker { source, .. } = field.kind
+                && !sources.contains(&source)
+            {
+                sources.push(source);
+            }
+        }
         self.overlay = Overlay::Composer(Box::new(composer));
+        if !sources.is_empty() {
+            let _ = self
+                .requests
+                .send(Request::PickerOptions { party_id, sources });
+        }
     }
 
     /// Validate the composer form and submit it (confirm or propose).
@@ -2404,6 +2727,12 @@ impl App {
     fn open_network_edit(&mut self) {
         let _ = self.requests.send(Request::NetworkPeers);
         self.overlay = Overlay::Busy("Loading network configuration…".to_owned());
+    }
+
+    /// Fetch and show this node's key status and DSO network identity.
+    fn open_node_info(&mut self) {
+        let _ = self.requests.send(Request::NodeInfo);
+        self.overlay = Overlay::Busy("Loading node info…".to_owned());
     }
 
     /// Save the edited peer list back to the node.
@@ -2856,6 +3185,123 @@ impl App {
         self.overlay = Overlay::Busy(format!("Kicking {label}…"));
     }
 
+    /// Open the add-party form for the party in the detail view, listing the
+    /// configured peers not already members (self excluded).
+    fn open_add_party(&mut self) {
+        let Some(party) = self.detail.as_ref() else {
+            return;
+        };
+        // Require this node's identity to be resolved so self is excluded.
+        let Some(self_id) = self
+            .peers
+            .iter()
+            .find(|peer| peer.is_self)
+            .map(|peer| peer.participant_id.clone())
+        else {
+            self.overlay = Overlay::Message(
+                "Still resolving this node's identity — try again in a moment.".to_owned(),
+            );
+            return;
+        };
+        let members: HashSet<String> = party
+            .participants
+            .iter()
+            .map(|participant| participant.participant_uid.to_string())
+            .collect();
+        let candidates: Vec<KickCandidate> = self
+            .peers
+            .iter()
+            .filter(|peer| !peer.is_self && peer.participant_id != self_id)
+            .filter(|peer| !members.contains(&peer.participant_id))
+            .map(|peer| KickCandidate {
+                participant_id: peer.participant_id.clone(),
+                label: peer.name.clone(),
+            })
+            .collect();
+        if candidates.is_empty() {
+            self.overlay = Overlay::Message(
+                "No peers left to add — every configured peer is already a member.".to_owned(),
+            );
+            return;
+        }
+        // The signing threshold is over the namespace owners (like the kick
+        // flow) — not every participant is necessarily an owner. Bound it by the
+        // post-add owner count: the current owners plus the joining member.
+        let owner_count = i32::try_from(party.owners.len()).unwrap_or(i32::MAX);
+        let max_threshold = owner_count.saturating_add(1);
+        self.overlay = Overlay::AddParty(AddPartyForm {
+            party_id: party.party_id.to_string(),
+            party_name: party_name(party).to_owned(),
+            previous_threshold: party.threshold,
+            candidates,
+            selected: 0,
+            new_threshold: party.threshold.clamp(1, max_threshold),
+            max_threshold,
+        });
+    }
+
+    /// Send the add-party request for the selected candidate.
+    fn confirm_add_party(&mut self) {
+        let Overlay::AddParty(form) = &self.overlay else {
+            return;
+        };
+        let Some(candidate) = form.candidates.get(form.selected) else {
+            return;
+        };
+        let request = Request::AddParty {
+            party_id: form.party_id.clone(),
+            participant_id: candidate.participant_id.clone(),
+            new_threshold: form.new_threshold,
+            previous_threshold: form.previous_threshold,
+        };
+        let label = candidate.label.clone();
+        let _ = self.requests.send(request);
+        self.overlay = Overlay::Busy(format!("Adding {label}…"));
+    }
+
+    /// Open the change-threshold form for the party in the detail view.
+    fn open_change_threshold(&mut self) {
+        let Some(party) = self.detail.as_ref() else {
+            return;
+        };
+        // The signing threshold is over the namespace owners (like the kick
+        // flow). A party with fewer than two owners has a fixed threshold of 1
+        // and nothing to change (mirrors the server's rejection).
+        let owner_count = i32::try_from(party.owners.len()).unwrap_or(i32::MAX);
+        if owner_count < 2 {
+            self.overlay = Overlay::Message(
+                "Cannot change threshold: the party has only one owner.".to_owned(),
+            );
+            return;
+        }
+        self.overlay = Overlay::ChangeThreshold(ChangeThresholdForm {
+            party_id: party.party_id.to_string(),
+            party_name: party_name(party).to_owned(),
+            previous_threshold: party.threshold,
+            new_threshold: party.threshold.clamp(1, owner_count),
+            max_threshold: owner_count,
+        });
+    }
+
+    /// Send the change-threshold request from the form.
+    fn confirm_change_threshold(&mut self) {
+        let Overlay::ChangeThreshold(form) = &self.overlay else {
+            return;
+        };
+        if form.new_threshold == form.previous_threshold {
+            self.overlay =
+                Overlay::Message(format!("Threshold is already {}.", form.previous_threshold));
+            return;
+        }
+        let request = Request::ChangeThreshold {
+            party_id: form.party_id.clone(),
+            new_threshold: form.new_threshold,
+            previous_threshold: form.previous_threshold,
+        };
+        let _ = self.requests.send(request);
+        self.overlay = Overlay::Busy("Changing threshold…".to_owned());
+    }
+
     /// Kick off the package checker.
     fn start_compare(&mut self) {
         let _ = self.requests.send(Request::Compare);
@@ -3236,6 +3682,74 @@ mod tests {
         assert_eq!(body["auth0_domain"], "tenant.auth0.com");
         assert_eq!(body["auth0_client_id"], "a0client");
         assert!(body.get("keycloak_client_secret").is_none());
+    }
+
+    #[test]
+    fn next_picker_value_cycles_and_starts_at_first() {
+        let options = vec![
+            PickerOption {
+                value: "a".to_owned(),
+                label: "A".to_owned(),
+            },
+            PickerOption {
+                value: "b".to_owned(),
+                label: "B".to_owned(),
+            },
+            PickerOption {
+                value: "c".to_owned(),
+                label: "C".to_owned(),
+            },
+        ];
+        // Nothing (or a typed cid) selected → first press lands on the first.
+        assert_eq!(next_picker_value(&options, "", true), "a");
+        assert_eq!(next_picker_value(&options, "", false), "a");
+        assert_eq!(next_picker_value(&options, "typed", true), "a");
+        // Forward and backward wrap around the ends.
+        assert_eq!(next_picker_value(&options, "c", true), "a");
+        assert_eq!(next_picker_value(&options, "a", false), "c");
+        assert_eq!(next_picker_value(&options, "a", true), "b");
+        // No options → the current value is kept.
+        assert_eq!(next_picker_value(&[], "x", true), "x");
+    }
+
+    #[test]
+    fn tab_at_maps_border_columns_to_tabs() {
+        // Title bar: "‹space›Parties │ Peers │ Dars │ Workflows", starting one
+        // column in from the top-left border corner.
+        let body = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 20,
+        };
+        // The corner and the leading space are not a tab.
+        assert_eq!(tab_at(body, 0), None);
+        assert_eq!(tab_at(body, 1), None);
+        // "Parties" spans columns 2..9.
+        assert_eq!(tab_at(body, 2), Some(Tab::Parties));
+        assert_eq!(tab_at(body, 8), Some(Tab::Parties));
+        // The " │ " divider is dead space.
+        assert_eq!(tab_at(body, 9), None);
+        // The remaining tabs, past each divider.
+        assert_eq!(tab_at(body, 12), Some(Tab::Peers));
+        assert_eq!(tab_at(body, 20), Some(Tab::Dars));
+        assert_eq!(tab_at(body, 27), Some(Tab::Workflows));
+        assert_eq!(tab_at(body, 35), Some(Tab::Workflows));
+        // Past the last title.
+        assert_eq!(tab_at(body, 60), None);
+    }
+
+    #[test]
+    fn tab_at_respects_panel_offset() {
+        // A non-zero panel origin shifts every tab range by the same amount.
+        let body = Rect {
+            x: 10,
+            y: 4,
+            width: 80,
+            height: 20,
+        };
+        assert_eq!(tab_at(body, 12), Some(Tab::Parties));
+        assert_eq!(tab_at(body, 22), Some(Tab::Peers));
     }
 
     #[test]
