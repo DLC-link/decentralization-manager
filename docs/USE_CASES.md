@@ -16,7 +16,7 @@ Three custodial organizations (Custodian A, B, C) want to jointly manage a digit
 
 **1. Create the decentralized party (3 participants):**
 
-Each custodian runs a DPM node connected to their Canton participant. The coordinator initiates onboarding:
+Each custodian runs a DecMan node connected to their Canton participant. The coordinator initiates onboarding:
 
 ```bash
 curl -X POST http://custodian-a:8080/onboarding \
@@ -76,12 +76,12 @@ The complete end-to-end deployment of a vault system follows these steps. Each g
 
 | # | Step | Actor | Description |
 |---|------|-------|-------------|
-| 1 | Create decentralized party | DPM (onboarding workflow) | Create the shared party identity |
-| 2 | Configure party credentials | DPM (`PUT /party-config` API) | Configure OAuth credentials (Keycloak or Auth0) and package IDs for each party |
+| 1 | Create decentralized party | DecMan (onboarding workflow) | Create the shared party identity |
+| 2 | Configure party credentials | DecMan (`PUT /party-config` API) | Configure OAuth credentials (Keycloak or Auth0) and package IDs for each party |
 | 3 | Grant Ledger API rights | External (Canton admin) | Grant `actAs`/`readAs` rights for member parties on the decentralized party |
-| 4 | Upload DARs | DPM (DARs workflow) | Upload DAR packages to all participant nodes |
-| 5a | Deploy GovernanceRules | DPM (contracts workflow) | Deploy `GovernanceRules` contract with package `#governance-core-<version>` (recommended) |
-| 5b | Deploy VaultGovernance | DPM (contracts workflow) | Deploy `VaultGovernanceRules` contract with package `#bitsafe-vault-governance-v0-rc8` (legacy) |
+| 4 | Upload DARs | DecMan (DARs workflow) | Upload DAR packages to all participant nodes |
+| 5a | Deploy GovernanceRules | DecMan (contracts workflow) | Deploy `GovernanceRules` contract with package `#governance-core-<version>` (recommended) |
+| 5b | Deploy VaultGovernance | DecMan (contracts workflow) | Deploy `VaultGovernanceRules` contract with package `#bitsafe-vault-governance-v0-rc8` (legacy) |
 | 6 | Create ProviderService | Governance action | `utility_create_provider_request` |
 | 7 | Create UserService | Governance action | `utility_create_user_request` |
 | 8 | Setup Utility | Governance action | `utility_setup` -- links provider and user services |
@@ -93,7 +93,7 @@ The complete end-to-end deployment of a vault system follows these steps. Each g
 | 14 | Accept Processor | External (Canton admin) | Accept the processor deployment |
 | 15 | Accept Free Credential | Governance action | `credential_accept_free` |
 
-Steps marked "External" are performed outside the DPM application (e.g., via Canton admin console or deployment tooling).
+Steps marked "External" are performed outside the DecMan application (e.g., via Canton admin console or deployment tooling).
 
 ### Day-to-Day Operations
 
@@ -465,7 +465,7 @@ End Users (Mobile/Web)
             |
             v
 ┌─────────────────────────┐     ┌─────────────────────────┐
-│  DPM Node (Custodian A) │<--->│  DPM Node (Custodian B) │
+│  DecMan (Custodian A)   │<--->│  DecMan (Custodian B)   │
 │  threshold = 2 of 3     │     │                         │
 │  POST /governance/      │     │  POST /governance/      │
 │       confirm           │     │       confirm           │
@@ -490,7 +490,7 @@ End Users (Mobile/Web)
 
 ## Utility Services
 
-The DPM supports onboarding to the Utility Registry, which provides provider and user service management.
+DecMan supports onboarding to the Utility Registry, which provides provider and user service management.
 
 ### Full Onboarding Flow
 

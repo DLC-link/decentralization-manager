@@ -130,9 +130,9 @@ pub mod artifact_kinds {
 /// Identity-table artefact kinds. These survive the originating workflow run's
 /// dismissal and are read by post-onboarding workflows (contracts, kick, …).
 pub mod identity_kinds {
-    /// Each peer's exported namespace + DAML signing keys. Stored under
+    /// Each peer's exported namespace + Daml signing keys. Stored under
     /// `(dec_party_id, peer_id)` — the local node's own row is the
-    /// canonical source for sign.rs's "load my DAML signing key" lookup.
+    /// canonical source for sign.rs's "load my Daml signing key" lookup.
     pub const PEER_PUBLIC_KEYS: &str = "peer_public_keys";
     /// Each peer's `participant_id` file content. Coordinator's row set
     /// holds one per peer; a peer's row set holds just their own.

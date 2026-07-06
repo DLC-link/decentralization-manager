@@ -45,7 +45,7 @@ use super::{
     },
 };
 
-/// Template identifier for DAML contracts
+/// Template identifier for Daml contracts
 struct TemplateId {
     package_id: String,
     module_name: &'static str,
@@ -728,7 +728,7 @@ pub async fn get_governance_confirmations(
                 .filter(|c| seen_parties.insert(c.confirming_party.clone()))
                 .collect();
 
-            // Mirror DAML's `expiresAt > now` filter so the UI doesn't offer an Execute that chain will reject.
+            // Mirror Daml's `expiresAt > now` filter so the UI doesn't offer an Execute that chain will reject.
             let confirmation_count = unique_confirmations
                 .iter()
                 .filter(|c| c.expires_at == 0 || c.expires_at > now_seconds)

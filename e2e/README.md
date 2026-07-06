@@ -1,4 +1,4 @@
-# DPM UI e2e tests
+# DecMan UI e2e tests
 
 Playwright UI tests mirroring the non-chaos phases of the Rust integration test, run as Keycloak user `cvault-finoa-lp-1`.
 

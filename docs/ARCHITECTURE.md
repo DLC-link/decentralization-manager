@@ -1,6 +1,6 @@
 # Architecture Overview
 
-The Decentralized Party Manager (DPM) enables multiple organizations to jointly control a single Canton party identity without any central authority. It automates the multi-party topology operations, contract deployment, and governance workflows required to create and manage shared party namespaces on Canton blockchain networks.
+The Decentralized Party Manager (DecMan) enables multiple organizations to jointly control a single Canton party identity without any central authority. It automates the multi-party topology operations, contract deployment, and governance workflows required to create and manage shared party namespaces on Canton blockchain networks.
 
 ## Core Concepts
 
@@ -33,7 +33,7 @@ The PartyToParticipant topology mapping connects a decentralized party to its ho
 - The party ID (derived from the decentralized namespace)
 - The hosting participant's ID
 - The participant's permission level (Submission, Confirmation, Observation)
-- DAML signing keys embedded in the mapping (Canton 3.4+)
+- Daml signing keys embedded in the mapping (Canton 3.4+)
 
 ### Threshold Model
 
@@ -51,7 +51,7 @@ The system manages three distinct key types:
 | Key | Algorithm | Purpose |
 |-----|-----------|---------|
 | Namespace key | Ed25519 (Canton) | Signs topology proposals (DNS, P2P) |
-| DAML signing key | Ed25519 (Canton) | Signs ledger transactions |
+| Daml signing key | Ed25519 (Canton) | Signs ledger transactions |
 | Noise key | secp256k1 | Authenticates P2P communication between nodes |
 
 ## System Components
@@ -195,7 +195,7 @@ Minimum message size: 6 bytes (type + length with zero payload).
 | Code | Name | Payload | Description |
 |------|------|---------|-------------|
 | 0x0001 | UploadDars | Encoded DAR files | Upload DAR files to local Canton node |
-| 0x0002 | GenerateKeys | JSON OnboardingConfig | Generate namespace + DAML keys |
+| 0x0002 | GenerateKeys | JSON OnboardingConfig | Generate namespace + Daml keys |
 | 0x0003 | SignDns | Binary DNS proposal | Sign DNS topology proposal |
 | 0x0004 | SignP2p | Binary P2P proposal | Sign P2P topology proposals |
 | 0x0005 | SignSubmissions | Config + prepared files | Sign ledger submissions |
@@ -275,7 +275,7 @@ Creates a new decentralized party with multiple hosting participants.
 | # | Step | Actor | Description |
 |---|------|-------|-------------|
 | 1 | WaitingForPeers | Coordinator | Wait for all invited peers to connect |
-| 2 | GenerateKeys | All | Each participant generates namespace + DAML signing keys via Canton Admin API |
+| 2 | GenerateKeys | All | Each participant generates namespace + Daml signing keys via Canton Admin API |
 | 3 | CreateProposals | Coordinator | Compute decentralized namespace hash, create DNS and P2P topology proposals |
 | 4 | SignDns | All | Each participant signs the DNS proposal with their namespace key |
 | 5 | SubmitDns | Coordinator | Submit signed DNS proposal to Canton, wait for topology propagation (30s) |
@@ -681,7 +681,7 @@ FAR configuration is used in:
 ### Known Limitations
 
 - **ACS sync for existing contracts**: Adding a new member to a party that already has active contracts requires Active Contract Set (ACS) export/import. This operation requires Canton's repair mode, which necessitates a participant restart. If the party has no active contracts, ACS sync is not needed.
-- **No external party support**: All members must run the DPM application on their own Canton participant node. There is no API for external parties to join without running the software.
+- **No external party support**: All members must run the DecMan application on their own Canton participant node. There is no API for external parties to join without running the software.
 - **Single workflow at a time**: The Noise listener is paused during active workflows. Only one workflow can run concurrently per node.
 - **Coordinator single point of progress**: If the coordinator goes offline during a workflow, the workflow cannot continue. Peers will retry 3 times before aborting.
 

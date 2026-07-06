@@ -53,7 +53,7 @@ impl AddPartyConfig {
         format!("{}-namespace", self.decentralized_party_id.prefix)
     }
 
-    /// DAML signing key name for the new member (see `namespace_key_name`).
+    /// Daml signing key name for the new member (see `namespace_key_name`).
     pub fn daml_key_name(&self) -> String {
         format!("{}-daml-transactions", self.decentralized_party_id.prefix)
     }

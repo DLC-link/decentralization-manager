@@ -1,7 +1,7 @@
-//! Serialization of ActionType to DAML Values for Vault Governance
+//! Serialization of ActionType to Daml Values for Vault Governance
 //!
 //! This module provides bidirectional conversion between `ActionType` enum
-//! and DAML `Value` representations for use with the Ledger API.
+//! and Daml `Value` representations for use with the Ledger API.
 
 use anyhow::Context;
 use canton_common::{
@@ -372,9 +372,9 @@ fn serialize_reltime(microseconds: i64) -> Value {
 // Action Serialization
 // ============================================================================
 
-/// Serialize an ActionType to a DAML Value (ActionRequiringConfirmation variant)
+/// Serialize an ActionType to a Daml Value (ActionRequiringConfirmation variant)
 ///
-/// The DAML ActionRequiringConfirmation type uses nested variants:
+/// The Daml ActionRequiringConfirmation type uses nested variants:
 /// - GovernanceAction(Governance_AddMemberAndSetThreshold {...})
 /// - UtilityOnboardingAction(UtilityOnboarding_CreateProviderServiceRequest {...})
 /// - VaultDeploymentAction({...}) - direct record, not nested
@@ -486,7 +486,7 @@ pub fn serialize_action(action: &ActionType) -> Value {
             ]),
         ),
 
-        // Vault Operations - direct variants with DAML field names
+        // Vault Operations - direct variants with Daml field names
         ActionType::VaultPause { vault_id } => make_variant(
             "VaultPauseAction",
             make_record(vec![field("pauseVaultId", make_contract_id(vault_id))]),
@@ -690,7 +690,7 @@ pub fn serialize_action(action: &ActionType) -> Value {
 
 /// Build the ConfirmAction choice argument
 ///
-/// The DAML structure is: { confirmer: Party, action: ActionRequiringConfirmation }
+/// The Daml structure is: { confirmer: Party, action: ActionRequiringConfirmation }
 pub fn build_confirm_action_argument(confirmer: &str, action: &ActionType) -> Value {
     make_record(vec![
         field("confirmer", make_party(confirmer)),
@@ -700,7 +700,7 @@ pub fn build_confirm_action_argument(confirmer: &str, action: &ActionType) -> Va
 
 /// Build the ExecuteConfirmedAction choice argument
 ///
-/// The DAML structure is:
+/// The Daml structure is:
 /// { executor: Party, action: ActionRequiringConfirmation, confirmations: [ContractId], contractCid: Optional ContractId }
 pub fn build_execute_action_argument(
     executor: &str,
@@ -733,7 +733,7 @@ pub fn build_execute_action_argument(
 // Governance-Core Self-Management Serialization
 // ============================================================================
 
-/// Serialize an ActionType to a GovernanceSelfAction DAML variant
+/// Serialize an ActionType to a GovernanceSelfAction Daml variant
 ///
 /// Maps the same ActionType variants used for vault governance to the
 /// governance-core GovernanceSelfAction enum (different field names).
@@ -794,7 +794,7 @@ fn serialize_self_action(action: &ActionType) -> Value {
     }
 }
 
-/// Deserialize a GovernanceSelfAction DAML variant to ActionType
+/// Deserialize a GovernanceSelfAction Daml variant to ActionType
 pub fn deserialize_self_action(value: &Value) -> Result<ActionType> {
     let variant = match &value.sum {
         Some(value::Sum::Variant(v)) => v,
@@ -855,7 +855,7 @@ pub fn deserialize_self_action(value: &Value) -> Result<ActionType> {
 
 /// Build the GovernanceRules_ConfirmGovernanceAction choice argument
 ///
-/// DAML structure: { confirmer: Party, action: GovernanceSelfAction }
+/// Daml structure: { confirmer: Party, action: GovernanceSelfAction }
 pub fn build_confirm_governance_action_arg(confirmer: &str, action: &ActionType) -> Value {
     make_record(vec![
         field("confirmer", make_party(confirmer)),
@@ -865,7 +865,7 @@ pub fn build_confirm_governance_action_arg(confirmer: &str, action: &ActionType)
 
 /// Build the GovernanceRules_ExecuteGovernanceAction choice argument
 ///
-/// DAML structure: { executor: Party, action: GovernanceSelfAction, confirmations: [ContractId GovernanceSelfConfirmation] }
+/// Daml structure: { executor: Party, action: GovernanceSelfAction, confirmations: [ContractId GovernanceSelfConfirmation] }
 pub fn build_execute_governance_action_arg(
     executor: &str,
     action: &ActionType,
@@ -1436,7 +1436,7 @@ pub fn build_proposal_create_args(
 
 /// Build the GovernanceRules_ConfirmAction choice argument for domain actions
 ///
-/// DAML structure: { confirmer: Party, actionProposalCid: ContractId GovernableAction }
+/// Daml structure: { confirmer: Party, actionProposalCid: ContractId GovernableAction }
 pub fn build_confirm_domain_action_arg(confirmer: &str, proposal_cid: &str) -> Value {
     make_record(vec![
         field("confirmer", make_party(confirmer)),
@@ -1446,7 +1446,7 @@ pub fn build_confirm_domain_action_arg(confirmer: &str, proposal_cid: &str) -> V
 
 /// Build the GovernanceRules_ExecuteConfirmedAction choice argument for domain actions
 ///
-/// DAML structure: { executor: Party, actionProposalCid: ContractId GovernableAction, confirmations: [ContractId GovernanceConfirmation] }
+/// Daml structure: { executor: Party, actionProposalCid: ContractId GovernableAction, confirmations: [ContractId GovernanceConfirmation] }
 pub fn build_execute_domain_action_arg(
     executor: &str,
     proposal_cid: &str,
@@ -1620,7 +1620,7 @@ fn deserialize_reltime(value: &Value) -> Result<i64> {
 // Action Deserialization
 // ============================================================================
 
-/// Deserialize a DAML Value (ActionRequiringConfirmation variant) to an ActionType
+/// Deserialize a Daml Value (ActionRequiringConfirmation variant) to an ActionType
 ///
 /// Handles nested variant structure:
 /// - GovernanceAction(Governance_AddMemberAndSetThreshold {...})
@@ -1816,7 +1816,7 @@ pub fn deserialize_action(value: &Value) -> Result<ActionType> {
             })
         }
 
-        // Vault Operations - direct record with DAML field names
+        // Vault Operations - direct record with Daml field names
         "VaultPauseAction" => {
             let record = extract_record(inner)?;
             Ok(ActionType::VaultPause {
@@ -2012,7 +2012,7 @@ mod tests {
 
     // ---- ActionType / ProposalType wire-shape assertions ----
     //
-    // These lock the DAML constructor names and field labels emitted for the
+    // These lock the Daml constructor names and field labels emitted for the
     // governance actions. The labels are hand-written and consumed by the
     // on-ledger interpreter, so a typo or a swap between the two governance
     // serializers (`serialize_action` vs `serialize_self_action`, which

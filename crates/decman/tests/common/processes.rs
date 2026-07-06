@@ -132,7 +132,7 @@ pub async fn wait_for_exit(pid: u32, deadline: Duration) -> Result<()> {
 /// connections.
 ///
 /// HTTP-only by design — the Noise *invite* listener's bound state is not
-/// a reliable signal that DPM is healthy after a chaos restart. DPM's
+/// a reliable signal that DecMan is healthy after a chaos restart. DecMan's
 /// restart-resume path (`src/server/mod.rs`) detects in-progress
 /// `workflow_runs` rows and resumes them as coordinators, which pauses the
 /// Noise invite listener and drops its TCP socket — workflow-specific Noise
@@ -142,17 +142,17 @@ pub async fn wait_for_exit(pid: u32, deadline: Duration) -> Result<()> {
 /// the Noise port in this state used to false-fail with
 /// "ports not bound: http=true noise=false" on G1 (restart_coordinator_resume).
 ///
-/// HTTP listener coming up is the right "DPM completed bootstrap" signal:
+/// HTTP listener coming up is the right "DecMan completed bootstrap" signal:
 /// it's bound exactly once in src/server/mod.rs after Canton's participant
 /// ID lookup, DB migrations, and the auth/workflow-state init pass. From
-/// that point forward, DPM is reachable on the HTTP plane; the Noise plane
+/// that point forward, DecMan is reachable on the HTTP plane; the Noise plane
 /// might or might not be bound depending on what workflow_runs were
 /// recovered from disk.
 pub async fn wait_for_server(http_port: u16, deadline: Duration) -> Result<()> {
     let start = Instant::now();
     loop {
         if TcpStream::connect(("127.0.0.1", http_port)).await.is_ok() {
-            // Settle delay so a freshly-respawned DPM has time to finish
+            // Settle delay so a freshly-respawned DecMan has time to finish
             // any in-flight workflow-resume work before the next test
             // step starts pounding it. Bash harness used 5s here; chaos
             // phases can restart multiple nodes back-to-back, so we use

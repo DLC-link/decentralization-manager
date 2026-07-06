@@ -18,7 +18,7 @@ A web application for managing decentralized parties in Canton blockchain networ
 
 - [Architecture Overview](docs/ARCHITECTURE.md) -- System architecture, core concepts, communication protocol, and technical constraints
 - [User Guide](USER_GUIDE.md) -- Walkthrough of the web UI for day-to-day party and governance operations
-- [Custom DAML Templates](docs/CUSTOM_DAML_TEMPLATES.md) -- Authoring and deploying your own DAML governance templates
+- [Custom Daml Templates](docs/CUSTOM_DAML_TEMPLATES.md) -- Authoring and deploying your own Daml governance templates
 - [Deployment Guide](docs/DEPLOYMENT_GUIDE.md) -- Deploying a node to Kubernetes from scratch: manifests, identity-provider setup, and configuration reference
 - [Use Cases](docs/USE_CASES.md) -- Vault governance, FAR rewards, multi-sig wallet, and utility service walkthroughs
 - [Contributing Guide](docs/CONTRIBUTING.md) -- Development setup, coding standards, commit conventions, and the PR process
@@ -150,7 +150,7 @@ The database file path can be overridden with the `--db` CLI flag.
 | `DECPM_DB_PATH` | SQLite database path override (CLI flag `--db`) | _(defaults to `{dir}/data/decpm.db`)_ |
 | `DECPM_DB_ENCRYPTION_KEY` | Encryption key for secrets stored in the database | _(none)_ |
 | `DECPM_ADMIN_ROLE` | Role name that gates sensitive endpoints (unset skips the role check) | _(none)_ |
-| `DECPM_ALLOWED_ORIGIN` | Origin permitted by CORS (e.g. `https://dpm.example.com`) | _(none, same-origin only)_ |
+| `DECPM_ALLOWED_ORIGIN` | Origin permitted by CORS (e.g. `https://decman.example.com`) | _(none, same-origin only)_ |
 | `DECPM_LISTEN_ADDRESS` | Address to listen on for Noise protocol connections | `0.0.0.0` |
 | `DECPM_NOISE_PORT` | Port for Noise protocol connections | `9000` |
 | `DECPM_PUBLIC_ADDRESS` | Public address that peers use to connect to this node | _(falls back to listen address)_ |
@@ -275,7 +275,7 @@ curl http://localhost:8081/party-config/decparty::1220abc...
    topology changes. It defaults to a majority (`ceil(owners / 2)`, shown and
    editable in the dialog)
 5. The coordinator invites peers and orchestrates:
-   - Cryptographic key generation (namespace + DAML signing keys)
+   - Cryptographic key generation (namespace + Daml signing keys)
    - Topology proposal creation (DNS and P2P mappings)
    - Multi-party signing
    - Proposal submission to Canton
@@ -559,21 +559,21 @@ faces — auth shape, topology propagation, namespace ownership, etc.
 
 ```bash
 ./integration-tests/run.sh --target devnet
-./integration-tests/run.sh --target devnet --verbose   # see DPM INFO trace
+./integration-tests/run.sh --target devnet --verbose   # see DecMan INFO trace
 ```
 
-The bringup is structurally identical to localnet (three bare-process DPM
+The bringup is structurally identical to localnet (three bare-process DecMan
 instances, same `wait_for_server` and `configure_peers` flow), except:
 - No Docker localnet — Canton is the production-shaped cluster in `ieu-devnet`.
 - Canton gRPC admin (5002/5012/5022) and ledger (5001/5011/5021) ports are
   tunneled to localhost via `kubectl port-forward` (managed by
   `devnet.env.sh`'s `start_canton_tunnels`).
-- DPM auth uses real Keycloak (the `JwtValidator`), not the test-mode
+- DecMan auth uses real Keycloak (the `JwtValidator`), not the test-mode
   `MockValidator` localnet uses. The test runner mints its own bearer token
   via password grant; per-party workflows use M2M `client_credentials`.
 - Member parties (`P{N}_MEMBER_PARTY_ID`) are pre-provisioned, not allocated
   during the test. CanActAs grants on the freshly-created dec party are
-  issued via DPM's `POST /auth/grant-rights` (Canton's gRPC
+  issued via DecMan's `POST /auth/grant-rights` (Canton's gRPC
   `UserManagementService.GrantUserRights`).
 
 #### Prerequisites
@@ -622,7 +622,7 @@ Beyond the localnet prerequisites listed above, you'll need:
    - **Per-participant** (`P{N}_*`): `MEMBER_PARTY_ID`, `MEMBER_USER_ID`,
      `MEMBER_KEYCLOAK_CLIENT_ID/SECRET` (workflow M2M client),
      `PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_ID/SECRET` (admin M2M client,
-     required by DPM's `POST /auth/grant-rights`).
+     required by DecMan's `POST /auth/grant-rights`).
 
 The bringup performs a Keycloak password-grant smoke check before spending
 time on `cargo build`, so misconfigured credentials fail fast with a

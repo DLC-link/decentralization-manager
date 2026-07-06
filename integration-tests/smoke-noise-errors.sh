@@ -4,7 +4,7 @@
 # liveness). Focuses on acceptance criterion #1: an idle cluster produces zero
 # `Noise ... input error` log lines from peer-to-peer probes.
 #
-# Reuses integration-tests/env.sh for localnet + dpm bootstrap; the only
+# Reuses integration-tests/env.sh for localnet + DecMan bootstrap; the only
 # differences vs run.sh are (a) per-node logs are captured to files so we
 # can grep them, and (b) we skip the governance e2e and just sit idle for 60s.
 #
@@ -18,7 +18,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$SCRIPT_DIR/integration-tests/env.sh"
 
-# Capture all dpm output at debug so the previously-spammy line would be visible
+# Capture all DecMan output at debug so the previously-spammy line would be visible
 # if it were still being emitted. Without this filter the default WARN drops it.
 export RUST_LOG="${RUST_LOG:-dec_party_manager=debug,tokio_noise=error,hyper_noise=error}"
 
@@ -26,7 +26,7 @@ LOG_DIR="$DEV_DIR/logs"
 NOISE_ERR_PATTERN='Noise connection from .* failed: noise.*input error'
 IDLE_SECONDS="${IDLE_SECONDS:-60}"
 
-# Override env.sh's start_nodes so each dpm's stdout+stderr lands in its own
+# Override env.sh's start_nodes so each DecMan's stdout+stderr lands in its own
 # log file. env.sh's version inherits the parent shell, which is fine for the
 # governance e2e but useless for greppable smoke checks.
 start_nodes() {
@@ -65,7 +65,7 @@ trap cleanup EXIT
 
 log_phase "Preflight"
 check_prerequisites
-check_dpm_ports_free
+check_decman_ports_free
 
 log_phase "Building release-ci binary (with test-mode feature)"
 # `-p decman`: the root is a virtual workspace (bare `--features` is rejected)

@@ -61,7 +61,7 @@ pub enum MessageType {
     Health = 0x000F,
     // Add-party commands live above the invite block (0x0010-0x001F) because
     // the low command range 0x0001-0x000F is exhausted.
-    /// Command: the new member generates its namespace + DAML keys. Other
+    /// Command: the new member generates its namespace + Daml keys. Other
     /// peers reply with a skip status.
     GenerateAddPartyKeys = 0x0020,
     /// Command: every peer signs the add-party DNS + P2P proposals.

@@ -41,7 +41,7 @@ P3_HTTP=8083
 P3_NOISE=9003
 
 # Paths
-DEV_DIR=$(mktemp -d "${TMPDIR:-/tmp}/dpm-it-XXXXXX")
+DEV_DIR=$(mktemp -d "${TMPDIR:-/tmp}/decman-it-XXXXXX")
 DARS_DIR="$SCRIPT_DIR/releases/v0/rc4"
 BINARY="$SCRIPT_DIR/target/release-ci/dec-party-manager"
 
@@ -95,13 +95,13 @@ cleanup() {
     # Preserve the per-node stderr logs before wiping the temp directory —
     # they are the only record of node-side WARN/ERROR lines (each node's
     # output is redirected to $DEV_DIR/participant-N/stderr.log, invisible in
-    # the runner's stdout). Set DPM_IT_LOG_DIR (CI does, on failure-upload)
+    # the runner's stdout). Set DECPM_IT_LOG_DIR (CI does, on failure-upload)
     # to copy them out; unset means the old wipe-everything behaviour.
-    if [ -n "$DEV_DIR" ] && [ -d "$DEV_DIR" ] && [ -n "${DPM_IT_LOG_DIR:-}" ]; then
-        mkdir -p "$DPM_IT_LOG_DIR"
+    if [ -n "$DEV_DIR" ] && [ -d "$DEV_DIR" ] && [ -n "${DECPM_IT_LOG_DIR:-}" ]; then
+        mkdir -p "$DECPM_IT_LOG_DIR"
         for i in 1 2 3; do
             cp "$DEV_DIR/participant-$i/stderr.log" \
-                "$DPM_IT_LOG_DIR/participant-$i.stderr.log" 2>/dev/null || true
+                "$DECPM_IT_LOG_DIR/participant-$i.stderr.log" 2>/dev/null || true
         done
     fi
 
@@ -164,7 +164,7 @@ start_localnet() {
     #
     # --wait blocks until canton + splice healthchecks pass. Splice healthy
     # means /api/validator/readyz returns OK, i.e. splice has registered the
-    # global synchronizer with all 3 participants. Without it, dpm processes
+    # global synchronizer with all 3 participants. Without it, DecMan processes
     # race ahead and get "No participant ID returned" / "synchronizer with
     # alias global is unknown" — the UIs used to incidentally pad the wall
     # clock during compose start; trimming them exposed the race.

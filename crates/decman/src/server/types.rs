@@ -309,7 +309,7 @@ pub type OnboardingResponse = WorkflowResponse;
 // Governance Types (Structured Actions)
 // ============================================================================
 
-/// Vault limits configuration (all fields are optional in DAML)
+/// Vault limits configuration (all fields are optional in Daml)
 #[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct VaultLimits {
@@ -465,7 +465,7 @@ impl ActionType {
     /// Validate the action's fields. Returns an error message if invalid.
     ///
     /// Catches obviously-malformed inputs (negative thresholds, non-positive
-    /// timeouts) before they reach Canton's DAML checks. Canton rejects bad
+    /// timeouts) before they reach Canton's Daml checks. Canton rejects bad
     /// values too, but here we surface a clear 400 rather than a generic
     /// submission error after the proposal contract is already on the wire.
     pub fn validate(&self) -> Result<(), String> {
@@ -715,7 +715,7 @@ pub enum ProposalType {
 
 impl ProposalType {
     /// Validate the proposal's fields. Mirrors `ActionType::validate` —
-    /// catches non-positive token amounts before they reach Canton's DAML
+    /// catches non-positive token amounts before they reach Canton's Daml
     /// checks so a 400 surfaces a precise reason rather than a generic
     /// submission error after a proposal contract is already created.
     pub fn validate(&self) -> Result<(), String> {
@@ -972,7 +972,7 @@ pub struct TransferInstructionInfo {
     pub pending_actions: Vec<PendingAction>,
     /// Unix seconds of the offer's `executeBefore` deadline. Past-deadline
     /// rows are surfaced anyway (disabled in the UI) so the user can see they
-    /// exist — DAML refuses to Accept them, but staying silent confused users.
+    /// exist — Daml refuses to Accept them, but staying silent confused users.
     #[serde(default)]
     pub expires_at: i64,
 }

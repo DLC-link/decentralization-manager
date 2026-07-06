@@ -83,7 +83,7 @@ Use this method when adding a member to a decentralized party that has **no exis
 
 ### Procedure
 
-1. **Generate keys** for the new member (namespace + DAML signing keys)
+1. **Generate keys** for the new member (namespace + Daml signing keys)
 2. **Create namespace delegation** for the new member
 3. **Update DecentralizedNamespaceDefinition** (add new owner)
 4. **Update PartyToParticipant** (add new participant)

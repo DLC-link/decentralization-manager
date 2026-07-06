@@ -286,7 +286,7 @@ pub fn compute_fingerprint(key: &SigningPublicKey) -> String {
 
 /// Process-wide cache for the resolved physical synchronizer ID.
 ///
-/// The ID is stable for the lifetime of a DPM process (it only changes if the
+/// The ID is stable for the lifetime of a DecMan process (it only changes if the
 /// node is reprovisioned against a different synchronizer, which requires a
 /// restart). Resolving it costs a fresh gRPC channel + a one-shot
 /// `get_synchronizer_id` call against the Canton admin API — observed at

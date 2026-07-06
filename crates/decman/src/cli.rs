@@ -137,7 +137,7 @@ pub enum Commands {
         #[arg(long, env = "DECPM_ADMIN_ROLE")]
         admin_role: Option<String>,
 
-        /// Origin permitted by CORS (e.g. `https://dpm.example.com`).
+        /// Origin permitted by CORS (e.g. `https://decman.example.com`).
         /// Defaults to same-origin only — set this when the SPA is served
         /// from a different host than the API (reverse proxy, dev server).
         #[arg(long, env = "DECPM_ALLOWED_ORIGIN")]

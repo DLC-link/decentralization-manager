@@ -31,7 +31,7 @@ use crate::{
 /// - new `PartyToParticipant`: existing participants + the new member with
 ///   `Confirmation` permission and the **Onboarding marker** set (suspends
 ///   the party on the new member until the ACS import lands and the flag is
-///   cleared), party signing keys merged with the new member's DAML key —
+///   cleared), party signing keys merged with the new member's Daml key —
 ///   persisted as `ADD_PARTY_P2P_PROPOSAL`
 pub async fn create_proposals(
     config: &NodeConfig,
@@ -76,7 +76,7 @@ pub async fn create_proposals(
     let new_daml_fingerprint = utils::compute_fingerprint(&new_daml_key);
     tracing::info!(
         "New member namespace fingerprint: {new_namespace_fingerprint}, \
-         DAML key fingerprint: {new_daml_fingerprint}"
+         Daml key fingerprint: {new_daml_fingerprint}"
     );
 
     if current_namespace_def
@@ -118,7 +118,7 @@ pub async fn create_proposals(
         onboarding: Some(hosting_participant::Onboarding {}),
     });
 
-    // Merge the new member's DAML key into the party signing keys, deduped by
+    // Merge the new member's Daml key into the party signing keys, deduped by
     // fingerprint so a retried run can't double-add it.
     let mut signing_keys = current_p2p
         .party_signing_keys

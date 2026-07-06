@@ -87,13 +87,13 @@ pub async fn create_proposals(
             );
         }
 
-        // First key is namespace key, second is DAML key
+        // First key is namespace key, second is Daml key
         namespace_keys.push(keys[0].clone());
         daml_keys.push(keys[1].clone());
 
         // Debug: Log fingerprints of keys being added to P2P mapping
         let daml_key_fp = utils::compute_fingerprint(&keys[1]);
-        tracing::debug!("DAML key from {peer_id} has fingerprint: {daml_key_fp}");
+        tracing::debug!("Daml key from {peer_id} has fingerprint: {daml_key_fp}");
     }
 
     // Step 3: Extract namespaces from namespace keys
@@ -233,9 +233,9 @@ pub async fn create_proposals(
         }),
     };
 
-    // Debug: Log all DAML key fingerprints being added to P2P mapping
+    // Debug: Log all Daml key fingerprints being added to P2P mapping
     tracing::info!(
-        "Adding {count} DAML signing keys to P2P mapping:",
+        "Adding {count} Daml signing keys to P2P mapping:",
         count = daml_keys.len()
     );
     for (idx, key) in daml_keys.iter().enumerate() {

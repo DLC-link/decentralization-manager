@@ -31,7 +31,7 @@ pub struct MemberCreds {
 
 /// Keycloak client_credentials for the participant-admin (Canton
 /// ParticipantAdmin) service account. Used on devnet by the test runner to
-/// drive DPM's POST /auth/grant-rights — that handler mints an admin token
+/// drive DecMan's POST /auth/grant-rights — that handler mints an admin token
 /// from these creds and calls UserManagementService.GrantUserRights to grant
 /// CoordinatorUser/attestorUserN the act_as+read_as rights on the freshly-
 /// created decentralized party. Localnet uses the JSON Ledger API and
@@ -50,11 +50,11 @@ pub enum TestTarget {
 
 impl TestTarget {
     fn from_env() -> anyhow::Result<Self> {
-        match std::env::var("DPM_IT_TARGET").as_deref() {
+        match std::env::var("DECPM_IT_TARGET").as_deref() {
             Ok("localnet") | Err(_) => Ok(TestTarget::Localnet),
             Ok("devnet") => Ok(TestTarget::Devnet),
             Ok(other) => {
-                anyhow::bail!("invalid DPM_IT_TARGET value: {other}; expected localnet|devnet")
+                anyhow::bail!("invalid DECPM_IT_TARGET value: {other}; expected localnet|devnet")
             }
         }
     }
@@ -168,12 +168,12 @@ impl Fixture {
                 })
             }
         };
-        let run_id = std::env::var("DPM_IT_RUN_ID").unwrap_or_else(|_| {
+        let run_id = std::env::var("DECPM_IT_RUN_ID").unwrap_or_else(|_| {
             let ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            format!("dpm-it-{ts}-{pid}", pid = std::process::id())
+            format!("decman-it-{ts}-{pid}", pid = std::process::id())
         });
 
         let (
@@ -320,7 +320,7 @@ impl Fixture {
             refresher: Arc::new(auth::Refresher::Static {
                 token: jwt.to_string(),
             }),
-            dev_dir: PathBuf::from("/tmp/dpm-it-test"),
+            dev_dir: PathBuf::from("/tmp/decman-it-test"),
             current_pids: [None, None, None],
             p1: NodePorts {
                 http: 8081,
@@ -380,15 +380,15 @@ mod tests {
             std::env::set_var("P2_PARTICIPANT_ID", "p2");
             std::env::set_var("P3_PARTICIPANT_ID", "p3");
             std::env::set_var("MOCK_TOKEN", "mock-jwt");
-            std::env::set_var("DEV_DIR", "/tmp/dpm-it-test");
-            std::env::set_var("DPM_IT_RUN_ID", "test-run-id");
-            // DPM_IT_TARGET intentionally left unset — exercises the default path
+            std::env::set_var("DEV_DIR", "/tmp/decman-it-test");
+            std::env::set_var("DECPM_IT_RUN_ID", "test-run-id");
+            // DECPM_IT_TARGET intentionally left unset — exercises the default path
         }
     }
 
     fn set_devnet_env() {
         unsafe {
-            std::env::set_var("DPM_IT_TARGET", "devnet");
+            std::env::set_var("DECPM_IT_TARGET", "devnet");
             std::env::set_var("DECPM_KEYCLOAK_URL", "https://keycloak.example.com/auth");
             std::env::set_var("DECPM_KEYCLOAK_REALM", "test-realm");
             std::env::set_var("DECPM_KEYCLOAK_CLIENT_ID", "test-client");
@@ -440,8 +440,8 @@ mod tests {
                 "P3_PARTICIPANT_ID",
                 "MOCK_TOKEN",
                 "DEV_DIR",
-                "DPM_IT_RUN_ID",
-                "DPM_IT_TARGET",
+                "DECPM_IT_RUN_ID",
+                "DECPM_IT_TARGET",
                 "DECPM_KEYCLOAK_URL",
                 "DECPM_KEYCLOAK_REALM",
                 "DECPM_KEYCLOAK_CLIENT_ID",
@@ -529,7 +529,7 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap();
         clear_all_env();
         set_all_env();
-        unsafe { std::env::set_var("DPM_IT_TARGET", "localnet") };
+        unsafe { std::env::set_var("DECPM_IT_TARGET", "localnet") };
         let f = Fixture::from_env().unwrap();
         assert!(matches!(f.target, TestTarget::Localnet));
     }
@@ -539,9 +539,9 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap();
         clear_all_env();
         set_all_env();
-        unsafe { std::env::set_var("DPM_IT_TARGET", "stagnet") };
+        unsafe { std::env::set_var("DECPM_IT_TARGET", "stagnet") };
         let err = Fixture::from_env().unwrap_err();
-        assert!(format!("{err:#}").contains("DPM_IT_TARGET"));
+        assert!(format!("{err:#}").contains("DECPM_IT_TARGET"));
         assert!(format!("{err:#}").contains("stagnet"));
         assert!(format!("{err:#}").contains("localnet"));
         assert!(format!("{err:#}").contains("devnet"));
@@ -561,9 +561,9 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap();
         clear_all_env();
         set_all_env();
-        unsafe { std::env::remove_var("DPM_IT_RUN_ID") };
+        unsafe { std::env::remove_var("DECPM_IT_RUN_ID") };
         let f = Fixture::from_env().unwrap();
-        assert!(f.run_id.starts_with("dpm-it-"));
+        assert!(f.run_id.starts_with("decman-it-"));
     }
 
     #[test]

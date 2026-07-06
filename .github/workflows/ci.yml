@@ -132,7 +132,7 @@ jobs:
       - name: Run integration tests
         run: ./integration-tests/run.sh
         env:
-          DPM_IT_LOG_DIR: ${{ github.workspace }}/it-node-logs
+          DECPM_IT_LOG_DIR: ${{ github.workspace }}/it-node-logs
       - name: Upload node logs
         if: failure()
         uses: actions/upload-artifact@v7
@@ -179,7 +179,7 @@ jobs:
         run: cargo-deny check advisories
 
   daml:
-    name: DAML Build & Test
+    name: Daml Build & Test
     runs-on: ubuntu-latest # TEMP stopgap: ubuntu-8-core larger runners unavailable — revert once restored
     defaults:
       run:
@@ -190,7 +190,7 @@ jobs:
       # both so the install steps below short-circuit on a hit. Key on the
       # SDK version so a bump invalidates the cache automatically; keep
       # the install-script-driven steps so a cache miss still self-heals.
-      - name: Cache dpm + DAML SDK
+      - name: Cache dpm + Daml SDK
         id: cache-dpm
         uses: actions/cache@v6
         with:
@@ -199,7 +199,7 @@ jobs:
       - name: Install dpm
         if: steps.cache-dpm.outputs.cache-hit != 'true'
         run: curl -sSL https://get.digitalasset.com/install/install.sh | sh
-      - name: Install DAML SDK
+      - name: Install Daml SDK
         if: steps.cache-dpm.outputs.cache-hit != 'true'
         run: ~/.dpm/bin/dpm install 3.4.11
       - name: Build

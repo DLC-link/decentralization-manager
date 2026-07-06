@@ -27,10 +27,10 @@ wait_for_server() {
     # Optional bearer token. Required on devnet (real JwtValidator) so the
     # readiness probes below aren't rejected as "missing bearer token". On
     # localnet the binary is built with `--features test-mode` (MockValidator)
-    # which accepts any/no token, so DPM_IT_AUTH_TOKEN is left unset.
+    # which accepts any/no token, so DECPM_IT_AUTH_TOKEN is left unset.
     local auth_args=()
-    if [ -n "${DPM_IT_AUTH_TOKEN:-}" ]; then
-        auth_args=(-H "Authorization: Bearer ${DPM_IT_AUTH_TOKEN}")
+    if [ -n "${DECPM_IT_AUTH_TOKEN:-}" ]; then
+        auth_args=(-H "Authorization: Bearer ${DECPM_IT_AUTH_TOKEN}")
     fi
 
     echo "Waiting for $name on port $port..."
@@ -122,11 +122,11 @@ check_prerequisites() {
 # ============================================================================
 
 # Checks that the dec-party-manager HTTP and Noise ports are free.
-# A leftover process (e.g. a dpm started by a previous run that didn't clean up,
-# or a different worktree's dpm still running) would silently steal one of these
+# A leftover process (e.g. a DecMan started by a previous run that didn't clean up,
+# or a different worktree's DecMan still running) would silently steal one of these
 # ports and the e2e would time out 60s into the first invitation accept.
 # Failing fast here turns that into an instant, actionable error.
-check_dpm_ports_free() {
+check_decman_ports_free() {
     local ports=("$P1_HTTP" "$P2_HTTP" "$P3_HTTP" "$P1_NOISE" "$P2_NOISE" "$P3_NOISE")
     local busy=()
 
@@ -145,7 +145,7 @@ check_dpm_ports_free() {
             lsof -nP -i:"$p" -sTCP:LISTEN 2>/dev/null | tail -n +2 | sed 's/^/    /'
         done
         echo ""
-        echo "Stop the offending process(es) (often a dpm leftover from a previous run"
+        echo "Stop the offending process(es) (often a DecMan leftover from a previous run"
         echo "or another worktree), then re-run the integration tests."
         exit 1
     fi
@@ -228,7 +228,7 @@ stop_nodes() {
             kill -9 "$pid" 2>/dev/null || true
         fi
     done
-    # Reap only the DPM PIDs we just killed. A bare `wait` would block on
+    # Reap only the DecMan PIDs we just killed. A bare `wait` would block on
     # every active bg child of the script — on devnet that includes the
     # `_canton_forward_loop` subshells (while-true kubectl port-forwards),
     # so `configure_peers`' restart cycle would hang forever.
@@ -246,8 +246,8 @@ configure_peers() {
     # See wait_for_server for the rationale: devnet's real JwtValidator
     # requires a bearer; localnet's test-mode MockValidator accepts no token.
     local auth_args=()
-    if [ -n "${DPM_IT_AUTH_TOKEN:-}" ]; then
-        auth_args=(-H "Authorization: Bearer ${DPM_IT_AUTH_TOKEN}")
+    if [ -n "${DECPM_IT_AUTH_TOKEN:-}" ]; then
+        auth_args=(-H "Authorization: Bearer ${DECPM_IT_AUTH_TOKEN}")
     fi
 
     P1_KEY=$(curl -s "${auth_args[@]+"${auth_args[@]}"}" "http://localhost:$P1_HTTP/keys/status" | jq -r '.public_key')
