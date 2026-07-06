@@ -55,7 +55,9 @@ The application runs as an HTTP server with an embedded React frontend. Multiple
 
 - Rust toolchain (for building from source)
 - Access to Canton participant nodes (Admin API and Ledger API)
-- Docker (optional, for containerized deployment)
+- Docker (optional, for containerized deployment). Building the image also
+  requires an SSH key registered on a GitHub account — see
+  [Running with Docker](#running-with-docker)
 
 ### Running Locally
 
@@ -82,9 +84,18 @@ Open http://localhost:8081 in your browser.
 
 ### Running with Docker
 
+> **An SSH key is required to build the image.** The build compiles the
+> `canton-lib` Rust dependency, which Cargo fetches from GitHub over SSH, so
+> BuildKit needs an SSH key forwarded into the build via `--ssh`. `canton-lib`
+> is a **public** repository, so any SSH key registered on any GitHub account
+> works — no special repository access is required. Point `--ssh default=` at
+> your private key file, or pass just `--ssh default` to forward your running
+> `ssh-agent`.
+
 ```bash
-# Build the image
-docker build -t dec-party-manager .
+# Build the image (forward an SSH key registered on a GitHub account;
+# replace the key path with your own)
+docker build --ssh default=$HOME/.ssh/id_ed25519 -t dec-party-manager .
 
 # Run a single instance
 docker run -p 8080:8080 -v ./data:/data \
@@ -100,7 +111,12 @@ docker run -p 8080:8080 -v ./data:/data \
 
 ### Running Multiple Participants (Development)
 
+The Compose services build from the same `Dockerfile` and forward your
+`ssh-agent` (`ssh: default`), so add your GitHub-registered SSH key to the
+agent before bringing them up:
+
 ```bash
+ssh-add ~/.ssh/id_ed25519   # your GitHub-registered key
 cd development
 docker compose up
 ```
@@ -651,8 +667,9 @@ TypeScript imports won't resolve.
 Build and push to ECR:
 
 ```bash
-# Build
-docker build -t dec-party-manager .
+# Build (forward an SSH key to fetch the canton-lib dependency — see
+# "Running with Docker" above)
+docker build --ssh default=$HOME/.ssh/id_ed25519 -t dec-party-manager .
 
 # Tag for ECR
 docker tag dec-party-manager:latest public.ecr.aws/dlc-link/canton-decparty-manager:<version>
