@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use common::types::{
@@ -12,6 +12,8 @@ use reqwest::blocking::{Client, Response};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
+
+use crate::composer::{PickerOption, PickerSource};
 
 /// User credentials and optional IdP overrides for the OAuth2 password grant.
 ///
@@ -139,6 +141,7 @@ fn merge_peers(
     node: &NodeConfigResponse,
     peers: &[PeerConfig],
     statuses: &[ParticipantStatus],
+    self_latency_ms: Option<u64>,
 ) -> Vec<PeerView> {
     let by_id: HashMap<&str, &ParticipantStatus> =
         statuses.iter().map(|s| (s.id.as_str(), s)).collect();
@@ -162,7 +165,13 @@ fn merge_peers(
                 address: peer.address.clone(),
                 port: peer.port,
                 status,
-                latency_ms: live.and_then(|s| s.latency_ms),
+                // Peers report a measured round-trip; self uses our own
+                // API round-trip instead (a peer never probes itself).
+                latency_ms: if is_self {
+                    self_latency_ms
+                } else {
+                    live.and_then(|s| s.latency_ms)
+                },
                 version: live
                     .and_then(|s| s.version.clone())
                     .or_else(|| if is_self { node.version.clone() } else { None }),
@@ -185,7 +194,7 @@ fn merge_peers(
             address,
             port: node.node.port,
             status: Some(ConnectionStatus::CurrentNode),
-            latency_ms: None,
+            latency_ms: self_latency_ms,
             version: node.version.clone(),
             workflow: None,
             is_self: true,
@@ -343,6 +352,27 @@ pub struct GovernanceConfirmations {
 struct OperatorInfoResponse {
     #[serde(default)]
     party_id: String,
+}
+
+/// `/keys/status` response: whether this node's Noise keypair exists and, if so,
+/// its public key (the value peers configure to reach this node).
+#[derive(Clone, Debug, Deserialize)]
+pub struct KeyStatus {
+    #[serde(default)]
+    pub has_keys: bool,
+    #[serde(default)]
+    pub public_key: Option<String>,
+}
+
+/// `/network-info` response: the DSO identity this node is bound to. The
+/// `amulet_rules` blob is intentionally not deserialized (it is large and only
+/// needed server-side).
+#[derive(Clone, Debug, Deserialize)]
+pub struct NetworkInfo {
+    #[serde(default)]
+    pub dso_party_id: String,
+    #[serde(default)]
+    pub amulet_rules_cid: String,
 }
 
 /// Per-party IdP configuration, from `GET /party-config/{id}` (secrets are
@@ -537,6 +567,93 @@ fn short_id(id: &str) -> &str {
     id.split("::").next().unwrap_or(id)
 }
 
+/// The endpoint path and response envelope key for a picker source.
+fn source_endpoint(source: PickerSource) -> (&'static str, &'static str) {
+    match source {
+        PickerSource::Instruments => ("/instruments", "instruments"),
+        PickerSource::Vaults => ("/vaults", "vaults"),
+        PickerSource::ProviderServices => ("/services/provider", "services"),
+        PickerSource::UserServices => ("/services/user", "services"),
+        PickerSource::RegistrarServices => ("/services/registrar", "services"),
+        PickerSource::CredentialOffers => ("/credential-offers", "credential_offers"),
+        PickerSource::MintRequests => ("/governance/mint-requests", "mint_requests"),
+        PickerSource::BurnRequests => ("/governance/burn-requests", "burn_requests"),
+        PickerSource::TransferInstructions => {
+            ("/governance/transfer-instructions", "transfer_instructions")
+        }
+        PickerSource::TransferFactories => ("/transfer-factories", "transfer_factories"),
+    }
+}
+
+/// Read a string field off a JSON contract object (empty when absent).
+fn str_field(item: &Value, key: &str) -> String {
+    item.get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// A short, always-non-empty stand-in label for a contract with no better
+/// summary: the first characters of its id.
+fn short_cid(cid: &str) -> String {
+    let head: String = cid.chars().take(14).collect();
+    if cid.chars().count() > 14 {
+        format!("{head}…")
+    } else {
+        head
+    }
+}
+
+/// A one-line human summary for a fetched contract, formatted per source to
+/// mirror the web frontend's dropdown labels.
+fn picker_label(source: PickerSource, item: &Value) -> String {
+    let f = |key: &str| str_field(item, key);
+    let p = |key: &str| short_id(&f(key)).to_owned();
+    let label = match source {
+        PickerSource::Instruments => format!("{} · {}", f("instrument_id"), p("instrument_admin")),
+        PickerSource::Vaults => {
+            let (name, symbol) = (f("vault_name"), f("share_symbol"));
+            if symbol.is_empty() {
+                name
+            } else {
+                format!("{name} ({symbol})")
+            }
+        }
+        PickerSource::ProviderServices => format!("provider {}", p("provider")),
+        PickerSource::UserServices => format!("user {}", p("user")),
+        PickerSource::RegistrarServices => format!("registrar {}", p("registrar")),
+        PickerSource::CredentialOffers => format!("{} → {}", f("credential_id"), p("holder")),
+        PickerSource::MintRequests | PickerSource::BurnRequests => {
+            format!("{} {} → {}", f("amount"), f("instrument_id"), p("holder"))
+        }
+        PickerSource::TransferInstructions => format!(
+            "{} {} {}→{}",
+            f("amount"),
+            f("instrument_id"),
+            p("sender"),
+            p("receiver")
+        ),
+        PickerSource::TransferFactories => format!("admin {}", p("expected_admin")),
+    };
+    label.trim().to_owned()
+}
+
+/// Turn a JSON contract object into a [`PickerOption`], or `None` when it has no
+/// contract id (e.g. the synthetic shared-instrument transfer-factory rows).
+fn picker_option(source: PickerSource, item: &Value) -> Option<PickerOption> {
+    let value = str_field(item, "contract_id");
+    if value.is_empty() {
+        return None;
+    }
+    let label = picker_label(source, item);
+    let label = if label.chars().any(char::is_alphanumeric) {
+        label
+    } else {
+        short_cid(&value)
+    };
+    Some(PickerOption { value, label })
+}
+
 /// Per-party authentication status, from `/auth/status`. Internally tagged on
 /// the wire under `status`.
 #[derive(Clone, Debug, Deserialize)]
@@ -663,10 +780,19 @@ impl DecmanClient {
     /// Returns an error if login or either request fails, the API returns a
     /// non-success status, or a response cannot be parsed.
     pub fn fetch_peers(&mut self) -> Result<Vec<PeerView>> {
+        // Time one round-trip to our own API as the self-node latency (the web
+        // frontend shows the same "you" latency), so this node's row is not blank.
+        let start = Instant::now();
         let node: NodeConfigResponse = self.get_json("/node-config")?;
+        let self_latency_ms = u64::try_from(start.elapsed().as_millis()).ok();
         let config: NetworkConfigResponse = self.get_json("/network-config")?;
         let statuses: ParticipantsStatusResponse = self.get_json("/participants-status")?;
-        Ok(merge_peers(&node, &config.peers, &statuses.statuses))
+        Ok(merge_peers(
+            &node,
+            &config.peers,
+            &statuses.statuses,
+            self_latency_ms,
+        ))
     }
 
     /// Fetch the DAML packages (DARs) vetted on this node, sorted like the
@@ -814,6 +940,55 @@ impl DecmanClient {
             Some(json!({
                 "decentralized_party_id": party_id,
                 "participant_id": participant_id,
+                "new_threshold": new_threshold,
+                "previous_threshold": previous_threshold,
+            })),
+        )
+    }
+
+    /// Add a new member to an existing decentralized party, re-issuing the
+    /// namespace + party mappings with `new_threshold`. The new participant must
+    /// already be a configured peer of this node.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if login or the request fails, or the API rejects it
+    /// (e.g. the participant is already a member, or a workflow is in progress).
+    pub fn start_add_party(
+        &mut self,
+        party_id: &str,
+        new_participant_id: &str,
+        new_threshold: i32,
+        previous_threshold: i32,
+    ) -> Result<()> {
+        self.post(
+            "/add-party",
+            Some(json!({
+                "decentralized_party_id": party_id,
+                "new_participant_id": new_participant_id,
+                "new_threshold": new_threshold,
+                "previous_threshold": previous_threshold,
+            })),
+        )
+    }
+
+    /// Change the signing threshold of an existing decentralized party
+    /// (namespace + P2P), keeping its membership unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if login or the request fails, or the API rejects it
+    /// (e.g. a workflow is already in progress, or the party is solo-owned).
+    pub fn start_change_threshold(
+        &mut self,
+        party_id: &str,
+        new_threshold: i32,
+        previous_threshold: i32,
+    ) -> Result<()> {
+        self.post(
+            "/change-threshold",
+            Some(json!({
+                "decentralized_party_id": party_id,
                 "new_threshold": new_threshold,
                 "previous_threshold": previous_threshold,
             })),
@@ -1024,6 +1199,51 @@ impl DecmanClient {
     pub fn fetch_operator_info(&mut self) -> Result<String> {
         let response: OperatorInfoResponse = self.get_json("/operator-info")?;
         Ok(response.party_id)
+    }
+
+    /// Fetch this node's Noise key status (existence + public key).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if login or the request fails, the API returns a
+    /// non-success status, or the response cannot be parsed.
+    pub fn fetch_key_status(&mut self) -> Result<KeyStatus> {
+        self.get_json("/keys/status")
+    }
+
+    /// Fetch the DSO network identity this node is bound to.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if login or the request fails, the API returns a
+    /// non-success status (e.g. the DSO API is unreachable), or the response
+    /// cannot be parsed.
+    pub fn fetch_network_info(&mut self) -> Result<NetworkInfo> {
+        self.get_json("/network-info")
+    }
+
+    /// Fetch the selectable contracts for a composer picker field: the same
+    /// read endpoints the web frontend queries to populate its proposal-form
+    /// dropdowns, mapped to `(contract_id, label)` options.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if login or the request fails, the API returns a
+    /// non-success status, or the response cannot be parsed.
+    pub fn fetch_picker_options(
+        &mut self,
+        source: PickerSource,
+        party_id: &str,
+    ) -> Result<Vec<PickerOption>> {
+        let (path, key) = source_endpoint(source);
+        let response: Value = self.get_json_query(path, &[("party_id", party_id)])?;
+        Ok(response
+            .get(key)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|item| picker_option(source, item))
+            .collect())
     }
 
     /// Fetch the per-party IdP configuration for a dec party.
@@ -1603,13 +1823,15 @@ mod tests {
         )];
 
         // Act
-        let views = merge_peers(&node("self::1220"), &peers, &statuses);
+        let views = merge_peers(&node("self::1220"), &peers, &statuses, Some(7));
 
         // Assert — self first, peer status/latency/workflow mapped.
         assert_eq!(views.len(), 2);
         assert_eq!(views[0].name, "me");
         assert!(views[0].is_self);
         assert_eq!(views[0].status, Some(ConnectionStatus::CurrentNode));
+        // Self shows our own API round-trip latency, not a peer probe.
+        assert_eq!(views[0].latency_ms, Some(7));
         assert_eq!(views[1].name, "alpha");
         assert_eq!(views[1].status, Some(ConnectionStatus::Connected));
         assert_eq!(views[1].latency_ms, Some(12));
@@ -1627,13 +1849,14 @@ mod tests {
         }];
 
         // Act
-        let views = merge_peers(&node("self::1220"), &peers, &[]);
+        let views = merge_peers(&node("self::1220"), &peers, &[], Some(9));
 
         // Assert — self synthesized and listed first; missing status → None (Unknown).
         assert_eq!(views.len(), 2);
         assert!(views[0].is_self);
         assert_eq!(views[0].status, Some(ConnectionStatus::CurrentNode));
         assert_eq!(views[0].version.as_deref(), Some("0.9.1"));
+        assert_eq!(views[0].latency_ms, Some(9));
         assert!(!views[1].is_self);
         assert_eq!(views[1].name, "ghost");
         assert_eq!(views[1].status, None);
@@ -1666,6 +1889,56 @@ mod tests {
         // Assert
         let order: Vec<&str> = packages.iter().map(|p| p.package_id.as_str()).collect();
         assert_eq!(order, ["b", "a", "c"]);
+    }
+
+    #[test]
+    fn source_endpoint_maps_paths_and_envelope_keys() {
+        assert_eq!(
+            source_endpoint(PickerSource::MintRequests),
+            ("/governance/mint-requests", "mint_requests")
+        );
+        assert_eq!(source_endpoint(PickerSource::Vaults), ("/vaults", "vaults"));
+        assert_eq!(
+            source_endpoint(PickerSource::ProviderServices),
+            ("/services/provider", "services")
+        );
+    }
+
+    #[test]
+    fn picker_option_skips_empty_cid_and_labels_by_source() {
+        // A contract with no id (e.g. a synthetic transfer-factory row) is dropped.
+        assert!(picker_option(PickerSource::Vaults, &json!({ "vault_name": "v" })).is_none());
+
+        // Vault: name + share symbol.
+        let vault = picker_option(
+            PickerSource::Vaults,
+            &json!({ "contract_id": "00v", "vault_name": "Treasury", "share_symbol": "tSHR" }),
+        )
+        .expect("vault option");
+        assert_eq!(vault.value, "00v");
+        assert_eq!(vault.label, "Treasury (tSHR)");
+
+        // Mint request: amount, instrument, holder prefix.
+        let mint = picker_option(
+            PickerSource::MintRequests,
+            &json!({
+                "contract_id": "00m", "amount": "100", "instrument_id": "CBTC",
+                "holder": "alice::1220",
+            }),
+        )
+        .expect("mint option");
+        assert_eq!(mint.label, "100 CBTC → alice");
+    }
+
+    #[test]
+    fn picker_option_falls_back_to_short_cid_without_label_fields() {
+        let option = picker_option(
+            PickerSource::Instruments,
+            &json!({ "contract_id": "00abcdef0123456789" }),
+        )
+        .expect("instrument option");
+        // No instrument_id / admin → the label degrades to a truncated cid.
+        assert_eq!(option.label, "00abcdef012345…");
     }
 
     #[test]

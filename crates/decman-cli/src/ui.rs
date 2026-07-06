@@ -9,8 +9,8 @@ use ratatui::widgets::{
 };
 
 use common::types::{
-    ConnectionStatus, DecentralizedParty, PeerErrorKind, PeerPackageComparison, PendingInvitation,
-    Permission, VettedPackageInfo, WorkflowProgress, WorkflowRun,
+    ConnectionStatus, DecentralizedParty, PackageInfo, PeerErrorKind, PeerPackageComparison,
+    PendingInvitation, Permission, VettedPackageInfo, WorkflowProgress, WorkflowRun,
 };
 
 use crate::api::{
@@ -18,9 +18,9 @@ use crate::api::{
     invitation_name, party_name, run_name,
 };
 use crate::app::{
-    App, ComposerKind, ComposerPick, DeployForm, DetailData, GovItem, GovView, GrantForm, IdpMode,
-    KickForm, NetworkEditState, OnboardForm, Overlay, PartyConfigForm, PcRow, PeerChoice, PeerForm,
-    Status, Tab, TabView,
+    AddPartyForm, App, ChangeThresholdForm, ComposerKind, ComposerPick, DeployForm, DetailData,
+    GovItem, GovView, GrantForm, IdpMode, KickForm, NetworkEditState, NodeInfoData, OnboardForm,
+    Overlay, PartyConfigForm, PcRow, PeerChoice, PeerForm, Status, Tab, TabView,
 };
 use crate::composer::{Composer, FieldKind};
 use crate::config::Profile;
@@ -41,7 +41,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     ])
     .areas(frame.area());
 
-    draw_header(frame, header);
+    // Record the panel rect so mouse clicks can be mapped back to a tab / row.
+    app.set_body_area(body);
+
+    draw_header(frame, header, app.node_version());
 
     let spinner = SPINNER[app.tick() % SPINNER.len()];
 
@@ -53,6 +56,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         let hint = match app.overlay() {
             Overlay::Json { .. } | Overlay::ChainAudit { .. } => " ↑/↓ scroll · esc close",
             Overlay::Kick(_) => " ↑/↓ pick · ←/→ threshold · enter kick · esc cancel",
+            Overlay::AddParty(_) => " ↑/↓ pick · ←/→ threshold · enter add · esc cancel",
+            Overlay::ChangeThreshold(_) => " ←/→ threshold · enter apply · esc cancel",
             Overlay::Governance(_) => {
                 " ↑/↓ · c confirm · e exec · r revoke · x expire · n new · p propose · esc"
             }
@@ -66,7 +71,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             }
             Overlay::Message(_) | Overlay::Busy(_) => " enter / esc to close",
             _ => {
-                " ↑/↓ audit · enter json · a login · g gov · D deploy · c chain · K kick · esc back"
+                " ↑/↓ audit · enter json · a login · g gov · D deploy · c chain · K kick · \
+                 P add · T thresh · esc back"
             }
         };
         frame.render_widget(
@@ -135,8 +141,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_overlay(frame, frame.area(), app.overlay(), spinner);
 }
 
-/// Draw the centered BitSafe wordmark and subtitle.
-fn draw_header(frame: &mut Frame, area: Rect) {
+/// Draw the centered BitSafe wordmark, subtitle, and — once connected — the
+/// version of the node this session is managing (the login screen has no node
+/// yet, so `version` is `None` there).
+fn draw_header(frame: &mut Frame, area: Rect, version: Option<&str>) {
     let mut lines = logo::lines();
     lines.push(Line::styled(
         SUBTITLE,
@@ -144,6 +152,12 @@ fn draw_header(frame: &mut Frame, area: Rect) {
             .fg(Color::Gray)
             .add_modifier(Modifier::BOLD),
     ));
+    if let Some(version) = version {
+        lines.push(Line::styled(
+            format!("v{version}"),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
     frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), area);
 }
 
@@ -156,7 +170,8 @@ pub fn draw_login(frame: &mut Frame, profiles: &[Profile], state: &mut TableStat
     ])
     .areas(frame.area());
 
-    draw_header(frame, header);
+    // No node is connected on the profile picker, so no version to show.
+    draw_header(frame, header, None);
 
     let header_row = Row::new(["PROFILE", "NETWORK", "USER", "API URL"]).style(header_style());
     let rows: Vec<Row> = profiles
@@ -172,8 +187,8 @@ pub fn draw_login(frame: &mut Frame, profiles: &[Profile], state: &mut TableStat
         .collect();
     let widths = [
         Constraint::Length(20),
-        Constraint::Length(12),
-        Constraint::Length(16),
+        Constraint::Length(10),
+        Constraint::Length(30),
         Constraint::Fill(1),
     ];
     let table = Table::new(rows, widths)
@@ -909,11 +924,13 @@ fn peers_table<'a>(peers: &'a [PeerView], block: Block<'a>) -> Table<'a> {
         ])
     });
 
+    // ADDRESS flexes to fill the width (host:port strings are long); the peer
+    // name column is fixed and comfortably fits a name plus its workflow note.
     let widths = [
         Constraint::Length(14),
+        Constraint::Length(30),
         Constraint::Fill(1),
-        Constraint::Length(18),
-        Constraint::Length(8),
+        Constraint::Length(9),
         Constraint::Length(9),
     ];
 
@@ -977,11 +994,19 @@ fn feed_table<'a>(feed: &[FeedItem], block: Block<'a>) -> Table<'a> {
             ]),
             FeedItem::Run(run) => {
                 let (color, label) = workflow_status_display(run.status);
+                // Only an in-progress run has a meaningful position; show it
+                // 1-based ("step 3 of 8"), matching the web frontend. A finished
+                // run's status column already says Completed / Failed.
+                let progress = if run.status == WorkflowProgress::InProgress && run.step_total > 0 {
+                    format!("{}/{}", run.step_index + 1, run.step_total)
+                } else {
+                    "—".to_owned()
+                };
                 Row::new(vec![
                     Cell::from(dash_if_empty(run.kind.as_str())),
                     Cell::from(dash_if_empty(run_name(run))),
                     Cell::from(dash_if_empty(&run.current_step)),
-                    Cell::from(format!("{}/{}", run.step_index, run.step_total)),
+                    Cell::from(progress),
                     Cell::from(Line::from(Span::styled(label, Style::default().fg(color)))),
                 ])
             }
@@ -1085,6 +1110,8 @@ fn footer_hint(active: Tab, overlay: &Overlay, can_logout: bool) -> String {
             " ↑/↓ field · space toggle peer · enter start · esc cancel".to_owned()
         }
         Overlay::Kick(_) => " ↑/↓ pick · ←/→ threshold · enter kick · esc cancel".to_owned(),
+        Overlay::AddParty(_) => " ↑/↓ pick · ←/→ threshold · enter add · esc cancel".to_owned(),
+        Overlay::ChangeThreshold(_) => " ←/→ threshold · enter apply · esc cancel".to_owned(),
         Overlay::Auth { .. } => " ↑/↓ select · t test · g grant · e config · esc close".to_owned(),
         Overlay::GrantRights(_) => " ↑/↓ field · type · enter next/grant · esc cancel".to_owned(),
         Overlay::PartyConfig(_) => {
@@ -1106,12 +1133,13 @@ fn footer_hint(active: Tab, overlay: &Overlay, can_logout: bool) -> String {
             " ↑/↓ select · a add · d remove · s save · esc cancel"
         }
         .to_owned(),
+        Overlay::NodeInfo(_) => " esc close".to_owned(),
         Overlay::Message(_) => " enter / esc to close".to_owned(),
         Overlay::Busy(_) => " working… · enter/esc to dismiss".to_owned(),
         Overlay::None => {
             let base = match active {
                 Tab::Parties => " ↑↓ nav · enter view · n onboard · r refresh",
-                Tab::Peers => " ↑↓ nav · e edit · tab switch",
+                Tab::Peers => " ↑↓ nav · e edit · i info · tab switch",
                 Tab::Dars => " c check · u upload · d distribute",
                 Tab::Workflows => {
                     " a accept · x deny · c cancel · t retry · enter detail · d dismiss"
@@ -1207,6 +1235,8 @@ fn draw_overlay(frame: &mut Frame, area: Rect, overlay: &Overlay, spinner: &str)
         Overlay::Json { value, scroll } => json_popup(frame, area, value, *scroll),
         Overlay::Onboard(form) => onboard_popup(frame, area, form),
         Overlay::Kick(form) => kick_popup(frame, area, form),
+        Overlay::AddParty(form) => add_party_popup(frame, area, form),
+        Overlay::ChangeThreshold(form) => change_threshold_popup(frame, area, form),
         Overlay::FeedDetail { item, scroll } => feed_detail_popup(frame, area, item, *scroll),
         Overlay::ChainAudit { entries, scroll } => chain_audit_popup(frame, area, entries, *scroll),
         Overlay::Auth { parties, selected } => auth_popup(frame, area, parties, *selected),
@@ -1217,6 +1247,7 @@ fn draw_overlay(frame: &mut Frame, area: Rect, overlay: &Overlay, spinner: &str)
         Overlay::Deploy(form) => deploy_popup(frame, area, form),
         Overlay::NetworkEdit(state) => network_edit_popup(frame, area, state),
         Overlay::PartyConfig(form) => party_config_popup(frame, area, form),
+        Overlay::NodeInfo(data) => node_info_popup(frame, area, data),
     }
 }
 
@@ -1572,6 +1603,34 @@ fn composer_field_display(field: &crate::composer::ComposerField, focused: bool)
                 "(empty)".to_owned()
             } else {
                 field.value.clone()
+            }
+        }
+        FieldKind::Picker {
+            options, loaded, ..
+        } => {
+            if let Some(option) = options.iter().find(|option| option.value == field.value) {
+                // A selected option: show its human label, not the raw cid.
+                format!("‹ {} ›", option.label)
+            } else if !field.value.is_empty() {
+                // A pasted / typed cid with no matching option.
+                if focused {
+                    format!("{}▏", field.value)
+                } else {
+                    field.value.clone()
+                }
+            } else if !loaded {
+                "loading…".to_owned()
+            } else if options.is_empty() {
+                // Nothing on the ledger to pick — fall back to text entry.
+                if focused {
+                    "▏".to_owned()
+                } else {
+                    "(none — type a cid)".to_owned()
+                }
+            } else if focused {
+                format!("‹ pick 1 of {} ›", options.len())
+            } else {
+                "(none selected)".to_owned()
             }
         }
     }
@@ -1979,59 +2038,111 @@ fn message_popup(frame: &mut Frame, area: Rect, title: &str, message: &str, colo
 
 /// The package-checker popup: local count and each peer's sync state.
 fn compare_popup(frame: &mut Frame, area: Rect, comparison: &PeerPackageComparison, scroll: u16) {
-    let local_ids: HashSet<&str> = comparison
-        .local_packages
-        .iter()
-        .map(|package| package.package_id.as_str())
-        .collect();
-
-    let mut lines = vec![
-        Line::from(Span::styled(
-            format!("Local packages: {}", comparison.local_packages.len()),
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::default(),
-    ];
-    for peer in &comparison.peers {
-        let line = if peer.reachable {
-            let peer_ids: HashSet<&str> = peer
-                .packages
-                .iter()
-                .map(|p| p.package_id.as_str())
-                .collect();
-            let missing = local_ids
-                .iter()
-                .filter(|id| !peer_ids.contains(*id))
-                .count();
-            let (color, note) = if missing == 0 {
-                (Color::Green, "in sync".to_owned())
-            } else {
-                (Color::Yellow, format!("{missing} missing"))
-            };
-            Line::from(vec![
-                Span::styled("● ", Style::default().fg(color)),
-                Span::raw(format!("{}  ", peer.name)),
-                Span::styled(note, Style::default().fg(color)),
-                Span::styled(
-                    format!("  ({} pkgs)", peer.packages.len()),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ])
-        } else {
-            let error = peer.error_kind.map_or("unreachable", peer_error_label);
-            Line::from(vec![
-                Span::styled("● ", Style::default().fg(Color::Red)),
-                Span::raw(format!("{}  ", peer.name)),
-                Span::styled(
-                    format!("unreachable ({error})"),
-                    Style::default().fg(Color::Red),
-                ),
-            ])
-        };
-        lines.push(line);
+    /// A peer rendered as a matrix column: its label, the set of
+    /// `(name, version)` it vets, and how many local packages it is missing.
+    struct PeerCol {
+        label: String,
+        width: usize,
+        reachable: bool,
+        error: &'static str,
+        keys: HashSet<(String, String)>,
+        missing: usize,
     }
 
-    let width = 70.min(area.width.saturating_sub(4));
+    let key_of = |pkg: &PackageInfo| (pkg.name.clone(), pkg.version.clone());
+    let peer_cols: Vec<PeerCol> = comparison
+        .peers
+        .iter()
+        .map(|peer| {
+            let keys: HashSet<(String, String)> = peer.packages.iter().map(key_of).collect();
+            let missing = comparison
+                .local_packages
+                .iter()
+                .filter(|pkg| !keys.contains(&key_of(pkg)))
+                .count();
+            let label = truncate(&peer.name, 12);
+            let width = label.chars().count().max(3);
+            PeerCol {
+                label,
+                width,
+                reachable: peer.reachable,
+                error: peer.error_kind.map_or("unreachable", peer_error_label),
+                keys,
+                missing,
+            }
+        })
+        .collect();
+
+    let name_w = 32usize;
+    let ver_w = 9usize;
+
+    // Header: total, then one status chip per peer.
+    let mut lines = vec![Line::from(Span::styled(
+        format!("Local packages: {}", comparison.local_packages.len()),
+        Style::default().add_modifier(Modifier::BOLD),
+    ))];
+    let mut summary: Vec<Span> = Vec::new();
+    for (index, (peer, col)) in comparison.peers.iter().zip(&peer_cols).enumerate() {
+        if index > 0 {
+            summary.push(Span::raw("   "));
+        }
+        let (color, note) = if !col.reachable {
+            (Color::Red, format!("unreachable ({})", col.error))
+        } else if col.missing == 0 {
+            (Color::Green, "in sync".to_owned())
+        } else {
+            (Color::Yellow, format!("{} missing", col.missing))
+        };
+        summary.push(Span::styled("● ", Style::default().fg(color)));
+        summary.push(Span::raw(format!("{} ", peer.name)));
+        summary.push(Span::styled(note, Style::default().fg(color)));
+    }
+    lines.push(Line::from(summary));
+    lines.push(Line::default());
+
+    // Matrix header row: PACKAGE · VERSION · one column per peer.
+    let mut header = vec![
+        Span::styled(format!("{:<name_w$}", "PACKAGE"), header_style()),
+        Span::styled(format!("{:<ver_w$}", "VERSION"), header_style()),
+    ];
+    for col in &peer_cols {
+        header.push(Span::styled(
+            format!(" {:^width$}", col.label, width = col.width),
+            header_style(),
+        ));
+    }
+    lines.push(Line::from(header));
+
+    // One row per local package (sorted like the Dars tab), with a ✓ / ✗ / –
+    // per peer: vetted (green) / missing-or-mismatch (yellow) / unreachable.
+    let mut locals: Vec<&PackageInfo> = comparison.local_packages.iter().collect();
+    locals.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.version.cmp(&b.version)));
+    for pkg in locals {
+        let key = key_of(pkg);
+        let mut spans = vec![
+            Span::raw(format!("{:<name_w$}", truncate(&pkg.name, name_w - 1))),
+            Span::styled(
+                format!("{:<ver_w$}", truncate(&pkg.version, ver_w - 1)),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ];
+        for col in &peer_cols {
+            let (symbol, color) = if !col.reachable {
+                ("–", Color::DarkGray)
+            } else if col.keys.contains(&key) {
+                ("✓", Color::Green)
+            } else {
+                ("✗", Color::Yellow)
+            };
+            spans.push(Span::styled(
+                format!(" {:^width$}", symbol, width = col.width),
+                Style::default().fg(color),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    let width = 92.min(area.width.saturating_sub(4));
     let height = ((lines.len() as u16) + 2)
         .min(area.height.saturating_sub(4))
         .max(6);
@@ -2177,6 +2288,141 @@ fn kick_popup(frame: &mut Frame, area: Rect, form: &KickForm) {
     let height = ((lines.len() as u16) + 2).clamp(8, area.height.saturating_sub(4));
     let rect = centered_rect(width, height, area);
     let paragraph = Paragraph::new(lines).block(popup_block("Kick participant"));
+    draw_shadow(frame, rect, area);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(paragraph, rect);
+}
+
+/// A `new threshold` editor line shared by the add-party and change-threshold
+/// popups: the current value in orange, then a dim hint with the old value,
+/// the ceiling, and the adjust keys.
+fn threshold_line(new_threshold: i32, previous: i32, max: i32) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("New threshold  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("{new_threshold} "),
+            Style::default()
+                .fg(logo::ORANGE)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("(was {previous}, max {max}) ←/→ adjust"),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ])
+}
+
+/// The add-party form popup: pick a peer to add and set the new threshold.
+fn add_party_popup(frame: &mut Frame, area: Rect, form: &AddPartyForm) {
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("Party  ", Style::default().fg(Color::DarkGray)),
+            Span::raw(form.party_name.clone()),
+        ]),
+        Line::default(),
+        dim_line("Add participant:"),
+    ];
+    for (i, candidate) in form.candidates.iter().enumerate() {
+        let focused = i == form.selected;
+        let marker = if focused { "▶ " } else { "  " };
+        let style = if focused {
+            Style::default()
+                .fg(logo::ORANGE)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{marker}{}", candidate.label),
+            style,
+        )));
+    }
+    lines.push(Line::default());
+    lines.push(threshold_line(
+        form.new_threshold,
+        form.previous_threshold,
+        form.max_threshold,
+    ));
+
+    let width = 64.min(area.width.saturating_sub(4));
+    let height = ((lines.len() as u16) + 2).clamp(8, area.height.saturating_sub(4));
+    let rect = centered_rect(width, height, area);
+    let paragraph = Paragraph::new(lines).block(popup_block("Add party member"));
+    draw_shadow(frame, rect, area);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(paragraph, rect);
+}
+
+/// The change-threshold form popup: adjust a party's signing threshold.
+fn change_threshold_popup(frame: &mut Frame, area: Rect, form: &ChangeThresholdForm) {
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("Party  ", Style::default().fg(Color::DarkGray)),
+            Span::raw(form.party_name.clone()),
+        ]),
+        Line::default(),
+        dim_line("Membership is unchanged; only the signing threshold changes."),
+        Line::default(),
+        threshold_line(
+            form.new_threshold,
+            form.previous_threshold,
+            form.max_threshold,
+        ),
+    ];
+
+    let width = 64.min(area.width.saturating_sub(4));
+    let height = ((lines.len() as u16) + 2).clamp(7, area.height.saturating_sub(4));
+    let rect = centered_rect(width, height, area);
+    let paragraph = Paragraph::new(lines).block(popup_block("Change threshold"));
+    draw_shadow(frame, rect, area);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(paragraph, rect);
+}
+
+/// This node's Noise key status and DSO network identity. Both sections render
+/// independently, so an unreachable DSO API still shows the local key status.
+fn node_info_popup(frame: &mut Frame, area: Rect, data: &NodeInfoData) {
+    let error_line =
+        |error: &str| Line::styled(format!("Error: {error}"), Style::default().fg(Color::Red));
+
+    let mut lines = vec![dim_line("Node keys")];
+    match &data.key {
+        Ok(status) => {
+            lines.push(detail_kv(
+                "Noise keys",
+                if status.has_keys {
+                    "present".to_owned()
+                } else {
+                    "not generated".to_owned()
+                },
+            ));
+            if let Some(key) = status.public_key.as_deref().filter(|key| !key.is_empty()) {
+                lines.push(detail_kv("Public key", key.to_owned()));
+            }
+        }
+        Err(error) => lines.push(error_line(error)),
+    }
+    lines.push(Line::default());
+    lines.push(dim_line("DSO network"));
+    match &data.network {
+        Ok(info) => {
+            lines.push(detail_kv("DSO party", info.dso_party_id.clone()));
+            if !info.amulet_rules_cid.is_empty() {
+                lines.push(detail_kv(
+                    "Amulet rules",
+                    truncate(&info.amulet_rules_cid, 44),
+                ));
+            }
+        }
+        Err(error) => lines.push(error_line(error)),
+    }
+
+    let width = 80.min(area.width.saturating_sub(4));
+    let height = ((lines.len() as u16) + 2).clamp(7, area.height.saturating_sub(4));
+    let rect = centered_rect(width, height, area);
+    let paragraph = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(popup_block("Node info"));
     draw_shadow(frame, rect, area);
     frame.render_widget(Clear, rect);
     frame.render_widget(paragraph, rect);
@@ -2346,8 +2592,8 @@ fn invitation_detail_lines(invitation: &PendingInvitation) -> Vec<Line<'static>>
 mod tests {
     use common::canton_id::CantonId;
     use common::types::{
-        AuditLogEntry, ContractInfo, InvitationType, ParticipantInfo, PendingInvitation,
-        WorkflowKind, WorkflowRole, WorkflowRun,
+        AuditLogEntry, ContractInfo, InvitationType, ParticipantInfo, PeerPackageResult,
+        PendingInvitation, WorkflowKind, WorkflowRole, WorkflowRun,
     };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -2537,6 +2783,34 @@ mod tests {
                 created_at: 0,
                 updated_at: 0,
             }),
+            FeedItem::Run(WorkflowRun {
+                instance_name: "onboarding-done-abc".to_owned(),
+                kind: WorkflowKind::Onboarding,
+                role: WorkflowRole::Coordinator,
+                status: WorkflowProgress::Completed,
+                current_step: "Complete".to_owned(),
+                step_index: 5,
+                step_total: 6,
+                config_json: String::new(),
+                coordinator_pubkey: None,
+                coordinator_instance: None,
+                coordinator_name: None,
+                expected_peers: Vec::new(),
+                completed_peers: Vec::new(),
+                dec_party_id: None,
+                prefix: None,
+                participants: Vec::new(),
+                previous_threshold: None,
+                new_threshold: None,
+                kicked_participant: None,
+                added_participant: None,
+                package_names: Vec::new(),
+                dar_filenames: Vec::new(),
+                error: None,
+                dismissed: false,
+                created_at: 0,
+                updated_at: 0,
+            }),
             FeedItem::Invitation(PendingInvitation {
                 id: "inv-1".to_owned(),
                 invitation_type: InvitationType::Onboarding,
@@ -2570,11 +2844,76 @@ mod tests {
         assert!(rendered.contains("Contracts"));
         // The full instance name is shown (not clipped to two characters).
         assert!(rendered.contains("contracts-pending-xyz"));
-        assert!(rendered.contains("2/3"));
+        // Progress is 1-based: step index 2 of 3 renders as "3/3" (final step).
+        assert!(rendered.contains("3/3"));
         assert!(rendered.contains("In progress"));
+        // A finished run hides its step fraction (no "5/6" or "6/6"); the
+        // status column carries the outcome instead.
+        assert!(rendered.contains("Completed"));
+        assert!(!rendered.contains("5/6"));
+        assert!(!rendered.contains("6/6"));
         // The invitation row is present and actionable.
         assert!(rendered.contains("Onboarding"));
         assert!(rendered.contains("vault-rc5"));
+    }
+
+    #[test]
+    fn header_shows_node_version_only_when_connected() {
+        let with = render(|frame, area| draw_header(frame, area, Some("1.2.1")));
+        assert!(with.contains("Decentralization Manager"));
+        assert!(with.contains("v1.2.1"));
+
+        // The login screen passes None — no version line.
+        let without = render(|frame, area| draw_header(frame, area, None));
+        assert!(without.contains("Decentralization Manager"));
+        assert!(!without.contains("v1.2.1"));
+    }
+
+    fn pkg(name: &str, version: &str) -> PackageInfo {
+        PackageInfo {
+            package_id: format!("00{name}"),
+            name: name.to_owned(),
+            version: version.to_owned(),
+        }
+    }
+
+    #[test]
+    fn compare_popup_renders_matrix_of_marks() {
+        let comparison = PeerPackageComparison {
+            local_packages: vec![pkg("cbtc", "1.0.0"), pkg("vault", "0.0.1")],
+            peers: vec![
+                PeerPackageResult {
+                    participant_id: "p1::1220".to_owned(),
+                    name: "devnet 1".to_owned(),
+                    reachable: true,
+                    error_kind: None,
+                    // Has cbtc but is missing vault.
+                    packages: vec![pkg("cbtc", "1.0.0")],
+                },
+                PeerPackageResult {
+                    participant_id: "p2::1220".to_owned(),
+                    name: "devnet 4".to_owned(),
+                    reachable: false,
+                    error_kind: None,
+                    packages: Vec::new(),
+                },
+            ],
+        };
+        let overlay = Overlay::Compare {
+            comparison,
+            scroll: 0,
+        };
+        let rendered = render(|frame, area| draw_overlay(frame, area, &overlay, "⠋"));
+
+        assert!(rendered.contains("Local packages: 2"));
+        assert!(rendered.contains("PACKAGE"));
+        assert!(rendered.contains("cbtc"));
+        // devnet 1: cbtc ✓, vault ✗; devnet 4: unreachable → – in every cell.
+        assert!(rendered.contains('✓'));
+        assert!(rendered.contains('✗'));
+        assert!(rendered.contains('–'));
+        assert!(rendered.contains("1 missing"));
+        assert!(rendered.contains("unreachable"));
         assert!(rendered.contains("Invitation"));
     }
 
@@ -2781,6 +3120,134 @@ mod tests {
         assert!(rendered.contains("cbtc-network"));
         assert!(rendered.contains("peerA"));
         assert!(rendered.contains("New threshold"));
+    }
+
+    #[test]
+    fn add_party_popup_renders_candidates_and_threshold() {
+        use crate::app::KickCandidate;
+
+        let overlay = Overlay::AddParty(AddPartyForm {
+            party_id: "dec::1220".to_owned(),
+            party_name: "cbtc-network".to_owned(),
+            previous_threshold: 2,
+            candidates: vec![KickCandidate {
+                participant_id: "p::1220".to_owned(),
+                label: "peerNew".to_owned(),
+            }],
+            selected: 0,
+            new_threshold: 3,
+            max_threshold: 3,
+        });
+        let rendered = render(|frame, area| draw_overlay(frame, area, &overlay, "⠋"));
+        assert!(rendered.contains("Add party member"));
+        assert!(rendered.contains("cbtc-network"));
+        assert!(rendered.contains("peerNew"));
+        assert!(rendered.contains("New threshold"));
+    }
+
+    #[test]
+    fn change_threshold_popup_renders_threshold_bounds() {
+        let overlay = Overlay::ChangeThreshold(ChangeThresholdForm {
+            party_id: "dec::1220".to_owned(),
+            party_name: "cbtc-network".to_owned(),
+            previous_threshold: 2,
+            new_threshold: 3,
+            max_threshold: 4,
+        });
+        let rendered = render(|frame, area| draw_overlay(frame, area, &overlay, "⠋"));
+        assert!(rendered.contains("Change threshold"));
+        assert!(rendered.contains("cbtc-network"));
+        assert!(rendered.contains("(was 2, max 4)"));
+    }
+
+    #[test]
+    fn node_info_popup_renders_keys_and_network() {
+        use crate::api::{KeyStatus, NetworkInfo};
+
+        let overlay = Overlay::NodeInfo(Box::new(NodeInfoData {
+            key: Ok(KeyStatus {
+                has_keys: true,
+                public_key: Some("deadbeefcafe".to_owned()),
+            }),
+            network: Ok(NetworkInfo {
+                dso_party_id: "DSO::1220".to_owned(),
+                amulet_rules_cid: "00rules".to_owned(),
+            }),
+        }));
+        let rendered = render(|frame, area| draw_overlay(frame, area, &overlay, "⠋"));
+        assert!(rendered.contains("Node info"));
+        assert!(rendered.contains("present"));
+        assert!(rendered.contains("deadbeefcafe"));
+        assert!(rendered.contains("DSO"));
+    }
+
+    #[test]
+    fn node_info_popup_shows_network_error_but_keeps_keys() {
+        use crate::api::KeyStatus;
+
+        let overlay = Overlay::NodeInfo(Box::new(NodeInfoData {
+            key: Ok(KeyStatus {
+                has_keys: false,
+                public_key: None,
+            }),
+            network: Err("DSO API unreachable".to_owned()),
+        }));
+        let rendered = render(|frame, area| draw_overlay(frame, area, &overlay, "⠋"));
+        assert!(rendered.contains("not generated"));
+        assert!(rendered.contains("Error"));
+    }
+
+    #[test]
+    fn composer_field_display_picker_states() {
+        use crate::composer::{ComposerField, PickerOption, PickerSource};
+
+        let make = |kind, value: &str| ComposerField {
+            key: "mint_request_cid",
+            label: "Mint request",
+            kind,
+            value: value.to_owned(),
+            optional: false,
+            help: "",
+        };
+
+        // Still loading.
+        let loading = make(
+            FieldKind::Picker {
+                source: PickerSource::MintRequests,
+                options: Vec::new(),
+                loaded: false,
+            },
+            "",
+        );
+        assert_eq!(composer_field_display(&loading, false), "loading…");
+
+        // Loaded but empty → text-entry fallback.
+        let empty = make(
+            FieldKind::Picker {
+                source: PickerSource::MintRequests,
+                options: Vec::new(),
+                loaded: true,
+            },
+            "",
+        );
+        assert_eq!(composer_field_display(&empty, false), "(none — type a cid)");
+
+        // A selected option shows its human label, not the raw cid.
+        let selected = make(
+            FieldKind::Picker {
+                source: PickerSource::MintRequests,
+                options: vec![PickerOption {
+                    value: "00abc".to_owned(),
+                    label: "100 CBTC → alice".to_owned(),
+                }],
+                loaded: true,
+            },
+            "00abc",
+        );
+        assert_eq!(
+            composer_field_display(&selected, false),
+            "‹ 100 CBTC → alice ›"
+        );
     }
 
     #[test]
