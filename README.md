@@ -679,3 +679,8 @@ for vulnerabilities, our [Security Policy](docs/SECURITY.md).
 ## License
 
 Licensed under the [Apache License 2.0](LICENSE).
+
+## Feedback
+
+Have feedback on the Decentralization Manager? Let us know via our
+[feedback form](https://bitsafe.typeform.com/decman-feedback).
