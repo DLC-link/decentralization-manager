@@ -7,7 +7,7 @@ pub const TOPOLOGY_RETRY_MAX_ATTEMPTS: usize = 30;
 pub const TOPOLOGY_RETRY_DELAY_SECS: u64 = 2;
 
 /// Maximum retry attempts for topology propagation, configurable at runtime
-/// via the `DPM_TOPOLOGY_RETRY_MAX_ATTEMPTS` env var. Defaults to
+/// via the `DECPM_TOPOLOGY_RETRY_MAX_ATTEMPTS` env var. Defaults to
 /// [`TOPOLOGY_RETRY_MAX_ATTEMPTS`] (30) when unset or unparseable.
 ///
 /// On devnet, Canton's topology read API response time varies significantly
@@ -15,17 +15,17 @@ pub const TOPOLOGY_RETRY_DELAY_SECS: u64 = 2;
 /// sometimes doesn't. Operators running against a slow synchronizer can
 /// raise this without recompiling.
 pub fn topology_retry_max_attempts() -> usize {
-    std::env::var("DPM_TOPOLOGY_RETRY_MAX_ATTEMPTS")
+    std::env::var("DECPM_TOPOLOGY_RETRY_MAX_ATTEMPTS")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(TOPOLOGY_RETRY_MAX_ATTEMPTS)
 }
 
 /// Delay between topology-poll attempts, configurable via the
-/// `DPM_TOPOLOGY_RETRY_DELAY_SECS` env var. Defaults to
+/// `DECPM_TOPOLOGY_RETRY_DELAY_SECS` env var. Defaults to
 /// [`TOPOLOGY_RETRY_DELAY_SECS`] (2) when unset or unparseable.
 pub fn topology_retry_delay_secs() -> u64 {
-    std::env::var("DPM_TOPOLOGY_RETRY_DELAY_SECS")
+    std::env::var("DECPM_TOPOLOGY_RETRY_DELAY_SECS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(TOPOLOGY_RETRY_DELAY_SECS)

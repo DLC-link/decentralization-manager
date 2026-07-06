@@ -23,7 +23,7 @@ use crate::{
     },
 };
 
-/// New-member-only step: generate the namespace + DAML signing keys, propose
+/// New-member-only step: generate the namespace + Daml signing keys, propose
 /// the namespace delegation, and persist everything the rest of the workflow
 /// needs locally.
 ///

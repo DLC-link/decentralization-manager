@@ -48,7 +48,7 @@ CREATE INDEX idx_workflow_artifacts_instance ON workflow_artifacts(instance_name
 --   - on a coordinator's DB after onboarding: one row per (dec_party_id,
 --     artifact_kind, attestor_id) for every collected attestor (e.g. all
 --     `participant_id` files).
---   - on a node's DB for self-only artefacts (its own DAML signing key
+--   - on a node's DB for self-only artefacts (its own Daml signing key
 --     export): a single row per (dec_party_id, artifact_kind) with
 --     attestor_id = the local participant_id.
 CREATE TABLE dec_party_identity (

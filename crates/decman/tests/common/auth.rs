@@ -69,7 +69,7 @@ impl Refresher {
 
 async fn fetch_token(client: &Client, creds: &KeycloakCreds) -> anyhow::Result<TokenState> {
     // Tolerate base URLs configured both with and without a trailing `/auth`.
-    // Mirrors src/auth/mod.rs::token_url so the test runner and DPM agree on
+    // Mirrors src/auth/mod.rs::token_url so the test runner and DecMan agree on
     // the endpoint regardless of how DECPM_KEYCLOAK_URL is set.
     let kc_base = creds.url.trim_end_matches('/');
     let kc_base = kc_base.strip_suffix("/auth").unwrap_or(kc_base);

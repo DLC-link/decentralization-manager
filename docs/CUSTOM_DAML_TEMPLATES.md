@@ -1,8 +1,8 @@
-# Writing Custom DAML Templates Supported by DecMan
+# Writing Custom Daml Templates Supported by DecMan
 
-This guide explains how to author a custom DAML template that is fully governable through the Decentralized Party Manager (DPM / "DecMan") App — i.e. how to produce a template that DecMan can package, upload, deploy, propose, confirm, execute, and audit without any code changes inside DecMan itself.
+This guide explains how to author a custom Daml template that is fully governable through the Decentralized Party Manager (DecMan) App — i.e. how to produce a template that DecMan can package, upload, deploy, propose, confirm, execute, and audit without any code changes inside DecMan itself.
 
-The extension model is **interface-based**. DecMan's governance engine (`GovernanceRules` in `governance-core`) is a fixed contract that operates on any DAML template implementing the `GovernableAction` interface. To plug a new action into governance you write a new template, build a DAR, upload it, and drive the lifecycle through the existing REST API.
+The extension model is **interface-based**. DecMan's governance engine (`GovernanceRules` in `governance-core`) is a fixed contract that operates on any Daml template implementing the `GovernableAction` interface. To plug a new action into governance you write a new template, build a DAR, upload it, and drive the lifecycle through the existing REST API.
 
 For background, read these first:
 
@@ -14,7 +14,7 @@ A custom template is fully supported by DecMan when:
 
 1. It implements the `GovernableAction` interface from `governance-action-v1` (`Governance.Action`).
 2. Its DAR can be distributed to every participant via `POST /dars/distribute`.
-3. Its proposal contract can either be (a) created via `POST /contracts` using the field-type system, or (b) created by an external DAML script / app that the governance party can read.
+3. Its proposal contract can either be (a) created via `POST /contracts` using the field-type system, or (b) created by an external Daml script / app that the governance party can read.
 4. It can be confirmed via `POST /governance/confirm` with `governance_type: "core_domain"` (no DecMan code change needed — confirmation works on the `ContractId GovernableAction` produced by step 3).
 5. It can be executed via `POST /governance/execute` with `governance_type: "core_domain"`, producing a `GovernanceExecutionResult` audit record.
 
@@ -101,7 +101,7 @@ template PauseProposal
 
 ## Package layout
 
-Custom templates live in their own DAML package. Place it under `daml/<your-package>/` alongside the existing packages:
+Custom templates live in their own Daml package. Place it under `daml/<your-package>/` alongside the existing packages:
 
 ```
 daml/
@@ -143,7 +143,7 @@ Notes:
 
 - The `governance-action-v1` DAR is the only **required** data-dependency. It exports the `GovernableAction` interface; `governance-core` is *not* a build-time dependency of your package.
 - Use `data-dependencies` (not `dependencies`) for every governance / utility-registry DAR — they ship as pre-built DARs, not source.
-- Keep the package name suffixed with a version qualifier (`-v0`, `-v1`, …). The DAML resolver treats package names with different version suffixes as distinct, which lets you ship a breaking change without touching deployed instances of the old version.
+- Keep the package name suffixed with a version qualifier (`-v0`, `-v1`, …). The Daml resolver treats package names with different version suffixes as distinct, which lets you ship a breaking change without touching deployed instances of the old version.
 
 ### `multi-package.yaml`
 
@@ -216,7 +216,7 @@ You only need to register a package id under one of those slots if you are *repl
 
 If your decentralized party doesn't yet have a `GovernanceRules` contract, create one through the `/contracts` workflow before any custom proposal can be confirmed. The template lives in `governance-core` and takes **five** fields, in this order (see [`Governance.Rules`](../daml/governance-core/daml/Governance/Rules.daml)):
 
-| # | Field | DAML type | Field-type JSON |
+| # | Field | Daml type | Field-type JSON |
 |---|---|---|---|
 | 1 | `governanceParty` | `Party` | `{ "type": "decentralized_party" }` |
 | 2 | `members` | `Set Party` | `{ "type": "party_set", "parties": [...] }` |
@@ -265,7 +265,7 @@ There are two supported paths, depending on whether the proposal's fields fit De
 
 Use this when every field on your template maps to one of the variants of [`FieldDefinition`](../crates/decman/src/workflow/contracts/config.rs). The full list:
 
-| `type` | JSON shape | DAML target type |
+| `type` | JSON shape | Daml target type |
 |---|---|---|
 | `decentralized_party` | `{ "type": "decentralized_party" }` | `Party` (the dec party) |
 | `operator_party` | `{ "type": "operator_party" }` | `Party` (the operator) |
@@ -282,7 +282,7 @@ Use this when every field on your template maps to one of the variants of [`Fiel
 | `record` | `{ "type": "record", "fields": [...] }` | nested record |
 | `governance_threshold` | `{ "type": "governance_threshold" }` (calculated majority) or `{ "type": "governance_threshold", "value": N }` (explicit) | `Int` |
 
-The serializer is defined at [`crates/decman/src/workflow/contracts/steps/prepare.rs:212`](../crates/decman/src/workflow/contracts/steps/prepare.rs). Field order in the JSON must match the field order in the DAML template.
+The serializer is defined at [`crates/decman/src/workflow/contracts/steps/prepare.rs:212`](../crates/decman/src/workflow/contracts/steps/prepare.rs). Field order in the JSON must match the field order in the Daml template.
 
 Example body for the `PauseProposal` template above (instantiated as a proposal — note that proposals are usually created by a single party, so a dedicated multi-party `/contracts` workflow is overkill; this path is mainly for the *infrastructure* contracts a custom package ships with — `GovernanceRules`-style admin templates, configuration contracts, etc.):
 
@@ -317,7 +317,7 @@ curl -X POST http://localhost:8080/contracts \
 
 The `/contracts` workflow runs `InteractiveSubmissionService.PrepareSubmission` → multi-party signing → `ExecuteSubmissionAndWaitForTransaction`. Minimum 3 participants. See `ARCHITECTURE.md → Workflows → Contracts`.
 
-### Path B — submit the proposal via DAML directly
+### Path B — submit the proposal via Daml directly
 
 For the common case — a member proposing an action — the proposer alone is the signatory, so you don't need the multi-party `/contracts` ceremony. Submit a normal `CreateCommand` through any Ledger API client (gRPC, JSON API, daml-script, your own backend) using the member's credentials:
 
@@ -388,7 +388,7 @@ The wire shape — defined as `DisclosedContractInput` in [`crates/decman/src/se
 ]
 ```
 
-You typically obtain `blob` (the `created_event_blob`) from your registry's HTTP endpoint at execute time — DPM does this for the token-standard flows in `maybe_fetch_for_proposal`. If your custom domain has its own off-chain registry, the caller — your backend, a daml-script, or a CLI — is responsible for fetching the blob and threading it into the `/governance/execute` call.
+You typically obtain `blob` (the `created_event_blob`) from your registry's HTTP endpoint at execute time — DecMan does this for the token-standard flows in `maybe_fetch_for_proposal`. If your custom domain has its own off-chain registry, the caller — your backend, a daml-script, or a CLI — is responsible for fetching the blob and threading it into the `/governance/execute` call.
 
 ### Granting propose-only rights to non-members
 
@@ -463,7 +463,7 @@ interface=true
 
 ## Testing
 
-### DAML tests
+### Daml tests
 
 Mirror the layout of `daml/governance-core-test` — a separate `<your-package>-test` package with `daml.yaml` listing your DAR as a data-dependency, and `Daml.Script` tests using the `TestHarness` pattern from [`GenericVoteTest.daml`](../daml/governance-core-test/daml/Governance/Test/GenericVoteTest.daml). Cover at minimum:
 
@@ -480,14 +480,14 @@ daml build --all && daml test --all
 
 ### Rust / integration tests
 
-If you only added a DAML package and no DecMan code, no Rust tests are required. If you also extended `FieldDefinition` or `ProposalType` (server-side change — beyond this guide's scope), follow the project test conventions in [`CONTRIBUTING.md`](CONTRIBUTING.md): `cargo fmt && cargo clippy --all-targets --all-features -- -D warnings && cargo test`.
+If you only added a Daml package and no DecMan code, no Rust tests are required. If you also extended `FieldDefinition` or `ProposalType` (server-side change — beyond this guide's scope), follow the project test conventions in [`CONTRIBUTING.md`](CONTRIBUTING.md): `cargo fmt && cargo clippy --all-targets --all-features -- -D warnings && cargo test`.
 
 ## Versioning and upgrades
 
 `GovernanceRules` exercises the proposal by `ContractId GovernableAction` — the proposal's own package id is bound into the contract id at creation time. That means:
 
 - Live proposals continue to execute against the version of your package that created them, even if you upload a newer DAR later.
-- A new version of your template is a *new* DAML package (e.g. `my-package-v1`), with its own DAR and package id. Coexists with the old one until you drain in-flight proposals.
+- A new version of your template is a *new* Daml package (e.g. `my-package-v1`), with its own DAR and package id. Coexists with the old one until you drain in-flight proposals.
 - Never silently mutate the semantics of an existing template version. Members confirming today's proposal must be able to trust that `executeImpl` will not be redefined under them.
 
 ## Self-management changes during in-flight proposals
@@ -558,4 +558,4 @@ curl -X POST http://node:8080/governance/execute \
 curl "http://node:8080/contracts/query?party_id=${DEC_PARTY}&package_id=%23governance-core-<version>&module_name=Governance.ExecutionResult&entity_name=GovernanceExecutionResult&interface=false"
 ```
 
-That is the entire contract between a custom DAML template and DecMan: implement `GovernableAction`, ship the DAR, and drive the lifecycle through the existing API.
+That is the entire contract between a custom Daml template and DecMan: implement `GovernableAction`, ship the DAR, and drive the lifecycle through the existing API.

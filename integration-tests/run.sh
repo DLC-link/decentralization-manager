@@ -90,17 +90,17 @@ check_prerequisites
 
 # Port-free check applies to both targets: PR #142 moved devnet to a
 # bare-process bringup (no longer docker-compose), so the same 6 ports
-# (8081-8083 HTTP + 9000-9002 Noise) are bound directly by DPM on devnet
-# too. An orphan DPM from a previous run (especially from another worktree
+# (8081-8083 HTTP + 9000-9002 Noise) are bound directly by DecMan on devnet
+# too. An orphan DecMan from a previous run (especially from another worktree
 # of the same repo) would otherwise:
 #   - hold the port,
 #   - silently steal the bash bringup's `wait_for_server` TCP readiness probe
-#     (so the new DPM's EADDRINUSE death is invisible),
+#     (so the new DecMan's EADDRINUSE death is invisible),
 #   - and respond to subsequent traffic with its own (stale, possibly
 #     wrong-revision) Noise keys — producing peer-decrypt errors that look
-#     like the new DPM is misconfigured.
+#     like the new DecMan is misconfigured.
 # Fail fast here instead.
-check_dpm_ports_free
+check_decman_ports_free
 
 # ---------------------------------------------------------------------------
 # Verbosity preset
@@ -181,7 +181,7 @@ export DEV_DIR
 
 # PIDs are populated by start_nodes after the env file is sourced, so they
 # can only be exported here. Chaos phases (G1-G9, P1-P2) read them on both
-# targets to kill and respawn the bare DPM binary.
+# targets to kill and respawn the bare DecMan binary.
 export P1_PID="${PIDS[0]}"
 export P2_PID="${PIDS[1]}"
 export P3_PID="${PIDS[2]}"

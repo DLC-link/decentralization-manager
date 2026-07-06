@@ -26,7 +26,7 @@ async fn allocate_party(f: &Fixture, port: u16, hint: &str, name: &str) -> anyho
     Ok(r.party_details.party)
 }
 
-/// Devnet-only: drive DPM's POST /auth/grant-rights so it mints an admin
+/// Devnet-only: drive DecMan's POST /auth/grant-rights so it mints an admin
 /// Keycloak token from the participant-admin client creds and calls Canton's
 /// UserManagementService.GrantUserRights via gRPC, granting the coordinator/
 /// attestor user act_as + read_as on both the member party and the freshly-
@@ -39,7 +39,7 @@ async fn grant_rights_devnet(
     admin: &ParticipantAdminCreds,
     name: &str,
 ) -> anyhow::Result<()> {
-    info!("Granting rights via DPM /auth/grant-rights on {name}");
+    info!("Granting rights via DecMan /auth/grant-rights on {name}");
     let req = json!({
         "dec_party_id": party_id,
         "admin_client_id": admin.keycloak_client_id,
@@ -201,7 +201,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     update_party_config(&*f, f.p3.http, &party_id, &p3m, "participant-3", f.p3_member_creds.as_ref()).await?;
 
                     // On devnet, the act_as/read_as grants for the freshly-
-                    // created dec party are issued by each DPM via its own
+                    // created dec party are issued by each DecMan via its own
                     // POST /auth/grant-rights (uses participant-admin creds
                     // to call Canton's UserManagementService). Must run AFTER
                     // update_party_config so party_credentials are registered.

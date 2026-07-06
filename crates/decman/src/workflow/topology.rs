@@ -51,7 +51,7 @@ use crate::{
 ///
 /// The retry budget is [`topology_retry_max_attempts`] ×
 /// [`topology_retry_delay_secs`] (env-configurable via
-/// `DPM_TOPOLOGY_RETRY_MAX_ATTEMPTS` / `DPM_TOPOLOGY_RETRY_DELAY_SECS`,
+/// `DECPM_TOPOLOGY_RETRY_MAX_ATTEMPTS` / `DECPM_TOPOLOGY_RETRY_DELAY_SECS`,
 /// defaults 30 × 2s = 60s), shared with the post-write topology-propagation
 /// polls in `submit.rs::wait_for_dns_in_topology` /
 /// `wait_for_p2p_in_topology`.

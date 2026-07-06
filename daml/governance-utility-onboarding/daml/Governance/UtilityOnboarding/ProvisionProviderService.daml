@@ -7,7 +7,7 @@
 -- decentralized governance party, creating this contract via direct ledger
 -- submission, multi-party daml-script submit, or `POST /contracts` fails on
 -- Canton with DAML_AUTHORIZATION_ERROR because the governance party is
--- externally signed (threshold > 1) and the DPM contracts workflow does not
+-- externally signed (threshold > 1) and the DecMan contracts workflow does not
 -- carry that signing flow. See issue #51.
 --
 -- The fix: wrap the create in a `GovernableAction` proposal. Inside

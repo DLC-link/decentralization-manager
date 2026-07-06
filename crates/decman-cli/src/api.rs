@@ -669,7 +669,7 @@ impl DecmanClient {
         Ok(merge_peers(&node, &config.peers, &statuses.statuses))
     }
 
-    /// Fetch the DAML packages (DARs) vetted on this node, sorted like the
+    /// Fetch the Daml packages (DARs) vetted on this node, sorted like the
     /// frontend (by name, then version).
     ///
     /// # Errors

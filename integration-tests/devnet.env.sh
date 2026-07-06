@@ -1,9 +1,9 @@
 #!/bin/bash
 # Devnet target's env-and-bring-up. Sourced by run.sh when --target devnet.
 #
-# DPM lifecycle: bare processes spawned by common.sh's start_nodes (same model
+# DecMan lifecycle: bare processes spawned by common.sh's start_nodes (same model
 # as localnet, with Canton endpoints pointing at tunneled-localhost ports
-# instead of localnet's docker-compose ports). Each DPM picks its
+# instead of localnet's docker-compose ports). Each DecMan picks its
 # DECPM_CANTON_* / DECPM_KEYCLOAK_* / DECPM_NOISE_PORT from the child env that
 # start_nodes assembles.
 
@@ -13,11 +13,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
 
 # ---------------------------------------------------------------------------
-# Source per-participant .env files for the shared Keycloak vars + per-DPM
+# Source per-participant .env files for the shared Keycloak vars + per-DecMan
 # member-party credentials (P{N}_MEMBER_*). The DECPM_CANTON_*_HOST/PORT and
 # DECPM_NOISE_PORT keys are duplicated across .env files with per-participant
 # values; sourcing all three sequentially leaves the last one's values in env,
-# which is fine since we override them per-DPM via P{N}_CANTON_* exports below.
+# which is fine since we override them per-DecMan via P{N}_CANTON_* exports below.
 # ---------------------------------------------------------------------------
 PARTICIPANT_1_ENV="$SCRIPT_DIR/../development/remote/participant-1/.env"
 PARTICIPANT_2_ENV="$SCRIPT_DIR/../development/remote/participant-2/.env"
@@ -64,7 +64,7 @@ fi
 unset MEMBER_VARS MEMBER_MISSING _v
 
 # ---------------------------------------------------------------------------
-# Per-participant admin-client credentials validation. The DPM's
+# Per-participant admin-client credentials validation. DecMan's
 # POST /auth/grant-rights handler uses these (passed per-call from the test
 # runner) to mint an admin Keycloak token via client_credentials, then calls
 # Canton's UserManagementService.GrantUserRights via gRPC to grant
@@ -94,14 +94,14 @@ unset ADMIN_VARS ADMIN_MISSING _v
 # Smoke-check Keycloak reachability via password grant.
 # The Rust test runner manages its own token lifecycle via KeycloakRefresher;
 # this is a fail-fast check that catches a misconfigured Keycloak client BEFORE
-# we spend time on cargo build / DPM spawn. The fetched token is NOT used by
+# we spend time on cargo build / DecMan spawn. The fetched token is NOT used by
 # the Rust runner.
 # ---------------------------------------------------------------------------
 # Normalize the base URL: strip a trailing slash, then strip a trailing
 # `/auth` if present. This lets users configure DECPM_KEYCLOAK_URL either as
 # `https://kc.example.com` or `https://kc.example.com/auth` — same shape as
-# src/auth/mod.rs::token_url uses on the DPM side, so the smoke check
-# composes the same endpoint the DPM's runtime auth path will reach.
+# src/auth/mod.rs::token_url uses on the DecMan side, so the smoke check
+# composes the same endpoint the DecMan's runtime auth path will reach.
 _KC_BASE="${DECPM_KEYCLOAK_URL%/}"; _KC_BASE="${_KC_BASE%/auth}"
 TOKEN_URL="${_KC_BASE}/auth/realms/${DECPM_KEYCLOAK_REALM}/protocol/openid-connect/token"
 _SMOKE_TOKEN=$(curl -s -f -X POST "$TOKEN_URL" \
@@ -119,15 +119,15 @@ if [ -z "$_SMOKE_TOKEN" ] || [ "$_SMOKE_TOKEN" = "null" ]; then
 fi
 # Reused by common.sh:wait_for_server for the readiness probes against the
 # real JwtValidator. Fresh token (~5min TTL) easily outlives start_nodes.
-export DPM_IT_AUTH_TOKEN="$_SMOKE_TOKEN"
+export DECPM_IT_AUTH_TOKEN="$_SMOKE_TOKEN"
 unset _SMOKE_TOKEN
 
 # ---------------------------------------------------------------------------
 # Target + run-id + DEV_DIR.
 # ---------------------------------------------------------------------------
-export DPM_IT_TARGET=devnet
-export DPM_IT_RUN_ID="dpm-it-$(date -u +%Y%m%d-%H%M%S)-$$"
-DEV_DIR="$(mktemp -d -t dpm-devnet-it-XXXXXX)"
+export DECPM_IT_TARGET=devnet
+export DECPM_IT_RUN_ID="decman-it-$(date -u +%Y%m%d-%H%M%S)-$$"
+DEV_DIR="$(mktemp -d -t decman-devnet-it-XXXXXX)"
 export DEV_DIR
 
 # Canton topology poll budget for this run. Defaults baked into the binary
@@ -139,17 +139,17 @@ export DEV_DIR
 # to 90 attempts × 2s = 180s gives headroom while staying well under the
 # scenario's outer deadline. Override on the CLI if you see further
 # timeouts.
-export DPM_TOPOLOGY_RETRY_MAX_ATTEMPTS=90
+export DECPM_TOPOLOGY_RETRY_MAX_ATTEMPTS=90
 
 # ---------------------------------------------------------------------------
 # Per-participant ports.
-# - HTTP: 8081/8082/8083 (DPM's own HTTP API)
-# - Noise: 9000/9001/9002 (per-DPM Noise listener; matches DECPM_NOISE_PORT
+# - HTTP: 8081/8082/8083 (DecMan's own HTTP API)
+# - Noise: 9000/9001/9002 (per-DecMan Noise listener; matches DECPM_NOISE_PORT
 #   values in the per-participant .env files)
 # - Canton ledger:  5001/5011/5021 (tunneled to participant-ibtc-devnet-{1,2,3}
 #   service port 5001 via kubectl port-forward)
 # - Canton admin:   5002/5012/5022 (tunneled the same way to service port 5002)
-# These are exported (not just shell vars) so chaos phases that respawn DPM
+# These are exported (not just shell vars) so chaos phases that respawn DecMan
 # inherit them.
 # ---------------------------------------------------------------------------
 export P1_HTTP=8081  P2_HTTP=8082  P3_HTTP=8083
@@ -165,13 +165,13 @@ export P3_CANTON_LEDGER=5021 P3_CANTON_ADMIN=5022
 export BINARY="$SCRIPT_DIR/../target/release-ci/dec-party-manager"
 
 # ---------------------------------------------------------------------------
-# DPM's own Keycloak + Canton config: ensure these are exported so the DPM
+# DecMan's own Keycloak + Canton config: ensure these are exported so the DecMan
 # child processes spawned by start_nodes inherit them. (They were sourced via
 # the .env files above, but `set -a` only auto-exports during the source; we
 # re-export explicitly for clarity.)
 #
-# DECPM_CANTON_NETWORK=devnet drives DPM's Network::Devnet defaults (DSO URL,
-# Keycloak URL fallback). The per-DPM CANTON_LEDGER_*/CANTON_ADMIN_* values
+# DECPM_CANTON_NETWORK=devnet drives DecMan's Network::Devnet defaults (DSO URL,
+# Keycloak URL fallback). The per-DecMan CANTON_LEDGER_*/CANTON_ADMIN_* values
 # are assembled by start_nodes from the P{N}_CANTON_* exports above.
 # ---------------------------------------------------------------------------
 export DECPM_KEYCLOAK_URL DECPM_KEYCLOAK_REALM DECPM_KEYCLOAK_CLIENT_ID
@@ -278,12 +278,12 @@ stop_canton_tunnels() {
 # Lifecycle hooks invoked by run.sh.
 # - start_localnet / stop_localnet: the no-op slots that run.sh always calls.
 #   We piggyback on them to start/stop the Canton tunnels, so the tunnels are
-#   up *before* start_nodes spawns DPM and torn down on exit.
+#   up *before* start_nodes spawns DecMan and torn down on exit.
 # - download_localnet: no-op (no Splice bundle to fetch).
 # - start_nodes, setup_directories, configure_peers: use common.sh's bare-
 #   process versions unchanged. start_nodes propagates the DECPM_KEYCLOAK_*
-#   we've exported above to each DPM child.
-# - cleanup: stop the DPM processes (stop_nodes from common.sh) AND the
+#   we've exported above to each DecMan child.
+# - cleanup: stop the DecMan processes (stop_nodes from common.sh) AND the
 #   tunnels.
 # ---------------------------------------------------------------------------
 download_localnet() { :; }
@@ -298,7 +298,7 @@ cleanup() {
     # `$DEV_DIR/restarted-pids`. The localnet `cleanup` in `env.sh` already
     # does this; devnet's override missed the equivalent step, leaking the
     # chaos-respawned DPMs after every run that exercised G1-P2. Those
-    # leftovers then trip `check_dpm_ports_free` on the next bringup or
+    # leftovers then trip `check_decman_ports_free` on the next bringup or
     # (worse, pre-port-check fix) silently steal `wait_for_server`'s TCP
     # readiness probes.
     if [ -n "${DEV_DIR:-}" ] && [ -f "$DEV_DIR/restarted-pids" ]; then

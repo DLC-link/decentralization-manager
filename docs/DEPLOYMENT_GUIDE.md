@@ -158,7 +158,7 @@ stringData:
   # before they can hit privileged endpoints (PUT /party-config, /kick, etc.).
   # If unset, every authenticated user is treated as admin — fine for a
   # single-operator deployment, dangerous for shared environments.
-  # DECPM_ADMIN_ROLE: "dpm-admin"
+  # DECPM_ADMIN_ROLE: "decman-admin"
 
   # Optional: encryption key for secrets stored in the SQLite database
   # (Keycloak client secrets per party). Any sufficiently long random

@@ -56,7 +56,7 @@ pub(crate) async fn resolve_ledger_token(
 pub enum AddPartyStep {
     /// Waiting for all peers (existing members + new member) to connect
     WaitingForPeers,
-    /// New member generates its namespace + DAML keys and uploads them
+    /// New member generates its namespace + Daml keys and uploads them
     GenerateNewMemberKeys,
     /// Coordinator exports current DNS + P2P state and validates the add
     ExportState,

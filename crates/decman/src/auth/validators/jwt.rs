@@ -570,7 +570,7 @@ mod tests {
             url: server.uri(),
             internal_url: None,
             realm: "test".to_string(),
-            client_id: "dpm".to_string(),
+            client_id: "decman".to_string(),
             client_secret: None,
             username: None,
             password: None,
@@ -616,7 +616,7 @@ mod tests {
     #[tokio::test]
     async fn accepts_valid_token_and_projects_roles() -> anyhow::Result<()> {
         let (_server, validator, issuer) = setup().await;
-        let token = rs256_token(&issuer, "dpm", 3600)?;
+        let token = rs256_token(&issuer, "decman", 3600)?;
         let principal = validator
             .validate(&token)
             .await
@@ -668,7 +668,7 @@ mod tests {
             url: public_url.clone(),
             internal_url: Some(server.uri()),
             realm: "test".to_string(),
-            client_id: "dpm".to_string(),
+            client_id: "decman".to_string(),
             client_secret: None,
             username: None,
             password: None,
@@ -681,7 +681,7 @@ mod tests {
         );
 
         let issuer = format!("{public_url}/realms/test");
-        let token = rs256_token(&issuer, "dpm", 3600)?;
+        let token = rs256_token(&issuer, "decman", 3600)?;
         let principal = validator
             .validate(&token)
             .await
@@ -694,7 +694,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_expired_token() -> anyhow::Result<()> {
         let (_server, validator, issuer) = setup().await;
-        let token = rs256_token(&issuer, "dpm", -3600)?;
+        let token = rs256_token(&issuer, "decman", -3600)?;
         assert!(matches!(
             validator.validate(&token).await,
             Err(ValidationError::InactiveToken)
@@ -705,7 +705,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_tampered_signature() -> anyhow::Result<()> {
         let (_server, validator, issuer) = setup().await;
-        let token = rs256_token(&issuer, "dpm", 3600)?;
+        let token = rs256_token(&issuer, "decman", 3600)?;
         // Flip the last char of the signature segment — still valid base64url,
         // but the signature no longer verifies.
         let (head, sig) = token
@@ -734,7 +734,7 @@ mod tests {
         let claims = json!({
             "iss": issuer,
             "sub": "alice",
-            "azp": "dpm",
+            "azp": "decman",
             "exp": unix_now()? + 3600,
         });
         let key = EncodingKey::from_secret(b"attacker-chosen-secret");
@@ -762,7 +762,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_untrusted_issuer() -> anyhow::Result<()> {
         let (_server, validator, _issuer) = setup().await;
-        let token = rs256_token("https://evil.example/realms/attacker", "dpm", 3600)?;
+        let token = rs256_token("https://evil.example/realms/attacker", "decman", 3600)?;
         assert!(matches!(
             validator.validate(&token).await,
             Err(ValidationError::UntrustedIssuer(_))

@@ -35,10 +35,10 @@ const DER_OCTET_STRING_TAG: u8 = 0x04;
 /// Expected length of Ed25519 private key in bytes (32 bytes)
 const ED25519_PRIVATE_KEY_LENGTH: u8 = 0x20;
 
-/// Sign prepared ledger submissions with DAML key
+/// Sign prepared ledger submissions with Daml key
 ///
 /// This step must be run by each peer participant to sign the prepared submissions.
-/// Each peer signs with their DAML signing key.
+/// Each peer signs with their Daml signing key.
 ///
 /// The signed bundle is persisted as a `SUBMISSION_SIGNATURES` artefact keyed
 /// by this node's participant id, byte-identical to the previous on-disk file
@@ -49,7 +49,7 @@ const ED25519_PRIVATE_KEY_LENGTH: u8 = 0x20;
 /// * `db` - Workflow storage backend (SqlitePool implementing `WorkflowStorage`)
 /// * `instance_name` - Workflow run instance name (key for `workflow_artifacts`)
 /// * `dec_party_id` - Decentralized party id used to look up `peer_public_keys`
-///   in the `dec_party_identity` table (this run's local DAML signing key bundle)
+///   in the `dec_party_identity` table (this run's local Daml signing key bundle)
 pub async fn sign_submissions(
     config: &NodeConfig,
     db: &SqlitePool,
@@ -60,7 +60,7 @@ pub async fn sign_submissions(
 
     let node_id = config.participant_id().to_string();
 
-    // Step 1: Load the DAML public key bundle that was exported during onboarding.
+    // Step 1: Load the Daml public key bundle that was exported during onboarding.
     // It MUST come from `dec_party_identity` (long-lived, survives the
     // originating onboarding run's dismissal) — not from `workflow_artifacts`,
     // because by the time contracts runs the onboarding run may have been
@@ -72,7 +72,7 @@ pub async fn sign_submissions(
     // `workflow_artifacts` row, then mirror it into `dec_party_identity` so
     // subsequent contracts runs hit the fast path.
     tracing::info!(
-        "Loading DAML public key bundle for {node_id} on {dec_party_id} from identity table..."
+        "Loading Daml public key bundle for {node_id} on {dec_party_id} from identity table..."
     );
     let keys_bytes = match db
         .read_identity(dec_party_id, identity_kinds::PEER_PUBLIC_KEYS, &node_id)
@@ -91,7 +91,7 @@ pub async fn sign_submissions(
                     tracing::warn!(
                         "Local artifacts backfill failed; querying Canton's on-chain \
                          topology (PartyToParticipant / legacy PartyToKeyMapping) to \
-                         recover this node's DAML signing key for {dec_party_id}"
+                         recover this node's Daml signing key for {dec_party_id}"
                     );
                     backfill_peer_keys_from_chain(config, dec_party_id)
                         .await?
@@ -137,13 +137,13 @@ pub async fn sign_submissions(
         );
     }
 
-    // Second key is the DAML signing key (first is namespace key)
+    // Second key is the Daml signing key (first is namespace key)
     let signing_public_key = &exported_keys[1];
 
-    // Compute fingerprint of the newly generated DAML key
+    // Compute fingerprint of the newly generated Daml key
     let key_fingerprint = utils::compute_fingerprint(signing_public_key);
 
-    tracing::info!("Using DAML key with fingerprint: {key_fingerprint}");
+    tracing::info!("Using Daml key with fingerprint: {key_fingerprint}");
     tracing::debug!("This is the key that was generated in step 1 and added to P2P mapping");
 
     // Verify this key exists in Canton's vault
@@ -163,7 +163,7 @@ pub async fn sign_submissions(
 
     if keys_response.private_keys_metadata.is_empty() {
         anyhow::bail!(
-            "DAML signing key with fingerprint {key_fingerprint} not found in Canton vault. \
+            "Daml signing key with fingerprint {key_fingerprint} not found in Canton vault. \
              This should not happen - the key was generated in step 1."
         );
     }
@@ -440,7 +440,7 @@ fn encode_messages_length_prefixed<M: prost::Message>(messages: &[M]) -> Vec<u8>
 /// On-chain backfill: recover the dec_party's protocol signing keys from
 /// Canton's topology store, then cross-reference them against this node's
 /// vault. The vault key whose fingerprint matches one of the on-chain
-/// signing keys is the DAML key this node contributes to the party.
+/// signing keys is the Daml key this node contributes to the party.
 ///
 /// The keys live in one of two places depending on when the party was
 /// onboarded: `PartyToParticipant.party_signing_keys` (Canton 3.4 — what the
@@ -450,7 +450,7 @@ fn encode_messages_length_prefixed<M: prost::Message>(messages: &[M]) -> Vec<u8>
 ///
 /// Returns the same `varint(len)||SigningPublicKey` × 2 byte layout that
 /// `read_all_messages_from_bytes` expects. Index `[0]` is unused downstream
-/// (originally the namespace key), so we duplicate the DAML key to keep the
+/// (originally the namespace key), so we duplicate the Daml key to keep the
 /// shape valid; the caller only reads `[1]`.
 async fn backfill_peer_keys_from_chain(
     config: &NodeConfig,
@@ -541,7 +541,7 @@ async fn backfill_peer_keys_from_chain(
             .into_inner();
         if !resp.private_keys_metadata.is_empty() {
             tracing::info!(
-                "Recovered DAML signing key {fingerprint} for {dec_party_id} from the on-chain \
+                "Recovered Daml signing key {fingerprint} for {dec_party_id} from the on-chain \
                  topology state"
             );
             // Encode as [namespace_placeholder, daml_key]. Downstream only

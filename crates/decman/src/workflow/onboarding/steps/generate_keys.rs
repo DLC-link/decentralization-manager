@@ -33,7 +33,7 @@ use crate::{
 ///
 /// Generates:
 /// 1. Namespace signing key (for namespace delegation)
-/// 2. DAML transaction key (for signing transactions)
+/// 2. Daml transaction key (for signing transactions)
 /// 3. Persists both keys + the participant id into `workflow_artifacts`
 ///    keyed by this node's own canton id, so the coordinator can later
 ///    aggregate all peers' keys via `list_artifacts`.
@@ -167,7 +167,7 @@ pub(crate) async fn get_or_create_signing_key(
     Ok((spk, false))
 }
 
-/// Encode the namespace + DAML signing keys as two consecutive
+/// Encode the namespace + Daml signing keys as two consecutive
 /// `varint(len)||proto` messages — matches the on-disk format
 /// `utils::write_messages_to_file(&[ns, daml], path)` produced, so the
 /// coordinator's `read_all_messages_from_file` (now `read_all_messages` over

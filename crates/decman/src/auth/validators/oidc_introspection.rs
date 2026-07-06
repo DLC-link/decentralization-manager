@@ -314,7 +314,7 @@ mod tests {
             url: server_uri.to_string(),
             internal_url: None,
             realm: "test".to_string(),
-            client_id: "dpm".to_string(),
+            client_id: "decman".to_string(),
             client_secret: Some("secret".to_string()),
             username: None,
             password: None,

@@ -77,7 +77,7 @@ PIDS=()
 # ---------------------------------------------------------------------------
 # Failure trap: clean up tunnels and nodes if the bring-up aborts before
 # the PID file is written. Without this, start_localnet's kubectl port-forwards
-# and any DPM processes spawned by start_nodes leak when set -e fires mid-run
+# and any DecMan processes spawned by start_nodes leak when set -e fires mid-run
 # (e.g. participant-1 fails to start, configure_peers HTTP error).
 #
 # _BRING_UP_COMPLETE is set to 1 just before the PID file write. The trap
@@ -103,7 +103,7 @@ trap _bring_up_failure_cleanup EXIT
 #   download_localnet  → no-op on devnet
 #   start_localnet     → opens kubectl port-forwards to Canton participants
 #   setup_directories  → mkdirs $DEV_DIR/participant-{1,2,3}
-#   start_nodes        → spawns 3 DPM processes, populates PIDS[]
+#   start_nodes        → spawns 3 DecMan processes, populates PIDS[]
 #   configure_peers    → posts peer config + restarts nodes
 # ---------------------------------------------------------------------------
 download_localnet
@@ -116,7 +116,7 @@ configure_peers
 
 # ---------------------------------------------------------------------------
 # Write all process PIDs to the PID file so --teardown can stop them.
-# Both DPM PIDs (PIDS[]) and Canton tunnel PIDs (CANTON_TUNNEL_PIDS[]) are
+# Both DecMan PIDs (PIDS[]) and Canton tunnel PIDs (CANTON_TUNNEL_PIDS[]) are
 # included so a single --teardown call cleans up the entire stack.
 # Mark bring-up complete BEFORE writing the PID file so the failure trap
 # becomes a no-op from this point forward.
