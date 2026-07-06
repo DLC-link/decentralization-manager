@@ -10,11 +10,14 @@ kicking a participant), see the [Use Cases](docs/USE_CASES.md).
 
 ## Quick Start with Docker
 
-Build the image locally, then run a single instance:
+Build the image locally, then run a single instance. The build fetches the
+`canton-lib` Rust dependency from GitHub over SSH, so forward an SSH key
+registered on a GitHub account via BuildKit's `--ssh` flag (`canton-lib` is
+public, so no special repository access is needed):
 
 ```bash
-# Build the image
-docker build -t dec-party-manager .
+# Build the image (replace the key path with your own GitHub-registered key)
+docker build --ssh default=$HOME/.ssh/id_ed25519 -t dec-party-manager .
 
 # Run
 docker run -p 8080:8080 -p 9000:9000 -v ./data:/data \
