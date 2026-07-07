@@ -5,6 +5,9 @@ use tracing::info;
 
 use crate::common::{Fixture, scenario::Scenario};
 
+// Noise mesh convergence on a CPU-starved 0.6.11 localnet is 120–240s (#242).
+const MESH_CONVERGENCE_DEADLINE: Duration = Duration::from_secs(300);
+
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: check_peer_dars");
 
@@ -15,7 +18,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         )
         .then(
             "P1 sees P2 and P3 reachable with packages",
-            Duration::from_secs(60),
+            MESH_CONVERGENCE_DEADLINE,
             |f, _| {
                 let port = f.p1.http;
                 let peer_a = f.p2.participant_id.clone();
@@ -25,7 +28,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         )
         .then(
             "P2 sees P1 and P3 reachable with packages",
-            Duration::from_secs(60),
+            MESH_CONVERGENCE_DEADLINE,
             |f, _| {
                 let port = f.p2.http;
                 let peer_a = f.p1.participant_id.clone();
@@ -35,7 +38,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         )
         .then(
             "P3 sees P1 and P2 reachable with packages",
-            Duration::from_secs(60),
+            MESH_CONVERGENCE_DEADLINE,
             |f, _| {
                 let port = f.p3.http;
                 let peer_a = f.p1.participant_id.clone();
@@ -97,7 +100,17 @@ async fn probe_compare_peers(
     expected_peer_b: &str,
 ) -> Option<anyhow::Result<()>> {
     let v: Value = f.get_json(port, "/packages/compare-peers").await.ok()?;
+    classify_compare_peers(&v, expected_peer_a, expected_peer_b)
+}
 
+/// Poll outcome for a `/packages/compare-peers` response: `None` = keep
+/// polling, `Some(Ok)` = both peers reachable with packages, `Some(Err)` =
+/// terminal invariant violation.
+fn classify_compare_peers(
+    v: &Value,
+    expected_peer_a: &str,
+    expected_peer_b: &str,
+) -> Option<anyhow::Result<()>> {
     let local_packages = v.get("local_packages")?.as_array()?;
     if local_packages.is_empty() {
         // Local DAR upload hasn't completed yet — keep polling.
@@ -119,9 +132,9 @@ async fn probe_compare_peers(
         let packages = peer.get("packages")?.as_array()?;
 
         if !reachable {
-            return Some(Err(anyhow::anyhow!(
-                "peer {id} reported unreachable (error_kind={error_kind:?})"
-            )));
+            // Not yet reachable — the Noise mesh is still converging; keep
+            // polling until the deadline (mirrors probe_participants_status).
+            return None;
         }
         if let Some(ek) = error_kind
             && !ek.is_null()
@@ -134,7 +147,7 @@ async fn probe_compare_peers(
         // if the peer reports reachable + zero packages while local has
         // some, that's the silent decode-failure path (Future work item 5
         // in the spec). Surface it as a terminal error so the failure
-        // message is actionable instead of a 60s timeout.
+        // message is actionable instead of a deadline timeout.
         if packages.is_empty() && local_count > 0 {
             return Some(Err(anyhow::anyhow!(
                 "peer {id} reachable but reported zero packages while local has {local_count} \
@@ -197,4 +210,111 @@ async fn probe_participants_status(
     }
 
     Some(Ok(()))
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::classify_compare_peers;
+
+    fn response(local_count: usize, peers: serde_json::Value) -> serde_json::Value {
+        let local: Vec<serde_json::Value> = (0..local_count).map(|_| json!({})).collect();
+        json!({ "local_packages": local, "peers": peers })
+    }
+
+    fn peer(
+        id: &str,
+        reachable: bool,
+        error_kind: serde_json::Value,
+        packages: usize,
+    ) -> serde_json::Value {
+        let packages: Vec<serde_json::Value> = (0..packages).map(|_| json!({})).collect();
+        json!({
+            "participant_id": id,
+            "reachable": reachable,
+            "error_kind": error_kind,
+            "packages": packages,
+        })
+    }
+
+    #[test]
+    fn both_peers_reachable_with_packages_passes() {
+        let v = response(
+            3,
+            json!([
+                peer("A", true, json!(null), 5),
+                peer("B", true, json!(null), 7)
+            ]),
+        );
+        assert!(matches!(classify_compare_peers(&v, "A", "B"), Some(Ok(()))));
+    }
+
+    #[test]
+    fn unreachable_peer_keeps_polling() {
+        // Regression for #242: a transient unreachable peer while the Noise
+        // mesh converges must keep polling, not fail the scenario.
+        let v = response(
+            3,
+            json!([
+                peer("A", true, json!(null), 5),
+                peer("B", false, json!("transport"), 0),
+            ]),
+        );
+        assert!(classify_compare_peers(&v, "A", "B").is_none());
+    }
+
+    #[test]
+    fn reachable_peer_with_zero_packages_is_terminal_error() {
+        let v = response(
+            3,
+            json!([
+                peer("A", true, json!(null), 5),
+                peer("B", true, json!(null), 0)
+            ]),
+        );
+        match classify_compare_peers(&v, "A", "B") {
+            Some(Err(e)) => {
+                let chain = format!("{e:#}");
+                assert!(chain.contains("decode failure"), "got: {chain}");
+            }
+            other => panic!("expected terminal decode-failure error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reachable_peer_with_error_kind_is_terminal_error() {
+        let v = response(
+            3,
+            json!([
+                peer("A", true, json!(null), 5),
+                peer("B", true, json!("transport"), 5),
+            ]),
+        );
+        assert!(matches!(classify_compare_peers(&v, "A", "B"), Some(Err(_))));
+    }
+
+    #[test]
+    fn unexpected_peer_is_terminal_error() {
+        let v = response(
+            3,
+            json!([
+                peer("A", true, json!(null), 5),
+                peer("X", true, json!(null), 5)
+            ]),
+        );
+        assert!(matches!(classify_compare_peers(&v, "A", "B"), Some(Err(_))));
+    }
+
+    #[test]
+    fn empty_local_packages_keeps_polling() {
+        let v = response(0, json!([]));
+        assert!(classify_compare_peers(&v, "A", "B").is_none());
+    }
+
+    #[test]
+    fn wrong_peer_count_keeps_polling() {
+        let v = response(3, json!([peer("A", true, json!(null), 5)]));
+        assert!(classify_compare_peers(&v, "A", "B").is_none());
+    }
 }
