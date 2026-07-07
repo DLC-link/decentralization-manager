@@ -276,8 +276,9 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
     /// per-connection tasks, so with quorum < total two of them can observe the
     /// same gate open at once; without this check-then-act guard both would
     /// advance and skip a step. The CAS re-check under the write lock makes the
-    /// second call a no-op.
-    async fn advance_step_if(&self, expected: S) {
+    /// second call a no-op. Also used by a coordinator loop to self-advance a
+    /// peer gate that no peer event will ever trip (the 1-of-N solo case).
+    pub async fn advance_step_if(&self, expected: S) {
         let mut current = self.current_step.write().await;
         if *current != expected {
             return;

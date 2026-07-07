@@ -134,7 +134,7 @@ async fn resolve_peer_threshold(
 
 /// Party signing threshold `M` from the `dec_parties` cache, or `None` (caller
 /// requires all) when it's absent or invalid (`< 1`).
-async fn lookup_party_threshold(db: &SqlitePool, party_id: &CantonId) -> Option<usize> {
+pub(crate) async fn lookup_party_threshold(db: &SqlitePool, party_id: &CantonId) -> Option<usize> {
     let party_id_str = party_id.to_string();
     let parties = match SchemaRead::get_dec_parties_by_prefix(db, &party_id.prefix).await {
         Ok(parties) => parties,
