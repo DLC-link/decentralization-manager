@@ -100,7 +100,7 @@ jobs:
 
   integration-test:
     name: Integration Tests
-    runs-on: ubuntu-latest # TEMP stopgap: ubuntu-8-core larger runners unavailable — revert once restored
+    runs-on: ubuntu-very-big
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
