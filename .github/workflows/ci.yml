@@ -100,7 +100,7 @@ jobs:
 
   integration-test:
     name: Integration Tests
-    runs-on: ubuntu-latest # TEMP stopgap: ubuntu-8-core larger runners unavailable — revert once restored
+    runs-on: ubuntu-very-big
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
@@ -124,7 +124,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: .localnet/
-          key: localnet-0.6.7
+          key: localnet-0.6.11
       # Generate the frontend TS bindings before the integration build (which
       # builds the decman binary → build.rs → frontend, needing this file).
       - name: Generate frontend TypeScript bindings
