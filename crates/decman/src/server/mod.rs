@@ -286,6 +286,33 @@ pub(crate) async fn respawn_coordinator(
         return;
     }
 
+    // Recovery-window guard: this row was loaded as InProgress, but between then
+    // and registering the in-memory instance a per-kind cancel could have hit
+    // the persisted-row cancel path (`cancel_persisted_run`, reached only while
+    // no instance is registered) and flipped it to Cancelled. Re-read the status
+    // and skip resuming if it's no longer InProgress, so we don't resurrect a run
+    // the operator just cancelled. (The initial-start path is already safe:
+    // `register_and_persist` registers the instance before it persists the row.)
+    match SchemaRead::get_workflow_run(&db, &instance_name).await {
+        Ok(Some(r)) if r.status == WorkflowProgress::InProgress => {}
+        Ok(Some(r)) => {
+            tracing::info!(
+                "respawn_coordinator: {instance_name} is now {:?}, not resuming",
+                r.status
+            );
+            return;
+        }
+        Ok(None) => {
+            tracing::warn!("respawn_coordinator: {instance_name} row vanished; not resuming");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(
+                "respawn_coordinator: status re-check failed for {instance_name}: {e}; resuming anyway"
+            );
+        }
+    }
+
     let instance = WorkflowInstance::new(instance_name.clone(), kind, WorkflowRole::Coordinator);
     *instance.http.invited_peers.write().await = run.expected_peers.clone();
     *instance.http.status.write().await = WorkflowProgress::InProgress;
