@@ -96,9 +96,14 @@ impl NoiseClient {
             message.to_bytes()
         };
 
+        // Single-shot connection: ask the server to close after replying so
+        // hyper runs poll_shutdown and blocking-drains tokio-noise's
+        // partial-write buffer, rather than stranding the final packet on the
+        // keep-alive path (truncates multi-packet responses). See #242.
         let request = Request::builder()
             .uri(uri)
             .method("POST")
+            .header(hyper::header::CONNECTION, "close")
             .body(Body::from(request_body))?;
 
         // Connect with timeout
