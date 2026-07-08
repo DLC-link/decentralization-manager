@@ -1,7 +1,0 @@
-# CI-only overlay: cap the heavy localnet JVMs so the host DecMan processes get CPU (#242).
-# Values (LOCALNET_CANTON_CPUS / LOCALNET_SPLICE_CPUS) are computed from nproc in env.sh.
-services:
-  canton:
-    cpus: ${LOCALNET_CANTON_CPUS}
-  splice:
-    cpus: ${LOCALNET_SPLICE_CPUS}

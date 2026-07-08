@@ -559,41 +559,15 @@ async fn send_noise_message_with_timeout(
 
     let initiator = Initiator { psk, identity };
 
-    let response =
+    let mut response =
         hyper_noise::client::send_request(tcp_stream, initiator, request, Some(timeout)).await?;
 
     if response.status() != StatusCode::OK {
         return Err(NoiseError::BadStatusCode(response.status()));
     }
 
-    // DIAG#242: read the body frame-by-frame so we can log exactly how many
-    // bytes arrived vs the advertised Content-Length when the connection dies.
-    let content_length = response
-        .headers()
-        .get(hyper::header::CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned);
-    use hyper::body::HttpBody as _;
-    let mut body = response.into_body();
-    let mut collected: Vec<u8> = Vec::new();
-    loop {
-        match body.data().await {
-            Some(Ok(chunk)) => collected.extend_from_slice(&chunk),
-            Some(Err(e)) => {
-                tracing::warn!(
-                    "DIAG#242 client: body error after {} bytes (content-length={content_length:?}): {e}",
-                    collected.len()
-                );
-                return Err(NoiseError::from(e));
-            }
-            None => break,
-        }
-    }
-    tracing::warn!(
-        "DIAG#242 client: body complete, {} bytes (content-length={content_length:?})",
-        collected.len()
-    );
-    Ok(Bytes::from(collected))
+    let resp_body_bytes = hyper::body::to_bytes(response.body_mut()).await?;
+    Ok(resp_body_bytes)
 }
 
 /// Owned, zeroizing secp256k1 secret-key bytes.

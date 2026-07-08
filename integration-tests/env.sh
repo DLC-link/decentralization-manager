@@ -135,44 +135,13 @@ download_localnet() {
     echo "Localnet bundle ready"
 }
 
-# Cap the two heavy localnet JVMs (canton, splice) on CI so the host DecMan
-# processes' async runtime gets scheduled. Uncapped, they saturate every core
-# and the peer Noise handlers starve — compare-peers never converges (#242).
-# Local runs have headroom, so they stay uncapped. Exports the cpu values the
-# localnet-cpu-limits.yaml overlay interpolates, and LOCALNET_CPU_OVERRIDE.
-maybe_cap_localnet_cpu() {
-    unset LOCALNET_CPU_OVERRIDE
-    [ -n "${CI:-}" ] || return 0
-
-    local cores
-    cores=$(nproc 2>/dev/null || echo 0)
-    [ "$cores" -ge 8 ] || return 0
-
-    local budget=$((cores - 4)) # reserve 4 cores for the 3 host DecMan processes
-    export LOCALNET_CANTON_CPUS=$(((budget * 6 + 9) / 10)) # ~60%, rounded up
-    export LOCALNET_SPLICE_CPUS=$((budget - LOCALNET_CANTON_CPUS))
-    [ "$LOCALNET_SPLICE_CPUS" -ge 1 ] || LOCALNET_SPLICE_CPUS=1
-    export LOCALNET_CPU_OVERRIDE="$SCRIPT_DIR/integration-tests/localnet-cpu-limits.yaml"
-
-    if [ -z "${LOCALNET_CPU_LOGGED:-}" ]; then
-        echo "localnet CPU caps (#242): ${cores} cores → canton=${LOCALNET_CANTON_CPUS} splice=${LOCALNET_SPLICE_CPUS}, ~4 reserved for DecMan"
-        export LOCALNET_CPU_LOGGED=1
-    fi
-}
-
 localnet_compose() {
     export IMAGE_TAG="$LOCALNET_VERSION"
-
-    maybe_cap_localnet_cpu
-    local cpu_override=()
-    [ -n "${LOCALNET_CPU_OVERRIDE:-}" ] && cpu_override=(-f "$LOCALNET_CPU_OVERRIDE")
-
     docker compose \
         --env-file "$LOCALNET_COMPOSE_DIR/compose.env" \
         --env-file "$LOCALNET_COMPOSE_DIR/env/common.env" \
         -f "$LOCALNET_COMPOSE_DIR/compose.yaml" \
         -f "$LOCALNET_COMPOSE_DIR/resource-constraints.yaml" \
-        ${cpu_override[@]+"${cpu_override[@]}"} \
         --profile sv \
         --profile app-provider \
         --profile app-user \
@@ -200,11 +169,6 @@ start_localnet() {
     # alias global is unknown" — the UIs used to incidentally pad the wall
     # clock during compose start; trimming them exposed the race.
     localnet_compose up -d --wait canton splice postgres
-
-    # DIAG#242: confirm the CPU cap actually took effect (NanoCpus = cpus * 1e9;
-    # 0 means uncapped). Remove once the compare-peers hang is understood.
-    echo "DIAG#242 canton NanoCpus: $(docker inspect canton --format '{{.HostConfig.NanoCpus}}' 2>/dev/null || echo '?')"
-    echo "DIAG#242 splice NanoCpus: $(docker inspect splice --format '{{.HostConfig.NanoCpus}}' 2>/dev/null || echo '?')"
 }
 
 stop_localnet() {

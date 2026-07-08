@@ -1416,10 +1416,6 @@ async fn handle_incoming_connection(
 
                             if payload.len() <= MAX_PAYLOAD_SIZE {
                                 // Small enough to ship in one un-chunked Data response.
-                                tracing::warn!(
-                                    "DIAG#242 ListPackages: returning {}-byte Data response",
-                                    payload.len()
-                                );
                                 let response_msg = Message::new(MessageType::Data, payload);
                                 return Ok(Response::builder()
                                     .status(StatusCode::OK)
@@ -2255,10 +2251,7 @@ async fn list_my_owner_keys(
 }
 
 async fn list_local_packages(admin_api_url: &str) -> Result<Vec<u8>> {
-    let t0 = Instant::now();
     let mut client = PackageServiceClient::connect(admin_api_url.to_string()).await?;
-    tracing::warn!("DIAG#242 list_local_packages: connected to {admin_api_url} in {:?}", t0.elapsed());
-    let t1 = Instant::now();
     let response = client
         .list_packages(tonic::Request::new(ListPackagesRequest {
             limit: 0,
@@ -2266,11 +2259,6 @@ async fn list_local_packages(admin_api_url: &str) -> Result<Vec<u8>> {
         }))
         .await?
         .into_inner();
-    tracing::warn!(
-        "DIAG#242 list_local_packages: list_packages returned {} pkgs in {:?}",
-        response.package_descriptions.len(),
-        t1.elapsed()
-    );
 
     let packages: Vec<serde_json::Value> = response
         .package_descriptions

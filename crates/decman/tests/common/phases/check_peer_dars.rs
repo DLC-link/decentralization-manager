@@ -5,8 +5,9 @@ use tracing::info;
 
 use crate::common::{Fixture, scenario::Scenario};
 
-// Noise mesh convergence on a CPU-starved 0.6.11 localnet is 120–240s (#242).
-const MESH_CONVERGENCE_DEADLINE: Duration = Duration::from_secs(300);
+// Peers become reachable over the Noise mesh a few seconds after the
+// configure_peers restart; keep a generous margin for a loaded CI runner (#242).
+const MESH_CONVERGENCE_DEADLINE: Duration = Duration::from_secs(120);
 
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: check_peer_dars");
