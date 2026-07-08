@@ -535,9 +535,16 @@ async fn send_noise_message_with_timeout(
     let uri = parse_flexible_uri(&format!("http://{socket_addr}/message"))?;
     let request_body = message.to_bytes();
 
+    // Each Noise call opens a fresh TCP connection and never reuses it, so ask
+    // the server to close after replying. That drives hyper through
+    // `poll_shutdown`, which blocking-drains tokio-noise's partial-write buffer;
+    // the keep-alive path leaves the final packet's ciphertext stranded and the
+    // client truncates a multi-packet response ("end of file before message
+    // length reached"). See #242.
     let request = Request::builder()
         .uri(uri)
         .method("POST")
+        .header(hyper::header::CONNECTION, "close")
         .body(Body::from(request_body))?;
 
     let tcp_stream = match tokio::time::timeout(timeout, TcpStream::connect(&socket_addr)).await {
