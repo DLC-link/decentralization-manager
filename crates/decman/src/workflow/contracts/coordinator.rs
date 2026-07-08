@@ -77,6 +77,14 @@ async fn run_workflow(
     let instance_name = config.instance_name.clone();
     let dec_party_id = config.decentralized_party_id.clone();
 
+    // 1-of-N party: the coordinator's own signature already meets the threshold,
+    // so no peer signatures are required. The peer gates (WaitingForPeers /
+    // SignSubmissions) would otherwise wait for a peer that may never connect;
+    // the coordinator advances them itself below. Any other threshold (or an
+    // unresolved one) falls back to the normal peer wait.
+    let coordinator_only =
+        crate::noise::server::lookup_party_threshold(&db, &dec_party_id).await == Some(1);
+
     // Auth handle for the decentralized party. We deliberately fetch a fresh
     // token at each ledger-touching step rather than caching one snapshot up
     // front: a workflow can sit in `WaitingForPeers` for an arbitrarily long
@@ -91,6 +99,11 @@ async fn run_workflow(
 
         match current_step {
             ContractsStep::WaitingForPeers => {
+                if coordinator_only {
+                    workflow_state
+                        .advance_step_if(ContractsStep::WaitingForPeers)
+                        .await;
+                }
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             }
             ContractsStep::PrepareSubmissions => {
@@ -122,6 +135,13 @@ async fn run_workflow(
                 sign_submissions(&node_config, &db, &instance_name, &dec_party_id)
                     .await
                     .context("Failed to sign submissions")?;
+                if coordinator_only {
+                    // Coordinator's signature (just produced) already meets M=1;
+                    // advance without waiting for peer signatures.
+                    workflow_state
+                        .advance_step_if(ContractsStep::SignSubmissions)
+                        .await;
+                }
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             }
             ContractsStep::ExecuteSubmissions => {

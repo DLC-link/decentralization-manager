@@ -2665,18 +2665,85 @@ async fn send_dars_invites(
 /// run of `kind` via [`pick_coordinator_run`] (deterministic lowest
 /// instance_name), so `/{kind}/status` and `/{kind}/cancel` always act on the
 /// same instance. Callers that know which run they mean should use
-/// `POST /workflows/{instance}/cancel`.
+/// `POST /workflows/{instance}/cancel`. With no in-memory run, falls back to the
+/// persisted row (see [`cancel_persisted_run`]) so a stuck run stays cancellable.
 async fn cancel_workflow_state(
     data: &web::Data<AppState>,
     label: &str,
     kind: WorkflowKind,
 ) -> HttpResponse {
-    let Some(instance) = pick_coordinator_run(data, kind) else {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format!("No {label} workflow in progress"),
-        });
+    if let Some(instance) = pick_coordinator_run(data, kind) {
+        return cancel_instance(data, &instance, label).await;
+    }
+    cancel_persisted_run(data, label, kind).await
+}
+
+/// Cancel a run with a persisted `inprogress` row but no in-memory instance
+/// (nothing to abort): notify the row's peers, flip it to Cancelled, 409 if none.
+async fn cancel_persisted_run(
+    data: &web::Data<AppState>,
+    label: &str,
+    kind: WorkflowKind,
+) -> HttpResponse {
+    let run = match data
+        .db
+        .get_active_workflow_run(kind, WorkflowRole::Coordinator)
+        .await
+    {
+        Ok(Some(run)) => run,
+        Ok(None) => {
+            return HttpResponse::Conflict().json(ErrorResponse {
+                error: format!("No {label} workflow in progress"),
+            });
+        }
+        Err(e) => {
+            tracing::error!("Failed to load persisted {label} run for cancel: {e:#}");
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to cancel {label} workflow (database error) — try again"),
+            });
+        }
     };
-    cancel_instance(data, &instance, label).await
+
+    if !run.expected_peers.is_empty()
+        && let Err(e) = send_cancel_invites(
+            &data.config,
+            &data.db,
+            &run.expected_peers,
+            &run.instance_name,
+        )
+        .await
+    {
+        tracing::warn!("send_cancel_invites failed during {label} cancel: {e}");
+    }
+
+    // On write failure the row stays InProgress (recovery may resume it) — 500.
+    if let Err(e) = mark_run_status(
+        &data.db,
+        &run.instance_name,
+        WorkflowProgress::Cancelled,
+        None,
+    )
+    .await
+    {
+        tracing::error!(
+            "Failed to persist cancel for stuck {label} run {}: {e:#}",
+            run.instance_name
+        );
+        return HttpResponse::InternalServerError().json(ErrorResponse {
+            error: format!(
+                "Failed to cancel {label} workflow (database error); the run is still \
+                 active — try again"
+            ),
+        });
+    }
+
+    tracing::info!(
+        "{label} workflow {} cancelled off the persisted row",
+        run.instance_name
+    );
+    HttpResponse::Ok().json(MessageResponse {
+        message: format!("{label} workflow cancelled"),
+    })
 }
 
 /// Cancel exactly one registered coordinator run: abort its task, notify its
