@@ -200,6 +200,11 @@ start_localnet() {
     # alias global is unknown" — the UIs used to incidentally pad the wall
     # clock during compose start; trimming them exposed the race.
     localnet_compose up -d --wait canton splice postgres
+
+    # DIAG#242: confirm the CPU cap actually took effect (NanoCpus = cpus * 1e9;
+    # 0 means uncapped). Remove once the compare-peers hang is understood.
+    echo "DIAG#242 canton NanoCpus: $(docker inspect canton --format '{{.HostConfig.NanoCpus}}' 2>/dev/null || echo '?')"
+    echo "DIAG#242 splice NanoCpus: $(docker inspect splice --format '{{.HostConfig.NanoCpus}}' 2>/dev/null || echo '?')"
 }
 
 stop_localnet() {
