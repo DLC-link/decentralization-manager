@@ -46,7 +46,6 @@ base64 = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true, features = ["string"] }
-colored = { workspace = true }
 dotenvy = { workspace = true }
 ed25519-dalek = { workspace = true }
 futures = { workspace = true }
@@ -58,21 +57,17 @@ jsonwebtoken = { workspace = true }
 mime_guess = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
-rand = { workspace = true }
 reqwest = { version = "0.13", features = ["form", "json"] }
 rust-embed = { workspace = true }
 secp256k1 = { workspace = true }
 serde = { workspace = true }
-serde-big-array = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 sqlx = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-noise = { workspace = true }
-tokio-stream = { workspace = true }
 tonic = { workspace = true }
-tonic-prost = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 ts-rs = { workspace = true, optional = true }
