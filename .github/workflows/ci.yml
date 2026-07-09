@@ -178,6 +178,13 @@ jobs:
       - name: cargo-deny check advisories
         run: cargo-deny check advisories
 
+  cargo-machete:
+    name: Cargo Machete
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: bnjbvr/cargo-machete@v0.9.2
+
   daml:
     name: Daml Build & Test
     runs-on: ubuntu-latest # TEMP stopgap: ubuntu-8-core larger runners unavailable — revert once restored
