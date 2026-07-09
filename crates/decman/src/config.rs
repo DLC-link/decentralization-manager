@@ -327,7 +327,9 @@ pub struct KeycloakDefaults {
 }
 
 /// Canton Network environment
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, utoipa::ToSchema, clap::ValueEnum)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, utoipa::ToSchema, clap::ValueEnum,
+)]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 #[serde(rename_all = "lowercase")]
 pub enum Network {

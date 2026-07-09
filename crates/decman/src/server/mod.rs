@@ -53,7 +53,7 @@ use crate::{
         AuthRegistry, JwtValidator, MockAuthRegistry, MockValidator, TokenValidator, WorkflowAuth,
     },
     canton_id::CantonId,
-    config::{NodeConfig, PartyCredentials},
+    config::{Network, NodeConfig, PartyCredentials},
     db::schema::{Commitable, SchemaRead, SchemaWrite},
     error::Result,
     noise::{
@@ -812,6 +812,23 @@ impl WorkflowTriggers {
     }
 }
 
+/// Refuse to boot with insecure mode enabled on anything but devnet.
+///
+/// Insecure mode disables authentication, so a stray `DECPM_INSECURE=true` on a
+/// testnet/mainnet node would silently turn off all auth with only a log line.
+/// This turns that footgun into a hard boot failure. Guards the runtime flag
+/// only — `cfg!(test)` / `feature = "test-mode"` builds force insecure on
+/// regardless of network and are expected to run off-devnet.
+fn ensure_insecure_allowed(insecure: bool, network: Network) -> Result {
+    if insecure && network != Network::Devnet {
+        anyhow::bail!(
+            "--insecure / DECPM_INSECURE is only permitted on the devnet network; \
+             refusing to start on {network:?}"
+        );
+    }
+    Ok(())
+}
+
 /// Start the HTTP server and a heartbeat system for peer status tracking
 pub async fn start_server(
     host: &str,
@@ -821,6 +838,10 @@ pub async fn start_server(
     admin_role: Option<String>,
     allowed_origin: Option<String>,
 ) -> Result {
+    // Fail fast before any setup: the runtime `--insecure` flag must never be
+    // honored off devnet (see `ensure_insecure_allowed`).
+    ensure_insecure_allowed(config.insecure, config.canton.network)?;
+
     // Insecure mode is a runtime decision: `--insecure` / `DECPM_INSECURE`
     // selects mock auth (accept any inbound token, present an unsafe HMAC token
     // to Canton) in any build. It is also forced on under `cargo test` and in
@@ -2302,4 +2323,27 @@ async fn list_local_packages(admin_api_url: &str) -> Result<Vec<u8>> {
         .collect();
 
     Ok(serde_json::to_vec(&packages)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ensure_insecure_allowed, Network};
+
+    #[test]
+    fn insecure_allowed_on_devnet() {
+        assert!(ensure_insecure_allowed(true, Network::Devnet).is_ok());
+    }
+
+    #[test]
+    fn insecure_refused_off_devnet() {
+        assert!(ensure_insecure_allowed(true, Network::Testnet).is_err());
+        assert!(ensure_insecure_allowed(true, Network::Mainnet).is_err());
+    }
+
+    #[test]
+    fn secure_allowed_on_any_network() {
+        assert!(ensure_insecure_allowed(false, Network::Devnet).is_ok());
+        assert!(ensure_insecure_allowed(false, Network::Testnet).is_ok());
+        assert!(ensure_insecure_allowed(false, Network::Mainnet).is_ok());
+    }
 }

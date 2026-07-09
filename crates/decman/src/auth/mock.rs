@@ -65,7 +65,9 @@ fn mint_unsafe_token(
 
 /// Mint the unsafe token and resolve its subject, from the configured
 /// secret/audience/subject. Falls back to the static [`MOCK_TOKEN`] if encoding
-/// fails. Never logs the secret.
+/// fails, warning loudly when a custom secret is in play — the fallback is
+/// signed with the default secret and would not match Canton. Never logs the
+/// secret.
 fn mint_credentials(cfg: &InsecureAuthConfig) -> (String, String) {
     match mint_unsafe_token(&cfg.secret, &cfg.audience, &cfg.subject) {
         Ok(token) => {
@@ -75,6 +77,20 @@ fn mint_credentials(cfg: &InsecureAuthConfig) -> (String, String) {
                 cfg.subject
             );
             (token, cfg.subject.clone())
+        }
+        // HS256 encoding effectively never fails, so this only fires on a real
+        // problem. The static fallback is signed with the default `unsafe`
+        // secret, so it substitutes cleanly only when the operator kept that
+        // default; with a custom secret it will NOT match Canton and would fail
+        // confusingly downstream, so flag that explicitly instead of masking it.
+        Err(e) if cfg.secret != InsecureAuthConfig::default().secret => {
+            tracing::error!(
+                "Failed to mint unsafe Canton HMAC token from the configured \
+                 DECPM_CANTON_HMAC_SECRET: {e}. Falling back to the default-secret static \
+                 token, which will NOT match your secret and will fail Canton auth — fix \
+                 DECPM_CANTON_HMAC_SECRET."
+            );
+            (MOCK_TOKEN.to_string(), MOCK_USER_ID.to_string())
         }
         Err(e) => {
             tracing::error!("Failed to mint unsafe Canton HMAC token: {e}; using static fallback");
