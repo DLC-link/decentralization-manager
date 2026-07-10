@@ -101,6 +101,10 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     // terminator — this is the point in the suite where P3 is idle. It puts
     // P3 back on the plaintext port before returning.
     phases::canton_admin_tls::run(&mut f).await?;
+    // Decentrally-hosted external-party onboarding: P1 generates the party's
+    // client-side Ed25519 key and hosts it across P1+P2+P3 at a 2-of-3
+    // confirmation threshold. Runs early, while the mesh is healthy.
+    phases::external_party::run(&mut f).await?;
     phases::create_dec_party::run(&mut f).await?;
     phases::distribute_dars::run(&mut f).await?;
     phases::check_peer_dars::run(&mut f).await?;
@@ -180,5 +184,25 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     // multi-instance workflows — full-mesh cross-acceptance of simultaneous
     // Onboarding + DARs coordinators on every node.
     phases::concurrent_cross_workflows::run(&mut f).await?; // G11
+    Ok(())
+}
+
+/// Runs ONLY the decentrally-hosted external-party onboarding phase against a
+/// running localnet. This is the whole-suite's `external_party` phase in
+/// isolation, so you can iterate on that one workflow without the full sequence
+/// above.
+///
+/// Invoke via `integration-tests/run-external-party.sh`, which brings up the
+/// localnet + 3 dec-party-manager nodes (a healthy mesh) and runs just this
+/// test. The phase depends only on that mesh — fixture setup +
+/// `discover_network_parties` is all it needs, no earlier phases.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires running localnet — invoke via integration-tests/run-external-party.sh"]
+async fn external_party_e2e() -> anyhow::Result<()> {
+    init_tracing();
+
+    let mut f = Fixture::from_env()?;
+    f.discover_network_parties().await?;
+    phases::external_party::run(&mut f).await?;
     Ok(())
 }

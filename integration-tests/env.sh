@@ -66,17 +66,23 @@ cleanup() {
     # Noise/HTTP ports until the host reboots. Send SIGTERM first (give the
     # process a chance to shut down cleanly if it ever starts honoring it),
     # wait briefly, then SIGKILL anything still alive.
-    for pid in "${PIDS[@]}"; do
-        if kill -0 "$pid" 2>/dev/null; then
-            kill "$pid" 2>/dev/null || true
-        fi
-    done
-    sleep 2
-    for pid in "${PIDS[@]}"; do
-        if kill -0 "$pid" 2>/dev/null; then
-            kill -9 "$pid" 2>/dev/null || true
-        fi
-    done
+    # Guard the array expansions: macOS ships bash 3.2, which treats
+    # "${arr[@]}" on an EMPTY array as an unbound-variable error under `set -u`.
+    # cleanup() runs as an EXIT trap, so on an early failure (before start_nodes
+    # populates PIDS) an unguarded loop aborts here and masks the real error.
+    if [ "${#PIDS[@]}" -gt 0 ]; then
+        for pid in "${PIDS[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then
+                kill "$pid" 2>/dev/null || true
+            fi
+        done
+        sleep 2
+        for pid in "${PIDS[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then
+                kill -9 "$pid" 2>/dev/null || true
+            fi
+        done
+    fi
 
     # Also kill any processes the Rust chaos phases respawned during the run.
     # Each restart appends one PID per line to $DEV_DIR/restarted-pids so the

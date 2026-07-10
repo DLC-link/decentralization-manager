@@ -2,6 +2,7 @@ pub mod add_party;
 pub mod change_threshold;
 pub mod contracts;
 pub mod dars;
+pub mod external_party;
 pub mod kick;
 pub mod onboarding;
 pub mod state;
@@ -38,6 +39,7 @@ pub use add_party::{AddPartyConfig, AddPartyStep};
 pub use change_threshold::{ChangeThresholdConfig, ChangeThresholdStep};
 pub use contracts::{ContractsConfig, ContractsStep};
 pub use dars::{DarsConfig, DarsStep};
+pub use external_party::{ExternalPartyConfig, ExternalPartyStep};
 pub use kick::{KickConfig, KickStep};
 pub use onboarding::{OnboardingConfig, OnboardingStep};
 pub use state::WorkflowState;
@@ -51,6 +53,7 @@ pub enum WorkflowType {
     Kick,
     AddParty,
     ChangeThreshold,
+    ExternalParty,
 }
 
 /// Result from a coordinator workflow, optionally containing the created party ID
@@ -71,6 +74,7 @@ pub async fn start_coordinator(
     dars_config: Option<DarsConfig>,
     add_party_config: Option<AddPartyConfig>,
     change_threshold_config: Option<ChangeThresholdConfig>,
+    external_party_config: Option<ExternalPartyConfig>,
     workflow_auth: Option<WorkflowAuth>,
     last_seen: LastSeen,
     instance: Arc<WorkflowInstance>,
@@ -181,6 +185,23 @@ pub async fn start_coordinator(
             .await?;
             Ok(CoordinatorResult {
                 created_party_id: None,
+            })
+        }
+        WorkflowType::ExternalParty => {
+            let config = external_party_config.ok_or_else(|| {
+                anyhow::anyhow!("ExternalPartyConfig is required for ExternalParty workflow")
+            })?;
+            let party_id = external_party::coordinator::start_coordinator(
+                node_config,
+                network_config,
+                config,
+                db,
+                last_seen,
+                instance,
+            )
+            .await?;
+            Ok(CoordinatorResult {
+                created_party_id: Some(party_id),
             })
         }
     }
@@ -364,6 +385,26 @@ pub async fn start_peer(
                     continue;
                 }
                 if let Err(e) = client.send_status(b"UploadDars completed".to_vec()).await {
+                    tracing::error!("Failed to send completion status: {e}");
+                }
+            }
+            MessageType::AllocateExternalParty => {
+                tracing::info!("Executing: Authorize external-party hosting");
+                if let Err(e) = external_party::peer::authorize_hosting(
+                    &node_config,
+                    &db,
+                    &instance_name,
+                    &payload,
+                )
+                .await
+                {
+                    tracing::error!("Step execution failed: {e}");
+                    continue;
+                }
+                if let Err(e) = client
+                    .send_status(b"AllocateExternalParty completed".to_vec())
+                    .await
+                {
                     tracing::error!("Failed to send completion status: {e}");
                 }
             }
@@ -1098,6 +1139,18 @@ fn peer_step_for_command(
                 step.step_name(),
                 step.step_index(),
                 ChangeThresholdStep::step_total(),
+            ))
+        }
+        WorkflowKind::ExternalParty => {
+            let step = match command {
+                MessageType::AllocateExternalParty => ExternalPartyStep::AllocatePeers,
+                MessageType::Disconnect => ExternalPartyStep::Complete,
+                _ => return None,
+            };
+            Some((
+                step.step_name(),
+                step.step_index(),
+                ExternalPartyStep::step_total(),
             ))
         }
     }

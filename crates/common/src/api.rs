@@ -214,6 +214,29 @@ pub struct OnboardingRequest {
     pub threshold: Option<i32>,
 }
 
+/// Request to onboard a decentrally-hosted external party (single-node v0).
+///
+/// The party's Ed25519 namespace key is generated client-side by DPM; the
+/// local participant hosts it with Confirmation permission.
+#[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct ExternalPartyRequest {
+    /// Human-readable hint forming the party id's identifier segment
+    /// (`{party_hint}::{namespace_fingerprint}`).
+    pub party_hint: String,
+    /// The other participants that will host the party (beyond this
+    /// coordinator node). Each runs DPM and authorizes hosting on its own
+    /// participant. A decentrally-hosted party needs at least one.
+    #[serde(default)]
+    pub hosting_peers: Vec<CantonId>,
+    /// Confirmation threshold for the hosting participant set (how many hosts
+    /// must confirm a transaction). Optional: when omitted Canton defaults it
+    /// to the number of hosting participants.
+    #[serde(default)]
+    pub confirmation_threshold: Option<u32>,
+}
+
 /// Why a directed edge was reported missing. The frontend renders different
 /// remediation hints depending on which kind it sees: `MeshHole` is a true
 /// peer↔peer config gap ("on `from`, add `to` to the network config"), while
@@ -302,6 +325,31 @@ pub struct WorkflowRunsResponse {
     pub runs: Vec<WorkflowRun>,
 }
 
+/// One external party this node has onboarded. Derived from an allocated
+/// `ExternalParty` workflow run. Runs still onboarding (no party id yet) or that
+/// failed before allocation are not listed here — they show in `/workflows`.
+#[derive(Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct ExternalPartyInfo {
+    /// The onboarding run's `instance_name` (its primary key).
+    pub instance_name: String,
+    /// The allocated party id (`{hint}::{fingerprint}`).
+    pub party_id: String,
+    /// The party's namespace fingerprint (the `{fingerprint}` half of the id).
+    pub fingerprint: String,
+    /// Unix-seconds creation time of the run.
+    pub created_at: i64,
+}
+
+/// Response wrapper for `GET /external-parties`.
+#[derive(Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct ExternalPartiesResponse {
+    pub parties: Vec<ExternalPartyInfo>,
+}
+
 /// Response for key status check
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -326,6 +374,26 @@ pub struct OnboardingInvitePayload {
     /// The coordinator's `workflow_runs` instance name for this run. Echoed
     /// back in `DeclineInvitationPayload` so the coordinator can tell a
     /// decline of THIS run apart from a stale invite of an earlier run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_instance: Option<String>,
+}
+
+/// Payload sent inside an `InviteExternalParty` Noise message. The coordinator
+/// invites each hosting participant to authorize hosting the external party on
+/// its own node.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct ExternalPartyInvitePayload {
+    /// The party hint (identifier segment), so the invite card can show it.
+    pub party_hint: String,
+    /// The full hosting participant set (coordinator + peers).
+    pub participants: Vec<CantonId>,
+    /// Confirmation threshold the coordinator chose, for the invite/run cards.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmation_threshold: Option<u32>,
+    /// The coordinator's `workflow_runs` instance name for this run, echoed
+    /// back on decline so the coordinator only fails the matching run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_instance: Option<String>,
 }
