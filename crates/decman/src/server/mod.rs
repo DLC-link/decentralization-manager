@@ -2327,7 +2327,7 @@ async fn list_local_packages(admin_api_url: &str) -> Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_insecure_allowed, Network};
+    use super::{Network, ensure_insecure_allowed};
 
     #[test]
     fn insecure_allowed_on_devnet() {
