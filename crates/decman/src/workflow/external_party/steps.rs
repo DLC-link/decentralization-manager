@@ -65,9 +65,7 @@ pub async fn prepare_topology(
     // Hosts = the coordinator's own participant + the confirming peers. Default
     // the confirmation threshold to all hosts when the caller didn't set one.
     let num_hosts = 1 + other_confirming_participant_uids.len();
-    let confirmation_threshold = external
-        .confirmation_threshold
-        .unwrap_or(num_hosts as u32);
+    let confirmation_threshold = external.confirmation_threshold.unwrap_or(num_hosts as u32);
 
     let request = GenerateExternalPartyTopologyRequest {
         synchronizer,
@@ -99,10 +97,7 @@ pub async fn prepare_topology(
     // and every downstream identity claim is wrong — fail loudly rather than
     // onboard a party whose namespace DPM cannot reproduce.
     let derived_fingerprint = keypair.fingerprint();
-    let canton_fingerprint = response
-        .party_id
-        .split_once("::")
-        .map_or("", |(_, fp)| fp);
+    let canton_fingerprint = response.party_id.split_once("::").map_or("", |(_, fp)| fp);
     if canton_fingerprint != derived_fingerprint {
         return Err(anyhow::anyhow!(
             "external-party fingerprint mismatch: Canton derived {canton_fingerprint} but DPM \
