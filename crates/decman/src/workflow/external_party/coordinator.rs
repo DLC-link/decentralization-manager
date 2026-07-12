@@ -284,7 +284,10 @@ async fn run_workflow(
 
 #[cfg(test)]
 mod tests {
-    use crate::{db::MIGRATOR, server::WorkflowProgress};
+    use crate::{
+        db::MIGRATOR,
+        server::{WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun},
+    };
 
     use super::*;
 
@@ -298,6 +301,40 @@ mod tests {
         let party_id = CantonId::parse(&format!("alice::{TEST_FINGERPRINT}"))?;
         let seed = [7u8; 32];
         let public_key = [9u8; 32];
+
+        // A run row must exist first: workflow_artifacts has a FK to workflow_runs
+        // (the real flow inserts the run before any artifact write).
+        let run = WorkflowRun {
+            instance_name: instance.to_string(),
+            kind: WorkflowKind::ExternalParty,
+            role: WorkflowRole::Coordinator,
+            status: WorkflowProgress::InProgress,
+            current_step: "PrepareTopology".to_string(),
+            step_index: 2,
+            step_total: 5,
+            config_json: "{}".to_string(),
+            coordinator_pubkey: None,
+            coordinator_instance: None,
+            coordinator_name: None,
+            expected_peers: Vec::new(),
+            completed_peers: Vec::new(),
+            dec_party_id: None,
+            prefix: None,
+            participants: Vec::new(),
+            previous_threshold: None,
+            new_threshold: None,
+            kicked_participant: None,
+            added_participant: None,
+            package_names: Vec::new(),
+            dar_filenames: Vec::new(),
+            error: None,
+            dismissed: false,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_workflow_run(&run).await?;
+        Commitable::commit(tx).await?;
 
         // Seed the transient artifacts a live GenerateKeys step would have written.
         pool.write_artifact(instance, artifact_kinds::EXTERNAL_PARTY_SEED, None, &seed)
