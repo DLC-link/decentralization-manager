@@ -592,6 +592,40 @@ impl WorkflowTriggers {
             workflow_instance,
         };
 
+        // External-party hosting is a safe operation — the party's namespace key
+        // is client-held, and a host only authorizes hosting the party on its own
+        // participant. So auto-accept without a manual approval step: spawn the
+        // peer run directly and record no pending card (mirrors the core of
+        // `accept_invitation`).
+        if invitation_type == InvitationType::ExternalParty {
+            match handlers::insert_peer_run(&self.db, &invitation).await {
+                Some(peer_instance) => {
+                    let job = PeerJob {
+                        kind: invitation_type.into(),
+                        instance_name: peer_instance,
+                        coordinator_instance: invitation
+                            .workflow_instance
+                            .clone()
+                            .unwrap_or_default(),
+                        coordinator_pubkey: invitation.coordinator_pubkey.clone(),
+                    };
+                    if self.peer_job_sender.send(job).is_err() {
+                        tracing::error!(
+                            "auto-accept external-party invite: peer job listener unavailable"
+                        );
+                    } else {
+                        tracing::info!(
+                            "Auto-accepted external-party hosting invite from {coordinator_pubkey}"
+                        );
+                    }
+                }
+                None => {
+                    tracing::error!("auto-accept external-party invite: failed to record peer run")
+                }
+            }
+            return;
+        }
+
         // Dedup by `id` (which includes the coordinator's run `instance`), not
         // by (type, coordinator): a coordinator can now run several workflows
         // of the same kind concurrently, so each distinct run must surface as

@@ -21,6 +21,7 @@ pub use governance::{
     get_transfer_instructions_handler, get_transfer_preapprovals_handler,
     get_user_services_handler, get_vaults_handler, propose_action, query_contracts_handler,
 };
+pub(crate) use invitations::insert_peer_run;
 pub use invitations::{accept_invitation, decline_invitation, get_invitations};
 pub use keys::get_key_status;
 pub use parties::{
