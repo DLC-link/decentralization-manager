@@ -1,14 +1,14 @@
 //! Decentrally-hosted external-party onboarding phase.
 //!
 //! Drives `POST /external-party` on P1 naming P2 + P3 as additional hosts at a
-//! 2-of-3 confirmation threshold. The coordinator generates the party's key,
-//! builds the multi-host onboarding topology, authorizes hosting on its own
-//! participant, and fans the party-signed bundle out to P2 and P3, which each
-//! authorize hosting on theirs. Asserts the coordinator run completes, both peer
-//! runs complete, and the party surfaces with a well-formed id.
+//! 2-of-3 confirmation threshold. P2 and P3 accept the hosting invitations, then
+//! each authorizes hosting on its own participant. Asserts the coordinator run
+//! completes, both peer runs complete, and the party surfaces with a well-formed
+//! id.
 
 use std::time::Duration;
 
+use anyhow::Context;
 use serde_json::{Value, json};
 use tracing::info;
 
@@ -16,7 +16,7 @@ use crate::common::{
     Fixture,
     chaos::fresh_prefix,
     http::{probe_workflow_run_visible, probe_workflow_status},
-    invitations::InvitationIds,
+    invitations::{InvitationIds, post_accept_invitation, probe_pending_invitation},
     scenario::Scenario,
 };
 
@@ -44,6 +44,48 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 Ok(())
             })
         }
+    })
+    .then(
+        "ExternalParty invitation visible on P2",
+        Duration::from_secs(60),
+        |f, ctx| {
+            Box::pin(async move {
+                let id = probe_pending_invitation(f, f.p2.http, "ExternalParty").await?;
+                ctx.p2 = Some(id);
+                Some(Ok(()))
+            })
+        },
+    )
+    .then(
+        "ExternalParty invitation visible on P3",
+        Duration::from_secs(60),
+        |f, ctx| {
+            Box::pin(async move {
+                let id = probe_pending_invitation(f, f.p3.http, "ExternalParty").await?;
+                ctx.p3 = Some(id);
+                Some(Ok(()))
+            })
+        },
+    )
+    .when("P2 + P3 accept ExternalParty invitations", |f, ctx| {
+        Box::pin(async move {
+            let p2_id = ctx
+                .p2
+                .as_deref()
+                .context("P2 invitation id not set")?
+                .to_string();
+            let p3_id = ctx
+                .p3
+                .as_deref()
+                .context("P3 invitation id not set")?
+                .to_string();
+            let p2_accept = post_accept_invitation(f, f.p2.http, &p2_id);
+            let p3_accept = post_accept_invitation(f, f.p3.http, &p3_id);
+            let (r2, r3) = tokio::join!(p2_accept, p3_accept);
+            r2.context("accept on P2")?;
+            r3.context("accept on P3")?;
+            Ok(())
+        })
     })
     .then(
         "external-party workflow reaches completed on P1 (Coordinator)",
