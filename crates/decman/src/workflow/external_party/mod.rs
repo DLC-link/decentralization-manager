@@ -1,9 +1,9 @@
 //! Decentrally-hosted external-party onboarding workflow.
 //!
-//! See `docs/decentralice-external-party-v0.md`. This workflow onboards a
-//! sovereign external party whose Ed25519 namespace key is generated and held
-//! client-side (by DPM, standing in for a wallet) and hosted with Confirmation
-//! permission across N participants at an M-of-N confirmation threshold.
+//! This workflow onboards a sovereign external party whose Ed25519 namespace key
+//! is generated and held client-side (by DPM, standing in for a wallet) and
+//! hosted with Confirmation permission across N participants at an M-of-N
+//! confirmation threshold.
 //!
 //! The coordinator generates the key, builds the multi-host onboarding topology
 //! naming every host, signs the multi-hash once, allocates on its own

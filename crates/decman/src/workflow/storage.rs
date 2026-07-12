@@ -129,8 +129,10 @@ pub mod artifact_kinds {
     // External-party onboarding (workflow_artifacts during a run)
     /// Raw 32-byte Ed25519 public key of the external party. Shared.
     pub const EXTERNAL_PARTY_PUBLIC_KEY: &str = "external_party_public_key";
-    /// Raw 32-byte Ed25519 private seed. SECURITY: v0-only plaintext storage
-    /// for the demo — production must seal this in the secret store. Shared.
+    /// Raw 32-byte Ed25519 private seed. AES-GCM encrypted at rest like every
+    /// artifact (see `db::sqlite` `write_workflow_artifact`), but this is a
+    /// transient run store, not a dedicated secret store — the seed is copied
+    /// into `dec_party_identity` at completion. Shared.
     pub const EXTERNAL_PARTY_SEED: &str = "external_party_seed";
     /// Canton namespace fingerprint of the external party's key. Plaintext.
     pub const EXTERNAL_PARTY_FINGERPRINT: &str = "external_party_fingerprint";

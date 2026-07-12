@@ -3325,8 +3325,9 @@ pub async fn list_workflows(data: web::Data<AppState>) -> impl Responder {
 }
 
 /// List every external party this node has onboarded (or is onboarding),
-/// derived from `ExternalParty` workflow runs plus the party-id/fingerprint
-/// artifacts each run stores. Newest run first.
+/// derived from each `ExternalParty` workflow run's durable `dec_party_id`
+/// column (set once the party is allocated; runtime artifacts are wiped on
+/// completion). Newest run first.
 #[utoipa::path(
     tag = "Workflows",
     responses((status = 200, description = "External parties", body = ExternalPartiesResponse))

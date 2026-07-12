@@ -214,10 +214,11 @@ pub struct OnboardingRequest {
     pub threshold: Option<i32>,
 }
 
-/// Request to onboard a decentrally-hosted external party (single-node v0).
+/// Request to onboard a decentrally-hosted external party.
 ///
-/// The party's Ed25519 namespace key is generated client-side by DPM; the
-/// local participant hosts it with Confirmation permission.
+/// The party's Ed25519 namespace key is generated client-side by DPM; the party
+/// is hosted with Confirmation permission across the coordinator node and
+/// `hosting_peers`, at the given confirmation threshold.
 #[derive(Clone, Debug, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]

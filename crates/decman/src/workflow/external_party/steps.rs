@@ -215,8 +215,7 @@ async fn external_party_synchronizer(config: &NodeConfig) -> Result<String> {
 ///   the mock auth registry.
 /// - In production we currently have no token: `AllocateExternalParty` requires
 ///   `ParticipantAdmin OR IdentityProviderAdmin`, and there is no node-admin
-///   token in the per-party auth registry yet. Wiring one in is the open item
-///   (see `docs/decentralice-external-party-v0.md`).
+///   token in the per-party auth registry yet. Wiring one in is the open item.
 fn external_party_token() -> Option<String> {
     #[cfg(any(test, feature = "test-mode"))]
     {
