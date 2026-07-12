@@ -598,32 +598,33 @@ impl WorkflowTriggers {
         // peer run directly and record no pending card (mirrors the core of
         // `accept_invitation`).
         if invitation_type == InvitationType::ExternalParty {
-            match handlers::insert_peer_run(&self.db, &invitation).await {
-                Some(peer_instance) => {
-                    let job = PeerJob {
-                        kind: invitation_type.into(),
-                        instance_name: peer_instance,
-                        coordinator_instance: invitation
-                            .workflow_instance
-                            .clone()
-                            .unwrap_or_default(),
-                        coordinator_pubkey: invitation.coordinator_pubkey.clone(),
-                    };
-                    if self.peer_job_sender.send(job).is_err() {
-                        tracing::error!(
-                            "auto-accept external-party invite: peer job listener unavailable"
-                        );
-                    } else {
-                        tracing::info!(
-                            "Auto-accepted external-party hosting invite from {coordinator_pubkey}"
-                        );
-                    }
+            if let Some(peer_instance) = handlers::insert_peer_run(&self.db, &invitation).await {
+                let job = PeerJob {
+                    kind: invitation_type.into(),
+                    instance_name: peer_instance,
+                    coordinator_instance: invitation.workflow_instance.clone().unwrap_or_default(),
+                    coordinator_pubkey: invitation.coordinator_pubkey.clone(),
+                };
+                if self.peer_job_sender.send(job).is_ok() {
+                    tracing::info!(
+                        "Auto-accepted external-party hosting invite from {coordinator_pubkey}"
+                    );
+                    return;
                 }
-                None => {
-                    tracing::error!("auto-accept external-party invite: failed to record peer run")
-                }
+                tracing::error!(
+                    "auto-accept external-party invite: peer job listener unavailable; recording a \
+                     pending card for manual retry"
+                );
+            } else {
+                tracing::error!(
+                    "auto-accept external-party invite: failed to record peer run; recording a \
+                     pending card for manual retry"
+                );
             }
-            return;
+            // Auto-accept failed — fall through to persist a normal pending card
+            // so the operator can retry the accept manually, rather than dropping
+            // the invite and leaving the coordinator waiting for a host that
+            // never starts.
         }
 
         // Dedup by `id` (which includes the coordinator's run `instance`), not

@@ -214,13 +214,14 @@ fi
 # DECPM_E2E_TEST picks which #[ignore]d test in the governance_workflows binary
 # to run. Defaults to the full suite (governance_workflows_e2e); the wrapper
 # run-external-party.sh sets it to external_party_e2e to exercise only that one
-# feature. The name is a cargo test filter, so it must match exactly one test.
+# feature. Run with `--exact` so the name matches exactly one test, never a
+# substring set.
 E2E_TEST="${DECPM_E2E_TEST:-governance_workflows_e2e}"
 
 # Run the selected e2e test against the already-running stack.
 run_e2e() {
     cargo test --profile release-ci -p decman ${FEATURES_FLAG[@]+"${FEATURES_FLAG[@]}"} \
-        --test governance_workflows "$E2E_TEST" -- --ignored --nocapture
+        --test governance_workflows -- --ignored --nocapture --exact "$E2E_TEST"
 }
 
 # DECPM_E2E_HOLD=1 switches to interactive mode: bring the stack up, wait for the

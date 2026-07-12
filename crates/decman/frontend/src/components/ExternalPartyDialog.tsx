@@ -65,9 +65,10 @@ export const ExternalPartyDialog = ({
     new Set(),
   );
   const [loadingPeers, setLoadingPeers] = useState(false);
-  // Confirmation threshold. Defaults (visibly) to the same majority algorithm
-  // the server would use — `ceil(owners / 2)` — recomputed as the selected
-  // hosting-peer set changes, until the operator edits the field.
+  // Confirmation threshold. Defaults to a majority of hosts (`ceil(owners / 2)`)
+  // — a sensible fault-tolerant default, recomputed as the selected hosting-peer
+  // set changes, until the operator edits it. The dialog always sends an explicit
+  // value; the server's own fallback for an unset threshold is all hosts.
   const [threshold, setThreshold] = useState(1);
   const [thresholdTouched, setThresholdTouched] = useState(false);
   const { showSnackbar } = useSnackbar();
