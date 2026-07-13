@@ -105,6 +105,9 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     // client-side Ed25519 key and hosts it across P1+P2+P3 at a 2-of-3
     // confirmation threshold. Runs early, while the mesh is healthy.
     phases::external_party::run(&mut f).await?;
+    // Same, but wallet-driven via the /v0/tenant/* API: the key is generated
+    // client-side and DPM only relays the signed onboarding bundle.
+    phases::external_party_tenant::run(&mut f).await?;
     phases::create_dec_party::run(&mut f).await?;
     phases::distribute_dars::run(&mut f).await?;
     phases::check_peer_dars::run(&mut f).await?;

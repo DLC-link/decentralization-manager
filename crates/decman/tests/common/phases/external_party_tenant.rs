@@ -1,0 +1,155 @@
+//! Wallet-driven external-party onboarding via the tenant API (`/v0/tenant/*`).
+//!
+//! Stands in for a wallet: generates an Ed25519 key locally, calls
+//! `POST /v0/tenant/prepare` to get the multi-host onboarding topology + the
+//! multi-hash, signs the multi-hash with the local key, then submits the signed
+//! bundle to `POST /v0/tenant/onboard`. DPM never sees the private key. Asserts
+//! the onboarding completes across P1+P2+P3 and the party's ACS is readable via
+//! `GET /v0/tenant/{party}/acs`.
+//!
+//! (Full transacting — prepare-submission/execute-submission of a real contract
+//! — is exercised against DevNet, since it needs a concrete template; here we
+//! confirm onboarding + the ACS read end-to-end.)
+
+use std::time::Duration;
+
+use anyhow::Context;
+use base64::{Engine, engine::general_purpose::STANDARD};
+use dec_party_manager::workflow::external_party::keys::ExternalKeyPair;
+use serde_json::{Value, json};
+use tracing::info;
+
+use crate::common::{
+    Fixture,
+    chaos::fresh_prefix,
+    http::{probe_workflow_run_visible, probe_workflow_status},
+    scenario::Scenario,
+};
+
+pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
+    info!("Phase: external_party_tenant");
+
+    // The "wallet": key generated + held client-side; DPM only ever sees the
+    // public key and the signature.
+    let wallet = ExternalKeyPair::generate();
+    let seed = wallet.seed();
+    let hint = fresh_prefix("tenant-ext");
+    let party_id = wallet.party_id(&hint);
+    let public_key = STANDARD.encode(wallet.public_key_bytes());
+    info!("Wallet-driven external party: {party_id}");
+
+    Scenario::with_ctx(
+        format!("onboard wallet-driven external party {hint} via /v0/tenant/*"),
+        (),
+    )
+    .when("wallet prepares, signs, and onboards via the tenant API", {
+        let hint = hint.clone();
+        let public_key = public_key.clone();
+        move |f, _| {
+            let hint = hint.clone();
+            let public_key = public_key.clone();
+            Box::pin(async move {
+                // 1) DPM builds the multi-host topology from the wallet's pubkey.
+                let prepare_req = json!({
+                    "party_hint": hint,
+                    "public_key": public_key,
+                    "hosting_peers": [&f.p2.participant_id, &f.p3.participant_id],
+                    "confirmation_threshold": 2,
+                });
+                let prep: Value = f
+                    .post_json(f.p1.http, "/v0/tenant/prepare", &prepare_req)
+                    .await?;
+                let multi_hash_b64 = prep
+                    .get("multi_hash")
+                    .and_then(Value::as_str)
+                    .context("prepare response missing multi_hash")?;
+                let multi_hash = STANDARD
+                    .decode(multi_hash_b64)
+                    .context("multi_hash is not valid base64")?;
+                let topology_transactions = prep
+                    .get("topology_transactions")
+                    .cloned()
+                    .context("prepare response missing topology_transactions")?;
+
+                // 2) The wallet signs the multi-hash locally with its own key.
+                let wallet = ExternalKeyPair::from_seed(seed);
+                let signature = STANDARD.encode(wallet.sign(&multi_hash));
+
+                // 3) Submit the signed bundle; DPM allocates + fans out to hosts.
+                let onboard_req = json!({
+                    "party_hint": hint,
+                    "public_key": public_key,
+                    "hosting_peers": [&f.p2.participant_id, &f.p3.participant_id],
+                    "confirmation_threshold": 2,
+                    "topology_transactions": topology_transactions,
+                    "multi_hash_signature": signature,
+                    "signed_by": wallet.fingerprint(),
+                });
+                let _: Value = f
+                    .post_json(f.p1.http, "/v0/tenant/onboard", &onboard_req)
+                    .await?;
+                Ok(())
+            })
+        }
+    })
+    .then(
+        "wallet-driven onboarding reaches completed on P1",
+        Duration::from_secs(180),
+        {
+            let party_id = party_id.clone();
+            move |f, _| {
+                let party_id = party_id.clone();
+                Box::pin(async move {
+                    probe_workflow_status(
+                        &*f,
+                        f.p1.http,
+                        &format!("/v0/tenant/{party_id}/status"),
+                        "tenant-onboarding",
+                    )
+                    .await
+                })
+            }
+        },
+    )
+    .then(
+        "external-party peer run completed on P2 (host authorized)",
+        Duration::from_secs(60),
+        |f, _| {
+            Box::pin(async move {
+                probe_workflow_run_visible(f, f.p2.http, "ExternalParty", "Peer", "completed").await
+            })
+        },
+    )
+    .then(
+        "external-party peer run completed on P3 (host authorized)",
+        Duration::from_secs(60),
+        |f, _| {
+            Box::pin(async move {
+                probe_workflow_run_visible(f, f.p3.http, "ExternalParty", "Peer", "completed").await
+            })
+        },
+    )
+    .then(
+        "party ACS readable via /v0/tenant/{party}/acs",
+        Duration::from_secs(30),
+        {
+            let party_id = party_id.clone();
+            move |f, _| {
+                let party_id = party_id.clone();
+                Box::pin(async move {
+                    let resp: Value = f
+                        .get_json(f.p1.http, &format!("/v0/tenant/{party_id}/acs"))
+                        .await
+                        .ok()?;
+                    // A freshly onboarded party has no contracts yet; the check is
+                    // that the endpoint answers with a contracts array.
+                    resp.get("contracts")
+                        .and_then(Value::as_array)
+                        .map(|_| Ok(()))
+                })
+            }
+        },
+    )
+    .run(f)
+    .await
+}
