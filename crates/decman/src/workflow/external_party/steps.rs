@@ -20,7 +20,10 @@ use crate::{
     config::NodeConfig,
     error::Result,
     utils::{self, extract_synchronizer_fingerprint},
-    workflow::external_party::{ExternalPartyConfig, keys::ExternalKeyPair},
+    workflow::external_party::{
+        ExternalPartyConfig,
+        keys::{self, ExternalKeyPair},
+    },
 };
 
 /// The unsigned onboarding topology returned by `GenerateExternalPartyTopology`.
@@ -47,13 +50,13 @@ pub struct PreparedTopology {
 pub async fn prepare_topology(
     config: &NodeConfig,
     external: &ExternalPartyConfig,
-    keypair: &ExternalKeyPair,
+    public_key: &[u8; 32],
 ) -> Result<PreparedTopology> {
     let synchronizer = external_party_synchronizer(config).await?;
 
-    let public_key = SigningPublicKey {
+    let signing_public_key = SigningPublicKey {
         format: CryptoKeyFormat::Raw as i32,
-        key_data: keypair.public_key_bytes().to_vec(),
+        key_data: public_key.to_vec(),
         key_spec: SigningKeySpec::EcCurve25519 as i32,
     };
 
@@ -70,7 +73,7 @@ pub async fn prepare_topology(
     let request = GenerateExternalPartyTopologyRequest {
         synchronizer,
         party_hint: external.party_hint.clone(),
-        public_key: Some(public_key),
+        public_key: Some(signing_public_key),
         local_participant_observation_only: false,
         other_confirming_participant_uids,
         confirmation_threshold,
@@ -96,7 +99,7 @@ pub async fn prepare_topology(
     // A mismatch means `keys.rs` is out of sync with Canton's key-fingerprinting
     // and every downstream identity claim is wrong — fail loudly rather than
     // onboard a party whose namespace DPM cannot reproduce.
-    let derived_fingerprint = keypair.fingerprint();
+    let derived_fingerprint = keys::fingerprint_from_public_key(public_key);
     let canton_fingerprint = response.party_id.split_once("::").map_or("", |(_, fp)| fp);
     if canton_fingerprint != derived_fingerprint {
         return Err(anyhow::anyhow!(

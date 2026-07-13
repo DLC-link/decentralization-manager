@@ -207,6 +207,12 @@ pub enum Commands {
         #[arg(long, env = "DECPM_CANTON_HMAC_SUBJECT")]
         canton_hmac_subject: Option<String>,
 
+        /// Comma-separated bearer API keys for the wallet-facing `/v0/tenant/*`
+        /// endpoints (external-party onboarding + interactive submission).
+        /// Empty (default) disables the tenant API unless in insecure/test mode.
+        #[arg(long, env = "DECPM_TENANT_API_KEYS")]
+        tenant_api_keys: Option<String>,
+
         // Timeouts
         /// Noise handshake timeout in seconds
         #[arg(long, env = "DECPM_TIMEOUT_HANDSHAKE")]

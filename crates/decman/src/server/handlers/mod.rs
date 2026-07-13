@@ -5,6 +5,7 @@ mod invitations;
 mod keys;
 mod parties;
 mod party_config;
+mod tenant;
 mod workflows;
 
 pub use auth::{get_auth_config, get_auth_status, grant_rights, test_auth};
@@ -30,6 +31,10 @@ pub use parties::{
     store_parties_to_db,
 };
 pub use party_config::{discover_member_party, get_party_config, save_party_config};
+pub use tenant::{
+    tenant_acs, tenant_execute_submission, tenant_onboard, tenant_prepare,
+    tenant_prepare_submission, tenant_status,
+};
 pub use workflows::{
     cancel_add_party, cancel_change_threshold, cancel_contracts, cancel_dars,
     cancel_external_party, cancel_kick, cancel_onboarding, cancel_workflow_instance,

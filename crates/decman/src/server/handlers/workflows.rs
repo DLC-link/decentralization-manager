@@ -42,7 +42,8 @@ use crate::{
     utils,
     workflow::{
         self, AddPartyStep, ChangeThresholdStep, ContractsStep, DarsStep, ExternalPartyStep,
-        KickStep, OnboardingStep, state::WorkflowStep,
+        KickStep, OnboardingStep, external_party::steps::ExternalPartyAllocatePayload,
+        state::WorkflowStep,
     },
 };
 
@@ -1515,7 +1516,10 @@ async fn send_change_threshold_invites(
 /// a reachable threshold is `1..=num_hosts`. Reject 0 and anything above the
 /// host count up-front instead of failing deep in a Canton proto error. Unset
 /// lets Canton default it to the number of hosts.
-fn validate_confirmation_threshold(threshold: Option<u32>, num_hosts: usize) -> Result<(), String> {
+pub(crate) fn validate_confirmation_threshold(
+    threshold: Option<u32>,
+    num_hosts: usize,
+) -> Result<(), String> {
     let Some(t) = threshold else { return Ok(()) };
     if !(1..=num_hosts as u32).contains(&t) {
         return Err(format!(
@@ -1573,6 +1577,40 @@ pub async fn start_external_party(
         return HttpResponse::BadRequest().json(ErrorResponse { error: msg });
     }
 
+    // DPM-custody flow: the coordinator generates and holds the party key, so no
+    // prepared bundle. The wallet-driven `/v0/tenant/onboard` passes Some(bundle).
+    match spawn_external_party_onboarding(
+        &data,
+        body.party_hint.clone(),
+        hosting_peers,
+        body.confirmation_threshold,
+        None,
+    )
+    .await
+    {
+        Ok(instance_name) => HttpResponse::Accepted().json(WorkflowResponse {
+            status: WorkflowProgress::InProgress,
+            message: "External-party workflow started".to_string(),
+            instance_name,
+        }),
+        Err(resp) => resp,
+    }
+}
+
+/// Core of external-party onboarding, shared by the admin `/external-party`
+/// endpoint (DPM holds the key, `prepared_bundle = None`) and the wallet-facing
+/// `/v0/tenant/onboard` endpoint (the wallet holds the key, `prepared_bundle =
+/// Some`). Runs the mesh pre-flight, the peer version gate, registers + persists
+/// the run, records the invited peers, and spawns the coordinator task. Returns
+/// the run's `instance_name` on success, or the `HttpResponse` the caller should
+/// return (422 mesh hole, 409 incompatible peer / duplicate run, 500 mesh error).
+pub(crate) async fn spawn_external_party_onboarding(
+    data: &web::Data<AppState>,
+    party_hint: String,
+    hosting_peers: Vec<CantonId>,
+    confirmation_threshold: Option<u32>,
+    prepared_bundle: Option<ExternalPartyAllocatePayload>,
+) -> std::result::Result<String, HttpResponse> {
     // Pre-flight: every hosting peer must have every other hosting peer in its
     // network config, otherwise the coordinator hangs waiting for peer
     // connections that can never be established (mirrors onboarding).
@@ -1592,21 +1630,22 @@ pub async fn start_external_party(
                 "External-party onboarding rejected: {n} missing peer mesh edge(s): {edge_summary}",
                 n = missing.len()
             );
-            return HttpResponse::UnprocessableEntity().json(OnboardingMeshErrorResponse {
-                error: format!("Could not verify a full peer mesh. Edges: {edge_summary}"),
-                missing_edges: missing,
-            });
+            return Err(
+                HttpResponse::UnprocessableEntity().json(OnboardingMeshErrorResponse {
+                    error: format!("Could not verify a full peer mesh. Edges: {edge_summary}"),
+                    missing_edges: missing,
+                }),
+            );
         }
         Ok(_) => {}
         Err(e) => {
             tracing::error!("Failed to run mesh pre-flight: {e:#}");
-            return HttpResponse::InternalServerError().json(ErrorResponse {
+            return Err(HttpResponse::InternalServerError().json(ErrorResponse {
                 error: "Failed to verify peer mesh".into(),
-            });
+            }));
         }
     }
 
-    let party_hint = body.party_hint.clone();
     let instance_name = format!("{party_hint}-external");
     let instance = WorkflowInstance::new(
         instance_name.clone(),
@@ -1617,30 +1656,28 @@ pub async fn start_external_party(
         party_hint.clone(),
         instance_name.clone(),
         hosting_peers.clone(),
-        body.confirmation_threshold,
+        confirmation_threshold,
+        prepared_bundle,
     );
 
     // Refuse to invite any peer that can't speak the concurrent-workflows wire
     // format — NO invites are sent if even one invitee fails the version gate.
     let incompatible = preflight_incompatible_peers(&data.config, &data.db, &hosting_peers).await;
     if !incompatible.is_empty() {
-        return HttpResponse::Conflict().json(ErrorResponse {
+        return Err(HttpResponse::Conflict().json(ErrorResponse {
             error: format_incompatible_peers(&incompatible),
-        });
+        }));
     }
 
-    if let Err(resp) = register_and_persist(
-        &data,
+    register_and_persist(
+        data,
         &instance,
         ExternalPartyStep::WaitingForPeers,
         &external_config,
         &hosting_peers,
         None,
     )
-    .await
-    {
-        return resp;
-    }
+    .await?;
 
     let config = data.config.clone();
     let db = data.db.clone();
@@ -1649,8 +1686,9 @@ pub async fn start_external_party(
     let http_state_for_task = instance.http.clone();
     let instance_for_coord = instance.clone();
     let instance_for_task = instance_name.clone();
-    let confirmation_threshold = body.confirmation_threshold;
-    *instance.http.invited_peers.write().await = hosting_peers.clone();
+    let party_hint_for_task = party_hint.clone();
+    let hosting_peers_for_task = hosting_peers.clone();
+    *instance.http.invited_peers.write().await = hosting_peers;
 
     // Flip abort_handle, status, and error under simultaneously-held locks so a
     // concurrent /external-party/cancel can never observe
@@ -1666,8 +1704,8 @@ pub async fn start_external_party(
         let invite_result = send_external_party_invites(
             &config,
             &db,
-            &hosting_peers,
-            &party_hint,
+            &hosting_peers_for_task,
+            &party_hint_for_task,
             confirmation_threshold,
             &instance_for_task,
         )
@@ -1731,11 +1769,7 @@ pub async fn start_external_party(
     drop(status_guard);
     drop(abort_guard);
 
-    HttpResponse::Accepted().json(WorkflowResponse {
-        status: WorkflowProgress::InProgress,
-        message: "External-party workflow started".to_string(),
-        instance_name,
-    })
+    Ok(instance_name)
 }
 
 /// Send external-party hosting invites to the selected peers using Noise.

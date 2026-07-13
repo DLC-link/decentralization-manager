@@ -102,8 +102,12 @@ pub async fn start_coordinator(
 
     // Move the client key out of the transient artifacts (about to be wiped on
     // completion) into the durable identity store so the sovereign party stays
-    // recoverable and can later transact.
-    persist_external_party_identity(&db, &config.instance_name, &party_id).await?;
+    // recoverable and can later transact. Skipped in the wallet-driven flow —
+    // there DPM never holds a seed (the wallet keeps it), so there is nothing to
+    // persist.
+    if config.prepared_bundle.is_none() {
+        persist_external_party_identity(&db, &config.instance_name, &party_id).await?;
+    }
 
     Ok(party_id)
 }
@@ -222,45 +226,79 @@ async fn run_workflow(
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
             ExternalPartyStep::GenerateKeys => {
-                tracing::info!("external-party: generating client-side Ed25519 key");
-                keypair = Some(load_or_create_keypair(&db, &instance_name).await?);
+                if config.prepared_bundle.is_some() {
+                    // Wallet-driven: the wallet holds the key, so there is
+                    // nothing for the coordinator to generate.
+                    tracing::info!(
+                        "external-party: wallet-provided key, skipping coordinator key generation"
+                    );
+                } else {
+                    tracing::info!("external-party: generating client-side Ed25519 key");
+                    keypair = Some(load_or_create_keypair(&db, &instance_name).await?);
+                }
                 workflow_state.advance_step().await;
             }
             ExternalPartyStep::PrepareTopology => {
-                let kp = keypair
-                    .as_ref()
-                    .context("keypair missing before PrepareTopology")?;
-                tracing::info!(
-                    "external-party: generating multi-host onboarding topology via Canton"
-                );
-                let prep = prepare_topology(&node_config, &config, kp).await?;
-                db.write_artifact(
-                    &instance_name,
-                    artifact_kinds::EXTERNAL_PARTY_ID,
-                    None,
-                    prep.party_id.as_bytes(),
-                )
-                .await?;
-                db.write_artifact(
-                    &instance_name,
-                    artifact_kinds::EXTERNAL_PARTY_MULTI_HASH,
-                    None,
-                    &prep.multi_hash,
-                )
-                .await?;
+                if let Some(bundle) = config.prepared_bundle.as_ref() {
+                    // Wallet-driven: the wallet already generated the key, asked
+                    // Canton to build the topology, and signed the multi-hash.
+                    // Allocate directly from that bundle on the coordinator's own
+                    // participant and fan the same bundle out to the hosts — the
+                    // coordinator never touches the key or Canton generate/sign.
+                    tracing::info!(
+                        "external-party: allocating wallet-signed party on coordinator participant"
+                    );
+                    db.write_artifact(
+                        &instance_name,
+                        artifact_kinds::EXTERNAL_PARTY_ID,
+                        None,
+                        bundle.party_id.as_bytes(),
+                    )
+                    .await?;
+                    allocate_party(&node_config, bundle).await?;
+                    let payload = serde_json::to_vec(bundle)
+                        .context("serialize external-party allocate bundle")?;
+                    workflow_state.set_command_payload(payload).await;
+                    workflow_state.advance_step().await;
+                } else {
+                    let kp = keypair
+                        .as_ref()
+                        .context("keypair missing before PrepareTopology")?;
+                    tracing::info!(
+                        "external-party: generating multi-host onboarding topology via Canton"
+                    );
+                    let prep =
+                        prepare_topology(&node_config, &config, &kp.public_key_bytes()).await?;
+                    db.write_artifact(
+                        &instance_name,
+                        artifact_kinds::EXTERNAL_PARTY_ID,
+                        None,
+                        prep.party_id.as_bytes(),
+                    )
+                    .await?;
+                    db.write_artifact(
+                        &instance_name,
+                        artifact_kinds::EXTERNAL_PARTY_MULTI_HASH,
+                        None,
+                        &prep.multi_hash,
+                    )
+                    .await?;
 
-                // Party signs the multi-hash once; the coordinator (itself a
-                // host) authorizes hosting on its own participant.
-                let bundle = ExternalPartyAllocatePayload::sign(&prep, kp);
-                tracing::info!("external-party: authorizing hosting on coordinator participant");
-                allocate_party(&node_config, &bundle).await?;
+                    // Party signs the multi-hash once; the coordinator (itself a
+                    // host) authorizes hosting on its own participant.
+                    let bundle = ExternalPartyAllocatePayload::sign(&prep, kp);
+                    tracing::info!(
+                        "external-party: authorizing hosting on coordinator participant"
+                    );
+                    allocate_party(&node_config, &bundle).await?;
 
-                // Fan the same party-signed bundle out to the hosting peers as
-                // the AllocatePeers command payload.
-                let payload = serde_json::to_vec(&bundle)
-                    .context("serialize external-party allocate bundle")?;
-                workflow_state.set_command_payload(payload).await;
-                workflow_state.advance_step().await;
+                    // Fan the same party-signed bundle out to the hosting peers as
+                    // the AllocatePeers command payload.
+                    let payload = serde_json::to_vec(&bundle)
+                        .context("serialize external-party allocate bundle")?;
+                    workflow_state.set_command_payload(payload).await;
+                    workflow_state.advance_step().await;
+                }
             }
             ExternalPartyStep::AllocatePeers => {
                 // Peer-gated: each hosting peer authorizes on its own participant;

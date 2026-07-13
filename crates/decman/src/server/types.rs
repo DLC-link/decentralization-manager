@@ -30,9 +30,12 @@ pub use common::api::{
     OnboardingMeshErrorResponse, OnboardingRequest, OperatorInfo, PartyAuthStatus,
     PartyConfigRequest, PartyConfigResponse, PendingInvitationsResponse, ProviderServiceInfo,
     ProviderServicesResponse, RegistrarServiceInfo, RegistrarServicesResponse, ResponseSource,
-    RightsStatus, SuccessResponse, TransferFactoriesResponse, TransferFactoryInfo,
-    TransferPreapprovalsResponse, UserServiceInfo, UserServicesResponse, VaultInfo, VaultsResponse,
-    WorkflowResponse, WorkflowRunsResponse, WorkflowStatusResponse,
+    RightsStatus, SuccessResponse, TenantAcsResponse, TenantContract,
+    TenantExecuteSubmissionRequest, TenantOnboardRequest, TenantOnboardResponse,
+    TenantPrepareRequest, TenantPrepareResponse, TenantPrepareSubmissionRequest,
+    TenantPrepareSubmissionResponse, TenantTemplateId, TransferFactoriesResponse,
+    TransferFactoryInfo, TransferPreapprovalsResponse, UserServiceInfo, UserServicesResponse,
+    VaultInfo, VaultsResponse, WorkflowResponse, WorkflowRunsResponse, WorkflowStatusResponse,
 };
 pub use common::types::{
     AuditLogEntry, AuthConfigResponse, ConnectionStatus, ContractInfo, DecentralizedParty,
