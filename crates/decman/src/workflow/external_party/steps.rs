@@ -191,14 +191,60 @@ pub async fn allocate_party(
         .allocate_external_party(tonic::Request::new(request))
         .await
     {
-        Ok(_) => Ok(()),
+        Ok(_) => {
+            grant_read_as_hosted_party(config, &bundle.party_id).await;
+            Ok(())
+        }
         Err(status) if status.code() == tonic::Code::AlreadyExists => {
             tracing::info!("external-party already allocated on this node; treating as success");
+            grant_read_as_hosted_party(config, &bundle.party_id).await;
             Ok(())
         }
         Err(status) => Err(anyhow::anyhow!(
             "AllocateExternalParty RPC failed: {status}"
         )),
+    }
+}
+
+/// Grant this participant's ledger user `CanReadAs` the hosted external party, so
+/// the tenant ACS / prepare-submission endpoints can read the party's contracts
+/// through the participant's token. Deliberately read-only: never `CanActAs`,
+/// which would let a host impersonate the sovereign party without its signature.
+///
+/// Best-effort — a failure is logged, not propagated (the party is hosted either
+/// way). Wired only for insecure/test builds, mirroring [`external_party_token`];
+/// production external-party ledger auth is the open item tracked in the design
+/// doc.
+async fn grant_read_as_hosted_party(config: &NodeConfig, party_id: &str) {
+    #[cfg(any(test, feature = "test-mode"))]
+    {
+        use canton_proto_rs::com::daml::ledger::api::v2::admin::{
+            GrantUserRightsRequest, Right,
+            right::{CanReadAs, Kind},
+        };
+        let mut client = match utils::create_user_client(config, external_party_token()).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("external-party: user client for read-as grant failed: {e}");
+                return;
+            }
+        };
+        let request = GrantUserRightsRequest {
+            user_id: crate::auth::mock::MOCK_USER_ID.to_string(),
+            rights: vec![Right {
+                kind: Some(Kind::CanReadAs(CanReadAs {
+                    party: party_id.to_string(),
+                })),
+            }],
+            identity_provider_id: String::new(),
+        };
+        if let Err(e) = client.grant_user_rights(tonic::Request::new(request)).await {
+            tracing::warn!("external-party: grant CanReadAs {party_id} failed: {e}");
+        }
+    }
+    #[cfg(not(any(test, feature = "test-mode")))]
+    {
+        let _ = (config, party_id);
     }
 }
 
