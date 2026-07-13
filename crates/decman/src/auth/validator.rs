@@ -10,9 +10,7 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
-#[cfg(any(test, feature = "test-mode"))]
-use super::validators::MockValidator;
-use super::validators::{JwtValidator, OidcIntrospectionValidator};
+use super::validators::{JwtValidator, MockValidator, OidcIntrospectionValidator};
 
 #[derive(Error, Debug)]
 pub enum ValidationError {
@@ -101,10 +99,10 @@ pub enum TokenValidator {
     /// RFC 7662 introspection against a real OIDC provider. Kept for
     /// deployments where local signature verification is not feasible.
     OidcIntrospection(Arc<OidcIntrospectionValidator>),
-    /// Permissive dev/test validator (admin-by-default, accepts any
-    /// token). Compiled in only behind `cfg(any(test, feature = "test-mode"))`
-    /// so a production binary cannot accidentally enable it.
-    #[cfg(any(test, feature = "test-mode"))]
+    /// Permissive dev validator (admin-by-default, accepts any token).
+    /// Always compiled, but selected only at runtime when the server is
+    /// started with `--insecure` (or under tests). A production binary must
+    /// never be launched with that flag.
     Mock(Arc<MockValidator>),
 }
 
@@ -120,7 +118,6 @@ impl TokenValidator {
         match self {
             Self::Jwt(v) => v.validate(token).await,
             Self::OidcIntrospection(v) => v.validate(token).await,
-            #[cfg(any(test, feature = "test-mode"))]
             Self::Mock(v) => v.validate(token).await,
         }
     }

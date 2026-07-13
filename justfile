@@ -13,13 +13,14 @@ gen-types:
     DECMAN_SKIP_FRONTEND=1 cargo run -q -p decman --features typegen --bin gen-types
     echo "Generated crates/decman/frontend/src/types.generated.ts"
 
-# Forward Canton ibtc-devnet participant 1..3 Ledger/Admin ports (KUBE_NS=catalyst-canton by default).
+# Forward Canton devnet participant 1..3 Ledger/Admin ports. Each node lives in
+# its own namespace (KUBE_NS_PREFIX=canton-node- by default -> canton-node-1..3).
 [group('canton')]
 port-forward:
     #!/usr/bin/env bash
     set -uo pipefail
 
-    ns="${KUBE_NS:-catalyst-canton}"
+    prefix="${KUBE_NS_PREFIX:-canton-node-}"
     pids=()
 
     cleanup() {
@@ -32,20 +33,19 @@ port-forward:
     trap cleanup INT TERM EXIT
 
     fwd() {
-        local tag=$1 svc=$2; shift 2
+        local tag=$1 ns=$2 svc=$3; shift 3
         kubectl port-forward -n "$ns" "svc/$svc" "$@" 2>&1 \
             | sed -u "s/^/[$tag] /" &
         pids+=($!)
     }
 
-    fwd p1 participant-ibtc-devnet-1 5001:5001 5002:5002
-    fwd p2 participant-ibtc-devnet-2 5011:5001 5012:5002
-    fwd p3 participant-ibtc-devnet-3 5021:5001 5022:5002
+    fwd p1 "${prefix}1" participant 5001:5001 5002:5002
+    fwd p2 "${prefix}2" participant 5011:5001 5012:5002
+    fwd p3 "${prefix}3" participant 5021:5001 5022:5002
 
-    echo "[port-forward] namespace: $ns"
-    echo "[port-forward]   participant 1  ->  localhost:5001 / 5002"
-    echo "[port-forward]   participant 2  ->  localhost:5011 / 5012"
-    echo "[port-forward]   participant 3  ->  localhost:5021 / 5022"
+    echo "[port-forward]   participant 1 (${prefix}1)  ->  localhost:5001 / 5002"
+    echo "[port-forward]   participant 2 (${prefix}2)  ->  localhost:5011 / 5012"
+    echo "[port-forward]   participant 3 (${prefix}3)  ->  localhost:5021 / 5022"
     echo "[port-forward] Ctrl-C to stop all."
 
     wait

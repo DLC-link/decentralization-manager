@@ -3,14 +3,15 @@ use crate::auth::{
     validator::{Principal, ValidationError},
 };
 
-/// Inbound validator used when the binary is built with the `test-mode`
-/// Cargo feature (or under `cargo test`).
+/// Permissive inbound validator, selected at runtime in insecure mode
+/// (`--insecure` / `DECPM_INSECURE`, or under `cargo test`).
 ///
-/// Accepts either the hardcoded mock token or an empty/missing token, so
-/// test-mode UX (swagger, unauthenticated curls) keeps working while the
+/// Accepts *any* token, including an empty/missing one — validation always
+/// succeeds and only logs when the token differs from the mock token. So the
+/// insecure-mode UX (swagger, unauthenticated curls) works while the
 /// middleware plumbing is still exercised end-to-end. The returned principal
 /// carries the admin role so gated endpoints (`PUT /party-config`, `POST /kick`)
-/// are reachable from tests.
+/// are reachable without a real IdP.
 pub struct MockValidator {
     admin_role: String,
 }

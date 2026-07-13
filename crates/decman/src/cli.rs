@@ -143,6 +143,28 @@ pub enum Commands {
         #[arg(long, env = "DECPM_ALLOWED_ORIGIN")]
         allowed_origin: Option<String>,
 
+        // Insecure / no-IdP mode (local dev against an unsafe-auth Canton).
+        /// Run without an IdP: accept ANY inbound token and present an unsafe
+        /// HS256 token to Canton. Disables authentication — NEVER use in
+        /// production. Pair with an unsafe-auth Canton (see the HMAC flags).
+        #[arg(long, env = "DECPM_INSECURE", default_value_t = false)]
+        insecure: bool,
+
+        /// HMAC secret decman signs the unsafe Canton token with (insecure
+        /// mode). Must match Canton's unsafe auth-service secret. Default `unsafe`.
+        #[arg(long, env = "DECPM_CANTON_HMAC_SECRET")]
+        canton_hmac_secret: Option<String>,
+
+        /// `aud` claim for the unsafe Canton token (insecure mode). Must match
+        /// Canton's `target-audience`. Default `https://canton.network.global`.
+        #[arg(long, env = "DECPM_CANTON_HMAC_AUDIENCE")]
+        canton_hmac_audience: Option<String>,
+
+        /// `sub` claim / ledger user for the unsafe Canton token (insecure
+        /// mode). Default `ledger-api-user`.
+        #[arg(long, env = "DECPM_CANTON_HMAC_SUBJECT")]
+        canton_hmac_subject: Option<String>,
+
         // Timeouts
         /// Noise handshake timeout in seconds
         #[arg(long, env = "DECPM_TIMEOUT_HANDSHAKE")]
