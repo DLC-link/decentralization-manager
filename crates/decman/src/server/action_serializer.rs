@@ -903,6 +903,7 @@ fn serialize_instrument_allowances(allowances: &[InstrumentAllowance]) -> Value 
 #[allow(clippy::enum_variant_names)]
 pub enum ProposalPackage {
     GovernanceCore,
+    GovernanceRewards,
     GovernanceTokenCustody,
     GovernanceUtilityCredential,
     GovernanceUtilityOnboarding,
@@ -1216,6 +1217,34 @@ pub fn build_proposal_create_args(
                     field("governanceParty", make_party(governance_party)),
                     field("proposer", make_party(proposer)),
                     field("operator", make_party(operator)),
+                ],
+            },
+        ),
+        ProposalType::SetupMintingDelegation {
+            delegate,
+            dso,
+            expires_at_micros,
+            amulet_merge_limit,
+            description,
+        } => (
+            ProposalPackage::GovernanceRewards,
+            "Governance.Rewards.SetupMintingDelegation",
+            "SetupMintingDelegation",
+            Record {
+                record_id: None,
+                fields: vec![
+                    field("governanceParty", make_party(governance_party)),
+                    field("proposer", make_party(proposer)),
+                    field("delegate", make_party(delegate)),
+                    field("dso", make_party(dso)),
+                    field(
+                        "expiresAt",
+                        Value {
+                            sum: Some(value::Sum::Timestamp(*expires_at_micros)),
+                        },
+                    ),
+                    field("amuletMergeLimit", make_int64(*amulet_merge_limit)),
+                    field("description", make_text(description)),
                 ],
             },
         ),
@@ -2359,6 +2388,45 @@ mod tests {
         assert!(owned_labels(&mint_record).contains(&"extraArgsMeta"));
         assert!(owned_labels(&burn_record).contains(&"meta"));
         assert!(owned_labels(&burn_record).contains(&"extraArgsMeta"));
+        Ok(())
+    }
+
+    #[test]
+    fn build_proposal_setup_minting_delegation_shape() -> Result {
+        let expires_at_micros = 1_800_000_000_000_000;
+        let proposal = ProposalType::SetupMintingDelegation {
+            delegate: party_id(),
+            dso: party_id(),
+            expires_at_micros,
+            amulet_merge_limit: 10,
+            description: "collect CIP-104 rewards".to_string(),
+        };
+        let (package, module, entity, record) =
+            build_proposal_create_args("gov", "proposer", &proposal, None, None)?;
+
+        assert_eq!(package, ProposalPackage::GovernanceRewards);
+        assert_eq!(module, "Governance.Rewards.SetupMintingDelegation");
+        assert_eq!(entity, "SetupMintingDelegation");
+        assert_eq!(
+            owned_labels(&record),
+            [
+                "governanceParty",
+                "proposer",
+                "delegate",
+                "dso",
+                "expiresAt",
+                "amuletMergeLimit",
+                "description",
+            ]
+        );
+        assert!(matches!(
+            field_value(&record, "expiresAt").sum,
+            Some(value::Sum::Timestamp(micros)) if micros == expires_at_micros,
+        ));
+        assert!(matches!(
+            field_value(&record, "amuletMergeLimit").sum,
+            Some(value::Sum::Int64(10)),
+        ));
         Ok(())
     }
 

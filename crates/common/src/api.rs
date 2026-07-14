@@ -32,6 +32,7 @@ use crate::{
 pub struct PackageConfig {
     pub governance_action: Option<String>,
     pub governance_core: Option<String>,
+    pub governance_rewards: Option<String>,
     pub governance_token_custody: Option<String>,
     pub governance_utility_credential: Option<String>,
     pub governance_utility_onboarding: Option<String>,
