@@ -890,7 +890,7 @@ The `governance-rewards` package lets a decentralized party delegate the minting
 
 - `GovernanceRules` contract deployed (from `#governance-core-<version>`)
 - `governance-rewards` DAR uploaded to all participants (from `#governance-rewards-<version>`)
-- The `splice-wallet` DAR (containing `Splice.Wallet.MintingDelegation`) available on the participants
+- The `splice-wallet` DAR (containing `Splice.Wallet.MintingDelegation`) uploaded to all participants
 
 ### How It Works
 
