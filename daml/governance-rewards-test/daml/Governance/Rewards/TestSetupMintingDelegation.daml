@@ -9,7 +9,7 @@ import Daml.Script
 import Splice.Wallet.MintingDelegation (MintingDelegationProposal)
 
 import Governance.Action (GovernableAction)
-import Governance.Rules (GovernanceRules)
+import Governance.Rules
 
 import Governance.Rewards.SetupMintingDelegation
 import Governance.Rewards.TestUtils
@@ -96,4 +96,35 @@ test_when_zero_merge_limit_then_create_rejected = script do
   run Test with
     given = given_governance_setup
     when = when_zero_merge_limit
+    then_ = then_nothing
+
+-- A past expiry cannot be caught by `ensure` (no clock at create time), so the
+-- proposal creates and confirms fine — execution is where it must fail.
+when_past_expiry_execute_fails : Fixture -> Script ()
+when_past_expiry_execute_fails f = do
+  now <- getTime
+  proposalCid <- submit f.parties.member1 $ createCmd SetupMintingDelegation with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    delegate = f.parties.delegate
+    dso = f.parties.dso
+    expiresAt = now `addRelTime` days (-1)
+    amuletMergeLimit = 10
+    description = "already expired"
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  confirmationCids <- submitConfirmations f.parties.governanceParty f.rulesCid
+    proposalInterfaceCid [f.parties.member1, f.parties.member2]
+  submitMustFail (actAs f.parties.member1
+    <> readAs f.parties.governanceParty
+    <> readAs f.parties.delegate
+    <> readAs f.parties.dso) $
+    exerciseCmd f.rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor = f.parties.member1
+      actionProposalCid = proposalInterfaceCid
+      confirmations = confirmationCids
+
+test_when_past_expiry_then_execute_rejected = script do
+  run Test with
+    given = given_governance_setup
+    when = when_past_expiry_execute_fails
     then_ = then_nothing

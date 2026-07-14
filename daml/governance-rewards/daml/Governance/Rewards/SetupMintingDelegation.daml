@@ -41,6 +41,10 @@ template SetupMintingDelegation
         description
 
       executeImpl = do
+        -- Cannot be an `ensure` (no clock at create time): reject votes whose
+        -- expiry has already passed, which would create a dead delegation.
+        now <- getTime
+        assertMsg "expiresAt must be in the future" (expiresAt > now)
         -- The delegation beneficiary is fixed to governanceParty: the proposal's
         -- signatory is the beneficiary, and executeImpl only carries the
         -- governance party's authority, so no other value could be created here.
