@@ -2,6 +2,8 @@ packages:
   - governance-action-v1
   - governance-core
   - governance-core-test
+  - governance-rewards
+  - governance-rewards-test
   - governance-token-custody
   - governance-token-custody-test
   - governance-utility-credential
