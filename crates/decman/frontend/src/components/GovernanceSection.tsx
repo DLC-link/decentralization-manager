@@ -1538,6 +1538,11 @@ export const GovernanceSection = ({
           if (!Number.isFinite(expiresAtMs)) {
             throw new Error("Expires At must be a valid date and time");
           }
+          // Micros beyond MAX_SAFE_INTEGER (~year 2255) would silently lose
+          // precision; the datetime-local input allows dates up to year 9999.
+          if (!Number.isSafeInteger(expiresAtMs * 1000)) {
+            throw new Error("Expires At is too far in the future");
+          }
           const mergeLimit = Number(proposalAmuletMergeLimit);
           if (!Number.isInteger(mergeLimit) || mergeLimit <= 0) {
             throw new Error("Amulet Merge Limit must be a positive integer");
