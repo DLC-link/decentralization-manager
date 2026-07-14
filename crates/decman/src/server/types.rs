@@ -752,8 +752,7 @@ impl ProposalType {
                 ..
             } => validate_positive_amount(d, "deposit_initial_amount_usd"),
             ProposalType::SetupMintingDelegation {
-                amulet_merge_limit,
-                ..
+                amulet_merge_limit, ..
             } => {
                 if *amulet_merge_limit <= 0 {
                     return Err("amulet_merge_limit must be greater than 0".to_string());
