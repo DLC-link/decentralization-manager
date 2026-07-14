@@ -1,4 +1,54 @@
 -- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- | Plugin template that, when confirmed by governance, creates a
+-- MintingDelegationProposal on behalf of the decentralized party (the
+-- governance party). A validator node's delegate party accepts the proposal
+-- out-of-band via the wallet API, after which the node's built-in automation
+-- mints the decparty's CIP-104 reward coupons into CC before they expire.
 module Governance.Rewards.SetupMintingDelegation where
+
+import Splice.Wallet.MintingDelegation
+  (MintingDelegation(..), MintingDelegationProposal(..))
+
+import Governance.Action
+
+template SetupMintingDelegation
+  with
+    governanceParty : Party
+      -- ^ The decentralized party. Becomes the delegation beneficiary.
+    proposer : Party
+    delegate : Party
+      -- ^ The validator node operator party authorized to mint on the decparty's behalf.
+    dso : Party
+      -- ^ Expected DSO party.
+    expiresAt : Time
+      -- ^ Expiry of the resulting delegation.
+    amuletMergeLimit : Int
+      -- ^ Auto-merge target for the beneficiary's amulets.
+    description : Text
+  where
+    signatory proposer
+    observer governanceParty
+
+    ensure amuletMergeLimit > 0
+
+    interface instance GovernableAction for SetupMintingDelegation where
+      view = GovernableActionView with
+        governanceParty
+        proposer
+        actionLabel = "SetupMintingDelegation"
+        description
+
+      executeImpl = do
+        -- The delegation beneficiary is fixed to governanceParty: the proposal's
+        -- signatory is the beneficiary, and executeImpl only carries the
+        -- governance party's authority, so no other value could be created here.
+        _ <- create MintingDelegationProposal with
+          delegation = MintingDelegation with
+            beneficiary = governanceParty
+            delegate
+            dso
+            expiresAt
+            amuletMergeLimit
+        pure ()
