@@ -1,0 +1,77 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Test utilities for the rewards governance plugin.
+module Governance.Rewards.TestUtils where
+
+import DA.Set as Set hiding (filter)
+import DA.Time (minutes)
+import Daml.Script
+
+import Governance.Action (GovernableAction)
+import Governance.Confirmation (GovernanceConfirmation)
+import Governance.ExecutionResult
+import Governance.Rules
+
+-- | Standard test party allocation for rewards governance tests.
+data RewardsTestParties = RewardsTestParties
+  with
+    governanceParty : Party
+    member1 : Party
+    member2 : Party
+    member3 : Party
+    delegate : Party
+    dso : Party
+  deriving (Show, Eq)
+
+allocateRewardsTestParties : Script RewardsTestParties
+allocateRewardsTestParties = do
+  governanceParty <- allocateParty "GovernanceParty"
+  member1 <- allocateParty "Member1"
+  member2 <- allocateParty "Member2"
+  member3 <- allocateParty "Member3"
+  delegate <- allocateParty "Delegate"
+  dso <- allocateParty "DSO"
+  pure RewardsTestParties with ..
+
+getMembers : RewardsTestParties -> Set Party
+getMembers parties = Set.fromList [parties.member1, parties.member2, parties.member3]
+
+memberContext : Party -> Party -> SubmitOptions
+memberContext member gp = actAs member <> readAs gp
+
+createTestGovernance : RewardsTestParties -> Script (ContractId GovernanceRules)
+createTestGovernance parties =
+  submit parties.governanceParty $ createCmd GovernanceRules with
+    governanceParty = parties.governanceParty
+    members = getMembers parties
+    threshold = 2
+    actionConfirmationTimeout = minutes 30
+    additionalProposers = None
+
+submitConfirmations
+  : Party -> ContractId GovernanceRules -> ContractId GovernableAction -> [Party]
+  -> Script [ContractId GovernanceConfirmation]
+submitConfirmations governanceParty rulesCid proposalCid confirmers =
+  mapA (\confirmer -> do
+    result <- submit (memberContext confirmer governanceParty) $
+      exerciseCmd rulesCid GovernanceRules_ConfirmAction with
+        confirmer
+        actionProposalCid = proposalCid
+    pure result.confirmationCid
+  ) confirmers
+
+confirmAndExecute
+  : RewardsTestParties -> ContractId GovernanceRules
+  -> ContractId GovernableAction -> [Party] -> Party
+  -> Script ExecuteConfirmedActionResult
+confirmAndExecute parties rulesCid proposalCid confirmers executor = do
+  confirmationCids <- submitConfirmations parties.governanceParty rulesCid proposalCid confirmers
+  submit (actAs executor
+    <> readAs parties.governanceParty
+    <> readAs parties.delegate
+    <> readAs parties.dso) $
+    exerciseCmd rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor
+      actionProposalCid = proposalCid
+      confirmations = confirmationCids
