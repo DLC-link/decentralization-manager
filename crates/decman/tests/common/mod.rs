@@ -68,6 +68,10 @@ pub struct NodePorts {
     pub http: u16,
     pub noise: u16,
     pub participant_id: String,
+    /// Canton participant admin-API port. Set on localnet (exported by
+    /// `run.sh`); `None` on devnet, where the admin API is reached via
+    /// kubectl port-forwards outside the test's control.
+    pub canton_admin: Option<u16>,
 }
 
 #[derive(Debug)]
@@ -127,16 +131,19 @@ impl Fixture {
             http: read_port("P1_HTTP")?,
             noise: read_port("P1_NOISE")?,
             participant_id: read_env("P1_PARTICIPANT_ID")?,
+            canton_admin: read_port("P1_CANTON_ADMIN").ok(),
         };
         let p2 = NodePorts {
             http: read_port("P2_HTTP")?,
             noise: read_port("P2_NOISE")?,
             participant_id: read_env("P2_PARTICIPANT_ID")?,
+            canton_admin: read_port("P2_CANTON_ADMIN").ok(),
         };
         let p3 = NodePorts {
             http: read_port("P3_HTTP")?,
             noise: read_port("P3_NOISE")?,
             participant_id: read_env("P3_PARTICIPANT_ID")?,
+            canton_admin: read_port("P3_CANTON_ADMIN").ok(),
         };
         let dev_dir = PathBuf::from(read_env("DEV_DIR")?);
         let current_pids = [
@@ -343,16 +350,19 @@ impl Fixture {
                 http: 8081,
                 noise: 9001,
                 participant_id: "p1".to_string(),
+                canton_admin: None,
             },
             p2: NodePorts {
                 http: 8082,
                 noise: 9002,
                 participant_id: "p2".to_string(),
+                canton_admin: None,
             },
             p3: NodePorts {
                 http: 8083,
                 noise: 9003,
                 participant_id: "p3".to_string(),
+                canton_admin: None,
             },
             target: TestTarget::Localnet,
             run_id: "test-run-id".to_string(),
