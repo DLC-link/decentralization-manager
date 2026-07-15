@@ -282,11 +282,21 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                             .ok()
                             .flatten()
                             .unwrap_or_default();
-                        if err.to_lowercase().contains("package") {
+                        // Require the fix's preflight wording ("missing … package …
+                        // before onboarding"), not just any package error — a raw
+                        // mid-import Canton failure would also mention "package", so
+                        // this strictly proves the preflight fired BEFORE the
+                        // disconnect/import window rather than the import dying inside it.
+                        let el = err.to_lowercase();
+                        if el.contains("missing")
+                            && el.contains("package")
+                            && el.contains("before onboarding")
+                        {
                             Some(Ok(()))
                         } else {
                             Some(Err(anyhow::anyhow!(
-                                "P3 peer failed but not with a missing-package error: {err}"
+                                "P3 peer failed but NOT via the DAR preflight (expected a \
+                                 'missing … package … before onboarding' error): {err}"
                             )))
                         }
                     }
