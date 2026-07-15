@@ -158,11 +158,15 @@ async fn run_workflow(
                     export_party_acs(&node_config, &db, &instance_name, &add_party_config).await?;
                 // Package ids the new member must have to validate the imported
                 // ACS — its import preflight fails fast (before disconnecting) if
-                // any are missing, instead of the import dying mid-window.
-                let party_id = add_party_config.decentralized_party_id.to_string();
-                let package_ids =
+                // any are missing, instead of the import dying mid-window. Skip the
+                // ledger scan when the snapshot is empty: no contracts, no packages.
+                let package_ids = if snapshot.is_empty() {
+                    Vec::new()
+                } else {
+                    let party_id = add_party_config.decentralized_party_id.to_string();
                     collect_party_package_ids(&node_config, &party_id, ledger_token.as_deref())
-                        .await?;
+                        .await?
+                };
                 let package_ids_payload = package_ids.join("\n").into_bytes();
                 let payload = utils::encode_length_prefixed(&[
                     &config_payload,

@@ -237,30 +237,37 @@ pub async fn import_party_acs(
     let mut connectivity =
         SynchronizerConnectivityServiceClient::new(config.admin_channel().await?);
 
-    // Snapshot the currently-connected synchronizers and disconnect them one at
-    // a time via `DisconnectSynchronizer` rather than the bulk
+    // Snapshot the currently-connected synchronizers so we can disconnect them
+    // one at a time via `DisconnectSynchronizer` rather than the bulk
     // `DisconnectAllSynchronizers` (behaviourally identical in Canton — same
-    // connectQueue — but it keeps the bulk call out of our code). The reconnect
-    // below is health-verified against the configured synchronizer.
-    let connected = connectivity
+    // connectQueue — but it keeps the bulk call out of our code).
+    let mut connected = connectivity
         .list_connected_synchronizers(tonic::Request::new(ListConnectedSynchronizersRequest {}))
         .await?
         .into_inner()
         .connected_synchronizers;
 
-    // Preflight: don't open the disconnect window unless the participant is
-    // currently connected AND healthy on our synchronizer. Disconnecting an
-    // already-degraded participant risks turning a recoverable state into the
-    // orphan-ACS-row corruption this whole bracket guards against — fail fast
-    // and leave it untouched instead. (On a recovering re-entry the marker path
-    // above already reconnected it, so this passes there too.)
+    // Preflight: the participant must be healthy and connected before we open
+    // the disconnect window. If it's NOT (e.g. already disconnected from a prior
+    // interrupted attempt), try to bring it back rather than refusing outright —
+    // `ImportPartyAcs` needs it disconnected anyway, but we must first confirm it
+    // can reach a healthy connected state, and only THEN re-list the synchronizers
+    // to disconnect. Bail only if it genuinely can't be recovered.
     if !synchronizer_healthy(&connected, config.synchronizer()) {
-        anyhow::bail!(
-            "refusing to start ACS import: participant is not connected and healthy on \
-             synchronizer '{}' — restore the participant's health before retrying \
-             add-party so the disconnect/import window can't compound a bad state",
-            config.synchronizer()
-        );
+        reconnect_and_verify_healthy(config).await.map_err(|e| {
+            anyhow::anyhow!(
+                "refusing to start ACS import: participant is not connected and healthy on \
+                 synchronizer '{}' and could not be recovered — restore its health before \
+                 retrying add-party so the disconnect/import window can't compound a bad \
+                 state: {e}",
+                config.synchronizer()
+            )
+        })?;
+        connected = connectivity
+            .list_connected_synchronizers(tonic::Request::new(ListConnectedSynchronizersRequest {}))
+            .await?
+            .into_inner()
+            .connected_synchronizers;
     }
 
     // Open the crash-safety window BEFORE disconnecting so a crash between here
