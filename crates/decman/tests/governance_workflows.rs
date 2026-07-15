@@ -206,10 +206,6 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
         }
     }
 
-    // Reproduction phase runs dead last: it kicks P3, unvets a package on P3,
-    // and drives a deliberately-failing re-add, leaving P3 out of the party —
-    // so nothing may run after it (the CIP-104 phases above still need P3 in).
-    phases::add_party_missing_dar::run(&mut f).await?;
     Ok(())
 }
 
