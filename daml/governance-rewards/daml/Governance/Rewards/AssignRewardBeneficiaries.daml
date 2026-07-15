@@ -1,0 +1,52 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | GovernableAction that, when confirmed by governance, assigns
+-- governance-chosen beneficiaries to the decparty's CIP-104 reward coupons
+-- so they can be minted before they expire.
+module Governance.Rewards.AssignRewardBeneficiaries where
+
+import Splice.Api.RewardAssignmentV1
+  (RewardCoupon, RewardBeneficiary, RewardCoupon_AssignBeneficiaries(..))
+import Splice.Api.Token.MetadataV1
+  (ExtraArgs(..), emptyChoiceContext, emptyMetadata)
+
+import Governance.Action
+
+-- | `Splice.Api.Token.MetadataV1` does not export a ready-made
+-- `emptyExtraArgs` (that helper only exists in the test-only
+-- `Splice.Testing.Utils`, unsuitable for production code); build the
+-- equivalent value from the exported primitives.
+emptyExtraArgs : ExtraArgs
+emptyExtraArgs = ExtraArgs with
+  context = emptyChoiceContext
+  meta = emptyMetadata
+
+template AssignRewardBeneficiaries
+  with
+    governanceParty : Party
+      -- ^ The decparty; equals the coupons' provider (spec §4.1).
+    proposer : Party
+    primaryCoupon : ContractId RewardCoupon
+      -- ^ First coupon to assign; the choice is exercised on this one.
+    additionalCoupons : [ContractId RewardCoupon]
+      -- ^ Further coupons of the same provider, batched into one tx.
+    newBeneficiaries : [RewardBeneficiary]
+      -- ^ Beneficiary + percentage; percentages in (0,1], sum 1.0, <= maxNumNewBeneficiaries.
+  where
+    signatory proposer
+    observer governanceParty
+
+    interface instance GovernableAction for AssignRewardBeneficiaries where
+      view = GovernableActionView with
+        governanceParty
+        proposer
+        actionLabel = "AssignRewardBeneficiaries"
+        description = "Assign governance-configured beneficiaries to reward coupons."
+
+      executeImpl = do
+        _ <- exercise primaryCoupon RewardCoupon_AssignBeneficiaries with
+               additionalCoupons
+               newBeneficiaries
+               extraArgs = emptyExtraArgs
+        pure ()
