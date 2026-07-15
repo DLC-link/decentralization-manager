@@ -337,6 +337,16 @@ pub struct AppRewardBeneficiary {
     pub weight: DamlDecimal,
 }
 
+/// A CIP-104 reward-coupon beneficiary assignment.
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct RewardBeneficiary {
+    pub beneficiary: CantonId,
+    #[schema(value_type = String)]
+    #[cfg_attr(feature = "typegen", ts(type = "string"))]
+    pub percentage: DamlDecimal,
+}
+
 /// Featured App Right configuration
 #[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
@@ -630,6 +640,15 @@ pub enum ProposalType {
         #[serde(default)]
         provider_app_reward_beneficiaries: Option<Vec<AppRewardBeneficiary>>,
     },
+    /// Assign governance-configured beneficiaries to the decparty's CIP-104
+    /// reward coupons via `RewardCoupon_AssignBeneficiaries`. governanceParty
+    /// == the coupons' provider (spec §4.1). Percentages sum to 1.0, <= 20
+    /// entries.
+    AssignRewardBeneficiaries {
+        primary_coupon: CantonId,
+        additional_coupons: Vec<CantonId>,
+        new_beneficiaries: Vec<RewardBeneficiary>,
+    },
     /// Toggle result-contract emission on a `RegistrarService`.
     SetEnableResultContracts {
         registrar_service_cid: String,
@@ -763,9 +782,45 @@ impl ProposalType {
                 provider_app_reward_beneficiaries: Some(beneficiaries),
                 ..
             } => validate_beneficiary_weights(beneficiaries),
+            ProposalType::AssignRewardBeneficiaries {
+                new_beneficiaries, ..
+            } => validate_reward_beneficiaries(new_beneficiaries),
             _ => Ok(()),
         }
     }
+}
+
+/// Validates `AssignRewardBeneficiaries::new_beneficiaries`: non-empty,
+/// <= 20 entries, each percentage in (0.0, 1.0], summing to exactly 1.0.
+///
+/// `DamlDecimal` addition is exact (no float rounding), so an exact `==`
+/// against `1.0` is sufficient here — no epsilon tolerance is needed.
+fn validate_reward_beneficiaries(beneficiaries: &[RewardBeneficiary]) -> Result<(), String> {
+    if beneficiaries.is_empty() {
+        return Err("new_beneficiaries must not be empty".to_string());
+    }
+    if beneficiaries.len() > 20 {
+        return Err("at most 20 beneficiaries per coupon".to_string());
+    }
+    let zero = "0"
+        .parse::<DamlDecimal>()
+        .expect("'0' is a valid DamlDecimal");
+    let one: DamlDecimal = "1".parse().expect("'1' is a valid DamlDecimal");
+    for b in beneficiaries {
+        if b.percentage.value() <= zero.value() || b.percentage.value() > one.value() {
+            return Err(format!(
+                "each percentage must be in (0.0, 1.0], got {}",
+                b.percentage
+            ));
+        }
+    }
+    let sum: DamlDecimal = beneficiaries.iter().map(|b| b.percentage).sum();
+    if sum != one {
+        return Err(format!(
+            "reward beneficiary percentages must sum to exactly 1.0, got {sum}"
+        ));
+    }
+    Ok(())
 }
 
 /// Request to propose a governance domain action (creates proposal contract)
@@ -1416,5 +1471,59 @@ mod tests {
         // A custom (positive) window is accepted; a zero-hour window is rejected.
         assert!(mk("1.0", Some(48)).validate().is_ok());
         assert!(mk("1.0", Some(0)).validate().is_err());
+    }
+
+    /// Test-only helper: builds a `CantonId` with a fixed valid namespace so
+    /// tests can vary just the prefix.
+    fn cid(prefix: &str) -> CantonId {
+        let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
+        CantonId::parse(&format!("{prefix}::{ns}")).unwrap()
+    }
+
+    /// Test-only helper: builds a `RewardBeneficiary` from a Canton-ID prefix
+    /// and a decimal percentage string.
+    fn rb(prefix: &str, pct: &str) -> RewardBeneficiary {
+        RewardBeneficiary {
+            beneficiary: cid(prefix),
+            percentage: pct.parse().expect("valid decimal"),
+        }
+    }
+
+    #[test]
+    fn assign_reward_beneficiaries_validate_rejects_empty_beneficiaries() {
+        let p = ProposalType::AssignRewardBeneficiaries {
+            primary_coupon: cid("c1"),
+            additional_coupons: vec![],
+            new_beneficiaries: vec![],
+        };
+        assert!(p.validate().is_err());
+    }
+
+    #[test]
+    fn assign_reward_beneficiaries_validate_rejects_bad_percentages() {
+        // sum != 1.0
+        let p = ProposalType::AssignRewardBeneficiaries {
+            primary_coupon: cid("c1"),
+            additional_coupons: vec![],
+            new_beneficiaries: vec![rb("alice", "0.5")],
+        };
+        assert!(p.validate().is_err());
+        // percentage out of (0,1]
+        let p2 = ProposalType::AssignRewardBeneficiaries {
+            primary_coupon: cid("c1"),
+            additional_coupons: vec![],
+            new_beneficiaries: vec![rb("alice", "0.0"), rb("bob", "1.0")],
+        };
+        assert!(p2.validate().is_err());
+    }
+
+    #[test]
+    fn assign_reward_beneficiaries_validate_accepts_valid() {
+        let p = ProposalType::AssignRewardBeneficiaries {
+            primary_coupon: cid("c1"),
+            additional_coupons: vec![cid("c2")],
+            new_beneficiaries: vec![rb("alice", "0.8"), rb("bob", "0.2")],
+        };
+        assert!(p.validate().is_ok());
     }
 }
