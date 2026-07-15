@@ -1,6 +1,7 @@
 packages:
   - governance-action-v1
   - governance-core
+  - orphan-marker
   - governance-core-test
   - governance-rewards
   - governance-rewards-test
