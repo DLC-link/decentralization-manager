@@ -300,6 +300,10 @@ async fn reconnect_and_verify_healthy(config: &NodeConfig) -> Result {
     let alias = config.synchronizer();
     let max_attempts = topology_retry_max_attempts();
     let retry_delay = Duration::from_secs(topology_retry_delay_secs());
+    // Track the most recent reason we're not yet healthy so the final error
+    // carries the actionable root cause (admin API unreachable / RPC error /
+    // connected-but-unhealthy) rather than a generic timeout message.
+    let mut last_reason = "no successful status poll".to_string();
     for attempt in 1..=max_attempts {
         // Fresh client each poll: a crash-looping participant drops its admin
         // API, so a connect/RPC error is itself the signal recovery has failed.
@@ -311,13 +315,18 @@ async fn reconnect_and_verify_healthy(config: &NodeConfig) -> Result {
                 .await
             {
                 Ok(resp) => {
-                    synchronizer_healthy(&resp.into_inner().connected_synchronizers, alias)
+                    let ok = synchronizer_healthy(&resp.into_inner().connected_synchronizers, alias);
+                    if !ok {
+                        last_reason = format!("'{alias}' not connected or not reporting healthy");
+                    }
+                    ok
                 }
                 Err(status) => {
                     tracing::warn!(
                         "ListConnectedSynchronizers failed \
                          (attempt {attempt}/{max_attempts}): {status}"
                     );
+                    last_reason = format!("ListConnectedSynchronizers RPC error: {status}");
                     false
                 }
             },
@@ -325,6 +334,7 @@ async fn reconnect_and_verify_healthy(config: &NodeConfig) -> Result {
                 tracing::warn!(
                     "participant admin API unreachable (attempt {attempt}/{max_attempts}): {e}"
                 );
+                last_reason = format!("admin API unreachable: {e}");
                 false
             }
         };
@@ -337,7 +347,7 @@ async fn reconnect_and_verify_healthy(config: &NodeConfig) -> Result {
     }
     anyhow::bail!(
         "synchronizer '{alias}' did not become healthy after reconnect within \
-         {max_attempts} attempts"
+         {max_attempts} attempts (last: {last_reason})"
     )
 }
 
