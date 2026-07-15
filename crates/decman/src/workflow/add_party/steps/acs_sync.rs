@@ -317,7 +317,8 @@ async fn reconnect_and_verify_healthy(config: &NodeConfig) -> Result {
                 .await
             {
                 Ok(resp) => {
-                    let ok = synchronizer_healthy(&resp.into_inner().connected_synchronizers, alias);
+                    let ok =
+                        synchronizer_healthy(&resp.into_inner().connected_synchronizers, alias);
                     if !ok {
                         last_reason = format!("'{alias}' not connected or not reporting healthy");
                     }
