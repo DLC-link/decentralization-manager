@@ -3,6 +3,7 @@ packages:
   - governance-core
   - governance-core-test
   - governance-rewards
+  - governance-rewards-assign-test
   - governance-rewards-test
   - governance-token-custody
   - governance-token-custody-test
