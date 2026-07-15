@@ -171,10 +171,13 @@ pub async fn import_party_acs(
     add_party_config: &AddPartyConfig,
     snapshot: Vec<u8>,
 ) -> Result {
-    // Recovery: a previous attempt in this run may have disconnected the
-    // participant without confirming a clean reconnect. Bring it back and
-    // verify health before doing anything else.
-    let interrupted = storage
+    // The marker is durable (never cleared), so its presence means the
+    // disconnect window was entered on a prior attempt of this run — the
+    // participant may have been left disconnected (DecMan died mid-window) or
+    // crash-looping (unclean participant shutdown). Recover conservatively:
+    // reconnect and verify health before doing anything else. This is a no-op
+    // when the participant is already connected and healthy.
+    let disconnect_window_opened = storage
         .read_artifact(
             instance_name,
             artifact_kinds::ADD_PARTY_ACS_IMPORT_INFLIGHT,
@@ -182,17 +185,16 @@ pub async fn import_party_acs(
         )
         .await?
         .is_some();
-    if interrupted {
+    if disconnect_window_opened {
         tracing::warn!(
-            "ACS import re-entered with an open disconnect marker — recovering the \
-             participant before retrying"
+            "ACS import re-entered with the disconnect-window marker set — verifying \
+             the participant is reconnected and healthy before retrying"
         );
         reconnect_and_verify_healthy(config).await.map_err(|e| {
             anyhow::anyhow!(
-                "participant did not return to a healthy, connected state after an \
-                 interrupted ACS import — it may be crash-looping on orphan ACS rows \
-                 left by an unclean shutdown; the participant needs manual repair \
-                 before add-party can proceed: {e}"
+                "participant is not healthy and connected on ACS-import re-entry — it \
+                 may be crash-looping on orphan ACS rows left by an unclean shutdown; \
+                 the participant needs manual repair before add-party can proceed: {e}"
             )
         })?;
     }
