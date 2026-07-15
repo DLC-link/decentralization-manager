@@ -159,12 +159,10 @@ async fn run_workflow(
                 // Package ids the new member must have to validate the imported
                 // ACS — its import preflight fails fast (before disconnecting) if
                 // any are missing, instead of the import dying mid-window.
-                let package_ids = collect_party_package_ids(
-                    &node_config,
-                    &add_party_config.decentralized_party_id.to_string(),
-                    ledger_token.as_deref(),
-                )
-                .await?;
+                let party_id = add_party_config.decentralized_party_id.to_string();
+                let package_ids =
+                    collect_party_package_ids(&node_config, &party_id, ledger_token.as_deref())
+                        .await?;
                 let package_ids_payload = package_ids.join("\n").into_bytes();
                 let payload = utils::encode_length_prefixed(&[
                     &config_payload,
