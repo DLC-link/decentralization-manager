@@ -1,8 +1,9 @@
 use std::time::Duration;
 
 use canton_proto_rs::com::digitalasset::canton::admin::participant::v30::{
-    ContractImportMode, DisconnectAllSynchronizersRequest, ExportPartyAcsRequest,
-    ImportPartyAcsRequest, ReconnectSynchronizersRequest,
+    ContractImportMode, DisconnectSynchronizerRequest, ExportPartyAcsRequest,
+    ImportPartyAcsRequest, ListConnectedSynchronizersRequest, ReconnectSynchronizersRequest,
+    list_connected_synchronizers_response,
     party_management_service_client::PartyManagementServiceClient,
     synchronizer_connectivity_service_client::SynchronizerConnectivityServiceClient,
 };
@@ -141,55 +142,204 @@ async fn collect_export_stream(
     Ok(snapshot)
 }
 
-/// New-member side: import the ACS snapshot via the Canton 3.4
-/// `ImportPartyAcs` admin endpoint. No repair mode or restart is needed,
-/// but Canton DOES require the participant to be disconnected from all
+/// New-member side: import the ACS snapshot via the Canton `ImportPartyAcs`
+/// admin endpoint. Canton requires the participant to be disconnected from all
 /// synchronizers for the duration of the import (refused otherwise with
 /// `IMPORT_ACS_ERROR: There are still synchronizers connected`) — the party
 /// itself stays suspended here via the Onboarding marker until the
-/// flag-clearing round, so the brief disconnect is the only downtime.
+/// flag-clearing round, so the disconnect is the only downtime.
+///
+/// The disconnect window is the fragile part: if the participant shuts down
+/// uncleanly mid-import it can be left with orphan ACS rows that make it
+/// FATAL-crash on every reconnect. DecMan can't make Canton's import atomic,
+/// but it makes the window crash-safe on its own side:
+///
+/// - a durable marker is written before disconnecting, so a retry (after a
+///   DecMan or participant crash) knows the participant was left mid-window and
+///   recovers it — reconnecting and verifying health — before touching it again;
+/// - the participant is never left disconnected: reconnect runs even when the
+///   import fails, and success is reported only once the synchronizer is
+///   confirmed healthy again (not merely that `ReconnectSynchronizers` was
+///   accepted);
+/// - a participant that can't be brought back to a healthy connected state
+///   yields an actionable error naming the likely orphan-row corruption instead
+///   of a cryptic retry-abort.
 pub async fn import_party_acs(
     config: &NodeConfig,
+    storage: &SqlitePool,
+    instance_name: &str,
     add_party_config: &AddPartyConfig,
     snapshot: Vec<u8>,
 ) -> Result {
+    // Recovery: a previous attempt in this run may have disconnected the
+    // participant without confirming a clean reconnect. Bring it back and
+    // verify health before doing anything else.
+    let interrupted = storage
+        .read_artifact(
+            instance_name,
+            artifact_kinds::ADD_PARTY_ACS_IMPORT_INFLIGHT,
+            None,
+        )
+        .await?
+        .is_some();
+    if interrupted {
+        tracing::warn!(
+            "ACS import re-entered with an open disconnect marker — recovering the \
+             participant before retrying"
+        );
+        reconnect_and_verify_healthy(config).await.map_err(|e| {
+            anyhow::anyhow!(
+                "participant did not return to a healthy, connected state after an \
+                 interrupted ACS import — it may be crash-looping on orphan ACS rows \
+                 left by an unclean shutdown; the participant needs manual repair \
+                 before add-party can proceed: {e}"
+            )
+        })?;
+    }
+
     if snapshot.is_empty() {
         tracing::info!("ACS snapshot is empty — nothing to import");
         return Ok(());
     }
 
-    // Canton 3.5's ImportPartyAcsRequest requires the synchronizer (logical
-    // id — see `current_ledger_offset` for the physical-id pitfall) and the
-    // party being imported.
+    // Logical synchronizer id (see `current_ledger_offset` for the physical-id
+    // pitfall) plus the party being imported.
     let synchronizer_id =
         utils::extract_synchronizer_fingerprint(&utils::get_synchronizer_id(config).await?)?;
     let party_id = add_party_config.decentralized_party_id.to_string();
 
     let mut connectivity =
         SynchronizerConnectivityServiceClient::connect(config.admin_api_url()).await?;
-    tracing::info!("Disconnecting from all synchronizers for the ACS import...");
-    connectivity
-        .disconnect_all_synchronizers(tonic::Request::new(DisconnectAllSynchronizersRequest {}))
+
+    // Snapshot the currently-connected synchronizers so we disconnect exactly
+    // these — per-synchronizer `DisconnectSynchronizer`, never the bulk
+    // `DisconnectAllSynchronizers` (behaviourally identical in Canton, but we
+    // need the list anyway to verify the reconnect below).
+    let connected = connectivity
+        .list_connected_synchronizers(tonic::Request::new(ListConnectedSynchronizersRequest {}))
+        .await?
+        .into_inner()
+        .connected_synchronizers;
+
+    // Open the crash-safety window BEFORE disconnecting so a crash between here
+    // and a verified reconnect is detected on the next attempt.
+    storage
+        .write_artifact(
+            instance_name,
+            artifact_kinds::ADD_PARTY_ACS_IMPORT_INFLIGHT,
+            None,
+            b"1",
+        )
         .await?;
+
+    tracing::info!(
+        "Disconnecting from {} synchronizer(s) for the ACS import...",
+        connected.len()
+    );
+    for s in &connected {
+        connectivity
+            .disconnect_synchronizer(tonic::Request::new(DisconnectSynchronizerRequest {
+                synchronizer_alias: s.synchronizer_alias.clone(),
+            }))
+            .await?;
+    }
 
     let import_result = run_import(config, &synchronizer_id, &party_id, snapshot).await;
 
-    // ALWAYS reconnect — a participant left disconnected is a worse failure
+    // ALWAYS reconnect and verify the connection is actually healthy — a
+    // participant left disconnected (or half-reconnected) is a worse failure
     // mode than a failed import (which the peer step retries end-to-end).
-    tracing::info!("Reconnecting to synchronizers...");
-    let reconnect_result = connectivity
-        .reconnect_synchronizers(tonic::Request::new(ReconnectSynchronizersRequest {
-            ignore_failures: false,
-        }))
-        .await;
+    let reconnect_result = reconnect_and_verify_healthy(config).await;
 
     import_result?;
-    reconnect_result.map_err(|status| {
-        anyhow::anyhow!("ACS imported but synchronizer reconnect failed: {status}")
+    reconnect_result.map_err(|e| {
+        anyhow::anyhow!(
+            "ACS imported but the participant did not return to a healthy, connected \
+             state — it may be crash-looping on orphan ACS rows from an unclean \
+             shutdown; the participant may need manual repair: {e}"
+        )
     })?;
 
     tracing::info!("ACS snapshot imported successfully");
     Ok(())
+}
+
+/// Reconnect the participant to all registered synchronizers and confirm the
+/// connection is genuinely healthy. `ReconnectSynchronizers` returning `Ok`
+/// only means the request was accepted, not that replay succeeded — so we poll
+/// `ListConnectedSynchronizers` until the configured synchronizer reports
+/// healthy. A participant that reconnects but then crash-loops (or whose admin
+/// API is unreachable) is caught here and surfaced as an error rather than
+/// reported as a successful import.
+async fn reconnect_and_verify_healthy(config: &NodeConfig) -> Result {
+    let mut connectivity =
+        SynchronizerConnectivityServiceClient::connect(config.admin_api_url()).await?;
+    connectivity
+        .reconnect_synchronizers(tonic::Request::new(ReconnectSynchronizersRequest {
+            ignore_failures: false,
+        }))
+        .await?;
+
+    let alias = config.synchronizer();
+    let max_attempts = topology_retry_max_attempts();
+    let retry_delay = Duration::from_secs(topology_retry_delay_secs());
+    for attempt in 1..=max_attempts {
+        // Fresh client each poll: a crash-looping participant drops its admin
+        // API, so a connect/RPC error is itself the signal recovery has failed.
+        let healthy = match SynchronizerConnectivityServiceClient::connect(config.admin_api_url())
+            .await
+        {
+            Ok(mut c) => match c
+                .list_connected_synchronizers(tonic::Request::new(
+                    ListConnectedSynchronizersRequest {},
+                ))
+                .await
+            {
+                Ok(resp) => {
+                    synchronizer_healthy(&resp.into_inner().connected_synchronizers, alias)
+                }
+                Err(status) => {
+                    tracing::warn!(
+                        "ListConnectedSynchronizers failed \
+                         (attempt {attempt}/{max_attempts}): {status}"
+                    );
+                    false
+                }
+            },
+            Err(e) => {
+                tracing::warn!(
+                    "participant admin API unreachable (attempt {attempt}/{max_attempts}): {e}"
+                );
+                false
+            }
+        };
+        if healthy {
+            return Ok(());
+        }
+        if attempt < max_attempts {
+            tokio::time::sleep(retry_delay).await;
+        }
+    }
+    anyhow::bail!(
+        "synchronizer '{alias}' did not become healthy after reconnect within \
+         {max_attempts} attempts"
+    )
+}
+
+/// True iff the participant reports an active, healthy connection to `alias`.
+/// The safety-critical predicate behind `reconnect_and_verify_healthy`: a
+/// reconnect only counts as successful when the synchronizer is both present in
+/// the connected set AND flagged healthy — never on the mere presence of a row
+/// or an accepted `ReconnectSynchronizers` request. Reporting a half-reconnected
+/// (or crash-looping) participant as success is exactly the failure this fix
+/// exists to prevent.
+fn synchronizer_healthy(
+    connected: &[list_connected_synchronizers_response::Result],
+    alias: &str,
+) -> bool {
+    connected
+        .iter()
+        .any(|s| s.synchronizer_alias == alias && s.healthy)
 }
 
 /// The streamed `ImportPartyAcs` call, isolated so the caller can pair it
@@ -223,4 +373,41 @@ async fn run_import(
         .import_party_acs(tonic::Request::new(futures::stream::iter(requests)))
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn connected(alias: &str, healthy: bool) -> list_connected_synchronizers_response::Result {
+        list_connected_synchronizers_response::Result {
+            synchronizer_alias: alias.to_string(),
+            healthy,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn healthy_only_when_alias_present_and_flagged_healthy() {
+        let alias = "global-domain";
+
+        // Present and healthy → the reconnect is genuinely complete.
+        assert!(synchronizer_healthy(&[connected(alias, true)], alias));
+
+        // Present but NOT healthy → reconnect accepted but replay not done yet;
+        // must not be reported as success (the crux of the fix).
+        assert!(!synchronizer_healthy(&[connected(alias, false)], alias));
+
+        // Absent → participant still disconnected (or connected elsewhere).
+        assert!(!synchronizer_healthy(&[connected("other", true)], alias));
+
+        // Empty → fully disconnected / crash-looping.
+        assert!(!synchronizer_healthy(&[], alias));
+
+        // The right synchronizer healthy among several → success.
+        assert!(synchronizer_healthy(
+            &[connected("other", false), connected(alias, true)],
+            alias,
+        ));
+    }
 }

@@ -98,6 +98,13 @@ pub mod artifact_kinds {
     /// (before activation), used as `begin_offset_exclusive` for
     /// `ClearPartyOnboardingFlag`. Plaintext UTF-8 integer, keyed by self id.
     pub const ADD_PARTY_PRE_ACTIVATION_OFFSET: &str = "add_party_pre_activation_offset";
+    /// New-member-side crash-safety marker for the offline ACS import. Written
+    /// (presence only) right before the participant is disconnected from its
+    /// synchronizers and left in place. If it's set when `import_party_acs` is
+    /// re-entered, a prior attempt did not confirm a clean reconnect — the
+    /// participant may be disconnected (DecMan died mid-window) or crash-looping
+    /// on orphan ACS rows (unclean participant shutdown), so recovery runs first.
+    pub const ADD_PARTY_ACS_IMPORT_INFLIGHT: &str = "add_party_acs_import_inflight";
     /// Unsigned onboarding-flag clearing proposal (P2P update without the
     /// new member's Onboarding marker) created by the coordinator. Empty
     /// payload doubles as the "flag already cleared — skip the sign round"
