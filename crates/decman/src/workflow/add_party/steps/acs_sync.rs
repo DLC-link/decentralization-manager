@@ -480,7 +480,10 @@ async fn local_package_ids(config: &NodeConfig) -> Result<std::collections::Hash
     let mut client = PackageServiceClient::connect(config.admin_api_url()).await?;
     let descriptions = client
         .list_packages(tonic::Request::new(ListPackagesRequest {
-            limit: 10_000,
+            // 0 = no limit (the convention used across the codebase); a finite
+            // cap could omit a required package on a participant with many
+            // packages and wrongly fail the preflight.
+            limit: 0,
             filter_name: String::new(),
         }))
         .await?
