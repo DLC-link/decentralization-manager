@@ -16,7 +16,7 @@ use crate::{canton_id::CantonId, error::Result};
 
 use super::types::{
     ActionType, AppRewardBeneficiary, BillingParams, Claim, FarConfig, InstrumentAllowance,
-    InstrumentId, InstrumentIdentifier, ProposalType, VaultLimits,
+    InstrumentId, InstrumentIdentifier, ProposalType, RewardBeneficiary, VaultLimits,
 };
 
 // ============================================================================
@@ -325,6 +325,13 @@ fn serialize_app_reward_beneficiary(b: &AppRewardBeneficiary) -> Value {
     make_record(vec![
         field("beneficiary", make_party(&b.beneficiary)),
         field("weight", make_numeric(&b.weight.to_string())),
+    ])
+}
+
+fn serialize_reward_beneficiary(b: &RewardBeneficiary) -> Value {
+    make_record(vec![
+        field("beneficiary", make_party(&b.beneficiary)),
+        field("percentage", make_numeric(&b.percentage.to_string())),
     ])
 }
 
@@ -1180,6 +1187,44 @@ pub fn build_proposal_create_args(
                     field(
                         "providerAppRewardBeneficiaries",
                         make_optional_beneficiaries(provider_app_reward_beneficiaries),
+                    ),
+                ],
+            },
+        ),
+        ProposalType::AssignRewardBeneficiaries {
+            primary_coupon,
+            additional_coupons,
+            new_beneficiaries,
+        } => (
+            ProposalPackage::GovernanceRewards,
+            "Governance.Rewards.AssignRewardBeneficiaries",
+            "AssignRewardBeneficiaries",
+            Record {
+                record_id: None,
+                fields: vec![
+                    field("governanceParty", make_party(governance_party)),
+                    field("proposer", make_party(proposer)),
+                    field(
+                        "primaryCoupon",
+                        make_contract_id(&primary_coupon.to_string()),
+                    ),
+                    field(
+                        "additionalCoupons",
+                        make_list(
+                            additional_coupons
+                                .iter()
+                                .map(|cid| make_contract_id(&cid.to_string()))
+                                .collect(),
+                        ),
+                    ),
+                    field(
+                        "newBeneficiaries",
+                        make_list(
+                            new_beneficiaries
+                                .iter()
+                                .map(serialize_reward_beneficiary)
+                                .collect(),
+                        ),
                     ),
                 ],
             },
@@ -2056,6 +2101,17 @@ mod tests {
         CantonId::new("p".to_string(), Namespace::new([0u8; NAMESPACE_LENGTH]))
     }
 
+    /// Like `party_id`, but with a caller-chosen prefix so distinct fixture
+    /// values (e.g. multiple coupon contract ids in one test) don't collide.
+    fn party_id_str(prefix: &str) -> CantonId {
+        CantonId::new(prefix.to_string(), Namespace::new([0u8; NAMESPACE_LENGTH]))
+    }
+
+    /// Parse a decimal literal in test fixtures, panicking on invalid input.
+    fn dec(s: &str) -> DamlDecimal {
+        DamlDecimal::parse(s).expect("valid decimal literal")
+    }
+
     /// Unwrap a `Variant` value into `(constructor, inner)`.
     fn as_variant(value: &Value) -> (&str, &Value) {
         match &value.sum {
@@ -2426,6 +2482,50 @@ mod tests {
         assert!(matches!(
             field_value(&record, "amuletMergeLimit").sum,
             Some(value::Sum::Int64(10)),
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn build_proposal_assign_reward_beneficiaries_shape() -> Result {
+        let proposal = ProposalType::AssignRewardBeneficiaries {
+            primary_coupon: party_id_str("c1"),
+            additional_coupons: vec![party_id_str("c2")],
+            new_beneficiaries: vec![
+                RewardBeneficiary {
+                    beneficiary: party_id(),
+                    percentage: dec("0.8"),
+                },
+                RewardBeneficiary {
+                    beneficiary: party_id(),
+                    percentage: dec("0.2"),
+                },
+            ],
+        };
+        let (package, module, entity, record) =
+            build_proposal_create_args("gov", "proposer", &proposal, None, None)?;
+
+        assert_eq!(package, ProposalPackage::GovernanceRewards);
+        assert_eq!(module, "Governance.Rewards.AssignRewardBeneficiaries");
+        assert_eq!(entity, "AssignRewardBeneficiaries");
+        assert_eq!(
+            owned_labels(&record),
+            [
+                "governanceParty",
+                "proposer",
+                "primaryCoupon",
+                "additionalCoupons",
+                "newBeneficiaries",
+            ]
+        );
+        // additionalCoupons is a list of one; newBeneficiaries is a list of two records
+        assert!(matches!(
+            field_value(&record, "additionalCoupons").sum,
+            Some(value::Sum::List(_)),
+        ));
+        assert!(matches!(
+            field_value(&record, "newBeneficiaries").sum,
+            Some(value::Sum::List(_)),
         ));
         Ok(())
     }
