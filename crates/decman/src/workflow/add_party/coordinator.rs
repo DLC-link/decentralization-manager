@@ -20,8 +20,8 @@ use crate::{
 use super::{
     AddPartyConfig, AddPartyStep, resolve_ledger_token,
     steps::{
-        clear_onboarding::wait_for_flag_cleared, create_proposals, export_party_acs, export_state,
-        submit_clear_proposal, submit_proposals,
+        clear_onboarding::wait_for_flag_cleared, collect_party_package_ids, create_proposals,
+        export_party_acs, export_state, submit_clear_proposal, submit_proposals,
     },
 };
 
@@ -156,7 +156,21 @@ async fn run_workflow(
                 // the party has no active contracts — the new member skips.
                 let snapshot =
                     export_party_acs(&node_config, &db, &instance_name, &add_party_config).await?;
-                let payload = utils::encode_length_prefixed(&[&config_payload, &snapshot]);
+                // Package ids the new member must have to validate the imported
+                // ACS — its import preflight fails fast (before disconnecting) if
+                // any are missing, instead of the import dying mid-window.
+                let package_ids = collect_party_package_ids(
+                    &node_config,
+                    &add_party_config.decentralized_party_id.to_string(),
+                    ledger_token.as_deref(),
+                )
+                .await?;
+                let package_ids_payload = package_ids.join("\n").into_bytes();
+                let payload = utils::encode_length_prefixed(&[
+                    &config_payload,
+                    &snapshot,
+                    &package_ids_payload,
+                ]);
                 workflow_state.set_command_payload(payload).await;
                 workflow_state.advance_step().await;
             }

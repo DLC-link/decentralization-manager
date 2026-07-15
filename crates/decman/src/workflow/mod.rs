@@ -797,7 +797,7 @@ pub async fn start_peer(
             }
             MessageType::ImportAcs => {
                 tracing::info!("Executing: Import party ACS");
-                let items = match utils::decode_length_prefixed(&payload, 2) {
+                let items = match utils::decode_length_prefixed(&payload, 3) {
                     Ok(items) => items,
                     Err(e) => {
                         tracing::error!("Failed to decode ImportAcs payload: {e}");
@@ -811,6 +811,13 @@ pub async fn start_peer(
                     send_skip_status(&client, "ImportAcs").await;
                     continue;
                 }
+                // Newline-joined package ids the party's contracts need; the
+                // import preflight checks this participant has them all.
+                let required_package_ids: Vec<String> = String::from_utf8_lossy(&items[2])
+                    .lines()
+                    .filter(|l| !l.is_empty())
+                    .map(str::to_string)
+                    .collect();
 
                 if let Err(e) = add_party::import_party_acs(
                     &node_config,
@@ -818,6 +825,7 @@ pub async fn start_peer(
                     &instance_name,
                     &add_party_config,
                     items[1].clone(),
+                    &required_package_ids,
                 )
                 .await
                 {
