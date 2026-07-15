@@ -926,3 +926,39 @@ curl -X POST http://custodian-a:8080/governance/propose \
 
 - **Acceptance is manual.** There is no auto-accept; the delegation does nothing until the delegate accepts the proposal via the wallet API.
 - **No auto-renewal.** `expiresAt` on a `MintingDelegation` is immutable. A new `SetupMintingDelegation` vote is required before expiry to keep collecting rewards (the accept choice can atomically archive the old delegation and create the new one).
+
+### External-Party Setup (ValidatorRight prerequisite)
+
+A `MintingDelegation` alone is not enough for the validator to run reward-collection automation for the decentralized party: the validator only spins up the external-party wallet (and its `MintingDelegationCollectRewardsTrigger`) once the party has a `ValidatorRight` + `TransferPreapproval` on that validator. Establishing those is a two-step onboarding:
+
+1. **Validator operator creates the proposal (out of scope for this plugin).** The operator of the validator node calls the validator's internal admin API:
+
+   ```bash
+   curl -X POST http://node-1:5003/api/validator/v0/admin/external-party/setup-proposal \
+     -H "Content-Type: application/json" \
+     -d '{ "user_party_id": "joint-vault::1220..." }'
+   ```
+
+   This creates an on-ledger `Splice.AmuletRules:ExternalPartySetupProposal` (signed by the validator + DSO, observed by the decentralized party) and returns its contract id. This step is a manual operator action — it is not part of `governance-rewards`.
+
+2. **Governance votes `AcceptExternalPartySetup`.** A member proposes the action with the proposal's contract id; after threshold confirmations, execution exercises `ExternalPartySetupProposal_Accept` with the decentralized party's (the governance party's) authority — it is the proposal's `user`, i.e. the choice controller. Acceptance creates the party's `ValidatorRight` and `TransferPreapproval` (the validator/DSO authority for those rides in on the consumed proposal). The validator's `ValidatorRightTrigger` then provisions the external-party wallet, and its `MintingDelegationCollectRewardsTrigger` begins collecting the party's coupons via the `MintingDelegation` established above.
+
+   ```bash
+   curl -X POST http://custodian-a:8080/governance/propose \
+     -H "Content-Type: application/json" \
+     -d '{
+       "party_id": "joint-vault::1220...",
+       "rules_contract_id": "<governance-rules-cid>",
+       "proposal": {
+         "type": "accept_external_party_setup",
+         "proposal_cid": "<external-party-setup-proposal-cid>"
+       }
+     }'
+   ```
+
+- `proposal_cid`: the `ExternalPartySetupProposal` contract id returned by step 1.
+
+**Caveats:**
+
+- **Accept promptly.** The `ExternalPartySetupProposal` carries a `preapprovalExpiresAt` deadline; `ExternalPartySetupProposal_Accept` asserts the deadline has not passed, so an expired proposal cannot be accepted and the operator must create a fresh one.
+- **SCU cross-version smoke-test.** On-ledger the proposal is created by the validator's splice-amulet (e.g. 0.1.22 on splice 0.6.12), while this plugin compiles against the vendored `splice-amulet-0.1.17`. The template is stable, so Smart Contract Upgrade should let a 0.1.17-typed exercise run on the newer on-ledger contract — but confirm on a devnet before relying on it (same risk class as the 0.1.18 `MintingDelegation`, which worked).
