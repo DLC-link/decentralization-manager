@@ -797,12 +797,24 @@ pub async fn start_peer(
             }
             MessageType::ImportAcs => {
                 tracing::info!("Executing: Import party ACS");
+                // Current coordinators send 3 items [config, snapshot, package_ids].
+                // Stay backward-compatible with an older coordinator that ships the
+                // legacy 2-item payload (config + snapshot, no package-id list):
+                // fall back to 2 items and treat the required-package set as empty
+                // (skips the preflight — the pre-fix behaviour), so a mixed-version
+                // rolling upgrade doesn't wedge the peer.
                 let items = match utils::decode_length_prefixed(&payload, 3) {
                     Ok(items) => items,
-                    Err(e) => {
-                        tracing::error!("Failed to decode ImportAcs payload: {e}");
-                        continue;
-                    }
+                    Err(_) => match utils::decode_length_prefixed(&payload, 2) {
+                        Ok(mut items) => {
+                            items.push(Vec::new());
+                            items
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to decode ImportAcs payload: {e}");
+                            continue;
+                        }
+                    },
                 };
                 let Some(add_party_config) = decode_add_party_config(&items[0]) else {
                     continue;
