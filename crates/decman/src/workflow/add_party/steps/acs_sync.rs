@@ -224,6 +224,21 @@ pub async fn import_party_acs(
         .into_inner()
         .connected_synchronizers;
 
+    // Preflight: don't open the disconnect window unless the participant is
+    // currently connected AND healthy on our synchronizer. Disconnecting an
+    // already-degraded participant risks turning a recoverable state into the
+    // orphan-ACS-row corruption this whole bracket guards against — fail fast
+    // and leave it untouched instead. (On a recovering re-entry the marker path
+    // above already reconnected it, so this passes there too.)
+    if !synchronizer_healthy(&connected, config.synchronizer()) {
+        anyhow::bail!(
+            "refusing to start ACS import: participant is not connected and healthy on \
+             synchronizer '{}' — restore the participant's health before retrying \
+             add-party so the disconnect/import window can't compound a bad state",
+            config.synchronizer()
+        );
+    }
+
     // Open the crash-safety window BEFORE disconnecting so a crash between here
     // and a verified reconnect is detected on the next attempt.
     storage
