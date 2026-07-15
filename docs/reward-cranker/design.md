@@ -11,7 +11,7 @@ A consortium of orgs is represented on-chain by a single **decentralized party i
 
 But in that on-chain capacity the consortium has **no wallet** — it can act only through threshold governance. That is slow, because acting means the member orgs **vote by hand**: an operator at each org clicks "confirm." Coupons arrive every round and expire in ~36h, so manual voting can't keep up, and the rewards expire uncollected.
 
-So this builds **automation, running on every member's node, that casts those votes automatically**. It routes each coupon to its governance-configured recipients — technically, it *assigns* the coupon: the unassigned coupon (whose `beneficiary` field is empty) is replaced by one coupon per recipient, each carrying its own `beneficiary` and percentage share.
+So this builds **automation, running on every member's node, that casts those votes automatically**. It routes each coupon to its governance-configured recipients — technically, it *assigns* the coupon: the unassigned coupon (whose `beneficiary` field is empty) is replaced by one coupon per recipient, each carrying its own `beneficiary` and its share of the reward `amount`.
 
 The safety comes from the votes, not from trusting any node: each node submits its confirmation **only** for a routing that matches the on-ledger rules. So no node is trusted, and no human clicks.
 
