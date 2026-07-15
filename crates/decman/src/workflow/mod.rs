@@ -812,9 +812,14 @@ pub async fn start_peer(
                     continue;
                 }
 
-                if let Err(e) =
-                    add_party::import_party_acs(&node_config, &add_party_config, items[1].clone())
-                        .await
+                if let Err(e) = add_party::import_party_acs(
+                    &node_config,
+                    &db,
+                    &instance_name,
+                    &add_party_config,
+                    items[1].clone(),
+                )
+                .await
                 {
                     tracing::error!("Step execution failed: {e}");
                     consecutive_step_failures += 1;
