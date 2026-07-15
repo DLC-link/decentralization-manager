@@ -1,10 +1,10 @@
-# CIP-104 Reward Cranker (Mode A) — M1+M2 Implementation Plan
+# CIP-104 Coupon-Reassignment Automation (Mode A) — M1+M2 Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add the on-ledger `AssignRewardBeneficiaries` governance action and its Rust proposal plumbing, so a decparty can — through the normal propose → confirm → execute flow — assign governance-chosen beneficiaries to its CIP-104 `RewardCouponV2` coupons.
 
-**Architecture:** A new DAML `GovernableAction` template (`AssignRewardBeneficiaries`) whose `executeImpl` exercises splice's `RewardCoupon_AssignBeneficiaries`, plus a matching `ProposalType` variant + `validate()` arm + `action_serializer` mapping in the Rust backend. This mirrors, almost line-for-line, the just-merged PR #248 (`SetupMintingDelegation`) and the existing `SetProviderAppRewardBeneficiaries`. After M1+M2 an operator can drive the action manually via `/governance/propose|confirm|execute`; M3 (the auto-confirmation engine + cranker that submit these calls automatically) and M4 (devnet IT) are a **separate follow-up plan**, gated on the spec's §14.1 config-source decision.
+**Architecture:** A new DAML `GovernableAction` template (`AssignRewardBeneficiaries`) whose `executeImpl` exercises splice's `RewardCoupon_AssignBeneficiaries`, plus a matching `ProposalType` variant + `validate()` arm + `action_serializer` mapping in the Rust backend. This mirrors, almost line-for-line, the just-merged PR #248 (`SetupMintingDelegation`) and the existing `SetProviderAppRewardBeneficiaries`. After M1+M2 an operator can drive the action manually via `/governance/propose|confirm|execute`; M3 (the auto-confirmation engine + automation that submit these calls automatically) and M4 (devnet IT) are a **separate follow-up plan**, gated on the spec's §14.1 config-source decision.
 
 **Tech Stack:** DAML (SDK 3.4.11, `dpm`), Rust (actix-web backend, `cargo`), splice DARs — **`splice-api-reward-assignment-v1-1.0.0`** and **`splice-amulet-0.1.19`** (versions verified against devnet — see Global Constraints), copied from `/Users/gyorgybalazsi/splice/daml/dars/`.
 
@@ -27,7 +27,7 @@
 ## Prerequisites (confirm before Task 1)
 
 1. **PR #248 merged to `main` on 2026-07-15** — so `main` already contains the `governance-rewards` + `governance-rewards-test` packages and the `GovernanceRewards` backend wiring this plan builds on. Base off `main`, not off Robert's `feat/governance/rewards-plugin` branch.
-2. Branch off `main` (your local checkout is on a different branch, so pull first): `git checkout main && git pull && git checkout -b feat/governance/reward-cranker-action`.
+2. Branch off `main` (your local checkout is on a different branch, so pull first): `git checkout main && git pull && git checkout -b feat/governance/coupon-reassignment-automation`.
 3. `dpm` and the Rust toolchain build the repo as-is (`dpm build --all` and `cargo build` succeed before you start).
 
 ## File Structure
@@ -524,7 +524,7 @@ git commit -m "feat(decman): serialize AssignRewardBeneficiaries proposal args"
 Run: `(cd daml && dpm build --all) && (cd daml/governance-rewards-assign-test && dpm test) && cargo test -p decman`
 Expected: all pass.
 
-- [ ] **Step 2: Confirm the propose payload shape** an operator (or, later, the cranker) will send — record it in the PR description for reviewers:
+- [ ] **Step 2: Confirm the propose payload shape** an operator (or, later, the automation) will send — record it in the PR description for reviewers:
 
 ```json
 {
@@ -542,13 +542,13 @@ Expected: all pass.
 }
 ```
 
-- [ ] **Step 3: Open the PR.** Title: `feat(governance-rewards): AssignRewardBeneficiaries action + backend plumbing`. In the body, state that this is M1+M2 of the Mode A reward cranker (spec `docs/superpowers/specs/2026-07-14-cip104-reward-cranker-design.md`); the automation that *submits* these proposals/confirmations (M3) and the devnet IT (M4) follow once §14.1 (the split-source interface with Robert) is pinned.
+- [ ] **Step 3: Open the PR.** Title: `feat(governance-rewards): AssignRewardBeneficiaries action + backend plumbing`. In the body, state that this is M1+M2 of the Mode A coupon-reassignment automation (spec `docs/superpowers/specs/2026-07-14-cip104-coupon-reassignment-design.md`); the automation that *submits* these proposals/confirmations (M3) and the devnet IT (M4) follow once §14.1 (the split-source interface with Robert) is pinned.
 
 ---
 
 ## What this plan intentionally does NOT cover (next plan: M3+M4)
 
-- The **auto-confirmation engine** and the **cranker** (proposer + confirmer background loops) — spec §5, §9. **Blocked** on spec §14.1: how the *effective split* is sourced on-ledger (Robert's shared template vs. compose from `InstrumentConfiguration` + `AppRewardConfiguration`). Design M3 against a `SplitSource` trait so the source is swappable.
+- The **auto-confirmation engine** and the **automation** (proposer + confirmer background loops) — spec §5, §9. **Blocked** on spec §14.1: how the *effective split* is sourced on-ledger (Robert's shared template vs. compose from `InstrumentConfiguration` + `AppRewardConfiguration`). Design M3 against a `SplitSource` trait so the source is swappable.
 - **Devnet integration test** (multi-node propose → auto-confirm → execute against live `cbtc-network` coupons) — spec §13, needs multiple DecMan instances.
 - **Frontend** form — not needed; the action is automation-driven, not human-entered.
 
