@@ -10,15 +10,17 @@ import Splice.Wallet.MintingDelegation (MintingDelegationProposal)
 
 import Governance.Action (GovernableAction)
 import Governance.Rules
+import Governance.TestUtils
 
 import Governance.Rewards.SetupMintingDelegation
-import Governance.Rewards.TestUtils
 
 import TestHarness
 
 data Fixture = Fixture
   with
-    parties : RewardsTestParties
+    parties : TestParties
+    delegate : Party
+    dso : Party
     rulesCid : ContractId GovernanceRules
   deriving (Eq, Show)
 
@@ -34,7 +36,9 @@ data DelegationInputs = DelegationInputs
 
 given_governance_setup : Script Fixture
 given_governance_setup = do
-  parties <- allocateRewardsTestParties
+  parties <- allocateTestParties
+  delegate <- allocateParty "Delegate"
+  dso <- allocateParty "DSO"
   rulesCid <- createTestGovernance parties
   pure Fixture with ..
 
@@ -42,8 +46,8 @@ when_delegation_proposed_and_confirmed : Fixture -> Script DelegationInputs
 when_delegation_proposed_and_confirmed f = do
   now <- getTime
   let inputs = DelegationInputs with
-        delegate = f.parties.delegate
-        dso = f.parties.dso
+        delegate = f.delegate
+        dso = f.dso
         expiresAt = now `addRelTime` days 30
         amuletMergeLimit = 10
   proposalCid <- submit f.parties.member1 $ createCmd SetupMintingDelegation with
@@ -83,8 +87,8 @@ when_zero_merge_limit f = do
   submitMustFail f.parties.member1 $ createCmd SetupMintingDelegation with
     governanceParty = f.parties.governanceParty
     proposer = f.parties.member1
-    delegate = f.parties.delegate
-    dso = f.parties.dso
+    delegate = f.delegate
+    dso = f.dso
     expiresAt = now `addRelTime` days 30
     amuletMergeLimit = 0
     description = "should be rejected"
@@ -106,18 +110,15 @@ when_past_expiry_execute_fails f = do
   proposalCid <- submit f.parties.member1 $ createCmd SetupMintingDelegation with
     governanceParty = f.parties.governanceParty
     proposer = f.parties.member1
-    delegate = f.parties.delegate
-    dso = f.parties.dso
+    delegate = f.delegate
+    dso = f.dso
     expiresAt = now `addRelTime` days (-1)
     amuletMergeLimit = 10
     description = "already expired"
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
   confirmationCids <- submitConfirmations f.parties.governanceParty f.rulesCid
     proposalInterfaceCid [f.parties.member1, f.parties.member2]
-  submitMustFail (actAs f.parties.member1
-    <> readAs f.parties.governanceParty
-    <> readAs f.parties.delegate
-    <> readAs f.parties.dso) $
+  submitMustFail (memberContext f.parties.member1 f.parties.governanceParty) $
     exerciseCmd f.rulesCid GovernanceRules_ExecuteConfirmedAction with
       executor = f.parties.member1
       actionProposalCid = proposalInterfaceCid
