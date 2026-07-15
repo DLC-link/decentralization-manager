@@ -142,8 +142,8 @@ test.describe.serial("governance happy path", () => {
   });
 
   test("03 distribute DARs", async () => {
-    // DARs are committed under releases/v0/release (repo root); cwd is e2e/.
-    const darDir = "../releases/v0/release";
+    // DARs are committed under releases/v1 (repo root); cwd is e2e/.
+    const darDir = "../releases/v1";
     const dars = [
       "governance-action-v1-0.1.0.dar",
       "governance-core-v1-0.1.0.dar",

@@ -79,7 +79,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     // DAR fixtures live at the workspace-root `releases/`; this crate sits at
     // `crates/decman`, so resolve two levels up from CARGO_MANIFEST_DIR.
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let dars_dir = Path::new(manifest_dir).join("../../releases/v0/release");
+    let dars_dir = Path::new(manifest_dir).join("../../releases/v1");
 
     let mut entries = Vec::with_capacity(DAR_FILES.len());
     for filename in DAR_FILES {
