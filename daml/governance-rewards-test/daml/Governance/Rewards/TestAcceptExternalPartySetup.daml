@@ -1,0 +1,71 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+module Governance.Rewards.TestAcceptExternalPartySetup where
+
+import DA.Time (addRelTime, days)
+import Daml.Script
+
+import Splice.AmuletRules (ExternalPartySetupProposal(..), TransferPreapproval)
+import Splice.Amulet (ValidatorRight)
+
+import Governance.Action (GovernableAction)
+import Governance.Rules
+import Governance.TestUtils
+
+import Governance.Rewards.AcceptExternalPartySetup
+
+import TestHarness
+
+data Fixture = Fixture
+  with
+    parties : TestParties
+    validator : Party
+    dso : Party
+    rulesCid : ContractId GovernanceRules
+    proposalCid : ContractId ExternalPartySetupProposal
+  deriving (Eq, Show)
+
+-- The validator + dso create the ExternalPartySetupProposal (a validator-side
+-- action, simulated here), whose `user` is the governance party. Governance
+-- then votes to accept it.
+given_governance_and_proposal : Script Fixture
+given_governance_and_proposal = do
+  parties <- allocateTestParties
+  validator <- allocateParty "Validator"
+  dso <- allocateParty "DSO"
+  rulesCid <- createTestGovernance parties
+  now <- getTime
+  proposalCid <- submit (actAs validator <> actAs dso) $ createCmd ExternalPartySetupProposal with
+    validator
+    user = parties.governanceParty
+    dso
+    createdAt = now
+    preapprovalExpiresAt = now `addRelTime` days 90
+  pure Fixture with ..
+
+when_accept_confirmed : Fixture -> Script ()
+when_accept_confirmed f = do
+  actionCid <- submit f.parties.member1 $ createCmd AcceptExternalPartySetup with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    proposalCid = f.proposalCid
+    description = "accept external party setup"
+  let ifaceCid : ContractId GovernableAction = toInterfaceContractId actionCid
+  _ <- confirmAndExecute f.parties f.rulesCid ifaceCid
+    [f.parties.member1, f.parties.member2] f.parties.member1
+  pure ()
+
+then_validator_right_and_preapproval_created : Fixture -> () -> Script Failures
+then_validator_right_and_preapproval_created f _ = do
+  vrs <- query @ValidatorRight f.parties.governanceParty
+  preapprovals <- query @TransferPreapproval f.parties.governanceParty
+  pure $
+    shouldBe "ValidatorRight count" 1 (length vrs) <>
+    shouldBe "TransferPreapproval count" 1 (length preapprovals)
+
+test_accept_creates_validator_right = script do
+  run Test with
+    given = given_governance_and_proposal
+    when = when_accept_confirmed
+    then_ = then_validator_right_and_preapproval_created
