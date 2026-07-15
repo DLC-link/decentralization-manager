@@ -2,7 +2,6 @@
 
 pub mod add_party;
 pub mod add_party_edge_cases;
-pub mod add_party_missing_dar;
 pub mod cancel_cascades;
 pub mod cancel_stuck_contracts;
 pub mod canton_admin_tls;
