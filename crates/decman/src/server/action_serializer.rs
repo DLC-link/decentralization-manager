@@ -1260,7 +1260,9 @@ pub fn build_proposal_create_args(
                     field("proposalCid", make_contract_id(proposal_cid)),
                     field(
                         "description",
-                        make_text("Accept external party setup (ValidatorRight + TransferPreapproval)"),
+                        make_text(&format!(
+                            "Accept external party setup (ValidatorRight + TransferPreapproval) for proposal {proposal_cid}"
+                        )),
                     ),
                 ],
             },

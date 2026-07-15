@@ -1563,12 +1563,19 @@ export const GovernanceSection = ({
           };
           break;
         }
-        case "accept_external_party_setup":
+        case "accept_external_party_setup": {
+          const proposalCid = proposalExternalPartySetupCid.trim();
+          if (!proposalCid) {
+            throw new Error(
+              "External Party Setup Proposal Contract Id must not be empty",
+            );
+          }
           proposal = {
             type: "accept_external_party_setup",
-            proposal_cid: proposalExternalPartySetupCid,
+            proposal_cid: proposalCid,
           };
           break;
+        }
         case "mint":
           proposal = {
             type: "mint",
@@ -4761,7 +4768,7 @@ export const GovernanceSection = ({
                   slotProps={{
                     input: {
                       endAdornment: fieldHelpAdornment(
-                        "Contract id of the ExternalPartySetupProposal the validator operator created (via POST /v0/admin/external-party/setup-proposal). Accepting it creates the decentralized party's ValidatorRight + TransferPreapproval, unblocking reward collection.",
+                        "Contract id of the ExternalPartySetupProposal the validator operator created (via POST /api/validator/v0/admin/external-party/setup-proposal). Accepting it creates the decentralized party's ValidatorRight + TransferPreapproval, unblocking reward collection.",
                         "Help for External Party Setup Proposal Contract Id",
                       ),
                     },
