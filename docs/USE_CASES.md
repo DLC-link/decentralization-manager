@@ -881,3 +881,48 @@ curl -X POST http://custodian-a:8080/governance/execute \
 ```
 
 Self-management execution returns a new `GovernanceRules` contract with the updated state.
+
+## CIP-104 Reward Collection
+
+The `governance-rewards` package lets a decentralized party delegate the minting of its CIP-104 reward coupons to a validator node, so the coupons are converted into Canton Coin before they expire. The delegation is set up through the standard propose -> confirm -> execute flow.
+
+### Prerequisites
+
+- `GovernanceRules` contract deployed (from `#governance-core-<version>`)
+- `governance-rewards` DAR uploaded to all participants (from `#governance-rewards-<version>`)
+- The `splice-wallet` DAR (containing `Splice.Wallet.MintingDelegation`) uploaded to all participants
+
+### How It Works
+
+1. **Governance votes `SetupMintingDelegation`.** A member proposes the action with the validator operator's party as `delegate`; after threshold confirmations, execution creates a `MintingDelegationProposal` signed by the decentralized party. The delegation `beneficiary` is always the decentralized party (the governance party) — it is the party whose reward coupons get minted, and the only value the governance party's authority can create.
+2. **The delegate accepts out-of-band.** The validator operator accepts the `MintingDelegationProposal` via its wallet API (`acceptMintingDelegationProposal`). This is NOT part of this plugin — acceptance is a manual, out-of-band step.
+3. **The validator's automation mints.** Once the `MintingDelegation` is active, the validator node's built-in `MintingDelegationCollectRewardsTrigger` periodically (roughly every 5 minutes) mints the decentralized party's `RewardCouponV2` coupons into Canton Coin, ahead of the coupons' ~36 hour expiry.
+
+### Set Up a Minting Delegation
+
+```bash
+curl -X POST http://custodian-a:8080/governance/propose \
+  -H "Content-Type: application/json" \
+  -d '{
+    "party_id": "joint-vault::1220...",
+    "rules_contract_id": "<governance-rules-cid>",
+    "proposal": {
+      "type": "setup_minting_delegation",
+      "delegate": "validator-operator::1220...",
+      "dso": "dso-party::1220...",
+      "expires_at_micros": 1800000000000000,
+      "amulet_merge_limit": 10,
+      "description": "Collect CIP-104 rewards via validator X"
+    }
+  }'
+```
+
+- `delegate`: the validator node operator party that will mint on the decentralized party's behalf
+- `dso`: the Splice DSO party; the delegation's mint transfers verify the `AmuletRules` contract belongs to it
+- `expires_at_micros`: delegation expiry as microseconds since epoch
+- `amulet_merge_limit`: number of amulet contracts to keep after auto-merging (must be positive)
+
+### Operational Caveats
+
+- **Acceptance is manual.** There is no auto-accept; the delegation does nothing until the delegate accepts the proposal via the wallet API.
+- **No auto-renewal.** `expiresAt` on a `MintingDelegation` is immutable. A new `SetupMintingDelegation` vote is required before expiry to keep collecting rewards (the accept choice can atomically archive the old delegation and create the new one).

@@ -1144,6 +1144,7 @@ mod tests {
             packages: PackageConfig {
                 governance_action: Some("#gov-action".to_string()),
                 governance_core: Some("#gov-core".to_string()),
+                governance_rewards: Some("#gov-rewards".to_string()),
                 governance_token_custody: None,
                 governance_utility_credential: None,
                 governance_utility_onboarding: None,

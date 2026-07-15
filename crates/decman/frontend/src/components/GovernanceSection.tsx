@@ -170,6 +170,12 @@ export const GovernanceSection = ({
   const [proposalType, setProposalType] = useState<ProposalType["type"]>("setup_cc_preapproval");
   const [proposalProvider, setProposalProvider] = useState("");
   const [proposalExpectedDso, setProposalExpectedDso] = useState("");
+  const [proposalDelegate, setProposalDelegate] = useState("");
+  // datetime-local string; converted to micros-since-epoch on submit.
+  const [proposalDelegationExpiresAt, setProposalDelegationExpiresAt] =
+    useState("");
+  const [proposalAmuletMergeLimit, setProposalAmuletMergeLimit] =
+    useState("10");
   const [proposalOperator, setProposalOperator] = useState(
     defaultOperatorParty || "",
   );
@@ -1029,11 +1035,15 @@ export const GovernanceSection = ({
     }
   }, [selectedActionType, fetchDeployContracts, fetchBurnMintFactory, fetchNetworkInfo]);
 
-  // Setup CC Preapproval needs the DSO party id from the network-info
-  // endpoint to prefill `expected_dso`. Mirror the action-form trigger above
-  // for the proposal form.
+  // Setup CC Preapproval and Setup Minting Delegation need the DSO party id
+  // from the network-info endpoint to prefill their DSO field. Mirror the
+  // action-form trigger above for the proposal form.
   useEffect(() => {
-    if (proposalType === "setup_cc_preapproval" && !dsoPartyId) {
+    if (
+      (proposalType === "setup_cc_preapproval" ||
+        proposalType === "setup_minting_delegation") &&
+      !dsoPartyId
+    ) {
       fetchNetworkInfo();
     }
   }, [proposalType, dsoPartyId, fetchNetworkInfo]);
@@ -1390,6 +1400,9 @@ export const GovernanceSection = ({
     setProposalCredentialId("");
     setProposalCredentialClaimsText("");
     setProposalCredentialOfferCid("");
+    setProposalDelegate("");
+    setProposalDelegationExpiresAt("");
+    setProposalAmuletMergeLimit("10");
   };
 
   const handleSubmitProposal = async () => {
@@ -1520,6 +1533,30 @@ export const GovernanceSection = ({
             operator: proposalOperator,
           };
           break;
+        case "setup_minting_delegation": {
+          const expiresAtMs = new Date(proposalDelegationExpiresAt).getTime();
+          if (!Number.isFinite(expiresAtMs)) {
+            throw new Error("Expires At must be a valid date and time");
+          }
+          // Micros beyond MAX_SAFE_INTEGER (~year 2255) would silently lose
+          // precision; the datetime-local input allows dates up to year 9999.
+          if (!Number.isSafeInteger(expiresAtMs * 1000)) {
+            throw new Error("Expires At is too far in the future");
+          }
+          const mergeLimit = Number(proposalAmuletMergeLimit);
+          if (!Number.isInteger(mergeLimit) || mergeLimit <= 0) {
+            throw new Error("Amulet Merge Limit must be a positive integer");
+          }
+          proposal = {
+            type: "setup_minting_delegation",
+            delegate: proposalDelegate,
+            dso: proposalExpectedDso,
+            expires_at_micros: expiresAtMs * 1000,
+            amulet_merge_limit: mergeLimit,
+            description: proposalDescription,
+          };
+          break;
+        }
         case "mint":
           proposal = {
             type: "mint",
@@ -3702,6 +3739,9 @@ export const GovernanceSection = ({
                   <MenuItem value="accept_mint_request">Accept Mint Request</MenuItem>
                   <MenuItem value="accept_burn_request">Accept Burn Request</MenuItem>
                   <Divider />
+                  <ListSubheader sx={{ color: "primary.main", fontWeight: 600 }}>Rewards</ListSubheader>
+                  <MenuItem value="setup_minting_delegation">Setup Minting Delegation</MenuItem>
+                  <Divider />
                   <ListSubheader sx={{ color: "primary.main", fontWeight: 600 }}>Utility Credential</ListSubheader>
                   <MenuItem value="offer_free_credential">Offer Free Credential</MenuItem>
                   <MenuItem value="accept_free_credential">Accept Free Credential</MenuItem>
@@ -4603,6 +4643,96 @@ export const GovernanceSection = ({
                     },
                   }}
                 />
+              )}
+
+              {proposalType === "setup_minting_delegation" && (
+                <>
+                  <TextField
+                    size="small"
+                    label="Delegate Party"
+                    value={proposalDelegate}
+                    onChange={(e) => setProposalDelegate(e.target.value)}
+                    fullWidth
+                    required
+                    slotProps={{
+                      input: {
+                        endAdornment: fieldHelpAdornment(
+                          "Party id of the validator node operator authorized to mint the decentralized party's reward coupons. It accepts the resulting MintingDelegationProposal out-of-band via the wallet API.",
+                          "Help for Delegate Party",
+                        ),
+                      },
+                    }}
+                  />
+                  <TextField
+                    size="small"
+                    label="DSO Party"
+                    value={proposalExpectedDso}
+                    onChange={(e) => setProposalExpectedDso(e.target.value)}
+                    fullWidth
+                    required
+                    slotProps={{
+                      input: {
+                        endAdornment: fieldHelpAdornment(
+                          "Party id of the Splice DSO; the delegation's mint transfers verify the AmuletRules contract belongs to this DSO.",
+                          "Help for DSO Party",
+                        ),
+                      },
+                    }}
+                  />
+                  <TextField
+                    size="small"
+                    label="Expires At"
+                    type="datetime-local"
+                    value={proposalDelegationExpiresAt}
+                    onChange={(e) =>
+                      setProposalDelegationExpiresAt(e.target.value)
+                    }
+                    fullWidth
+                    required
+                    slotProps={{
+                      inputLabel: { shrink: true },
+                      input: {
+                        endAdornment: fieldHelpAdornment(
+                          "When the delegation stops being valid. There is no auto-renewal — a new proposal must be voted in before this time to keep collecting rewards.",
+                          "Help for Expires At",
+                        ),
+                      },
+                    }}
+                  />
+                  <TextField
+                    size="small"
+                    label="Amulet Merge Limit"
+                    type="number"
+                    value={proposalAmuletMergeLimit}
+                    onChange={(e) => setProposalAmuletMergeLimit(e.target.value)}
+                    fullWidth
+                    required
+                    slotProps={{
+                      input: {
+                        endAdornment: fieldHelpAdornment(
+                          "Number of amulet contracts to keep after auto-merging; the delegate merges contracts once there are strictly more than this number. Must be positive.",
+                          "Help for Amulet Merge Limit",
+                        ),
+                      },
+                    }}
+                  />
+                  <TextField
+                    size="small"
+                    label="Description"
+                    value={proposalDescription}
+                    onChange={(e) => setProposalDescription(e.target.value)}
+                    fullWidth
+                    required
+                    slotProps={{
+                      input: {
+                        endAdornment: fieldHelpAdornment(
+                          "Free-form note recorded on the proposal, e.g. why this delegation is being set up.",
+                          "Help for Description",
+                        ),
+                      },
+                    }}
+                  />
+                </>
               )}
 
               {(proposalType === "mint" || proposalType === "burn") && (

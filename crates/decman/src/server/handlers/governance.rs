@@ -1256,6 +1256,16 @@ pub async fn propose_action(
                 }
             }
         }
+        action_serializer::ProposalPackage::GovernanceRewards => {
+            match packages.governance_rewards.as_deref() {
+                Some(pkg) => pkg,
+                None => {
+                    return HttpResponse::BadRequest().json(ErrorResponse {
+                        error: "governance_rewards package not configured".to_string(),
+                    });
+                }
+            }
+        }
         action_serializer::ProposalPackage::GovernanceTokenCustody => {
             match packages.governance_token_custody.as_deref() {
                 Some(pkg) => pkg,

@@ -639,6 +639,19 @@ pub enum ProposalType {
     /// Authorize the `operator` to create batched activity markers on behalf
     /// of the governance party via a `DelegatedBatchedMarkersProxy`.
     CreateDelegatedBatchedMarkersProxy { operator: CantonId },
+    /// Delegate minting of the governance party's CIP-104 reward coupons to a
+    /// validator node's `delegate` party via a `MintingDelegationProposal`.
+    /// The delegation beneficiary is always the governance party; the delegate
+    /// accepts the proposal out-of-band via the wallet API.
+    SetupMintingDelegation {
+        delegate: CantonId,
+        dso: CantonId,
+        /// Delegation expiry as microseconds since epoch.
+        expires_at_micros: i64,
+        /// Auto-merge target for the beneficiary's amulets. Must be positive.
+        amulet_merge_limit: i64,
+        description: String,
+    },
     /// Offer a mint of `amount` tokens to `recipient` via
     /// `AllocationFactory_OfferMint`. The resulting `MintOffer` is accepted
     /// later by the recipient, outside this plugin.
@@ -738,6 +751,14 @@ impl ProposalType {
                 deposit_initial_amount_usd: Some(d),
                 ..
             } => validate_positive_amount(d, "deposit_initial_amount_usd"),
+            ProposalType::SetupMintingDelegation {
+                amulet_merge_limit, ..
+            } => {
+                if *amulet_merge_limit <= 0 {
+                    return Err("amulet_merge_limit must be greater than 0".to_string());
+                }
+                Ok(())
+            }
             ProposalType::SetProviderAppRewardBeneficiaries {
                 provider_app_reward_beneficiaries: Some(beneficiaries),
                 ..

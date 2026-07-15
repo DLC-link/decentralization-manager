@@ -398,6 +398,7 @@ pub fn default_package_config() -> PackageConfig {
     PackageConfig {
         governance_action: Some("#governance-action-v1".to_string()),
         governance_core: Some("#governance-core-v1".to_string()),
+        governance_rewards: Some("#governance-rewards-v1".to_string()),
         governance_token_custody: Some("#governance-token-custody-v1".to_string()),
         governance_utility_credential: Some("#governance-utility-credential-v1".to_string()),
         governance_utility_onboarding: Some("#governance-utility-onboarding-v1".to_string()),
@@ -605,6 +606,10 @@ mod tests {
         assert_eq!(
             packages.governance_core.as_deref(),
             Some("#governance-core-v1"),
+        );
+        assert_eq!(
+            packages.governance_rewards.as_deref(),
+            Some("#governance-rewards-v1"),
         );
         assert_eq!(
             packages.governance_token_custody.as_deref(),

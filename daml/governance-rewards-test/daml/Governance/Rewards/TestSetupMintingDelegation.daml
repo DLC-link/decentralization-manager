@@ -1,0 +1,131 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+module Governance.Rewards.TestSetupMintingDelegation where
+
+import DA.Time (addRelTime, days)
+import Daml.Script
+
+import Splice.Wallet.MintingDelegation (MintingDelegationProposal)
+
+import Governance.Action (GovernableAction)
+import Governance.Rules
+import Governance.TestUtils
+
+import Governance.Rewards.SetupMintingDelegation
+
+import TestHarness
+
+data Fixture = Fixture
+  with
+    parties : TestParties
+    delegate : Party
+    dso : Party
+    rulesCid : ContractId GovernanceRules
+  deriving (Eq, Show)
+
+-- Carries the values supplied to SetupMintingDelegation so the `then_` stage
+-- can assert they round-trip into the resulting MintingDelegationProposal.
+data DelegationInputs = DelegationInputs
+  with
+    delegate : Party
+    dso : Party
+    expiresAt : Time
+    amuletMergeLimit : Int
+  deriving (Eq, Show)
+
+given_governance_setup : Script Fixture
+given_governance_setup = do
+  parties <- allocateTestParties
+  delegate <- allocateParty "Delegate"
+  dso <- allocateParty "DSO"
+  rulesCid <- createTestGovernance parties
+  pure Fixture with ..
+
+when_delegation_proposed_and_confirmed : Fixture -> Script DelegationInputs
+when_delegation_proposed_and_confirmed f = do
+  now <- getTime
+  let inputs = DelegationInputs with
+        delegate = f.delegate
+        dso = f.dso
+        expiresAt = now `addRelTime` days 30
+        amuletMergeLimit = 10
+  proposalCid <- submit f.parties.member1 $ createCmd SetupMintingDelegation with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    delegate = inputs.delegate
+    dso = inputs.dso
+    expiresAt = inputs.expiresAt
+    amuletMergeLimit = inputs.amuletMergeLimit
+    description = "collect CIP-104 rewards"
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  _ <- confirmAndExecute f.parties f.rulesCid proposalInterfaceCid
+    [f.parties.member1, f.parties.member2] f.parties.member1
+  pure inputs
+
+then_minting_delegation_proposal_fields_match : Fixture -> DelegationInputs -> Script Failures
+then_minting_delegation_proposal_fields_match f inputs = do
+  proposals <- query @MintingDelegationProposal f.parties.governanceParty
+  case proposals of
+    [(_, p)] -> pure $
+      shouldBe "delegation.beneficiary" f.parties.governanceParty p.delegation.beneficiary <>
+      shouldBe "delegation.delegate" inputs.delegate p.delegation.delegate <>
+      shouldBe "delegation.dso" inputs.dso p.delegation.dso <>
+      shouldBe "delegation.expiresAt" inputs.expiresAt p.delegation.expiresAt <>
+      shouldBe "delegation.amuletMergeLimit" inputs.amuletMergeLimit p.delegation.amuletMergeLimit
+    _ -> pure $ shouldBe "MintingDelegationProposal count" 1 (length proposals)
+
+test_when_delegation_confirmed_then_proposal_created = script do
+  run Test with
+    given = given_governance_setup
+    when = when_delegation_proposed_and_confirmed
+    then_ = then_minting_delegation_proposal_fields_match
+
+when_zero_merge_limit : Fixture -> Script ()
+when_zero_merge_limit f = do
+  now <- getTime
+  submitMustFail f.parties.member1 $ createCmd SetupMintingDelegation with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    delegate = f.delegate
+    dso = f.dso
+    expiresAt = now `addRelTime` days 30
+    amuletMergeLimit = 0
+    description = "should be rejected"
+
+then_nothing : Fixture -> () -> Script Failures
+then_nothing _ _ = pure []
+
+test_when_zero_merge_limit_then_create_rejected = script do
+  run Test with
+    given = given_governance_setup
+    when = when_zero_merge_limit
+    then_ = then_nothing
+
+-- A past expiry cannot be caught by `ensure` (no clock at create time), so the
+-- proposal creates and confirms fine — execution is where it must fail.
+when_past_expiry_execute_fails : Fixture -> Script ()
+when_past_expiry_execute_fails f = do
+  now <- getTime
+  proposalCid <- submit f.parties.member1 $ createCmd SetupMintingDelegation with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    delegate = f.delegate
+    dso = f.dso
+    expiresAt = now `addRelTime` days (-1)
+    amuletMergeLimit = 10
+    description = "already expired"
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  confirmationCids <- submitConfirmations f.parties.governanceParty f.rulesCid
+    proposalInterfaceCid [f.parties.member1, f.parties.member2]
+  submitMustFail (memberContext f.parties.member1 f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor = f.parties.member1
+      actionProposalCid = proposalInterfaceCid
+      confirmations = confirmationCids
+
+test_when_past_expiry_then_execute_rejected = script do
+  run Test with
+    given = given_governance_setup
+    when = when_past_expiry_execute_fails
+    then_ = then_nothing
