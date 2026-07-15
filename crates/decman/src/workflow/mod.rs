@@ -805,8 +805,15 @@ pub async fn start_peer(
                 // rolling upgrade doesn't wedge the peer.
                 let items = match utils::decode_length_prefixed(&payload, 3) {
                     Ok(items) => items,
-                    Err(_) => match utils::decode_length_prefixed(&payload, 2) {
+                    Err(three_item_err) => match utils::decode_length_prefixed(&payload, 2) {
                         Ok(mut items) => {
+                            // Log the 3-item decode error so a genuine
+                            // corruption/encoding bug is distinguishable from an
+                            // intentional legacy 2-item payload, without changing behaviour.
+                            tracing::debug!(
+                                "ImportAcs payload not in 3-item format ({three_item_err}); \
+                                 using legacy 2-item payload (package preflight skipped)"
+                            );
                             items.push(Vec::new());
                             items
                         }
