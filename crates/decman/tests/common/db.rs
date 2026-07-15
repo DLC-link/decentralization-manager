@@ -200,6 +200,26 @@ pub async fn workflow_run_status(
     Ok(s)
 }
 
+/// The `error` recorded on a workflow run (the message a failed run stored).
+/// `None` if there's no row or the column is NULL.
+pub async fn workflow_run_error(
+    db_path: &Path,
+    instance_name: &str,
+    role: &str,
+) -> anyhow::Result<Option<String>> {
+    let pool = open(db_path).await?;
+    let s: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT error FROM workflow_runs WHERE instance_name = ?1 AND role = ?2",
+    )
+    .bind(instance_name)
+    .bind(role)
+    .fetch_optional(&pool)
+    .await
+    .context("workflow_run_error")?;
+    pool.close().await;
+    Ok(s.flatten())
+}
+
 /// Status of the (single) peer-side run that belongs to the given coordinator
 /// run, matched via the `coordinator_instance` column persisted at accept
 /// time. Returns `None` while the peer hasn't accepted (no row yet).
