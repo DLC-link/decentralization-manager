@@ -258,14 +258,22 @@ pub async fn import_party_acs(
     // mode than a failed import (which the peer step retries end-to-end).
     let reconnect_result = reconnect_and_verify_healthy(config).await;
 
+    // Prioritise an unhealthy participant: that's the critical, operator-
+    // actionable failure and must not be masked by a (retryable) import error
+    // when both fail. A failed import with a HEALTHY participant is reported
+    // only after, so the peer step can retry it end-to-end.
+    if let Err(reconnect_err) = reconnect_result {
+        let import_note = match &import_result {
+            Ok(()) => "the ACS import itself completed".to_string(),
+            Err(e) => format!("the ACS import also failed: {e}"),
+        };
+        anyhow::bail!(
+            "ACS import did not leave the participant healthy and connected — it may \
+             be crash-looping on orphan ACS rows from an unclean shutdown and may need \
+             manual repair ({import_note}): {reconnect_err}"
+        );
+    }
     import_result?;
-    reconnect_result.map_err(|e| {
-        anyhow::anyhow!(
-            "ACS imported but the participant did not return to a healthy, connected \
-             state — it may be crash-looping on orphan ACS rows from an unclean \
-             shutdown; the participant may need manual repair: {e}"
-        )
-    })?;
 
     tracing::info!("ACS snapshot imported successfully");
     Ok(())
