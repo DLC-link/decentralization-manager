@@ -211,10 +211,11 @@ pub async fn import_party_acs(
     let mut connectivity =
         SynchronizerConnectivityServiceClient::connect(config.admin_api_url()).await?;
 
-    // Snapshot the currently-connected synchronizers so we disconnect exactly
-    // these — per-synchronizer `DisconnectSynchronizer`, never the bulk
-    // `DisconnectAllSynchronizers` (behaviourally identical in Canton, but we
-    // need the list anyway to verify the reconnect below).
+    // Snapshot the currently-connected synchronizers and disconnect them one at
+    // a time via `DisconnectSynchronizer` rather than the bulk
+    // `DisconnectAllSynchronizers` (behaviourally identical in Canton — same
+    // connectQueue — but it keeps the bulk call out of our code). The reconnect
+    // below is health-verified against the configured synchronizer.
     let connected = connectivity
         .list_connected_synchronizers(tonic::Request::new(ListConnectedSynchronizersRequest {}))
         .await?
@@ -236,15 +237,21 @@ pub async fn import_party_acs(
         "Disconnecting from {} synchronizer(s) for the ACS import...",
         connected.len()
     );
-    for s in &connected {
-        connectivity
-            .disconnect_synchronizer(tonic::Request::new(DisconnectSynchronizerRequest {
-                synchronizer_alias: s.synchronizer_alias.clone(),
-            }))
-            .await?;
+    // Disconnect + import as one fallible unit. Whatever its outcome — including
+    // a `DisconnectSynchronizer` failing partway through the loop — the
+    // reconnect/health-verify bracket below ALWAYS runs, so the participant is
+    // never left (partially) disconnected.
+    let import_result = async {
+        for s in &connected {
+            connectivity
+                .disconnect_synchronizer(tonic::Request::new(DisconnectSynchronizerRequest {
+                    synchronizer_alias: s.synchronizer_alias.clone(),
+                }))
+                .await?;
+        }
+        run_import(config, &synchronizer_id, &party_id, snapshot).await
     }
-
-    let import_result = run_import(config, &synchronizer_id, &party_id, snapshot).await;
+    .await;
 
     // ALWAYS reconnect and verify the connection is actually healthy — a
     // participant left disconnected (or half-reconnected) is a worse failure
