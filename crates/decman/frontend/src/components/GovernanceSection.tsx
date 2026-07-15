@@ -227,6 +227,12 @@ export const GovernanceSection = ({
   // Accept holder-initiated mint/burn request state
   const [proposalMintRequestCid, setProposalMintRequestCid] = useState("");
   const [proposalBurnRequestCid, setProposalBurnRequestCid] = useState("");
+  // Accept External Party Setup: contract id of the validator-created
+  // ExternalPartySetupProposal to accept.
+  const [
+    proposalExternalPartySetupCid,
+    setProposalExternalPartySetupCid,
+  ] = useState("");
   const [proposalLoading, setProposalLoading] = useState(false);
   const [rulesContractId, setRulesContractId] = useState(
     initialRulesContractId || "",
@@ -1557,6 +1563,12 @@ export const GovernanceSection = ({
           };
           break;
         }
+        case "accept_external_party_setup":
+          proposal = {
+            type: "accept_external_party_setup",
+            proposal_cid: proposalExternalPartySetupCid,
+          };
+          break;
         case "mint":
           proposal = {
             type: "mint",
@@ -3741,6 +3753,7 @@ export const GovernanceSection = ({
                   <Divider />
                   <ListSubheader sx={{ color: "primary.main", fontWeight: 600 }}>Rewards</ListSubheader>
                   <MenuItem value="setup_minting_delegation">Setup Minting Delegation</MenuItem>
+                  <MenuItem value="accept_external_party_setup">Accept External Party Setup</MenuItem>
                   <Divider />
                   <ListSubheader sx={{ color: "primary.main", fontWeight: 600 }}>Utility Credential</ListSubheader>
                   <MenuItem value="offer_free_credential">Offer Free Credential</MenuItem>
@@ -4733,6 +4746,27 @@ export const GovernanceSection = ({
                     }}
                   />
                 </>
+              )}
+
+              {proposalType === "accept_external_party_setup" && (
+                <TextField
+                  size="small"
+                  label="External Party Setup Proposal Contract Id"
+                  value={proposalExternalPartySetupCid}
+                  onChange={(e) =>
+                    setProposalExternalPartySetupCid(e.target.value)
+                  }
+                  fullWidth
+                  required
+                  slotProps={{
+                    input: {
+                      endAdornment: fieldHelpAdornment(
+                        "Contract id of the ExternalPartySetupProposal the validator operator created (via POST /v0/admin/external-party/setup-proposal). Accepting it creates the decentralized party's ValidatorRight + TransferPreapproval, unblocking reward collection.",
+                        "Help for External Party Setup Proposal Contract Id",
+                      ),
+                    },
+                  }}
+                />
               )}
 
               {(proposalType === "mint" || proposalType === "burn") && (
