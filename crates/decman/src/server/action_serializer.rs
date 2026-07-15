@@ -1204,16 +1204,13 @@ pub fn build_proposal_create_args(
                 fields: vec![
                     field("governanceParty", make_party(governance_party)),
                     field("proposer", make_party(proposer)),
-                    field(
-                        "primaryCoupon",
-                        make_contract_id(&primary_coupon.to_string()),
-                    ),
+                    field("primaryCoupon", make_contract_id(primary_coupon)),
                     field(
                         "additionalCoupons",
                         make_list(
                             additional_coupons
                                 .iter()
-                                .map(|cid| make_contract_id(&cid.to_string()))
+                                .map(|cid| make_contract_id(cid))
                                 .collect(),
                         ),
                     ),
@@ -2101,12 +2098,6 @@ mod tests {
         CantonId::new("p".to_string(), Namespace::new([0u8; NAMESPACE_LENGTH]))
     }
 
-    /// Like `party_id`, but with a caller-chosen prefix so distinct fixture
-    /// values (e.g. multiple coupon contract ids in one test) don't collide.
-    fn party_id_str(prefix: &str) -> CantonId {
-        CantonId::new(prefix.to_string(), Namespace::new([0u8; NAMESPACE_LENGTH]))
-    }
-
     /// Parse a decimal literal in test fixtures, panicking on invalid input.
     fn dec(s: &str) -> DamlDecimal {
         DamlDecimal::parse(s).expect("valid decimal literal")
@@ -2489,8 +2480,8 @@ mod tests {
     #[test]
     fn build_proposal_assign_reward_beneficiaries_shape() -> Result {
         let proposal = ProposalType::AssignRewardBeneficiaries {
-            primary_coupon: party_id_str("c1"),
-            additional_coupons: vec![party_id_str("c2")],
+            primary_coupon: "0089abc-c1".to_string(),
+            additional_coupons: vec!["0089abc-c2".to_string()],
             new_beneficiaries: vec![
                 RewardBeneficiary {
                     beneficiary: party_id(),

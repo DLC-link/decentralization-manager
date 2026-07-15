@@ -645,8 +645,8 @@ pub enum ProposalType {
     /// == the coupons' provider (spec §4.1). Percentages sum to 1.0, <= 20
     /// entries.
     AssignRewardBeneficiaries {
-        primary_coupon: CantonId,
-        additional_coupons: Vec<CantonId>,
+        primary_coupon: String,
+        additional_coupons: Vec<String>,
         new_beneficiaries: Vec<RewardBeneficiary>,
     },
     /// Toggle result-contract emission on a `RegistrarService`.
@@ -1492,7 +1492,7 @@ mod tests {
     #[test]
     fn assign_reward_beneficiaries_validate_rejects_empty_beneficiaries() {
         let p = ProposalType::AssignRewardBeneficiaries {
-            primary_coupon: cid("c1"),
+            primary_coupon: "0089abc".to_string(),
             additional_coupons: vec![],
             new_beneficiaries: vec![],
         };
@@ -1503,14 +1503,14 @@ mod tests {
     fn assign_reward_beneficiaries_validate_rejects_bad_percentages() {
         // sum != 1.0
         let p = ProposalType::AssignRewardBeneficiaries {
-            primary_coupon: cid("c1"),
+            primary_coupon: "0089abc".to_string(),
             additional_coupons: vec![],
             new_beneficiaries: vec![rb("alice", "0.5")],
         };
         assert!(p.validate().is_err());
         // percentage out of (0,1]
         let p2 = ProposalType::AssignRewardBeneficiaries {
-            primary_coupon: cid("c1"),
+            primary_coupon: "0089abc".to_string(),
             additional_coupons: vec![],
             new_beneficiaries: vec![rb("alice", "0.0"), rb("bob", "1.0")],
         };
@@ -1520,8 +1520,8 @@ mod tests {
     #[test]
     fn assign_reward_beneficiaries_validate_accepts_valid() {
         let p = ProposalType::AssignRewardBeneficiaries {
-            primary_coupon: cid("c1"),
-            additional_coupons: vec![cid("c2")],
+            primary_coupon: "0089abc".to_string(),
+            additional_coupons: vec!["0089def".to_string()],
             new_beneficiaries: vec![rb("alice", "0.8"), rb("bob", "0.2")],
         };
         assert!(p.validate().is_ok());
