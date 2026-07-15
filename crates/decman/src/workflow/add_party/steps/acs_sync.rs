@@ -170,6 +170,7 @@ pub async fn import_party_acs(
     instance_name: &str,
     add_party_config: &AddPartyConfig,
     snapshot: Vec<u8>,
+    required_package_ids: &[String],
 ) -> Result {
     // The marker is durable (never cleared), so its presence means the
     // disconnect window was entered on a prior attempt of this run — the
@@ -202,6 +203,29 @@ pub async fn import_party_acs(
     if snapshot.is_empty() {
         tracing::info!("ACS snapshot is empty — nothing to import");
         return Ok(());
+    }
+
+    // Package preflight: refuse to open the disconnect window if this participant
+    // is missing any package the party's contracts need. The offline import
+    // re-validates every contract (ContractImportMode::Validation) and fails on a
+    // missing package — but only AFTER disconnecting, which is the devnet
+    // "onboarded a node without the DARs" failure. Catch it here, before any
+    // disconnect, with an actionable error and the participant untouched.
+    if !required_package_ids.is_empty() {
+        let available = local_package_ids(config).await?;
+        let missing: Vec<&str> = required_package_ids
+            .iter()
+            .map(String::as_str)
+            .filter(|id| !available.contains(*id))
+            .collect();
+        if !missing.is_empty() {
+            anyhow::bail!(
+                "new member is missing {n} package(s) required by the party's contracts — \
+                 vet the corresponding DAR(s) on this participant before onboarding; add-party \
+                 will not import the ACS without them. Missing package ids: {missing:?}",
+                n = missing.len()
+            );
+        }
     }
 
     // Logical synchronizer id (see `current_ledger_offset` for the physical-id
@@ -381,6 +405,88 @@ fn synchronizer_healthy(
     connected
         .iter()
         .any(|s| s.synchronizer_alias == alias && s.healthy)
+}
+
+/// Coordinator side: the distinct package ids referenced by the party's active
+/// contracts. Shipped to the new member so its ACS-import preflight can verify
+/// it has every package the imported contracts need before disconnecting.
+pub async fn collect_party_package_ids(
+    config: &NodeConfig,
+    party_id: &str,
+    ledger_token: Option<&str>,
+) -> Result<Vec<String>> {
+    use std::collections::BTreeSet;
+
+    use canton_proto_rs::com::daml::ledger::api::v2::{
+        CumulativeFilter, EventFormat, Filters, GetActiveContractsRequest, GetLedgerEndRequest,
+        WildcardFilter, cumulative_filter, get_active_contracts_response::ContractEntry,
+    };
+
+    let mut state = utils::create_state_client(config, ledger_token.map(str::to_string)).await?;
+    let ledger_end = state
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .await?
+        .into_inner()
+        .offset;
+
+    let mut filters_by_party = std::collections::HashMap::new();
+    filters_by_party.insert(
+        party_id.to_string(),
+        Filters {
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
+                    WildcardFilter {
+                        include_created_event_blob: false,
+                    },
+                )),
+            }],
+        },
+    );
+
+    let request = GetActiveContractsRequest {
+        active_at_offset: ledger_end,
+        event_format: Some(EventFormat {
+            filters_by_party,
+            filters_for_any_party: None,
+            verbose: false,
+        }),
+        stream_continuation_token: None,
+    };
+
+    let mut stream = state
+        .get_active_contracts(tonic::Request::new(request))
+        .await?
+        .into_inner();
+
+    let mut package_ids = BTreeSet::new();
+    while let Some(response) = stream.message().await? {
+        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
+            && let Some(created) = active.created_event
+            && let Some(template_id) = created.template_id
+        {
+            package_ids.insert(template_id.package_id);
+        }
+    }
+    Ok(package_ids.into_iter().collect())
+}
+
+/// New-member side: package ids currently known to this participant, via the
+/// admin `PackageService.ListPackages`. Backs the ACS-import package preflight.
+async fn local_package_ids(config: &NodeConfig) -> Result<std::collections::HashSet<String>> {
+    use canton_proto_rs::com::digitalasset::canton::admin::participant::v30::{
+        ListPackagesRequest, package_service_client::PackageServiceClient,
+    };
+
+    let mut client = PackageServiceClient::connect(config.admin_api_url()).await?;
+    let descriptions = client
+        .list_packages(tonic::Request::new(ListPackagesRequest {
+            limit: 10_000,
+            filter_name: String::new(),
+        }))
+        .await?
+        .into_inner()
+        .package_descriptions;
+    Ok(descriptions.into_iter().map(|p| p.package_id).collect())
 }
 
 /// The streamed `ImportPartyAcs` call, isolated so the caller can pair it
