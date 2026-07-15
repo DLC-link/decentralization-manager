@@ -1248,6 +1248,23 @@ pub fn build_proposal_create_args(
                 ],
             },
         ),
+        ProposalType::AcceptExternalPartySetup { proposal_cid } => (
+            ProposalPackage::GovernanceRewards,
+            "Governance.Rewards.AcceptExternalPartySetup",
+            "AcceptExternalPartySetup",
+            Record {
+                record_id: None,
+                fields: vec![
+                    field("governanceParty", make_party(governance_party)),
+                    field("proposer", make_party(proposer)),
+                    field("proposalCid", make_contract_id(proposal_cid)),
+                    field(
+                        "description",
+                        make_text("Accept external party setup (ValidatorRight + TransferPreapproval)"),
+                    ),
+                ],
+            },
+        ),
         ProposalType::Mint {
             allocation_factory_cid,
             instrument_id,
@@ -2427,6 +2444,23 @@ mod tests {
             field_value(&record, "amuletMergeLimit").sum,
             Some(value::Sum::Int64(10)),
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn build_proposal_accept_external_party_setup_shape() -> Result {
+        let proposal = ProposalType::AcceptExternalPartySetup {
+            proposal_cid: "00abc123".to_string(),
+        };
+        let (package, module, entity, record) =
+            build_proposal_create_args("gov", "proposer", &proposal, None, None)?;
+        assert_eq!(package, ProposalPackage::GovernanceRewards);
+        assert_eq!(module, "Governance.Rewards.AcceptExternalPartySetup");
+        assert_eq!(entity, "AcceptExternalPartySetup");
+        assert_eq!(
+            owned_labels(&record),
+            ["governanceParty", "proposer", "proposalCid", "description"]
+        );
         Ok(())
     }
 
