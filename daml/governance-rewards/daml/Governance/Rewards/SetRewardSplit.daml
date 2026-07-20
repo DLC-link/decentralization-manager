@@ -1,0 +1,43 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | GovernableAction that sets (replacing any existing) the decparty's
+-- RewardSplitConfig. Runs with governanceParty authority via governance execute.
+module Governance.Rewards.SetRewardSplit where
+
+import DA.Foldable (forA_)
+import Splice.Api.RewardAssignmentV1 (RewardBeneficiary(..))
+import Governance.Rewards.RewardSplitConfig
+import Governance.Action
+
+template SetRewardSplit
+  with
+    governanceParty : Party
+    proposer : Party
+    priorConfig : Optional (ContractId RewardSplitConfig)
+      -- ^ cid of the config to replace (None for the first set); archived at execute.
+    beneficiaries : [RewardBeneficiary]
+  where
+    signatory proposer
+    observer governanceParty
+
+    interface instance GovernableAction for SetRewardSplit where
+      view = GovernableActionView with
+        governanceParty
+        proposer
+        actionLabel = "SetRewardSplit"
+        description = "Set the reward beneficiary split for the decparty."
+
+      executeImpl = do
+        -- execute-time guards (a direct ledger submit bypasses the Rust boundary)
+        assertMsg "beneficiaries must not be empty" (not (null beneficiaries))
+        assertMsg "at most 20 beneficiaries" (length beneficiaries <= 20)
+        -- Decimal is exact fixed-point: require an exact sum (matches the Rust
+        -- boundary check and split_matches, which also use exact Decimal equality).
+        let total = sum (map (.percentage) beneficiaries)
+        assertMsg "percentages must sum to 1.0" (total == 1.0)
+        -- keyless replace: archive the prior config (if any), then create the new one.
+        -- `Optional` is `Foldable`, so `forA_` runs `archive` only when `Some`.
+        forA_ priorConfig archive
+        _ <- create RewardSplitConfig with governanceParty; beneficiaries
+        pure ()

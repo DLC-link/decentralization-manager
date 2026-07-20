@@ -1,0 +1,18 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | The decparty's governance-configured reward split, held on-ledger so the
+-- auto-confirmer can validate every assignment against it (spec §2, §8, §12).
+-- Keyless (no governance package uses contract keys); singleton is maintained by
+-- SetRewardSplit's replace-by-cid and the reader's defensive single-config check.
+module Governance.Rewards.RewardSplitConfig where
+
+import Splice.Api.RewardAssignmentV1 (RewardBeneficiary)
+
+template RewardSplitConfig
+  with
+    governanceParty : Party
+    beneficiaries : [RewardBeneficiary]
+      -- ^ percentages in (0,1], sum 1.0, <= 20 (guarded at set time).
+  where
+    signatory governanceParty

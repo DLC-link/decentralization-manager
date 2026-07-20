@@ -1,0 +1,56 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+module Governance.Rewards.TestSetRewardSplit where
+
+import Daml.Script
+import Splice.Api.RewardAssignmentV1 (RewardBeneficiary(..))
+import Governance.Action (GovernableAction)
+import Governance.Rules
+import Governance.Rewards.SetRewardSplit
+import Governance.Rewards.RewardSplitConfig
+import Governance.Rewards.AssignTestUtils
+
+test_set_reward_split_creates_config = script do
+  parties <- allocateRewardsTestParties
+  rulesCid <- createTestGovernance parties
+  let gp = parties.governanceParty
+  let split = [ RewardBeneficiary with beneficiary = parties.member2; percentage = 0.8
+              , RewardBeneficiary with beneficiary = parties.member3; percentage = 0.2 ]
+  propCid <- submit parties.member1 $ createCmd SetRewardSplit with
+    governanceParty = gp; proposer = parties.member1; priorConfig = None; beneficiaries = split
+  let ifaceCid : ContractId GovernableAction = toInterfaceContractId propCid
+  _ <- confirmAndExecute parties rulesCid ifaceCid [parties.member1, parties.member2] parties.member1
+  configs <- query @RewardSplitConfig gp
+  assertMsg "one config exists" (length configs == 1)
+  assertMsg "split matches" (map (\(_, c) -> c.beneficiaries) configs == [split])
+  pure ()
+
+test_set_reward_split_replaces_existing = script do
+  parties <- allocateRewardsTestParties
+  rulesCid <- createTestGovernance parties
+  let gp = parties.governanceParty
+  let mk prior p = submit parties.member1 $ createCmd SetRewardSplit with
+        governanceParty = gp; proposer = parties.member1; priorConfig = prior
+        beneficiaries = [RewardBeneficiary with beneficiary = p; percentage = 1.0]
+  p1 <- mk None parties.member2
+  _ <- confirmAndExecute parties rulesCid (toInterfaceContractId p1) [parties.member1, parties.member2] parties.member1
+  [(oldCid, _)] <- query @RewardSplitConfig gp
+  p2 <- mk (Some oldCid) parties.member3
+  _ <- confirmAndExecute parties rulesCid (toInterfaceContractId p2) [parties.member1, parties.member2] parties.member1
+  configs <- query @RewardSplitConfig gp
+  assertMsg "still singleton after replace" (length configs == 1)
+  pure ()
+
+test_set_reward_split_empty_fails = script do
+  parties <- allocateRewardsTestParties
+  rulesCid <- createTestGovernance parties
+  let gp = parties.governanceParty
+  prop <- submit parties.member1 $ createCmd SetRewardSplit with
+    governanceParty = gp; proposer = parties.member1; priorConfig = None; beneficiaries = []
+  confs <- submitConfirmations gp rulesCid (toInterfaceContractId prop) [parties.member1, parties.member2]
+  submitMustFail (actAs parties.member1 <> readAs gp) $
+    exerciseCmd rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor = parties.member1
+      actionProposalCid = toInterfaceContractId prop
+      confirmations = confs
