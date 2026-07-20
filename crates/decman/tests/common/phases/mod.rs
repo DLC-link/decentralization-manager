@@ -28,6 +28,7 @@ pub mod restart_peer_resume;
 pub mod restart_with_concurrent_kinds;
 pub mod retry_coordinator_broadcast;
 pub mod retry_with_offline_peer;
+pub mod reward_assignment;
 pub mod start_handler_conflict_409;
 pub mod token_custody;
 pub mod two_member_party;

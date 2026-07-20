@@ -170,5 +170,16 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     // multi-instance workflows — full-mesh cross-acceptance of simultaneous
     // Onboarding + DARs coordinators on every node.
     phases::concurrent_cross_workflows::run(&mut f).await?; // G11
+
+    // CIP-104 Mode A reward-assignment e2e (Task 10). Devnet-only and opt-in:
+    // it needs a decparty with live unassigned RewardCouponV2 coupons (Mode-B
+    // collection paused so they don't get swept to 0) and test nodes running a
+    // short `reward_automation_interval_secs`. Gated behind DECPM_IT_REWARD so it
+    // never runs in normal CI; even when opted in, it self-skips (returns Ok) if
+    // the decparty has no coupons. See the phase module doc for the full
+    // operational preconditions.
+    if std::env::var("DECPM_IT_REWARD").is_ok() {
+        phases::reward_assignment::run(&mut f).await?;
+    }
     Ok(())
 }
