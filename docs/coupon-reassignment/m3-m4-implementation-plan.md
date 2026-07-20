@@ -43,7 +43,7 @@
 - **Modify** `crates/decman/src/server/types.rs` — `ProposalType::SetRewardSplit` variant + `validate()` arm; extract `validate_reward_beneficiaries` helper shared with `AssignRewardBeneficiaries`.
 - **Modify** `crates/decman/src/server/action_serializer.rs` — `SetRewardSplit` arm + round-trip test.
 - **Modify** `crates/decman/src/server/handlers/governance.rs` — extract `pub(crate) submit_proposal(...)` and `pub(crate) resolve_active_governance_rules(...)` (from `governance.rs:115–138`); widen `execute_confirm_action`, `get_party_credentials`, `packages()` to `pub(crate)`.
-- **Create** `crates/decman/src/server/reward_automation/mod.rs` — the automation module: `SplitSource`, coupon reader, proposal parse-back, auto-confirm engine, proposer, confirmer, and the loop. (One new module directory; ask already granted via this plan.)
+- **Create** `crates/decman/src/server/reward_automation/mod.rs` — the automation module: `effective_split` reader, coupon reader, proposal parse-back, auto-confirm engine, proposer, confirmer, and the loop. (One new module directory; ask already granted via this plan.)
 - **Modify** `crates/decman/src/server/mod.rs` — register the loop in `start_server` (share the existing `web::Data<AppState>`).
 - **Modify** `crates/decman/src/config.rs` — add the `NodeConfig` tick-interval field (Task 9).
 - **Modify** `crates/decman/src/server/mod.rs` module list (`mod reward_automation;`).
@@ -171,6 +171,10 @@ template SetRewardSplit
         -- execute-time guards (a direct ledger submit bypasses the Rust boundary)
         assertMsg "beneficiaries must not be empty" (not (null beneficiaries))
         assertMsg "at most 20 beneficiaries" (length beneficiaries <= 20)
+        -- Each share must be a positive fraction (matches the Rust boundary
+        -- validate_reward_beneficiaries): (0, 1].
+        assertMsg "each percentage must be in (0,1]"
+          (all (\b -> b.percentage > 0.0 && b.percentage <= 1.0) beneficiaries)
         -- Decimal is exact fixed-point: require an exact sum (matches the Rust
         -- boundary check and split_matches, which also use exact Decimal equality).
         let total = sum (map (.percentage) beneficiaries)
@@ -181,6 +185,8 @@ template SetRewardSplit
         _ <- create RewardSplitConfig with governanceParty; beneficiaries
         pure ()
 ```
+
+**Note (R-3, per-percentage guard):** in addition to non-empty / `<= 20` / `sum == 1.0`, `executeImpl` asserts each share is in `(0,1]` (`all (\b -> b.percentage > 0.0 && b.percentage <= 1.0) beneficiaries`), mirroring the Rust boundary `validate_reward_beneficiaries` (Task 2). Without it a direct ledger submit could set a share of `0.0` or `> 1.0` that still summed to `1.0`.
 
 **Note (verify at first build):** `SetRewardSplit` archives `priorConfig` under `governanceParty` authority — `RewardSplitConfig`'s only signatory is `governanceParty`, which the governed execute carries, so the archive is authorized. If a stale/ wrong `priorConfig` cid is passed, the archive fails and the whole execute aborts (safe — no partial state).
 
@@ -221,8 +227,8 @@ git commit -m "feat(governance-rewards): RewardSplitConfig + SetRewardSplit acti
 - Modify: `crates/decman/src/server/action_serializer.rs` (+ tests)
 
 **Interfaces:**
-- Consumes: `RewardBeneficiary` + the `ProposalType` enum + the `_ => Ok(())` default arm (M2); serializer helpers `make_party`, `make_numeric`, `make_list`, `make_record`, `field`; `ProposalPackage::GovernanceRewards`.
-- Produces: `ProposalType::SetRewardSplit { new_beneficiaries: Vec<RewardBeneficiary>, prior_config: Option<String> }` (`prior_config` = cid of the config to replace); a shared `fn validate_reward_beneficiaries(bs: &[RewardBeneficiary]) -> Result<(), String>` (**exact `Decimal`**, no f64); a serializer arm emitting `("Governance.Rewards.SetRewardSplit", "SetRewardSplit", Record{ governanceParty, proposer, priorConfig, beneficiaries })`.
+- Consumes: `RewardBeneficiary` + the `ProposalType` enum + the `_ => Ok(())` default arm (M2); the **pre-existing M2 helper** `validate_reward_beneficiaries` (already exact `DamlDecimal`); serializer helpers `make_party`, `make_list`, `serialize_reward_beneficiary`, `make_optional_contract_id`, `field`; `ProposalPackage::GovernanceRewards`.
+- Produces: `ProposalType::SetRewardSplit { new_beneficiaries: Vec<RewardBeneficiary>, prior_config: Option<String> }` (`prior_config` = cid of the config to replace); a new `validate()` arm calling the existing `validate_reward_beneficiaries` (**exact `DamlDecimal`**, no f64 — nothing extracted, the M2 helper is reused); a serializer arm emitting `("Governance.Rewards.SetRewardSplit", "SetRewardSplit", Record{ governanceParty, proposer, priorConfig, beneficiaries })`.
 
 - [ ] **Step 1: Write the failing validation tests** (in `types.rs` tests):
 
@@ -242,29 +248,43 @@ fn set_reward_split_validate() {
 
 - [ ] **Step 2: Run; verify fail (variant missing).** Run: `cargo test -p decman set_reward_split_validate`. Expected: FAIL.
 
-- [ ] **Step 3: Extract the shared helper** and refactor `AssignRewardBeneficiaries`'s arm to call it (DRY — the checks are identical). **Use exact `Decimal`, not f64** — this refines M2's f64/`1e-9` approach so the boundary agrees with the DAML `total == 1.0` guard (Task 1) and the confirmer's `split_matches` (Task 5); the M2 assign tests (`0.8 + 0.2`) still pass because they sum exactly. In `types.rs`:
+- [ ] **Step 3: Reuse the M2 helper.** `validate_reward_beneficiaries` **already exists** on the branch (added in M2 for `AssignRewardBeneficiaries`) and already uses **exact `DamlDecimal`** — not f64. So there is nothing to extract: just add the `SetRewardSplit` arm that calls the same helper (DRY — the checks are identical). The helper's `DamlDecimal` arithmetic (`b.percentage.value()` comparisons + `DamlDecimal` `Sum`, `sum != one`) is exact, so the boundary already agrees with the DAML `total == 1.0` guard (Task 1) and the confirmer's `split_matches` (Task 5). Verbatim from `types.rs`:
 
 ```rust
-use std::str::FromStr;
-use rust_decimal::Decimal; // the exact type DamlDecimal wraps; confirm the crate/path at first build
-
-/// Non-empty, each percentage in (0.0, 1.0], sum == 1.0 exactly, <= 20 entries.
-fn validate_reward_beneficiaries(bs: &[RewardBeneficiary]) -> Result<(), String> {
-    if bs.is_empty() { return Err("new_beneficiaries must not be empty".into()); }
-    if bs.len() > 20 { return Err("at most 20 beneficiaries".into()); }
-    let (zero, one) = (Decimal::ZERO, Decimal::ONE);
-    let mut sum = Decimal::ZERO;
-    for b in bs {
-        let p = Decimal::from_str(&b.percentage.to_string())
-            .map_err(|_| "percentage is not a number".to_string())?;
-        if p <= zero || p > one { return Err("each percentage must be in (0.0, 1.0]".into()); }
-        sum += p;
+/// Validates `AssignRewardBeneficiaries::new_beneficiaries`: non-empty,
+/// <= 20 entries, each percentage in (0.0, 1.0], summing to exactly 1.0.
+///
+/// `DamlDecimal` addition is exact (no float rounding), so an exact `==`
+/// against `1.0` is sufficient here — no epsilon tolerance is needed.
+fn validate_reward_beneficiaries(beneficiaries: &[RewardBeneficiary]) -> Result<(), String> {
+    if beneficiaries.is_empty() {
+        return Err("new_beneficiaries must not be empty".to_string());
     }
-    if sum != one { return Err("percentages must sum to exactly 1.0".into()); }
+    if beneficiaries.len() > 20 {
+        return Err("at most 20 beneficiaries per coupon".to_string());
+    }
+    let zero = "0"
+        .parse::<DamlDecimal>()
+        .expect("'0' is a valid DamlDecimal");
+    let one: DamlDecimal = "1".parse().expect("'1' is a valid DamlDecimal");
+    for b in beneficiaries {
+        if b.percentage.value() <= zero.value() || b.percentage.value() > one.value() {
+            return Err(format!(
+                "each percentage must be in (0.0, 1.0], got {}",
+                b.percentage
+            ));
+        }
+    }
+    let sum: DamlDecimal = beneficiaries.iter().map(|b| b.percentage).sum();
+    if sum != one {
+        return Err(format!(
+            "reward beneficiary percentages must sum to exactly 1.0, got {sum}"
+        ));
+    }
     Ok(())
 }
 ```
-(If `DamlDecimal` already exposes `Decimal`/`Add`/`Ord`, use it directly instead of re-parsing from string.) Then the `AssignRewardBeneficiaries` arm becomes `=> validate_reward_beneficiaries(new_beneficiaries)`, and add:
+The `AssignRewardBeneficiaries` arm already reads `=> validate_reward_beneficiaries(new_beneficiaries)`, so just add:
 ```rust
 ProposalType::SetRewardSplit { new_beneficiaries, .. } => validate_reward_beneficiaries(new_beneficiaries),
 ```
@@ -302,7 +322,10 @@ fn build_proposal_set_reward_split_shape() -> Result {
 - [ ] **Step 6: Add the serializer arm** (reuse M1's `serialize_reward_beneficiary`), next to the `AssignRewardBeneficiaries` arm:
 
 ```rust
-ProposalType::SetRewardSplit { new_beneficiaries, prior_config } => (
+ProposalType::SetRewardSplit {
+    new_beneficiaries,
+    prior_config,
+} => (
     ProposalPackage::GovernanceRewards,
     "Governance.Rewards.SetRewardSplit",
     "SetRewardSplit",
@@ -311,15 +334,21 @@ ProposalType::SetRewardSplit { new_beneficiaries, prior_config } => (
         fields: vec![
             field("governanceParty", make_party(governance_party)),
             field("proposer", make_party(proposer)),
-            field("priorConfig",
-                make_optional(prior_config.as_ref().map(|c| make_contract_id(c)))),
-            field("beneficiaries",
-                make_list(new_beneficiaries.iter().map(serialize_reward_beneficiary).collect())),
+            field("priorConfig", make_optional_contract_id(prior_config)),
+            field(
+                "beneficiaries",
+                make_list(
+                    new_beneficiaries
+                        .iter()
+                        .map(serialize_reward_beneficiary)
+                        .collect(),
+                ),
+            ),
         ],
     },
 ),
 ```
-(Use the existing optional-encoding helper — grep `make_optional` in `action_serializer.rs`; the `SetProviderAppRewardBeneficiaries` arm already encodes an `Optional`, so mirror it. If the helper takes a value + tag rather than an `Option<Value>`, match its signature.)
+Use the existing `make_optional_contract_id(opt: &Option<String>) -> Value` helper (`action_serializer.rs:252`) — it wraps `value::Sum::Optional` over `make_contract_id`, exactly what `priorConfig : Optional (ContractId RewardSplitConfig)` needs. It takes the `&Option<String>` directly, so pass `prior_config` as-is (no `.as_ref().map(...)`).
 
 - [ ] **Step 7: Refresh TS bindings.** Adding the `SetRewardSplit` variant changes the generated TS union, so run `cargo run --features typegen --bin gen-types` (the bindings are gitignored — this just keeps a local frontend build compiling). **No UI form is needed** (`set_reward_split` is automation-driven); the `default:` case in `GovernanceSection.tsx`'s propose switch already covers it — do not add a case.
 
@@ -357,7 +386,7 @@ git commit -m "refactor(decman): extract pub(crate) submit_proposal; widen creds
 
 ---
 
-### Task 4: Rust — `SplitSource` + unassigned-coupon reader
+### Task 4: Rust — `effective_split` reader + unassigned-coupon reader
 
 **Files:** Create `crates/decman/src/server/reward_automation/mod.rs`; add `mod reward_automation;` in `crates/decman/src/server/mod.rs`.
 
@@ -389,7 +418,7 @@ fn parse_split_record_reads_beneficiaries() {
 
 - [ ] **Step 2: Run; verify fail.** Run: `cargo test -p decman parse_split_record`. Expected: FAIL (fn missing).
 
-- [ ] **Step 3: Implement `active_created_records`, `parse_split_record`, `OnLedgerSplitSource`.** First write `active_created_records` (the shared decoded read above). Then `effective_split` calls it with the `RewardSplitConfig` **template** filter (`package_id = packages.governance_rewards` — an `Option<String>`, so `else return Ok(None)` if unset; `module = "Governance.Rewards.RewardSplitConfig"`, `entity = "RewardSplitConfig"`, `interface_view = false`), keeps records whose `governanceParty == decparty`, and — since the config is a keyless singleton (Task 1) — **defends the single-config invariant**: `0` → `Ok(None)` (off for this decparty); exactly `1` → `Ok(Some(parse_split_record(&rec)?))`; `>1` → `Err("ambiguous RewardSplitConfig: N active — refusing")` + `warn!` (a duplicate slipped past replace-by-cid; the confirmer then refuses everything until cleanup — fail-safe, never mis-assigns). Decoding uses `active_created_records` (above) — no raw-blob parsing.
+- [ ] **Step 3: Implement `active_created_records`, `parse_split_record`, `effective_split`.** First write `active_created_records` (the shared decoded read above). Then `effective_split` (a plain `pub(crate) async fn`, **not** a trait — the codebase avoids `async-trait` and there is one source today; still the single swap point for a future shared template) calls it with the `RewardSplitConfig` **template** filter (`package_id = packages.governance_rewards` — an `Option<String>`, so `else return Ok(None)` if unset; `module = "Governance.Rewards.RewardSplitConfig"`, `entity = "RewardSplitConfig"`, `interface_view = false`), keeps records whose `governanceParty == decparty`, and — since the config is a keyless singleton (Task 1) — **defends the single-config invariant**: `0` → `Ok(None)` (off for this decparty); exactly `1` → `Ok(Some(parse_split_record(&rec)?))`; `>1` → `Err("ambiguous RewardSplitConfig: N active — refusing")` + `warn!` (a duplicate slipped past replace-by-cid; the confirmer then refuses everything until cleanup — fail-safe, never mis-assigns). Decoding uses `active_created_records` (above) — no raw-blob parsing.
 
 - [ ] **Step 4: Run split test; verify pass.** Run: `cargo test -p decman parse_split_record`. Expected: PASS.
 
@@ -398,7 +427,7 @@ fn parse_split_record_reads_beneficiaries() {
 - [ ] **Step 6: Commit.**
 ```bash
 git add crates/decman/src/server/reward_automation/mod.rs crates/decman/src/server/mod.rs
-git commit -m "feat(decman): reward-automation SplitSource + unassigned-coupon reader"
+git commit -m "feat(decman): reward-automation effective_split + unassigned-coupon reader"
 ```
 
 ---
@@ -409,7 +438,7 @@ git commit -m "feat(decman): reward-automation SplitSource + unassigned-coupon r
 
 **Interfaces:**
 - Produces:
-  - `pub(crate) struct PendingAssign { pub proposal_cid: String, pub primary_coupon: String, pub additional_coupons: Vec<String>, pub new_beneficiaries: Vec<RewardBeneficiary> }` (populated by Task 6).
+  - `pub(crate) struct PendingAssign { pub proposal_cid: String, pub governance_party: CantonId, pub primary_coupon: String, pub additional_coupons: Vec<String>, pub new_beneficiaries: Vec<RewardBeneficiary> }` (populated by Task 6). The `governance_party` field (R-6) is the `governanceParty` the proposal is scoped to; the confirmer (Task 8) verifies it equals the decparty so that security-critical check does not rely on ACS visibility alone.
   - `pub(crate) fn split_matches(proposed: &[RewardBeneficiary], configured: &[RewardBeneficiary]) -> bool` — set-equal with **exact `Decimal`** equality on percentage (no float tolerance; matches DAML).
   - `pub(crate) fn is_confirmable(action_label: &str, proposal: &PendingAssign, configured: &[RewardBeneficiary], coupons_unassigned: bool) -> bool` — the allowlist-of-one policy: returns true iff `action_label == "AssignRewardBeneficiaries"` AND `split_matches(&proposal.new_beneficiaries, configured)` AND `coupons_unassigned`.
 
@@ -455,13 +484,13 @@ git commit -m "feat(decman): default-deny auto-confirmation policy (split match)
 
 ---
 
-### Task 6: Rust — read a pending `AssignRewardBeneficiaries` proposal (parse-back)
+### Task 6: Rust — read all pending `AssignRewardBeneficiaries` proposals (parse-back)
 
 **Files:** Modify `crates/decman/src/server/reward_automation/mod.rs` (+ tests).
 
 **Interfaces:**
-- Produces: `pub(crate) async fn read_pending_assign(config, decparty, proposal_cid, token, test_mode, packages) -> anyhow::Result<Option<PendingAssign>>`, and a pure `fn parse_assign_record(cid: &str, rec: &Record) -> anyhow::Result<PendingAssign>`.
-- Rationale: `DomainGovernanceAction` (`types.rs:761`) exposes only `action_label`/`description` — no coupon cids or beneficiaries — so the confirmer must read the concrete `AssignRewardBeneficiaries` contract to validate it.
+- Produces: `pub(crate) async fn read_all_pending_assigns(config, decparty, token, test_mode, packages) -> anyhow::Result<HashMap<String, PendingAssign>>` (R-5: **one** ACS scan per tick, indexed by proposal cid — callers look up by cid instead of re-scanning per proposal), and a pure `fn parse_assign_record(cid: &str, rec: &Record) -> anyhow::Result<PendingAssign>`. `parse_assign_record` populates all five `PendingAssign` fields, including `governance_party` (from the `governanceParty` record field — R-6).
+- Rationale: `DomainGovernanceAction` (`types.rs:761`) exposes only `action_label`/`description` — no coupon cids or beneficiaries — so the confirmer must read the concrete `AssignRewardBeneficiaries` contracts to validate them.
 
 - [ ] **Step 1: Write the failing parse test** against a hand-built `Record` mirroring the M1 template (`governanceParty, proposer, primaryCoupon, additionalCoupons, newBeneficiaries`):
 
@@ -479,6 +508,8 @@ fn parse_assign_record_reads_coupons_and_split() {
         ])),
     ]);
     let pa = parse_assign_record("p1", &rec).unwrap();
+    assert_eq!(pa.proposal_cid, "p1");
+    assert_eq!(pa.governance_party.to_string(), "gov::1220"); // R-6: parsed from governanceParty
     assert_eq!(pa.primary_coupon, "c1");
     assert_eq!(pa.additional_coupons, vec!["c2".to_string()]);
     assert_eq!(pa.new_beneficiaries.len(), 2);
@@ -487,7 +518,7 @@ fn parse_assign_record_reads_coupons_and_split() {
 
 - [ ] **Step 2: Run; verify fail.** Run: `cargo test -p decman parse_assign_record`. Expected: FAIL.
 
-- [ ] **Step 3: Implement `parse_assign_record` + `read_pending_assign`.** `read_pending_assign` calls `active_created_records(config, decparty, token, test_mode, packages.governance_rewards, "Governance.Rewards.AssignRewardBeneficiaries", "AssignRewardBeneficiaries", /*interface_view=*/ false)` (concrete template → `create_arguments` Record), finds the record whose cid == `proposal_cid`, and decodes it with `parse_assign_record`. Return `None` if not found (proposal already executed/expired).
+- [ ] **Step 3: Implement `parse_assign_record` + `read_all_pending_assigns`.** `read_all_pending_assigns` calls `active_created_records(config, decparty, token, test_mode, packages.governance_rewards, "Governance.Rewards.AssignRewardBeneficiaries", "AssignRewardBeneficiaries", /*interface_view=*/ false)` (concrete template → `create_arguments` Record) **once**, then decodes every returned `(cid, rec)` with `parse_assign_record` into a `HashMap<String, PendingAssign>` keyed by cid (R-5 — one scan per tick; callers `pending.get(&proposal_cid)` instead of re-scanning). Returns an empty map when the governance-rewards package is unconfigured. `parse_assign_record` also reads the `governanceParty` field into `PendingAssign.governance_party` (R-6, used by the confirmer's decparty-match check).
 
 - [ ] **Step 4: Run; verify pass.** Run: `cargo test -p decman parse_assign_record`. Expected: PASS.
 
@@ -506,7 +537,8 @@ git commit -m "feat(decman): parse-back of pending AssignRewardBeneficiaries pro
 **Interfaces:**
 - Produces:
   - `pub(crate) fn select_batch(coupons: &[CouponInfo], now: DateTime<Utc>, watermark: Duration, minting_margin: Duration, max_batch: usize) -> Vec<String>` — pure; returns cids to assign this tick.
-  - `pub(crate) async fn run_proposer_once(config, decparty, member_party_id, token, split, test_mode, packages, covered_coupons: &HashSet<String>) -> anyhow::Result<()>` — `covered_coupons` = coupon cids already targeted by in-flight proposals (Task 9 builds it), excluded from this tick's batch (best-effort dedupe, spec §10; coupon-level so partial overlaps are handled).
+  - `pub(crate) async fn run_proposer_once(config, decparty, member_party_id, token, rules_contract_id: &str, split, test_mode, packages, covered_coupons: &HashSet<String>) -> anyhow::Result<()>` — `covered_coupons` = coupon cids already targeted by in-flight proposals (Task 9 builds it), excluded from this tick's batch (best-effort dedupe, spec §10; coupon-level so partial overlaps are handled). `rules_contract_id` (resolved once per tick by Task 9) is needed for the self-confirmation step (see Step 4, C-1).
+  - `async fn submit_confirmation(config, decparty, rules_contract_id, proposal_cid, token, member_party_id, packages) -> anyhow::Result<()>` — a **shared** helper (used by both proposer and confirmer, Task 8) that builds a `CoreDomain` `ConfirmActionRequest` and calls `execute_confirm_action`.
 
 - [ ] **Step 1: Write the failing `select_batch` tests** (spec §9 proposer step 2, §11 batch/margin):
 
@@ -538,7 +570,9 @@ fn select_batch_caps_size() {
 
 - [ ] **Step 3: Implement `select_batch`.** Keep coupons where `now - (expires_at - COUPON_TTL) >= watermark` **and** `expires_at - now >= minting_margin`; sort by `expires_at` ascending (most-urgent-but-still-mintable first); truncate to `max_batch`; return cids. (Use a `COUPON_TTL` const of 36h to derive age from expiry, matching spec §1; if the interface view exposes a `createdAt`, prefer that.)
 
-- [ ] **Step 4: Implement `run_proposer_once`.** Read `unassigned_coupons` (Task 4); drop any whose cid is in `covered_coupons` (dedupe); `select_batch` over the remainder; if a non-empty batch remains, build `ProposalType::AssignRewardBeneficiaries { primary_coupon = batch[0], additional_coupons = batch[1..], new_beneficiaries = split.clone() }` and call `submit_proposal` (Task 3). Log the proposed batch. (If the batch is empty — nothing ripe or all covered — no-op.)
+- [ ] **Step 4: Implement `run_proposer_once` (incl. C-1 self-confirm).** Read `unassigned_coupons` (Task 4); drop any whose cid is in `covered_coupons` (dedupe); `select_batch` over the remainder; if a non-empty batch remains, build `ProposalType::AssignRewardBeneficiaries { primary_coupon = batch[0], additional_coupons = batch[1..], new_beneficiaries = split.clone() }` and call `submit_proposal` (Task 3), which returns the created proposal's `cid`. (If the batch is empty — nothing ripe or all covered — no-op.) `submit_proposal` ignores its `rules_contract_id` arg on creates (it resolves the package ref itself), so pass `""` there.
+  - **Then immediately self-confirm** by calling the shared `submit_confirmation(config, decparty, rules_contract_id, &cid, token, member_party_id, packages)` helper (**C-1**). This is not optional: `get_governance_confirmations` only surfaces proposals that already have ≥1 confirmation, so a proposal with zero confirmations is invisible to every confirmer (including this node) and can never reach threshold. The confirming choice needs the **real** `rules_contract_id` (unlike the create). Log the proposed + self-confirmed batch.
+  - `submit_confirmation` builds a `CoreDomain` `ConfirmActionRequest { party_id: decparty, rules_contract_id, action: ActionType::GovernanceSetThreshold { new_threshold: 0 }, governance_type: GovernanceType::CoreDomain, proposal_cid: Some(proposal_cid) }` and calls `execute_confirm_action`. The `action` is an **inert placeholder** — `execute_confirm_action`'s `CoreDomain` branch derives the choice arg from `proposal_cid` and ignores `action` (mirrors the frontend's `governance_set_threshold { new_threshold: 0 }` placeholder in `NotificationsView.tsx`).
 
 - [ ] **Step 5: Run batch tests; verify pass.** Run: `cargo test -p decman -- select_batch batch`. Expected: PASS.
 
@@ -555,8 +589,8 @@ git commit -m "feat(decman): proposer role (TTL-watermark batch + dedupe + propo
 **Files:** Modify `crates/decman/src/server/reward_automation/mod.rs` (+ tests).
 
 **Interfaces:**
-- Produces: `pub(crate) async fn run_confirmer_once(data: &web::Data<AppState>, config, decparty, member_party_id, token, rules_contract_id: &str, split, domain: &[DomainGovernanceAction], test_mode, packages) -> anyhow::Result<()>`, plus a pure `fn already_confirmed_by(action: &DomainGovernanceAction, member: &CantonId) -> bool`. (`domain` is fetched once per tick by Task 9 and passed in — no re-fetch here; `can_execute` is already on each `DomainGovernanceAction`, so no `threshold` arg is needed.)
-- Consumes: `read_pending_assign` (Task 6), `is_confirmable` (Task 5), `unassigned_coupons` (Task 4, to recheck coupons), `execute_confirm_action` (Task 3, now `pub(crate)`).
+- Produces: `pub(crate) async fn run_confirmer_once(data: &web::Data<AppState>, config, decparty, member_party_id, token, rules_contract_id: &str, split, domain: &[DomainGovernanceAction], pending: &HashMap<String, PendingAssign>, test_mode, packages) -> anyhow::Result<()>`, plus a pure `fn already_confirmed_by(action: &DomainGovernanceAction, member: &CantonId) -> bool`. (`domain` **and** `pending` are both built once per tick by Task 9 and passed in — no re-fetch/re-scan here; `can_execute` is already on each `DomainGovernanceAction`, so no `threshold` arg is needed.)
+- Consumes: `pending.get(&a.proposal_cid)` from the map Task 9 built via `read_all_pending_assigns` (Task 6 — R-5, no per-proposal re-read), `is_confirmable` (Task 5), `unassigned_coupons` (Task 4, to recheck coupons once), the shared `submit_confirmation` helper (Task 7), which wraps `execute_confirm_action` (Task 3, now `pub(crate)`).
 
 - [ ] **Step 1: Write the failing `already_confirmed_by` test** (avoid double-confirming):
 
@@ -580,12 +614,13 @@ fn already_confirmed_by_detects_this_member() {
 - [ ] **Step 3: Implement `already_confirmed_by` + `run_confirmer_once`.** Flow:
   1. Iterate the `domain` slice passed in (fetched once by Task 9 — do not re-fetch).
   1b. Fetch the unassigned set **once** before the loop: `let live: HashSet<String> = unassigned_coupons(config, decparty, token, test_mode, packages).await?.into_iter().map(|c| c.cid).collect();` (do not re-query per proposal).
-  2. For each `a in domain` with `a.action_label == "AssignRewardBeneficiaries"` and `!already_confirmed_by(a, member_party_id)` and `!a.orphaned`:
-     - `let Some(pa) = read_pending_assign(config, decparty, &a.proposal_cid, token, test_mode, packages).await? else continue;`
+  2. For each `a in domain` with `a.action_label == "AssignRewardBeneficiaries"` and `!a.orphaned` and `!already_confirmed_by(a, member_party_id)`:
+     - **Look up** the proposal in the passed-in map (R-5, no per-proposal ACS read): `let Some(pa) = pending.get(&a.proposal_cid) else { continue; };`
+     - **Verify `governanceParty` locally** (R-6, security-critical): `if pa.governance_party != *decparty { warn!(...); continue; }` — do not rely on ACS visibility alone.
      - `coupons_ok = std::iter::once(&pa.primary_coupon).chain(&pa.additional_coupons).all(|c| live.contains(c));` (using the hoisted `live`)
-     - `if is_confirmable(&a.action_label, &pa, split, coupons_ok) { execute_confirm_action(config, &confirm_req, token, member_party_id, packages).await?; }` else `warn!`-refuse. Build `confirm_req: ConfirmActionRequest` exactly like the proposer-auto-confirm block does (see verification below), with `governance_type: GovernanceType::CoreDomain` and `proposal_cid: Some(a.proposal_cid.clone())`.
-  3. (Optional, first-wins) if `a.can_execute`, call the executor; a lost race fails harmlessly (spec §10). Keep execution behind the same enrolled-label guard.
-  - **First-build verification (concrete example exists):** `propose_action` already **auto-confirms as the proposer** immediately after creating a proposal — the block at ~`governance.rs:1420–1470` builds a `ConfirmActionRequest { governance_type: GovernanceType::CoreDomain, proposal_cid: Some(...), rules_contract_id, action, .. }` and calls `execute_confirm_action`. Copy that exact construction (including whatever `action: ActionType` value it uses for `CoreDomain` — `execute_confirm_action`'s CoreDomain branch builds the choice arg from `proposal_cid`, `governance.rs:2094`, so `action` is effectively inert there). The `rules_contract_id` is resolved once per tick by `resolve_active_governance_rules` (Task 3/9, extracted from `governance.rs:115–138`) and threaded in.
+     - `if is_confirmable(&a.action_label, pa, split, coupons_ok) { submit_confirmation(config, decparty, rules_contract_id, &a.proposal_cid, token, member_party_id, packages).await?; }` else `warn!`-refuse. The confirmation goes through the **shared `submit_confirmation` helper** (Task 7) — the same helper the proposer's self-confirm uses.
+  3. (Deferred, first-wins) a `TODO(M4)` guards optional execute when `a.can_execute`; left out to keep scope tight — execute stays human-driven for now.
+  - **How the `ConfirmActionRequest` is built (corrects an earlier assumption):** the `propose_action` handler does **not** build a `ConfirmActionRequest` (it exercises the confirm inline via the choice), so there is no reusable inline confirm block to copy. Instead, `submit_confirmation` builds a `CoreDomain` `ConfirmActionRequest { party_id: decparty, rules_contract_id, action: ActionType::GovernanceSetThreshold { new_threshold: 0 }, governance_type: GovernanceType::CoreDomain, proposal_cid: Some(a.proposal_cid.clone()) }`. The `action` is an **inert placeholder** — `execute_confirm_action`'s `CoreDomain` branch (`governance.rs:2130`) derives the choice arg from `proposal_cid` and ignores `action` (this mirrors the frontend's `governance_set_threshold { new_threshold: 0 }` placeholder in `NotificationsView.tsx`). The `rules_contract_id` is resolved once per tick by `resolve_active_governance_rules` (Task 3/9, extracted from `governance.rs:115–138`) and threaded in.
 
 - [ ] **Step 4: Run; verify pass.** Run: `cargo test -p decman already_confirmed_by`. Expected: PASS.
 
@@ -628,26 +663,30 @@ pub(crate) async fn run_reward_automation_loop(data: web::Data<AppState>) {
 async fn run_once_for_party(data: &web::Data<AppState>, decparty: &CantonId) -> anyhow::Result<()> {
     let pkgs = packages();
     let Some((token, member)) = get_party_credentials(data, decparty).await else { return Ok(()); };
-    // enablement: "on" iff the decparty has exactly one RewardSplitConfig (Task 4).
-    // (effective_split is a plain async fn — the single-impl SplitSource trait was
-    // dropped to match the codebase's no-async-trait convention.)
+    // enablement: exactly one RewardSplitConfig => on; none => off; >1 => Err.
+    // (effective_split is a plain async fn — no SplitSource trait; the codebase
+    // deliberately avoids async-trait and there is one source today.)
     let Some(split) = effective_split(&data.config, &pkgs, data.test_mode, decparty, &token).await? else { return Ok(()); }; // None => off; Err => ambiguous, propagates as a warn
     // governance rules cid + governance threshold (NOT topology) from the active GovernanceRules
-    let (rules_cid, threshold) = resolve_active_governance_rules(&data.config, decparty, &token, data.test_mode, &pkgs).await?;
+    let (rules_cid, threshold) = resolve_active_governance_rules(&data.config, decparty, Some(token.clone()), data.test_mode, &pkgs).await?;
     // fetch pending governance actions ONCE this tick (shared by dedupe + confirmer)
     let (_, domain) = get_governance_confirmations(
         &data.config, decparty, threshold, Some(token.clone()), data.test_mode, &pkgs).await?;
+    // all in-flight AssignRewardBeneficiaries proposals, read ONCE (indexed by cid),
+    // shared by the proposer's dedupe + the confirmer (R-5 — no per-proposal scan).
+    let pending = read_all_pending_assigns(&data.config, decparty, Some(token.clone()), data.test_mode, &pkgs).await?;
     // coupons already targeted by in-flight assign proposals -> dedupe input for the proposer
     let mut covered: HashSet<String> = HashSet::new();
-    for a in domain.iter().filter(|a| a.action_label == "AssignRewardBeneficiaries" && !a.orphaned) {
-        if let Some(pa) = read_pending_assign(&data.config, decparty, &a.proposal_cid, &token, data.test_mode, &pkgs).await? {
-            covered.insert(pa.primary_coupon);
-            covered.extend(pa.additional_coupons);
-        }
+    for pa in pending.values() {
+        covered.insert(pa.primary_coupon.clone());
+        covered.extend(pa.additional_coupons.iter().cloned());
     }
-    // proposer then confirmer (order within a tick is immaterial; see spec §10)
-    run_proposer_once(&data.config, decparty, &member, &token, &split, data.test_mode, &pkgs, &covered).await?;
-    run_confirmer_once(data, &data.config, decparty, &member, &token, &rules_cid, &split, &domain, data.test_mode, &pkgs).await?;
+    // A transient propose error must not skip confirming already-pending proposals
+    // this tick (R-1): log and continue to the confirmer.
+    if let Err(e) = run_proposer_once(&data.config, decparty, &member, &token, &rules_cid, &split, data.test_mode, &pkgs, &covered).await {
+        tracing::warn!(%decparty, error=%e, "reward automation: proposer tick failed");
+    }
+    run_confirmer_once(data, &data.config, decparty, &member, &token, &rules_cid, &split, &domain, &pending, data.test_mode, &pkgs).await?;
     Ok(())
 }
 ```
@@ -696,7 +735,7 @@ git commit -m "test(integration): Mode A propose -> auto-confirm -> execute on d
 ## What this plan intentionally does NOT cover
 
 - Mode B / the MintingDelegation collection path (Robert; now a one-shot, live on devnet via #256).
-- A shared reward-config template — if Robert builds one, swap `OnLedgerSplitSource` (Task 4) for it; nothing else changes.
+- A shared reward-config template — if Robert builds one, swap `effective_split`'s body (Task 4) for it; nothing else changes.
 - Deterministic leader election / grace-window proposer optimisation (spec §10 — a follow-up; any-node-proposes is already safe).
 - Beneficiary self-mint automation (spec §4.3 — the beneficiaries' own agents).
 - Auto-confirmation for any action other than `AssignRewardBeneficiaries` (default-deny holds).
