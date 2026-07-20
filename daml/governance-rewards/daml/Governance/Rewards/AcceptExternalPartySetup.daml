@@ -1,0 +1,39 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Plugin template that, when confirmed by governance, accepts a validator-created
+-- ExternalPartySetupProposal on behalf of the decentralized party (the governance
+-- party). Accepting creates the decparty's ValidatorRight + TransferPreapproval on
+-- that validator, which is what makes the validator run reward-collection automation
+-- (MintingDelegationCollectRewardsTrigger) for the party.
+module Governance.Rewards.AcceptExternalPartySetup where
+
+import Splice.AmuletRules (ExternalPartySetupProposal, ExternalPartySetupProposal_Accept(..))
+
+import Governance.Action
+
+template AcceptExternalPartySetup
+  with
+    governanceParty : Party
+      -- ^ The decentralized party = the proposal's `user` (choice controller).
+    proposer : Party
+    proposalCid : ContractId ExternalPartySetupProposal
+      -- ^ The validator-created proposal to accept (from POST /v0/admin/external-party/setup-proposal).
+    description : Text
+  where
+    signatory proposer
+    observer governanceParty
+
+    interface instance GovernableAction for AcceptExternalPartySetup where
+      view = GovernableActionView with
+        governanceParty
+        proposer
+        actionLabel = "AcceptExternalPartySetup"
+        description
+
+      executeImpl = do
+        -- Runs with governanceParty authority; the proposal's Accept controller is
+        -- `user` == governanceParty, so this is authorized. Creates ValidatorRight +
+        -- TransferPreapproval (validator/dso authority comes from the consumed proposal).
+        _ <- exercise proposalCid ExternalPartySetupProposal_Accept
+        pure ()

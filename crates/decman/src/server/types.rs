@@ -652,6 +652,16 @@ pub enum ProposalType {
         amulet_merge_limit: i64,
         description: String,
     },
+    /// Accept a validator-created `ExternalPartySetupProposal` on behalf of the
+    /// governance party, creating its `ValidatorRight` + `TransferPreapproval`.
+    /// This is the missing prerequisite that makes the validator's built-in
+    /// `MintingDelegationCollectRewardsTrigger` start collecting the party's
+    /// CIP-104 reward coupons via the established `MintingDelegation`.
+    AcceptExternalPartySetup {
+        /// Contract id of the ExternalPartySetupProposal to accept (from the
+        /// validator's POST /v0/admin/external-party/setup-proposal).
+        proposal_cid: String,
+    },
     /// Offer a mint of `amount` tokens to `recipient` via
     /// `AllocationFactory_OfferMint`. The resulting `MintOffer` is accepted
     /// later by the recipient, outside this plugin.
@@ -756,6 +766,12 @@ impl ProposalType {
             } => {
                 if *amulet_merge_limit <= 0 {
                     return Err("amulet_merge_limit must be greater than 0".to_string());
+                }
+                Ok(())
+            }
+            ProposalType::AcceptExternalPartySetup { proposal_cid } => {
+                if proposal_cid.trim().is_empty() {
+                    return Err("proposal_cid must not be empty".to_string());
                 }
                 Ok(())
             }

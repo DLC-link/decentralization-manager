@@ -1,6 +1,6 @@
 sdk-version: 3.4.11
 name: governance-rewards-v1
-version: 0.1.0
+version: 0.1.1
 source: daml
 dependencies:
   - daml-prim
@@ -8,6 +8,7 @@ dependencies:
 data-dependencies:
   - ../governance-action-v1/.daml/dist/governance-action-v1-0.1.0.dar
   - ../dars/splice-wallet-0.1.18.dar
+  - ../dars/splice-amulet-0.1.17.dar
 build-options:
   - --target=2.2
   - --ghc-option=-Wunused-binds
