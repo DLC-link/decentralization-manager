@@ -46,7 +46,12 @@ use crate::{
     utils,
 };
 
-use super::types::RewardBeneficiary;
+use super::AppState;
+use super::handlers::{execute_confirm_action, submit_proposal};
+use super::types::{
+    ActionType, ConfirmActionRequest, DomainGovernanceAction, GovernanceType, ProposalType,
+    RewardBeneficiary,
+};
 
 // ============================================================================
 // Record field extraction (mirrors queries.rs `field_*` helpers; the originals
@@ -496,9 +501,233 @@ pub(crate) async fn read_pending_assign(
     Ok(None)
 }
 
+// ============================================================================
+// Proposer role
+// ============================================================================
+
+/// Total lifetime of a `RewardCouponV2` coupon (spec §1: 36h TTL). Used to
+/// derive a coupon's age from its `expiresAt`, since the interface view exposes
+/// no `createdAt`.
+const COUPON_TTL: chrono::Duration = chrono::Duration::hours(36);
+
+/// Select the coupons to assign this tick (pure). Keeps a coupon iff:
+///   * it is old enough — its age (`now - (expiresAt - COUPON_TTL)`) is past
+///     `watermark`, so freshly-earned coupons get first refusal by any other
+///     collection path before we sweep them (spec §9/§11); AND
+///   * enough time remains before expiry to mint after assigning —
+///     `expiresAt - now >= minting_margin`.
+///
+/// Survivors are ordered most-urgent-first (ascending `expiresAt`) and truncated
+/// to `max_batch`; the coupon cids are returned.
+pub(crate) fn select_batch(
+    coupons: &[CouponInfo],
+    now: DateTime<Utc>,
+    watermark: chrono::Duration,
+    minting_margin: chrono::Duration,
+    max_batch: usize,
+) -> Vec<String> {
+    let mut selected: Vec<&CouponInfo> = coupons
+        .iter()
+        .filter(|c| {
+            let age = now - (c.expires_at - COUPON_TTL);
+            let remaining = c.expires_at - now;
+            age >= watermark && remaining >= minting_margin
+        })
+        .collect();
+    selected.sort_by_key(|c| c.expires_at);
+    selected
+        .into_iter()
+        .take(max_batch)
+        .map(|c| c.cid.clone())
+        .collect()
+}
+
+/// One proposer tick for a decparty: read its unassigned coupons, drop any
+/// already targeted by an in-flight proposal (`covered_coupons`), select a ripe
+/// batch, and — if non-empty — propose `AssignRewardBeneficiaries` for the
+/// configured `split`. An empty batch (nothing ripe, or all covered) is a no-op.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_proposer_once(
+    config: &NodeConfig,
+    decparty: &CantonId,
+    member_party_id: &CantonId,
+    token: &str,
+    split: &[RewardBeneficiary],
+    test_mode: bool,
+    packages: &PackageConfig,
+    covered_coupons: &std::collections::HashSet<String>,
+) -> anyhow::Result<()> {
+    // Batch policy constants (spec §9 proposer step 2, §11 TTL/margin/cap):
+    //   * watermark 6h — leave freshly-earned coupons to any other collection
+    //     path first; only sweep what remains unassigned after 6h.
+    //   * minting_margin 2h — refuse coupons too close to their 36h expiry to
+    //     still be minted after the assignment lands.
+    //   * max_batch 50 — a conservative per-tick cap so a single propose command
+    //     stays well within ledger limits.
+    const WATERMARK: chrono::Duration = chrono::Duration::hours(6);
+    const MINTING_MARGIN: chrono::Duration = chrono::Duration::hours(2);
+    const MAX_BATCH: usize = 50;
+
+    let coupons: Vec<CouponInfo> = unassigned_coupons(
+        config,
+        decparty,
+        Some(token.to_string()),
+        test_mode,
+        packages,
+    )
+    .await?
+    .into_iter()
+    .filter(|c| !covered_coupons.contains(&c.cid))
+    .collect();
+
+    let batch = select_batch(&coupons, Utc::now(), WATERMARK, MINTING_MARGIN, MAX_BATCH);
+    if batch.is_empty() {
+        return Ok(());
+    }
+
+    let proposal = ProposalType::AssignRewardBeneficiaries {
+        primary_coupon: batch[0].clone(),
+        additional_coupons: batch[1..].to_vec(),
+        new_beneficiaries: split.to_vec(),
+    };
+
+    tracing::info!(
+        %decparty,
+        batch_size = batch.len(),
+        coupons = ?batch,
+        "reward automation: proposing AssignRewardBeneficiaries",
+    );
+
+    // `submit_proposal` ignores `rules_contract_id` for creates (it resolves the
+    // package ref itself), so pass an empty string here.
+    submit_proposal(
+        config,
+        decparty,
+        "",
+        &proposal,
+        token,
+        member_party_id,
+        packages,
+    )
+    .await?;
+
+    Ok(())
+}
+
+// ============================================================================
+// Confirmer role
+// ============================================================================
+
+/// True iff `member` already appears among `action`'s confirmations, so this
+/// node does not double-confirm a proposal it has already signed.
+pub(crate) fn already_confirmed_by(action: &DomainGovernanceAction, member: &CantonId) -> bool {
+    action
+        .confirmations
+        .iter()
+        .any(|c| &c.confirming_party == member)
+}
+
+/// One confirmer tick for a decparty. For each pending
+/// `AssignRewardBeneficiaries` proposal this node has not yet confirmed, read it
+/// back from the ledger, validate its proposed split against the on-ledger
+/// `split` and that every target coupon is still unassigned, and — only then —
+/// add this node's confirmation. Correctness comes from this check, never from
+/// trusting the proposer (default-deny; spec §5, §12).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_confirmer_once(
+    data: &actix_web::web::Data<AppState>,
+    config: &NodeConfig,
+    decparty: &CantonId,
+    member_party_id: &CantonId,
+    token: &str,
+    rules_contract_id: &str,
+    split: &[RewardBeneficiary],
+    domain: &[DomainGovernanceAction],
+    test_mode: bool,
+    packages: &PackageConfig,
+) -> anyhow::Result<()> {
+    // Held for the (deferred) first-wins execute path; see TODO(M4) below.
+    let _ = data;
+
+    // Fetch the unassigned set ONCE this tick; reused to recheck every
+    // proposal's target coupons (do not re-query per proposal).
+    let live: std::collections::HashSet<String> = unassigned_coupons(
+        config,
+        decparty,
+        Some(token.to_string()),
+        test_mode,
+        packages,
+    )
+    .await?
+    .into_iter()
+    .map(|c| c.cid)
+    .collect();
+
+    for a in domain {
+        if a.action_label != "AssignRewardBeneficiaries"
+            || a.orphaned
+            || already_confirmed_by(a, member_party_id)
+        {
+            continue;
+        }
+
+        let Some(pa) = read_pending_assign(
+            config,
+            decparty,
+            &a.proposal_cid,
+            Some(token.to_string()),
+            test_mode,
+            packages,
+        )
+        .await?
+        else {
+            continue;
+        };
+
+        let coupons_ok = std::iter::once(&pa.primary_coupon)
+            .chain(&pa.additional_coupons)
+            .all(|c| live.contains(c));
+
+        if is_confirmable(&a.action_label, &pa, split, coupons_ok) {
+            // Build the confirm request as the `/governance/confirm` path does
+            // for a CoreDomain action: `execute_confirm_action`'s CoreDomain
+            // branch builds the choice arg from `proposal_cid`, so `action` is
+            // inert here — mirror the frontend's placeholder
+            // (`governance_set_threshold { new_threshold: 0 }`,
+            // NotificationsView.tsx).
+            let req = ConfirmActionRequest {
+                party_id: decparty.clone(),
+                rules_contract_id: rules_contract_id.to_string(),
+                action: ActionType::GovernanceSetThreshold { new_threshold: 0 },
+                governance_type: GovernanceType::CoreDomain,
+                proposal_cid: Some(a.proposal_cid.clone()),
+            };
+            execute_confirm_action(config, &req, token, member_party_id, packages).await?;
+            tracing::info!(
+                %decparty,
+                proposal_cid = %a.proposal_cid,
+                "reward automation: confirmed AssignRewardBeneficiaries",
+            );
+        } else {
+            tracing::warn!(
+                %decparty,
+                proposal_cid = %a.proposal_cid,
+                "reward automation: refusing to confirm AssignRewardBeneficiaries \
+                 (split mismatch or a target coupon is no longer unassigned)",
+            );
+        }
+
+        // TODO(M4): optional first-wins execute when `a.can_execute` — left out
+        // to keep scope tight; execute stays human-driven for now.
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::types::GovernanceConfirmation;
     use canton_proto_rs::com::daml::ledger::api::v2::{List, RecordField, Value};
 
     fn value(sum: value::Sum) -> Value {
@@ -670,5 +899,98 @@ mod tests {
         assert_eq!(pa.primary_coupon, "c1");
         assert_eq!(pa.additional_coupons, vec!["c2".to_string()]);
         assert_eq!(pa.new_beneficiaries.len(), 2);
+    }
+
+    // ---- proposer (select_batch) --------------------------------------------
+
+    fn dt(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s)
+            .expect("valid rfc3339")
+            .with_timezone(&Utc)
+    }
+
+    fn coupon(id: &str, expires: &str) -> CouponInfo {
+        CouponInfo {
+            cid: id.to_string(),
+            provider: CantonId::parse(ALICE).expect("valid canton id"),
+            amount: "1".parse().expect("valid decimal"),
+            expires_at: dt(expires),
+        }
+    }
+
+    #[test]
+    fn select_batch_respects_watermark_margin_and_cap() {
+        let now = dt("2026-07-20T12:00:00Z");
+        let coupons = vec![
+            // ~35h to expiry -> age ~1h < 6h watermark -> too fresh, excluded.
+            coupon("young", "2026-07-21T23:00:00Z"),
+            // 8h to expiry -> age 28h past watermark, margin ok -> included.
+            coupon("ripe", "2026-07-20T20:00:00Z"),
+            // 30m to expiry -> inside 2h minting margin -> excluded.
+            coupon("urgent", "2026-07-20T12:30:00Z"),
+        ];
+        let got = select_batch(
+            &coupons,
+            now,
+            chrono::Duration::hours(6),
+            chrono::Duration::hours(2),
+            100,
+        );
+        assert_eq!(got, vec!["ripe".to_string()]);
+    }
+
+    #[test]
+    fn select_batch_caps_size() {
+        let now = dt("2026-07-20T12:00:00Z");
+        let coupons: Vec<CouponInfo> = (0..10)
+            .map(|i| coupon(&format!("c{i}"), "2026-07-20T20:00:00Z"))
+            .collect();
+        assert_eq!(
+            select_batch(
+                &coupons,
+                now,
+                chrono::Duration::hours(6),
+                chrono::Duration::hours(2),
+                3,
+            )
+            .len(),
+            3
+        );
+    }
+
+    // ---- confirmer (already_confirmed_by) -----------------------------------
+
+    fn gov_conf(p: &str) -> GovernanceConfirmation {
+        GovernanceConfirmation {
+            contract_id: "conf".to_string(),
+            action: ActionType::GovernanceSetThreshold { new_threshold: 0 },
+            confirming_party: CantonId::parse(p).expect("valid canton id"),
+            created_at: 0,
+            expires_at: 0,
+        }
+    }
+
+    #[test]
+    fn already_confirmed_by_detects_this_member() {
+        let action = DomainGovernanceAction {
+            proposal_cid: "p".to_string(),
+            action_label: "AssignRewardBeneficiaries".to_string(),
+            description: None,
+            confirmations: vec![gov_conf(ALICE)],
+            confirmation_count: 1,
+            can_execute: false,
+            orphaned: false,
+            transfer_details: None,
+            accept_transfer_details: None,
+            service_request_details: None,
+        };
+        assert!(already_confirmed_by(
+            &action,
+            &CantonId::parse(ALICE).expect("valid canton id")
+        ));
+        assert!(!already_confirmed_by(
+            &action,
+            &CantonId::parse(BOB).expect("valid canton id")
+        ));
     }
 }

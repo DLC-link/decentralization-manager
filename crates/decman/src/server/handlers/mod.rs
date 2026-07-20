@@ -21,6 +21,10 @@ pub use governance::{
     get_transfer_instructions_handler, get_transfer_preapprovals_handler,
     get_user_services_handler, get_vaults_handler, propose_action, query_contracts_handler,
 };
+// Crate-internal governance helpers reused by the reward-automation module
+// (Task 3 widened these to `pub(crate)`; re-exported here so they are reachable
+// through the private `governance` submodule).
+pub(crate) use governance::{execute_confirm_action, submit_proposal};
 pub use invitations::{accept_invitation, decline_invitation, get_invitations};
 pub use keys::get_key_status;
 pub use parties::{
