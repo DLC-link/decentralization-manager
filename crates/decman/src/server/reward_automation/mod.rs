@@ -408,7 +408,7 @@ pub(crate) async fn unassigned_coupons(
 
 /// A pending `AssignRewardBeneficiaries` proposal, read back from the ledger so
 /// the confirmer can validate it against the configured split before adding this
-/// node's confirmation. Populated by [`read_pending_assign`].
+/// node's confirmation. Populated by [`read_all_pending_assigns`].
 #[derive(Clone, Debug)]
 pub(crate) struct PendingAssign {
     /// Mirrors the `DomainGovernanceAction` cid so a `PendingAssign` is
@@ -482,16 +482,15 @@ fn parse_assign_record(cid: &str, rec: &Record) -> anyhow::Result<PendingAssign>
 /// `proposal_cid`, decoding its target coupons and proposed split. Returns
 /// `Ok(None)` if the governance-rewards package is unconfigured or the proposal
 /// is no longer active (already executed/expired).
-pub(crate) async fn read_pending_assign(
+pub(crate) async fn read_all_pending_assigns(
     config: &NodeConfig,
     decparty: &CantonId,
-    proposal_cid: &str,
     token: Option<String>,
     test_mode: bool,
     packages: &PackageConfig,
-) -> anyhow::Result<Option<PendingAssign>> {
+) -> anyhow::Result<HashMap<String, PendingAssign>> {
     let Some(package_id) = packages.governance_rewards.as_deref() else {
-        return Ok(None);
+        return Ok(HashMap::new());
     };
 
     let records = active_created_records(
@@ -506,12 +505,13 @@ pub(crate) async fn read_pending_assign(
     )
     .await?;
 
+    // One ACS scan per tick; callers look up by cid instead of re-scanning per
+    // pending proposal.
+    let mut out = HashMap::with_capacity(records.len());
     for (cid, rec) in &records {
-        if cid == proposal_cid {
-            return Ok(Some(parse_assign_record(cid, rec)?));
-        }
+        out.insert(cid.clone(), parse_assign_record(cid, rec)?);
     }
-    Ok(None)
+    Ok(out)
 }
 
 // ============================================================================
@@ -710,6 +710,7 @@ pub(crate) async fn run_confirmer_once(
     rules_contract_id: &str,
     split: &[RewardBeneficiary],
     domain: &[DomainGovernanceAction],
+    pending: &std::collections::HashMap<String, PendingAssign>,
     test_mode: bool,
     packages: &PackageConfig,
 ) -> anyhow::Result<()> {
@@ -738,16 +739,7 @@ pub(crate) async fn run_confirmer_once(
             continue;
         }
 
-        let Some(pa) = read_pending_assign(
-            config,
-            decparty,
-            &a.proposal_cid,
-            Some(token.to_string()),
-            test_mode,
-            packages,
-        )
-        .await?
-        else {
+        let Some(pa) = pending.get(&a.proposal_cid) else {
             continue;
         };
 
@@ -768,7 +760,7 @@ pub(crate) async fn run_confirmer_once(
             .chain(&pa.additional_coupons)
             .all(|c| live.contains(c));
 
-        if is_confirmable(&a.action_label, &pa, split, coupons_ok) {
+        if is_confirmable(&a.action_label, pa, split, coupons_ok) {
             submit_confirmation(
                 config,
                 decparty,
@@ -864,25 +856,22 @@ async fn run_once_for_party(
         &pkgs,
     )
     .await?;
-    // Coupons already covered by in-flight assign proposals => dedupe the proposer.
+    // All in-flight AssignRewardBeneficiaries proposals for this decparty, read
+    // ONCE (indexed by cid) and shared by the proposer's dedupe + the confirmer,
+    // instead of a full ACS scan per pending proposal (M-5).
+    let pending = read_all_pending_assigns(
+        &data.config,
+        decparty,
+        Some(token.clone()),
+        data.test_mode,
+        &pkgs,
+    )
+    .await?;
+    // Coupons already covered by an in-flight proposal => dedupe the proposer.
     let mut covered: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for a in domain
-        .iter()
-        .filter(|a| a.action_label == "AssignRewardBeneficiaries" && !a.orphaned)
-    {
-        if let Some(pa) = read_pending_assign(
-            &data.config,
-            decparty,
-            &a.proposal_cid,
-            Some(token.clone()),
-            data.test_mode,
-            &pkgs,
-        )
-        .await?
-        {
-            covered.insert(pa.primary_coupon);
-            covered.extend(pa.additional_coupons);
-        }
+    for pa in pending.values() {
+        covered.insert(pa.primary_coupon.clone());
+        covered.extend(pa.additional_coupons.iter().cloned());
     }
     // A transient propose error must not skip confirming already-pending
     // proposals this tick (M-1): log and continue to the confirmer.
@@ -910,6 +899,7 @@ async fn run_once_for_party(
         &rules_cid,
         &split,
         &domain,
+        &pending,
         data.test_mode,
         &pkgs,
     )
