@@ -150,7 +150,7 @@ Two small pieces on top of existing DecMan machinery (propose/confirm/execute en
 ```
 
 **6.1 Existing pieces reused**
-- Discovery: `get_governance_confirmations(party_id, threshold, …)` (`queries.rs:630`) lists `GovernableAction` proposals (via `fetch_proposal_infos`, generic over the interface) + their `GovernanceConfirmation`s and computes `can_execute = confirmation_count >= threshold`. Threshold via existing `get_party_threshold`.
+- Discovery: `get_governance_confirmations(party_id, threshold, …)` (`queries.rs:630`) lists `GovernableAction` proposals (via `fetch_proposal_infos`, generic over the interface) + their `GovernanceConfirmation`s and computes `can_execute = confirmation_count >= threshold`. The threshold here is the **governance** threshold read off the active `GovernanceRules` contract (the app-level DecMan threshold, resolved at `handlers/governance.rs:115–138`), **not** the topology threshold `get_party_threshold` returns — see §5's "two confirmation levels".
 - Submission: `propose_action` / `execute_confirm_action` / `execute_action` (`handlers/governance.rs`) — the background loop calls the internal functions directly (not the `require_admin`-gated HTTP handlers), using the node's stored member credentials (`get_party_credentials`).
 - Coupon/ACS reads: `get_contracts` (`queries.rs:251`).
 
