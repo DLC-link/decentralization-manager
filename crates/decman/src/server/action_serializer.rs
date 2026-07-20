@@ -249,6 +249,14 @@ fn make_optional_numeric(opt: &Option<DamlDecimal>) -> Value {
     }
 }
 
+fn make_optional_contract_id(opt: &Option<String>) -> Value {
+    Value {
+        sum: Some(value::Sum::Optional(Box::new(Optional {
+            value: opt.as_ref().map(|c| Box::new(make_contract_id(c))),
+        }))),
+    }
+}
+
 fn make_optional_bool(opt: &Option<bool>) -> Value {
     Value {
         sum: Some(value::Sum::Optional(Box::new(Optional {
@@ -1216,6 +1224,31 @@ pub fn build_proposal_create_args(
                     ),
                     field(
                         "newBeneficiaries",
+                        make_list(
+                            new_beneficiaries
+                                .iter()
+                                .map(serialize_reward_beneficiary)
+                                .collect(),
+                        ),
+                    ),
+                ],
+            },
+        ),
+        ProposalType::SetRewardSplit {
+            new_beneficiaries,
+            prior_config,
+        } => (
+            ProposalPackage::GovernanceRewards,
+            "Governance.Rewards.SetRewardSplit",
+            "SetRewardSplit",
+            Record {
+                record_id: None,
+                fields: vec![
+                    field("governanceParty", make_party(governance_party)),
+                    field("proposer", make_party(proposer)),
+                    field("priorConfig", make_optional_contract_id(prior_config)),
+                    field(
+                        "beneficiaries",
                         make_list(
                             new_beneficiaries
                                 .iter()
@@ -2552,6 +2585,47 @@ mod tests {
         ));
         assert!(matches!(
             field_value(&record, "newBeneficiaries").sum,
+            Some(value::Sum::List(_)),
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn build_proposal_set_reward_split_shape() -> Result {
+        let proposal = ProposalType::SetRewardSplit {
+            new_beneficiaries: vec![
+                RewardBeneficiary {
+                    beneficiary: party_id(),
+                    percentage: dec("0.8"),
+                },
+                RewardBeneficiary {
+                    beneficiary: party_id(),
+                    percentage: dec("0.2"),
+                },
+            ],
+            prior_config: Some("0089abc-old".to_string()),
+        };
+        let (package, module, entity, record) =
+            build_proposal_create_args("gov", "proposer", &proposal, None, None)?;
+
+        assert_eq!(package, ProposalPackage::GovernanceRewards);
+        assert_eq!(module, "Governance.Rewards.SetRewardSplit");
+        assert_eq!(entity, "SetRewardSplit");
+        assert_eq!(
+            owned_labels(&record),
+            [
+                "governanceParty",
+                "proposer",
+                "priorConfig",
+                "beneficiaries"
+            ]
+        );
+        assert!(matches!(
+            field_value(&record, "priorConfig").sum,
+            Some(value::Sum::Optional(_)),
+        ));
+        assert!(matches!(
+            field_value(&record, "beneficiaries").sum,
             Some(value::Sum::List(_)),
         ));
         Ok(())

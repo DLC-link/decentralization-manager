@@ -649,6 +649,14 @@ pub enum ProposalType {
         additional_coupons: Vec<String>,
         new_beneficiaries: Vec<RewardBeneficiary>,
     },
+    /// Set the decparty's on-ledger reward split (`RewardSplitConfig`).
+    /// `prior_config` is the cid of the config being replaced (`None` for the
+    /// first set). Percentages sum to 1.0, <= 20 entries.
+    SetRewardSplit {
+        new_beneficiaries: Vec<RewardBeneficiary>,
+        #[serde(default)]
+        prior_config: Option<String>,
+    },
     /// Toggle result-contract emission on a `RegistrarService`.
     SetEnableResultContracts {
         registrar_service_cid: String,
@@ -799,6 +807,9 @@ impl ProposalType {
                 ..
             } => validate_beneficiary_weights(beneficiaries),
             ProposalType::AssignRewardBeneficiaries {
+                new_beneficiaries, ..
+            } => validate_reward_beneficiaries(new_beneficiaries),
+            ProposalType::SetRewardSplit {
                 new_beneficiaries, ..
             } => validate_reward_beneficiaries(new_beneficiaries),
             _ => Ok(()),
@@ -1541,5 +1552,27 @@ mod tests {
             new_beneficiaries: vec![rb("alice", "0.8"), rb("bob", "0.2")],
         };
         assert!(p.validate().is_ok());
+    }
+
+    #[test]
+    fn set_reward_split_validate() {
+        // valid split (sums to exactly 1.0)
+        let ok = ProposalType::SetRewardSplit {
+            new_beneficiaries: vec![rb("alice", "0.8"), rb("bob", "0.2")],
+            prior_config: None,
+        };
+        assert!(ok.validate().is_ok());
+        // empty rejected
+        let empty = ProposalType::SetRewardSplit {
+            new_beneficiaries: vec![],
+            prior_config: None,
+        };
+        assert!(empty.validate().is_err());
+        // sum != 1.0 rejected (prior_config present is irrelevant to validation)
+        let bad_sum = ProposalType::SetRewardSplit {
+            new_beneficiaries: vec![rb("alice", "0.5")],
+            prior_config: Some("0089old".to_string()),
+        };
+        assert!(bad_sum.validate().is_err());
     }
 }
