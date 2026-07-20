@@ -1325,6 +1325,7 @@ dependencies = [
  "actix-web",
  "aes-gcm 0.11.0",
  "anyhow",
+ "async-trait",
  "base64",
  "bytes",
  "canton-proto-rs",

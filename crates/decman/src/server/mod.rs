@@ -15,6 +15,7 @@ mod handlers;
 mod middleware;
 mod package_inventory;
 mod queries;
+mod reward_automation;
 mod transfer_context;
 mod types;
 
