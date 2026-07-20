@@ -257,81 +257,53 @@ pub(crate) fn parse_split_record(rec: &Record) -> anyhow::Result<Vec<RewardBenef
     Ok(out)
 }
 
-/// Reads the effective reward split for a decparty.
-#[async_trait::async_trait]
-pub(crate) trait SplitSource {
-    /// The configured split, or `None` when the decparty has no
-    /// `RewardSplitConfig` (i.e. the automation is not enabled for it).
-    async fn effective_split(
-        &self,
-        decparty: &CantonId,
-        token: &str,
-    ) -> anyhow::Result<Option<Vec<RewardBeneficiary>>>;
-}
-
-/// A [`SplitSource`] backed by the on-ledger `RewardSplitConfig` contract.
-pub(crate) struct OnLedgerSplitSource<'a> {
-    config: &'a NodeConfig,
-    packages: &'a PackageConfig,
+/// The effective reward split for a decparty, read from its on-ledger
+/// `RewardSplitConfig`, or `None` when there is no config (i.e. the automation
+/// is not enabled for that decparty). Defends the keyless-singleton invariant.
+///
+/// This is the **single swap point** for the split source: if a shared
+/// reward-config template ships later (Robert), only this function body changes.
+/// (Kept as a plain async fn — the codebase deliberately avoids `async-trait`,
+/// and there is one source today, so a trait would be premature.)
+pub(crate) async fn effective_split(
+    config: &NodeConfig,
+    packages: &PackageConfig,
     test_mode: bool,
-}
+    decparty: &CantonId,
+    token: &str,
+) -> anyhow::Result<Option<Vec<RewardBeneficiary>>> {
+    let Some(package_id) = packages.governance_rewards.as_deref() else {
+        return Ok(None);
+    };
 
-impl<'a> OnLedgerSplitSource<'a> {
-    pub(crate) fn new(
-        config: &'a NodeConfig,
-        packages: &'a PackageConfig,
-        test_mode: bool,
-    ) -> Self {
-        Self {
-            config,
-            packages,
-            test_mode,
-        }
-    }
-}
+    let records = active_created_records(
+        config,
+        decparty,
+        Some(token.to_string()),
+        test_mode,
+        package_id,
+        "Governance.Rewards.RewardSplitConfig",
+        "RewardSplitConfig",
+        false,
+    )
+    .await?;
 
-#[async_trait::async_trait]
-impl SplitSource for OnLedgerSplitSource<'_> {
-    async fn effective_split(
-        &self,
-        decparty: &CantonId,
-        token: &str,
-    ) -> anyhow::Result<Option<Vec<RewardBeneficiary>>> {
-        let Some(package_id) = self.packages.governance_rewards.as_deref() else {
-            return Ok(None);
-        };
+    // Defend the keyless-singleton invariant: keep only configs whose
+    // `governanceParty` is this decparty.
+    let mut matching: Vec<&Record> = records
+        .iter()
+        .filter(|(_, rec)| field_party_id(rec, "governanceParty").ok().as_ref() == Some(decparty))
+        .map(|(_, rec)| rec)
+        .collect();
 
-        let records = active_created_records(
-            self.config,
-            decparty,
-            Some(token.to_string()),
-            self.test_mode,
-            package_id,
-            "Governance.Rewards.RewardSplitConfig",
-            "RewardSplitConfig",
-            false,
-        )
-        .await?;
-
-        // Defend the keyless-singleton invariant: keep only configs whose
-        // `governanceParty` is this decparty.
-        let mut matching: Vec<&Record> = records
-            .iter()
-            .filter(|(_, rec)| {
-                field_party_id(rec, "governanceParty").ok().as_ref() == Some(decparty)
-            })
-            .map(|(_, rec)| rec)
-            .collect();
-
-        match matching.len() {
-            0 => Ok(None),
-            1 => Ok(Some(parse_split_record(matching.remove(0))?)),
-            n => {
-                tracing::warn!("ambiguous RewardSplitConfig for {decparty}: {n} active — refusing");
-                Err(anyhow!(
-                    "ambiguous RewardSplitConfig: {n} active — refusing"
-                ))
-            }
+    match matching.len() {
+        0 => Ok(None),
+        1 => Ok(Some(parse_split_record(matching.remove(0))?)),
+        n => {
+            tracing::warn!("ambiguous RewardSplitConfig for {decparty}: {n} active — refusing");
+            Err(anyhow!(
+                "ambiguous RewardSplitConfig: {n} active — refusing"
+            ))
         }
     }
 }
