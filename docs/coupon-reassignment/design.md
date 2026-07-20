@@ -1,7 +1,7 @@
 # CIP-104 Coupon-Reassignment Automation (Mode A) — Design
 
-**Date:** 2026-07-14 (rev. 2026-07-15)
-**Status:** Draft for review
+**Date:** 2026-07-14 (rev. 2026-07-20)
+**Status:** Design — reconciled with delivered code (Mode A M1–M3 shipped; M4 devnet IT pending)
 **Author:** Gyorgy Balazsi (with Claude)
 **Design doc lives in:** `cip-104` · **Implementation target:** `decentralization-manager`
 
@@ -35,13 +35,13 @@ The safety comes from the votes, not from trusting any node: each node submits i
 - **Assign (`RewardCoupon_AssignBeneficiaries`)** — a choice the provider party controls that replaces an unassigned coupon with one coupon per beneficiary (each carrying its `beneficiary` + percentage); afterwards each beneficiary can mint its share.
 - **Self-mint** — a beneficiary's *agent* consuming its coupon to produce CC. Non-custodial: the CC lands with the beneficiary.
 - **DSO** — the Splice super-validator collective that issues coupons / runs Amulet rules.
-- **Effective split** — the resolved `{beneficiary → percentage}` set (for CBTC: operator 20% + `cbtc-beneficiary` 80%), read from on-ledger governance config.
+- **Effective split** — the resolved `{beneficiary → percentage}` set (for CBTC, an example configured value: operator 20% + `cbtc-beneficiary` 80%), read from the on-ledger `RewardSplitConfig` (§8).
 
 *This design:*
 - **Coupon-reassignment automation** ("the automation") — the per-node background process this doc specifies (a member node's L2 agent).
 - **Proposer / Confirmer** — the automation's two roles: propose a batched assignment; validate + auto- confirm proposals that match the on-ledger split.
 - **Auto-confirmation** — the net-new mechanism: a node confirms an action automatically *iff* it matches on-ledger policy — replacing the human click, without weakening the threshold.
-- **Mode A / Mode B** — two selectable reward-distribution modes. A = assign & self-mint (this doc). B = accrue into the decparty's treasury and distribute later (Robert).
+- **Mode A / Mode B** — two alternative reward-distribution approaches, **not** runtime-selectable via a mode flag. A = assign & self-mint (this doc), a standing per-node automation. B = collect coupons into the decparty via Robert's `MintingDelegation`/`AcceptExternalPartySetup` path (a one-shot, shipped as PR #256). There is no shared mode selector; a decparty runs one approach or the other.
 
 ## 1. Context & goal
 
@@ -55,7 +55,7 @@ Verified on devnet (PQS `pqs_cbtc`, snapshot round 51961 / 2026-07-09): there ar
 
 **Scope of "closing the gap" — read carefully.** This increment closes the *provider-side* gap: the decparty's coupons no longer expire *unassigned*. It does **not** by itself guarantee CC reaches beneficiaries — after assignment each beneficiary holds its own coupon, which **its software agent must mint before the coupon expires** (§2, §4.3). That minting is a precondition, not a deliverable here. So "reward realized end-to-end" = this increment **plus** each beneficiary's agent minting.
 
-Division of labour (per Robert, 2026-07-14): both Mode A and Mode B are selectable per decparty via a **shared DAML config template Robert is building**; Robert owns Mode B + that template; this increment is the **Mode A automation**.
+Division of labour (settled with Robert, 2026-07-20): there is **no** shared mode/config template and **no** per-decparty mode selection. Mode B is a **one-shot** collection path Robert shipped separately (PR #256); this increment is the **Mode A automation**, which owns its own on-ledger config, `RewardSplitConfig` (§8). A decparty runs one approach or the other, never both at once (they'd compete for the same unassigned coupons).
 
 ## 2. Actor model — the three layers (the backbone of this design)
 
@@ -83,6 +83,7 @@ Every design choice below follows from this principle. **Writing rule for this d
 
 **In scope**
 - A new `GovernableAction` DAML template `AssignRewardBeneficiaries` wrapping `RewardCoupon_AssignBeneficiaries`.
+- A new on-ledger `RewardSplitConfig` template holding the resolved `[RewardBeneficiary]` split, plus a `SetRewardSplit` `GovernableAction` to set it through governance (§8).
 - A new Rust background module in `crates/decman` — the automation — as **two roles**: a **proposer** (discovers coupons, proposes a batched assignment) and a **confirmer** (validates the proposal against on-ledger config and auto-confirms). Each member node runs an instance.
 - Sourcing the effective beneficiary split from on-ledger (L3) governance config.
 - Batching + TTL-watermark cadence; duplicate/all-or-nothing handling.
@@ -90,8 +91,7 @@ Every design choice below follows from this principle. **Writing rule for this d
 - Tests: DAML action tests (mirroring splice reward-assignment tests), Rust unit tests, a devnet integration test.
 
 **Out of scope (future increments)**
-- Mode B (treasury accrual & deferred distribution) — Robert.
-- The shared mode/config DAML template — Robert (consumed here via a defined interface).
+- Mode B (the one-shot collection path) — Robert (PR #256); a separate, non-runtime-selectable approach.
 - Deterministic leader election + grace-window optimisation on the proposer side.
 - Self-mint-as-a-service / grace-period sweeper for offline beneficiary agents.
 - >20 beneficiaries (hierarchical reassignment / Merkle claim).
@@ -103,10 +103,10 @@ Every design choice below follows from this principle. **Writing rule for this d
 Each is verified or flagged as a dependency.
 
 1. **`governanceParty` == app-provider party.** `GovernableAction_Execute` is controlled by `governanceParty` and exercises `RewardCoupon_AssignBeneficiaries`, whose controller is the coupon's `provider`. This only authorizes if the decparty's governance party *is* the provider party. **Verified for CBTC:** `InstrumentConfiguration` has `provider == registrar == cbtc-network`, and DecMan governs as `cbtc-network`. If a decparty's governance party ever differs from its provider party, this design does not apply unchanged.
-2. **Decparty configured for Mode A.** Modes are selectable per decparty via Robert's shared template. The automation runs only where the configured mode is A (else Mode B's minting races it). Depends on the template exposing the mode — dependency (§14).
+2. **Enablement — the decparty has a governance-configured `RewardSplitConfig`.** There is no mode selector. The automation runs for a decparty **iff** that decparty has exactly one on-ledger `RewardSplitConfig` (presence = on; absence = skip; >1 = refuse). Mode B (Robert's one-shot collection path, PR #256) is a separate approach that must not run on the same decparty — the two would compete for the same unassigned coupons.
 3. **Each beneficiary has a minting agent (L2).** Mode A's premise: after assignment, each beneficiary's software agent mints its coupon before expiry. Building that agent is out of scope; the beneficiary must already have one (its own wallet automation, or a `MintingDelegation` to a node that runs the collect-rewards trigger). Without it, coupons expire at the beneficiary instead of the provider. **Verified for CBTC (devnet PQS):** the configured beneficiaries are wallet-capable *normal* parties, not decparties, so there is no recursion of the "can't run a wallet" problem — `cbtc-beneficiary` (80%) lives under the single-node attestor-1/bitsafe namespace and has a dedicated `cbtc-beneficiary-minter` L2 agent; the operator (20%, `auth0_…`) is a standard validator wallet user. Still untested end-to-end, because on devnet the coupons expired *unassigned at the provider* — nothing ever reached the beneficiaries to exercise their agents.
 4. **Devnet has the live CIP-104 V2 stack.** Verified in PQS: `RewardCouponV2`, `splice-api-reward-assignment-v1:RewardCoupon` (the assign interface), and `MintingDelegation` are all deployed.
-5. **`splice-api-reward-assignment-v1` is available as a DAML build dependency** for the new package, matching the version live on the target network.
+5. **`splice-api-reward-assignment-v1` is available as a DAML build dependency** for the new package, matching the version live on the target network. **Resolved:** vendored and verified against the target network — no longer an open assumption.
 
 ## 5. Why auto-confirmation, and what's net-new
 
@@ -127,26 +127,32 @@ Each is verified or flagged as a dependency.
 Two small pieces on top of existing DecMan machinery (propose/confirm/execute engine, per-node member credentials, ACS/PQS queries, `tokio::spawn` background tasks):
 
 ```
-        per-node automation = a member node's L2 agent (new background task)
-        ┌──────────────────────────────────────────────┐
-        │ PROPOSER (any node; duplicates safe, see §10)  │
-        │  scan unassigned RewardCouponV2 (provider=DP)  │
-        │  read effective split from on-ledger (L3) cfg  │
-        │  propose AssignRewardBeneficiaries(batch,split) │──┐
-        │                                                │  │ GovernableAction proposal
-        │ CONFIRMER (every node)                          │  │ on ledger (L3)
-        │  see proposal → validate split == L3 config    │◄─┘
-        │  if match: auto-submit GovernanceConfirmation  │
-        └──────────────────────────────────────────────┘
-                    │ app-level threshold confirmations reached
-                    ▼
-        GovernableAction_Execute (controller = decparty)
-                    │ executeImpl
-                    ▼
-        RewardCoupon_AssignBeneficiaries(coupons, split)
-                    │
-                    ▼
-        one coupon per beneficiary → each beneficiary's L2 agent mints it
+   Per-node automation (a member node's L2 agent — a new background task).
+   Every member node runs BOTH roles on each tick:
+
+   PROPOSER  (any node; duplicate proposals are safe — see §10)
+     1. scan unassigned RewardCouponV2 (provider = decparty)
+     2. read the configured split from the on-ledger (L3) RewardSplitConfig
+     3. propose AssignRewardBeneficiaries(batch, split), then self-confirm
+            │
+            ▼
+     ─── a GovernableAction proposal now exists on the ledger (L3) ───
+            │
+            ▼
+   CONFIRMER (every node)
+     1. see the pending proposal
+     2. validate: proposed split == on-ledger (L3) config, coupons still unassigned,
+        governanceParty == decparty
+     3. if it matches, auto-submit this node's GovernanceConfirmation
+            │
+            ▼   app-level governance threshold of confirmations reached
+   GovernableAction_Execute  (controller = the decparty)
+            │   executeImpl
+            ▼
+   RewardCoupon_AssignBeneficiaries(coupons, split)
+            │
+            ▼
+   one coupon per beneficiary  →  each beneficiary's own L2 agent mints it
 ```
 
 **6.1 Existing pieces reused**
@@ -193,22 +199,20 @@ Notes:
 - Because `GovernableAction_Execute` is controlled by `governanceParty` and the coupon choice's controller is the provider (= the same party), the governed execute carries the decparty's own authority — no extra delegation contract needed.
 - DAR dependency: `splice-api-reward-assignment-v1` in `daml.yaml`.
 
-## 8. Effective split & config source (interface with Robert's template)
+## 8. Effective split & config source (`RewardSplitConfig`)
 
-The split is an **L3 artifact that encodes the L1 decision** — this is where fairness is enforced, per §2. Contrast Mode B (PR #248), where a fairness-relevant business decision — *which delegate* — stays off-chain, carried only as a free-text note the code can't act on. Mode A deliberately puts its fairness-relevant decision, the split, **on-chain**, which is exactly what lets it be *enforced* (the confirmer refuses anything that doesn't match) rather than *trusted*. The rationale for a particular split (why 20/80) remains an L1 fact and lives off-chain; only the split itself needs to be on-ledger for enforcement.
+The split is an **L3 artifact that encodes the L1 decision** — this is where fairness is enforced, per §2. Contrast Mode B, where a fairness-relevant business decision — *which delegate* — stays off-chain, carried only as a free-text note the code can't act on. Mode A deliberately puts its fairness-relevant decision, the split, **on-chain**, which is exactly what lets it be *enforced* (the confirmer refuses anything that doesn't match) rather than *trusted*. The rationale for a particular split (why 20/80) remains an L1 fact and lives off-chain; only the split itself needs to be on-ledger for enforcement.
 
-The assign choice wants `[RewardBeneficiary { beneficiary; percentage }]` (percentages sum to 1.0). The **effective split** for CBTC today is **operator 20% + cbtc-beneficiary 80%**, produced by the utility-registry `getBeneficiaries` composition: the operator weight (`AppRewardConfiguration`, 0.2) is taken off the top and the provider's beneficiaries (`InstrumentConfiguration` .`providerAppRewardBeneficiaries`, cbtc-beneficiary weight 1.0) are normalized into the remaining 0.8. The source stores `AppRewardBeneficiary { weight }`; the automation maps composed weights to percentages summing to 1.0.
+The split is read from a **Mode-A-owned on-ledger `RewardSplitConfig` contract** — a single authoritative source per decparty. It holds the resolved `[RewardBeneficiary { beneficiary; percentage }]` directly, with percentages summing to 1.0, and is set through governance via the `SetRewardSplit` `GovernableAction`. **The split is whatever governance configures** — there is no weight composition and no operator-cut derivation. If the DSO's (or an operator's) cut is part of the arrangement, it is just another configured `RewardBeneficiary` entry; the automation does not compute it. `RewardSplitConfig` stores percentages, not weights, so nothing is normalized at read time.
 
-Caveat: `getBeneficiaries` is defined for the **marker path** (`createActivityMarker`). Whether the operator 20% cut applies identically on the **V2 assign path** — or whether under V2 only `providerAppRewardBeneficiaries` applies and the operator relationship is handled elsewhere — is unconfirmed and part of the open question below.
-
-**Interface point (depends on Robert's shared template):** the automation must read the *effective* split from a single authoritative on-ledger source. Preferred: the shared config template exposes the resolved `[RewardBeneficiary]` (or mode + inputs the automation composes). Fallback: compose from `InstrumentConfiguration` + `AppRewardConfiguration` via the same `getBeneficiaries` logic. **This is the one blocking dependency to pin with Robert before implementation** — see §14.
+The **effective split** for CBTC today is, as an example configured value, **operator 20% + cbtc-beneficiary 80%** — stored directly as two `RewardBeneficiary` entries (0.2 and 0.8) in `RewardSplitConfig`. (The earlier `getBeneficiaries` weight-composition from utility-registry `InstrumentConfiguration` + `AppRewardConfiguration` is no longer used.)
 
 ## 9. Rust automation module (a member node's L2 agent)
 
-New module `crates/decman/src/server/coupon_reassignment/` (mirrors existing background-task style; registered via `tokio::spawn` in `start_server`, like the Canton sync loop).
+New module `crates/decman/src/server/reward_automation/` (mirrors existing background-task style; registered via `tokio::spawn` in `start_server`, like the Canton sync loop). Cadence is a single global tick interval, `NodeConfig.reward_automation_interval_secs` (default 300s).
 
 **Config / gating**
-- Runs for a decparty only if (a) configured mode is **A**, and (b) an effective split is available on-ledger. Missing either ⇒ no-op (log and skip).
+- Enablement is the **presence of exactly one on-ledger `RewardSplitConfig`** for the decparty (§8) — there is no mode gate. None ⇒ no-op (log and skip); more than one ⇒ refuse (log). The split read comes from that contract.
 - **Not** gated on an active `FeaturedAppRight`: the FAR governs whether *new* coupons accrue, not whether *existing* unassigned coupons can be assigned. The automation acts on any live unassigned coupon whose `provider` is the decparty, even if the FAR has lapsed.
 - Uses the node's existing member credentials; no new secrets.
 
@@ -216,11 +220,11 @@ New module `crates/decman/src/server/coupon_reassignment/` (mirrors existing bac
 1. Query unassigned coupons: active `RewardCouponV2` where `provider = decparty` and `beneficiary = null`, ordered by `expiresAt` (minted/consumed coupons archive out of the ACS, so "active + beneficiary = null" suffices).
 2. Select the batch by **TTL-watermark**: coupons whose age ≥ watermark (e.g. ~6h after creation, matching splice defaults) or approaching expiry, up to a conservative per-tx batch size (bounded by transaction/traffic size, *not* a fixed count — the ≤20 limit is beneficiaries per coupon, not coupons per batch). **Leave enough margin for the beneficiary's agent to mint afterward** — assigned coupons most likely inherit the original expiry, so assigning near the deadline could leave the beneficiary no time to mint. Cadence: a periodic tick (a few times/day), not per-round — coupons can be assigned any time before mint/expiry, minimizing tx cost.
 3. Read the effective split (§8).
-4. If no in-flight proposal already covers this batch, propose one `AssignRewardBeneficiaries`.
+4. If no in-flight proposal already covers this batch, propose one `AssignRewardBeneficiaries`, then **self-confirm** its own proposal (so the proposal is visible on-ledger and counts toward threshold).
 
 **Confirmer role** (runs on every node — the auto-confirmation engine, §5):
 1. Discover pending `AssignRewardBeneficiaries` proposals via `get_governance_confirmations`.
-2. **Validate** (policy P): proposed `newBeneficiaries` == effective on-ledger split (set + percentages within tolerance) AND target coupons are unassigned and belong to the decparty.
+2. **Validate** (policy P): proposed `newBeneficiaries` == effective on-ledger split (set + percentages compared with **exact `Decimal` equality**) AND target coupons are unassigned and belong to the decparty AND `governanceParty == decparty`.
 3. If valid and not already confirmed by this node, auto-submit a `GovernanceConfirmation` via `execute_confirm_action`. If invalid, refuse (log; never confirm).
 4. When `can_execute` (threshold reached), any node calls execute (first-wins; a second execute finds the proposal consumed and fails harmlessly).
 
@@ -239,14 +243,14 @@ New module `crates/decman/src/server/coupon_reassignment/` (mirrors existing bac
 ## 11. Error handling & edge cases
 
 - **Coupon expires before assignment commits:** it leaves the ACS; a stale proposal's execute fails cleanly; next tick re-scans. Watermark leaves ample margin inside 36h.
-- **Split mismatch:** confirmer refuses; the proposal never reaches threshold. Bounded confirmation expiry (below) clears it. Alert.
+- **Split mismatch:** confirmer refuses; the proposal never reaches threshold and becomes non-executable after `actionConfirmationTimeout` (below). Alert.
 - **Transient config-view skew:** if nodes read the split at slightly different offsets (or it changes mid-flight), some confirmers reject a proposal built on a different view. This only *delays* — the proposal expires and the next tick re-proposes against converged config; it never mis-assigns.
-- **Stale / never-executed proposals:** propose with a **bounded confirmation `expiresAt`** aligned to the batch's earliest coupon TTL, so unmet proposals auto-expire instead of lingering. `get_governance_confirmations` already ignores expired confirmations for `can_execute`.
+- **Stale / never-executed proposals:** the design intent is to propose with a **bounded confirmation `expiresAt`** aligned to the batch's earliest coupon TTL, so unmet proposals auto-expire instead of lingering. **Not implemented in this increment (deferred, review finding R-4):** doing so would require changing the shared `GovernanceRules_ConfirmAction` choice, which is disproportionate for this increment; unmet proposals already become non-executable after the fixed `actionConfirmationTimeout`, so they do not execute stale. `get_governance_confirmations` already ignores expired confirmations for `can_execute`.
 - **Confirmer input:** reconstruct the action (`ProposalType::AssignRewardBeneficiaries` — coupon CIDs + beneficiaries) from the on-ledger proposal payload, validate, then build the `ConfirmActionRequest`.
-- **Config missing / mode ≠ A:** no-op with a clear log.
+- **Config missing:** no-op with a clear log (no `RewardSplitConfig` ⇒ automation is off for that decparty).
 - **Batch size:** bounded by transaction/traffic size, not a fixed count (§9, proposer step 2) — chunk conservatively; remainder next tick.
 - **Beneficiary count:** capped by `maxNumNewBeneficiaries` (≤20); CBTC has 2, well within. >20 is out of scope (§3).
-- **Weight→percentage:** the split already sums to 1.0 (operator 0.2 + provider-share 0.8); map to `percentage` and re-normalize to sum exactly 1.0, dropping zero entries; reject if invalid.
+- **Configured split shape:** the split is already stored as `[RewardBeneficiary]` percentages summing to 1.0 in `RewardSplitConfig` (validated at set time via `SetRewardSplit`); there is no weight-to-percentage composition to perform at read time.
 - **A node being down:** fewer proposers/confirmers. Others still propose; assignment proceeds while enough nodes are live to satisfy *both* the app-level governance threshold and the protocol-level topology threshold (§5) — the decparty's normal liveness bound.
 
 ## 12. Trust & security properties
@@ -261,19 +265,19 @@ Stated in the §2 frame — **fairness/correctness live in L3, never in L2 trust
 ## 13. Testing
 
 - **DAML:** action tests for `AssignRewardBeneficiaries` mirroring splice's reward-assignment tests (and PR #248's test shape): happy path, already-assigned coupon rejected (all-or-nothing), percentages sum to 1.0, beneficiary count ≤ `maxNumNewBeneficiaries`, batching via `additionalCoupons`, empty-set rejected at execute.
-- **Rust unit:** `ProposalType::AssignRewardBeneficiaries` serialization round-trip (copy PR #248's `build_proposal_*_shape` test); `validate()` rejects empty set / bad percentages / >cap (the boundary test PR #248 lacked); batch selection (TTL-watermark, minting-margin); weight→percentage composition; confirmer validation (accept correct split; reject mismatch; reject on mid-flight config change); best-effort duplicate suppression.
+- **Rust unit:** `ProposalType::AssignRewardBeneficiaries` serialization round-trip (copy PR #248's `build_proposal_*_shape` test); `validate()` rejects empty set / bad percentages / >cap (the boundary test PR #248 lacked); batch selection (TTL-watermark, minting-margin); confirmer validation (accept correct split; reject mismatch on exact `Decimal` equality; reject on mid-flight config change); best-effort duplicate suppression.
 - **Integration (devnet):** against live `cbtc-network` coupons — propose → auto-confirm across member nodes → execute → assert the beneficiaries' coupons appear with the expected split. (Beneficiary minting is a separate precondition, asserted only if those agents run.) Requires **multiple DecMan instances** (the decparty's member nodes) to exercise multi-node auto-confirm; extends the existing devnet IT phase (`test(integration): extend IT suite to devnet`), which may currently be single-instance.
 
-## 14. Open dependencies / to pin with Robert
+## 14. Decisions (resolved with Robert, 2026-07-20)
 
-1. **Config interface (§8):** does the shared template expose the resolved `[RewardBeneficiary]`, or does the automation compose it from `InstrumentConfiguration` + `AppRewardConfiguration` — and does the operator 20% cut apply on the V2 assign path? Determines the confirmer's validation source. *Blocking for implementation.*
-2. **Package placement** of `AssignRewardBeneficiaries` — the new `governance-rewards` package (created by PR #248) is the natural home.
-3. Whether the shared template also carries the **mode (A/B)** selector the automation gates on.
+1. **Config interface (§8):** "Option B" — a governance-config template, built **Mode-A-owned** as the on-ledger `RewardSplitConfig` contract, set via the `SetRewardSplit` `GovernableAction`. The automation reads the resolved `[RewardBeneficiary]` split directly from that single contract. **No `getBeneficiaries` composition and no operator-cut derivation** — "the split is whatever governance configures," so any DA/operator cut is just another configured entry.
+2. **Package placement** of `AssignRewardBeneficiaries` (and `RewardSplitConfig` / `SetRewardSplit`): the `governance-rewards` package.
+3. **Mode selector:** none. Mode A is built standalone; Mode B is a **one-shot** collection path (PR #256), not a runtime-selectable engine mode. There is no shared mode/config template and no per-decparty mode flag.
 
 ## 15. Milestone breakdown (proposed)
 
 - **M1 — DAML action + tests:** `AssignRewardBeneficiaries` in the `governance-rewards` package + `daml.yaml` dep on `splice-api-reward-assignment-v1` + DAML tests. Reviewable in isolation.
 - **M2 — Rust action plumbing:** `ProposalType::AssignRewardBeneficiaries` variant + `validate()` + `action_serializer` mapping + `ProposalPackage`/handler/`PackageConfig`; serialization + validation unit tests. Mirrors PR #248. Enables propose/confirm/execute from Rust.
-- **M3 — auto-confirmation engine + automation:** the action-agnostic, default-deny auto-confirm engine (policy interface + background loop) with `AssignRewardBeneficiaries` as the sole enrolled policy; proposer + confirmer roles, effective-split read, TTL-watermark batching, bounded proposal expiry; Rust unit tests.
+- **M3 — auto-confirmation engine + automation:** the action-agnostic, default-deny auto-confirm engine (policy interface + background loop) with `AssignRewardBeneficiaries` as the sole enrolled policy; proposer + confirmer roles, effective-split read, TTL-watermark batching; Rust unit tests. (Bounded proposal `expiresAt` is **deferred** — see §11, review finding R-4; unmet proposals become non-executable after `actionConfirmationTimeout`.)
 - **M4 — devnet integration:** end-to-end assignment of live `cbtc-network` coupons across member nodes; IT test.
 - **M5 (future):** leader/grace-window; reconciliation/metrics; beneficiary self-mint enablement; additional auto-confirm policies (Mode B distribution, delegation-renew); Mainnet gating.
