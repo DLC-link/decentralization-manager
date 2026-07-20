@@ -415,6 +415,10 @@ pub(crate) struct PendingAssign {
     /// self-describing; the confirmer keys off the action's cid, not this.
     #[allow(dead_code)]
     pub proposal_cid: String,
+    /// The `governanceParty` the proposal is scoped to. The confirmer verifies
+    /// this equals the decparty locally, so the security-critical invariant does
+    /// not rely on ACS visibility alone (M-6).
+    pub governance_party: CantonId,
     pub primary_coupon: String,
     pub additional_coupons: Vec<String>,
     pub new_beneficiaries: Vec<RewardBeneficiary>,
@@ -467,6 +471,7 @@ pub(crate) fn is_confirmable(
 fn parse_assign_record(cid: &str, rec: &Record) -> anyhow::Result<PendingAssign> {
     Ok(PendingAssign {
         proposal_cid: cid.to_string(),
+        governance_party: field_party_id(rec, "governanceParty")?,
         primary_coupon: field_contract_id(rec, "primaryCoupon")?,
         additional_coupons: field_contract_id_list(rec, "additionalCoupons")?,
         new_beneficiaries: parse_beneficiary_list(rec, "newBeneficiaries")?,
@@ -560,6 +565,7 @@ pub(crate) async fn run_proposer_once(
     decparty: &CantonId,
     member_party_id: &CantonId,
     token: &str,
+    rules_contract_id: &str,
     split: &[RewardBeneficiary],
     test_mode: bool,
     packages: &PackageConfig,
@@ -606,9 +612,9 @@ pub(crate) async fn run_proposer_once(
         "reward automation: proposing AssignRewardBeneficiaries",
     );
 
-    // `submit_proposal` ignores `rules_contract_id` for creates (it resolves the
-    // package ref itself), so pass an empty string here.
-    submit_proposal(
+    // `submit_proposal` ignores its `rules_contract_id` arg for creates (it
+    // resolves the package ref itself), so pass an empty string here.
+    let cid = submit_proposal(
         config,
         decparty,
         "",
@@ -619,12 +625,65 @@ pub(crate) async fn run_proposer_once(
     )
     .await?;
 
+    // Immediately cast the proposer's own confirmation. Without this the
+    // proposal has zero confirmations and `get_governance_confirmations` hides
+    // it from every confirmer (including this node) — so it would never be
+    // visible and never reach threshold (C-1 liveness). The confirming choice
+    // needs the real governance rules cid, unlike the create above.
+    submit_confirmation(
+        config,
+        decparty,
+        rules_contract_id,
+        &cid,
+        token,
+        member_party_id,
+        packages,
+    )
+    .await?;
+
+    tracing::info!(
+        %decparty,
+        proposal_cid = %cid,
+        "reward automation: proposed + self-confirmed AssignRewardBeneficiaries",
+    );
+
     Ok(())
 }
 
 // ============================================================================
 // Confirmer role
 // ============================================================================
+
+/// Submit this node's confirmation for a `CoreDomain` governance proposal.
+///
+/// Builds the SAME `CoreDomain` [`ConfirmActionRequest`] the confirmer uses
+/// inline — `execute_confirm_action`'s CoreDomain branch derives the choice arg
+/// from `proposal_cid`, so `action` is an inert placeholder (mirrors the
+/// frontend's `governance_set_threshold { new_threshold: 0 }` placeholder in
+/// NotificationsView.tsx) — and calls [`execute_confirm_action`].
+///
+/// Used both by the proposer (to immediately cast its own bootstrapping vote so
+/// the proposal is visible to confirmers — `get_governance_confirmations` hides
+/// zero-confirmation proposals) and by the confirmer.
+async fn submit_confirmation(
+    config: &NodeConfig,
+    decparty: &CantonId,
+    rules_contract_id: &str,
+    proposal_cid: &str,
+    token: &str,
+    member_party_id: &CantonId,
+    packages: &PackageConfig,
+) -> anyhow::Result<()> {
+    let req = ConfirmActionRequest {
+        party_id: decparty.clone(),
+        rules_contract_id: rules_contract_id.to_string(),
+        action: ActionType::GovernanceSetThreshold { new_threshold: 0 },
+        governance_type: GovernanceType::CoreDomain,
+        proposal_cid: Some(proposal_cid.to_string()),
+    };
+    execute_confirm_action(config, &req, token, member_party_id, packages).await?;
+    Ok(())
+}
 
 /// True iff `member` already appears among `action`'s confirmations, so this
 /// node does not double-confirm a proposal it has already signed.
@@ -692,25 +751,34 @@ pub(crate) async fn run_confirmer_once(
             continue;
         };
 
+        // Verify the proposal is scoped to this decparty locally, rather than
+        // relying on ACS visibility alone (M-6, security-critical path).
+        if pa.governance_party != *decparty {
+            tracing::warn!(
+                %decparty,
+                proposal_cid = %a.proposal_cid,
+                governance_party = %pa.governance_party,
+                "reward automation: refusing to confirm AssignRewardBeneficiaries \
+                 (governanceParty does not match decparty)",
+            );
+            continue;
+        }
+
         let coupons_ok = std::iter::once(&pa.primary_coupon)
             .chain(&pa.additional_coupons)
             .all(|c| live.contains(c));
 
         if is_confirmable(&a.action_label, &pa, split, coupons_ok) {
-            // Build the confirm request as the `/governance/confirm` path does
-            // for a CoreDomain action: `execute_confirm_action`'s CoreDomain
-            // branch builds the choice arg from `proposal_cid`, so `action` is
-            // inert here — mirror the frontend's placeholder
-            // (`governance_set_threshold { new_threshold: 0 }`,
-            // NotificationsView.tsx).
-            let req = ConfirmActionRequest {
-                party_id: decparty.clone(),
-                rules_contract_id: rules_contract_id.to_string(),
-                action: ActionType::GovernanceSetThreshold { new_threshold: 0 },
-                governance_type: GovernanceType::CoreDomain,
-                proposal_cid: Some(a.proposal_cid.clone()),
-            };
-            execute_confirm_action(config, &req, token, member_party_id, packages).await?;
+            submit_confirmation(
+                config,
+                decparty,
+                rules_contract_id,
+                &a.proposal_cid,
+                token,
+                member_party_id,
+                packages,
+            )
+            .await?;
             tracing::info!(
                 %decparty,
                 proposal_cid = %a.proposal_cid,
@@ -816,17 +884,23 @@ async fn run_once_for_party(
             covered.extend(pa.additional_coupons);
         }
     }
-    run_proposer_once(
+    // A transient propose error must not skip confirming already-pending
+    // proposals this tick (M-1): log and continue to the confirmer.
+    if let Err(e) = run_proposer_once(
         &data.config,
         decparty,
         &member,
         &token,
+        &rules_cid,
         &split,
         data.test_mode,
         &pkgs,
         &covered,
     )
-    .await?;
+    .await
+    {
+        tracing::warn!(%decparty, error = %e, "reward automation: proposer tick failed");
+    }
     run_confirmer_once(
         data,
         &data.config,
@@ -957,6 +1031,7 @@ mod tests {
         let cfg = vec![rb("a", "1.0")];
         let good = PendingAssign {
             proposal_cid: "p".into(),
+            governance_party: CantonId::parse(GOV).expect("valid canton id"),
             primary_coupon: "c1".into(),
             additional_coupons: vec![],
             new_beneficiaries: vec![rb("a", "1.0")],
@@ -1015,6 +1090,7 @@ mod tests {
 
         let pa = parse_assign_record("p1", &rec).unwrap();
         assert_eq!(pa.proposal_cid, "p1");
+        assert_eq!(pa.governance_party.to_string(), GOV);
         assert_eq!(pa.primary_coupon, "c1");
         assert_eq!(pa.additional_coupons, vec!["c2".to_string()]);
         assert_eq!(pa.new_beneficiaries.len(), 2);

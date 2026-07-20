@@ -54,3 +54,20 @@ test_set_reward_split_empty_fails = script do
       executor = parties.member1
       actionProposalCid = toInterfaceContractId prop
       confirmations = confs
+
+-- A split summing to 1.0 but with a 0.0 share is rejected by the per-percentage
+-- (0,1] range guard, isolating it from the empty/sum guards.
+test_set_reward_split_zero_percentage_fails = script do
+  parties <- allocateRewardsTestParties
+  rulesCid <- createTestGovernance parties
+  let gp = parties.governanceParty
+  let split = [ RewardBeneficiary with beneficiary = parties.member2; percentage = 0.0
+              , RewardBeneficiary with beneficiary = parties.member3; percentage = 1.0 ]
+  prop <- submit parties.member1 $ createCmd SetRewardSplit with
+    governanceParty = gp; proposer = parties.member1; priorConfig = None; beneficiaries = split
+  confs <- submitConfirmations gp rulesCid (toInterfaceContractId prop) [parties.member1, parties.member2]
+  submitMustFail (actAs parties.member1 <> readAs gp) $
+    exerciseCmd rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor = parties.member1
+      actionProposalCid = toInterfaceContractId prop
+      confirmations = confs

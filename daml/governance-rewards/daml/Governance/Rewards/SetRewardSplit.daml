@@ -32,6 +32,10 @@ template SetRewardSplit
         -- execute-time guards (a direct ledger submit bypasses the Rust boundary)
         assertMsg "beneficiaries must not be empty" (not (null beneficiaries))
         assertMsg "at most 20 beneficiaries" (length beneficiaries <= 20)
+        -- Each share must be a positive fraction (matches the Rust boundary
+        -- validate_reward_beneficiaries): (0, 1].
+        assertMsg "each percentage must be in (0,1]"
+          (all (\b -> b.percentage > 0.0 && b.percentage <= 1.0) beneficiaries)
         -- Decimal is exact fixed-point: require an exact sum (matches the Rust
         -- boundary check and split_matches, which also use exact Decimal equality).
         let total = sum (map (.percentage) beneficiaries)
