@@ -1040,6 +1040,271 @@ pub async fn get_governance_chain_audit(
 // Action Endpoints
 // ============================================================================
 
+/// Build and submit a `GovernableAction` proposal-create command, returning the
+/// created proposal contract id.
+///
+/// Extracted verbatim from the `propose_action` HTTP handler so the CIP-104
+/// reward automation (Mode A proposer) can create proposals without going
+/// through HTTP. Behavior-preserving for the create path: it resolves any
+/// registry-backed transfer choice-context, builds the create arguments,
+/// resolves the target package id, and submits over a fresh
+/// `CommandServiceClient`. Errors surface as `anyhow::Error` (the handler maps
+/// them to an HTTP error + audit-log; the automation logs them itself).
+///
+/// `_rules_contract_id` is part of the propose API surface (used by the caller's
+/// subsequent confirm step) but is not needed to create the proposal.
+pub(crate) async fn submit_proposal(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    _rules_contract_id: &str,
+    proposal: &ProposalType,
+    token: &str,
+    member_party_id: &CantonId,
+    packages: &PackageConfig,
+) -> anyhow::Result<String> {
+    // Resolve registry-backed context for token-standard transfer flows:
+    //   * `AcceptTransfer`: fetch the `transfer-rule` choice context the
+    //     `TransferInstruction_Accept` choice reads at execute time. Without it
+    //     execute fails with `Missing context entry for
+    //     utility.digitalasset.com/transfer-rule`.
+    //   * `Transfer` of a utility-registry instrument: `TransferFactory_Transfer`
+    //     reads `utility.digitalasset.com/instrument-configuration` from
+    //     `extraArgs.context.values` at execute time, so the context must be
+    //     fetched from the registrar and baked into the proposal regardless of
+    //     whether the dec party administers the instrument. For shared
+    //     instruments (e.g. CBTC, admin = `cbtc-network`) the factory isn't on
+    //     the dec party's ACS, so we also substitute the resolved factory cid.
+    //     Canton Coin is excluded — its `AmuletRules` factory and context come
+    //     from the DSO scan API. See `needs_registry_context`.
+    // Bounded validity window for any Transfer proposal, captured ONCE so the
+    // registry choice-context fetch and the on-chain create args agree
+    // byte-for-byte. A bounded `executeBefore` lets an unaccepted two-step offer
+    // expire and release its escrow instead of locking funds forever. The
+    // window defaults to 24h but the caller may override it per-transfer.
+    let now_micros = chrono::Utc::now().timestamp_micros();
+    let transfer_validity = match proposal {
+        ProposalType::Transfer {
+            validity_window_hours: Some(hours),
+            ..
+        } => action_serializer::TransferValidity::from_now_with_window(
+            now_micros,
+            i64::from(*hours).saturating_mul(60 * 60 * 1_000_000),
+        ),
+        _ => action_serializer::TransferValidity::from_now(now_micros),
+    };
+
+    let mut resolved_proposal = proposal.clone();
+    let transfer_choice_context = match &mut resolved_proposal {
+        ProposalType::AcceptTransfer {
+            transfer_instruction_cid,
+        } => match fetch_accept_transfer_context(
+            config,
+            Some(token.to_string()),
+            config.canton.network,
+            party_id,
+            transfer_instruction_cid,
+        )
+        .await
+        {
+            Ok(ctx) => Some(ctx),
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to fetch AcceptTransfer choice context from registry: {e:#}"
+                );
+                anyhow::bail!("Failed to fetch transfer choice context: {e}");
+            }
+        },
+        ProposalType::Transfer {
+            transfer_factory_cid,
+            receiver,
+            amount,
+            instrument_id,
+            input_holding_cids,
+            ..
+        } if needs_registry_context(
+            transfer_factory_cid,
+            &instrument_id.admin,
+            &party_id.to_string(),
+        ) =>
+        {
+            let admin: CantonId = match instrument_id.admin.parse() {
+                Ok(p) => p,
+                Err(e) => {
+                    anyhow::bail!("Invalid instrument admin party id: {e}");
+                }
+            };
+            // The token-standard transfer factory rejects an empty
+            // `inputHoldingCids` ("No holdings provided"). When the caller
+            // didn't pin specific holdings, fund the transfer with every
+            // Holding the sender owns for this instrument and let the choice
+            // consume what it needs (returning change).
+            if input_holding_cids.is_empty() {
+                match select_input_holdings(
+                    config,
+                    party_id,
+                    Some(token.to_string()),
+                    &admin,
+                    &instrument_id.id,
+                )
+                .await
+                {
+                    Ok(cids) if cids.is_empty() => {
+                        anyhow::bail!(
+                            "No holdings of instrument {} owned by {} to fund the transfer",
+                            instrument_id.id,
+                            party_id
+                        );
+                    }
+                    Ok(cids) => *input_holding_cids = cids,
+                    Err(e) => {
+                        tracing::warn!("Failed to select input holdings for transfer: {e:#}");
+                        anyhow::bail!("Failed to select input holdings: {e}");
+                    }
+                }
+            }
+            match fetch_factory_for_propose(
+                config.canton.network,
+                ProposeTransferArgs {
+                    sender: party_id,
+                    receiver,
+                    amount,
+                    instrument_admin: &admin,
+                    instrument_id: &instrument_id.id,
+                    input_holding_cids,
+                    requested_at_micros: transfer_validity.requested_at_micros,
+                    execute_before_micros: transfer_validity.execute_before_micros,
+                },
+            )
+            .await
+            {
+                Ok(resolved) => {
+                    // Self-administered utility tokens already carry the factory
+                    // cid the UI read from the dec party's ACS; only fill it in
+                    // for shared instruments where the UI left it empty.
+                    if transfer_factory_cid.is_empty() {
+                        *transfer_factory_cid = resolved.factory_cid;
+                    }
+                    Some(AcceptTransferContext {
+                        context: resolved.context,
+                        disclosed_contracts: resolved.disclosed_contracts,
+                    })
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to fetch Transfer choice context from registry: {e:#}");
+                    anyhow::bail!("Failed to fetch transfer factory: {e}");
+                }
+            }
+        }
+        _ => None,
+    };
+
+    let (package_source, module_name, entity_name, create_args) =
+        action_serializer::build_proposal_create_args(
+            &party_id.to_string(),
+            &member_party_id.to_string(),
+            &resolved_proposal,
+            transfer_choice_context.as_ref().map(|r| &r.context),
+            Some(transfer_validity),
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to build proposal create arguments: {e}"))?;
+
+    let package_id =
+        match package_source {
+            action_serializer::ProposalPackage::GovernanceCore => packages
+                .governance_core
+                .as_deref()
+                .context("governance_core package not configured")?,
+            action_serializer::ProposalPackage::GovernanceRewards => packages
+                .governance_rewards
+                .as_deref()
+                .context("governance_rewards package not configured")?,
+            action_serializer::ProposalPackage::GovernanceTokenCustody => packages
+                .governance_token_custody
+                .as_deref()
+                .context("governance_token_custody package not configured")?,
+            action_serializer::ProposalPackage::GovernanceUtilityCredential => packages
+                .governance_utility_credential
+                .as_deref()
+                .context("governance_utility_credential package not configured")?,
+            action_serializer::ProposalPackage::GovernanceUtilityOnboarding => packages
+                .governance_utility_onboarding
+                .as_deref()
+                .context("governance_utility_onboarding package not configured")?,
+        };
+
+    let template_id = Identifier {
+        package_id: package_id.to_string(),
+        module_name: module_name.to_string(),
+        entity_name: entity_name.to_string(),
+    };
+
+    let cmd = Command {
+        command: Some(command::Command::Create(CreateCommand {
+            template_id: Some(template_id),
+            create_arguments: Some(create_args),
+        })),
+    };
+
+    let commands = Commands {
+        workflow_id: String::new(),
+        user_id: String::new(),
+        command_id: uuid::Uuid::new_v4().to_string(),
+        commands: vec![cmd],
+        deduplication_period: None,
+        min_ledger_time_abs: None,
+        min_ledger_time_rel: None,
+        act_as: vec![member_party_id.to_string()],
+        read_as: vec![party_id.to_string()],
+        submission_id: String::new(),
+        disclosed_contracts: vec![],
+        synchronizer_id: String::new(),
+        package_id_selection_preference: vec![],
+        prefetch_contract_keys: vec![],
+    };
+
+    let channel = tonic::transport::Channel::from_shared(config.ledger_api_url())
+        .map_err(|e| anyhow::anyhow!("Invalid ledger API URL: {e}"))?
+        .connect()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to connect to ledger API: {e}"))?;
+
+    let mut client =
+        CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
+
+    // Create the proposal and get the contract ID back
+    let mut create_req = tonic::Request::new(SubmitAndWaitForTransactionRequest {
+        commands: Some(commands),
+        transaction_format: None,
+    });
+    create_req
+        .metadata_mut()
+        .insert("authorization", format!("Bearer {token}").parse().unwrap());
+
+    let response = client
+        .submit_and_wait_for_transaction(create_req)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to create proposal: {e}");
+            anyhow::anyhow!("Failed to create proposal: {e}")
+        })?;
+
+    // Extract created contract ID from the transaction events
+    response
+        .into_inner()
+        .transaction
+        .and_then(|tx| {
+            tx.events.iter().find_map(|event| {
+                event.event.as_ref().and_then(|e| match e {
+                    canton_proto_rs::com::daml::ledger::api::v2::event::Event::Created(created) => {
+                        Some(created.contract_id.clone())
+                    }
+                    _ => None,
+                })
+            })
+        })
+        .context("Proposal created but could not extract contract ID")
+}
+
 /// Propose a domain governance action (creates a GovernableAction proposal contract)
 #[utoipa::path(
     tag = "Governance",
@@ -1084,301 +1349,20 @@ pub async fn propose_action(
 
     let packages = packages();
 
-    // Resolve registry-backed context for token-standard transfer flows:
-    //   * `AcceptTransfer`: fetch the `transfer-rule` choice context the
-    //     `TransferInstruction_Accept` choice reads at execute time. Without it
-    //     execute fails with `Missing context entry for
-    //     utility.digitalasset.com/transfer-rule`.
-    //   * `Transfer` of a utility-registry instrument: `TransferFactory_Transfer`
-    //     reads `utility.digitalasset.com/instrument-configuration` from
-    //     `extraArgs.context.values` at execute time, so the context must be
-    //     fetched from the registrar and baked into the proposal regardless of
-    //     whether the dec party administers the instrument. For shared
-    //     instruments (e.g. CBTC, admin = `cbtc-network`) the factory isn't on
-    //     the dec party's ACS, so we also substitute the resolved factory cid.
-    //     Canton Coin is excluded — its `AmuletRules` factory and context come
-    //     from the DSO scan API. See `needs_registry_context`.
-    // Bounded validity window for any Transfer proposal, captured ONCE so the
-    // registry choice-context fetch and the on-chain create args agree
-    // byte-for-byte. A bounded `executeBefore` lets an unaccepted two-step offer
-    // expire and release its escrow instead of locking funds forever. The
-    // window defaults to 24h but the caller may override it per-transfer.
-    let now_micros = chrono::Utc::now().timestamp_micros();
-    let transfer_validity = match &body.proposal {
-        ProposalType::Transfer {
-            validity_window_hours: Some(hours),
-            ..
-        } => action_serializer::TransferValidity::from_now_with_window(
-            now_micros,
-            i64::from(*hours).saturating_mul(60 * 60 * 1_000_000),
-        ),
-        _ => action_serializer::TransferValidity::from_now(now_micros),
-    };
-
-    let mut resolved_proposal = body.proposal.clone();
-    let transfer_choice_context = match &mut resolved_proposal {
-        ProposalType::AcceptTransfer {
-            transfer_instruction_cid,
-        } => match fetch_accept_transfer_context(
-            &data.config,
-            Some(token.clone()),
-            data.config.canton.network,
-            party_id,
-            transfer_instruction_cid,
-        )
-        .await
-        {
-            Ok(ctx) => Some(ctx),
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to fetch AcceptTransfer choice context from registry: {e:#}"
-                );
-                return HttpResponse::BadGateway().json(ErrorResponse {
-                    error: format!("Failed to fetch transfer choice context: {e}"),
-                });
-            }
-        },
-        ProposalType::Transfer {
-            transfer_factory_cid,
-            receiver,
-            amount,
-            instrument_id,
-            input_holding_cids,
-            ..
-        } if needs_registry_context(
-            transfer_factory_cid,
-            &instrument_id.admin,
-            &party_id.to_string(),
-        ) =>
-        {
-            let admin: CantonId = match instrument_id.admin.parse() {
-                Ok(p) => p,
-                Err(e) => {
-                    return HttpResponse::BadRequest().json(ErrorResponse {
-                        error: format!("Invalid instrument admin party id: {e}"),
-                    });
-                }
-            };
-            // The token-standard transfer factory rejects an empty
-            // `inputHoldingCids` ("No holdings provided"). When the caller
-            // didn't pin specific holdings, fund the transfer with every
-            // Holding the sender owns for this instrument and let the choice
-            // consume what it needs (returning change).
-            if input_holding_cids.is_empty() {
-                match select_input_holdings(
-                    &data.config,
-                    party_id,
-                    Some(token.clone()),
-                    &admin,
-                    &instrument_id.id,
-                )
-                .await
-                {
-                    Ok(cids) if cids.is_empty() => {
-                        return HttpResponse::BadRequest().json(ErrorResponse {
-                            error: format!(
-                                "No holdings of instrument {} owned by {} to fund the transfer",
-                                instrument_id.id, party_id
-                            ),
-                        });
-                    }
-                    Ok(cids) => *input_holding_cids = cids,
-                    Err(e) => {
-                        tracing::warn!("Failed to select input holdings for transfer: {e:#}");
-                        return HttpResponse::InternalServerError().json(ErrorResponse {
-                            error: format!("Failed to select input holdings: {e}"),
-                        });
-                    }
-                }
-            }
-            match fetch_factory_for_propose(
-                data.config.canton.network,
-                ProposeTransferArgs {
-                    sender: party_id,
-                    receiver,
-                    amount,
-                    instrument_admin: &admin,
-                    instrument_id: &instrument_id.id,
-                    input_holding_cids,
-                    requested_at_micros: transfer_validity.requested_at_micros,
-                    execute_before_micros: transfer_validity.execute_before_micros,
-                },
-            )
-            .await
-            {
-                Ok(resolved) => {
-                    // Self-administered utility tokens already carry the factory
-                    // cid the UI read from the dec party's ACS; only fill it in
-                    // for shared instruments where the UI left it empty.
-                    if transfer_factory_cid.is_empty() {
-                        *transfer_factory_cid = resolved.factory_cid;
-                    }
-                    Some(AcceptTransferContext {
-                        context: resolved.context,
-                        disclosed_contracts: resolved.disclosed_contracts,
-                    })
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to fetch Transfer choice context from registry: {e:#}");
-                    return HttpResponse::BadGateway().json(ErrorResponse {
-                        error: format!("Failed to fetch transfer factory: {e}"),
-                    });
-                }
-            }
-        }
-        _ => None,
-    };
-
-    let (package_source, module_name, entity_name, create_args) =
-        match action_serializer::build_proposal_create_args(
-            &party_id.to_string(),
-            &member_party_id.to_string(),
-            &resolved_proposal,
-            transfer_choice_context.as_ref().map(|r| &r.context),
-            Some(transfer_validity),
-        ) {
-            Ok(args) => args,
-            Err(e) => {
-                return HttpResponse::BadRequest().json(ErrorResponse {
-                    error: format!("Failed to build proposal create arguments: {e}"),
-                });
-            }
-        };
-
-    let package_id = match package_source {
-        action_serializer::ProposalPackage::GovernanceCore => {
-            match packages.governance_core.as_deref() {
-                Some(pkg) => pkg,
-                None => {
-                    return HttpResponse::BadRequest().json(ErrorResponse {
-                        error: "governance_core package not configured".to_string(),
-                    });
-                }
-            }
-        }
-        action_serializer::ProposalPackage::GovernanceRewards => {
-            match packages.governance_rewards.as_deref() {
-                Some(pkg) => pkg,
-                None => {
-                    return HttpResponse::BadRequest().json(ErrorResponse {
-                        error: "governance_rewards package not configured".to_string(),
-                    });
-                }
-            }
-        }
-        action_serializer::ProposalPackage::GovernanceTokenCustody => {
-            match packages.governance_token_custody.as_deref() {
-                Some(pkg) => pkg,
-                None => {
-                    return HttpResponse::BadRequest().json(ErrorResponse {
-                        error: "governance_token_custody package not configured".to_string(),
-                    });
-                }
-            }
-        }
-        action_serializer::ProposalPackage::GovernanceUtilityCredential => {
-            match packages.governance_utility_credential.as_deref() {
-                Some(pkg) => pkg,
-                None => {
-                    return HttpResponse::BadRequest().json(ErrorResponse {
-                        error: "governance_utility_credential package not configured".to_string(),
-                    });
-                }
-            }
-        }
-        action_serializer::ProposalPackage::GovernanceUtilityOnboarding => {
-            match packages.governance_utility_onboarding.as_deref() {
-                Some(pkg) => pkg,
-                None => {
-                    return HttpResponse::BadRequest().json(ErrorResponse {
-                        error: "governance_utility_onboarding package not configured".to_string(),
-                    });
-                }
-            }
-        }
-    };
-
-    let template_id = Identifier {
-        package_id: package_id.to_string(),
-        module_name: module_name.to_string(),
-        entity_name: entity_name.to_string(),
-    };
-
-    let cmd = Command {
-        command: Some(command::Command::Create(CreateCommand {
-            template_id: Some(template_id),
-            create_arguments: Some(create_args),
-        })),
-    };
-
-    let commands = Commands {
-        workflow_id: String::new(),
-        user_id: String::new(),
-        command_id: uuid::Uuid::new_v4().to_string(),
-        commands: vec![cmd],
-        deduplication_period: None,
-        min_ledger_time_abs: None,
-        min_ledger_time_rel: None,
-        act_as: vec![member_party_id.to_string()],
-        read_as: vec![party_id.to_string()],
-        submission_id: String::new(),
-        disclosed_contracts: vec![],
-        synchronizer_id: String::new(),
-        package_id_selection_preference: vec![],
-        prefetch_contract_keys: vec![],
-    };
-
-    let channel = match tonic::transport::Channel::from_shared(data.config.ledger_api_url()) {
-        Ok(endpoint) => match endpoint.connect().await {
-            Ok(ch) => ch,
-            Err(e) => {
-                return HttpResponse::InternalServerError().json(ErrorResponse {
-                    error: format!("Failed to connect to ledger API: {e}"),
-                });
-            }
-        },
+    let proposal_cid = match submit_proposal(
+        &data.config,
+        party_id,
+        &body.rules_contract_id,
+        &body.proposal,
+        &token,
+        &member_party_id,
+        &packages,
+    )
+    .await
+    {
+        Ok(cid) => cid,
         Err(e) => {
-            return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Invalid ledger API URL: {e}"),
-            });
-        }
-    };
-
-    let mut client =
-        CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
-
-    // Step 1: Create the proposal and get the contract ID back
-    let mut create_req = tonic::Request::new(SubmitAndWaitForTransactionRequest {
-        commands: Some(commands),
-        transaction_format: None,
-    });
-    create_req
-        .metadata_mut()
-        .insert("authorization", format!("Bearer {token}").parse().unwrap());
-
-    let proposal_cid = match client.submit_and_wait_for_transaction(create_req).await {
-        Ok(response) => {
-            // Extract created contract ID from the transaction events
-            match response.into_inner().transaction.and_then(|tx| {
-                tx.events.iter().find_map(|event| {
-                    event.event.as_ref().and_then(|e| match e {
-                        canton_proto_rs::com::daml::ledger::api::v2::event::Event::Created(
-                            created,
-                        ) => Some(created.contract_id.clone()),
-                        _ => None,
-                    })
-                })
-            }) {
-                Some(cid) => cid,
-                None => {
-                    return HttpResponse::InternalServerError().json(ErrorResponse {
-                        error: "Proposal created but could not extract contract ID".to_string(),
-                    });
-                }
-            }
-        }
-        Err(e) => {
-            tracing::error!("Failed to create proposal: {e}");
+            tracing::error!("Failed to create proposal: {e:#}");
             spawn_audit_log(
                 audit_pool,
                 AuditParams {
@@ -1389,11 +1373,11 @@ pub async fn propose_action(
                     action_summary: audit_summary,
                     details: audit_details,
                     status: "failed",
-                    error_message: Some(format!("Failed to create proposal: {e}")),
+                    error_message: Some(format!("{e}")),
                 },
             );
             return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to create proposal: {e}"),
+                error: format!("{e}"),
             });
         }
     };
@@ -1457,6 +1441,25 @@ pub async fn propose_action(
         package_id_selection_preference: vec![],
         prefetch_contract_keys: vec![],
     };
+
+    let channel = match tonic::transport::Channel::from_shared(data.config.ledger_api_url()) {
+        Ok(endpoint) => match endpoint.connect().await {
+            Ok(ch) => ch,
+            Err(e) => {
+                return HttpResponse::InternalServerError().json(ErrorResponse {
+                    error: format!("Failed to connect to ledger API: {e}"),
+                });
+            }
+        },
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Invalid ledger API URL: {e}"),
+            });
+        }
+    };
+
+    let mut client =
+        CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
 
     let mut confirm_req = tonic::Request::new(SubmitAndWaitRequest {
         commands: Some(confirm_commands),
@@ -2072,7 +2075,7 @@ async fn get_member_party_id(data: &web::Data<AppState>, party_id: &CantonId) ->
 }
 
 /// Get token and member_party_id for a party
-async fn get_party_credentials(
+pub(crate) async fn get_party_credentials(
     data: &web::Data<AppState>,
     party_id: &CantonId,
 ) -> Option<(String, CantonId)> {
@@ -2092,8 +2095,32 @@ async fn get_party_credentials(
 }
 
 /// Get the hardcoded default package config (package IDs are constants, not per-party)
-fn packages() -> PackageConfig {
+pub(crate) fn packages() -> PackageConfig {
     default_package_config()
+}
+
+/// Resolve the active `GovernanceRules` contract id and the governance
+/// execute-threshold for `party_id`.
+///
+/// This is the *governance* threshold that gates
+/// `GovernanceRules_ExecuteConfirmedAction` — not the decentralized-namespace
+/// topology threshold from `get_party_threshold`. Consumed by the CIP-104
+/// reward automation (Mode A, M3+M4). The `get_governance` handler keeps its
+/// own inline resolution because it additionally needs the governance-core
+/// out-of-date flags and a topology-threshold fallback, neither of which fit
+/// this helper's `(String, usize)` shape.
+#[allow(dead_code)]
+pub(crate) async fn resolve_active_governance_rules(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    test_mode: bool,
+    packages: &PackageConfig,
+) -> anyhow::Result<(String, usize)> {
+    let state = query_governance_state(config, party_id, token, test_mode, packages)
+        .await?
+        .context("no active GovernanceRules contract for party")?;
+    Ok((state.contract_id, state.threshold as usize))
 }
 
 // ============================================================================
@@ -2101,7 +2128,7 @@ fn packages() -> PackageConfig {
 // ============================================================================
 
 /// Execute ConfirmAction choice on VaultGovernanceRules contract with structured action
-async fn execute_confirm_action(
+pub(crate) async fn execute_confirm_action(
     config: &NodeConfig,
     request: &ConfirmActionRequest,
     token: &str,
