@@ -23,12 +23,6 @@
 //! The pure record decoders ([`parse_split_record`]) are unit-tested here; the
 //! gRPC reads are exercised by the devnet integration test.
 
-// The reader side of the automation lands ahead of the proposer/confirmer
-// roles and the background loop (M3+M4 Tasks 5–9) that consume it, so several
-// `pub(crate)` items are not yet wired into a call path. Mirrors the same
-// `#[allow(dead_code)]` on `resolve_active_governance_rules` in governance.rs.
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 
 use anyhow::{Context, anyhow};
@@ -46,8 +40,14 @@ use crate::{
     utils,
 };
 
+use std::time::Duration;
+
 use super::AppState;
-use super::handlers::{execute_confirm_action, submit_proposal};
+use super::handlers::{
+    execute_confirm_action, get_party_credentials, packages, resolve_active_governance_rules,
+    submit_proposal,
+};
+use super::queries::get_governance_confirmations;
 use super::types::{
     ActionType, ConfirmActionRequest, DomainGovernanceAction, GovernanceType, ProposalType,
     RewardBeneficiary,
@@ -348,7 +348,12 @@ pub(crate) async fn effective_split(
 /// A decparty's unassigned reward coupon (`RewardCoupon` interface view).
 pub(crate) struct CouponInfo {
     pub cid: String,
+    /// Populated for operator logging and the devnet IT's assertions; the
+    /// batching logic itself keys off `cid` + `expires_at` only.
+    #[allow(dead_code)]
     pub provider: CantonId,
+    /// See `provider` — surfaced for logging/IT, not read by batching.
+    #[allow(dead_code)]
     pub amount: DamlDecimal,
     pub expires_at: DateTime<Utc>,
 }
@@ -406,6 +411,9 @@ pub(crate) async fn unassigned_coupons(
 /// node's confirmation. Populated by [`read_pending_assign`].
 #[derive(Clone, Debug)]
 pub(crate) struct PendingAssign {
+    /// Mirrors the `DomainGovernanceAction` cid so a `PendingAssign` is
+    /// self-describing; the confirmer keys off the action's cid, not this.
+    #[allow(dead_code)]
     pub proposal_cid: String,
     pub primary_coupon: String,
     pub additional_coupons: Vec<String>,
@@ -721,6 +729,117 @@ pub(crate) async fn run_confirmer_once(
         // to keep scope tight; execute stays human-driven for now.
     }
 
+    Ok(())
+}
+
+// ============================================================================
+// Background loop + registration
+// ============================================================================
+
+/// Per-node background loop: every `reward_automation_interval_secs`, run the
+/// proposer + confirmer once for each decparty this node holds credentials for.
+/// Enablement is on-ledger — a decparty with no `RewardSplitConfig` is skipped.
+pub(crate) async fn run_reward_automation_loop(data: actix_web::web::Data<AppState>) {
+    let mut ticker = tokio::time::interval(Duration::from_secs(
+        data.config.reward_automation_interval_secs,
+    ));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        ticker.tick().await;
+        let parties: Vec<CantonId> = data
+            .party_credentials
+            .read()
+            .await
+            .iter()
+            .map(|p| p.dec_party_id.clone())
+            .collect();
+        for decparty in parties {
+            if let Err(e) = run_once_for_party(&data, &decparty).await {
+                tracing::warn!(%decparty, error = %e, "reward automation tick failed");
+            }
+        }
+    }
+}
+
+/// One proposer + confirmer pass for a single decparty. No-op unless the
+/// decparty has an on-ledger `RewardSplitConfig` (the enablement signal).
+async fn run_once_for_party(
+    data: &actix_web::web::Data<AppState>,
+    decparty: &CantonId,
+) -> anyhow::Result<()> {
+    let pkgs = packages();
+    let Some((token, member)) = get_party_credentials(data, decparty).await else {
+        return Ok(());
+    };
+    // Enablement: exactly one RewardSplitConfig => on; none => off; >1 => Err.
+    let Some(split) =
+        effective_split(&data.config, &pkgs, data.test_mode, decparty, &token).await?
+    else {
+        return Ok(());
+    };
+    // Governance rules cid + governance threshold (NOT the topology threshold).
+    let (rules_cid, threshold) = resolve_active_governance_rules(
+        &data.config,
+        decparty,
+        Some(token.clone()),
+        data.test_mode,
+        &pkgs,
+    )
+    .await?;
+    // Fetch pending governance actions once; shared by dedupe + the confirmer.
+    let (_, domain) = get_governance_confirmations(
+        &data.config,
+        decparty,
+        threshold,
+        Some(token.clone()),
+        data.test_mode,
+        &pkgs,
+    )
+    .await?;
+    // Coupons already covered by in-flight assign proposals => dedupe the proposer.
+    let mut covered: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for a in domain
+        .iter()
+        .filter(|a| a.action_label == "AssignRewardBeneficiaries" && !a.orphaned)
+    {
+        if let Some(pa) = read_pending_assign(
+            &data.config,
+            decparty,
+            &a.proposal_cid,
+            Some(token.clone()),
+            data.test_mode,
+            &pkgs,
+        )
+        .await?
+        {
+            covered.insert(pa.primary_coupon);
+            covered.extend(pa.additional_coupons);
+        }
+    }
+    run_proposer_once(
+        &data.config,
+        decparty,
+        &member,
+        &token,
+        &split,
+        data.test_mode,
+        &pkgs,
+        &covered,
+    )
+    .await?;
+    run_confirmer_once(
+        data,
+        &data.config,
+        decparty,
+        &member,
+        &token,
+        &rules_cid,
+        &split,
+        &domain,
+        data.test_mode,
+        &pkgs,
+    )
+    .await?;
     Ok(())
 }
 

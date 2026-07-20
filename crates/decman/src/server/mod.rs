@@ -1025,6 +1025,14 @@ pub async fn start_server(
         .await;
     });
 
+    // Background task: CIP-104 Mode A reward-assignment automation. Clone the
+    // existing `web::Data<AppState>` (an Arc) so the loop shares the SAME state —
+    // live party credentials, auth, config — never a fresh AppState.
+    let reward_automation_state = app_state.clone();
+    tokio::spawn(async move {
+        reward_automation::run_reward_automation_loop(reward_automation_state).await;
+    });
+
     // Single peer-job listener: drains the queue and spawns one
     // `workflow::start_peer` per accepted / retried / resumed invite, so this
     // node can be a peer in many concurrent workflows at once.

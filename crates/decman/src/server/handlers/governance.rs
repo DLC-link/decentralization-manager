@@ -2109,7 +2109,6 @@ pub(crate) fn packages() -> PackageConfig {
 /// own inline resolution because it additionally needs the governance-core
 /// out-of-date flags and a topology-threshold fallback, neither of which fit
 /// this helper's `(String, usize)` shape.
-#[allow(dead_code)]
 pub(crate) async fn resolve_active_governance_rules(
     config: &NodeConfig,
     party_id: &CantonId,

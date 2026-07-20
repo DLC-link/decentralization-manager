@@ -247,6 +247,10 @@ pub struct NodeConfig {
     pub canton: CantonConfig,
     pub timeouts: Timeouts,
     pub noise_retry: NoiseRetryConfig,
+    /// Tick interval (seconds) for the CIP-104 Mode A reward-assignment
+    /// automation loop. Enablement is on-ledger (presence of a
+    /// `RewardSplitConfig`), so this only controls cadence. Default 300s.
+    pub reward_automation_interval_secs: u64,
     /// Top-level Keycloak config for frontend website gating
     pub keycloak: Option<KeycloakConfig>,
     /// Top-level Auth0 config for frontend website gating (mutually exclusive
@@ -272,6 +276,7 @@ impl Default for NodeConfig {
             canton: CantonConfig::default(),
             timeouts: Timeouts::default(),
             noise_retry: NoiseRetryConfig::default(),
+            reward_automation_interval_secs: 300,
             keycloak: None,
             auth0: None,
             insecure: false,

@@ -24,7 +24,10 @@ pub use governance::{
 // Crate-internal governance helpers reused by the reward-automation module
 // (Task 3 widened these to `pub(crate)`; re-exported here so they are reachable
 // through the private `governance` submodule).
-pub(crate) use governance::{execute_confirm_action, submit_proposal};
+pub(crate) use governance::{
+    execute_confirm_action, get_party_credentials, packages, resolve_active_governance_rules,
+    submit_proposal,
+};
 pub use invitations::{accept_invitation, decline_invitation, get_invitations};
 pub use keys::get_key_status;
 pub use parties::{
