@@ -946,17 +946,17 @@ git commit -m "refactor: remove AssignRewardBeneficiaries/RewardSplitConfig/SetR
 
 ### Task 9 (M4): Devnet integration test — delegation model
 
-**Files:** **rename** the existing `DECPM_IT_REWARD`-gated reward IT phase to match the naming revert, then rewrite its scenario in place. No new runtime code.
-- Rename + rewrite: `crates/decman/tests/common/phases/reward_assignment.rs` → `crates/decman/tests/common/phases/coupon_reassignment.rs` (via `git mv`; the 429-line scaffold from commit `4a42134` currently drives the propose→auto-confirm→execute flow — its contents are replaced wholesale by the delegation scenario, so the rename is free).
-- Modify: `crates/decman/tests/common/phases/mod.rs` — rename the module declaration `mod reward_assignment;` → `mod coupon_reassignment;`.
-- Modify: `crates/decman/tests/governance_workflows.rs` — update the `DECPM_IT_REWARD`-gated call to the `coupon_reassignment` module path and adjust it to the single-node delegation scenario.
+**Files:** **create** the delegation-model IT phase. (The old `reward_assignment.rs` phase was already removed in Task 8 — it was engine-era dead code naming the deleted proposal types — so this is a fresh create, not a rename.) No new runtime code; the shared IT harness (`common/types.rs`, `common/governance.rs`, `propose_confirm_execute`, `Scenario`, etc.) is intact and reused.
+- Create: `crates/decman/tests/common/phases/coupon_reassignment.rs` — the delegation-model scenario (below).
+- Modify: `crates/decman/tests/common/phases/mod.rs` — add `pub mod coupon_reassignment;` (alphabetical position).
+- Modify: `crates/decman/tests/governance_workflows.rs` — add the `DECPM_IT_REWARD`-gated call into the new phase (single-node delegation scenario).
 
 **Preconditions (operational — spec §13, handover):**
 - **Pause the Mode-B collection path for `cbtc-network`** (it sweeps coupons to 0) so unassigned coupons re-accumulate — coordinate with the team. Coupons re-appear within ~one round.
 - Create the delegation via ONE governance vote: propose→confirm→execute `SetupCouponReassignmentDelegation` for `cbtc-network` with `assigners = [attestor-1, attestor-2]` (the active members) and `beneficiaries = [cbtc-beneficiary 0.8, operator 0.2]`. Verify exactly one `CouponReassignmentDelegation` exists.
 - **Only ONE DecMan member instance needs to run** to reassign (contrast the old multi-node confirm) — the IT no longer requires ≥2 instances for the happy path.
 
-- [ ] **Step 0: Rename the phase module.** `git mv crates/decman/tests/common/phases/reward_assignment.rs crates/decman/tests/common/phases/coupon_reassignment.rs`; rename `mod reward_assignment;` → `mod coupon_reassignment;` in `crates/decman/tests/common/phases/mod.rs`; update the gated call in `crates/decman/tests/governance_workflows.rs` to the new module path. Run `DECPM_IT_REWARD=1 cargo test -p decman --no-run` to confirm the rename compiles before touching the scenario body.
+- [ ] **Step 0: Create + register the phase module.** Create `crates/decman/tests/common/phases/coupon_reassignment.rs`; add `pub mod coupon_reassignment;` to `crates/decman/tests/common/phases/mod.rs` (alphabetical); add a `DECPM_IT_REWARD`-gated call into it from `crates/decman/tests/governance_workflows.rs`. Model the harness usage (starting nodes, PQS `pqs_cbtc` queries, `propose_confirm_execute`, `Scenario`) on the surviving sibling phases (`utility_onboarding.rs`, `notification_feed.rs`). This phase is **devnet-only, gated behind `DECPM_IT_REWARD`** — it does not run in normal CI; verify it **compiles + is gated** with `DECPM_IT_REWARD=1 cargo test -p decman --no-run` (a live devnet run is a separate pre-merge ops step, not part of this task).
 
 - [ ] **Step 1: Write the happy-path scenario.** With the delegation in place and collection paused: start the automation on one member node; wait up to N ticks. Assert against devnet PQS `pqs_cbtc`, in order: (a) the unassigned `RewardCouponV2` coupons (`provider = cbtc-network`, `beneficiary = null`) exist; (b) after a tick, those coupons are archived and one `RewardCouponV2` per beneficiary now exists with `beneficiary ∈ {cbtc-beneficiary, operator}` and the expected `amount` shares (0.8 / 0.2). (Beneficiary self-minting is a separate precondition — assert only if those agents run; spec §4.3.)
 
