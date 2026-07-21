@@ -342,6 +342,99 @@ pub(crate) async fn effective_split(
 }
 
 // ============================================================================
+// CouponReassignmentDelegation (the delegation-model enablement signal)
+// ============================================================================
+
+/// The active `CouponReassignmentDelegation` for a decparty: its cid and the
+/// set of members authorized to execute `Delegation_Assign`. The split is
+/// **not** carried here — it lives in the on-ledger contract and
+/// `Delegation_Assign` enforces it by construction (spec §12), so the Rust
+/// side never needs to read it.
+pub(crate) struct ActiveDelegation {
+    pub cid: String,
+    pub assigners: Vec<CantonId>,
+}
+
+/// Read a list-of-`Party` field, parsing each element into a [`CantonId`].
+/// Mirrors `field_contract_id_list`, decoding each element the same way
+/// `field_party_id` decodes a single `Party` value.
+fn field_party_list(rec: &Record, label: &str) -> anyhow::Result<Vec<CantonId>> {
+    let list = match record_field(rec, label) {
+        Some(value::Sum::List(l)) => l,
+        _ => return Err(anyhow!("field `{label}`: expected a List value")),
+    };
+    list.elements
+        .iter()
+        .map(|elem| match elem.sum.as_ref() {
+            Some(value::Sum::Party(p)) => p
+                .parse::<CantonId>()
+                .with_context(|| format!("field `{label}`: invalid party id `{p}`")),
+            _ => Err(anyhow!("field `{label}`: element is not a Party")),
+        })
+        .collect()
+}
+
+/// Decode a `CouponReassignmentDelegation` create-arguments `Record` into an
+/// [`ActiveDelegation`]. Reads only `assigners` — the `split` field is
+/// intentionally **not** parsed here; `Delegation_Assign` enforces it in DAML.
+fn parse_delegation_record(cid: &str, rec: &Record) -> anyhow::Result<ActiveDelegation> {
+    Ok(ActiveDelegation {
+        cid: cid.to_string(),
+        assigners: field_party_list(rec, "assigners")?,
+    })
+}
+
+/// The active `CouponReassignmentDelegation` for a decparty, read from the
+/// ledger, or `None` when there is none (automation not enabled for that
+/// decparty). Defends the keyless-singleton invariant, mirroring
+/// `effective_split`. Replaces `effective_split` as the Task 6 loop's
+/// enablement + assigners source (`effective_split` is deleted in Task 7).
+pub(crate) async fn active_delegation(
+    config: &NodeConfig,
+    packages: &PackageConfig,
+    test_mode: bool,
+    decparty: &CantonId,
+    token: &str,
+) -> anyhow::Result<Option<ActiveDelegation>> {
+    let Some(package_id) = packages.governance_rewards.as_deref() else {
+        return Ok(None);
+    };
+
+    let records = active_created_records(
+        config,
+        decparty,
+        Some(token.to_string()),
+        test_mode,
+        package_id,
+        "Governance.Rewards.CouponReassignmentDelegation",
+        "CouponReassignmentDelegation",
+        false,
+    )
+    .await?;
+
+    // Defend the keyless-singleton invariant: keep only delegations whose
+    // `decparty` field is this decparty.
+    let mut mine: Vec<(String, Record)> = records
+        .into_iter()
+        .filter(|(_, rec)| field_party_id(rec, "decparty").ok().as_ref() == Some(decparty))
+        .collect();
+
+    match mine.len() {
+        0 => Ok(None),
+        1 => {
+            let (cid, rec) = mine.remove(0);
+            Ok(Some(parse_delegation_record(&cid, &rec)?))
+        }
+        n => {
+            tracing::warn!(%decparty, count = n, "ambiguous CouponReassignmentDelegation — refusing");
+            Err(anyhow!(
+                "ambiguous CouponReassignmentDelegation: {n} active — refusing"
+            ))
+        }
+    }
+}
+
+// ============================================================================
 // Unassigned reward coupons
 // ============================================================================
 
@@ -996,6 +1089,33 @@ mod tests {
     fn parse_split_record_rejects_missing_list() {
         let rec = record(vec![field("governanceParty", party(GOV))]);
         assert!(parse_split_record(&rec).is_err());
+    }
+
+    #[test]
+    fn parse_delegation_record_reads_assigners_and_split() {
+        // List values: `value::Sum::List(List { elements: vec![Value, ..] })` — same as the
+        // existing parse_split_record test. `party(..)` returns value::Sum, so wrap each with
+        // `value(..)`; `beneficiary_record(..)` already returns a Value. `field(label, sum)`
+        // takes a value::Sum, so pass `value::Sum::List(..)` directly.
+        let rec = record(vec![
+            field("decparty", party(GOV)),
+            field(
+                "assigners",
+                value::Sum::List(List {
+                    elements: vec![value(party(ALICE)), value(party(BOB))],
+                }),
+            ),
+            field(
+                "split",
+                value::Sum::List(List {
+                    elements: vec![beneficiary_record(ALICE, "0.8"), beneficiary_record(BOB, "0.2")],
+                }),
+            ),
+        ]);
+        let d = parse_delegation_record("00del", &rec).unwrap();
+        assert_eq!(d.cid, "00del");
+        assert_eq!(d.assigners.len(), 2);
+        // split is not parsed (DAML-enforced) — the record's `split` field is ignored.
     }
 
     #[test]
