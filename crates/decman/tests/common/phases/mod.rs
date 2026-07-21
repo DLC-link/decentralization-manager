@@ -9,6 +9,7 @@ pub mod concurrent_cross_workflows;
 pub mod concurrent_sibling_cancel;
 pub mod concurrent_sibling_decline;
 pub mod contracts_quorum_completes;
+pub mod coupon_reassignment;
 pub mod create_dec_party;
 pub mod deploy_gov_core;
 pub mod dismiss_failed_cleans_artifacts;
