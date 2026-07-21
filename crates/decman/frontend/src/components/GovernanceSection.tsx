@@ -1638,9 +1638,10 @@ export const GovernanceSection = ({
             "Paid credential proposal forms are not implemented yet — use the Free direction or call the API directly.",
           );
         default:
-          // Automation-only proposal types (e.g. assign_reward_beneficiaries,
-          // set_reward_split) have no UI form by design and are never offered in
-          // the menu; guard the exhaustiveness so `proposal` is always assigned.
+          // Automation-only proposal types (e.g. setup_coupon_reassignment_delegation,
+          // revoke_coupon_reassignment_delegation) have no UI form by design and are
+          // never offered in the menu; guard the exhaustiveness so `proposal` is
+          // always assigned.
           throw new Error(
             `Proposal type "${proposalType}" is automation-only and not available in the UI.`,
           );

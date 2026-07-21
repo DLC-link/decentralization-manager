@@ -104,7 +104,7 @@ fn field_time(rec: &Record, label: &str) -> anyhow::Result<DateTime<Utc>> {
 /// Return true iff `label` is an `Optional` field carrying `None`.
 ///
 /// A missing field, or a non-optional value, returns false — the caller then
-/// treats the contract as *not* unassigned (fail-safe: never propose against a
+/// treats the contract as *not* unassigned (fail-safe: never assign against a
 /// coupon we can't confirm is unassigned).
 fn field_optional_is_none(rec: &Record, label: &str) -> bool {
     matches!(record_field(rec, label), Some(value::Sum::Optional(opt)) if opt.value.is_none())
@@ -279,9 +279,9 @@ fn parse_delegation_record(cid: &str, rec: &Record) -> anyhow::Result<ActiveDele
 
 /// The active `CouponReassignmentDelegation` for a decparty, read from the
 /// ledger, or `None` when there is none (automation not enabled for that
-/// decparty). Defends the keyless-singleton invariant, mirroring
-/// `effective_split`. Replaces `effective_split` as the Task 6 loop's
-/// enablement + assigners source (`effective_split` is deleted in Task 7).
+/// decparty). Defends the keyless-singleton invariant: more than one active
+/// delegation for the same decparty is refused rather than guessed at. This
+/// is the reassign loop's enablement + assigners source.
 pub(crate) async fn active_delegation(
     config: &NodeConfig,
     packages: &PackageConfig,
@@ -334,11 +334,11 @@ pub(crate) async fn active_delegation(
 /// A decparty's unassigned reward coupon (`RewardCoupon` interface view).
 pub(crate) struct CouponInfo {
     pub cid: String,
-    /// Populated for operator logging and the devnet IT's assertions; the
-    /// batching logic itself keys off `cid` + `expires_at` only.
+    /// Currently unused — the batching logic keys off `cid` + `expires_at`
+    /// only. Retained for future operator logging / devnet IT assertions.
     #[allow(dead_code)]
     pub provider: CantonId,
-    /// See `provider` — surfaced for logging/IT, not read by batching.
+    /// See `provider` — currently unused, retained for the same reason.
     #[allow(dead_code)]
     pub amount: DamlDecimal,
     pub expires_at: DateTime<Utc>,
@@ -389,7 +389,7 @@ pub(crate) async fn unassigned_coupons(
 }
 
 // ============================================================================
-// Proposer role
+// Coupon batch selection
 // ============================================================================
 
 /// Total lifetime of a `RewardCouponV2` coupon (spec §1: 36h TTL). Used to
@@ -453,6 +453,19 @@ fn build_delegation_assign_arg(
     }
 }
 
+/// Build the `Identifier` for the `CouponReassignmentDelegation` template
+/// (pure). The DAML template lives in module `Governance.Rewards.
+/// CouponReassignmentDelegation` (not the shorter `Governance.Rewards`) — the
+/// Ledger API `module_name` must be the full module path or the exercise
+/// resolves against the wrong (non-existent) template.
+fn delegation_template_id(package_id: String) -> Identifier {
+    Identifier {
+        package_id,
+        module_name: "Governance.Rewards.CouponReassignmentDelegation".to_string(),
+        entity_name: "CouponReassignmentDelegation".to_string(),
+    }
+}
+
 /// Exercise `Delegation_Assign` as a plain ledger command (no governance
 /// round). Adapted from `execute_confirm_action`
 /// (`handlers/governance.rs:2107`); the differences are the target contract
@@ -489,11 +502,7 @@ pub(crate) async fn submit_delegation_assign(
         fallback,
     )
     .await;
-    let template_id = Identifier {
-        package_id,
-        module_name: "Governance.Rewards".to_string(),
-        entity_name: "CouponReassignmentDelegation".to_string(),
-    };
+    let template_id = delegation_template_id(package_id);
     let channel = tonic::transport::Channel::from_shared(config.ledger_api_url())?
         .connect()
         .await?;
@@ -537,7 +546,9 @@ pub(crate) async fn submit_delegation_assign(
 /// One reassign tick for a decparty under the delegation model: read
 /// unassigned coupons, select a ripe batch, and — if non-empty — exercise
 /// `Delegation_Assign` for it. An empty batch (nothing ripe) is a no-op.
-/// Batch policy constants mirror `run_proposer_once` (spec §9/§11).
+/// Batch policy: a coupon must clear the watermark and leave enough margin
+/// before expiry to mint after assigning, capped at a max batch size (spec
+/// §9/§11; see [`select_batch`]).
 pub(crate) async fn run_reassign_once(
     config: &NodeConfig,
     decparty: &CantonId,
@@ -730,7 +741,7 @@ mod tests {
         // split is not parsed (DAML-enforced) — the record's `split` field is ignored.
     }
 
-    // ---- proposer (select_batch) --------------------------------------------
+    // ---- batch selection (select_batch) -------------------------------------
 
     fn dt(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s)
@@ -795,5 +806,19 @@ mod tests {
             build_delegation_assign_arg(&rb("m1", "1.0").beneficiary, "00c1", &["00c2".into()]);
         let labels: Vec<&str> = rec.fields.iter().map(|f| f.label.as_str()).collect();
         assert_eq!(labels, ["assigner", "primaryCoupon", "additionalCoupons"]);
+    }
+
+    #[test]
+    fn delegation_template_id_uses_full_module_path() {
+        // The DAML template lives in `Governance.Rewards.CouponReassignmentDelegation`,
+        // not the shorter `Governance.Rewards` — a truncated module_name makes the
+        // Ledger API resolve the exercise against a non-existent template.
+        let id = delegation_template_id("pkg123".to_string());
+        assert_eq!(id.package_id, "pkg123");
+        assert_eq!(
+            id.module_name,
+            "Governance.Rewards.CouponReassignmentDelegation"
+        );
+        assert_eq!(id.entity_name, "CouponReassignmentDelegation");
     }
 }
