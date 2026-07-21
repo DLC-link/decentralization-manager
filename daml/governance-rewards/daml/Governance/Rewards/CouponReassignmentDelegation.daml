@@ -8,7 +8,7 @@
 module Governance.Rewards.CouponReassignmentDelegation where
 
 -- NB: copy these imports + emptyExtraArgs verbatim from AssignRewardBeneficiaries.daml
--- (lines 9-12) before that file is deleted in Task 8.
+-- before that file is deleted in Task 8.
 import Splice.Api.RewardAssignmentV1
   (RewardCoupon, RewardBeneficiary, RewardCoupon_AssignBeneficiaries(..))
 import Splice.Api.Token.MetadataV1
