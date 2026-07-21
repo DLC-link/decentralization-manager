@@ -25,7 +25,7 @@
 //!     the run must target a decparty that does (point the harness at
 //!     `cbtc-network`, or arrange coupons for the harness decparty).
 //!   - **Mode-B collection must be paused** for that decparty (coordinate with
-//!     Robert) so coupons re-accumulate unassigned instead of being swept to 0.
+//!     the team) so coupons re-accumulate unassigned instead of being swept to 0.
 //!   - The test nodes must run with a **short `reward_automation_interval_secs`**
 //!     (default is 300s — far too slow for a test). See the `NOTE(interval)`
 //!     below: there is currently no env/config override for this field, so

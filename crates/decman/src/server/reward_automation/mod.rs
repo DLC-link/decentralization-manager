@@ -295,7 +295,7 @@ pub(crate) fn parse_split_record(rec: &Record) -> anyhow::Result<Vec<RewardBenef
 /// is not enabled for that decparty). Defends the keyless-singleton invariant.
 ///
 /// This is the **single swap point** for the split source: if a shared
-/// reward-config template ships later (Robert), only this function body changes.
+/// reward-config template ships later, only this function body changes.
 /// (Kept as a plain async fn — the codebase deliberately avoids `async-trait`,
 /// and there is one source today, so a trait would be premature.)
 pub(crate) async fn effective_split(
