@@ -1,0 +1,46 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | GovernableAction that creates (or atomically replaces) the decparty's
+-- CouponReassignmentDelegation. The ONLY reassignment step that takes a
+-- governance vote (spec §5, §6, §8). Runs with governanceParty authority.
+module Governance.Rewards.SetupCouponReassignmentDelegation where
+
+import DA.Foldable (forA_)
+import Splice.Api.RewardAssignmentV1 (RewardBeneficiary(..))
+import Governance.Rewards.CouponReassignmentDelegation
+import Governance.Action
+
+template SetupCouponReassignmentDelegation
+  with
+    governanceParty : Party
+    proposer : Party
+    priorDelegation : Optional (ContractId CouponReassignmentDelegation)
+      -- ^ cid of the delegation to replace (None for the first create); revoked at execute.
+    assigners : [Party]
+    beneficiaries : [RewardBeneficiary]
+  where
+    signatory proposer
+    observer governanceParty
+
+    interface instance GovernableAction for SetupCouponReassignmentDelegation where
+      view = GovernableActionView with
+        governanceParty
+        proposer
+        actionLabel = "SetupCouponReassignmentDelegation"
+        description = "Create (or replace) the coupon-reassignment delegation."
+
+      executeImpl = do
+        -- execute-time guards (a direct ledger submit bypasses the Rust boundary).
+        -- Same checks as the Rust validate_reward_beneficiaries + a non-empty assigners set.
+        assertMsg "beneficiaries must not be empty" (not (null beneficiaries))
+        assertMsg "at most 20 beneficiaries" (length beneficiaries <= 20)
+        assertMsg "each percentage must be in (0,1]"
+          (all (\b -> b.percentage > 0.0 && b.percentage <= 1.0) beneficiaries)
+        let total = sum (map (.percentage) beneficiaries)
+        assertMsg "percentages must sum to 1.0" (total == 1.0)   -- exact Decimal
+        assertMsg "assigners must not be empty" (not (null assigners))
+        forA_ priorDelegation (`exercise` Delegation_Revoke)      -- atomic replace when Some
+        _ <- create CouponReassignmentDelegation with
+               decparty = governanceParty; assigners; split = beneficiaries
+        pure ()

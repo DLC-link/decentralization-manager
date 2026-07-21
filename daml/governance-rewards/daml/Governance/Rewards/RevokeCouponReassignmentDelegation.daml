@@ -1,0 +1,28 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | GovernableAction that disables (archives) the delegation (spec §8, §11).
+module Governance.Rewards.RevokeCouponReassignmentDelegation where
+
+import Governance.Rewards.CouponReassignmentDelegation
+import Governance.Action
+
+template RevokeCouponReassignmentDelegation
+  with
+    governanceParty : Party
+    proposer : Party
+    delegation : ContractId CouponReassignmentDelegation
+  where
+    signatory proposer
+    observer governanceParty
+
+    interface instance GovernableAction for RevokeCouponReassignmentDelegation where
+      view = GovernableActionView with
+        governanceParty
+        proposer
+        actionLabel = "RevokeCouponReassignmentDelegation"
+        description = "Revoke the coupon-reassignment delegation."
+
+      executeImpl = do
+        _ <- exercise delegation Delegation_Revoke
+        pure ()
