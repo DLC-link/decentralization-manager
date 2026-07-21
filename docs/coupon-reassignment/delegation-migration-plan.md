@@ -60,7 +60,8 @@
 - Create: `daml/governance-rewards-assign-test/daml/Governance/Rewards/TestCouponReassignmentDelegation.daml`
 
 **Interfaces:**
-- Consumes: `Splice.Api.RewardAssignmentV1 (RewardBeneficiary, RewardCoupon, RewardCoupon_AssignBeneficiaries(..))` and the token-metadata `ExtraArgs`/`emptyChoiceContext`/`emptyMetadata` — **copy the exact import lines and the `emptyExtraArgs` definition verbatim from the existing `AssignRewardBeneficiaries.daml` (lines 20–23)** before deleting it. The M1 test helper `allocateRewardsTestParties` from `AssignTestUtils`. **Define `mkUnassignedCoupon` locally** in the new test module by copying its body verbatim from `TestAssignRewardBeneficiaries.daml:19` (`Party -> Party -> Decimal -> Script (ContractId RewardCoupon)`) — do **not** import it, because that file is deleted in Task 8.
+- Consumes (template `CouponReassignmentDelegation.daml`, Step 3): `Splice.Api.RewardAssignmentV1 (RewardBeneficiary, RewardCoupon, RewardCoupon_AssignBeneficiaries(..))` + the token-metadata `ExtraArgs`/`emptyChoiceContext`/`emptyMetadata` — **copy the import lines + the `emptyExtraArgs` definition verbatim from the existing `AssignRewardBeneficiaries.daml` (lines 20–23)** before it is deleted.
+- Consumes (tests — **GWT / `TestHarness` style**, matching `governance-rewards-test`): `TestHarness` (`Test{given,when,then_}`, `run`, `Failures`, `shouldBe`) + `AssignTestUtils` (`allocateRewardsTestParties`, `TestParties` with `.dso`/`.governanceParty`/`.member1..3`, and for Task 2 `createTestGovernance`/`confirmAndExecute`/`submitConfirmations`) + `Splice.Amulet (RewardCouponV2(..))` + `Splice.Types (Round(..))`. **No `daml.yaml` change needed** — `testlib-0.1.0.dar` (→ `TestHarness`) and the local `AssignTestUtils` are already deps of `governance-rewards-assign-test`. `mkUnassignedCoupon` is defined locally (full body inlined in Step 1, copied from `TestAssignRewardBeneficiaries.daml:19`), since that file is deleted in Task 8. Assertions query the concrete `RewardCouponV2` (`query @RewardCouponV2`), not the interface.
 - Produces: `template CouponReassignmentDelegation with decparty : Party; assigners : [Party]; split : [RewardBeneficiary]`; `nonconsuming choice Delegation_Assign with assigner : Party; primaryCoupon : ContractId RewardCoupon; additionalCoupons : [ContractId RewardCoupon]`; `choice Delegation_Revoke : ()`.
 
 - [ ] **Step 0: Bump the package version + wire the test dependency.** In `daml/governance-rewards/daml.yaml:3`, `version: 0.1.2` → `version: 0.1.3`. Open `daml/governance-rewards-assign-test/daml.yaml`, find its `governance-rewards` `data-dependency`, and note the exact path it uses for `-0.1.2.dar` (either `releases/v1/…` or a build-output path); repoint it to `-0.1.3.dar`. This must happen first — the test module in Step 1 cannot compile against the new template until the `0.1.3` DAR exists where this ref points (Step 6 builds + places it).
@@ -70,61 +71,118 @@
 ```haskell
 module Governance.Rewards.TestCouponReassignmentDelegation where
 
+import DA.Time (addRelTime, hours)
 import Daml.Script
-import DA.Assert ((===))
-import Splice.Api.RewardAssignmentV1 (RewardBeneficiary(..), RewardCoupon)
+import Splice.Amulet (RewardCouponV2(..))
+import Splice.Types (Round(..))
+import Splice.Api.RewardAssignmentV1 (RewardCoupon, RewardBeneficiary(..))
 import Governance.Rewards.CouponReassignmentDelegation
-import Governance.Rewards.AssignTestUtils (allocateRewardsTestParties)
+import Governance.Rewards.AssignTestUtils   -- allocateRewardsTestParties, TestParties (has .dso)
+import TestHarness                            -- Test{given,when,then_}, run, Failures, shouldBe
 
--- Define mkUnassignedCoupon locally (copy verbatim from TestAssignRewardBeneficiaries.daml:19;
--- that file is deleted in Task 8, so it cannot be imported):
---   mkUnassignedCoupon : Party -> Party -> Decimal -> Script (ContractId RewardCoupon)
+-- Local copy of mkUnassignedCoupon (its M1 home TestAssignRewardBeneficiaries.daml is
+-- deleted in Task 8, so it cannot be imported). Verbatim from that file:
+mkUnassignedCoupon : Party -> Party -> Decimal -> Script (ContractId RewardCoupon)
+mkUnassignedCoupon dso provider amount = do
+  now <- getTime
+  cid <- submit dso $ createCmd RewardCouponV2 with
+    dso; provider; round = Round 1; amount
+    expiresAt = now `addRelTime` hours 36
+    providerIsObserver = True; beneficiary = None
+  pure (toInterfaceContractId @RewardCoupon cid)
 
--- A delegation is created directly here (in production it is created by the
--- SetupCouponReassignmentDelegation governance action — Task 2). decparty is the
--- provider on the coupons; assigners are the member parties.
-setup = script do
+-- GWT fixture: parties + a delegation created DIRECTLY (in production it is created by
+-- the SetupCouponReassignmentDelegation governance action — Task 2). decparty is the
+-- coupons' provider; assigners are the member parties (1-of-n).
+data Fixture = Fixture with
+    parties : TestParties
+    split   : [RewardBeneficiary]
+    delId   : ContractId CouponReassignmentDelegation
+
+given_delegation : Script Fixture
+given_delegation = do
   parties <- allocateRewardsTestParties
   let gp = parties.governanceParty
   let split = [ RewardBeneficiary with beneficiary = parties.member2; percentage = 0.8
               , RewardBeneficiary with beneficiary = parties.member3; percentage = 0.2 ]
   delId <- submit gp $ createCmd CouponReassignmentDelegation with
-             decparty = gp; assigners = [parties.member1, parties.member2]; split
-  pure (parties, gp, split, delId)
+    decparty = gp; assigners = [parties.member1, parties.member2]; split
+  pure Fixture with ..
+
+-- shared no-assertion then_ for negative cases (when : Fixture -> Script ())
+then_nothing : Fixture -> a -> Script Failures
+then_nothing _ _ = pure []
+
+-- happy path: a SINGLE assigner (member1), acting alone, reassigns one coupon to the
+-- baked-in split -> one RewardCouponV2 per beneficiary (original archived).
+when_assigner_reassigns : Fixture -> Script Int
+when_assigner_reassigns f = do
+  let gp = f.parties.governanceParty
+  c1 <- mkUnassignedCoupon f.parties.dso gp 100.0
+  submit f.parties.member1 $ exerciseCmd f.delId Delegation_Assign with
+    assigner = f.parties.member1; primaryCoupon = c1; additionalCoupons = []
+  coupons <- query @RewardCouponV2 gp
+  pure (length coupons)
+
+then_two_beneficiary_coupons : Fixture -> Int -> Script Failures
+then_two_beneficiary_coupons _ n = pure $ shouldBe "one coupon per beneficiary" 2 n
 
 test_assigner_reassigns_to_baked_split = script do
-  (parties, gp, split, delId) <- setup
-  c1 <- mkUnassignedCoupon gp gp 100.0   -- provider = gp
-  -- a SINGLE assigner (member1), acting alone, drives the reassignment
-  submit parties.member1 $ exerciseCmd delId Delegation_Assign with
-    assigner = parties.member1; primaryCoupon = c1; additionalCoupons = []
-  -- the produced per-beneficiary coupons carry exactly `split`
-  assigned <- query @RewardCoupon gp
-  assertMsg "one coupon per beneficiary" (length assigned == 2)
-  pure ()
+  run Test with
+    given = given_delegation
+    when = when_assigner_reassigns
+    then_ = then_two_beneficiary_coupons
+
+-- security: a non-assigner (member3, not in `assigners`) is rejected by the elem gate.
+when_non_assigner_rejected : Fixture -> Script ()
+when_non_assigner_rejected f = do
+  c1 <- mkUnassignedCoupon f.parties.dso f.parties.governanceParty 100.0
+  submitMustFail f.parties.member3 $ exerciseCmd f.delId Delegation_Assign with
+    assigner = f.parties.member3; primaryCoupon = c1; additionalCoupons = []
 
 test_non_assigner_cannot_reassign = script do
-  (parties, gp, _split, delId) <- setup
-  c1 <- mkUnassignedCoupon gp gp 100.0
-  -- member3 is NOT in assigners -> must fail
-  submitMustFail parties.member3 $ exerciseCmd delId Delegation_Assign with
-    assigner = parties.member3; primaryCoupon = c1; additionalCoupons = []
+  run Test with
+    given = given_delegation
+    when = when_non_assigner_rejected
+    then_ = then_nothing
+
+-- nonconsuming: the same delegation serves two rounds (2 coupons x 2 beneficiaries = 4).
+when_two_rounds : Fixture -> Script Int
+when_two_rounds f = do
+  let gp = f.parties.governanceParty
+  c1 <- mkUnassignedCoupon f.parties.dso gp 100.0
+  c2 <- mkUnassignedCoupon f.parties.dso gp 50.0
+  submit f.parties.member1 $ exerciseCmd f.delId Delegation_Assign with
+    assigner = f.parties.member1; primaryCoupon = c1; additionalCoupons = []
+  submit f.parties.member1 $ exerciseCmd f.delId Delegation_Assign with
+    assigner = f.parties.member1; primaryCoupon = c2; additionalCoupons = []
+  coupons <- query @RewardCouponV2 gp
+  pure (length coupons)
+
+then_four_beneficiary_coupons : Fixture -> Int -> Script Failures
+then_four_beneficiary_coupons _ n = pure $ shouldBe "two rounds x two beneficiaries" 4 n
 
 test_delegation_is_nonconsuming = script do
-  (parties, gp, _split, delId) <- setup
-  c1 <- mkUnassignedCoupon gp gp 100.0
-  c2 <- mkUnassignedCoupon gp gp 50.0
-  submit parties.member1 $ exerciseCmd delId Delegation_Assign with
-    assigner = parties.member1; primaryCoupon = c1; additionalCoupons = []
-  -- same delegation still usable for the next round
-  submit parties.member1 $ exerciseCmd delId Delegation_Assign with
-    assigner = parties.member1; primaryCoupon = c2; additionalCoupons = []
+  run Test with
+    given = given_delegation
+    when = when_two_rounds
+    then_ = then_four_beneficiary_coupons
+
+-- revoke: the decparty archives the delegation.
+when_revoke : Fixture -> Script Int
+when_revoke f = do
+  submit f.parties.governanceParty $ exerciseCmd f.delId Delegation_Revoke
+  dels <- query @CouponReassignmentDelegation f.parties.governanceParty
+  pure (length dels)
+
+then_no_delegation : Fixture -> Int -> Script Failures
+then_no_delegation _ n = pure $ shouldBe "delegation archived" 0 n
 
 test_revoke_archives = script do
-  (parties, gp, _split, delId) <- setup
-  submit gp $ exerciseCmd delId Delegation_Revoke
-  dels <- query @CouponReassignmentDelegation gp
-  dels === []
+  run Test with
+    given = given_delegation
+    when = when_revoke
+    then_ = then_no_delegation
 ```
 
 - [ ] **Step 2: Run; verify fail (template not in scope).** Run: `cd daml/governance-rewards-assign-test && dpm test`. Expected: FAIL — `CouponReassignmentDelegation` unknown.
@@ -189,19 +247,26 @@ template CouponReassignmentDelegation
 
 **Note (security review — spec §7, §12):** `Delegation_Assign` is authority-carrying DAML. The review must confirm: (a) `newBeneficiaries = split` reads the contract field, not a choice arg; (b) `controller assigner` + `assert (assigner `elem` assigners)` restricts to a listed member and cannot be escalated by passing another party (the submitter must authorize *as* `assigner`); (c) nonconsuming, so the delegation is not spent per round; (d) the nested `RewardCoupon_AssignBeneficiaries` gets the provider (= `decparty`) authority from the delegation's signatory.
 
-- [ ] **Step 4: Run the tests; verify pass.** Run: `cd daml/governance-rewards-assign-test && dpm test`. Expected: all four scripts PASS. If `mkUnassignedCoupon`'s provider/beneficiary argument order differs, align the `mkUnassignedCoupon gp gp` call to its actual signature (`TestAssignRewardBeneficiaries.daml:19`).
+- [ ] **Step 4: Run the tests; verify pass.** Run: `cd daml/governance-rewards-assign-test && dpm test`. Expected: all four `test_*` scripts (each a `run Test with …`) PASS. `mkUnassignedCoupon` is inlined verbatim from the green M1 test, so there's no signature guesswork.
 
-- [ ] **Step 5: Add the "already-assigned coupon rejected" test** (all-or-nothing), mirroring `test_assign_already_assigned_fails` (`TestAssignRewardBeneficiaries.daml:59`):
+- [ ] **Step 5: Add the "already-assigned coupon rejected" test** (all-or-nothing), in the same GWT style (reuses `given_delegation` + `then_nothing`):
 
 ```haskell
+when_reassign_same_coupon_fails : Fixture -> Script ()
+when_reassign_same_coupon_fails f = do
+  let gp = f.parties.governanceParty
+  c1 <- mkUnassignedCoupon f.parties.dso gp 100.0
+  submit f.parties.member1 $ exerciseCmd f.delId Delegation_Assign with
+    assigner = f.parties.member1; primaryCoupon = c1; additionalCoupons = []
+  -- c1 is now consumed/assigned; re-assigning the same cid fails the whole tx (all-or-nothing)
+  submitMustFail f.parties.member1 $ exerciseCmd f.delId Delegation_Assign with
+    assigner = f.parties.member1; primaryCoupon = c1; additionalCoupons = []
+
 test_already_assigned_coupon_rejected = script do
-  (parties, gp, _split, delId) <- setup
-  c1 <- mkUnassignedCoupon gp gp 100.0
-  submit parties.member1 $ exerciseCmd delId Delegation_Assign with
-    assigner = parties.member1; primaryCoupon = c1; additionalCoupons = []
-  -- c1 is now consumed/assigned; re-assigning the same cid fails the whole tx
-  submitMustFail parties.member1 $ exerciseCmd delId Delegation_Assign with
-    assigner = parties.member1; primaryCoupon = c1; additionalCoupons = []
+  run Test with
+    given = given_delegation
+    when = when_reassign_same_coupon_fails
+    then_ = then_nothing
 ```
 
 - [ ] **Step 6: DAML gate (build + ship + test) + commit.** Run `(cd daml && dpm build --all)`, then place the freshly built `governance-rewards-v1-0.1.3.dar` where the test package's `data-dependency` points (Step 0 — e.g. `cp` into `releases/v1/` if that is the ref), then `(cd daml/governance-rewards-assign-test && dpm test)`. Then:
@@ -226,58 +291,119 @@ git commit -m "feat(governance-rewards): CouponReassignmentDelegation + Delegati
 - Consumes: `Governance.Action (GovernableAction, GovernableActionView(..))`; `Governance.Rewards.CouponReassignmentDelegation`; `DA.Foldable (forA_)`; the `AssignTestUtils` `createTestGovernance` + `confirmAndExecute`. Mirror `SetRewardSplit.daml` structure (the just-superseded action) field-for-field.
 - Produces: `template SetupCouponReassignmentDelegation with governanceParty : Party; proposer : Party; priorDelegation : Optional (ContractId CouponReassignmentDelegation); assigners : [Party]; beneficiaries : [RewardBeneficiary]`; `template RevokeCouponReassignmentDelegation with governanceParty : Party; proposer : Party; delegation : ContractId CouponReassignmentDelegation`. Field orders drive Task 4's serializer.
 
-- [ ] **Step 1: Write the failing governance-path tests** (append to `TestCouponReassignmentDelegation.daml`), mirroring `test_set_reward_split_creates_config`:
+- [ ] **Step 1: Write the failing governance-path tests** (append to `TestCouponReassignmentDelegation.daml`), in the same GWT / `TestHarness` style (mirroring `TestSetupMintingDelegation.daml`'s governance-action tests):
 
 ```haskell
 import Governance.Rewards.SetupCouponReassignmentDelegation
 import Governance.Rewards.RevokeCouponReassignmentDelegation
 import Governance.Action (GovernableAction)
-import Governance.Rewards.AssignTestUtils (createTestGovernance, confirmAndExecute)
+import Governance.Rules   -- GovernanceRules, GovernanceRules_ExecuteConfirmedAction
+-- createTestGovernance / confirmAndExecute / submitConfirmations come from the
+-- AssignTestUtils import already in Step 1 (whole-module import).
 
-test_setup_creates_delegation_via_governance = script do
+-- GWT fixture for the governance-created path: parties + a GovernanceRules + the split.
+data GovFixture = GovFixture with
+    parties  : TestParties
+    rulesCid : ContractId GovernanceRules
+    split    : [RewardBeneficiary]
+
+given_governance : Script GovFixture
+given_governance = do
   parties <- allocateRewardsTestParties
   rulesCid <- createTestGovernance parties
-  let gp = parties.governanceParty
   let split = [ RewardBeneficiary with beneficiary = parties.member2; percentage = 0.8
               , RewardBeneficiary with beneficiary = parties.member3; percentage = 0.2 ]
-  prop <- submit parties.member1 $ createCmd SetupCouponReassignmentDelegation with
-    governanceParty = gp; proposer = parties.member1; priorDelegation = None
-    assigners = [parties.member1, parties.member2]; beneficiaries = split
-  _ <- confirmAndExecute parties rulesCid (toInterfaceContractId prop)
-         [parties.member1, parties.member2] parties.member1
-  dels <- query @CouponReassignmentDelegation gp
-  assertMsg "one delegation exists" (length dels == 1)
-  assertMsg "split baked in" (map (\(_, d) -> d.split) dels == [split])
+  pure GovFixture with ..
 
-test_setup_replaces_prior_delegation = script do
-  parties <- allocateRewardsTestParties
-  rulesCid <- createTestGovernance parties
-  let gp = parties.governanceParty
-  let mk prior p = submit parties.member1 $ createCmd SetupCouponReassignmentDelegation with
-        governanceParty = gp; proposer = parties.member1; priorDelegation = prior
-        assigners = [parties.member1, parties.member2]
-        beneficiaries = [RewardBeneficiary with beneficiary = p; percentage = 1.0]
-  p1 <- mk None parties.member2
-  _ <- confirmAndExecute parties rulesCid (toInterfaceContractId p1) [parties.member1, parties.member2] parties.member1
+then_singleton : GovFixture -> Int -> Script Failures
+then_singleton _ n = pure $ shouldBe "exactly one delegation" 1 n
+
+then_zero : GovFixture -> Int -> Script Failures
+then_zero _ n = pure $ shouldBe "no delegation" 0 n
+
+then_gov_nothing : GovFixture -> () -> Script Failures
+then_gov_nothing _ _ = pure []
+
+-- one governance vote (propose -> confirm -> execute) creates the delegation
+when_setup_executed : GovFixture -> Script [(ContractId CouponReassignmentDelegation, CouponReassignmentDelegation)]
+when_setup_executed f = do
+  let gp = f.parties.governanceParty
+  actionCid <- submit f.parties.member1 $ createCmd SetupCouponReassignmentDelegation with
+    governanceParty = gp; proposer = f.parties.member1; priorDelegation = None
+    assigners = [f.parties.member1, f.parties.member2]; beneficiaries = f.split
+  let iface : ContractId GovernableAction = toInterfaceContractId actionCid
+  _ <- confirmAndExecute f.parties f.rulesCid iface [f.parties.member1, f.parties.member2] f.parties.member1
+  query @CouponReassignmentDelegation gp
+
+then_one_delegation_with_split : GovFixture -> [(ContractId CouponReassignmentDelegation, CouponReassignmentDelegation)] -> Script Failures
+then_one_delegation_with_split f dels =
+  pure $ shouldBe "one delegation exists" 1 (length dels)
+      <> shouldBe "split baked in" [f.split] (map (\(_, d) -> d.split) dels)
+
+test_setup_creates_delegation = script do
+  run Test with
+    given = given_governance; when = when_setup_executed; then_ = then_one_delegation_with_split
+
+-- replace: a second Setup carrying priorDelegation archives the first (still singleton)
+when_setup_replaces : GovFixture -> Script Int
+when_setup_replaces f = do
+  let gp = f.parties.governanceParty
+      mk prior bene = do
+        a <- submit f.parties.member1 $ createCmd SetupCouponReassignmentDelegation with
+          governanceParty = gp; proposer = f.parties.member1; priorDelegation = prior
+          assigners = [f.parties.member1, f.parties.member2]
+          beneficiaries = [RewardBeneficiary with beneficiary = bene; percentage = 1.0]
+        let iface : ContractId GovernableAction = toInterfaceContractId a
+        confirmAndExecute f.parties f.rulesCid iface [f.parties.member1, f.parties.member2] f.parties.member1
+  _ <- mk None f.parties.member2
   [(oldCid, _)] <- query @CouponReassignmentDelegation gp
-  p2 <- mk (Some oldCid) parties.member3
-  _ <- confirmAndExecute parties rulesCid (toInterfaceContractId p2) [parties.member1, parties.member2] parties.member1
+  _ <- mk (Some oldCid) f.parties.member3
   dels <- query @CouponReassignmentDelegation gp
-  assertMsg "still singleton after replace" (length dels == 1)
+  pure (length dels)
 
-test_setup_empty_split_fails = script do
-  parties <- allocateRewardsTestParties
-  rulesCid <- createTestGovernance parties
-  let gp = parties.governanceParty
-  prop <- submit parties.member1 $ createCmd SetupCouponReassignmentDelegation with
-    governanceParty = gp; proposer = parties.member1; priorDelegation = None
-    assigners = [parties.member1]; beneficiaries = []
-  confs <- submitConfirmations gp rulesCid (toInterfaceContractId prop) [parties.member1, parties.member2]
-  submitMustFail (actAs parties.member1 <> readAs gp) $
-    exerciseCmd rulesCid GovernanceRules_ExecuteConfirmedAction with
-      executor = parties.member1
-      actionProposalCid = toInterfaceContractId prop
+test_setup_replaces_prior = script do
+  run Test with
+    given = given_governance; when = when_setup_replaces; then_ = then_singleton
+
+-- revoke via governance: the RevokeCouponReassignmentDelegation action archives it
+when_revoke_via_governance : GovFixture -> Script Int
+when_revoke_via_governance f = do
+  let gp = f.parties.governanceParty
+  s <- submit f.parties.member1 $ createCmd SetupCouponReassignmentDelegation with
+    governanceParty = gp; proposer = f.parties.member1; priorDelegation = None
+    assigners = [f.parties.member1, f.parties.member2]; beneficiaries = f.split
+  _ <- confirmAndExecute f.parties f.rulesCid (toInterfaceContractId s : ContractId GovernableAction)
+         [f.parties.member1, f.parties.member2] f.parties.member1
+  [(delCid, _)] <- query @CouponReassignmentDelegation gp
+  r <- submit f.parties.member1 $ createCmd RevokeCouponReassignmentDelegation with
+    governanceParty = gp; proposer = f.parties.member1; delegation = delCid
+  _ <- confirmAndExecute f.parties f.rulesCid (toInterfaceContractId r : ContractId GovernableAction)
+         [f.parties.member1, f.parties.member2] f.parties.member1
+  dels <- query @CouponReassignmentDelegation gp
+  pure (length dels)
+
+test_revoke_via_governance = script do
+  run Test with
+    given = given_governance; when = when_revoke_via_governance; then_ = then_zero
+
+-- empty split rejected at execute (executeImpl asserts non-empty beneficiaries)
+when_empty_split_execute_fails : GovFixture -> Script ()
+when_empty_split_execute_fails f = do
+  let gp = f.parties.governanceParty
+  actionCid <- submit f.parties.member1 $ createCmd SetupCouponReassignmentDelegation with
+    governanceParty = gp; proposer = f.parties.member1; priorDelegation = None
+    assigners = [f.parties.member1]; beneficiaries = []
+  let iface : ContractId GovernableAction = toInterfaceContractId actionCid
+  confs <- submitConfirmations gp f.rulesCid iface [f.parties.member1, f.parties.member2]
+  submitMustFail (actAs f.parties.member1 <> readAs gp) $
+    exerciseCmd f.rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor = f.parties.member1               -- governance executor (NOT the delegation assigner)
+      actionProposalCid = iface
       confirmations = confs
+
+test_setup_empty_split_rejected = script do
+  run Test with
+    given = given_governance; when = when_empty_split_execute_fails; then_ = then_gov_nothing
 ```
 (`submitConfirmations` + `GovernanceRules_ExecuteConfirmedAction` are the M1 negative-test idiom — import `Governance.Rules` and `AssignTestUtils (submitConfirmations)` as `TestSetRewardSplit.daml:45` did.)
 
