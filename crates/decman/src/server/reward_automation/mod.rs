@@ -28,8 +28,10 @@ use std::collections::HashMap;
 use anyhow::{Context, anyhow};
 use canton_common::decimal::DamlDecimal;
 use canton_proto_rs::com::daml::ledger::api::v2::{
-    CumulativeFilter, EventFormat, Filters, GetActiveContractsRequest, GetLedgerEndRequest,
-    Identifier, InterfaceFilter, Record, TemplateFilter, WildcardFilter, cumulative_filter,
+    Command, Commands, CumulativeFilter, EventFormat, ExerciseCommand, Filters,
+    GetActiveContractsRequest, GetLedgerEndRequest, Identifier, InterfaceFilter, Record,
+    SubmitAndWaitRequest, TemplateFilter, Value, WildcardFilter, command,
+    command_service_client::CommandServiceClient, cumulative_filter,
     get_active_contracts_response::ContractEntry, value,
 };
 use chrono::{DateTime, Utc};
@@ -43,11 +45,12 @@ use crate::{
 use std::time::Duration;
 
 use super::AppState;
+use super::action_serializer::{field, make_contract_id, make_list, make_party};
 use super::handlers::{
     execute_confirm_action, get_party_credentials, packages, resolve_active_governance_rules,
     submit_proposal,
 };
-use super::queries::get_governance_confirmations;
+use super::queries::{get_governance_confirmations, resolve_contract_package_ref};
 use super::types::{
     ActionType, ConfirmActionRequest, DomainGovernanceAction, GovernanceType, ProposalType,
     RewardBeneficiary,
@@ -744,6 +747,153 @@ pub(crate) async fn run_proposer_once(
 }
 
 // ============================================================================
+// Delegation-model per-round assigner (`Delegation_Assign`)
+// ============================================================================
+
+/// Build the `Delegation_Assign` choice argument (pure): fields
+/// `assigner, primaryCoupon, additionalCoupons`, in that order.
+fn build_delegation_assign_arg(
+    assigner: &CantonId,
+    primary: &str,
+    additional: &[String],
+) -> Record {
+    Record {
+        record_id: None,
+        fields: vec![
+            field("assigner", make_party(assigner)),
+            field("primaryCoupon", make_contract_id(primary)),
+            field(
+                "additionalCoupons",
+                make_list(additional.iter().map(|c| make_contract_id(c)).collect()),
+            ),
+        ],
+    }
+}
+
+/// Exercise `Delegation_Assign` as a plain ledger command (no governance
+/// round). Adapted from `execute_confirm_action`
+/// (`handlers/governance.rs:2130`); the differences are the target contract
+/// (the delegation cid), the choice (`Delegation_Assign`), the template
+/// (`Governance.Rewards.CouponReassignmentDelegation`), and `act_as =
+/// [assigner]` / `read_as = [decparty]` (co-hosting, spec §4.6).
+pub(crate) async fn submit_delegation_assign(
+    config: &NodeConfig,
+    decparty: &CantonId,
+    assigner: &CantonId,
+    token: &str,
+    delegation_cid: &str,
+    primary: &str,
+    additional: &[String],
+    packages: &PackageConfig,
+) -> anyhow::Result<()> {
+    let choice_argument = Value {
+        sum: Some(value::Sum::Record(build_delegation_assign_arg(
+            assigner, primary, additional,
+        ))),
+    };
+    let fallback = packages
+        .governance_rewards
+        .as_deref()
+        .context("governance_rewards package not configured")?;
+    // The delegation may live under an older package ref — resolve its actual
+    // one (same as `execute_confirm_action`, governance.rs:2200-2208).
+    let package_id = resolve_contract_package_ref(
+        config,
+        decparty,
+        Some(token.to_string()),
+        delegation_cid,
+        fallback,
+    )
+    .await;
+    let template_id = Identifier {
+        package_id,
+        module_name: "Governance.Rewards".to_string(),
+        entity_name: "CouponReassignmentDelegation".to_string(),
+    };
+    let channel = tonic::transport::Channel::from_shared(config.ledger_api_url())?
+        .connect()
+        .await?;
+    let mut client =
+        CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
+    let cmd = Command {
+        command: Some(command::Command::Exercise(ExerciseCommand {
+            template_id: Some(template_id),
+            contract_id: delegation_cid.to_string(),
+            choice: "Delegation_Assign".to_string(),
+            choice_argument: Some(choice_argument),
+        })),
+    };
+    // act_as = [assigner], read_as = [decparty]. Remaining fields mirror
+    // `execute_confirm_action` (governance.rs:2226-2241).
+    let commands = Commands {
+        workflow_id: String::new(),
+        user_id: String::new(),
+        command_id: uuid::Uuid::new_v4().to_string(),
+        commands: vec![cmd],
+        deduplication_period: None,
+        min_ledger_time_abs: None,
+        min_ledger_time_rel: None,
+        act_as: vec![assigner.to_string()],
+        read_as: vec![decparty.to_string()],
+        submission_id: String::new(),
+        disclosed_contracts: vec![],
+        synchronizer_id: String::new(),
+        package_id_selection_preference: vec![],
+        prefetch_contract_keys: vec![],
+    };
+    let mut req = tonic::Request::new(SubmitAndWaitRequest {
+        commands: Some(commands),
+    });
+    req.metadata_mut()
+        .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    client.submit_and_wait(req).await?; // an assign needs no created-cid readback
+    Ok(())
+}
+
+/// One reassign tick for a decparty under the delegation model: read
+/// unassigned coupons, select a ripe batch, and — if non-empty — exercise
+/// `Delegation_Assign` for it. An empty batch (nothing ripe) is a no-op.
+/// Batch policy constants mirror `run_proposer_once` (spec §9/§11).
+pub(crate) async fn run_reassign_once(
+    config: &NodeConfig,
+    decparty: &CantonId,
+    assigner: &CantonId,
+    token: &str,
+    delegation: &ActiveDelegation,
+    test_mode: bool,
+    packages: &PackageConfig,
+) -> anyhow::Result<()> {
+    const WATERMARK: chrono::Duration = chrono::Duration::hours(6);
+    const MINTING_MARGIN: chrono::Duration = chrono::Duration::hours(2);
+    const MAX_BATCH: usize = 50;
+    let coupons = unassigned_coupons(
+        config,
+        decparty,
+        Some(token.to_string()),
+        test_mode,
+        packages,
+    )
+    .await?;
+    let batch = select_batch(&coupons, Utc::now(), WATERMARK, MINTING_MARGIN, MAX_BATCH);
+    let Some((primary, additional)) = batch.split_first() else {
+        return Ok(()); // nothing ripe -> no-op
+    };
+    submit_delegation_assign(
+        config,
+        decparty,
+        assigner,
+        token,
+        &delegation.cid,
+        primary,
+        additional,
+        packages,
+    )
+    .await?;
+    tracing::info!(%decparty, %assigner, count = batch.len(), "reassigned coupon batch");
+    Ok(())
+}
+
+// ============================================================================
 // Confirmer role
 // ============================================================================
 
@@ -1273,6 +1423,16 @@ mod tests {
             created_at: 0,
             expires_at: 0,
         }
+    }
+
+    #[test]
+    fn build_delegation_assign_arg_shape() {
+        // rb(..).beneficiary yields a CantonId (this module has no canton_id helper);
+        // rb takes a bare prefix and appends a fixed namespace itself.
+        let rec =
+            build_delegation_assign_arg(&rb("m1", "1.0").beneficiary, "00c1", &["00c2".into()]);
+        let labels: Vec<&str> = rec.fields.iter().map(|f| f.label.as_str()).collect();
+        assert_eq!(labels, ["assigner", "primaryCoupon", "additionalCoupons"]);
     }
 
     #[test]

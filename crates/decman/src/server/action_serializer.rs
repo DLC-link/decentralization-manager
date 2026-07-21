@@ -23,7 +23,7 @@ use super::types::{
 // Helper Functions
 // ============================================================================
 
-fn make_party(p: impl std::fmt::Display) -> Value {
+pub(crate) fn make_party(p: impl std::fmt::Display) -> Value {
     Value {
         sum: Some(value::Sum::Party(p.to_string())),
     }
@@ -53,13 +53,13 @@ fn make_bool(b: bool) -> Value {
     }
 }
 
-fn make_contract_id(c: &str) -> Value {
+pub(crate) fn make_contract_id(c: &str) -> Value {
     Value {
         sum: Some(value::Sum::ContractId(c.to_string())),
     }
 }
 
-fn field(label: &str, value: Value) -> RecordField {
+pub(crate) fn field(label: &str, value: Value) -> RecordField {
     RecordField {
         label: label.to_string(),
         value: Some(value),
@@ -85,7 +85,7 @@ fn make_variant(constructor: &str, value: Value) -> Value {
     }
 }
 
-fn make_list(values: Vec<Value>) -> Value {
+pub(crate) fn make_list(values: Vec<Value>) -> Value {
     Value {
         sum: Some(value::Sum::List(List { elements: values })),
     }
