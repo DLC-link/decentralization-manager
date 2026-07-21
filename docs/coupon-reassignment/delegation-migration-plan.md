@@ -58,38 +58,31 @@
 **Files:**
 - Create: `daml/governance-rewards/daml/Governance/Rewards/CouponReassignmentDelegation.daml`
 - Create: `daml/governance-rewards-assign-test/daml/Governance/Rewards/TestCouponReassignmentDelegation.daml`
+- Modify: `daml/governance-rewards-assign-test/daml/Governance/Rewards/AssignTestUtils.daml` — relocate `mkUnassignedCoupon` here (shared; survives Task 8).
+- Modify: `daml/governance-rewards-assign-test/daml/Governance/Rewards/TestAssignRewardBeneficiaries.daml` — import `mkUnassignedCoupon` from `AssignTestUtils` instead of defining it (keeps the M1 test green until Task 8 deletes it).
 
 **Interfaces:**
 - Consumes (template `CouponReassignmentDelegation.daml`, Step 3): `Splice.Api.RewardAssignmentV1 (RewardBeneficiary, RewardCoupon, RewardCoupon_AssignBeneficiaries(..))` + the token-metadata `ExtraArgs`/`emptyChoiceContext`/`emptyMetadata` — **copy the import lines + the `emptyExtraArgs` definition verbatim from the existing `AssignRewardBeneficiaries.daml` (lines 20–23)** before it is deleted.
-- Consumes (tests — **GWT / `TestHarness` style**, matching `governance-rewards-test`): `TestHarness` (`Test{given,when,then_}`, `run`, `Failures`, `shouldBe`) + `AssignTestUtils` (`allocateRewardsTestParties`, `TestParties` with `.dso`/`.governanceParty`/`.member1..3`, and for Task 2 `createTestGovernance`/`confirmAndExecute`/`submitConfirmations`) + `Splice.Amulet (RewardCouponV2(..))` + `Splice.Types (Round(..))`. **No `daml.yaml` change needed** — `testlib-0.1.0.dar` (→ `TestHarness`) and the local `AssignTestUtils` are already deps of `governance-rewards-assign-test`. `mkUnassignedCoupon` is defined locally (full body inlined in Step 1, copied from `TestAssignRewardBeneficiaries.daml:19`), since that file is deleted in Task 8. Assertions query the concrete `RewardCouponV2` (`query @RewardCouponV2`), not the interface.
+- Consumes (tests — **GWT / `TestHarness` style**, matching `governance-rewards-test`): `TestHarness` (`Test{given,when,then_}`, `run`, `Failures`, `shouldBe`) + `AssignTestUtils` (`allocateRewardsTestParties`, `TestParties` with `.dso`/`.governanceParty`/`.member1..3`, and for Task 2 `createTestGovernance`/`confirmAndExecute`/`submitConfirmations`) + `Splice.Amulet (RewardCouponV2(..))` (for `query @RewardCouponV2`). **No `daml.yaml` change needed** — `testlib-0.1.0.dar` (→ `TestHarness`) and the local `AssignTestUtils` are already deps of `governance-rewards-assign-test`. `mkUnassignedCoupon` is **relocated into `AssignTestUtils`** (Step 0b — single source, no local copy) and imported via the whole-module `AssignTestUtils` import, since `TestAssignRewardBeneficiaries.daml` is deleted in Task 8. Assertions query the concrete `RewardCouponV2` (`query @RewardCouponV2`), not the interface.
 - Produces: `template CouponReassignmentDelegation with decparty : Party; assigners : [Party]; split : [RewardBeneficiary]`; `nonconsuming choice Delegation_Assign with assigner : Party; primaryCoupon : ContractId RewardCoupon; additionalCoupons : [ContractId RewardCoupon]`; `choice Delegation_Revoke : ()`.
 
 - [ ] **Step 0: Bump the package version + wire the test dependency.** In `daml/governance-rewards/daml.yaml:3`, `version: 0.1.2` → `version: 0.1.3`. Open `daml/governance-rewards-assign-test/daml.yaml`, find its `governance-rewards` `data-dependency`, and note the exact path it uses for `-0.1.2.dar` (either `releases/v1/…` or a build-output path); repoint it to `-0.1.3.dar`. This must happen first — the test module in Step 1 cannot compile against the new template until the `0.1.3` DAR exists where this ref points (Step 6 builds + places it).
+
+- [ ] **Step 0b: Relocate `mkUnassignedCoupon` into the shared test-utils.** Move the `mkUnassignedCoupon` definition (currently `TestAssignRewardBeneficiaries.daml:19`, `Party -> Party -> Decimal -> Script (ContractId RewardCoupon)`) into `daml/governance-rewards-assign-test/daml/Governance/Rewards/AssignTestUtils.daml` (survives Task 8), moving its imports with it (`Splice.Amulet (RewardCouponV2(..))`, `Splice.Types (Round(..))`, `Splice.Api.RewardAssignmentV1 (RewardCoupon)`, `DA.Time (addRelTime, hours)`). Update `TestAssignRewardBeneficiaries.daml` to import it from `AssignTestUtils` rather than define it (keeps the M1 test green until Task 8 deletes it). Single source — no duplication.
 
 - [ ] **Step 1: Write the failing happy-path + security tests.** Create `TestCouponReassignmentDelegation.daml`:
 
 ```haskell
 module Governance.Rewards.TestCouponReassignmentDelegation where
 
-import DA.Time (addRelTime, hours)
 import Daml.Script
 import Splice.Amulet (RewardCouponV2(..))
-import Splice.Types (Round(..))
-import Splice.Api.RewardAssignmentV1 (RewardCoupon, RewardBeneficiary(..))
+import Splice.Api.RewardAssignmentV1 (RewardBeneficiary(..))
 import Governance.Rewards.CouponReassignmentDelegation
 import Governance.Rewards.AssignTestUtils   -- allocateRewardsTestParties, TestParties (has .dso)
 import TestHarness                            -- Test{given,when,then_}, run, Failures, shouldBe
 
--- Local copy of mkUnassignedCoupon (its M1 home TestAssignRewardBeneficiaries.daml is
--- deleted in Task 8, so it cannot be imported). Verbatim from that file:
-mkUnassignedCoupon : Party -> Party -> Decimal -> Script (ContractId RewardCoupon)
-mkUnassignedCoupon dso provider amount = do
-  now <- getTime
-  cid <- submit dso $ createCmd RewardCouponV2 with
-    dso; provider; round = Round 1; amount
-    expiresAt = now `addRelTime` hours 36
-    providerIsObserver = True; beneficiary = None
-  pure (toInterfaceContractId @RewardCoupon cid)
+-- mkUnassignedCoupon lives in AssignTestUtils (relocated in Step 0b) — shared, survives Task 8.
 
 -- GWT fixture: parties + a delegation created DIRECTLY (in production it is created by
 -- the SetupCouponReassignmentDelegation governance action — Task 2). decparty is the
