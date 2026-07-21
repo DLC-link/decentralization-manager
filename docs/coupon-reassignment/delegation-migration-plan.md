@@ -783,9 +783,11 @@ pub(crate) async fn submit_delegation_assign(config: &NodeConfig, decparty: &Can
     // (same as execute_confirm_action:2200-2208).
     let package_id = resolve_contract_package_ref(
         config, decparty, Some(token.to_string()), delegation_cid, fallback).await;
+    // NB: module_name is the FULL module path (Daml Ledger API), matching how
+    // active_delegation reads the same template — NOT the truncated "Governance.Rewards".
     let template_id = Identifier {
         package_id,
-        module_name: "Governance.Rewards".to_string(),
+        module_name: "Governance.Rewards.CouponReassignmentDelegation".to_string(),
         entity_name: "CouponReassignmentDelegation".to_string(),
     };
     let channel = tonic::transport::Channel::from_shared(config.ledger_api_url())?
