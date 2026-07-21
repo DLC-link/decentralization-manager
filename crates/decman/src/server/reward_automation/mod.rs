@@ -1064,8 +1064,9 @@ pub(crate) async fn run_reward_automation_loop(data: actix_web::web::Data<AppSta
     }
 }
 
-/// One proposer + confirmer pass for a single decparty. No-op unless the
-/// decparty has an on-ledger `RewardSplitConfig` (the enablement signal).
+/// One reassign pass for a single decparty under the delegation model. No-op
+/// unless the decparty has an active `CouponReassignmentDelegation` (the
+/// enablement signal) naming this node's member party as an assigner.
 async fn run_once_for_party(
     data: &actix_web::web::Data<AppState>,
     decparty: &CantonId,
@@ -1074,80 +1075,27 @@ async fn run_once_for_party(
     let Some((token, member)) = get_party_credentials(data, decparty).await else {
         return Ok(());
     };
-    // Enablement: exactly one RewardSplitConfig => on; none => off; >1 => Err.
-    let Some(split) =
-        effective_split(&data.config, &pkgs, data.test_mode, decparty, &token).await?
+    // Enablement: exactly one active delegation. None => off (no-op). >1 => Err (refuse+alert).
+    let Some(delegation) =
+        active_delegation(&data.config, &pkgs, data.test_mode, decparty, &token).await?
     else {
         return Ok(());
     };
-    // Governance rules cid + governance threshold (NOT the topology threshold).
-    let (rules_cid, threshold) = resolve_active_governance_rules(
-        &data.config,
-        decparty,
-        Some(token.clone()),
-        data.test_mode,
-        &pkgs,
-    )
-    .await?;
-    // Fetch pending governance actions once; shared by dedupe + the confirmer.
-    let (_, domain) = get_governance_confirmations(
-        &data.config,
-        decparty,
-        threshold,
-        Some(token.clone()),
-        data.test_mode,
-        &pkgs,
-    )
-    .await?;
-    // All in-flight AssignRewardBeneficiaries proposals for this decparty, read
-    // ONCE (indexed by cid) and shared by the proposer's dedupe + the confirmer,
-    // instead of a full ACS scan per pending proposal (M-5).
-    let pending = read_all_pending_assigns(
-        &data.config,
-        decparty,
-        Some(token.clone()),
-        data.test_mode,
-        &pkgs,
-    )
-    .await?;
-    // Coupons already covered by an in-flight proposal => dedupe the proposer.
-    let mut covered: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for pa in pending.values() {
-        covered.insert(pa.primary_coupon.clone());
-        covered.extend(pa.additional_coupons.iter().cloned());
+    // This node must be a listed assigner, else it cannot reassign (spec §9, §11).
+    if !delegation.assigners.contains(&member) {
+        tracing::debug!(%decparty, %member, "node not an assigner on the delegation — skipping");
+        return Ok(());
     }
-    // A transient propose error must not skip confirming already-pending
-    // proposals this tick (M-1): log and continue to the confirmer.
-    if let Err(e) = run_proposer_once(
+    run_reassign_once(
         &data.config,
         decparty,
         &member,
         &token,
-        &rules_cid,
-        &split,
+        &delegation,
         data.test_mode,
         &pkgs,
-        &covered,
     )
     .await
-    {
-        tracing::warn!(%decparty, error = %e, "reward automation: proposer tick failed");
-    }
-    run_confirmer_once(
-        data,
-        &data.config,
-        decparty,
-        &member,
-        &token,
-        &rules_cid,
-        &split,
-        &domain,
-        &pending,
-        data.test_mode,
-        &pkgs,
-    )
-    .await?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1258,7 +1206,10 @@ mod tests {
             field(
                 "split",
                 value::Sum::List(List {
-                    elements: vec![beneficiary_record(ALICE, "0.8"), beneficiary_record(BOB, "0.2")],
+                    elements: vec![
+                        beneficiary_record(ALICE, "0.8"),
+                        beneficiary_record(BOB, "0.2"),
+                    ],
                 }),
             ),
         ]);
