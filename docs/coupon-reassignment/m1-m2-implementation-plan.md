@@ -1,5 +1,7 @@
 # CIP-104 Coupon-Reassignment Automation (Mode A) — M1+M2 Implementation Plan
 
+> **⚠️ Superseded for the delegation pivot (2026-07-21).** This plan describes the auto-confirmation-engine model that was built (green on `feat/governance/coupon-reassignment-automation`) and is now being reworked to the **delegation model** (spec rev. 2026-07-20). The delta is in `delegation-migration-plan.md` (this directory). Retained as the record of what was built — do **not** implement from this plan.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add the on-ledger `AssignRewardBeneficiaries` governance action and its Rust proposal plumbing, so a decparty can — through the normal propose → confirm → execute flow — assign governance-chosen beneficiaries to its CIP-104 `RewardCouponV2` coupons.
@@ -26,7 +28,7 @@
 
 ## Prerequisites (confirm before Task 1)
 
-1. **PR #248 merged to `main` on 2026-07-15** — so `main` already contains the `governance-rewards` + `governance-rewards-test` packages and the `GovernanceRewards` backend wiring this plan builds on. Base off `main`, not off Robert's `feat/governance/rewards-plugin` branch.
+1. **PR #248 merged to `main` on 2026-07-15** — so `main` already contains the `governance-rewards` + `governance-rewards-test` packages and the `GovernanceRewards` backend wiring this plan builds on. Base off `main`, not off the rewards-plugin feature branch (`feat/governance/rewards-plugin`).
 2. Branch off `main` (your local checkout is on a different branch, so pull first): `git checkout main && git pull && git checkout -b feat/governance/coupon-reassignment-automation`.
 3. `dpm` and the Rust toolchain build the repo as-is (`dpm build --all` and `cargo build` succeed before you start).
 
@@ -542,13 +544,13 @@ Expected: all pass.
 }
 ```
 
-- [ ] **Step 3: Open the PR.** Title: `feat(governance-rewards): AssignRewardBeneficiaries action + backend plumbing`. In the body, state that this is M1+M2 of the Mode A coupon-reassignment automation (spec `docs/superpowers/specs/2026-07-14-cip104-coupon-reassignment-design.md`); the automation that *submits* these proposals/confirmations (M3) and the devnet IT (M4) follow once §14.1 (the split-source interface with Robert) is pinned.
+- [ ] **Step 3: Open the PR.** Title: `feat(governance-rewards): AssignRewardBeneficiaries action + backend plumbing`. In the body, state that this is M1+M2 of the Mode A coupon-reassignment automation (spec `docs/superpowers/specs/2026-07-14-cip104-coupon-reassignment-design.md`); the automation that *submits* these proposals/confirmations (M3) and the devnet IT (M4) follow once §14.1 (the split-source interface) is pinned in team coordination.
 
 ---
 
 ## What this plan intentionally does NOT cover (next plan: M3+M4)
 
-- The **auto-confirmation engine** and the **automation** (proposer + confirmer background loops) — spec §5, §9. **Blocked** on spec §14.1: how the *effective split* is sourced on-ledger (Robert's shared template vs. compose from `InstrumentConfiguration` + `AppRewardConfiguration`). Design M3 against a `SplitSource` trait so the source is swappable.
+- The **auto-confirmation engine** and the **automation** (proposer + confirmer background loops) — spec §5, §9. **Blocked** on spec §14.1: how the *effective split* is sourced on-ledger (a shared config template vs. compose from `InstrumentConfiguration` + `AppRewardConfiguration`). Design M3 against a `SplitSource` trait so the source is swappable.
 - **Devnet integration test** (multi-node propose → auto-confirm → execute against live `cbtc-network` coupons) — spec §13, needs multiple DecMan instances.
 - **Frontend** form — not needed; the action is automation-driven, not human-entered.
 
