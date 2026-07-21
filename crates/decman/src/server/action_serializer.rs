@@ -1259,6 +1259,52 @@ pub fn build_proposal_create_args(
                 ],
             },
         ),
+        ProposalType::SetupCouponReassignmentDelegation {
+            assigners,
+            new_beneficiaries,
+            prior_delegation,
+        } => (
+            ProposalPackage::GovernanceRewards,
+            "Governance.Rewards.SetupCouponReassignmentDelegation",
+            "SetupCouponReassignmentDelegation",
+            Record {
+                record_id: None,
+                fields: vec![
+                    field("governanceParty", make_party(governance_party)),
+                    field("proposer", make_party(proposer)),
+                    field(
+                        "priorDelegation",
+                        make_optional_contract_id(prior_delegation),
+                    ),
+                    field(
+                        "assigners",
+                        make_list(assigners.iter().map(make_party).collect()),
+                    ),
+                    field(
+                        "beneficiaries",
+                        make_list(
+                            new_beneficiaries
+                                .iter()
+                                .map(serialize_reward_beneficiary)
+                                .collect(),
+                        ),
+                    ),
+                ],
+            },
+        ),
+        ProposalType::RevokeCouponReassignmentDelegation { delegation } => (
+            ProposalPackage::GovernanceRewards,
+            "Governance.Rewards.RevokeCouponReassignmentDelegation",
+            "RevokeCouponReassignmentDelegation",
+            Record {
+                record_id: None,
+                fields: vec![
+                    field("governanceParty", make_party(governance_party)),
+                    field("proposer", make_party(proposer)),
+                    field("delegation", make_contract_id(delegation)),
+                ],
+            },
+        ),
         ProposalType::SetEnableResultContracts {
             registrar_service_cid,
             enable_result_contracts,
@@ -2628,6 +2674,63 @@ mod tests {
             field_value(&record, "beneficiaries").sum,
             Some(value::Sum::List(_)),
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn build_proposal_setup_delegation_shape() -> Result {
+        let proposal = ProposalType::SetupCouponReassignmentDelegation {
+            assigners: vec![party_id(), party_id()],
+            new_beneficiaries: vec![
+                RewardBeneficiary {
+                    beneficiary: party_id(),
+                    percentage: dec("0.8"),
+                },
+                RewardBeneficiary {
+                    beneficiary: party_id(),
+                    percentage: dec("0.2"),
+                },
+            ],
+            prior_delegation: Some("00old".to_string()),
+        };
+        let (package, module, entity, record) =
+            build_proposal_create_args("gov", "proposer", &proposal, None, None)?;
+        assert_eq!(package, ProposalPackage::GovernanceRewards);
+        assert_eq!(
+            module,
+            "Governance.Rewards.SetupCouponReassignmentDelegation"
+        );
+        assert_eq!(entity, "SetupCouponReassignmentDelegation");
+        assert_eq!(
+            owned_labels(&record),
+            [
+                "governanceParty",
+                "proposer",
+                "priorDelegation",
+                "assigners",
+                "beneficiaries"
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn build_proposal_revoke_delegation_shape() -> Result {
+        let proposal = ProposalType::RevokeCouponReassignmentDelegation {
+            delegation: "00abc".to_string(),
+        };
+        let (package, module, entity, record) =
+            build_proposal_create_args("gov", "proposer", &proposal, None, None)?;
+        assert_eq!(package, ProposalPackage::GovernanceRewards);
+        assert_eq!(
+            module,
+            "Governance.Rewards.RevokeCouponReassignmentDelegation"
+        );
+        assert_eq!(entity, "RevokeCouponReassignmentDelegation");
+        assert_eq!(
+            owned_labels(&record),
+            ["governanceParty", "proposer", "delegation"]
+        );
         Ok(())
     }
 

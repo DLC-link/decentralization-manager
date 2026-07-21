@@ -657,6 +657,16 @@ pub enum ProposalType {
         #[serde(default)]
         prior_config: Option<String>,
     },
+    /// Create (or replace) the decparty's on-ledger CouponReassignmentDelegation.
+    /// `prior_delegation` is the cid of the delegation being replaced (None for the first).
+    SetupCouponReassignmentDelegation {
+        assigners: Vec<CantonId>,
+        new_beneficiaries: Vec<RewardBeneficiary>,
+        #[serde(default)]
+        prior_delegation: Option<String>,
+    },
+    /// Revoke (archive) the decparty's CouponReassignmentDelegation.
+    RevokeCouponReassignmentDelegation { delegation: String },
     /// Toggle result-contract emission on a `RegistrarService`.
     SetEnableResultContracts {
         registrar_service_cid: String,
@@ -812,6 +822,17 @@ impl ProposalType {
             ProposalType::SetRewardSplit {
                 new_beneficiaries, ..
             } => validate_reward_beneficiaries(new_beneficiaries),
+            ProposalType::SetupCouponReassignmentDelegation {
+                assigners,
+                new_beneficiaries,
+                ..
+            } => {
+                if assigners.is_empty() {
+                    return Err("assigners must not be empty".to_string());
+                }
+                validate_reward_beneficiaries(new_beneficiaries)
+            }
+            ProposalType::RevokeCouponReassignmentDelegation { .. } => Ok(()),
             _ => Ok(()),
         }
     }
@@ -1574,5 +1595,37 @@ mod tests {
             prior_config: Some("0089old".to_string()),
         };
         assert!(bad_sum.validate().is_err());
+    }
+
+    #[test]
+    fn setup_delegation_validate() {
+        // Reuse the `rb` helper from the neighboring set_reward_split_validate
+        // test; `rb(..).beneficiary` yields a CantonId (there is no dedicated
+        // party-id helper). Note: `rb`'s prefix is combined with a fixed
+        // namespace via `cid()`, so the prefix must be a plain string (no
+        // embedded "::") -- unlike the brief's example.
+        let execs = vec![rb("m1", "1.0").beneficiary, rb("m2", "1.0").beneficiary];
+        let ok = ProposalType::SetupCouponReassignmentDelegation {
+            assigners: execs.clone(),
+            new_beneficiaries: vec![rb("a", "0.8"), rb("b", "0.2")],
+            prior_delegation: None,
+        };
+        assert!(ok.validate().is_ok());
+        let no_exec = ProposalType::SetupCouponReassignmentDelegation {
+            assigners: vec![],
+            new_beneficiaries: vec![rb("a", "1.0")],
+            prior_delegation: None,
+        };
+        assert!(no_exec.validate().is_err());
+        let bad_sum = ProposalType::SetupCouponReassignmentDelegation {
+            assigners: execs,
+            new_beneficiaries: vec![rb("a", "0.5")],
+            prior_delegation: None,
+        };
+        assert!(bad_sum.validate().is_err());
+        let revoke = ProposalType::RevokeCouponReassignmentDelegation {
+            delegation: "00abc".into(),
+        };
+        assert!(revoke.validate().is_ok());
     }
 }
