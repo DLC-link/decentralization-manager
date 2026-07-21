@@ -6,7 +6,7 @@
 
 **Architecture:** This is a **delta on top of the existing branch** `feat/governance/coupon-reassignment-automation`, not a fresh build. Recon (2026-07-20) confirmed the reusable read side (`active_created_records`, `unassigned_coupons`, `CouponInfo`, `select_batch`, field decoders, governance plumbing) shares **no types** with the auto-confirm engine — `PendingAssign` is confined to engine fns and `select_batch` has zero engine coupling. So we **add** the delegation DAML + one setup/revoke `GovernableAction` + a `CouponReassignmentDelegation` reader + a `Delegation_Assign` executor, **rewrite** the single wiring fn `run_once_for_party`, then **delete** the engine (proposer/confirmer/`is_confirmable`/`split_matches`/`PendingAssign`/…) and the now-dead DAML (`AssignRewardBeneficiaries`, `RewardSplitConfig`, `SetRewardSplit`). Task order keeps the build green at every step: additions first (old + new coexist and compile), removals last.
 
-**Tech Stack:** DAML (SDK 3.4.11, `dpm`, `--target=2.2`), Rust (actix-web backend, `tokio`, `tonic`/`CommandServiceClient`), splice DARs `splice-api-reward-assignment-v1-1.0.0` + `splice-amulet` + token-metadata (already vendored). Package `governance-rewards` (currently `0.1.2`).
+**Tech Stack:** DAML — built with `dpm` (v3.4.11, LF `--target=2.2`), Rust (actix-web backend, `tokio`, `tonic`/`CommandServiceClient`), splice DARs `splice-api-reward-assignment-v1-1.0.0` + `splice-amulet` + token-metadata (already vendored). Package `governance-rewards` (currently `0.1.2`).
 
 ## Global Constraints
 

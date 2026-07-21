@@ -8,7 +8,7 @@
 
 **Architecture:** The split lives on-ledger in a new **`RewardSplitConfig`** contract, set through governance (a `SetRewardSplit` action). A per-node background loop runs two roles against each decparty that has a config: a **proposer** (finds unassigned coupons, batches them, proposes `AssignRewardBeneficiaries`) and a **confirmer** (reads a pending proposal, checks its beneficiaries equal the configured split and its coupons are still unassigned, then submits this node's `GovernanceConfirmation`). Correctness comes from the confirmer's check against the on-ledger split (L3), never from trusting the proposer.
 
-**Tech Stack:** DAML (SDK 3.4.11, `dpm`), Rust (actix-web backend, `tokio`, `tonic`/`CommandServiceClient`), splice DARs `splice-api-reward-assignment-v1-1.0.0` + `splice-amulet-0.1.19` (already vendored by M1). Builds on the M1+M2 branch.
+**Tech Stack:** DAML — built with `dpm` (v3.4.11), Rust (actix-web backend, `tokio`, `tonic`/`CommandServiceClient`), splice DARs `splice-api-reward-assignment-v1-1.0.0` + `splice-amulet-0.1.19` (already vendored by M1). Builds on the M1+M2 branch.
 
 ## Global Constraints
 
