@@ -2099,29 +2099,6 @@ pub(crate) fn packages() -> PackageConfig {
     default_package_config()
 }
 
-/// Resolve the active `GovernanceRules` contract id and the governance
-/// execute-threshold for `party_id`.
-///
-/// This is the *governance* threshold that gates
-/// `GovernanceRules_ExecuteConfirmedAction` — not the decentralized-namespace
-/// topology threshold from `get_party_threshold`. Consumed by the CIP-104
-/// reward automation (Mode A, M3+M4). The `get_governance` handler keeps its
-/// own inline resolution because it additionally needs the governance-core
-/// out-of-date flags and a topology-threshold fallback, neither of which fit
-/// this helper's `(String, usize)` shape.
-pub(crate) async fn resolve_active_governance_rules(
-    config: &NodeConfig,
-    party_id: &CantonId,
-    token: Option<String>,
-    test_mode: bool,
-    packages: &PackageConfig,
-) -> anyhow::Result<(String, usize)> {
-    let state = query_governance_state(config, party_id, token, test_mode, packages)
-        .await?
-        .context("no active GovernanceRules contract for party")?;
-    Ok((state.contract_id, state.threshold as usize))
-}
-
 // ============================================================================
 // Ledger Command Execution
 // ============================================================================

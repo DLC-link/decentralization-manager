@@ -1,12 +1,15 @@
 // Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! CIP-104 Mode A reward-assignment automation.
+//! CIP-104 Mode A reward-assignment automation (delegation model).
 //!
 //! A decparty earns traffic-based app rewards as `RewardCouponV2` coupons that
-//! carry `beneficiary = None` and expire unclaimed unless automation assigns
-//! them to the decparty's governance-configured split. This module holds the
-//! per-node read side of that automation:
+//! carry `beneficiary = None` and expire unclaimed unless automation
+//! reassigns them. Under the delegation model, a single threshold governance
+//! vote sets the split and the authorized assigners once, into a
+//! `CouponReassignmentDelegation`; from then on, any one listed assigner
+//! executes each periodic reassignment directly — no per-round voting. This
+//! module holds that automation:
 //!
 //! * [`active_created_records`] — the one shared **decoded** ACS read. Unlike
 //!   `queries::query_contracts_by_template` (cid + base64 blob, no fields) and
@@ -15,13 +18,17 @@
 //!   `queries::fetch_proposal_infos` — and returns the decoded create-arguments
 //!   `Record` (template reads) or the decoded interface-view `Record`
 //!   (interface reads).
-//! * [`OnLedgerSplitSource`] — reads the singleton `RewardSplitConfig` for a
-//!   decparty via a [`SplitSource`], defending the single-config invariant.
+//! * [`active_delegation`] — reads the decparty's active
+//!   `CouponReassignmentDelegation` (its cid and authorized `assigners`); the
+//!   split itself is not read here — `Delegation_Assign` enforces it in DAML.
 //! * [`unassigned_coupons`] — reads the decparty's unassigned `RewardCoupon`
 //!   interface views.
+//! * [`run_reassign_once`] — one reassign tick: selects a ripe batch of
+//!   unassigned coupons and exercises `Delegation_Assign` for it.
 //!
-//! The pure record decoders ([`parse_split_record`]) are unit-tested here; the
-//! gRPC reads are exercised by the devnet integration test.
+//! The pure record/batch decoders ([`select_batch`]) are unit-tested here; the
+//! gRPC reads and command submission are exercised by the devnet integration
+//! test.
 
 use std::collections::HashMap;
 
@@ -46,15 +53,8 @@ use std::time::Duration;
 
 use super::AppState;
 use super::action_serializer::{field, make_contract_id, make_list, make_party};
-use super::handlers::{
-    execute_confirm_action, get_party_credentials, packages, resolve_active_governance_rules,
-    submit_proposal,
-};
-use super::queries::{get_governance_confirmations, resolve_contract_package_ref};
-use super::types::{
-    ActionType, ConfirmActionRequest, DomainGovernanceAction, GovernanceType, ProposalType,
-    RewardBeneficiary,
-};
+use super::handlers::{get_party_credentials, packages};
+use super::queries::resolve_contract_package_ref;
 
 // ============================================================================
 // Record field extraction (mirrors queries.rs `field_*` helpers; the originals
@@ -99,30 +99,6 @@ fn field_time(rec: &Record, label: &str) -> anyhow::Result<DateTime<Utc>> {
     };
     DateTime::from_timestamp_micros(micros)
         .ok_or_else(|| anyhow!("field `{label}`: timestamp {micros} micros is out of range"))
-}
-
-/// Read a `ContractId` field as its contract-id string. On the wire a
-/// `ContractId` is `value::Sum::ContractId(String)`.
-fn field_contract_id(rec: &Record, label: &str) -> anyhow::Result<String> {
-    match record_field(rec, label) {
-        Some(value::Sum::ContractId(c)) => Ok(c.clone()),
-        _ => Err(anyhow!("field `{label}`: expected a ContractId value")),
-    }
-}
-
-/// Read a list-of-`ContractId` field as contract-id strings.
-fn field_contract_id_list(rec: &Record, label: &str) -> anyhow::Result<Vec<String>> {
-    let list = match record_field(rec, label) {
-        Some(value::Sum::List(l)) => l,
-        _ => return Err(anyhow!("field `{label}`: expected a List value")),
-    };
-    list.elements
-        .iter()
-        .map(|elem| match elem.sum.as_ref() {
-            Some(value::Sum::ContractId(c)) => Ok(c.clone()),
-            _ => Err(anyhow!("field `{label}`: element is not a ContractId")),
-        })
-        .collect()
 }
 
 /// Return true iff `label` is an `Optional` field carrying `None`.
@@ -256,92 +232,6 @@ pub(crate) async fn active_created_records(
     }
 
     Ok(out)
-}
-
-// ============================================================================
-// RewardSplitConfig (the on-ledger split)
-// ============================================================================
-
-/// Decode a list of `{ beneficiary : Party, percentage : Numeric }` records at
-/// `label` into [`RewardBeneficiary`]s. Shared by `RewardSplitConfig`
-/// (`beneficiaries`) and `AssignRewardBeneficiaries` (`newBeneficiaries`), which
-/// carry the identical element shape.
-fn parse_beneficiary_list(rec: &Record, label: &str) -> anyhow::Result<Vec<RewardBeneficiary>> {
-    let list = match record_field(rec, label) {
-        Some(value::Sum::List(l)) => l,
-        _ => return Err(anyhow!("field `{label}`: expected a beneficiary List")),
-    };
-
-    let mut out = Vec::with_capacity(list.elements.len());
-    for elem in &list.elements {
-        let inner = match elem.sum.as_ref() {
-            Some(value::Sum::Record(r)) => r,
-            _ => return Err(anyhow!("field `{label}`: element is not a record")),
-        };
-        out.push(RewardBeneficiary {
-            beneficiary: field_party_id(inner, "beneficiary")?,
-            percentage: field_decimal(inner, "percentage")?,
-        });
-    }
-    Ok(out)
-}
-
-/// Decode a `RewardSplitConfig` create-arguments `Record` into the configured
-/// split. Reads the `beneficiaries` field — a list of
-/// `{ beneficiary : Party, percentage : Numeric }` records.
-pub(crate) fn parse_split_record(rec: &Record) -> anyhow::Result<Vec<RewardBeneficiary>> {
-    parse_beneficiary_list(rec, "beneficiaries")
-}
-
-/// The effective reward split for a decparty, read from its on-ledger
-/// `RewardSplitConfig`, or `None` when there is no config (i.e. the automation
-/// is not enabled for that decparty). Defends the keyless-singleton invariant.
-///
-/// This is the **single swap point** for the split source: if a shared
-/// reward-config template ships later, only this function body changes.
-/// (Kept as a plain async fn — the codebase deliberately avoids `async-trait`,
-/// and there is one source today, so a trait would be premature.)
-pub(crate) async fn effective_split(
-    config: &NodeConfig,
-    packages: &PackageConfig,
-    test_mode: bool,
-    decparty: &CantonId,
-    token: &str,
-) -> anyhow::Result<Option<Vec<RewardBeneficiary>>> {
-    let Some(package_id) = packages.governance_rewards.as_deref() else {
-        return Ok(None);
-    };
-
-    let records = active_created_records(
-        config,
-        decparty,
-        Some(token.to_string()),
-        test_mode,
-        package_id,
-        "Governance.Rewards.RewardSplitConfig",
-        "RewardSplitConfig",
-        false,
-    )
-    .await?;
-
-    // Defend the keyless-singleton invariant: keep only configs whose
-    // `governanceParty` is this decparty.
-    let mut matching: Vec<&Record> = records
-        .iter()
-        .filter(|(_, rec)| field_party_id(rec, "governanceParty").ok().as_ref() == Some(decparty))
-        .map(|(_, rec)| rec)
-        .collect();
-
-    match matching.len() {
-        0 => Ok(None),
-        1 => Ok(Some(parse_split_record(matching.remove(0))?)),
-        n => {
-            tracing::warn!("ambiguous RewardSplitConfig for {decparty}: {n} active — refusing");
-            Err(anyhow!(
-                "ambiguous RewardSplitConfig: {n} active — refusing"
-            ))
-        }
-    }
 }
 
 // ============================================================================
@@ -499,118 +389,6 @@ pub(crate) async fn unassigned_coupons(
 }
 
 // ============================================================================
-// Pending AssignRewardBeneficiaries proposal + auto-confirmation policy
-// ============================================================================
-
-/// A pending `AssignRewardBeneficiaries` proposal, read back from the ledger so
-/// the confirmer can validate it against the configured split before adding this
-/// node's confirmation. Populated by [`read_all_pending_assigns`].
-#[derive(Clone, Debug)]
-pub(crate) struct PendingAssign {
-    /// Mirrors the `DomainGovernanceAction` cid so a `PendingAssign` is
-    /// self-describing; the confirmer keys off the action's cid, not this.
-    #[allow(dead_code)]
-    pub proposal_cid: String,
-    /// The `governanceParty` the proposal is scoped to. The confirmer verifies
-    /// this equals the decparty locally, so the security-critical invariant does
-    /// not rely on ACS visibility alone (M-6).
-    pub governance_party: CantonId,
-    pub primary_coupon: String,
-    pub additional_coupons: Vec<String>,
-    pub new_beneficiaries: Vec<RewardBeneficiary>,
-}
-
-/// True iff `proposed` and `configured` describe the same split: equal length,
-/// and every configured `(beneficiary, percentage)` has a matching proposed
-/// entry. Beneficiaries compare by [`CantonId`] equality and percentages by
-/// **exact [`DamlDecimal`]** equality — no float tolerance, mirroring the DAML
-/// `total == 1.0` guard and `validate_reward_beneficiaries` in `server::types`.
-pub(crate) fn split_matches(
-    proposed: &[RewardBeneficiary],
-    configured: &[RewardBeneficiary],
-) -> bool {
-    if proposed.len() != configured.len() {
-        return false;
-    }
-    configured.iter().all(|c| {
-        proposed
-            .iter()
-            .any(|p| p.beneficiary == c.beneficiary && p.percentage == c.percentage)
-    })
-}
-
-/// Default-deny auto-confirmation policy with an allowlist of exactly one action
-/// label. Returns true **iff** the action is `AssignRewardBeneficiaries`, its
-/// proposed split matches the configured one, and every target coupon is still
-/// unassigned. Any other action label is refused (correctness comes from this
-/// check, never from trusting the proposer).
-pub(crate) fn is_confirmable(
-    action_label: &str,
-    proposal: &PendingAssign,
-    configured: &[RewardBeneficiary],
-    coupons_unassigned: bool,
-) -> bool {
-    action_label == "AssignRewardBeneficiaries"
-        && split_matches(&proposal.new_beneficiaries, configured)
-        && coupons_unassigned
-}
-
-// ============================================================================
-// Parse-back of a pending AssignRewardBeneficiaries proposal
-// ============================================================================
-
-/// Decode an `AssignRewardBeneficiaries` create-arguments `Record` into a
-/// [`PendingAssign`]. Field order (verified against the M1 template):
-/// `governanceParty, proposer, primaryCoupon, additionalCoupons,
-/// newBeneficiaries`. `primaryCoupon` / `additionalCoupons` are `ContractId`s;
-/// `newBeneficiaries` reuses the shared beneficiary-list decoder.
-fn parse_assign_record(cid: &str, rec: &Record) -> anyhow::Result<PendingAssign> {
-    Ok(PendingAssign {
-        proposal_cid: cid.to_string(),
-        governance_party: field_party_id(rec, "governanceParty")?,
-        primary_coupon: field_contract_id(rec, "primaryCoupon")?,
-        additional_coupons: field_contract_id_list(rec, "additionalCoupons")?,
-        new_beneficiaries: parse_beneficiary_list(rec, "newBeneficiaries")?,
-    })
-}
-
-/// Read the pending `AssignRewardBeneficiaries` proposal identified by
-/// `proposal_cid`, decoding its target coupons and proposed split. Returns
-/// `Ok(None)` if the governance-rewards package is unconfigured or the proposal
-/// is no longer active (already executed/expired).
-pub(crate) async fn read_all_pending_assigns(
-    config: &NodeConfig,
-    decparty: &CantonId,
-    token: Option<String>,
-    test_mode: bool,
-    packages: &PackageConfig,
-) -> anyhow::Result<HashMap<String, PendingAssign>> {
-    let Some(package_id) = packages.governance_rewards.as_deref() else {
-        return Ok(HashMap::new());
-    };
-
-    let records = active_created_records(
-        config,
-        decparty,
-        token,
-        test_mode,
-        package_id,
-        "Governance.Rewards.AssignRewardBeneficiaries",
-        "AssignRewardBeneficiaries",
-        false,
-    )
-    .await?;
-
-    // One ACS scan per tick; callers look up by cid instead of re-scanning per
-    // pending proposal.
-    let mut out = HashMap::with_capacity(records.len());
-    for (cid, rec) in &records {
-        out.insert(cid.clone(), parse_assign_record(cid, rec)?);
-    }
-    Ok(out)
-}
-
-// ============================================================================
 // Proposer role
 // ============================================================================
 
@@ -651,101 +429,6 @@ pub(crate) fn select_batch(
         .collect()
 }
 
-/// One proposer tick for a decparty: read its unassigned coupons, drop any
-/// already targeted by an in-flight proposal (`covered_coupons`), select a ripe
-/// batch, and — if non-empty — propose `AssignRewardBeneficiaries` for the
-/// configured `split`. An empty batch (nothing ripe, or all covered) is a no-op.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_proposer_once(
-    config: &NodeConfig,
-    decparty: &CantonId,
-    member_party_id: &CantonId,
-    token: &str,
-    rules_contract_id: &str,
-    split: &[RewardBeneficiary],
-    test_mode: bool,
-    packages: &PackageConfig,
-    covered_coupons: &std::collections::HashSet<String>,
-) -> anyhow::Result<()> {
-    // Batch policy constants (spec §9 proposer step 2, §11 TTL/margin/cap):
-    //   * watermark 6h — leave freshly-earned coupons to any other collection
-    //     path first; only sweep what remains unassigned after 6h.
-    //   * minting_margin 2h — refuse coupons too close to their 36h expiry to
-    //     still be minted after the assignment lands.
-    //   * max_batch 50 — a conservative per-tick cap so a single propose command
-    //     stays well within ledger limits.
-    const WATERMARK: chrono::Duration = chrono::Duration::hours(6);
-    const MINTING_MARGIN: chrono::Duration = chrono::Duration::hours(2);
-    const MAX_BATCH: usize = 50;
-
-    let coupons: Vec<CouponInfo> = unassigned_coupons(
-        config,
-        decparty,
-        Some(token.to_string()),
-        test_mode,
-        packages,
-    )
-    .await?
-    .into_iter()
-    .filter(|c| !covered_coupons.contains(&c.cid))
-    .collect();
-
-    let batch = select_batch(&coupons, Utc::now(), WATERMARK, MINTING_MARGIN, MAX_BATCH);
-    if batch.is_empty() {
-        return Ok(());
-    }
-
-    let proposal = ProposalType::AssignRewardBeneficiaries {
-        primary_coupon: batch[0].clone(),
-        additional_coupons: batch[1..].to_vec(),
-        new_beneficiaries: split.to_vec(),
-    };
-
-    tracing::info!(
-        %decparty,
-        batch_size = batch.len(),
-        coupons = ?batch,
-        "reward automation: proposing AssignRewardBeneficiaries",
-    );
-
-    // `submit_proposal` ignores its `rules_contract_id` arg for creates (it
-    // resolves the package ref itself), so pass an empty string here.
-    let cid = submit_proposal(
-        config,
-        decparty,
-        "",
-        &proposal,
-        token,
-        member_party_id,
-        packages,
-    )
-    .await?;
-
-    // Immediately cast the proposer's own confirmation. Without this the
-    // proposal has zero confirmations and `get_governance_confirmations` hides
-    // it from every confirmer (including this node) — so it would never be
-    // visible and never reach threshold (C-1 liveness). The confirming choice
-    // needs the real governance rules cid, unlike the create above.
-    submit_confirmation(
-        config,
-        decparty,
-        rules_contract_id,
-        &cid,
-        token,
-        member_party_id,
-        packages,
-    )
-    .await?;
-
-    tracing::info!(
-        %decparty,
-        proposal_cid = %cid,
-        "reward automation: proposed + self-confirmed AssignRewardBeneficiaries",
-    );
-
-    Ok(())
-}
-
 // ============================================================================
 // Delegation-model per-round assigner (`Delegation_Assign`)
 // ============================================================================
@@ -772,10 +455,11 @@ fn build_delegation_assign_arg(
 
 /// Exercise `Delegation_Assign` as a plain ledger command (no governance
 /// round). Adapted from `execute_confirm_action`
-/// (`handlers/governance.rs:2130`); the differences are the target contract
+/// (`handlers/governance.rs:2107`); the differences are the target contract
 /// (the delegation cid), the choice (`Delegation_Assign`), the template
 /// (`Governance.Rewards.CouponReassignmentDelegation`), and `act_as =
 /// [assigner]` / `read_as = [decparty]` (co-hosting, spec §4.6).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn submit_delegation_assign(
     config: &NodeConfig,
     decparty: &CantonId,
@@ -796,7 +480,7 @@ pub(crate) async fn submit_delegation_assign(
         .as_deref()
         .context("governance_rewards package not configured")?;
     // The delegation may live under an older package ref — resolve its actual
-    // one (same as `execute_confirm_action`, governance.rs:2200-2208).
+    // one (same as `execute_confirm_action`, governance.rs:2177-2184).
     let package_id = resolve_contract_package_ref(
         config,
         decparty,
@@ -824,7 +508,7 @@ pub(crate) async fn submit_delegation_assign(
         })),
     };
     // act_as = [assigner], read_as = [decparty]. Remaining fields mirror
-    // `execute_confirm_action` (governance.rs:2226-2241).
+    // `execute_confirm_action` (governance.rs:2203-2217).
     let commands = Commands {
         workflow_id: String::new(),
         user_id: String::new(),
@@ -894,154 +578,14 @@ pub(crate) async fn run_reassign_once(
 }
 
 // ============================================================================
-// Confirmer role
-// ============================================================================
-
-/// Submit this node's confirmation for a `CoreDomain` governance proposal.
-///
-/// Builds the SAME `CoreDomain` [`ConfirmActionRequest`] the confirmer uses
-/// inline — `execute_confirm_action`'s CoreDomain branch derives the choice arg
-/// from `proposal_cid`, so `action` is an inert placeholder (mirrors the
-/// frontend's `governance_set_threshold { new_threshold: 0 }` placeholder in
-/// NotificationsView.tsx) — and calls [`execute_confirm_action`].
-///
-/// Used both by the proposer (to immediately cast its own bootstrapping vote so
-/// the proposal is visible to confirmers — `get_governance_confirmations` hides
-/// zero-confirmation proposals) and by the confirmer.
-async fn submit_confirmation(
-    config: &NodeConfig,
-    decparty: &CantonId,
-    rules_contract_id: &str,
-    proposal_cid: &str,
-    token: &str,
-    member_party_id: &CantonId,
-    packages: &PackageConfig,
-) -> anyhow::Result<()> {
-    let req = ConfirmActionRequest {
-        party_id: decparty.clone(),
-        rules_contract_id: rules_contract_id.to_string(),
-        action: ActionType::GovernanceSetThreshold { new_threshold: 0 },
-        governance_type: GovernanceType::CoreDomain,
-        proposal_cid: Some(proposal_cid.to_string()),
-    };
-    execute_confirm_action(config, &req, token, member_party_id, packages).await?;
-    Ok(())
-}
-
-/// True iff `member` already appears among `action`'s confirmations, so this
-/// node does not double-confirm a proposal it has already signed.
-pub(crate) fn already_confirmed_by(action: &DomainGovernanceAction, member: &CantonId) -> bool {
-    action
-        .confirmations
-        .iter()
-        .any(|c| &c.confirming_party == member)
-}
-
-/// One confirmer tick for a decparty. For each pending
-/// `AssignRewardBeneficiaries` proposal this node has not yet confirmed, read it
-/// back from the ledger, validate its proposed split against the on-ledger
-/// `split` and that every target coupon is still unassigned, and — only then —
-/// add this node's confirmation. Correctness comes from this check, never from
-/// trusting the proposer (default-deny; spec §5, §12).
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_confirmer_once(
-    data: &actix_web::web::Data<AppState>,
-    config: &NodeConfig,
-    decparty: &CantonId,
-    member_party_id: &CantonId,
-    token: &str,
-    rules_contract_id: &str,
-    split: &[RewardBeneficiary],
-    domain: &[DomainGovernanceAction],
-    pending: &std::collections::HashMap<String, PendingAssign>,
-    test_mode: bool,
-    packages: &PackageConfig,
-) -> anyhow::Result<()> {
-    // Held for the (deferred) first-wins execute path; see TODO(M4) below.
-    let _ = data;
-
-    // Fetch the unassigned set ONCE this tick; reused to recheck every
-    // proposal's target coupons (do not re-query per proposal).
-    let live: std::collections::HashSet<String> = unassigned_coupons(
-        config,
-        decparty,
-        Some(token.to_string()),
-        test_mode,
-        packages,
-    )
-    .await?
-    .into_iter()
-    .map(|c| c.cid)
-    .collect();
-
-    for a in domain {
-        if a.action_label != "AssignRewardBeneficiaries"
-            || a.orphaned
-            || already_confirmed_by(a, member_party_id)
-        {
-            continue;
-        }
-
-        let Some(pa) = pending.get(&a.proposal_cid) else {
-            continue;
-        };
-
-        // Verify the proposal is scoped to this decparty locally, rather than
-        // relying on ACS visibility alone (M-6, security-critical path).
-        if pa.governance_party != *decparty {
-            tracing::warn!(
-                %decparty,
-                proposal_cid = %a.proposal_cid,
-                governance_party = %pa.governance_party,
-                "reward automation: refusing to confirm AssignRewardBeneficiaries \
-                 (governanceParty does not match decparty)",
-            );
-            continue;
-        }
-
-        let coupons_ok = std::iter::once(&pa.primary_coupon)
-            .chain(&pa.additional_coupons)
-            .all(|c| live.contains(c));
-
-        if is_confirmable(&a.action_label, pa, split, coupons_ok) {
-            submit_confirmation(
-                config,
-                decparty,
-                rules_contract_id,
-                &a.proposal_cid,
-                token,
-                member_party_id,
-                packages,
-            )
-            .await?;
-            tracing::info!(
-                %decparty,
-                proposal_cid = %a.proposal_cid,
-                "reward automation: confirmed AssignRewardBeneficiaries",
-            );
-        } else {
-            tracing::warn!(
-                %decparty,
-                proposal_cid = %a.proposal_cid,
-                "reward automation: refusing to confirm AssignRewardBeneficiaries \
-                 (split mismatch or a target coupon is no longer unassigned)",
-            );
-        }
-
-        // TODO(M4): optional first-wins execute when `a.can_execute` — left out
-        // to keep scope tight; execute stays human-driven for now.
-    }
-
-    Ok(())
-}
-
-// ============================================================================
 // Background loop + registration
 // ============================================================================
 
-/// Per-node background loop: every `reward_automation_interval_secs`, run the
-/// proposer + confirmer once for each decparty this node holds credentials for.
-/// Enablement is on-ledger — a decparty with no `RewardSplitConfig` is skipped.
+/// Per-node background loop: every `reward_automation_interval_secs`, read the
+/// active `CouponReassignmentDelegation` for each decparty this node holds
+/// credentials for, and — if this node's member party is a listed assigner —
+/// reassign its due coupons via [`run_reassign_once`]. Enablement is
+/// on-ledger — a decparty with no active delegation is skipped.
 pub(crate) async fn run_reward_automation_loop(data: actix_web::web::Data<AppState>) {
     let mut ticker = tokio::time::interval(Duration::from_secs(
         data.config.reward_automation_interval_secs,
@@ -1100,8 +644,8 @@ async fn run_once_for_party(
 
 #[cfg(test)]
 mod tests {
+    use super::super::types::RewardBeneficiary;
     use super::*;
-    use crate::server::types::GovernanceConfirmation;
     use canton_proto_rs::com::daml::ledger::api::v2::{List, RecordField, Value};
 
     fn value(sum: value::Sum) -> Value {
@@ -1137,10 +681,6 @@ mod tests {
         ])))
     }
 
-    fn contract_id(c: &str) -> value::Sum {
-        value::Sum::ContractId(c.to_string())
-    }
-
     /// Test-only helper mirroring `server::types` tests: builds a
     /// [`RewardBeneficiary`] from a Canton-ID prefix + a decimal percentage
     /// string. A fixed valid namespace keeps party ids parseable; distinct
@@ -1159,35 +699,6 @@ mod tests {
     const ALICE: &str =
         "alice::1220aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const BOB: &str = "bob::1220bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-
-    #[test]
-    fn parse_split_record_reads_beneficiaries() {
-        let rec = record(vec![
-            field("governanceParty", party(GOV)),
-            field(
-                "beneficiaries",
-                value::Sum::List(List {
-                    elements: vec![
-                        beneficiary_record(ALICE, "0.8"),
-                        beneficiary_record(BOB, "0.2"),
-                    ],
-                }),
-            ),
-        ]);
-
-        let split = parse_split_record(&rec).unwrap();
-        assert_eq!(split.len(), 2);
-        assert_eq!(split[0].percentage.to_string(), "0.8");
-        assert_eq!(split[1].percentage.to_string(), "0.2");
-        assert_eq!(split[0].beneficiary.to_string(), ALICE);
-        assert_eq!(split[1].beneficiary.to_string(), BOB);
-    }
-
-    #[test]
-    fn parse_split_record_rejects_missing_list() {
-        let rec = record(vec![field("governanceParty", party(GOV))]);
-        assert!(parse_split_record(&rec).is_err());
-    }
 
     #[test]
     fn parse_delegation_record_reads_assigners_and_split() {
@@ -1217,94 +728,6 @@ mod tests {
         assert_eq!(d.cid, "00del");
         assert_eq!(d.assigners.len(), 2);
         // split is not parsed (DAML-enforced) — the record's `split` field is ignored.
-    }
-
-    #[test]
-    fn split_matches_is_order_insensitive_and_exact() {
-        let cfg = vec![rb("a", "0.8"), rb("b", "0.2")];
-        // reordered -> still a match
-        assert!(split_matches(&[rb("b", "0.2"), rb("a", "0.8")], &cfg));
-        // wrong percentage -> no match
-        assert!(!split_matches(&[rb("a", "0.7"), rb("b", "0.3")], &cfg));
-        // off by 1e-10 -> reject (exact Decimal equality, no tolerance)
-        assert!(!split_matches(
-            &[rb("a", "0.8000000001"), rb("b", "0.1999999999")],
-            &cfg
-        ));
-        // wrong set (different length) -> no match
-        assert!(!split_matches(&[rb("a", "1.0")], &cfg));
-        // wrong party -> no match
-        assert!(!split_matches(&[rb("a", "0.8"), rb("c", "0.2")], &cfg));
-    }
-
-    #[test]
-    fn is_confirmable_is_default_deny() {
-        let cfg = vec![rb("a", "1.0")];
-        let good = PendingAssign {
-            proposal_cid: "p".into(),
-            governance_party: CantonId::parse(GOV).expect("valid canton id"),
-            primary_coupon: "c1".into(),
-            additional_coupons: vec![],
-            new_beneficiaries: vec![rb("a", "1.0")],
-        };
-        // valid: enrolled label + matching split + coupons unassigned
-        assert!(is_confirmable(
-            "AssignRewardBeneficiaries",
-            &good,
-            &cfg,
-            true
-        ));
-        // coupon now assigned -> refuse
-        assert!(!is_confirmable(
-            "AssignRewardBeneficiaries",
-            &good,
-            &cfg,
-            false
-        ));
-        // non-enrolled action label -> refuse (default-deny)
-        assert!(!is_confirmable("SetRewardSplit", &good, &cfg, true));
-        // split mismatch -> refuse
-        let bad = PendingAssign {
-            new_beneficiaries: vec![rb("z", "1.0")],
-            ..good.clone()
-        };
-        assert!(!is_confirmable(
-            "AssignRewardBeneficiaries",
-            &bad,
-            &cfg,
-            true
-        ));
-    }
-
-    #[test]
-    fn parse_assign_record_reads_coupons_and_split() {
-        let rec = record(vec![
-            field("governanceParty", party(GOV)),
-            field("proposer", party(ALICE)),
-            field("primaryCoupon", contract_id("c1")),
-            field(
-                "additionalCoupons",
-                value::Sum::List(List {
-                    elements: vec![value(contract_id("c2"))],
-                }),
-            ),
-            field(
-                "newBeneficiaries",
-                value::Sum::List(List {
-                    elements: vec![
-                        beneficiary_record(ALICE, "0.8"),
-                        beneficiary_record(BOB, "0.2"),
-                    ],
-                }),
-            ),
-        ]);
-
-        let pa = parse_assign_record("p1", &rec).unwrap();
-        assert_eq!(pa.proposal_cid, "p1");
-        assert_eq!(pa.governance_party.to_string(), GOV);
-        assert_eq!(pa.primary_coupon, "c1");
-        assert_eq!(pa.additional_coupons, vec!["c2".to_string()]);
-        assert_eq!(pa.new_beneficiaries.len(), 2);
     }
 
     // ---- proposer (select_batch) --------------------------------------------
@@ -1364,18 +787,6 @@ mod tests {
         );
     }
 
-    // ---- confirmer (already_confirmed_by) -----------------------------------
-
-    fn gov_conf(p: &str) -> GovernanceConfirmation {
-        GovernanceConfirmation {
-            contract_id: "conf".to_string(),
-            action: ActionType::GovernanceSetThreshold { new_threshold: 0 },
-            confirming_party: CantonId::parse(p).expect("valid canton id"),
-            created_at: 0,
-            expires_at: 0,
-        }
-    }
-
     #[test]
     fn build_delegation_assign_arg_shape() {
         // rb(..).beneficiary yields a CantonId (this module has no canton_id helper);
@@ -1384,29 +795,5 @@ mod tests {
             build_delegation_assign_arg(&rb("m1", "1.0").beneficiary, "00c1", &["00c2".into()]);
         let labels: Vec<&str> = rec.fields.iter().map(|f| f.label.as_str()).collect();
         assert_eq!(labels, ["assigner", "primaryCoupon", "additionalCoupons"]);
-    }
-
-    #[test]
-    fn already_confirmed_by_detects_this_member() {
-        let action = DomainGovernanceAction {
-            proposal_cid: "p".to_string(),
-            action_label: "AssignRewardBeneficiaries".to_string(),
-            description: None,
-            confirmations: vec![gov_conf(ALICE)],
-            confirmation_count: 1,
-            can_execute: false,
-            orphaned: false,
-            transfer_details: None,
-            accept_transfer_details: None,
-            service_request_details: None,
-        };
-        assert!(already_confirmed_by(
-            &action,
-            &CantonId::parse(ALICE).expect("valid canton id")
-        ));
-        assert!(!already_confirmed_by(
-            &action,
-            &CantonId::parse(BOB).expect("valid canton id")
-        ));
     }
 }
