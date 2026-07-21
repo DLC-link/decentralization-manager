@@ -249,7 +249,7 @@ pub struct NodeConfig {
     pub noise_retry: NoiseRetryConfig,
     /// Tick interval (seconds) for the CIP-104 Mode A reward-assignment
     /// automation loop. Enablement is on-ledger (presence of a
-    /// `RewardSplitConfig`), so this only controls cadence. Default 300s.
+    /// `CouponReassignmentDelegation`), so this only controls cadence. Default 300s.
     pub reward_automation_interval_secs: u64,
     /// Top-level Keycloak config for frontend website gating
     pub keycloak: Option<KeycloakConfig>,

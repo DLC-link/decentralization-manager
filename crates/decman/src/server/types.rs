@@ -640,23 +640,6 @@ pub enum ProposalType {
         #[serde(default)]
         provider_app_reward_beneficiaries: Option<Vec<AppRewardBeneficiary>>,
     },
-    /// Assign governance-configured beneficiaries to the decparty's CIP-104
-    /// reward coupons via `RewardCoupon_AssignBeneficiaries`. governanceParty
-    /// == the coupons' provider (spec §4.1). Percentages sum to 1.0, <= 20
-    /// entries.
-    AssignRewardBeneficiaries {
-        primary_coupon: String,
-        additional_coupons: Vec<String>,
-        new_beneficiaries: Vec<RewardBeneficiary>,
-    },
-    /// Set the decparty's on-ledger reward split (`RewardSplitConfig`).
-    /// `prior_config` is the cid of the config being replaced (`None` for the
-    /// first set). Percentages sum to 1.0, <= 20 entries.
-    SetRewardSplit {
-        new_beneficiaries: Vec<RewardBeneficiary>,
-        #[serde(default)]
-        prior_config: Option<String>,
-    },
     /// Create (or replace) the decparty's on-ledger CouponReassignmentDelegation.
     /// `prior_delegation` is the cid of the delegation being replaced (None for the first).
     SetupCouponReassignmentDelegation {
@@ -816,12 +799,6 @@ impl ProposalType {
                 provider_app_reward_beneficiaries: Some(beneficiaries),
                 ..
             } => validate_beneficiary_weights(beneficiaries),
-            ProposalType::AssignRewardBeneficiaries {
-                new_beneficiaries, ..
-            } => validate_reward_beneficiaries(new_beneficiaries),
-            ProposalType::SetRewardSplit {
-                new_beneficiaries, ..
-            } => validate_reward_beneficiaries(new_beneficiaries),
             ProposalType::SetupCouponReassignmentDelegation {
                 assigners,
                 new_beneficiaries,
@@ -838,7 +815,8 @@ impl ProposalType {
     }
 }
 
-/// Validates `AssignRewardBeneficiaries::new_beneficiaries`: non-empty,
+/// Validates a `new_beneficiaries` list (e.g.
+/// `SetupCouponReassignmentDelegation::new_beneficiaries`): non-empty,
 /// <= 20 entries, each percentage in (0.0, 1.0], summing to exactly 1.0.
 ///
 /// `DamlDecimal` addition is exact (no float rounding), so an exact `==`
@@ -1535,66 +1513,6 @@ mod tests {
             beneficiary: cid(prefix),
             percentage: pct.parse().expect("valid decimal"),
         }
-    }
-
-    #[test]
-    fn assign_reward_beneficiaries_validate_rejects_empty_beneficiaries() {
-        let p = ProposalType::AssignRewardBeneficiaries {
-            primary_coupon: "0089abc".to_string(),
-            additional_coupons: vec![],
-            new_beneficiaries: vec![],
-        };
-        assert!(p.validate().is_err());
-    }
-
-    #[test]
-    fn assign_reward_beneficiaries_validate_rejects_bad_percentages() {
-        // sum != 1.0
-        let p = ProposalType::AssignRewardBeneficiaries {
-            primary_coupon: "0089abc".to_string(),
-            additional_coupons: vec![],
-            new_beneficiaries: vec![rb("alice", "0.5")],
-        };
-        assert!(p.validate().is_err());
-        // percentage out of (0,1]
-        let p2 = ProposalType::AssignRewardBeneficiaries {
-            primary_coupon: "0089abc".to_string(),
-            additional_coupons: vec![],
-            new_beneficiaries: vec![rb("alice", "0.0"), rb("bob", "1.0")],
-        };
-        assert!(p2.validate().is_err());
-    }
-
-    #[test]
-    fn assign_reward_beneficiaries_validate_accepts_valid() {
-        let p = ProposalType::AssignRewardBeneficiaries {
-            primary_coupon: "0089abc".to_string(),
-            additional_coupons: vec!["0089def".to_string()],
-            new_beneficiaries: vec![rb("alice", "0.8"), rb("bob", "0.2")],
-        };
-        assert!(p.validate().is_ok());
-    }
-
-    #[test]
-    fn set_reward_split_validate() {
-        // valid split (sums to exactly 1.0)
-        let ok = ProposalType::SetRewardSplit {
-            new_beneficiaries: vec![rb("alice", "0.8"), rb("bob", "0.2")],
-            prior_config: None,
-        };
-        assert!(ok.validate().is_ok());
-        // empty rejected
-        let empty = ProposalType::SetRewardSplit {
-            new_beneficiaries: vec![],
-            prior_config: None,
-        };
-        assert!(empty.validate().is_err());
-        // sum != 1.0 rejected (prior_config present is irrelevant to validation)
-        let bad_sum = ProposalType::SetRewardSplit {
-            new_beneficiaries: vec![rb("alice", "0.5")],
-            prior_config: Some("0089old".to_string()),
-        };
-        assert!(bad_sum.validate().is_err());
     }
 
     #[test]

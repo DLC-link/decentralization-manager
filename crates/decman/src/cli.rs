@@ -197,8 +197,8 @@ pub enum Commands {
         noise_retry_backoff_ms: Option<u64>,
 
         /// CIP-104 Mode A reward-automation loop tick interval, in seconds.
-        /// Enablement is on-ledger (presence of a RewardSplitConfig); this only
-        /// controls cadence. Defaults to 300.
+        /// Enablement is on-ledger (presence of a CouponReassignmentDelegation);
+        /// this only controls cadence. Defaults to 300.
         #[arg(long, env = "DECPM_REWARD_AUTOMATION_INTERVAL_SECS")]
         reward_automation_interval_secs: Option<u64>,
     },

@@ -1,8 +1,8 @@
 -- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
--- | Test utilities for AssignRewardBeneficiaries tests. Copied (and adapted
--- with an added `dso` party) from `Governance.TestUtils` in
+-- | Test utilities for the coupon-reassignment-delegation tests. Copied (and
+-- adapted with an added `dso` party) from `Governance.TestUtils` in
 -- governance-core-test so this package does not need to depend on that
 -- test-support package's wallet-bearing closure.
 -- In real Canton, members have readAs rights on the governance party via
@@ -50,8 +50,7 @@ getMembers : TestParties -> Set Party
 getMembers parties = Set.fromList [parties.member1, parties.member2, parties.member3]
 
 -- | Create a RewardCouponV2 owned (provider) by `provider`, unassigned, as an
--- interface CID. Shared by the AssignRewardBeneficiaries and
--- CouponReassignmentDelegation tests.
+-- interface CID. Used by the coupon-reassignment-delegation tests.
 mkUnassignedCoupon : Party -> Party -> Decimal -> Script (ContractId RewardCoupon)
 mkUnassignedCoupon dso provider amount = do
   now <- getTime

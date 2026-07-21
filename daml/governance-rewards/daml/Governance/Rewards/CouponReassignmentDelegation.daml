@@ -7,15 +7,13 @@
 -- split with a plain Delegation_Assign exercise — no per-round vote (spec §5, §7, §12).
 module Governance.Rewards.CouponReassignmentDelegation where
 
--- NB: copy these imports + emptyExtraArgs verbatim from AssignRewardBeneficiaries.daml
--- before that file is deleted in Task 8.
 import Splice.Api.RewardAssignmentV1
   (RewardCoupon, RewardBeneficiary, RewardCoupon_AssignBeneficiaries(..))
 import Splice.Api.Token.MetadataV1
   (ExtraArgs(..), emptyChoiceContext, emptyMetadata)
 
 -- `Splice.Api.Token.MetadataV1` exports no ready-made `emptyExtraArgs`; build it from
--- the exported primitives (verbatim from the old `AssignRewardBeneficiaries.daml`).
+-- the exported primitives (carried over from the now-removed per-round assign template).
 emptyExtraArgs : ExtraArgs
 emptyExtraArgs = ExtraArgs with
   context = emptyChoiceContext
