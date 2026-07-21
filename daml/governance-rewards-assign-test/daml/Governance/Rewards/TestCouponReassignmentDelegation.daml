@@ -1,0 +1,127 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+module Governance.Rewards.TestCouponReassignmentDelegation where
+
+import Daml.Script
+import Splice.Amulet (RewardCouponV2(..))
+import Splice.Api.RewardAssignmentV1 (RewardBeneficiary(..))
+import Governance.Rewards.CouponReassignmentDelegation
+import Governance.Rewards.AssignTestUtils   -- allocateRewardsTestParties, TestParties (has .dso)
+import TestHarness                            -- Test{given,when,then_}, run, Failures, shouldBe
+
+-- mkUnassignedCoupon lives in AssignTestUtils (relocated in Step 0b) — shared, survives Task 8.
+
+-- GWT fixture: parties + a delegation created DIRECTLY (in production it is created by
+-- the SetupCouponReassignmentDelegation governance action — Task 2). decparty is the
+-- coupons' provider; assigners are the member parties (1-of-n).
+data Fixture = Fixture with
+    parties : TestParties
+    split   : [RewardBeneficiary]
+    delId   : ContractId CouponReassignmentDelegation
+
+given_delegation : Script Fixture
+given_delegation = do
+  parties <- allocateRewardsTestParties
+  let gp = parties.governanceParty
+  let split = [ RewardBeneficiary with beneficiary = parties.member2; percentage = 0.8
+              , RewardBeneficiary with beneficiary = parties.member3; percentage = 0.2 ]
+  delId <- submit gp $ createCmd CouponReassignmentDelegation with
+    decparty = gp; assigners = [parties.member1, parties.member2]; split
+  pure Fixture with ..
+
+-- shared no-assertion then_ for negative cases (when : Fixture -> Script ())
+then_nothing : Fixture -> a -> Script Failures
+then_nothing _ _ = pure []
+
+-- happy path: a SINGLE assigner (member1), acting alone, reassigns one coupon to the
+-- baked-in split -> one RewardCouponV2 per beneficiary (original archived).
+when_assigner_reassigns : Fixture -> Script Int
+when_assigner_reassigns f = do
+  let gp = f.parties.governanceParty
+  c1 <- mkUnassignedCoupon f.parties.dso gp 100.0
+  submit (memberContext f.parties.member1 gp) $ exerciseCmd f.delId Delegation_Assign with
+    assigner = f.parties.member1; primaryCoupon = c1; additionalCoupons = []
+  coupons <- query @RewardCouponV2 gp
+  pure (length coupons)
+
+then_two_beneficiary_coupons : Fixture -> Int -> Script Failures
+then_two_beneficiary_coupons _ n = pure $ shouldBe "one coupon per beneficiary" 2 n
+
+test_assigner_reassigns_to_baked_split = script do
+  run Test with
+    given = given_delegation
+    when = when_assigner_reassigns
+    then_ = then_two_beneficiary_coupons
+
+-- security: a non-assigner (member3, not in `assigners`) is rejected by the elem gate.
+when_non_assigner_rejected : Fixture -> Script ()
+when_non_assigner_rejected f = do
+  let gp = f.parties.governanceParty
+  c1 <- mkUnassignedCoupon f.parties.dso gp 100.0
+  -- member3 has the same readAs visibility a real member would; the rejection
+  -- must come from the `elem` gate, not from incidental lack of visibility.
+  submitMustFail (memberContext f.parties.member3 gp) $ exerciseCmd f.delId Delegation_Assign with
+    assigner = f.parties.member3; primaryCoupon = c1; additionalCoupons = []
+
+test_non_assigner_cannot_reassign = script do
+  run Test with
+    given = given_delegation
+    when = when_non_assigner_rejected
+    then_ = then_nothing
+
+-- nonconsuming: the same delegation serves two rounds (2 coupons x 2 beneficiaries = 4).
+when_two_rounds : Fixture -> Script Int
+when_two_rounds f = do
+  let gp = f.parties.governanceParty
+  c1 <- mkUnassignedCoupon f.parties.dso gp 100.0
+  c2 <- mkUnassignedCoupon f.parties.dso gp 50.0
+  submit (memberContext f.parties.member1 gp) $ exerciseCmd f.delId Delegation_Assign with
+    assigner = f.parties.member1; primaryCoupon = c1; additionalCoupons = []
+  submit (memberContext f.parties.member1 gp) $ exerciseCmd f.delId Delegation_Assign with
+    assigner = f.parties.member1; primaryCoupon = c2; additionalCoupons = []
+  coupons <- query @RewardCouponV2 gp
+  pure (length coupons)
+
+then_four_beneficiary_coupons : Fixture -> Int -> Script Failures
+then_four_beneficiary_coupons _ n = pure $ shouldBe "two rounds x two beneficiaries" 4 n
+
+test_delegation_is_nonconsuming = script do
+  run Test with
+    given = given_delegation
+    when = when_two_rounds
+    then_ = then_four_beneficiary_coupons
+
+-- revoke: the decparty archives the delegation.
+when_revoke : Fixture -> Script Int
+when_revoke f = do
+  submit f.parties.governanceParty $ exerciseCmd f.delId Delegation_Revoke
+  dels <- query @CouponReassignmentDelegation f.parties.governanceParty
+  pure (length dels)
+
+then_no_delegation : Fixture -> Int -> Script Failures
+then_no_delegation _ n = pure $ shouldBe "delegation archived" 0 n
+
+test_revoke_archives = script do
+  run Test with
+    given = given_delegation
+    when = when_revoke
+    then_ = then_no_delegation
+
+-- already-assigned coupon rejected (all-or-nothing): re-assigning a consumed coupon
+-- fails the whole tx.
+when_reassign_same_coupon_fails : Fixture -> Script ()
+when_reassign_same_coupon_fails f = do
+  let gp = f.parties.governanceParty
+  c1 <- mkUnassignedCoupon f.parties.dso gp 100.0
+  submit (memberContext f.parties.member1 gp) $ exerciseCmd f.delId Delegation_Assign with
+    assigner = f.parties.member1; primaryCoupon = c1; additionalCoupons = []
+  -- c1 is now consumed/assigned; re-assigning the same cid fails the whole tx (all-or-nothing)
+  submitMustFail (memberContext f.parties.member1 gp) $ exerciseCmd f.delId Delegation_Assign with
+    assigner = f.parties.member1; primaryCoupon = c1; additionalCoupons = []
+
+test_already_assigned_coupon_rejected = script do
+  run Test with
+    given = given_delegation
+    when = when_reassign_same_coupon_fails
+    then_ = then_nothing

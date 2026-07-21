@@ -10,8 +10,12 @@
 module Governance.Rewards.AssignTestUtils where
 
 import DA.Set as Set hiding (filter)
-import DA.Time (minutes)
+import DA.Time (addRelTime, hours, minutes)
 import Daml.Script
+
+import Splice.Amulet (RewardCouponV2(..))
+import Splice.Types (Round(..))
+import Splice.Api.RewardAssignmentV1 (RewardCoupon)
 
 import Governance.Action (GovernableAction)
 import Governance.Confirmation
@@ -44,6 +48,22 @@ allocateRewardsTestParties = do
 -- | Get the standard member list (3 members).
 getMembers : TestParties -> Set Party
 getMembers parties = Set.fromList [parties.member1, parties.member2, parties.member3]
+
+-- | Create a RewardCouponV2 owned (provider) by `provider`, unassigned, as an
+-- interface CID. Shared by the AssignRewardBeneficiaries and
+-- CouponReassignmentDelegation tests.
+mkUnassignedCoupon : Party -> Party -> Decimal -> Script (ContractId RewardCoupon)
+mkUnassignedCoupon dso provider amount = do
+  now <- getTime
+  cid <- submit dso $ createCmd RewardCouponV2 with
+    dso
+    provider
+    round = Round 1
+    amount
+    expiresAt = now `addRelTime` hours 36
+    providerIsObserver = True
+    beneficiary = None
+  pure (toInterfaceContractId @RewardCoupon cid)
 
 -- | Build the submission context for a member acting with readAs on governance party.
 -- Simulates the Canton topology where members host the governance party.

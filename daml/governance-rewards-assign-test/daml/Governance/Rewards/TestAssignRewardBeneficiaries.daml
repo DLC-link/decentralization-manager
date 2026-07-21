@@ -3,31 +3,16 @@
 
 module Governance.Rewards.TestAssignRewardBeneficiaries where
 
-import DA.Time (addRelTime, hours)
 import Daml.Script
 
 import Splice.Amulet (RewardCouponV2(..))
-import Splice.Types (Round(..))
-import Splice.Api.RewardAssignmentV1 (RewardCoupon, RewardBeneficiary(..))
+import Splice.Api.RewardAssignmentV1 (RewardBeneficiary(..))
 
 import Governance.Action (GovernableAction)
 import Governance.Rules
 import Governance.Rewards.AssignRewardBeneficiaries
 import Governance.Rewards.AssignTestUtils
-
--- create a RewardCouponV2 owned (provider) by `provider`, unassigned, as an interface CID
-mkUnassignedCoupon : Party -> Party -> Decimal -> Script (ContractId RewardCoupon)
-mkUnassignedCoupon dso provider amount = do
-  now <- getTime
-  cid <- submit dso $ createCmd RewardCouponV2 with
-    dso
-    provider
-    round = Round 1
-    amount
-    expiresAt = now `addRelTime` hours 36
-    providerIsObserver = True
-    beneficiary = None
-  pure (toInterfaceContractId @RewardCoupon cid)
+  -- mkUnassignedCoupon relocated here (shared; survives Task 8's deletion of this module)
 
 test_assign_happy_path = script do
   parties <- allocateRewardsTestParties
