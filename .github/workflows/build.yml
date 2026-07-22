@@ -29,7 +29,9 @@ jobs:
       - uses: ./.github/actions/setup-build-env
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          extra-packages: mold
+          # curl: utoipa-swagger-ui's build script shells out to `curl` to
+          # download the Swagger UI bundle (its reqwest feature isn't enabled).
+          extra-packages: curl mold
 
       - name: Setup Rust target cache
         uses: Swatinem/rust-cache@v2
