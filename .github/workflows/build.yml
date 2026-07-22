@@ -10,10 +10,30 @@ on:
       - "**"
 
 jobs:
+  # Dev version = latest tag with the patch number bumped by one (e.g. latest
+  # tag v1.4.3 -> 1.4.4). Any pre-release suffix on the tag is dropped first.
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: v
+        run: |
+          LATEST=$(git tag --sort=-v:refname | head -n1)
+          LATEST="${LATEST#v}"
+          if [ -z "$LATEST" ]; then LATEST="0.0.0"; fi
+          CORE="${LATEST%%-*}"
+          echo "version=${CORE%.*}.$(( ${CORE##*.} + 1 ))" >> "$GITHUB_OUTPUT"
+
   binary:
+    needs: version
     uses: ./.github/workflows/build-binary.yml
     with:
       profile: fast
+      version: ${{ needs.version.outputs.version }}
     secrets: inherit
 
   docker:

@@ -14,6 +14,10 @@ on:
         description: "Cargo profile to build: `fast` (dev images) or `release` (tags)."
         required: true
         type: string
+      version:
+        description: "Version string written into crates/decman/Cargo.toml before building."
+        required: true
+        type: string
 
 jobs:
   binary:
@@ -27,6 +31,14 @@ jobs:
       RUSTFLAGS: -C link-arg=-fuse-ld=mold
     steps:
       - uses: actions/checkout@v7
+
+      # Stamp the crate version (the binary reports it via CARGO_PKG_VERSION).
+      # Only crates/decman/Cargo.toml has a line-anchored `version = `; the
+      # dependency specs are `name = { version = ... }`, so they aren't matched.
+      - name: Set crate version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: sed -i "s/^version = .*/version = \"$VERSION\"/" crates/decman/Cargo.toml
 
       - uses: ./.github/actions/setup-build-env
         with:
