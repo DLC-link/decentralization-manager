@@ -111,7 +111,7 @@ docker run -p 8080:8080 -v ./data:/data \
 
 ### Running Multiple Participants (Development)
 
-The Compose services build from the same `Dockerfile` and forward your
+The Compose services build from `development/Dockerfile` and forward your
 `ssh-agent` (`ssh: default`), so add your GitHub-registered SSH key to the
 agent before bringing them up:
 
