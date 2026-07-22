@@ -60,6 +60,7 @@ prost-types = { workspace = true }
 reqwest = { version = "0.13", features = ["form", "json"] }
 rust-embed = { workspace = true }
 secp256k1 = { workspace = true }
+semver = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
