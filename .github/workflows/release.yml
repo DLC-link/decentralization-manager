@@ -12,7 +12,7 @@ jobs:
     secrets: inherit
 
   docker:
-    name: Build & Push Docker Images
+    name: Build & Push Docker Image
     needs: ci
     runs-on: ubuntu-latest
     permissions:
@@ -24,21 +24,19 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6
         with:
-          role-to-assume: arn:aws:iam::903295530547:role/gh-oidc-build-dec-party-manager
+          role-to-assume: arn:aws:iam::903295530547:role/gh-oidc-build-decentralization-manager
           role-session-name: gha-${{ github.run_id }}
           aws-region: us-east-1
 
-      - name: Login to Amazon ECR Public
+      - name: Log in to Amazon ECR Public
         id: login-ecr-public
         uses: aws-actions/amazon-ecr-login@v2
         with:
           registry-type: public
 
       - name: Extract version from tag
-        id: version
-        run: |
-          VERSION=${GITHUB_REF_NAME#v}
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+        id: tag
+        run: echo "version_tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -48,30 +46,11 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.BOT_SSH_PRIVATE_KEY }}
 
-      - name: Build and push internal image
+      - name: Build and push to ECR Public
         env:
-          ECR_PUBLIC_REGISTRY: ${{ steps.login-ecr-public.outputs.registry }}
-          REGISTRY_ALIAS: dlc-link
-          ECR_REPOSITORY: canton-decparty-manager
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION_TAG: ${{ steps.tag.outputs.version_tag }}
         run: |
           echo "VITE_ADMIN_ACCESS=true" > crates/decman/frontend/.env
-          docker build --ssh default \
-            -t $ECR_PUBLIC_REGISTRY/$REGISTRY_ALIAS/$ECR_REPOSITORY:v$VERSION \
-            -t $ECR_PUBLIC_REGISTRY/$REGISTRY_ALIAS/$ECR_REPOSITORY:latest .
-          docker push $ECR_PUBLIC_REGISTRY/$REGISTRY_ALIAS/$ECR_REPOSITORY:v$VERSION
-          docker push $ECR_PUBLIC_REGISTRY/$REGISTRY_ALIAS/$ECR_REPOSITORY:latest
-
-      - name: Build and push demo image
-        env:
-          ECR_PUBLIC_REGISTRY: ${{ steps.login-ecr-public.outputs.registry }}
-          REGISTRY_ALIAS: dlc-link
-          ECR_REPOSITORY: canton-decparty-manager
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          echo "VITE_ADMIN_ACCESS=false" > crates/decman/frontend/.env
-          docker build --ssh default \
-            -t $ECR_PUBLIC_REGISTRY/$REGISTRY_ALIAS/$ECR_REPOSITORY:v$VERSION-demo \
-            -t $ECR_PUBLIC_REGISTRY/$REGISTRY_ALIAS/$ECR_REPOSITORY:demo .
-          docker push $ECR_PUBLIC_REGISTRY/$REGISTRY_ALIAS/$ECR_REPOSITORY:v$VERSION-demo
-          docker push $ECR_PUBLIC_REGISTRY/$REGISTRY_ALIAS/$ECR_REPOSITORY:demo
+          docker buildx build --ssh default \
+            -t public.ecr.aws/dlc-link/decentralization-manager:$VERSION_TAG \
+            --push .
