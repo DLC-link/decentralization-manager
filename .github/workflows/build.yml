@@ -1,0 +1,52 @@
+name: Build
+
+# Per-commit dev images: build and push to the private ECR repo on every push
+# to any branch, tagged with the short git SHA. Tags are excluded here — those
+# are built and pushed to the public repo by release.yml instead.
+on:
+  push:
+    branches:
+      - "**"
+
+jobs:
+  docker-private:
+    name: Build & Push Private Image
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: arn:aws:iam::903295530547:role/gh-oidc-build-decentralization-manager
+          role-session-name: gha-${{ github.run_id }}
+          aws-region: us-east-1
+
+      - name: Log in to Amazon ECR (private)
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Extract short SHA
+        id: sha
+        run: echo "short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.10.0
+        with:
+          ssh-private-key: ${{ secrets.BOT_SSH_PRIVATE_KEY }}
+
+      - name: Build and push to ECR (private)
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          SHORT_SHA: ${{ steps.sha.outputs.short }}
+        run: |
+          echo "VITE_ADMIN_ACCESS=true" > crates/decman/frontend/.env
+          docker buildx build --ssh default \
+            -t $ECR_REGISTRY/decentralization-manager:$SHORT_SHA \
+            --push .
