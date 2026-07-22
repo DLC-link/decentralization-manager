@@ -36,17 +36,14 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Setup SSH
-        uses: webfactory/ssh-agent@v0.10.0
-        with:
-          ssh-private-key: ${{ secrets.BOT_SSH_PRIVATE_KEY }}
-
       - name: Build and push to ECR (private)
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           SHORT_SHA: ${{ steps.sha.outputs.short }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           echo "VITE_ADMIN_ACCESS=true" > crates/decman/frontend/.env
-          docker buildx build --ssh default \
+          docker buildx build \
+            --secret id=gh_token,env=GH_TOKEN \
             -t $ECR_REGISTRY/decentralization-manager:$SHORT_SHA \
             --push .
