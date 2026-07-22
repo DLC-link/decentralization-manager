@@ -56,7 +56,6 @@ jobs:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           SHORT_SHA: ${{ steps.sha.outputs.short }}
         run: |
-          chmod +x ctx/dec-party-manager
           docker buildx build ctx -f Dockerfile \
             -t $ECR_REGISTRY/decentralization-manager:$SHORT_SHA \
             --push

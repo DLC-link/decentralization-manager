@@ -6,15 +6,10 @@ RUN apt-get install -y cmake pkg-config libssl-dev git openssh-client protobuf-c
 
 WORKDIR /app
 
-# Fetch private git deps (canton-lib) over HTTPS using a token passed as a build
-# secret — the same mechanism as CI's setup-build-env action, so no SSH deploy
-# key is needed. The credential helper reads the token from the mounted secret
-# at fetch time, so the token never lands in an image layer; only the (harmless)
-# insteadOf rewrite and helper script are persisted in .gitconfig.
-RUN git config --global \
-      url."https://github.com/".insteadOf "ssh://git@github.com/" \
- && git config --global \
-      credential.helper '!f() { echo username=x-access-token; echo "password=$(cat /run/secrets/gh_token)"; }; f'
+# Fetch private git deps (canton-lib) over SSH. docker-compose forwards the
+# developer's ssh-agent (`ssh: default`); the cargo steps below mount it with
+# `--mount=type=ssh`. See the README for adding your GitHub key to the agent.
+RUN mkdir -p /root/.ssh && ssh-keyscan github.com >> /root/.ssh/known_hosts
 
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 
@@ -41,13 +36,13 @@ COPY crates/decman/frontend/index.html crates/decman/frontend/vite.config.ts cra
 # which `build.rs` needs before it builds the frontend. DECMAN_SKIP_FRONTEND so
 # this generation build doesn't itself try to build the frontend (chicken-and-egg).
 # Same --release profile so the dependency compiles are shared with the build below.
-RUN --mount=type=secret,id=gh_token DECMAN_SKIP_FRONTEND=1 \
+RUN --mount=type=ssh DECMAN_SKIP_FRONTEND=1 \
     cargo run --release -p decman --features typegen --bin gen-types
 
 # Build only the backend (its bin is `dec-party-manager`). `-p decman` avoids
 # compiling the `decman-cli` TUI, whose Linux file-dialog backend would pull in
 # extra system libraries the server image doesn't need.
-RUN --mount=type=secret,id=gh_token cargo build --release -p decman
+RUN --mount=type=ssh cargo build --release -p decman
 
 FROM busybox:latest AS runtime
 

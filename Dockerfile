@@ -11,7 +11,7 @@
 # against in the rust:slim-bookworm CI job — so nothing needs to be copied in.
 FROM gcr.io/distroless/cc-debian12
 
-COPY dec-party-manager /usr/local/bin/dec-party-manager
+COPY --chmod=0755 dec-party-manager /usr/local/bin/dec-party-manager
 
 EXPOSE 8080 9000
 
