@@ -36,7 +36,24 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
+      # Persist the Dockerfile's BuildKit cache mounts (cargo registry/git +
+      # target/) across runs. GitHub-hosted runners are ephemeral, so without
+      # this the cargo compile starts cold every time. The action restores the
+      # mounts before the build (main step) and saves them afterwards (post
+      # step); skip-extraction only skips the save if the build never succeeded.
+      - name: Restore cargo build caches
+        uses: reproducible-containers/buildkit-cache-dance@v3
+        with:
+          cache-map: |
+            {
+              "cargo-registry": "/usr/local/cargo/registry",
+              "cargo-git": "/usr/local/cargo/git",
+              "cargo-target": "/app/target"
+            }
+          skip-extraction: ${{ steps.build.outcome != 'success' }}
+
       - name: Build and push to ECR (private)
+        id: build
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           SHORT_SHA: ${{ steps.sha.outputs.short }}
@@ -45,5 +62,7 @@ jobs:
           echo "VITE_ADMIN_ACCESS=true" > crates/decman/frontend/.env
           docker buildx build \
             --secret id=gh_token,env=GH_TOKEN \
+            --build-arg CARGO_PROFILE_RELEASE_LTO=false \
+            --build-arg CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
             -t $ECR_REGISTRY/decentralization-manager:$SHORT_SHA \
             --push .
