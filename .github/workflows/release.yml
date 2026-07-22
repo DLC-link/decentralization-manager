@@ -11,15 +11,27 @@ jobs:
     uses: ./.github/workflows/ci.yml
     secrets: inherit
 
-  docker:
-    name: Build & Push Docker Image
+  binary:
     needs: ci
+    uses: ./.github/workflows/build-binary.yml
+    with:
+      profile: release
+    secrets: inherit
+
+  docker:
+    name: Build & Push Public Image
+    needs: binary
     runs-on: ubuntu-latest
     permissions:
       id-token: write
       contents: read
     steps:
       - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: dec-party-manager
+          path: ctx
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6
@@ -41,13 +53,13 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
+      # Tiny build context: just the binary in ctx/ + the runtime Dockerfile, so
+      # there's no repo upload to the buildkit daemon and nothing to compile.
       - name: Build and push to ECR Public
         env:
           VERSION_TAG: ${{ steps.tag.outputs.version_tag }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "VITE_ADMIN_ACCESS=true" > crates/decman/frontend/.env
-          docker buildx build \
-            --secret id=gh_token,env=GH_TOKEN \
+          chmod +x ctx/dec-party-manager
+          docker buildx build ctx -f Dockerfile \
             -t public.ecr.aws/dlc-link/decentralization-manager:$VERSION_TAG \
-            --push .
+            --push

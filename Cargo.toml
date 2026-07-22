@@ -114,3 +114,7 @@ strip = "none"
 inherits = "dev"
 debug = false
 incremental = false
+# rust-embed only embeds frontend/dist at compile time when debug_assertions is
+# off (otherwise it loads the folder from disk at runtime, which doesn't exist in
+# the container → 404). opt-level stays 0, so this keeps the fast compile.
+debug-assertions = false

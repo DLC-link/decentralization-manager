@@ -1,6 +1,6 @@
 # Local 3-node dec-party-manager dev stack.
 #
-# Builds the image from source (../Dockerfile). The build fetches private
+# Builds the image from source (./Dockerfile). The build fetches private
 # DLC-link dependencies (canton-lib) over SSH via `--mount=type=ssh`, so you
 # need an ssh-agent running with a key that can read github.com/DLC-link/*:
 #   eval "$(ssh-agent -s)" && ssh-add ~/.ssh/<your-key>
@@ -35,7 +35,7 @@ services:
     platform: linux/amd64
     build:
       context: ..
-      dockerfile: Dockerfile
+      dockerfile: development/Dockerfile
       ssh:
         - default
     volumes:
@@ -59,7 +59,7 @@ services:
     platform: linux/amd64
     build:
       context: ..
-      dockerfile: Dockerfile
+      dockerfile: development/Dockerfile
       ssh:
         - default
     volumes:
@@ -83,7 +83,7 @@ services:
     platform: linux/amd64
     build:
       context: ..
-      dockerfile: Dockerfile
+      dockerfile: development/Dockerfile
       ssh:
         - default
     volumes:
