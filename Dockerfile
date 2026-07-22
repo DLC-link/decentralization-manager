@@ -2,7 +2,7 @@ FROM rust:slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y curl ca-certificates
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-RUN apt-get install -y cmake pkg-config libssl-dev git openssh-client protobuf-compiler nodejs mold
+RUN apt-get install -y cmake pkg-config libssl-dev git openssh-client protobuf-compiler nodejs
 
 WORKDIR /app
 
@@ -17,17 +17,6 @@ RUN git config --global \
       credential.helper '!f() { echo username=x-access-token; echo "password=$(cat /run/secrets/gh_token)"; }; f'
 
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
-
-# Which cargo profile to build. Defaults to the shipped `release` profile (fat
-# LTO) for tagged public images. Per-commit dev images pass
-# --build-arg BUILD_PROFILE=fast (opt-level 0, no LTO, no debuginfo) to build as
-# fast as possible; runtime performance of those throwaway images doesn't matter.
-ARG BUILD_PROFILE=release
-# Extra rustc flags, empty by default. The private build passes a faster linker
-# (-fuse-ld=mold) here to cut link time; the public build leaves it unset so the
-# shipped binary links exactly as before.
-ARG RUSTFLAGS=
-ENV RUSTFLAGS=${RUSTFLAGS}
 
 # Frontend deps layer, cached unless package*.json change. The frontend now
 # lives under the backend crate (crates/decman/frontend).
@@ -52,29 +41,13 @@ COPY crates/decman/frontend/index.html crates/decman/frontend/vite.config.ts cra
 # which `build.rs` needs before it builds the frontend. DECMAN_SKIP_FRONTEND so
 # this generation build doesn't itself try to build the frontend (chicken-and-egg).
 # Same --release profile so the dependency compiles are shared with the build below.
-# The three cache mounts (cargo registry, cargo git, and the workspace target/)
-# persist compiled artifacts across builds. On CI they're kept warm across runs
-# by reproducible-containers/buildkit-cache-dance (see build.yml); locally they
-# reuse the buildkit builder's cache. Both cargo steps mount the same targets so
-# the dep graph compiled here by gen-types is reused by the build below.
-RUN --mount=type=secret,id=gh_token \
-    --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/app/target \
-    DECMAN_SKIP_FRONTEND=1 \
-    cargo run --profile ${BUILD_PROFILE} -p decman --features typegen --bin gen-types
+RUN --mount=type=secret,id=gh_token DECMAN_SKIP_FRONTEND=1 \
+    cargo run --release -p decman --features typegen --bin gen-types
 
 # Build only the backend (its bin is `dec-party-manager`). `-p decman` avoids
 # compiling the `decman-cli` TUI, whose Linux file-dialog backend would pull in
-# extra system libraries the server image doesn't need. target/ is a cache mount
-# (not part of the image layer), so the built binary is copied out to /app before
-# the RUN ends — otherwise the runtime stage below would find nothing to COPY.
-RUN --mount=type=secret,id=gh_token \
-    --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/app/target \
-    cargo build --profile ${BUILD_PROFILE} -p decman \
- && cp target/${BUILD_PROFILE}/dec-party-manager /app/dec-party-manager
+# extra system libraries the server image doesn't need.
+RUN --mount=type=secret,id=gh_token cargo build --release -p decman
 
 FROM busybox:latest AS runtime
 
@@ -84,7 +57,7 @@ COPY --from=builder /lib/x86_64-linux-gnu/libgcc_s.so.1 /lib64/libgcc_s.so.1
 COPY --from=builder /lib/x86_64-linux-gnu/libssl.so.3 /lib64/libssl.so.3
 COPY --from=builder /lib/x86_64-linux-gnu/libcrypto.so.3 /lib64/libcrypto.so.3
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-COPY --from=builder /app/dec-party-manager /usr/local/bin/
+COPY --from=builder /app/target/release/dec-party-manager /usr/local/bin/
 
 EXPOSE 8080 9000
 
