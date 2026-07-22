@@ -2,7 +2,7 @@ FROM rust:slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y curl ca-certificates
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-RUN apt-get install -y cmake pkg-config libssl-dev git openssh-client protobuf-compiler nodejs
+RUN apt-get install -y cmake pkg-config libssl-dev git openssh-client protobuf-compiler nodejs mold
 
 WORKDIR /app
 
@@ -18,15 +18,16 @@ RUN git config --global \
 
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 
-# Release-profile overrides, applied to cargo via env (they take precedence over
-# [profile.release] in Cargo.toml). Defaults match the shipped profile (fat LTO,
-# one codegen unit) so tagged public builds are unaffected. Per-commit dev images
-# pass --build-arg CARGO_PROFILE_RELEASE_LTO=false (and a higher codegen-units)
-# to skip the expensive LTO link and build in a fraction of the time.
-ARG CARGO_PROFILE_RELEASE_LTO=true
-ARG CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
-ENV CARGO_PROFILE_RELEASE_LTO=${CARGO_PROFILE_RELEASE_LTO} \
-    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=${CARGO_PROFILE_RELEASE_CODEGEN_UNITS}
+# Which cargo profile to build. Defaults to the shipped `release` profile (fat
+# LTO) for tagged public images. Per-commit dev images pass
+# --build-arg BUILD_PROFILE=fast (opt-level 0, no LTO, no debuginfo) to build as
+# fast as possible; runtime performance of those throwaway images doesn't matter.
+ARG BUILD_PROFILE=release
+# Extra rustc flags, empty by default. The private build passes a faster linker
+# (-fuse-ld=mold) here to cut link time; the public build leaves it unset so the
+# shipped binary links exactly as before.
+ARG RUSTFLAGS=
+ENV RUSTFLAGS=${RUSTFLAGS}
 
 # Frontend deps layer, cached unless package*.json change. The frontend now
 # lives under the backend crate (crates/decman/frontend).
@@ -61,7 +62,7 @@ RUN --mount=type=secret,id=gh_token \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/app/target \
     DECMAN_SKIP_FRONTEND=1 \
-    cargo run --release -p decman --features typegen --bin gen-types
+    cargo run --profile ${BUILD_PROFILE} -p decman --features typegen --bin gen-types
 
 # Build only the backend (its bin is `dec-party-manager`). `-p decman` avoids
 # compiling the `decman-cli` TUI, whose Linux file-dialog backend would pull in
@@ -72,8 +73,8 @@ RUN --mount=type=secret,id=gh_token \
     --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/app/target \
-    cargo build --release -p decman \
- && cp target/release/dec-party-manager /app/dec-party-manager
+    cargo build --profile ${BUILD_PROFILE} -p decman \
+ && cp target/${BUILD_PROFILE}/dec-party-manager /app/dec-party-manager
 
 FROM busybox:latest AS runtime
 

@@ -62,7 +62,7 @@ jobs:
           echo "VITE_ADMIN_ACCESS=true" > crates/decman/frontend/.env
           docker buildx build \
             --secret id=gh_token,env=GH_TOKEN \
-            --build-arg CARGO_PROFILE_RELEASE_LTO=false \
-            --build-arg CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
+            --build-arg BUILD_PROFILE=fast \
+            --build-arg RUSTFLAGS='-C link-arg=-fuse-ld=mold' \
             -t $ECR_REGISTRY/decentralization-manager:$SHORT_SHA \
             --push .

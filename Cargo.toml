@@ -103,3 +103,14 @@ inherits = "release"
 codegen-units = 16
 lto = false
 strip = "none"
+
+# Fastest-to-compile profile, used for the per-commit private dev images
+# (build.yml). opt-level 0 (from dev) + no LTO + no debuginfo + max
+# codegen-units: these are throwaway images where compile speed is all that
+# matters and runtime performance does not. incremental is off for the same
+# reason CI turns it off elsewhere — the cache is restored fresh each run, so
+# per-fn incremental only adds size and slowdown.
+[profile.fast]
+inherits = "dev"
+debug = false
+incremental = false
