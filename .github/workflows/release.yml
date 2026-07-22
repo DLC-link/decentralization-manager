@@ -59,6 +59,7 @@ jobs:
         env:
           VERSION_TAG: ${{ steps.tag.outputs.version_tag }}
         run: |
-          docker buildx build ctx -f Dockerfile \
+          cp Dockerfile ctx/Dockerfile
+          docker buildx build ctx \
             -t public.ecr.aws/dlc-link/decentralization-manager:$VERSION_TAG \
             --push

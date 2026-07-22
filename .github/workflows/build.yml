@@ -56,6 +56,7 @@ jobs:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           SHORT_SHA: ${{ steps.sha.outputs.short }}
         run: |
-          docker buildx build ctx -f Dockerfile \
+          cp Dockerfile ctx/Dockerfile
+          docker buildx build ctx \
             -t $ECR_REGISTRY/decentralization-manager:$SHORT_SHA \
             --push
