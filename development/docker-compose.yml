@@ -1,13 +1,9 @@
 # Local 3-node dec-party-manager dev stack.
 #
-# Builds the image from source (../Dockerfile). The build fetches private
+# Builds the image from source (./Dockerfile). The build fetches private
 # DLC-link dependencies (canton-lib) over SSH via `--mount=type=ssh`, so you
 # need an ssh-agent running with a key that can read github.com/DLC-link/*:
 #   eval "$(ssh-agent -s)" && ssh-add ~/.ssh/<your-key>
-# NOTE: this build is currently broken with a GitHub SSH auth error — see
-# https://github.com/DLC-link/dec-party-manager/issues/221. Until it is fixed
-# you can run a prebuilt image instead by replacing each `build:` block with
-# `image: public.ecr.aws/dlc-link/canton-decparty-manager:<tag>`.
 #
 # Uses bridge networking (the Compose default) so it runs the same on Docker
 # Desktop for Mac, OrbStack, and Linux. Do NOT switch these to
@@ -35,7 +31,7 @@ services:
     platform: linux/amd64
     build:
       context: ..
-      dockerfile: Dockerfile
+      dockerfile: development/Dockerfile
       ssh:
         - default
     volumes:
@@ -59,7 +55,7 @@ services:
     platform: linux/amd64
     build:
       context: ..
-      dockerfile: Dockerfile
+      dockerfile: development/Dockerfile
       ssh:
         - default
     volumes:
@@ -83,7 +79,7 @@ services:
     platform: linux/amd64
     build:
       context: ..
-      dockerfile: Dockerfile
+      dockerfile: development/Dockerfile
       ssh:
         - default
     volumes:

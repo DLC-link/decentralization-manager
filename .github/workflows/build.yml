@@ -1,25 +1,23 @@
-name: Release
+name: Build
 
+# Per-commit dev images: on every push to any branch, build the binary (fast
+# profile, no optimization — throwaway images) and push it to the private ECR
+# repo tagged with the short git SHA. Tags are excluded here — those are built
+# and pushed to the public repo by release.yml instead.
 on:
   push:
-    tags:
-      - v[0-9]*
+    branches:
+      - "**"
 
 jobs:
-  ci:
-    name: CI
-    uses: ./.github/workflows/ci.yml
-    secrets: inherit
-
   binary:
-    needs: ci
     uses: ./.github/workflows/build-binary.yml
     with:
-      profile: release
+      profile: fast
     secrets: inherit
 
   docker:
-    name: Build & Push Public Image
+    name: Build & Push Private Image
     needs: binary
     runs-on: ubuntu-latest
     permissions:
@@ -40,26 +38,25 @@ jobs:
           role-session-name: gha-${{ github.run_id }}
           aws-region: us-east-1
 
-      - name: Log in to Amazon ECR Public
-        id: login-ecr-public
+      - name: Log in to Amazon ECR (private)
+        id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
-        with:
-          registry-type: public
 
-      - name: Extract version from tag
-        id: tag
-        run: echo "version_tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+      - name: Extract short SHA
+        id: sha
+        run: echo "short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
       # Tiny build context: just the binary in ctx/ + the runtime Dockerfile, so
       # there's no repo upload to the buildkit daemon and nothing to compile.
-      - name: Build and push to ECR Public
+      - name: Build and push to ECR (private)
         env:
-          VERSION_TAG: ${{ steps.tag.outputs.version_tag }}
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          SHORT_SHA: ${{ steps.sha.outputs.short }}
         run: |
           cp Dockerfile ctx/Dockerfile
           docker buildx build ctx \
-            -t public.ecr.aws/dlc-link/decentralization-manager:$VERSION_TAG \
+            -t $ECR_REGISTRY/decentralization-manager:$SHORT_SHA \
             --push

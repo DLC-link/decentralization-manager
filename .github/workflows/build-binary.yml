@@ -1,0 +1,83 @@
+name: Build Binary
+
+# Reusable binary build. Compiles the dec-party-manager binary on the runner
+# (not in Docker) with the given cargo profile and uploads it as an artifact
+# named "dec-party-manager". Callers (build.yml, release.yml) then wrap it in
+# the tiny Dockerfile.runtime image and push it to their respective ECR repo.
+#
+# Runs in rust:slim-bookworm so the binary links against the same glibc/openssl
+# that the distroless/cc-debian12 runtime image ships.
+on:
+  workflow_call:
+    inputs:
+      profile:
+        description: "Cargo profile to build: `fast` (dev images) or `release` (tags)."
+        required: true
+        type: string
+
+jobs:
+  binary:
+    name: Build Binary (${{ inputs.profile }})
+    runs-on: ubuntu-latest
+    container: rust:slim-bookworm
+    # mold is a much faster linker. Set at job level so every cargo invocation
+    # (gen-types + the binary build) shares one fingerprint and reuses the
+    # compiled dependency graph.
+    env:
+      RUSTFLAGS: -C link-arg=-fuse-ld=mold
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/setup-build-env
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          # curl: utoipa-swagger-ui's build script shells out to `curl` to
+          # download the Swagger UI bundle (its reqwest feature isn't enabled).
+          extra-packages: curl mold
+
+      # Separate cache per profile: fast (opt-level 0) and release (fat LTO)
+      # produce disjoint artifacts, so they must not share a target cache.
+      - name: Setup Rust target cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ inputs.profile }}-image
+          cache-on-failure: "true"
+
+      # The frontend imports frontend/src/types.generated.ts (gitignored), so the
+      # bindings must be generated from the Rust DTOs before the frontend builds.
+      - name: Generate frontend TypeScript bindings
+        run: DECMAN_SKIP_FRONTEND=1 cargo run --profile ${{ inputs.profile }} -p decman --features typegen --bin gen-types
+
+      # Cache the built frontend bundle keyed on the *content* of the frontend
+      # sources + the just-generated bindings. hashFiles is content-based, so a
+      # commit that doesn't touch the frontend or the DTOs is a cache hit and
+      # skips the tsc + vite build entirely. The bundle is identical regardless
+      # of the cargo profile, so both callers share this cache.
+      - name: Cache frontend bundle
+        id: fe-cache
+        uses: actions/cache@v6
+        with:
+          path: crates/decman/frontend/dist
+          key: fe-dist-${{ hashFiles('crates/decman/frontend/src/**', 'crates/decman/frontend/package-lock.json', 'crates/decman/frontend/index.html', 'crates/decman/frontend/vite.config.ts', 'crates/decman/frontend/tsconfig*.json') }}
+
+      - name: Build frontend
+        if: steps.fe-cache.outputs.cache-hit != 'true'
+        working-directory: crates/decman/frontend
+        run: |
+          echo "VITE_ADMIN_ACCESS=true" > .env
+          npm ci
+          npm run build
+
+      # DECMAN_SKIP_FRONTEND=1 tells build.rs not to rebuild the frontend — the
+      # bundle above is already in frontend/dist and rust-embed embeds it as-is.
+      - name: Build binary
+        run: DECMAN_SKIP_FRONTEND=1 cargo build --profile ${{ inputs.profile }} -p decman
+
+      - name: Stage binary for artifact
+        run: cp target/${{ inputs.profile }}/dec-party-manager dec-party-manager
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dec-party-manager
+          path: dec-party-manager
+          retention-days: 1

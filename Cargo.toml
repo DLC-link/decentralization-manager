@@ -43,6 +43,7 @@ ratatui = { version = "0.30.2" }
 rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
 rust-embed = { version = "8.5" }
 secp256k1 = { version = "0.29.1", features = ["rand-std"] }
+semver = { version = "1.0" }
 serde = { version = "1.0", features = ["derive"] }
 serde-big-array = { version = "0.5.1" }
 serde_json = { version = "1.0" }
@@ -102,3 +103,18 @@ inherits = "release"
 codegen-units = 16
 lto = false
 strip = "none"
+
+# Fastest-to-compile profile, used for the per-commit private dev images
+# (build.yml). opt-level 0 (from dev) + no LTO + no debuginfo + max
+# codegen-units: these are throwaway images where compile speed is all that
+# matters and runtime performance does not. incremental is off for the same
+# reason CI turns it off elsewhere — the cache is restored fresh each run, so
+# per-fn incremental only adds size and slowdown.
+[profile.fast]
+inherits = "dev"
+debug = false
+incremental = false
+# rust-embed only embeds frontend/dist at compile time when debug_assertions is
+# off (otherwise it loads the folder from disk at runtime, which doesn't exist in
+# the container → 404). opt-level stays 0, so this keeps the fast compile.
+debug-assertions = false
