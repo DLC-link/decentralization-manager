@@ -201,11 +201,16 @@ pub struct ParticipantStatus {
     /// reported one (peers on older code report `None`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow: Option<WorkflowInfo>,
-    /// dec-party-manager version: this node's own version for the current
+    /// dec-party-manager semver: this node's own version for the current
     /// node, or the version a peer reported in its health response. `None` for
     /// unreachable peers and peers on older code that don't report one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// Display build identity (image tag / short SHA / `<semver>-dev`) for this
+    /// node or the one a peer reported. `None` for unreachable peers and peers
+    /// on code that predates the field. This is what the peers table shows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_version: Option<String>,
 }
 
 /// Response for the participants status endpoint
