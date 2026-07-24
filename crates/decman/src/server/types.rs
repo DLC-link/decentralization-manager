@@ -817,7 +817,14 @@ impl ProposalType {
 
 /// Validates a `new_beneficiaries` list (e.g.
 /// `SetupCouponReassignmentDelegation::new_beneficiaries`): non-empty,
-/// <= 20 entries, each percentage in (0.0, 1.0], summing to exactly 1.0.
+/// <= 20 entries, no duplicate beneficiary, each percentage in (0.0, 1.0],
+/// summing to exactly 1.0.
+///
+/// The uniqueness rule mirrors the on-ledger `RewardCoupon_AssignBeneficiaries`
+/// impl (`require "Beneficaries are unique"`); catching it here means a
+/// duplicated split is rejected at propose time rather than passing the vote
+/// and then failing every `Delegation_Assign`, which would leave a permanently
+/// unusable delegation.
 ///
 /// `DamlDecimal` addition is exact (no float rounding), so an exact `==`
 /// against `1.0` is sufficient here — no epsilon tolerance is needed.
@@ -832,12 +839,16 @@ fn validate_reward_beneficiaries(beneficiaries: &[RewardBeneficiary]) -> Result<
         .parse::<DamlDecimal>()
         .expect("'0' is a valid DamlDecimal");
     let one: DamlDecimal = "1".parse().expect("'1' is a valid DamlDecimal");
+    let mut seen = std::collections::HashSet::new();
     for b in beneficiaries {
         if b.percentage.value() <= zero.value() || b.percentage.value() > one.value() {
             return Err(format!(
                 "each percentage must be in (0.0, 1.0], got {}",
                 b.percentage
             ));
+        }
+        if !seen.insert(&b.beneficiary) {
+            return Err(format!("duplicate beneficiary not allowed: {}", b.beneficiary));
         }
     }
     let sum: DamlDecimal = beneficiaries.iter().map(|b| b.percentage).sum();
@@ -1545,5 +1556,33 @@ mod tests {
             delegation: "00abc".into(),
         };
         assert!(revoke.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_reward_beneficiaries_edge_cases() {
+        // Empty is rejected.
+        assert!(validate_reward_beneficiaries(&[]).is_err());
+
+        // Per-percentage bound is (0.0, 1.0]: 0.0, negative, and > 1.0 all reject.
+        assert!(validate_reward_beneficiaries(&[rb("a", "0.0"), rb("b", "1.0")]).is_err());
+        assert!(validate_reward_beneficiaries(&[rb("a", "-0.5"), rb("b", "1.5")]).is_err());
+        assert!(validate_reward_beneficiaries(&[rb("a", "1.5")]).is_err());
+
+        // A single 1.0 (upper bound inclusive) is accepted.
+        assert!(validate_reward_beneficiaries(&[rb("a", "1.0")]).is_ok());
+
+        // Duplicate beneficiary is rejected even when percentages are otherwise valid.
+        assert!(validate_reward_beneficiaries(&[rb("dup", "0.5"), rb("dup", "0.5")]).is_err());
+
+        // Count boundary: exactly 20 (each 0.05, summing to 1.0) is accepted; 21 rejects.
+        let twenty: Vec<RewardBeneficiary> =
+            (0..20).map(|i| rb(&format!("b{i}"), "0.05")).collect();
+        assert!(validate_reward_beneficiaries(&twenty).is_ok());
+        let twenty_one: Vec<RewardBeneficiary> =
+            (0..21).map(|i| rb(&format!("b{i}"), "0.05")).collect();
+        assert!(validate_reward_beneficiaries(&twenty_one).is_err());
+
+        // Valid two-way split.
+        assert!(validate_reward_beneficiaries(&[rb("a", "0.8"), rb("b", "0.2")]).is_ok());
     }
 }
