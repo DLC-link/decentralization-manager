@@ -397,15 +397,28 @@ pub(crate) async fn unassigned_coupons(
 /// no `createdAt`.
 const COUPON_TTL: chrono::Duration = chrono::Duration::hours(36);
 
-/// Select the coupons to assign this tick (pure). Keeps a coupon iff:
+/// A coupon is *ripe* for assignment this tick (pure) iff:
 ///   * it is old enough — its age (`now - (expiresAt - COUPON_TTL)`) is past
 ///     `watermark`, so freshly-earned coupons get first refusal by any other
 ///     collection path before we sweep them (spec §9/§11); AND
 ///   * enough time remains before expiry to mint after assigning —
 ///     `expiresAt - now >= minting_margin`.
-///
-/// Survivors are ordered most-urgent-first (ascending `expiresAt`) and truncated
-/// to `max_batch`; the coupon cids are returned.
+fn is_ripe(
+    c: &CouponInfo,
+    now: DateTime<Utc>,
+    watermark: chrono::Duration,
+    minting_margin: chrono::Duration,
+) -> bool {
+    let age = now - (c.expires_at - COUPON_TTL);
+    let remaining = c.expires_at - now;
+    age >= watermark && remaining >= minting_margin
+}
+
+/// Select the coupons to assign this tick (pure): the ripe coupons (see
+/// [`is_ripe`]), ordered most-urgent-first (ascending `expiresAt`) and truncated
+/// to `max_batch`; the coupon cids are returned. When more coupons are ripe than
+/// `max_batch`, the remainder is deferred to a later tick — [`run_reassign_once`]
+/// logs a warning in that case (see [`ripe_count`]).
 pub(crate) fn select_batch(
     coupons: &[CouponInfo],
     now: DateTime<Utc>,
@@ -415,11 +428,7 @@ pub(crate) fn select_batch(
 ) -> Vec<String> {
     let mut selected: Vec<&CouponInfo> = coupons
         .iter()
-        .filter(|c| {
-            let age = now - (c.expires_at - COUPON_TTL);
-            let remaining = c.expires_at - now;
-            age >= watermark && remaining >= minting_margin
-        })
+        .filter(|c| is_ripe(c, now, watermark, minting_margin))
         .collect();
     selected.sort_by_key(|c| c.expires_at);
     selected
@@ -427,6 +436,20 @@ pub(crate) fn select_batch(
         .take(max_batch)
         .map(|c| c.cid.clone())
         .collect()
+}
+
+/// How many coupons are ripe this tick (pure), regardless of `max_batch`. Used
+/// to detect (and warn about) a batch that had to defer part of its ripe set.
+fn ripe_count(
+    coupons: &[CouponInfo],
+    now: DateTime<Utc>,
+    watermark: chrono::Duration,
+    minting_margin: chrono::Duration,
+) -> usize {
+    coupons
+        .iter()
+        .filter(|c| is_ripe(c, now, watermark, minting_margin))
+        .count()
 }
 
 // ============================================================================
@@ -569,7 +592,22 @@ pub(crate) async fn run_reassign_once(
         packages,
     )
     .await?;
-    let batch = select_batch(&coupons, Utc::now(), WATERMARK, MINTING_MARGIN, MAX_BATCH);
+    let now = Utc::now();
+    let ripe = ripe_count(&coupons, now, WATERMARK, MINTING_MARGIN);
+    if ripe > MAX_BATCH {
+        // Not an error — the remainder is picked up on later ticks — but a
+        // sustained backlog means coupons can expire unassigned, so surface it
+        // rather than truncate silently. Shorten the tick interval or raise
+        // MAX_BATCH if this persists.
+        tracing::warn!(
+            %decparty,
+            ripe,
+            max_batch = MAX_BATCH,
+            deferred = ripe - MAX_BATCH,
+            "more coupons ripe than one batch can assign; deferring the remainder to a later tick"
+        );
+    }
+    let batch = select_batch(&coupons, now, WATERMARK, MINTING_MARGIN, MAX_BATCH);
     let Some((primary, additional)) = batch.split_first() else {
         return Ok(()); // nothing ripe -> no-op
     };
