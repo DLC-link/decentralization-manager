@@ -224,21 +224,51 @@ test_revoke_via_governance = script do
   run Test with
     given = given_governance; when = when_revoke_via_governance; then_ = then_zero
 
--- empty split rejected at execute (executeImpl asserts non-empty beneficiaries)
-when_empty_split_execute_fails : GovFixture -> Script ()
-when_empty_split_execute_fails f = do
+-- Reusable negative driver: propose a Setup carrying the given (bad) assigners /
+-- beneficiaries, gather confirmations, and assert the governed execute fails an
+-- executeImpl guard. The executor is a governance executor, NOT the delegation
+-- assigner. Each `test_setup_*_rejected` below isolates one executeImpl guard.
+setupExecuteMustFail : GovFixture -> [Party] -> [RewardBeneficiary] -> Script ()
+setupExecuteMustFail f assigners beneficiaries = do
   let gp = f.parties.governanceParty
   actionCid <- submit f.parties.member1 $ createCmd SetupCouponReassignmentDelegation with
     governanceParty = gp; proposer = f.parties.member1; priorDelegation = None
-    assigners = [f.parties.member1]; beneficiaries = []
+    assigners; beneficiaries
   let iface : ContractId GovernableAction = toInterfaceContractId actionCid
   confs <- submitConfirmations gp f.rulesCid iface [f.parties.member1, f.parties.member2]
   submitMustFail (actAs f.parties.member1 <> readAs gp) $
     exerciseCmd f.rulesCid GovernanceRules_ExecuteConfirmedAction with
-      executor = f.parties.member1               -- governance executor (NOT the delegation assigner)
+      executor = f.parties.member1
       actionProposalCid = iface
       confirmations = confs
 
+rb : Party -> Decimal -> RewardBeneficiary
+rb p pct = RewardBeneficiary with beneficiary = p; percentage = pct
+
+-- empty split rejected at execute (executeImpl asserts non-empty beneficiaries)
 test_setup_empty_split_rejected = script do
   run Test with
-    given = given_governance; when = when_empty_split_execute_fails; then_ = then_gov_nothing
+    given = given_governance
+    when = \f -> setupExecuteMustFail f [f.parties.member1] []
+    then_ = then_gov_nothing
+
+-- percentages not summing to 1.0 rejected at execute
+test_setup_bad_sum_rejected = script do
+  run Test with
+    given = given_governance
+    when = \f -> setupExecuteMustFail f [f.parties.member1] [rb f.parties.member2 0.5]
+    then_ = then_gov_nothing
+
+-- a percentage outside (0,1] rejected at execute
+test_setup_percentage_out_of_range_rejected = script do
+  run Test with
+    given = given_governance
+    when = \f -> setupExecuteMustFail f [f.parties.member1] [rb f.parties.member2 1.5]
+    then_ = then_gov_nothing
+
+-- more than 20 beneficiaries rejected at execute
+test_setup_too_many_beneficiaries_rejected = script do
+  run Test with
+    given = given_governance
+    when = \f -> setupExecuteMustFail f [f.parties.member1] (replicate 21 (rb f.parties.member2 0.05))
+    then_ = then_gov_nothing
