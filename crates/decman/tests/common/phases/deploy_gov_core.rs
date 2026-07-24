@@ -8,15 +8,17 @@ use crate::common::{
     Fixture, MemberCreds, ParticipantAdminCreds, TestTarget,
     http::{probe_workflow_run_visible, probe_workflow_status},
     invitations::{InvitationIds, post_accept_invitation, probe_pending_invitation},
+    ledger_api::{P1_JSON_API, P2_JSON_API, P3_JSON_API},
     scenario::Scenario,
     types::{AllocatePartyResponse, DecentralizedPartiesResponse, GovernanceStateLookup},
 };
 
-const P1_JSON_API: u16 = 3975;
-const P2_JSON_API: u16 = 2975;
-const P3_JSON_API: u16 = 4975;
-
-async fn allocate_party(f: &Fixture, port: u16, hint: &str, name: &str) -> anyhow::Result<String> {
+pub(crate) async fn allocate_party(
+    f: &Fixture,
+    port: u16,
+    hint: &str,
+    name: &str,
+) -> anyhow::Result<String> {
     info!("Allocating '{hint}' on {name} (port {port})");
     let req = json!({ "party_id_hint": hint, "local_metadata": { "annotations": {} } });
     let r: AllocatePartyResponse = f
@@ -52,7 +54,12 @@ async fn grant_rights_devnet(
     Ok(())
 }
 
-async fn grant_rights(f: &Fixture, port: u16, party: &str, name: &str) -> anyhow::Result<()> {
+pub(crate) async fn grant_rights(
+    f: &Fixture,
+    port: u16,
+    party: &str,
+    name: &str,
+) -> anyhow::Result<()> {
     let req = json!({
         "userId": "ledger-api-user",
         "rights": [
