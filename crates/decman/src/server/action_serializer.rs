@@ -2608,7 +2608,10 @@ mod tests {
             let rec = as_record(bene);
             assert_eq!(owned_labels(rec), ["beneficiary", "percentage"]);
             assert!(
-                matches!(field_value(rec, "beneficiary").sum, Some(value::Sum::Party(_))),
+                matches!(
+                    field_value(rec, "beneficiary").sum,
+                    Some(value::Sum::Party(_))
+                ),
                 "beneficiary must be a Party"
             );
             match &field_value(rec, "percentage").sum {

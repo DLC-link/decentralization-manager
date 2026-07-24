@@ -1278,47 +1278,44 @@ pub(crate) async fn submit_proposal(
             ))
         })?;
 
-    let package_id =
-        match package_source {
-            action_serializer::ProposalPackage::GovernanceCore => packages
-                .governance_core
-                .as_deref()
-                .ok_or_else(|| {
-                    SubmitProposalError::service_unavailable("governance_core package not configured")
-                })?,
-            action_serializer::ProposalPackage::GovernanceRewards => packages
-                .governance_rewards
-                .as_deref()
-                .ok_or_else(|| {
-                    SubmitProposalError::service_unavailable(
-                        "governance_rewards package not configured",
-                    )
-                })?,
-            action_serializer::ProposalPackage::GovernanceTokenCustody => packages
-                .governance_token_custody
-                .as_deref()
-                .ok_or_else(|| {
-                    SubmitProposalError::service_unavailable(
-                        "governance_token_custody package not configured",
-                    )
-                })?,
-            action_serializer::ProposalPackage::GovernanceUtilityCredential => packages
-                .governance_utility_credential
-                .as_deref()
-                .ok_or_else(|| {
-                    SubmitProposalError::service_unavailable(
-                        "governance_utility_credential package not configured",
-                    )
-                })?,
-            action_serializer::ProposalPackage::GovernanceUtilityOnboarding => packages
-                .governance_utility_onboarding
-                .as_deref()
-                .ok_or_else(|| {
-                    SubmitProposalError::service_unavailable(
-                        "governance_utility_onboarding package not configured",
-                    )
-                })?,
-        };
+    let package_id = match package_source {
+        action_serializer::ProposalPackage::GovernanceCore => {
+            packages.governance_core.as_deref().ok_or_else(|| {
+                SubmitProposalError::service_unavailable("governance_core package not configured")
+            })?
+        }
+        action_serializer::ProposalPackage::GovernanceRewards => {
+            packages.governance_rewards.as_deref().ok_or_else(|| {
+                SubmitProposalError::service_unavailable(
+                    "governance_rewards package not configured",
+                )
+            })?
+        }
+        action_serializer::ProposalPackage::GovernanceTokenCustody => packages
+            .governance_token_custody
+            .as_deref()
+            .ok_or_else(|| {
+                SubmitProposalError::service_unavailable(
+                    "governance_token_custody package not configured",
+                )
+            })?,
+        action_serializer::ProposalPackage::GovernanceUtilityCredential => packages
+            .governance_utility_credential
+            .as_deref()
+            .ok_or_else(|| {
+                SubmitProposalError::service_unavailable(
+                    "governance_utility_credential package not configured",
+                )
+            })?,
+        action_serializer::ProposalPackage::GovernanceUtilityOnboarding => packages
+            .governance_utility_onboarding
+            .as_deref()
+            .ok_or_else(|| {
+                SubmitProposalError::service_unavailable(
+                    "governance_utility_onboarding package not configured",
+                )
+            })?,
+    };
 
     let template_id = Identifier {
         package_id: package_id.to_string(),

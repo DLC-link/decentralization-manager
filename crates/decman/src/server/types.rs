@@ -853,7 +853,10 @@ fn validate_reward_beneficiaries(beneficiaries: &[RewardBeneficiary]) -> Result<
             ));
         }
         if !seen.insert(&b.beneficiary) {
-            return Err(format!("duplicate beneficiary not allowed: {}", b.beneficiary));
+            return Err(format!(
+                "duplicate beneficiary not allowed: {}",
+                b.beneficiary
+            ));
         }
     }
     let sum: DamlDecimal = beneficiaries.iter().map(|b| b.percentage).sum();
