@@ -172,14 +172,22 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     phases::concurrent_cross_workflows::run(&mut f).await?; // G11
 
     // CIP-104 Mode A coupon-reassignment e2e (delegation model, Task 9).
-    // Devnet-only and opt-in: it needs a decparty with live unassigned
-    // RewardCouponV2 coupons (Mode-B collection paused so they aren't swept to
-    // 0) and test nodes running a short DECPM_REWARD_AUTOMATION_INTERVAL_SECS.
-    // Gated behind DECPM_IT_REWARD so it never runs in normal CI; even when
-    // opted in, it self-skips (returns Ok) if the decparty has no coupons. See
-    // the phase module doc for the full operational preconditions.
-    if std::env::var("DECPM_IT_REWARD").is_ok() {
-        phases::coupon_reassignment::run(&mut f).await?;
+    // On localnet the harness seeds its own unassigned RewardCouponV2 coupons,
+    // so the assign + 0.8/0.2 split run and assert on EVERY CI run. On devnet
+    // there is no way to synthesize coupons, so it stays opt-in
+    // (DECPM_IT_REWARD) and depends on live preconditions (Mode-B paused) —
+    // see issue #271. See the phase module doc for the full operational
+    // preconditions.
+    match f.target {
+        common::TestTarget::Localnet => {
+            phases::seed_reward_coupons::run(&mut f).await?;
+            phases::coupon_reassignment::run(&mut f).await?;
+        }
+        common::TestTarget::Devnet => {
+            if std::env::var("DECPM_IT_REWARD").is_ok() {
+                phases::coupon_reassignment::run(&mut f).await?;
+            }
+        }
     }
 
     Ok(())
