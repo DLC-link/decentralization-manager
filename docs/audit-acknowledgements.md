@@ -1,6 +1,6 @@
 # Quantstamp audit — design acknowledgements
 
-This document captures intentional design decisions in response to the Quantstamp audit (report dated 2026-05-22, commit `c3f578b`). The full report is archived at [`QS-Bitsafe-dec-manager-final-audit-report.pdf`](./QS-Bitsafe-dec-manager-final-audit-report.pdf). The items below remain in the code as-is by deliberate choice — they are addressed through process and documentation rather than code changes.
+This document captures intentional design decisions in response to the Quantstamp audit (report dated 2026-05-22, commit `c3f578b`). The full report is archived at [`QS-Bitsafe-dec-manager-final-audit-report.pdf`](./audits/QS-Bitsafe-dec-manager-final-audit-report.pdf). The items below remain in the code as-is by deliberate choice — they are addressed through process and documentation rather than code changes.
 
 ## DLC-5 — `GovernanceRules` permits 1-of-1 configurations
 
