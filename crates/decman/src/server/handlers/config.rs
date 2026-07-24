@@ -78,7 +78,7 @@ pub async fn save_network_config(
 /// `config` is owned (not borrowed) so the type can derive `ts_rs::TS` for the
 /// frontend type generator — `TS` needs an owned, `'static` type. The handler
 /// clones the node config once per request, which is cheap relative to the I/O.
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct NodeConfigResponse {
     #[serde(flatten)]
@@ -101,7 +101,7 @@ pub struct NodeConfigResponse {
 #[utoipa::path(
     tag = "Configuration",
     responses(
-        (status = 200, description = "Node configuration", body = NodeConfig)
+        (status = 200, description = "Node configuration", body = NodeConfigResponse)
     )
 )]
 #[get("/node-config")]
@@ -146,4 +146,26 @@ async fn save_peers_to_db(db: &SqlitePool, peers: &[Peer]) -> Result {
         tx.insert_peer(peer).await?;
     }
     Commitable::commit(tx).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use utoipa::PartialSchema;
+
+    // The `/node-config` OpenAPI response is documented as `NodeConfigResponse`,
+    // not the flattened `NodeConfig`. Guard that its schema builds (flatten can
+    // fail at spec-assembly, not compile time) and actually documents the build
+    // identity fields, so the generated Swagger stays honest.
+    #[test]
+    fn node_config_response_schema_documents_build_fields() {
+        let schema = NodeConfigResponse::schema();
+        let json = serde_json::to_string(&schema).expect("schema should serialize");
+        for field in ["version", "build_version", "build_time"] {
+            assert!(
+                json.contains(field),
+                "OpenAPI schema missing `{field}`: {json}"
+            );
+        }
+    }
 }
