@@ -371,21 +371,36 @@ pub(crate) async fn unassigned_coupons(
 
     let mut out = Vec::new();
     for (cid, rec) in records {
-        let provider = field_party_id(&rec, "provider")?;
-        if &provider != decparty {
-            continue;
+        if let Some(coupon) = parse_unassigned_coupon(&cid, &rec, decparty)? {
+            out.push(coupon);
         }
-        if !field_optional_is_none(&rec, "beneficiary") {
-            continue;
-        }
-        out.push(CouponInfo {
-            cid,
-            provider,
-            amount: field_decimal(&rec, "amount")?,
-            expires_at: field_time(&rec, "expiresAt")?,
-        });
     }
     Ok(out)
+}
+
+/// Decode one `RewardCoupon` interface-view record into a [`CouponInfo`], or
+/// `None` when it is not an unassigned coupon for `decparty`. Fail-safe: a
+/// coupon whose `provider` differs, or whose `beneficiary` is set (or cannot be
+/// confirmed absent), is skipped — never assigned against. Returns `Err` only
+/// when a coupon that *does* match cannot be decoded (bad amount/expiry).
+fn parse_unassigned_coupon(
+    cid: &str,
+    rec: &Record,
+    decparty: &CantonId,
+) -> anyhow::Result<Option<CouponInfo>> {
+    let provider = field_party_id(rec, "provider")?;
+    if &provider != decparty {
+        return Ok(None);
+    }
+    if !field_optional_is_none(rec, "beneficiary") {
+        return Ok(None);
+    }
+    Ok(Some(CouponInfo {
+        cid: cid.to_string(),
+        provider,
+        amount: field_decimal(rec, "amount")?,
+        expires_at: field_time(rec, "expiresAt")?,
+    }))
 }
 
 // ============================================================================
@@ -636,9 +651,13 @@ pub(crate) async fn run_reassign_once(
 /// reassign its due coupons via [`run_reassign_once`]. Enablement is
 /// on-ledger — a decparty with no active delegation is skipped.
 pub(crate) async fn run_reward_automation_loop(data: actix_web::web::Data<AppState>) {
-    let mut ticker = tokio::time::interval(Duration::from_secs(
-        data.config.reward_automation_interval_secs,
-    ));
+    // `tokio::time::interval` panics on a zero period, which would silently kill
+    // this background task; clamp a misconfigured 0 to 1s and warn.
+    let interval_secs = data.config.reward_automation_interval_secs;
+    if interval_secs == 0 {
+        tracing::warn!("reward_automation_interval_secs is 0; using 1s instead");
+    }
+    let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs.max(1)));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         ticker.tick().await;
@@ -695,7 +714,7 @@ async fn run_once_for_party(
 mod tests {
     use super::super::types::RewardBeneficiary;
     use super::*;
-    use canton_proto_rs::com::daml::ledger::api::v2::{List, RecordField, Value};
+    use canton_proto_rs::com::daml::ledger::api::v2::{List, Optional, RecordField, Value};
 
     fn value(sum: value::Sum) -> Value {
         Value { sum: Some(sum) }
@@ -721,6 +740,20 @@ mod tests {
 
     fn numeric(n: &str) -> value::Sum {
         value::Sum::Numeric(n.to_string())
+    }
+
+    fn optional_none() -> value::Sum {
+        value::Sum::Optional(Box::new(Optional { value: None }))
+    }
+
+    fn optional_some_party(p: &str) -> value::Sum {
+        value::Sum::Optional(Box::new(Optional {
+            value: Some(Box::new(value(party(p)))),
+        }))
+    }
+
+    fn timestamp(micros: i64) -> value::Sum {
+        value::Sum::Timestamp(micros)
     }
 
     fn beneficiary_record(p: &str, pct: &str) -> Value {
@@ -777,6 +810,47 @@ mod tests {
         assert_eq!(d.cid, "00del");
         assert_eq!(d.assigners.len(), 2);
         // split is not parsed (DAML-enforced) — the record's `split` field is ignored.
+    }
+
+    // ---- unassigned-coupon fail-safe filter (parse_unassigned_coupon) -------
+
+    #[test]
+    fn parse_unassigned_coupon_keeps_only_unassigned_for_decparty() {
+        let alice = CantonId::parse(ALICE).unwrap();
+        let bob = CantonId::parse(BOB).unwrap();
+
+        let unassigned = record(vec![
+            field("provider", party(ALICE)),
+            field("beneficiary", optional_none()),
+            field("amount", numeric("100.0")),
+            field("expiresAt", timestamp(1_700_000_000_000_000)),
+        ]);
+
+        // provider == decparty and beneficiary is None -> kept.
+        let got = parse_unassigned_coupon("00c1", &unassigned, &alice).unwrap();
+        let coupon = got.expect("unassigned coupon for the decparty is kept");
+        assert_eq!(coupon.cid, "00c1");
+        assert_eq!(coupon.amount, "100.0".parse().unwrap());
+
+        // provider != decparty -> skipped (fail-safe).
+        assert!(
+            parse_unassigned_coupon("00c1", &unassigned, &bob)
+                .unwrap()
+                .is_none()
+        );
+
+        // beneficiary already set -> skipped (never reassign an assigned coupon).
+        let assigned = record(vec![
+            field("provider", party(ALICE)),
+            field("beneficiary", optional_some_party(BOB)),
+            field("amount", numeric("100.0")),
+            field("expiresAt", timestamp(1_700_000_000_000_000)),
+        ]);
+        assert!(
+            parse_unassigned_coupon("00c2", &assigned, &alice)
+                .unwrap()
+                .is_none()
+        );
     }
 
     // ---- batch selection (select_batch) -------------------------------------
