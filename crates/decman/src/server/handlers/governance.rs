@@ -1042,8 +1042,11 @@ pub async fn get_governance_chain_audit(
 
 /// Error from [`submit_proposal`], pairing a message with the HTTP status the
 /// handler should surface. Extracting `submit_proposal` out of the handler must
-/// not flatten every failure to 500: bad input stays 400 and upstream-registry
-/// fetch failures stay 502, matching the behavior before the extraction.
+/// not flatten every failure to 500: bad input is 400, upstream-registry fetch
+/// failures are 502, an unprovisioned governance package is 503, and only true
+/// internal faults are 500. (The pre-extraction handler mapped the package case
+/// to 400, which was wrong — the request is valid; the node just isn't
+/// configured to serve it — so it is corrected to 503 here.)
 #[derive(Debug)]
 pub(crate) struct SubmitProposalError {
     status: actix_web::http::StatusCode,
@@ -1061,6 +1064,15 @@ impl SubmitProposalError {
     fn bad_gateway(message: impl Into<String>) -> Self {
         Self {
             status: actix_web::http::StatusCode::BAD_GATEWAY,
+            message: message.into(),
+        }
+    }
+
+    /// The node is missing configuration required to serve this proposal (e.g. a
+    /// governance package id). The request is valid; the server isn't ready.
+    fn service_unavailable(message: impl Into<String>) -> Self {
+        Self {
+            status: actix_web::http::StatusCode::SERVICE_UNAVAILABLE,
             message: message.into(),
         }
     }
@@ -1272,19 +1284,21 @@ pub(crate) async fn submit_proposal(
                 .governance_core
                 .as_deref()
                 .ok_or_else(|| {
-                    SubmitProposalError::bad_request("governance_core package not configured")
+                    SubmitProposalError::service_unavailable("governance_core package not configured")
                 })?,
             action_serializer::ProposalPackage::GovernanceRewards => packages
                 .governance_rewards
                 .as_deref()
                 .ok_or_else(|| {
-                    SubmitProposalError::bad_request("governance_rewards package not configured")
+                    SubmitProposalError::service_unavailable(
+                        "governance_rewards package not configured",
+                    )
                 })?,
             action_serializer::ProposalPackage::GovernanceTokenCustody => packages
                 .governance_token_custody
                 .as_deref()
                 .ok_or_else(|| {
-                    SubmitProposalError::bad_request(
+                    SubmitProposalError::service_unavailable(
                         "governance_token_custody package not configured",
                     )
                 })?,
@@ -1292,7 +1306,7 @@ pub(crate) async fn submit_proposal(
                 .governance_utility_credential
                 .as_deref()
                 .ok_or_else(|| {
-                    SubmitProposalError::bad_request(
+                    SubmitProposalError::service_unavailable(
                         "governance_utility_credential package not configured",
                     )
                 })?,
@@ -1300,7 +1314,7 @@ pub(crate) async fn submit_proposal(
                 .governance_utility_onboarding
                 .as_deref()
                 .ok_or_else(|| {
-                    SubmitProposalError::bad_request(
+                    SubmitProposalError::service_unavailable(
                         "governance_utility_onboarding package not configured",
                     )
                 })?,
@@ -1392,7 +1406,9 @@ pub(crate) async fn submit_proposal(
         (status = 400, description = "Bad request", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+        (status = 502, description = "Failed to fetch transfer context from registry", body = ErrorResponse),
+        (status = 503, description = "Governance package not configured on this node", body = ErrorResponse)
     )
 )]
 #[post("/governance/propose")]
@@ -2772,4 +2788,78 @@ async fn execute_cancel_confirmation(
     client.submit_and_wait(req).await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod submit_proposal_status_tests {
+    //! Regression guard for the `propose_action` HTTP status contract.
+    //! Extracting `submit_proposal` out of the handler once collapsed every
+    //! failure into a blanket 500; these tests pin distinct failure classes to
+    //! distinct statuses so that flattening cannot silently return. Both paths
+    //! return before any ledger/registry network call, so they need no fixtures.
+    use actix_web::http::StatusCode;
+    use canton_common::decimal::DamlDecimal;
+
+    use super::*;
+    use crate::server::types::InstrumentId;
+
+    fn party() -> CantonId {
+        // `prefix::<68 hex chars>` = a 34-byte all-zero namespace: a well-formed id.
+        CantonId::parse(&format!("p::{}", "0".repeat(68))).expect("valid canton id")
+    }
+
+    /// A proposal whose target governance package is not configured is a node
+    /// provisioning gap, not bad input or a crash: 503, never 500.
+    #[tokio::test]
+    async fn unconfigured_package_maps_to_503() {
+        let mut packages = default_package_config();
+        packages.governance_core = None; // `GenericVote` routes to governance_core
+
+        let err = submit_proposal(
+            &NodeConfig::default(),
+            &party(),
+            "",
+            &ProposalType::GenericVote {
+                description: "regression guard".to_string(),
+            },
+            "token",
+            &party(),
+            &packages,
+        )
+        .await
+        .expect_err("missing governance_core package must fail");
+
+        assert_eq!(err.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// Malformed request input is 400, never 500. An empty `transfer_factory_cid`
+    /// routes through registry-context resolution, which parses the instrument
+    /// admin (here an invalid id) before any network call.
+    #[tokio::test]
+    async fn invalid_instrument_admin_maps_to_400() {
+        let err = submit_proposal(
+            &NodeConfig::default(),
+            &party(),
+            "",
+            &ProposalType::Transfer {
+                transfer_factory_cid: String::new(),
+                expected_admin: party(),
+                receiver: party(),
+                amount: DamlDecimal::parse("1.5").unwrap(),
+                instrument_id: InstrumentId {
+                    admin: "not-a-canton-id".to_string(),
+                    id: "CBTC".to_string(),
+                },
+                input_holding_cids: vec![],
+                validity_window_hours: None,
+            },
+            "token",
+            &party(),
+            &default_package_config(),
+        )
+        .await
+        .expect_err("invalid instrument admin must fail");
+
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    }
 }
