@@ -3345,7 +3345,7 @@ async fn preflight_incompatible_peers(
             )
             .await
             {
-                Ok(response) => match classify_health_reply(&response).2 {
+                Ok(response) => match classify_health_reply(&response).version {
                     Some(v) if utils::version_at_least(&v, MIN_PEER_VERSION) => None,
                     Some(v) => Some((id, format!("running version {v}"))),
                     None => Some((

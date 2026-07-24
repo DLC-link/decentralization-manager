@@ -577,6 +577,14 @@ const App = () => {
     ) +
     workflowRuns.length;
 
+  const buildInfo = nodeConfig
+    ? {
+        version: nodeConfig.version,
+        buildVersion: nodeConfig.build_version,
+        buildTime: nodeConfig.build_time,
+      }
+    : undefined;
+
   return (
     <Box
       sx={{
@@ -591,9 +599,10 @@ const App = () => {
           partyCount={parties.length}
           packageCount={packageCount}
           notificationCount={notificationCount}
+          buildInfo={buildInfo}
         />
       ) : (
-        <Header />
+        <Header buildInfo={buildInfo} />
       )}
 
       {isLargeScreen && activeTab === 0 && !selectedPartyId && !error && (

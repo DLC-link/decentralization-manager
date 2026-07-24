@@ -21,7 +21,7 @@ import BitSafeLogoLight from "../assets/bitsafe-logo-light.svg";
 
 import { useAuth } from "../contexts";
 import { BITSAFE_BRANDING } from "../constants";
-import { Logo } from "./Logo";
+import { Logo, type BuildInfo } from "./Logo";
 import { ThemeSwitcher } from "./ThemeSwitcher";
 
 export const SIDEBAR_WIDTH = 260;
@@ -32,6 +32,8 @@ interface SidebarProps {
   partyCount: number;
   packageCount: number;
   notificationCount: number;
+  /** Build identity for the logo's hidden build-info reveal. */
+  buildInfo?: BuildInfo;
 }
 
 const navItems = [
@@ -47,6 +49,7 @@ export const Sidebar = ({
   partyCount,
   packageCount,
   notificationCount,
+  buildInfo,
 }: SidebarProps) => {
   const theme = useTheme();
   const { token, logout } = useAuth();
@@ -70,7 +73,7 @@ export const Sidebar = ({
     >
       {/* Logo */}
       <Box sx={{ px: 3, pt: 3, pb: 1 }}>
-        <Logo />
+        <Logo buildInfo={buildInfo} />
       </Box>
 
       {/* Navigation */}

@@ -28,7 +28,14 @@ pub struct HealthResponse {
     /// so payloads from nodes that predate this field still parse.
     #[serde(default)]
     pub workflow_count: usize,
+    /// Cargo semver — the compatibility version peers gate on
+    /// (`MIN_PEER_VERSION`).
     pub version: String,
+    /// Display build identity (image tag / short SHA / `<semver>-dev`). Shown
+    /// in the peers table; not used for compatibility gating. `default` so
+    /// payloads from peers that predate this field still parse.
+    #[serde(default)]
+    pub build_version: String,
 }
 
 impl HealthResponse {
@@ -81,24 +88,49 @@ pub async fn build_health_response(db: &SqlitePool, participant_id: &str) -> Hea
         in_workflow: workflow.is_some(),
         workflow,
         workflow_count,
-        version: env!("CARGO_PKG_VERSION").to_string(),
+        version: crate::build_info::SEMVER.to_string(),
+        build_version: crate::build_info::build_version().to_string(),
     }
+}
+
+/// Outcome of classifying a peer's reply to a `Health` probe. A reachable peer
+/// on older code fills only `status` (the rest are `None`/`Connected`), since
+/// its reply isn't a parseable [`HealthResponse`].
+pub(crate) struct HealthReply {
+    pub status: ConnectionStatus,
+    pub workflow: Option<WorkflowInfo>,
+    /// Semver the peer reported — used for `MIN_PEER_VERSION` gating.
+    pub version: Option<String>,
+    /// Display build identity the peer reported. `None` for peers on code that
+    /// predates the field (they send an empty string, normalized to `None`).
+    pub build_version: Option<String>,
 }
 
 /// Classify a successful Noise reply to a `Health` probe. Any reply that isn't a
 /// parseable `HealthResponse` (a peer on older code, a `Pong`, an empty body)
 /// still means the peer is reachable — we just don't learn its workflow state or
-/// version. Returns `(status, workflow, version)`.
-pub(crate) fn classify_health_reply(
-    reply: &[u8],
-) -> (ConnectionStatus, Option<WorkflowInfo>, Option<String>) {
+/// version.
+pub(crate) fn classify_health_reply(reply: &[u8]) -> HealthReply {
     if let Ok(msg) = Message::from_bytes(reply)
         && msg.msg_type == MessageType::HealthResponse
         && let Some(h) = HealthResponse::from_payload(&msg.payload)
     {
-        return (ConnectionStatus::Connected, h.workflow, Some(h.version));
+        // A blank build_version means the peer predates the field; normalize to
+        // None so the UI shows "—" rather than an empty cell.
+        let build_version = Some(h.build_version).filter(|v| !v.is_empty());
+        return HealthReply {
+            status: ConnectionStatus::Connected,
+            workflow: h.workflow,
+            version: Some(h.version),
+            build_version,
+        };
     }
-    (ConnectionStatus::Connected, None, None)
+    HealthReply {
+        status: ConnectionStatus::Connected,
+        workflow: None,
+        version: None,
+        build_version: None,
+    }
 }
 
 #[cfg(test)]
@@ -127,10 +159,12 @@ mod tests {
             }),
             workflow_count: 1,
             version: "0.1.0".into(),
+            build_version: "v0.1.0".into(),
         };
         let back =
             HealthResponse::from_payload(&h.to_payload()).context("payload should round-trip")?;
         assert!(back.in_workflow);
+        assert_eq!(back.build_version, "v0.1.0");
         let workflow = back.workflow.context("workflow should be present")?;
         assert_eq!(workflow.step, "SignDns");
         Ok(())
@@ -151,29 +185,47 @@ mod tests {
             }),
             workflow_count: 1,
             version: "0.1.0".into(),
+            build_version: "v0.1.0".into(),
         };
         let reply = Message::new(MessageType::HealthResponse, hr.to_payload()).to_bytes();
-        let (status, workflow, version) = classify_health_reply(&reply);
-        assert_eq!(status, ConnectionStatus::Connected);
+        let r = classify_health_reply(&reply);
+        assert_eq!(r.status, ConnectionStatus::Connected);
         assert_eq!(
-            workflow.context("workflow should be parsed")?.kind,
+            r.workflow.context("workflow should be parsed")?.kind,
             WorkflowKind::Onboarding
         );
-        assert_eq!(version.as_deref(), Some("0.1.0"));
+        assert_eq!(r.version.as_deref(), Some("0.1.0"));
+        assert_eq!(r.build_version.as_deref(), Some("v0.1.0"));
+
+        // Peer that predates build_version: sends an empty string → normalized
+        // to None, while version still parses.
+        let hr_old = HealthResponse {
+            participant_id: "p3::1220".into(),
+            in_workflow: false,
+            workflow: None,
+            workflow_count: 0,
+            version: "0.1.9".into(),
+            build_version: String::new(),
+        };
+        let reply = Message::new(MessageType::HealthResponse, hr_old.to_payload()).to_bytes();
+        let r = classify_health_reply(&reply);
+        assert_eq!(r.version.as_deref(), Some("0.1.9"));
+        assert!(r.build_version.is_none());
 
         // Old peer: replies Pong (not HealthResponse) → reachable, no workflow,
         // no version.
         let pong = Message::new_empty(MessageType::Pong).to_bytes();
-        let (status, workflow, version) = classify_health_reply(&pong);
-        assert_eq!(status, ConnectionStatus::Connected);
-        assert!(workflow.is_none());
-        assert!(version.is_none());
+        let r = classify_health_reply(&pong);
+        assert_eq!(r.status, ConnectionStatus::Connected);
+        assert!(r.workflow.is_none());
+        assert!(r.version.is_none());
+        assert!(r.build_version.is_none());
 
         // Empty body (e.g. an old listener's fall-through) → still reachable.
-        let (status, workflow, version) = classify_health_reply(&[]);
-        assert_eq!(status, ConnectionStatus::Connected);
-        assert!(workflow.is_none());
-        assert!(version.is_none());
+        let r = classify_health_reply(&[]);
+        assert_eq!(r.status, ConnectionStatus::Connected);
+        assert!(r.workflow.is_none());
+        assert!(r.version.is_none());
         Ok(())
     }
 

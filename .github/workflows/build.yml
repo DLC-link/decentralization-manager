@@ -58,5 +58,7 @@ jobs:
         run: |
           cp Dockerfile ctx/Dockerfile
           docker buildx build ctx \
+            --build-arg DECPM_BUILD_VERSION=$SHORT_SHA \
+            --build-arg DECPM_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
             -t $ECR_REGISTRY/decentralization-manager:$SHORT_SHA \
             --push

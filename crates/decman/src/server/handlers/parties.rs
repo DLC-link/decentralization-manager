@@ -935,7 +935,8 @@ async fn check_participants_status(
                     status: ConnectionStatus::CurrentNode,
                     latency_ms: None,
                     workflow: None,
-                    version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                    version: Some(crate::build_info::SEMVER.to_string()),
+                    build_version: Some(crate::build_info::build_version().to_string()),
                 }
             }));
             continue;
@@ -957,6 +958,7 @@ async fn check_participants_status(
                     latency_ms: None,
                     workflow: None,
                     version: None,
+                    build_version: None,
                 };
             };
 
@@ -976,13 +978,14 @@ async fn check_participants_status(
                     // classify_health_reply extracts its workflow state (or None
                     // if the peer is on older code that doesn't answer Health).
                     let latency_ms = u64::try_from(started.elapsed().as_millis()).ok();
-                    let (status, workflow, version) = classify_health_reply(&response);
+                    let reply = classify_health_reply(&response);
                     ParticipantStatus {
                         id: peer_id,
-                        status,
+                        status: reply.status,
                         latency_ms,
-                        workflow,
-                        version,
+                        workflow: reply.workflow,
+                        version: reply.version,
+                        build_version: reply.build_version,
                     }
                 }
                 Err(e) => {
@@ -1003,6 +1006,7 @@ async fn check_participants_status(
                         latency_ms: None,
                         workflow: None,
                         version: None,
+                        build_version: None,
                     }
                 }
             }
