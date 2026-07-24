@@ -2317,6 +2317,15 @@ mod tests {
         }
     }
 
+    /// Unwrap a `value::Sum::List` reference (for descending into a list `Value`
+    /// returned by `field_value`).
+    fn as_list(value: &Value) -> &[Value] {
+        match &value.sum {
+            Some(value::Sum::List(l)) => &l.elements,
+            other => panic!("expected List, got {other:?}"),
+        }
+    }
+
     #[test]
     fn build_proposal_transfer_shape_and_nested_records() -> Result {
         let proposal = ProposalType::Transfer {
@@ -2566,6 +2575,47 @@ mod tests {
                 "beneficiaries"
             ]
         );
+
+        // priorDelegation: Some -> Optional(Some(ContractId "00old")).
+        match &field_value(&record, "priorDelegation").sum {
+            Some(value::Sum::Optional(opt)) => {
+                let inner = opt.value.as_ref().expect("priorDelegation should be Some");
+                assert!(
+                    matches!(&inner.sum, Some(value::Sum::ContractId(c)) if c == "00old"),
+                    "priorDelegation inner must be ContractId(\"00old\"), got {:?}",
+                    inner.sum
+                );
+            }
+            other => panic!("priorDelegation must be Optional, got {other:?}"),
+        }
+
+        // assigners: a list of two Party values.
+        let assigners = as_list(field_value(&record, "assigners"));
+        assert_eq!(assigners.len(), 2);
+        assert!(
+            assigners
+                .iter()
+                .all(|v| matches!(v.sum, Some(value::Sum::Party(_)))),
+            "assigners elements must be Party"
+        );
+
+        // beneficiaries: a list of {beneficiary: Party, percentage: Numeric},
+        // carrying the 0.8 / 0.2 split in order. A regression swapping
+        // make_party <-> make_contract_id, or renaming `percentage`, fails here.
+        let benes = as_list(field_value(&record, "beneficiaries"));
+        assert_eq!(benes.len(), 2);
+        for (bene, expected_pct) in benes.iter().zip(["0.8", "0.2"]) {
+            let rec = as_record(bene);
+            assert_eq!(owned_labels(rec), ["beneficiary", "percentage"]);
+            assert!(
+                matches!(field_value(rec, "beneficiary").sum, Some(value::Sum::Party(_))),
+                "beneficiary must be a Party"
+            );
+            match &field_value(rec, "percentage").sum {
+                Some(value::Sum::Numeric(n)) => assert_eq!(n, expected_pct),
+                other => panic!("percentage must be Numeric, got {other:?}"),
+            }
+        }
         Ok(())
     }
 
@@ -2585,6 +2635,12 @@ mod tests {
         assert_eq!(
             owned_labels(&record),
             ["governanceParty", "proposer", "delegation"]
+        );
+        // delegation: a ContractId carrying the passed cid.
+        assert!(
+            matches!(&field_value(&record, "delegation").sum, Some(value::Sum::ContractId(c)) if c == "00abc"),
+            "delegation must be ContractId(\"00abc\"), got {:?}",
+            field_value(&record, "delegation").sum
         );
         Ok(())
     }
