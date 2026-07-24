@@ -1,5 +1,6 @@
-//! CIP-104 Mode A coupon-reassignment e2e (M4, Task 9) — **devnet-only,
-//! pending a live run**.
+//! CIP-104 Mode A coupon-reassignment e2e (M4, Task 9). Runs on **localnet**
+//! every CI run (the harness seeds its own coupons — see `seed_reward_coupons`)
+//! and, opt-in, against **devnet**.
 //!
 //! Exercises the **delegation model** end-to-end. One threshold governance
 //! vote (`SetupCouponReassignmentDelegation`) records the split and the
@@ -102,10 +103,25 @@ const GOVERNANCE_REWARDS_PKG: &str = "%23governance-rewards-v1";
 /// (still on the 300s default) or paused Mode-B collection was not arranged.
 const REASSIGN_TIMEOUT: Duration = Duration::from_secs(600);
 
+/// Devnet query: the `RewardCoupon` *interface* (matches any implementer; on
+/// cbtc-network that is `RewardCouponV2`). Real auth supports InterfaceFilter.
 fn reward_coupon_query_path(party_id: &str) -> String {
     format!(
         "/contracts/query?party_id={party_id}&package_id={REWARD_ASSIGN_PKG}\
          &module_name=Splice.Api.RewardAssignmentV1&entity_name=RewardCoupon&interface=true"
+    )
+}
+
+/// Localnet query: the *concrete* `Splice.Amulet:RewardCouponV2` template.
+/// Localnet builds DecMan with `--features test-mode`, where `/contracts/query`
+/// falls back to a `WildcardFilter` ACS read and matches results by concrete
+/// `module_name`/`entity_name` (mock auth can't use real Template/Interface
+/// filters). An interface query (`RewardCoupon`) therefore never matches and
+/// returns empty — we must query the concrete implementing template.
+fn reward_coupon_v2_query_path(party_id: &str) -> String {
+    format!(
+        "/contracts/query?party_id={party_id}&package_id=%23splice-amulet\
+         &module_name=Splice.Amulet&entity_name=RewardCouponV2&interface=false"
     )
 }
 
@@ -121,14 +137,16 @@ fn delegation_query_path(party_id: &str) -> String {
 /// endpoint does not surface decoded fields, so we cannot filter by
 /// `beneficiary == null` here — see the module doc).
 async fn query_reward_coupons(f: &Fixture, party_id: &str) -> anyhow::Result<HashSet<String>> {
-    let r: ContractsQueryResponse = f
-        .get_json(f.p1.http, &reward_coupon_query_path(party_id))
-        .await?;
+    let path = match f.target {
+        crate::common::TestTarget::Localnet => reward_coupon_v2_query_path(party_id),
+        crate::common::TestTarget::Devnet => reward_coupon_query_path(party_id),
+    };
+    let r: ContractsQueryResponse = f.get_json(f.p1.http, &path).await?;
     Ok(r.contracts.into_iter().map(|c| c.contract_id).collect())
 }
 
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
-    info!("Phase: coupon_reassignment (CIP-104 Mode A delegation model, Task 9 — devnet-only)");
+    info!("Phase: coupon_reassignment (CIP-104 Mode A delegation model, Task 9)");
 
     let decparty = f.party_id()?.to_string();
 
