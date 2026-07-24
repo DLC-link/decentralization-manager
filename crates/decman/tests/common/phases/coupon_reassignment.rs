@@ -18,9 +18,11 @@
 //! Gated two ways:
 //!   1. **Opt-in env var** `DECPM_IT_REWARD` in `governance_workflows.rs` — the
 //!      phase is not called at all unless that is set.
-//!   2. **Runtime precondition skip** (below) — if the decparty has no
-//!      `RewardCouponV2` coupons, the phase logs a SKIP line and returns
-//!      `Ok(())`, so it is a no-op on localnet / any decparty without coupons.
+//!   2. **Runtime precondition skip** (below) — **devnet-only**: if the
+//!      decparty has no `RewardCouponV2` coupons, the phase logs a SKIP line
+//!      and returns `Ok(())`. On **localnet** the phase seeds its own coupons
+//!      (`seed_reward_coupons`) and hard-fails instead of skipping if none are
+//!      visible after a short poll — there is no silent no-op path there.
 //!
 //! To actually observe reassignment on devnet, operational preconditions
 //! (spec §13, plan Task 9) must hold — none are reproducible from this harness:
@@ -50,10 +52,17 @@
 //! coupon **archival** (an originally-visible unassigned coupon cid is gone
 //! after a tick). It **cannot** assert, at the HTTP layer, that each resulting
 //! coupon carries a specific `beneficiary` or the 0.8 / 0.2 `amount` share
-//! (Task 9 step 1(b)). Those per-beneficiary field checks must be verified
-//! against devnet PQS `pqs_cbtc` on the real run — see the TODO on the final
-//! assertion. Beneficiary self-minting (spec §4.3) is a separate precondition
-//! (the beneficiaries' own agents) and is likewise verified out-of-band.
+//! (Task 9 step 1(b)).
+//!
+//! On **localnet**, the split IS asserted by value: each beneficiary party is
+//! an observer of its own assigned `RewardCouponV2`, so the phase reads the
+//! decoded amount via the JSON Ledger API (`active_reward_coupons`) and checks
+//! the 80.0 / 20.0 shares directly — no PQS needed. On **devnet**, the
+//! per-beneficiary field checks still require decoded reads not exposed by
+//! `/contracts/query` and must be verified against devnet PQS `pqs_cbtc` on the
+//! real run (issue #271) — see the TODO on the final assertion. Beneficiary
+//! self-minting (spec §4.3) is a separate precondition (the beneficiaries' own
+//! agents) and is likewise verified out-of-band.
 //!
 //! ## Security property (Task 9 step 2)
 //!
@@ -76,7 +85,8 @@ use serde_json::json;
 use tracing::{info, warn};
 
 use crate::common::{
-    Fixture, governance::propose_confirm_execute, scenario::Scenario, types::ContractsQueryResponse,
+    Fixture, governance::propose_confirm_execute, ledger_api::P1_JSON_API, scenario::Scenario,
+    types::ContractsQueryResponse,
 };
 
 /// `#splice-api-reward-assignment-v1`, URL-encoded — the `RewardCoupon`
@@ -129,14 +139,38 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     // setup so the skip truly makes the phase a no-op rather than doing
     // governance work first.)
     // ------------------------------------------------------------------
-    let initial_coupon_cids = query_reward_coupons(f, &decparty).await?;
-    if initial_coupon_cids.is_empty() {
-        warn!(
-            "coupon_reassignment IT SKIPPED: no unassigned RewardCouponV2 for {decparty} — \
-             needs live coupons with Mode-B collection paused (Task 9 precondition)"
-        );
-        return Ok(());
-    }
+    let initial_coupon_cids = match f.target {
+        crate::common::TestTarget::Localnet => {
+            // seed_reward_coupons committed the coupon synchronously; poll only
+            // to absorb any ledger->DecMan read lag, then hard-fail. A silent
+            // skip here would turn the whole phase into a false-positive no-op.
+            let deadline = std::time::Instant::now() + Duration::from_secs(60);
+            let cids = loop {
+                let cids = query_reward_coupons(f, &decparty).await?;
+                if !cids.is_empty() || std::time::Instant::now() >= deadline {
+                    break cids;
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            };
+            anyhow::ensure!(
+                !cids.is_empty(),
+                "coupon_reassignment (localnet): no unassigned RewardCouponV2 for {decparty} \
+                 after seeding — seed_reward_coupons must run first and commit the coupon"
+            );
+            cids
+        }
+        crate::common::TestTarget::Devnet => {
+            let cids = query_reward_coupons(f, &decparty).await?;
+            if cids.is_empty() {
+                warn!(
+                    "coupon_reassignment IT SKIPPED: no unassigned RewardCouponV2 for {decparty} — \
+                     needs live coupons with Mode-B collection paused (Task 9 precondition)"
+                );
+                return Ok(());
+            }
+            cids
+        }
+    };
     info!(
         "coupon_reassignment: {} candidate coupon(s) visible for {decparty}",
         initial_coupon_cids.len()
@@ -147,18 +181,36 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     // (propose -> confirm -> execute), recording the assigners and the
     // baked-in 0.8 / 0.2 split. `prior_delegation = null` (first delegation).
     //
-    // Party roles (harness stand-ins; the live cbtc-network run uses the real
-    // devnet parties per the operational preconditions):
-    //   assigners      = [p1_member, p2_member]  -> attestor-1, attestor-2
-    //   beneficiaries  = [p2_member @ 0.8, p3_member @ 0.2] -> cbtc-beneficiary,
-    //                     operator
-    // p3_member is deliberately NOT an assigner — it is the non-assigner used
-    // by the security note below. (A beneficiary is not thereby an assigner.)
+    // Party roles:
+    //   On localnet, assigners = [p1_member, p2_member], and beneficiaries are
+    //   the two dedicated non-assigner parties the seed phase allocated
+    //   ([reward_beneficiary_party @ 0.8, reward_operator_party @ 0.2]) — kept
+    //   disjoint from the assigners so the split-by-value assertion below
+    //   observes each beneficiary's own coupons unambiguously.
+    //
+    //   On devnet (harness stand-ins; the live cbtc-network run uses the real
+    //   devnet parties per the operational preconditions):
+    //     assigners      = [p1_member, p2_member]  -> attestor-1, attestor-2
+    //     beneficiaries  = [p2_member @ 0.8, p3_member @ 0.2] -> cbtc-beneficiary,
+    //                       operator
+    //   p3_member is deliberately NOT an assigner — it is the non-assigner used
+    //   by the security note below. (A beneficiary is not thereby an assigner.)
     // ------------------------------------------------------------------
     let assigner_a = f.p1_member_party()?.to_string();
     let assigner_b = f.p2_member_party()?.to_string();
-    let benef_a = f.p2_member_party()?.to_string();
-    let benef_b = f.p3_member_party()?.to_string();
+    // Beneficiaries must be disjoint from assigners. On localnet the seed phase
+    // allocated two dedicated non-assigner parties; on devnet keep the existing
+    // stand-ins (issue #271 wires the real cbtc-beneficiary/operator).
+    let (benef_a, benef_b) = match f.target {
+        crate::common::TestTarget::Localnet => (
+            f.reward_beneficiary_party()?.to_string(),
+            f.reward_operator_party()?.to_string(),
+        ),
+        crate::common::TestTarget::Devnet => (
+            f.p2_member_party()?.to_string(),
+            f.p3_member_party()?.to_string(),
+        ),
+    };
     propose_confirm_execute(
         "SetupCouponReassignmentDelegation",
         json!({
@@ -235,6 +287,53 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         )
         .run(f)
         .await?;
+
+    // Localnet: assert the 0.8 / 0.2 split BY VALUE (the automated replacement
+    // for the devnet/PQS TODO). Each beneficiary party is an observer of its own
+    // assigned RewardCouponV2, so we read the decoded amount via the JSON Ledger
+    // API. On devnet this stays a PQS check on the real run (issue #271).
+    if f.target == crate::common::TestTarget::Localnet {
+        let benef = f.reward_beneficiary_party()?.to_string();
+        let operator = f.reward_operator_party()?.to_string();
+        Scenario::new("0.8/0.2 split by value")
+            .then(
+                "beneficiary coupon ~4x operator coupon (80.0 vs 20.0)",
+                Duration::from_secs(120),
+                move |f, _| {
+                    let benef = benef.clone();
+                    let operator = operator.clone();
+                    Box::pin(async move {
+                        let b = f.active_reward_coupons(P1_JSON_API, &benef).await.ok()?;
+                        let o = f.active_reward_coupons(P1_JSON_API, &operator).await.ok()?;
+                        let sum = |v: &[(Option<String>, String)], who: &str| -> f64 {
+                            v.iter()
+                                .filter(|(bene, _)| bene.as_deref() == Some(who))
+                                .filter_map(|(_, amt)| amt.parse::<f64>().ok())
+                                .sum()
+                        };
+                        let b_total = sum(&b, &benef);
+                        let o_total = sum(&o, &operator);
+                        // Wait until both beneficiary coupons exist, then assert.
+                        if b_total <= 0.0 || o_total <= 0.0 {
+                            return None;
+                        }
+                        let ok = crate::common::ledger_api::split_ok(b_total, o_total, 0.01)
+                            && (b_total - 80.0).abs() < 0.01
+                            && (o_total - 20.0).abs() < 0.01;
+                        Some(if ok {
+                            Ok(())
+                        } else {
+                            Err(anyhow::anyhow!(
+                                "split mismatch: beneficiary={b_total} operator={o_total} \
+                                 (expected 80.0 / 20.0)"
+                            ))
+                        })
+                    })
+                },
+            )
+            .run(f)
+            .await?;
+    }
 
     // ------------------------------------------------------------------
     // Negative (security property, Task 9 step 2). See the module doc: the
