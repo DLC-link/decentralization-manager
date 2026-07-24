@@ -1,5 +1,4 @@
 use anyhow::Context;
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{Value, json};
 
 use super::Fixture;
@@ -157,19 +156,10 @@ impl Fixture {
     ) -> anyhow::Result<Vec<(Option<String>, String)>> {
         let offset = self.ledger_end(port).await?;
         let body = active_contracts_request(party, REWARD_COUPON_V2_TEMPLATE, offset);
-        let jwt = self.refresher.token().await.context("acquire bearer")?;
-        let url = format!("http://localhost:{port}/v2/state/active-contracts");
-        let res = self
-            .client
-            .post(&url)
-            .header(CONTENT_TYPE, "application/json")
-            .header(AUTHORIZATION, format!("Bearer {jwt}"))
-            .json(&body)
-            .send()
+        let (status, text) = self
+            .post_expect_status(port, "/v2/state/active-contracts", &body)
             .await
             .context("POST /v2/state/active-contracts")?;
-        let status = res.status();
-        let text = res.text().await.context("read ACS body")?;
         if !status.is_success() {
             anyhow::bail!("POST /v2/state/active-contracts returned {status}: {text}");
         }
@@ -208,11 +198,13 @@ mod tests {
 
     #[test]
     fn active_contracts_request_filters_by_party_and_template() {
-        let v = active_contracts_request("benef::1220", REWARD_COUPON_V2_TEMPLATE, 42);
+        // Distinct dummy template id (not REWARD_COUPON_V2_TEMPLATE) so this
+        // proves the value is threaded through, not hardcoded.
+        let v = active_contracts_request("benef::1220", "#dummy:Mod:Ent", 42);
         assert_eq!(v["activeAtOffset"], 42);
         let f = &v["eventFormat"]["filtersByParty"]["benef::1220"]["cumulative"][0]["identifierFilter"]
             ["TemplateFilter"]["value"];
-        assert_eq!(f["templateId"], REWARD_COUPON_V2_TEMPLATE);
+        assert_eq!(f["templateId"], "#dummy:Mod:Ent");
     }
 
     #[test]
@@ -257,5 +249,20 @@ mod tests {
         assert_eq!(v.as_array().unwrap().len(), 2);
         // both parse into the same shape parse_coupon_amounts expects
         assert_eq!(parse_coupon_amounts(&v).len(), 2);
+        // empty / whitespace-only body normalizes to an empty array
+        assert!(
+            normalize_acs_body("")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            normalize_acs_body("  \n ")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
     }
 }
