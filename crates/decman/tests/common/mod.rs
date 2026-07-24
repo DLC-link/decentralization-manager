@@ -6,6 +6,7 @@ pub mod db;
 pub mod governance;
 pub mod http;
 pub mod invitations;
+pub mod ledger_api;
 pub mod operator;
 pub mod phases;
 pub mod processes;
