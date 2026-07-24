@@ -133,11 +133,11 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     let decparty = f.party_id()?.to_string();
 
     // ------------------------------------------------------------------
-    // Precondition skip (the runtime half of the gate). Guards the WHOLE
-    // phase — including the governance setup below — so it is harmless on
-    // localnet / a decparty with no coupons. (Ordered before the delegation
-    // setup so the skip truly makes the phase a no-op rather than doing
-    // governance work first.)
+    // Precondition check (the runtime half of the gate). Target-aware:
+    // - Localnet: seed_reward_coupons committed coupons; empty here is a
+    //   hard failure after brief poll (no silent no-op).
+    // - Devnet: empty coupons log SKIP and return Ok(()).
+    // (Ordered before delegation setup so early exit avoids governance work.)
     // ------------------------------------------------------------------
     let initial_coupon_cids = match f.target {
         crate::common::TestTarget::Localnet => {
