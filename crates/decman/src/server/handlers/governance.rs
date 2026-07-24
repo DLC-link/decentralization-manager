@@ -1040,6 +1040,52 @@ pub async fn get_governance_chain_audit(
 // Action Endpoints
 // ============================================================================
 
+/// Error from [`submit_proposal`], pairing a message with the HTTP status the
+/// handler should surface. Extracting `submit_proposal` out of the handler must
+/// not flatten every failure to 500: bad input stays 400 and upstream-registry
+/// fetch failures stay 502, matching the behavior before the extraction.
+#[derive(Debug)]
+pub(crate) struct SubmitProposalError {
+    status: actix_web::http::StatusCode,
+    message: String,
+}
+
+impl SubmitProposalError {
+    fn bad_request(message: impl Into<String>) -> Self {
+        Self {
+            status: actix_web::http::StatusCode::BAD_REQUEST,
+            message: message.into(),
+        }
+    }
+
+    fn bad_gateway(message: impl Into<String>) -> Self {
+        Self {
+            status: actix_web::http::StatusCode::BAD_GATEWAY,
+            message: message.into(),
+        }
+    }
+
+    fn internal(message: impl Into<String>) -> Self {
+        Self {
+            status: actix_web::http::StatusCode::INTERNAL_SERVER_ERROR,
+            message: message.into(),
+        }
+    }
+
+    /// The HTTP status the handler should return for this failure.
+    pub(crate) fn status(&self) -> actix_web::http::StatusCode {
+        self.status
+    }
+}
+
+impl std::fmt::Display for SubmitProposalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for SubmitProposalError {}
+
 /// Build and submit a `GovernableAction` proposal-create command, returning the
 /// created proposal contract id.
 ///
@@ -1048,8 +1094,9 @@ pub async fn get_governance_chain_audit(
 /// through HTTP. Behavior-preserving for the create path: it resolves any
 /// registry-backed transfer choice-context, builds the create arguments,
 /// resolves the target package id, and submits over a fresh
-/// `CommandServiceClient`. Errors surface as `anyhow::Error` (the handler maps
-/// them to an HTTP error + audit-log; the automation logs them itself).
+/// `CommandServiceClient`. Errors surface as [`SubmitProposalError`], which
+/// pairs the message with the HTTP status the handler should return (the
+/// automation just logs the message and ignores the status).
 ///
 /// `_rules_contract_id` is part of the propose API surface (used by the caller's
 /// subsequent confirm step) but is not needed to create the proposal.
@@ -1061,7 +1108,7 @@ pub(crate) async fn submit_proposal(
     token: &str,
     member_party_id: &CantonId,
     packages: &PackageConfig,
-) -> anyhow::Result<String> {
+) -> Result<String, SubmitProposalError> {
     // Resolve registry-backed context for token-standard transfer flows:
     //   * `AcceptTransfer`: fetch the `transfer-rule` choice context the
     //     `TransferInstruction_Accept` choice reads at execute time. Without it
@@ -1111,7 +1158,9 @@ pub(crate) async fn submit_proposal(
                 tracing::warn!(
                     "Failed to fetch AcceptTransfer choice context from registry: {e:#}"
                 );
-                anyhow::bail!("Failed to fetch transfer choice context: {e}");
+                return Err(SubmitProposalError::bad_gateway(format!(
+                    "Failed to fetch transfer choice context: {e}"
+                )));
             }
         },
         ProposalType::Transfer {
@@ -1130,7 +1179,9 @@ pub(crate) async fn submit_proposal(
             let admin: CantonId = match instrument_id.admin.parse() {
                 Ok(p) => p,
                 Err(e) => {
-                    anyhow::bail!("Invalid instrument admin party id: {e}");
+                    return Err(SubmitProposalError::bad_request(format!(
+                        "Invalid instrument admin party id: {e}"
+                    )));
                 }
             };
             // The token-standard transfer factory rejects an empty
@@ -1149,16 +1200,17 @@ pub(crate) async fn submit_proposal(
                 .await
                 {
                     Ok(cids) if cids.is_empty() => {
-                        anyhow::bail!(
+                        return Err(SubmitProposalError::bad_request(format!(
                             "No holdings of instrument {} owned by {} to fund the transfer",
-                            instrument_id.id,
-                            party_id
-                        );
+                            instrument_id.id, party_id
+                        )));
                     }
                     Ok(cids) => *input_holding_cids = cids,
                     Err(e) => {
                         tracing::warn!("Failed to select input holdings for transfer: {e:#}");
-                        anyhow::bail!("Failed to select input holdings: {e}");
+                        return Err(SubmitProposalError::internal(format!(
+                            "Failed to select input holdings: {e}"
+                        )));
                     }
                 }
             }
@@ -1191,7 +1243,9 @@ pub(crate) async fn submit_proposal(
                 }
                 Err(e) => {
                     tracing::warn!("Failed to fetch Transfer choice context from registry: {e:#}");
-                    anyhow::bail!("Failed to fetch transfer factory: {e}");
+                    return Err(SubmitProposalError::bad_gateway(format!(
+                        "Failed to fetch transfer factory: {e}"
+                    )));
                 }
             }
         }
@@ -1206,30 +1260,50 @@ pub(crate) async fn submit_proposal(
             transfer_choice_context.as_ref().map(|r| &r.context),
             Some(transfer_validity),
         )
-        .map_err(|e| anyhow::anyhow!("Failed to build proposal create arguments: {e}"))?;
+        .map_err(|e| {
+            SubmitProposalError::bad_request(format!(
+                "Failed to build proposal create arguments: {e}"
+            ))
+        })?;
 
     let package_id =
         match package_source {
             action_serializer::ProposalPackage::GovernanceCore => packages
                 .governance_core
                 .as_deref()
-                .context("governance_core package not configured")?,
+                .ok_or_else(|| {
+                    SubmitProposalError::bad_request("governance_core package not configured")
+                })?,
             action_serializer::ProposalPackage::GovernanceRewards => packages
                 .governance_rewards
                 .as_deref()
-                .context("governance_rewards package not configured")?,
+                .ok_or_else(|| {
+                    SubmitProposalError::bad_request("governance_rewards package not configured")
+                })?,
             action_serializer::ProposalPackage::GovernanceTokenCustody => packages
                 .governance_token_custody
                 .as_deref()
-                .context("governance_token_custody package not configured")?,
+                .ok_or_else(|| {
+                    SubmitProposalError::bad_request(
+                        "governance_token_custody package not configured",
+                    )
+                })?,
             action_serializer::ProposalPackage::GovernanceUtilityCredential => packages
                 .governance_utility_credential
                 .as_deref()
-                .context("governance_utility_credential package not configured")?,
+                .ok_or_else(|| {
+                    SubmitProposalError::bad_request(
+                        "governance_utility_credential package not configured",
+                    )
+                })?,
             action_serializer::ProposalPackage::GovernanceUtilityOnboarding => packages
                 .governance_utility_onboarding
                 .as_deref()
-                .context("governance_utility_onboarding package not configured")?,
+                .ok_or_else(|| {
+                    SubmitProposalError::bad_request(
+                        "governance_utility_onboarding package not configured",
+                    )
+                })?,
         };
 
     let template_id = Identifier {
@@ -1263,10 +1337,12 @@ pub(crate) async fn submit_proposal(
     };
 
     let channel = tonic::transport::Channel::from_shared(config.ledger_api_url())
-        .map_err(|e| anyhow::anyhow!("Invalid ledger API URL: {e}"))?
+        .map_err(|e| SubmitProposalError::internal(format!("Invalid ledger API URL: {e}")))?
         .connect()
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to connect to ledger API: {e}"))?;
+        .map_err(|e| {
+            SubmitProposalError::internal(format!("Failed to connect to ledger API: {e}"))
+        })?;
 
     let mut client =
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
@@ -1285,7 +1361,7 @@ pub(crate) async fn submit_proposal(
         .await
         .map_err(|e| {
             tracing::error!("Failed to create proposal: {e}");
-            anyhow::anyhow!("Failed to create proposal: {e}")
+            SubmitProposalError::internal(format!("Failed to create proposal: {e}"))
         })?;
 
     // Extract created contract ID from the transaction events
@@ -1302,7 +1378,9 @@ pub(crate) async fn submit_proposal(
                 })
             })
         })
-        .context("Proposal created but could not extract contract ID")
+        .ok_or_else(|| {
+            SubmitProposalError::internal("Proposal created but could not extract contract ID")
+        })
 }
 
 /// Propose a domain governance action (creates a GovernableAction proposal contract)
@@ -1376,7 +1454,7 @@ pub async fn propose_action(
                     error_message: Some(format!("{e}")),
                 },
             );
-            return HttpResponse::InternalServerError().json(ErrorResponse {
+            return HttpResponse::build(e.status()).json(ErrorResponse {
                 error: format!("{e}"),
             });
         }
