@@ -809,7 +809,12 @@ impl ProposalType {
                 }
                 validate_reward_beneficiaries(new_beneficiaries)
             }
-            ProposalType::RevokeCouponReassignmentDelegation { .. } => Ok(()),
+            ProposalType::RevokeCouponReassignmentDelegation { delegation } => {
+                if delegation.trim().is_empty() {
+                    return Err("delegation must not be empty".to_string());
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -1556,6 +1561,12 @@ mod tests {
             delegation: "00abc".into(),
         };
         assert!(revoke.validate().is_ok());
+        // An empty delegation cid is rejected at the boundary (not left to fail
+        // only at ledger submission).
+        let revoke_empty = ProposalType::RevokeCouponReassignmentDelegation {
+            delegation: "  ".into(),
+        };
+        assert!(revoke_empty.validate().is_err());
     }
 
     #[test]
