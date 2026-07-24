@@ -303,8 +303,25 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     let benef = benef.clone();
                     let operator = operator.clone();
                     Box::pin(async move {
-                        let b = f.active_reward_coupons(P1_JSON_API, &benef).await.ok()?;
-                        let o = f.active_reward_coupons(P1_JSON_API, &operator).await.ok()?;
+                        // Log a hard read error (e.g. an ACS shape mismatch) on
+                        // each attempt instead of silently swallowing it into a
+                        // retry that ends in a generic timeout — makes the first
+                        // live/CI run diagnosable. Still returns None to retry
+                        // (the 120s deadline bounds it).
+                        let b = match f.active_reward_coupons(P1_JSON_API, &benef).await {
+                            Ok(v) => v,
+                            Err(e) => {
+                                warn!("split assertion: reading beneficiary coupons failed: {e:#}");
+                                return None;
+                            }
+                        };
+                        let o = match f.active_reward_coupons(P1_JSON_API, &operator).await {
+                            Ok(v) => v,
+                            Err(e) => {
+                                warn!("split assertion: reading operator coupons failed: {e:#}");
+                                return None;
+                            }
+                        };
                         let sum = |v: &[(Option<String>, String)], who: &str| -> f64 {
                             v.iter()
                                 .filter(|(bene, _)| bene.as_deref() == Some(who))
