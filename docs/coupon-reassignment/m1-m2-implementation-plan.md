@@ -14,7 +14,7 @@
 
 - **Package placement:** the new DAML lives in the `governance-rewards` package (`daml/governance-rewards/`) created by PR #248. That PR is a **prerequisite** — it also added `ProposalPackage::GovernanceRewards`, the `governance_rewards` `PackageConfig` field + default `#governance-rewards-v1`, and the `propose_action` handler arm for `GovernanceRewards`. **Do not re-add those; reuse them.**
 - **Actor-model precision (spec §2):** a party id is never an actor. `governanceParty == provider` (spec §4.1, verified for CBTC). The governed execute carries the decparty's own authority — no extra delegation contract.
-- **Splice assign semantics (verified in `splice/daml/splice-api-reward-assignment-v1/daml/Splice/Api/RewardAssignmentV1.daml`):** `RewardBeneficiary { beneficiary : Party, percentage : Decimal }`; `RewardCoupon_AssignBeneficiaries` takes `additionalCoupons : [ContractId RewardCoupon]`, `newBeneficiaries : [RewardBeneficiary]`, `extraArgs : ExtraArgs`; percentages must be in (0.0, 1.0], sum to 1.0, ≤ `maxNumNewBeneficiaries` (≤20), and every target coupon MUST have no beneficiary yet. `emptyExtraArgs` is exported from `Splice.Api.Token.MetadataV1`.
+- **Splice assign semantics (verified in `splice/daml/splice-api-reward-assignment-v1/daml/Splice/Api/RewardAssignmentV1.daml`):** `RewardBeneficiary { beneficiary : Party, percentage : Decimal }`; `RewardCoupon_AssignBeneficiaries` takes `additionalCoupons : [ContractId RewardCoupon]`, `newBeneficiaries : [RewardBeneficiary]`, `extraArgs : ExtraArgs`; percentages must be in (0.0, 1.0], sum to 1.0, ≤ `maxNumNewBeneficiaries` (≤20), and every target coupon MUST have no beneficiary yet. `Splice.Api.Token.MetadataV1` exports **no** ready-made `emptyExtraArgs`; build `ExtraArgs` locally from `emptyChoiceContext` + `emptyMetadata`.
 - **DAR versions (verified against devnet 2026-07-15):** vendor `splice-amulet-0.1.19.dar` (package-id `90987abe…`) and `splice-api-reward-assignment-v1-1.0.0.dar` (id `6f7b7236…`) from `/Users/gyorgybalazsi/splice/daml/dars/` into `daml/dars/`. These package-ids byte-match the packages devnet's DSO issues `RewardCouponV2` under (queried live: 842 of `cbtc-network`'s coupons are amulet `0.1.19`), so the assign will actually apply to the live coupons. **Do NOT bump the whole repo's amulet.** The `AssignRewardBeneficiaries` template imports only the `RewardCoupon` *interface* (`reward-assignment-v1`, which has no amulet dependency), so the `governance-rewards` package's closure is unaffected. `splice-amulet-0.1.19` is needed ONLY by the DAML test, to instantiate concrete `RewardCouponV2` coupons.
 - **`dpm` invocation:** this `dpm` (v1.0.10) has no `--package` flag. Build a single package by running `dpm build` from inside its directory (e.g. `cd daml/governance-rewards && dpm build`); `dpm build --all` builds the whole `multi-package.yaml`.
 - **Backend boundary validation (spec §9):** `validate()` must reject an empty coupon set, percentages outside (0.0, 1.0], a percentage sum ≠ 1.0 (within tolerance), and > 20 beneficiaries — so a raw API caller fails fast instead of wasting a governance round (the gap PR #248 left for `expires_at_micros`).
@@ -106,7 +106,7 @@ git commit -m "build(governance-rewards): vendor reward-assignment 1.0.0 + amule
 - Modify: `daml/multi-package.yaml` (register `governance-rewards-assign-test`).
 
 **Interfaces:**
-- Consumes: `Governance.Action (GovernableAction, GovernableActionView(..))`; `Splice.Api.RewardAssignmentV1`; `Splice.Api.Token.MetadataV1 (emptyExtraArgs)`; the copied `AssignTestUtils`.
+- Consumes: `Governance.Action (GovernableAction, GovernableActionView(..))`; `Splice.Api.RewardAssignmentV1`; `Splice.Api.Token.MetadataV1 (ExtraArgs(..), emptyChoiceContext, emptyMetadata)`; the copied `AssignTestUtils`.
 - Produces: `template AssignRewardBeneficiaries with governanceParty : Party; proposer : Party; primaryCoupon : ContractId RewardCoupon; additionalCoupons : [ContractId RewardCoupon]; newBeneficiaries : [RewardBeneficiary]` — a `GovernableAction`. This exact field set + order is what Task 3's serializer must reproduce.
 
 **Why a separate test package (and the one build risk):** PR #248's `governance-rewards-test` depends on `splice-wallet-0.1.18` (→ amulet `0.1.17`). This test needs amulet `0.1.19` (for `RewardCouponV2`). To keep the two amulet versions apart, the assign tests get their own package that depends on amulet `0.1.19` (not wallet). **Risk:** this test package must also depend on `governance-rewards-v1` (which contains `SetupMintingDelegation` and so transitively pulls `splice-wallet-0.1.18` → amulet `0.1.17`). If `dpm build` reports an amulet-version conflict between `0.1.17` and `0.1.19`, resolve it by **moving `AssignRewardBeneficiaries` into its own wallet-free package** (e.g. `governance-reward-assign-v1`, depending only on `governance-action-v1` + `reward-assignment-v1`) so nothing drags amulet `0.1.17` into the test closure — and update Task 2/3's package references accordingly. If neither coexistence nor the split resolves it, report BLOCKED with the exact `dpm` error.
@@ -186,9 +186,15 @@ module Governance.Rewards.AssignRewardBeneficiaries where
 
 import Splice.Api.RewardAssignmentV1
   (RewardCoupon, RewardBeneficiary, RewardCoupon_AssignBeneficiaries(..))
-import Splice.Api.Token.MetadataV1 (emptyExtraArgs)
+import Splice.Api.Token.MetadataV1 (ExtraArgs(..), emptyChoiceContext, emptyMetadata)
 
 import Governance.Action
+
+-- `Splice.Api.Token.MetadataV1` exports no ready-made `emptyExtraArgs`; build it locally.
+emptyExtraArgs : ExtraArgs
+emptyExtraArgs = ExtraArgs with
+  context = emptyChoiceContext
+  meta = emptyMetadata
 
 template AssignRewardBeneficiaries
   with

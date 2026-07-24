@@ -198,7 +198,7 @@ template CouponReassignmentDelegation
         _ <- exercise primaryCoupon RewardCoupon_AssignBeneficiaries with
                additionalCoupons
                newBeneficiaries = split
-               extraArgs = emptyExtraArgs   -- empty; exact ctor per token-metadata API
+               extraArgs = emptyExtraArgs   -- locally built (MetadataV1 exports none): ExtraArgs { emptyChoiceContext, emptyMetadata }
         pure ()
 
     -- Governance-only revoke (archive). Replacing the split = revoke + re-create (§8).
