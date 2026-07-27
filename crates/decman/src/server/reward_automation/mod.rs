@@ -407,26 +407,14 @@ fn parse_unassigned_coupon(
 // Coupon batch selection
 // ============================================================================
 
-/// Total lifetime of a `RewardCouponV2` coupon (spec §1: 36h TTL). Used to
-/// derive a coupon's age from its `expiresAt`, since the interface view exposes
-/// no `createdAt`.
-const COUPON_TTL: chrono::Duration = chrono::Duration::hours(36);
-
-/// A coupon is *ripe* for assignment this tick (pure) iff:
-///   * it is old enough — its age (`now - (expiresAt - COUPON_TTL)`) is past
-///     `watermark`, so freshly-earned coupons get first refusal by any other
-///     collection path before we sweep them (spec §9/§11); AND
-///   * enough time remains before expiry to mint after assigning —
-///     `expiresAt - now >= minting_margin`.
-fn is_ripe(
-    c: &CouponInfo,
-    now: DateTime<Utc>,
-    watermark: chrono::Duration,
-    minting_margin: chrono::Duration,
-) -> bool {
-    let age = now - (c.expires_at - COUPON_TTL);
-    let remaining = c.expires_at - now;
-    age >= watermark && remaining >= minting_margin
+/// A coupon is *ripe* for assignment this tick (pure) iff enough time remains
+/// before expiry for a beneficiary to mint after assigning —
+/// `expiresAt - now >= minting_margin`. Assignment neither consumes the coupon
+/// nor shortens it (the per-beneficiary coupons inherit `expiresAt`), so there
+/// is no reason to hold a coupon back for being young: assigning as early as we
+/// see it leaves the beneficiary the most time to mint.
+fn is_ripe(c: &CouponInfo, now: DateTime<Utc>, minting_margin: chrono::Duration) -> bool {
+    c.expires_at - now >= minting_margin
 }
 
 /// Select the coupons to assign this tick (pure): the ripe coupons (see
@@ -437,13 +425,12 @@ fn is_ripe(
 pub(crate) fn select_batch(
     coupons: &[CouponInfo],
     now: DateTime<Utc>,
-    watermark: chrono::Duration,
     minting_margin: chrono::Duration,
     max_batch: usize,
 ) -> Vec<String> {
     let mut selected: Vec<&CouponInfo> = coupons
         .iter()
-        .filter(|c| is_ripe(c, now, watermark, minting_margin))
+        .filter(|c| is_ripe(c, now, minting_margin))
         .collect();
     selected.sort_by_key(|c| c.expires_at);
     selected
@@ -458,12 +445,11 @@ pub(crate) fn select_batch(
 fn ripe_count(
     coupons: &[CouponInfo],
     now: DateTime<Utc>,
-    watermark: chrono::Duration,
     minting_margin: chrono::Duration,
 ) -> usize {
     coupons
         .iter()
-        .filter(|c| is_ripe(c, now, watermark, minting_margin))
+        .filter(|c| is_ripe(c, now, minting_margin))
         .count()
 }
 
@@ -584,9 +570,8 @@ pub(crate) async fn submit_delegation_assign(
 /// One reassign tick for a decparty under the delegation model: read
 /// unassigned coupons, select a ripe batch, and — if non-empty — exercise
 /// `Delegation_Assign` for it. An empty batch (nothing ripe) is a no-op.
-/// Batch policy: a coupon must clear the watermark and leave enough margin
-/// before expiry to mint after assigning, capped at a max batch size (spec
-/// §9/§11; see [`select_batch`]).
+/// Batch policy: a coupon must leave enough margin before expiry to mint after
+/// assigning, capped at a max batch size (spec §9/§11; see [`select_batch`]).
 pub(crate) async fn run_reassign_once(
     config: &NodeConfig,
     decparty: &CantonId,
@@ -596,7 +581,6 @@ pub(crate) async fn run_reassign_once(
     test_mode: bool,
     packages: &PackageConfig,
 ) -> anyhow::Result<()> {
-    const WATERMARK: chrono::Duration = chrono::Duration::hours(6);
     const MINTING_MARGIN: chrono::Duration = chrono::Duration::hours(2);
     const MAX_BATCH: usize = 50;
     let coupons = unassigned_coupons(
@@ -608,7 +592,7 @@ pub(crate) async fn run_reassign_once(
     )
     .await?;
     let now = Utc::now();
-    let ripe = ripe_count(&coupons, now, WATERMARK, MINTING_MARGIN);
+    let ripe = ripe_count(&coupons, now, MINTING_MARGIN);
     if ripe > MAX_BATCH {
         // Not an error — the remainder is picked up on later ticks — but a
         // sustained backlog means coupons can expire unassigned, so surface it
@@ -622,7 +606,7 @@ pub(crate) async fn run_reassign_once(
             "more coupons ripe than one batch can assign; deferring the remainder to a later tick"
         );
     }
-    let batch = select_batch(&coupons, now, WATERMARK, MINTING_MARGIN, MAX_BATCH);
+    let batch = select_batch(&coupons, now, MINTING_MARGIN, MAX_BATCH);
     let Some((primary, additional)) = batch.split_first() else {
         return Ok(()); // nothing ripe -> no-op
     };
@@ -871,24 +855,20 @@ mod tests {
     }
 
     #[test]
-    fn select_batch_respects_watermark_margin_and_cap() {
+    fn select_batch_respects_margin_and_cap() {
         let now = dt("2026-07-20T12:00:00Z");
         let coupons = vec![
-            // ~35h to expiry -> age ~1h < 6h watermark -> too fresh, excluded.
+            // ~35h to expiry -> freshly minted, but nothing is gained by
+            // holding it back -> included.
             coupon("young", "2026-07-21T23:00:00Z"),
-            // 8h to expiry -> age 28h past watermark, margin ok -> included.
+            // 8h to expiry -> plenty of margin -> included.
             coupon("ripe", "2026-07-20T20:00:00Z"),
             // 30m to expiry -> inside 2h minting margin -> excluded.
             coupon("urgent", "2026-07-20T12:30:00Z"),
         ];
-        let got = select_batch(
-            &coupons,
-            now,
-            chrono::Duration::hours(6),
-            chrono::Duration::hours(2),
-            100,
-        );
-        assert_eq!(got, vec!["ripe".to_string()]);
+        let got = select_batch(&coupons, now, chrono::Duration::hours(2), 100);
+        // Most-urgent-first among those with margin left.
+        assert_eq!(got, vec!["ripe".to_string(), "young".to_string()]);
     }
 
     #[test]
@@ -898,14 +878,7 @@ mod tests {
             .map(|i| coupon(&format!("c{i}"), "2026-07-20T20:00:00Z"))
             .collect();
         assert_eq!(
-            select_batch(
-                &coupons,
-                now,
-                chrono::Duration::hours(6),
-                chrono::Duration::hours(2),
-                3,
-            )
-            .len(),
+            select_batch(&coupons, now, chrono::Duration::hours(2), 3).len(),
             3
         );
     }

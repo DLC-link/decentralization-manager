@@ -89,7 +89,7 @@ The delegation model is the purest expression of this principle: the split is a 
 - A new DAML template `CouponReassignmentDelegation` (in the `governance-rewards` package): signed by the decparty, holding the fixed `[RewardBeneficiary]` split and the assigner list, with a `nonconsuming` `Delegation_Assign` choice that assigns caller-supplied coupons to the baked-in split (§7).
 - A `GovernableAction` to **create** the delegation through governance — `SetupCouponReassignmentDelegation` — and a governance path to **revoke** it (archive). Creating/replacing the delegation is the *only* action that goes through a threshold vote.
 - A new Rust background module in `crates/decman` — the automation — that, per node, reads the active delegation + the decparty's unassigned coupons, selects a due batch, and exercises `Delegation_Assign` as a plain ledger command. Each member node runs an instance.
-- Batching + TTL-watermark cadence with a minting margin; duplicate/all-or-nothing handling (§10).
+- Batching cadence with a minting margin; duplicate/all-or-nothing handling (§10).
 - Tests: DAML tests for the delegation and its choice, Rust unit tests, a devnet integration test.
 
 **Out of scope (future increments)**
@@ -146,7 +146,7 @@ Two phases on top of existing DecMan machinery (propose/confirm/execute engine, 
 
      1. read the one active CouponReassignmentDelegation (skip if none)
      2. scan unassigned RewardCouponV2 (provider = decparty, beneficiary = null)
-     3. select a due batch by TTL-watermark, leaving a minting margin
+     3. select a due batch, leaving a minting margin before expiry
      4. exercise Delegation_Assign(assigner = self, primaryCoupon, additionalCoupons)
             │        controller = this node's member party (1-of-n)
             ▼
@@ -214,7 +214,7 @@ Notes:
 - **`RewardCoupon_AssignBeneficiaries`** requires each coupon to have **no** assigned beneficiary and caps beneficiaries at `maxNumNewBeneficiaries` (≤20); it validates percentages in (0,1] summing to 1.0. The split is validated once at delegation-create time too (see below), so a bad split can never be baked in.
 - **Creation authority.** `signatory decparty` means the delegation can only be created with the decparty's authority — obtained through Phase-1 `GovernableAction_Execute` (controller = `governanceParty` = `decparty`). It cannot be created by any single member outside governance.
 - **Revocation & replacement** are governance actions (`Delegation_Revoke`, controlled by `decparty`); the per-round choice never archives the delegation (nonconsuming), so one vote serves indefinitely.
-- **Optional minting-margin guard.** `Delegation_Assign` may `assert` that each supplied coupon still has enough TTL left for a beneficiary to mint afterward (mirrors the Rust-side watermark, §9). Kept minimal; the Rust selector is the primary gate.
+- **Optional minting-margin guard.** `Delegation_Assign` may `assert` that each supplied coupon still has enough TTL left for a beneficiary to mint afterward (mirrors the Rust-side minting margin, §9). Kept minimal; the Rust selector is the primary gate.
 - **DAR dependency:** `splice-api-reward-assignment-v1` in `daml.yaml`.
 - **Review gate:** `Delegation_Assign` is authority-carrying DAML — `newBeneficiaries = split` (not a caller argument) is the entire security model. It gets a security-focused review before merge (§13).
 
@@ -242,7 +242,7 @@ New module `crates/decman/src/server/reward_automation/` (mirrors existing backg
 **Per-tick loop** (runs on every member node; running on several is safe — see §10):
 1. **Read the active delegation.** Load `CouponReassignmentDelegation` for the decparty via `active_created_records`. Zero ⇒ no-op; more than one ⇒ refuse + alert. This node's member party must appear in `assigners` (else it cannot assign — log and skip).
 2. **Query unassigned coupons:** active `RewardCouponV2` where `provider = decparty` and `beneficiary = null`, ordered by `expiresAt`. (Minted/consumed coupons archive out of the ACS, so "active + beneficiary = null" suffices — no separate "already assigned" bookkeeping.)
-3. **Select the batch** (`select_batch`) by **TTL-watermark**: coupons whose age ≥ watermark (e.g. ~6h after creation, matching splice defaults) or approaching expiry, up to a conservative per-tx batch size (bounded by transaction/traffic size, *not* a fixed count — the ≤20 limit is beneficiaries per coupon, not coupons per batch). **Leave enough margin for the beneficiary's agent to mint afterward** — assigned coupons most likely inherit the original expiry, so assigning near the deadline could leave the beneficiary no time to mint. Cadence: a periodic tick (a few times/day), not per-round — coupons can be assigned any time before mint/expiry, which minimizes tx cost.
+3. **Select the batch** (`select_batch`) by **minting margin**: every unassigned coupon is eligible as soon as we see it, except those too close to expiry — up to a conservative per-tx batch size (bounded by transaction/traffic size, *not* a fixed count — the ≤20 limit is beneficiaries per coupon, not coupons per batch). **Leave enough margin for the beneficiary's agent to mint afterward** — assigned coupons inherit the original expiry, so assigning near the deadline could leave the beneficiary no time to mint. There is deliberately **no minimum-age gate**: assignment does not consume the coupon or shorten its life, so holding a young coupon back would only cut into the beneficiary's minting window. Cadence: a periodic tick (a few times/day), not per-round — coupons can be assigned any time before mint/expiry, which minimizes tx cost.
 4. **Assign the batch:** exercise `Delegation_Assign { assigner = this node's member party, primaryCoupon, additionalCoupons }` on the delegation, as a **plain ledger command** from this node's member credentials. No proposal, no confirmation, no execute round. On success the coupons leave the unassigned scan; on failure (e.g. a coupon already assigned by another node this tick) the whole exercise fails harmlessly and the remaining coupons are retried next tick (§10).
 
 **Setup / revoke path (Phase 1, invoked out-of-band, not on the tick).** Creating or replacing the delegation goes through the reused governance flow (§6.1): `SetupCouponReassignmentDelegation` / revoke as `GovernableAction`s. `validate()` checks the split at the API boundary — non-empty beneficiary set, percentages in (0,1] summing to 1.0 (exact `DamlDecimal`), ≤ `maxNumNewBeneficiaries` (reuses `validate_reward_beneficiaries`) — so a bad split fails fast instead of wasting a governance round or baking in an invalid contract.
@@ -259,7 +259,7 @@ New module `crates/decman/src/server/reward_automation/` (mirrors existing backg
 
 ## 11. Error handling & edge cases
 
-- **Coupon expires before assignment commits:** it leaves the ACS; the `Delegation_Assign` exercise for a batch containing it fails cleanly (all-or-nothing); next tick re-scans the survivors. The watermark leaves ample margin inside 36h.
+- **Coupon expires before assignment commits:** it leaves the ACS; the `Delegation_Assign` exercise for a batch containing it fails cleanly (all-or-nothing); next tick re-scans the survivors. Assigning on first sight leaves the whole 36h TTL as margin.
 - **Coupon assigned by another node mid-tick:** same all-or-nothing failure; harmless; retried next tick.
 - **No active delegation:** no-op with a clear log (automation is off for that decparty until governance creates one).
 - **More than one active delegation:** refuse and alert (do **not** guess which split is authoritative). This occurs only transiently, during a create-then-revoke replacement (§8), or from a governance error; the automation stays off until exactly one is active.
@@ -283,7 +283,7 @@ Stated in the §2 frame — **fairness/correctness live in L3, never in L2 trust
 ## 13. Testing
 
 - **DAML** (for `CouponReassignmentDelegation`): happy path (an assigner assigns a batch to the baked-in split); **caller cannot alter the split** (the choice takes no beneficiary argument — asserted structurally, and the produced coupons carry exactly `split`); a non-assigner party cannot exercise `Delegation_Assign`; already-assigned coupon rejected (all-or-nothing); batching via `additionalCoupons`; the delegation can only be created with the decparty's authority (not a lone member); `Delegation_Revoke` archives it and is controlled by the decparty; nonconsuming — the delegation survives repeated assigns. Split validation (percentages in (0,1] summing to 1.0, ≤ cap, non-empty) at create. Written in the repo's `TestHarness` given/when/then harness (as `governance-rewards-test` does), not plain `Daml.Script`.
-- **Rust unit:** `ProposalType::SetupCouponReassignmentDelegation` serialization round-trip (copy the `build_proposal_*_shape` test shape); `validate()` rejects empty set / bad percentages / >cap (exact `DamlDecimal`, via `validate_reward_beneficiaries`); batch selection (`select_batch` — TTL-watermark, minting-margin); the per-tick gating (zero delegations → no-op; two → refuse; node-not-assigner → skip).
+- **Rust unit:** `ProposalType::SetupCouponReassignmentDelegation` serialization round-trip (copy the `build_proposal_*_shape` test shape); `validate()` rejects empty set / bad percentages / >cap (exact `DamlDecimal`, via `validate_reward_beneficiaries`); batch selection (`select_batch` — minting-margin, cap); the per-tick gating (zero delegations → no-op; two → refuse; node-not-assigner → skip).
 - **Integration (devnet):** against live `cbtc-network` coupons — create the delegation via governance (one vote), then a **single** member node exercises `Delegation_Assign` and we assert the beneficiaries' coupons appear with the expected split. (Beneficiary minting is a separate precondition, asserted only if those agents run.) This requires only **one** member node to assign — there is no per-round multi-node confirmation to exercise. Gated behind `DECPM_IT_REWARD`; extends the existing devnet IT phase. Note (devnet reality): `cbtc-network`'s coupons are currently swept to 0 by the Mode-B collection path, so the IT needs that paused (§ handover / team coordination).
 
 ## 14. Decisions (resolved in team coordination, 2026-07-20)
@@ -297,6 +297,6 @@ Stated in the §2 frame — **fairness/correctness live in L3, never in L2 trust
 
 - **M1 — DAML delegation + tests:** `CouponReassignmentDelegation` (template + `Delegation_Assign` + `Delegation_Revoke`) in the `governance-rewards` package + `daml.yaml` dep on `splice-api-reward-assignment-v1` + the DAML tests in §13. Reviewable in isolation; the `Delegation_Assign` security review lands here.
 - **M2 — Rust setup plumbing:** `ProposalType::SetupCouponReassignmentDelegation` (+ revoke) variant + `validate()` + `action_serializer` mapping + `ProposalPackage`/handler/`PackageConfig`; serialization + validation unit tests. Mirrors PR #256. Enables creating/replacing the delegation through governance.
-- **M3 — per-round automation:** the background loop — read active delegation, scan unassigned coupons, `select_batch` (TTL-watermark + minting-margin), exercise `Delegation_Assign` as a plain command; per-tick gating; Rust unit tests.
+- **M3 — per-round automation:** the background loop — read active delegation, scan unassigned coupons, `select_batch` (minting-margin), exercise `Delegation_Assign` as a plain command; per-tick gating; Rust unit tests.
 - **M4 — devnet integration:** end-to-end — governance creates the delegation, a single member node assigns live `cbtc-network` coupons; IT test (needs Mode-B collection paused on `cbtc-network`).
 - **M5 (future):** leader/grace-window; reconciliation/metrics; beneficiary self-mint enablement; Mainnet gating.

@@ -8,9 +8,10 @@
 //! acting as `p1_member`. `provider = decparty` + `providerIsObserver = true`
 //! makes it visible to the decparty (the reassignment authority), and
 //! `beneficiary = null` marks it unassigned (what the automation looks for).
-//! `expiresAt = now + 8h` keeps it inside the `select_batch` window
-//! (age >= 6h watermark, remaining >= 2h margin). Beneficiaries are two fresh
-//! non-assigner parties, matching the real cbtc-network topology.
+//! `expiresAt = now + 36h` mirrors a freshly issued coupon at the real TTL, so
+//! the phase exercises the automation on the same shape production sees.
+//! Beneficiaries are two fresh non-assigner parties, matching the real
+//! cbtc-network topology.
 
 use anyhow::Context;
 use chrono::Utc;
@@ -44,9 +45,9 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     grant_rights(&*f, P1_JSON_API, &beneficiary_party, "participant-1").await?;
     grant_rights(&*f, P1_JSON_API, &operator_party, "participant-1").await?;
 
-    // expiresAt = now + 8h -> age 28h past the 6h watermark, 8h remaining
-    // (>= 2h margin): immediately selectable by select_batch.
-    let expires_at = (Utc::now() + chrono::Duration::hours(8))
+    // A freshly issued coupon at the real 36h TTL: well clear of the 2h minting
+    // margin, so select_batch takes it on the next tick.
+    let expires_at = (Utc::now() + chrono::Duration::hours(36))
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string();
     let seed = SeedCoupon {
