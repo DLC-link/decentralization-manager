@@ -86,6 +86,11 @@ common = { workspace = true, features = ["openapi"] }
 keycloak = { workspace = true }
 
 [dev-dependencies]
+# rcgen + tokio-rustls back the e2e suite's TLS terminator
+# (tests/common/tls_proxy.rs), which puts a Canton admin API behind TLS so the
+# TLS client path has coverage on a plaintext localnet. Test-only.
+rcgen = { workspace = true }
 static_assertions = { workspace = true }
 tempfile = { workspace = true }
+tokio-rustls = { workspace = true }
 wiremock = { workspace = true }
