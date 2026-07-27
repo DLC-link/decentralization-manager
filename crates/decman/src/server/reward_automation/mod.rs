@@ -19,16 +19,17 @@
 //!   `Record` (template reads) or the decoded interface-view `Record`
 //!   (interface reads).
 //! * [`active_delegation`] — reads the decparty's active
-//!   `CouponReassignmentDelegation` (its cid and authorized `assigners`); the
-//!   split itself is not read here — `Delegation_Assign` enforces it in DAML.
+//!   `CouponReassignmentDelegation` (its cid, authorized `assigners`, and how
+//!   many beneficiaries the split names, to size a chunk); the split's contents
+//!   are not read here — `Delegation_Assign` enforces them in DAML.
 //! * [`unassigned_coupons`] — reads the decparty's unassigned `RewardCoupon`
 //!   interface views.
-//! * [`run_reassign_once`] — one reassign tick: selects a ripe batch of
-//!   unassigned coupons and exercises `Delegation_Assign` for it.
+//! * [`run_reassign_once`] — one reassign tick: assigns every assignable
+//!   unassigned coupon via successive chunked `Delegation_Assign` transactions.
 //!
-//! The pure record/batch decoders ([`select_batch`]) are unit-tested here; the
-//! gRPC reads and command submission are exercised by the devnet integration
-//! test.
+//! The pure record decoders, selection and chunk sizing ([`select_assignable`],
+//! [`chunk_size`]) are unit-tested here; the gRPC reads and command submission
+//! are exercised by the localnet and devnet integration tests.
 
 use std::collections::HashMap;
 
@@ -238,14 +239,25 @@ pub(crate) async fn active_created_records(
 // CouponReassignmentDelegation (the delegation-model enablement signal)
 // ============================================================================
 
-/// The active `CouponReassignmentDelegation` for a decparty: its cid and the
-/// set of members authorized to execute `Delegation_Assign`. The split is
-/// **not** carried here — it lives in the on-ledger contract and
-/// `Delegation_Assign` enforces it by construction (spec §12), so the Rust
-/// side never needs to read it.
+/// The active `CouponReassignmentDelegation` for a decparty: its cid, the set
+/// of members authorized to execute `Delegation_Assign`, and how many
+/// beneficiaries its split names. The split's *contents* are **not** carried
+/// here — they live in the on-ledger contract and `Delegation_Assign` enforces
+/// them by construction (spec §12), so the Rust side never needs to read them.
+/// Only the count is read, to size a chunk: one assign creates
+/// `coupons × beneficiaries` contracts (see [`chunk_size`]).
 pub(crate) struct ActiveDelegation {
     pub cid: String,
     pub assigners: Vec<CantonId>,
+    pub beneficiary_count: usize,
+}
+
+/// Return the number of elements in a `List` field.
+fn field_list_len(rec: &Record, label: &str) -> anyhow::Result<usize> {
+    match record_field(rec, label) {
+        Some(value::Sum::List(l)) => Ok(l.elements.len()),
+        _ => Err(anyhow!("field `{label}`: expected a List value")),
+    }
 }
 
 /// Read a list-of-`Party` field, parsing each element into a [`CantonId`].
@@ -271,9 +283,16 @@ fn field_party_list(rec: &Record, label: &str) -> anyhow::Result<Vec<CantonId>> 
 /// [`ActiveDelegation`]. Reads only `assigners` — the `split` field is
 /// intentionally **not** parsed here; `Delegation_Assign` enforces it in DAML.
 fn parse_delegation_record(cid: &str, rec: &Record) -> anyhow::Result<ActiveDelegation> {
+    let beneficiary_count = field_list_len(rec, "split")?;
+    if beneficiary_count == 0 {
+        // DAML rejects an empty split at create, so this means a decode problem
+        // rather than a real contract. Refuse rather than size a chunk from it.
+        return Err(anyhow!("field `split`: delegation names no beneficiaries"));
+    }
     Ok(ActiveDelegation {
         cid: cid.to_string(),
         assigners: field_party_list(rec, "assigners")?,
+        beneficiary_count,
     })
 }
 
@@ -407,50 +426,45 @@ fn parse_unassigned_coupon(
 // Coupon batch selection
 // ============================================================================
 
-/// A coupon is *ripe* for assignment this tick (pure) iff enough time remains
-/// before expiry for a beneficiary to mint after assigning —
-/// `expiresAt - now >= minting_margin`. Assignment neither consumes the coupon
-/// nor shortens it (the per-beneficiary coupons inherit `expiresAt`), so there
-/// is no reason to hold a coupon back for being young: assigning as early as we
-/// see it leaves the beneficiary the most time to mint.
-fn is_ripe(c: &CouponInfo, now: DateTime<Utc>, minting_margin: chrono::Duration) -> bool {
+/// A coupon is assignable (pure) iff enough time remains before expiry for a
+/// beneficiary to mint after assigning — `expiresAt - now >= minting_margin`.
+/// Assignment neither consumes the coupon nor shortens it (the per-beneficiary
+/// coupons inherit `expiresAt`), so there is no reason to hold a coupon back
+/// for being young: assigning as early as we see it leaves the beneficiary the
+/// most time to mint.
+fn is_assignable(c: &CouponInfo, now: DateTime<Utc>, minting_margin: chrono::Duration) -> bool {
     c.expires_at - now >= minting_margin
 }
 
-/// Select the coupons to assign this tick (pure): the ripe coupons (see
-/// [`is_ripe`]), ordered most-urgent-first (ascending `expiresAt`) and truncated
-/// to `max_batch`; the coupon cids are returned. When more coupons are ripe than
-/// `max_batch`, the remainder is deferred to a later tick — [`run_reassign_once`]
-/// logs a warning in that case (see [`ripe_count`]).
-pub(crate) fn select_batch(
+/// Every assignable coupon (pure), ordered most-urgent-first (ascending
+/// `expiresAt`) so that under any partial failure the coupons closest to expiry
+/// are assigned first. The whole set is returned — it is *not* truncated to a
+/// batch size, because a tick assigns all of it in successive chunked
+/// transactions (see [`chunk_size`] and [`run_reassign_once`]); the chunk size
+/// bounds one transaction, not a tick's work.
+pub(crate) fn select_assignable(
     coupons: &[CouponInfo],
     now: DateTime<Utc>,
     minting_margin: chrono::Duration,
-    max_batch: usize,
 ) -> Vec<String> {
     let mut selected: Vec<&CouponInfo> = coupons
         .iter()
-        .filter(|c| is_ripe(c, now, minting_margin))
+        .filter(|c| is_assignable(c, now, minting_margin))
         .collect();
     selected.sort_by_key(|c| c.expires_at);
-    selected
-        .into_iter()
-        .take(max_batch)
-        .map(|c| c.cid.clone())
-        .collect()
+    selected.into_iter().map(|c| c.cid.clone()).collect()
 }
 
-/// How many coupons are ripe this tick (pure), regardless of `max_batch`. Used
-/// to detect (and warn about) a batch that had to defer part of its ripe set.
-fn ripe_count(
-    coupons: &[CouponInfo],
-    now: DateTime<Utc>,
-    minting_margin: chrono::Duration,
-) -> usize {
-    coupons
-        .iter()
-        .filter(|c| is_ripe(c, now, minting_margin))
-        .count()
+/// How many coupons one `Delegation_Assign` may carry (pure).
+///
+/// The binding constraint is transaction size, and one assign creates
+/// `coupons × beneficiaries` contracts — so the cap is expressed in *output
+/// creates* and the coupon count is derived from the delegation's beneficiary
+/// count. A fixed coupon count would be `beneficiary_count`-times looser for a
+/// wide split than a narrow one. Never returns 0, so a tick always makes
+/// progress even with an implausibly wide split.
+pub(crate) fn chunk_size(max_creates: usize, beneficiary_count: usize) -> usize {
+    (max_creates / beneficiary_count.max(1)).max(1)
 }
 
 // ============================================================================
@@ -567,11 +581,22 @@ pub(crate) async fn submit_delegation_assign(
     Ok(())
 }
 
-/// One reassign tick for a decparty under the delegation model: read
-/// unassigned coupons, select a ripe batch, and — if non-empty — exercise
-/// `Delegation_Assign` for it. An empty batch (nothing ripe) is a no-op.
-/// Batch policy: a coupon must leave enough margin before expiry to mint after
-/// assigning, capped at a max batch size (spec §9/§11; see [`select_batch`]).
+/// One reassign tick for a decparty under the delegation model: read the
+/// unassigned coupons and assign **all** the assignable ones, in successive
+/// chunked `Delegation_Assign` transactions. Nothing assignable is a no-op.
+///
+/// A tick drains the whole set rather than assigning one chunk and waiting for
+/// the next tick, so throughput does not depend on the tick interval: the
+/// interval is a latency/cost knob, not a safety-critical one. The chunk bounds
+/// one *transaction* (spec §9/§11; see [`chunk_size`]).
+///
+/// Failure handling, since the real transaction-size ceiling is unmeasured:
+/// a failed chunk is retried at half the size, down to a single coupon, which
+/// lets an oversized chunk find a size the ledger accepts. Failures at a single
+/// coupon are almost always contention instead — another assigner took the
+/// coupon and this node's view is stale — so after
+/// `MAX_SINGLE_COUPON_FAILURES` of them the tick stops and lets the next tick
+/// re-read the ledger, rather than grinding through a set that is already gone.
 pub(crate) async fn run_reassign_once(
     config: &NodeConfig,
     decparty: &CantonId,
@@ -582,7 +607,12 @@ pub(crate) async fn run_reassign_once(
     packages: &PackageConfig,
 ) -> anyhow::Result<()> {
     const MINTING_MARGIN: chrono::Duration = chrono::Duration::hours(2);
-    const MAX_BATCH: usize = 50;
+    /// Output contracts one `Delegation_Assign` may create. Devnet has committed
+    /// 72 (36 coupons × 2 beneficiaries), so this is above the proven floor and
+    /// below an unmeasured ceiling; halve-on-failure covers a wrong guess.
+    const MAX_CREATES: usize = 100;
+    const MAX_SINGLE_COUPON_FAILURES: usize = 3;
+
     let coupons = unassigned_coupons(
         config,
         decparty,
@@ -591,37 +621,59 @@ pub(crate) async fn run_reassign_once(
         packages,
     )
     .await?;
-    let now = Utc::now();
-    let ripe = ripe_count(&coupons, now, MINTING_MARGIN);
-    if ripe > MAX_BATCH {
-        // Not an error — the remainder is picked up on later ticks — but a
-        // sustained backlog means coupons can expire unassigned, so surface it
-        // rather than truncate silently. Shorten the tick interval or raise
-        // MAX_BATCH if this persists.
-        tracing::warn!(
-            %decparty,
-            ripe,
-            max_batch = MAX_BATCH,
-            deferred = ripe - MAX_BATCH,
-            "more coupons ripe than one batch can assign; deferring the remainder to a later tick"
-        );
+    let assignable = select_assignable(&coupons, Utc::now(), MINTING_MARGIN);
+    if assignable.is_empty() {
+        return Ok(()); // nothing assignable -> no-op
     }
-    let batch = select_batch(&coupons, now, MINTING_MARGIN, MAX_BATCH);
-    let Some((primary, additional)) = batch.split_first() else {
-        return Ok(()); // nothing ripe -> no-op
-    };
-    submit_delegation_assign(
-        config,
-        decparty,
-        assigner,
-        token,
-        &delegation.cid,
-        primary,
-        additional,
-        packages,
-    )
-    .await?;
-    tracing::info!(%decparty, %assigner, count = batch.len(), "reassigned coupon batch");
+
+    let mut size = chunk_size(MAX_CREATES, delegation.beneficiary_count);
+    let mut offset = 0;
+    let mut assigned = 0;
+    let mut single_coupon_failures = 0;
+    while offset < assignable.len() {
+        let end = (offset + size).min(assignable.len());
+        let (primary, additional) = assignable[offset..end]
+            .split_first()
+            .expect("offset < len, so the chunk is non-empty");
+        match submit_delegation_assign(
+            config,
+            decparty,
+            assigner,
+            token,
+            &delegation.cid,
+            primary,
+            additional,
+            packages,
+        )
+        .await
+        {
+            Ok(()) => {
+                assigned += end - offset;
+                offset = end;
+            }
+            Err(e) if size > 1 => {
+                size /= 2;
+                tracing::warn!(%decparty, error = %e, new_chunk = size, "assign chunk failed; retrying smaller");
+            }
+            Err(e) => {
+                single_coupon_failures += 1;
+                tracing::warn!(%decparty, error = %e, coupon = %primary, "assign failed for a single coupon; skipping");
+                offset += 1;
+                if single_coupon_failures >= MAX_SINGLE_COUPON_FAILURES {
+                    tracing::warn!(
+                        %decparty,
+                        assigned,
+                        remaining = assignable.len() - offset,
+                        "too many single-coupon failures; ending tick to re-read the ledger"
+                    );
+                    break;
+                }
+            }
+        }
+    }
+    if assigned > 0 {
+        tracing::info!(%decparty, %assigner, count = assigned, "reassigned coupon batch");
+    }
     Ok(())
 }
 
@@ -793,7 +845,25 @@ mod tests {
         let d = parse_delegation_record("00del", &rec).unwrap();
         assert_eq!(d.cid, "00del");
         assert_eq!(d.assigners.len(), 2);
-        // split is not parsed (DAML-enforced) — the record's `split` field is ignored.
+        // Only the split's *length* is read, to size a chunk; its contents stay
+        // DAML-enforced and are never used to build a command.
+        assert_eq!(d.beneficiary_count, 2);
+    }
+
+    #[test]
+    fn parse_delegation_record_refuses_an_empty_split() {
+        // DAML rejects an empty split at create, so this is a decode problem;
+        // accepting it would size chunks off a meaningless beneficiary count.
+        let rec = record(vec![
+            field(
+                "assigners",
+                value::Sum::List(List {
+                    elements: vec![value(party(ALICE))],
+                }),
+            ),
+            field("split", value::Sum::List(List { elements: vec![] })),
+        ]);
+        assert!(parse_delegation_record("00del", &rec).is_err());
     }
 
     // ---- unassigned-coupon fail-safe filter (parse_unassigned_coupon) -------
@@ -837,7 +907,7 @@ mod tests {
         );
     }
 
-    // ---- batch selection (select_batch) -------------------------------------
+    // ---- selection + chunk sizing -------------------------------------------
 
     fn dt(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s)
@@ -855,32 +925,53 @@ mod tests {
     }
 
     #[test]
-    fn select_batch_respects_margin_and_cap() {
+    fn select_assignable_keeps_margin_and_orders_most_urgent_first() {
         let now = dt("2026-07-20T12:00:00Z");
         let coupons = vec![
             // ~35h to expiry -> freshly minted, but nothing is gained by
             // holding it back -> included.
             coupon("young", "2026-07-21T23:00:00Z"),
             // 8h to expiry -> plenty of margin -> included.
-            coupon("ripe", "2026-07-20T20:00:00Z"),
+            coupon("mid", "2026-07-20T20:00:00Z"),
             // 30m to expiry -> inside 2h minting margin -> excluded.
             coupon("urgent", "2026-07-20T12:30:00Z"),
         ];
-        let got = select_batch(&coupons, now, chrono::Duration::hours(2), 100);
-        // Most-urgent-first among those with margin left.
-        assert_eq!(got, vec!["ripe".to_string(), "young".to_string()]);
+        let got = select_assignable(&coupons, now, chrono::Duration::hours(2));
+        assert_eq!(got, vec!["mid".to_string(), "young".to_string()]);
     }
 
     #[test]
-    fn select_batch_caps_size() {
+    fn select_assignable_does_not_truncate() {
+        // A tick drains the whole set in chunks, so selection returns all of it;
+        // bounding a transaction is chunk_size's job, not selection's.
         let now = dt("2026-07-20T12:00:00Z");
-        let coupons: Vec<CouponInfo> = (0..10)
+        let coupons: Vec<CouponInfo> = (0..500)
             .map(|i| coupon(&format!("c{i}"), "2026-07-20T20:00:00Z"))
             .collect();
         assert_eq!(
-            select_batch(&coupons, now, chrono::Duration::hours(2), 3).len(),
-            3
+            select_assignable(&coupons, now, chrono::Duration::hours(2)).len(),
+            500
         );
+    }
+
+    #[test]
+    fn chunk_size_scales_with_beneficiary_count() {
+        // The cap is on output creates, so a wider split means fewer coupons per
+        // transaction — a fixed coupon count would be 10x looser at 20
+        // beneficiaries than at 2.
+        assert_eq!(chunk_size(100, 2), 50);
+        assert_eq!(chunk_size(100, 20), 5);
+        assert_eq!(chunk_size(100, 1), 100);
+    }
+
+    #[test]
+    fn chunk_size_never_stalls_a_tick() {
+        // A split wider than the create budget still yields a 1-coupon chunk
+        // rather than 0, which would loop forever making no progress.
+        assert_eq!(chunk_size(100, 500), 1);
+        assert_eq!(chunk_size(0, 2), 1);
+        // A malformed 0 count must not divide by zero.
+        assert_eq!(chunk_size(100, 0), 100);
     }
 
     #[test]

@@ -222,7 +222,8 @@ curl -X POST http://<decman-node>:8080/governance/propose -H "Content-Type: appl
 - **Mutually exclusive with Mode B.** Do not run coupon reassignment and
   minting-delegation collection on the same decparty — they compete for the same
   coupons.
-- **Reassignment cadence.** The `reward_automation` loop assigns up to
-  `MAX_BATCH` coupons per tick; size the tick interval to the coupon inflow so
-  the backlog stays under the cap (it logs a warning when a tick's ripe set
-  exceeds `MAX_BATCH`).
+- **Reassignment cadence.** The `reward_automation` loop assigns every
+  assignable coupon each tick, in chunks sized by output creates
+  (`MAX_CREATES / beneficiary_count`). Throughput does not depend on the tick
+  interval, so the interval only trades assignment latency against transaction
+  cost.
