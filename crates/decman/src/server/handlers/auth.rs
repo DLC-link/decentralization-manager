@@ -594,10 +594,11 @@ mod tests {
     use sqlx::SqlitePool;
     use tokio::sync::{Mutex, RwLock};
 
-    use super::grant_rights;
+    use super::{grant_rights, token_url};
     use crate::{
         auth::{MockAuthRegistry, MockValidator, TokenValidator, WorkflowAuth},
-        config::NodeConfig,
+        canton_id::CantonId,
+        config::{Auth0M2MConfig, KeycloakConfig, NodeConfig, PackageConfig, PartyCredentials},
         server::{AppState, middleware::AuthMiddleware},
     };
 
@@ -682,6 +683,61 @@ mod tests {
                 "expected canned `{field}: true` in mock-mode RightsStatus, got {body}"
             );
         }
+    }
+
+    const AUTH0_DOMAIN: &str = "bitsafe-test.eu.auth0.com";
+    const LEDGER_AUDIENCE: &str = "https://canton.network.global";
+
+    /// Party credentials as they look once the operator picks Auth0: `auth0`
+    /// carries the tenant, and `keycloak` stays at its `#[serde(default)]`
+    /// empty shape because nothing fills it in.
+    fn auth0_party() -> PartyCredentials {
+        PartyCredentials {
+            dec_party_id: CantonId::parse(VALID_CANTON_ID).expect("valid dec party id"),
+            member_party_id: CantonId::parse(VALID_CANTON_ID).expect("valid member party id"),
+            user_id: "attestor-1".to_string(),
+            keycloak: KeycloakConfig::default(),
+            auth0: Some(Auth0M2MConfig {
+                domain: AUTH0_DOMAIN.to_string(),
+                audience: LEDGER_AUDIENCE.to_string(),
+                client_id: "party-m2m".to_string(),
+                client_secret: "party-secret".to_string(),
+            }),
+            packages: PackageConfig::default(),
+        }
+    }
+
+    /// The admin-token endpoint `grant_rights` builds today: straight from the
+    /// party's Keycloak config, with no Auth0 branch. Kept as a local wrapper
+    /// so the test below pins current behaviour exactly.
+    fn admin_token_endpoint(creds: &PartyCredentials) -> String {
+        token_url(&creds.keycloak.url, &creds.keycloak.realm)
+    }
+
+    /// #259: with Auth0 configured, that endpoint is built from an empty
+    /// Keycloak config, so it comes out as the relative
+    /// `/realms//protocol/openid-connect/token`. reqwest refuses to send a
+    /// relative URL, which is the operator-visible "Keycloak
+    /// client_credentials login request error: builder error" — the admin
+    /// client id and secret from the dialog never leave the process.
+    ///
+    /// The admin token has to be minted from whichever IdP the party is
+    /// actually configured with, so the endpoint must be absolute and must
+    /// point at that IdP.
+    #[test]
+    fn admin_token_endpoint_for_an_auth0_party_targets_auth0() {
+        let creds = auth0_party();
+        let endpoint = admin_token_endpoint(&creds);
+
+        let parsed = match reqwest::Url::parse(&endpoint) {
+            Ok(url) => url,
+            Err(e) => panic!("admin-token endpoint {endpoint:?} is not a usable URL: {e}"),
+        };
+        assert_eq!(
+            parsed.host_str(),
+            Some(AUTH0_DOMAIN),
+            "admin token must be minted from the party's own IdP, got {endpoint}"
+        );
     }
 
     /// `require_admin` rejects requests that arrive without a `Principal`
