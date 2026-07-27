@@ -20,8 +20,7 @@ use common::{api::*, types::*};
 use dec_party_manager::{
     config::{
         Auth0Config, CantonConfig, CantonTlsConfig, KeycloakConfig, Network, NetworkConfig,
-        NodeConfig, NodeInfo,
-        NoiseRetryConfig, Peer, Timeouts,
+        NodeConfig, NodeInfo, NoiseRetryConfig, Peer, Timeouts,
     },
     server::{
         AcceptTransferDetails, ActionType, AppRewardBeneficiary, BillingParams,
