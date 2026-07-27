@@ -86,7 +86,11 @@ use serde_json::json;
 use tracing::{info, warn};
 
 use crate::common::{
-    Fixture, governance::propose_confirm_execute, ledger_api::P1_JSON_API, scenario::Scenario,
+    Fixture,
+    governance::propose_confirm_execute,
+    ledger_api::P1_JSON_API,
+    phases::seed_reward_coupons::{SEED_AMOUNT, SEED_COUPON_COUNT},
+    scenario::Scenario,
     types::ContractsQueryResponse,
 };
 
@@ -272,37 +276,47 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     // Delegation_Assign on its own — no vote per round. Proof-at-the-HTTP-layer:
     // at least one originally-visible unassigned coupon cid is now archived.
     // ------------------------------------------------------------------
+    // On localnet the seeded set spans more than one chunk (see
+    // `seed_reward_coupons::SEED_COUPON_COUNT`), so requiring *every* seeded
+    // coupon to be archived exercises the drain loop across chunk boundaries —
+    // a single-chunk assertion would pass while later chunks were dropped. On
+    // devnet the coupon set is whatever the ledger happens to hold and other
+    // automation may touch it, so one archived coupon remains the bar there.
+    let require_all_archived = f.target == crate::common::TestTarget::Localnet;
+    let archived_criterion = if require_all_archived {
+        "every seeded coupon archived by Delegation_Assign (spans >1 chunk)"
+    } else {
+        "at least one candidate coupon archived by Delegation_Assign"
+    };
     Scenario::new("delegation-model reassignment")
-        .then(
-            "at least one candidate coupon archived by Delegation_Assign",
-            REASSIGN_TIMEOUT,
-            {
-                let initial = initial_coupon_cids.clone();
-                move |f, _| {
-                    let initial = initial.clone();
-                    Box::pin(async move {
-                        let party_id = match f.party_id() {
-                            Ok(p) => p,
-                            Err(e) => return Some(Err(e)),
-                        };
-                        let current = query_reward_coupons(f, party_id).await.ok()?;
-                        // Delegation_Assign archives each targeted unassigned
-                        // coupon and creates one per beneficiary.
-                        //
-                        // TODO(devnet/PQS): the per-beneficiary field-level
-                        // checks (Task 9 step 1(b): one RewardCouponV2 per
-                        // beneficiary with `beneficiary ∈ {benef_a, benef_b}` and
-                        // the 0.8 / 0.2 `amount` shares) require decoded reads not
-                        // exposed by /contracts/query — verify them against devnet
-                        // PQS `pqs_cbtc` on the real run.
-                        initial
-                            .iter()
-                            .any(|c| !current.contains(c))
-                            .then_some(Ok(()))
-                    })
-                }
-            },
-        )
+        .then(archived_criterion, REASSIGN_TIMEOUT, {
+            let initial = initial_coupon_cids.clone();
+            move |f, _| {
+                let initial = initial.clone();
+                Box::pin(async move {
+                    let party_id = match f.party_id() {
+                        Ok(p) => p,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    let current = query_reward_coupons(f, party_id).await.ok()?;
+                    // Delegation_Assign archives each targeted unassigned
+                    // coupon and creates one per beneficiary.
+                    //
+                    // TODO(devnet/PQS): the per-beneficiary field-level
+                    // checks (Task 9 step 1(b): one RewardCouponV2 per
+                    // beneficiary with `beneficiary ∈ {benef_a, benef_b}` and
+                    // the 0.8 / 0.2 `amount` shares) require decoded reads not
+                    // exposed by /contracts/query — verify them against devnet
+                    // PQS `pqs_cbtc` on the real run.
+                    let mut gone = initial.iter().filter(|c| !current.contains(*c));
+                    if require_all_archived {
+                        gone.count().eq(&initial.len()).then_some(Ok(()))
+                    } else {
+                        gone.next().map(|_| Ok(()))
+                    }
+                })
+            }
+        })
         .run(f)
         .await?;
 
@@ -313,9 +327,14 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     if f.target == crate::common::TestTarget::Localnet {
         let benef = f.reward_beneficiary_party()?.to_string();
         let operator = f.reward_operator_party()?.to_string();
+        // Totals over the whole seeded set, so the split is checked across chunk
+        // boundaries rather than on one coupon.
+        let seeded_total = SEED_COUPON_COUNT as f64 * SEED_AMOUNT;
+        let expect_benef = seeded_total * 0.8;
+        let expect_operator = seeded_total * 0.2;
         Scenario::new("0.8/0.2 split by value")
             .then(
-                "beneficiary coupon ~4x operator coupon (80.0 vs 20.0)",
+                "beneficiary total ~4x operator total across all seeded coupons",
                 Duration::from_secs(120),
                 move |f, _| {
                     let benef = benef.clone();
@@ -352,15 +371,20 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         if b_total <= 0.0 || o_total <= 0.0 {
                             return None;
                         }
+                        // Wait for the full seeded total before judging: a
+                        // partial read mid-drain would look like a bad split.
+                        if b_total + o_total < seeded_total - 0.05 {
+                            return None;
+                        }
                         let ok = crate::common::ledger_api::split_ok(b_total, o_total, 0.01)
-                            && (b_total - 80.0).abs() < 0.01
-                            && (o_total - 20.0).abs() < 0.01;
+                            && (b_total - expect_benef).abs() < 0.05
+                            && (o_total - expect_operator).abs() < 0.05;
                         Some(if ok {
                             Ok(())
                         } else {
                             Err(anyhow::anyhow!(
                                 "split mismatch: beneficiary={b_total} operator={o_total} \
-                                 (expected 80.0 / 20.0)"
+                                 (expected {expect_benef} / {expect_operator})"
                             ))
                         })
                     })

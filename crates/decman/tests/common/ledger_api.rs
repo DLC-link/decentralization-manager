@@ -22,30 +22,43 @@ pub struct SeedCoupon {
     pub round: i64,
 }
 
-/// Build the `/v2/commands/submit-and-wait` body creating an UNASSIGNED
-/// `RewardCouponV2` (beneficiary = null, providerIsObserver = true so the
-/// provider/decparty can see and reassign it). Submitted as `ledger-api-user`
-/// acting as the coupon's sole signatory, `dso`.
-pub fn reward_coupon_create_command(c: &SeedCoupon, command_id: &str) -> Value {
-    json!({
-        "commands": [{
-            "CreateCommand": {
-                "templateId": REWARD_COUPON_V2_TEMPLATE,
-                "createArguments": {
-                    "dso": c.dso,
-                    "provider": c.provider,
-                    "round": { "number": c.round.to_string() },
-                    "amount": c.amount,
-                    "expiresAt": c.expires_at,
-                    "providerIsObserver": true,
-                    "beneficiary": Value::Null,
+/// Build the `/v2/commands/submit-and-wait` body creating one or more UNASSIGNED
+/// `RewardCouponV2` contracts (beneficiary = null, providerIsObserver = true so
+/// the provider/decparty can see and reassign them). Submitted as
+/// `ledger-api-user` acting as the coupons' sole signatory, `dso`.
+///
+/// `coupons` must be non-empty and share a `dso` (one `actAs`, one transaction).
+pub fn reward_coupon_create_command(coupons: &[SeedCoupon], command_id: &str) -> Value {
+    let dso = &coupons
+        .first()
+        .expect("at least one coupon to seed")
+        .dso
+        .clone();
+    let creates: Vec<Value> = coupons
+        .iter()
+        .map(|c| {
+            json!({
+                "CreateCommand": {
+                    "templateId": REWARD_COUPON_V2_TEMPLATE,
+                    "createArguments": {
+                        "dso": c.dso,
+                        "provider": c.provider,
+                        "round": { "number": c.round.to_string() },
+                        "amount": c.amount,
+                        "expiresAt": c.expires_at,
+                        "providerIsObserver": true,
+                        "beneficiary": Value::Null,
+                    }
                 }
-            }
-        }],
+            })
+        })
+        .collect();
+    json!({
+        "commands": creates,
         "commandId": command_id,
         "userId": "ledger-api-user",
-        "actAs": [c.dso],
-        "readAs": [c.dso],
+        "actAs": [dso],
+        "readAs": [dso],
     })
 }
 
@@ -180,7 +193,8 @@ mod tests {
             expires_at: "2026-07-24T20:00:00Z".into(),
             round: 0,
         };
-        let v = reward_coupon_create_command(&c, "seed-1");
+        let v = reward_coupon_create_command(std::slice::from_ref(&c), "seed-1");
+        assert_eq!(v["commands"].as_array().expect("commands array").len(), 1);
         let cmd = &v["commands"][0]["CreateCommand"];
         assert_eq!(cmd["templateId"], REWARD_COUPON_V2_TEMPLATE);
         let args = &cmd["createArguments"];
@@ -194,6 +208,28 @@ mod tests {
         assert_eq!(v["actAs"][0], "dso::1220"); // signatory = dso
         assert_eq!(v["userId"], "ledger-api-user");
         assert_eq!(v["commandId"], "seed-1");
+    }
+
+    #[test]
+    fn create_command_batches_many_coupons_into_one_transaction() {
+        // Seeding a multi-chunk set must not cost one round trip per coupon.
+        let seeds: Vec<SeedCoupon> = (0..20)
+            .map(|i| SeedCoupon {
+                dso: "dso::1220".into(),
+                provider: "decparty::1220".into(),
+                amount: "100.0".into(),
+                expires_at: "2026-07-24T20:00:00Z".into(),
+                round: i,
+            })
+            .collect();
+        let v = reward_coupon_create_command(&seeds, "seed-batch");
+        assert_eq!(v["commands"].as_array().expect("commands array").len(), 20);
+        assert_eq!(
+            v["commands"][19]["CreateCommand"]["createArguments"]["round"]["number"],
+            "19"
+        );
+        // One actAs for the whole transaction.
+        assert_eq!(v["actAs"].as_array().expect("actAs array").len(), 1);
     }
 
     #[test]

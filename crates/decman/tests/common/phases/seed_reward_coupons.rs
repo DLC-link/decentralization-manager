@@ -23,8 +23,23 @@ use crate::common::{
     phases::deploy_gov_core::{allocate_party, grant_rights},
 };
 
-/// Amulet amount for the seeded coupon; the 0.8/0.2 split yields 80.0 / 20.0.
-const SEED_AMOUNT: &str = "100.0";
+/// Amulet amount per seeded coupon; the 0.8/0.2 split yields 80.0 / 20.0 each.
+pub const SEED_AMOUNT: f64 = 100.0;
+
+/// How many unassigned coupons to seed.
+///
+/// Deliberately **more than one chunk**: `run_reassign_once` sizes a chunk in
+/// output creates (`MAX_CREATES / beneficiary_count` = 100/2 = 50 coupons here),
+/// so 60 forces the drain loop to submit a second `Delegation_Assign` — the
+/// multi-chunk path a single-coupon seed never reaches. (That the whole set
+/// drains within *one* tick is pinned down by the `drain_assignable` unit tests;
+/// an e2e poll cannot distinguish one draining tick from several chunking ones.)
+pub const SEED_COUPON_COUNT: usize = 60;
+
+/// Coupons per seed transaction. Keeps each seeding submission near the size
+/// devnet has proven (72 creates) so the seed itself is never the thing that
+/// fails when the point of the test is what the automation does afterwards.
+const SEED_TX_SIZE: usize = 20;
 
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     if f.target != TestTarget::Localnet {
@@ -45,26 +60,32 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     grant_rights(&*f, P1_JSON_API, &beneficiary_party, "participant-1").await?;
     grant_rights(&*f, P1_JSON_API, &operator_party, "participant-1").await?;
 
-    // A freshly issued coupon at the real 36h TTL: well clear of the 2h minting
-    // margin, so select_batch takes it on the next tick.
+    // Freshly issued coupons at the real 36h TTL: well clear of the 2h minting
+    // margin, so select_assignable takes them on the next tick. Distinct rounds
+    // keep the seeded contracts distinguishable in a failure dump.
     let expires_at = (Utc::now() + chrono::Duration::hours(36))
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string();
-    let seed = SeedCoupon {
-        dso,
-        provider: decparty.clone(),
-        amount: SEED_AMOUNT.to_string(),
-        expires_at,
-        round: 0,
-    };
-    let cmd = reward_coupon_create_command(&seed, &format!("seed-coupon-{}", f.run_id));
-    f.submit_create(P1_JSON_API, &cmd)
-        .await
-        .context("create seeded RewardCouponV2")?;
+    let seeds: Vec<SeedCoupon> = (0..SEED_COUPON_COUNT)
+        .map(|i| SeedCoupon {
+            dso: dso.clone(),
+            provider: decparty.clone(),
+            amount: format!("{SEED_AMOUNT:.1}"),
+            expires_at: expires_at.clone(),
+            round: i as i64,
+        })
+        .collect();
+    for (batch, chunk) in seeds.chunks(SEED_TX_SIZE).enumerate() {
+        let cmd =
+            reward_coupon_create_command(chunk, &format!("seed-coupons-{}-{batch}", f.run_id));
+        f.submit_create(P1_JSON_API, &cmd)
+            .await
+            .with_context(|| format!("create seeded RewardCouponV2 batch {batch}"))?;
+    }
 
     info!(
-        "seed_reward_coupons: created 1 unassigned RewardCouponV2 for {decparty} \
-         (beneficiary={beneficiary_party}, operator={operator_party})"
+        "seed_reward_coupons: created {SEED_COUPON_COUNT} unassigned RewardCouponV2 for \
+         {decparty} (beneficiary={beneficiary_party}, operator={operator_party})"
     );
     f.reward_beneficiary_party = Some(beneficiary_party);
     f.reward_operator_party = Some(operator_party);
