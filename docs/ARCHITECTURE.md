@@ -280,7 +280,7 @@ Creates a new decentralized party with multiple hosting participants.
 | 4 | SignDns | All | Each participant signs the DNS proposal with their namespace key |
 | 5 | SubmitDns | Coordinator | Submit signed DNS proposal to Canton, wait for topology propagation (30s) |
 | 6 | SignP2p | All | Each participant signs P2P proposals with their namespace key |
-| 7 | SubmitFinal | Coordinator | Submit signed P2P proposals, wait for propagation |
+| 7 | SubmitFinal | Coordinator | Re-sign the aggregate against the synchronizer store (the coordinator's namespace key only resolves once the DNS is active), verify the owner threshold is met, submit signed P2P proposals, wait for propagation |
 | 8 | Complete | All | Disconnect peers, workflow finished |
 
 **Canton API calls:**
