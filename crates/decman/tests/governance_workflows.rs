@@ -91,6 +91,11 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     // single invited peer (1 coordinator + 1 regular peer) before the
     // full-mesh happy path, which can't catch it because it invites everyone.
     phases::two_member_party::run(&mut f).await?;
+    // Regression guard for #261: a party whose threshold equals its owner
+    // count. The happy-path phases all use the majority default, where the
+    // peers' namespace signatures alone satisfy the P2P and the coordinator's
+    // missing one goes unnoticed.
+    phases::unanimous_threshold_party::run(&mut f).await?;
     phases::create_dec_party::run(&mut f).await?;
     phases::distribute_dars::run(&mut f).await?;
     phases::check_peer_dars::run(&mut f).await?;
