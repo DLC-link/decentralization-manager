@@ -426,14 +426,20 @@ fn parse_unassigned_coupon(
 // Coupon batch selection
 // ============================================================================
 
-/// A coupon is assignable (pure) iff enough time remains before expiry for a
-/// beneficiary to mint after assigning — `expiresAt - now >= minting_margin`.
-/// Assignment neither consumes the coupon nor shortens it (the per-beneficiary
-/// coupons inherit `expiresAt`), so there is no reason to hold a coupon back
-/// for being young: assigning as early as we see it leaves the beneficiary the
-/// most time to mint.
-fn is_assignable(c: &CouponInfo, now: DateTime<Utc>, minting_margin: chrono::Duration) -> bool {
-    c.expires_at - now >= minting_margin
+/// A coupon is assignable (pure) iff more than `expiry_margin` remains before
+/// it expires.
+///
+/// The margin exists to keep a coupon that is about to vanish out of a chunk:
+/// `Delegation_Assign` is all-or-nothing, so a coupon expiring between the ACS
+/// read and the commit fails the whole chunk. It is deliberately **not** a
+/// reserve of minting time for the beneficiary — withholding a coupon
+/// guarantees nobody ever mints it, whereas assigning it late still lets the
+/// beneficiary try, and the per-beneficiary coupons inherit `expiresAt`. For
+/// the same reason there is no minimum-age gate: assignment neither consumes
+/// the coupon nor shortens it, so assigning as early as we see it leaves the
+/// beneficiary the most time to mint.
+fn is_assignable(c: &CouponInfo, now: DateTime<Utc>, expiry_margin: chrono::Duration) -> bool {
+    c.expires_at - now >= expiry_margin
 }
 
 /// Every assignable coupon (pure), ordered most-urgent-first (ascending
@@ -445,11 +451,11 @@ fn is_assignable(c: &CouponInfo, now: DateTime<Utc>, minting_margin: chrono::Dur
 pub(crate) fn select_assignable(
     coupons: &[CouponInfo],
     now: DateTime<Utc>,
-    minting_margin: chrono::Duration,
+    expiry_margin: chrono::Duration,
 ) -> Vec<String> {
     let mut selected: Vec<&CouponInfo> = coupons
         .iter()
-        .filter(|c| is_assignable(c, now, minting_margin))
+        .filter(|c| is_assignable(c, now, expiry_margin))
         .collect();
     selected.sort_by_key(|c| c.expires_at);
     selected.into_iter().map(|c| c.cid.clone()).collect()
@@ -597,6 +603,10 @@ pub(crate) async fn submit_delegation_assign(
 /// coupon and this node's view is stale — so after
 /// `MAX_SINGLE_COUPON_FAILURES` of them the tick stops and lets the next tick
 /// re-read the ledger, rather than grinding through a set that is already gone.
+///
+/// The create budget and the expiry margin come from [`NodeConfig`] so they can
+/// be tuned against a live ledger without a rebuild; only the give-up count is
+/// fixed, since nothing about a deployment changes the right value for it.
 pub(crate) async fn run_reassign_once(
     config: &NodeConfig,
     decparty: &CantonId,
@@ -606,12 +616,9 @@ pub(crate) async fn run_reassign_once(
     test_mode: bool,
     packages: &PackageConfig,
 ) -> anyhow::Result<()> {
-    const MINTING_MARGIN: chrono::Duration = chrono::Duration::hours(2);
-    /// Output contracts one `Delegation_Assign` may create. Devnet has committed
-    /// 72 (36 coupons × 2 beneficiaries), so this is above the proven floor and
-    /// below an unmeasured ceiling; halve-on-failure covers a wrong guess.
-    const MAX_CREATES: usize = 100;
     const MAX_SINGLE_COUPON_FAILURES: usize = 3;
+    let expiry_margin =
+        chrono::Duration::seconds(config.reward_min_expiry_margin_secs.min(i64::MAX as u64) as i64);
 
     let coupons = unassigned_coupons(
         config,
@@ -621,14 +628,14 @@ pub(crate) async fn run_reassign_once(
         packages,
     )
     .await?;
-    let assignable = select_assignable(&coupons, Utc::now(), MINTING_MARGIN);
+    let assignable = select_assignable(&coupons, Utc::now(), expiry_margin);
     if assignable.is_empty() {
         return Ok(()); // nothing assignable -> no-op
     }
 
     let assigned = drain_assignable(
         &assignable,
-        chunk_size(MAX_CREATES, delegation.beneficiary_count),
+        chunk_size(config.reward_max_creates, delegation.beneficiary_count),
         MAX_SINGLE_COUPON_FAILURES,
         decparty,
         |primary, additional| {
@@ -968,13 +975,26 @@ mod tests {
             // ~35h to expiry -> freshly minted, but nothing is gained by
             // holding it back -> included.
             coupon("young", "2026-07-21T23:00:00Z"),
-            // 8h to expiry -> plenty of margin -> included.
+            // 8h to expiry -> included.
             coupon("mid", "2026-07-20T20:00:00Z"),
-            // 30m to expiry -> inside 2h minting margin -> excluded.
-            coupon("urgent", "2026-07-20T12:30:00Z"),
+            // 30s to expiry -> may vanish mid-submission and fail the whole
+            // chunk -> excluded.
+            coupon("expiring", "2026-07-20T12:00:30Z"),
         ];
-        let got = select_assignable(&coupons, now, chrono::Duration::hours(2));
+        let got = select_assignable(&coupons, now, chrono::Duration::minutes(2));
         assert_eq!(got, vec!["mid".to_string(), "young".to_string()]);
+    }
+
+    #[test]
+    fn select_assignable_keeps_a_coupon_the_beneficiary_may_not_have_time_to_mint() {
+        // The margin guards our own submission, not the beneficiary's minting
+        // window: withholding a coupon guarantees nobody mints it, while
+        // assigning it late still lets the beneficiary try. A coupon 30 min from
+        // expiry is well past any minting comfort but safely assignable.
+        let now = dt("2026-07-20T12:00:00Z");
+        let coupons = vec![coupon("late", "2026-07-20T12:30:00Z")];
+        let got = select_assignable(&coupons, now, chrono::Duration::minutes(2));
+        assert_eq!(got, vec!["late".to_string()]);
     }
 
     #[test]

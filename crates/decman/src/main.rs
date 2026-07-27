@@ -82,6 +82,8 @@ async fn main() -> Result {
             noise_retry_max_attempts,
             noise_retry_backoff_ms,
             reward_automation_interval_secs,
+            reward_max_creates,
+            reward_min_expiry_margin_secs,
             db_encryption_key,
             insecure,
             canton_hmac_secret,
@@ -184,6 +186,12 @@ async fn main() -> Result {
             }
             if let Some(v) = reward_automation_interval_secs {
                 config.reward_automation_interval_secs = *v;
+            }
+            if let Some(v) = reward_max_creates {
+                config.reward_max_creates = *v;
+            }
+            if let Some(v) = reward_min_expiry_margin_secs {
+                config.reward_min_expiry_margin_secs = *v;
             }
 
             config.insecure = *insecure;

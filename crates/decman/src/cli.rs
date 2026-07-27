@@ -201,5 +201,15 @@ pub enum Commands {
         /// this only controls cadence. Defaults to 300.
         #[arg(long, env = "DECPM_REWARD_AUTOMATION_INTERVAL_SECS")]
         reward_automation_interval_secs: Option<u64>,
+        /// Output contracts one Delegation_Assign may create, bounding the
+        /// coupons per transaction. Raise stepwise to find the ledger's real
+        /// ceiling; a too-high value self-corrects by halving. Defaults to 100.
+        #[arg(long, env = "DECPM_REWARD_MAX_CREATES")]
+        reward_max_creates: Option<usize>,
+        /// Seconds a coupon must have left before expiry to be assigned. Guards
+        /// against a coupon vanishing mid-submission, not a minting reserve for
+        /// the beneficiary. Defaults to 120.
+        #[arg(long, env = "DECPM_REWARD_MIN_EXPIRY_MARGIN_SECS")]
+        reward_min_expiry_margin_secs: Option<u64>,
     },
 }

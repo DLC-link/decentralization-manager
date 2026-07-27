@@ -224,6 +224,6 @@ curl -X POST http://<decman-node>:8080/governance/propose -H "Content-Type: appl
   coupons.
 - **Reassignment cadence.** The `reward_automation` loop assigns every
   assignable coupon each tick, in chunks sized by output creates
-  (`MAX_CREATES / beneficiary_count`). Throughput does not depend on the tick
+  (`reward_max_creates / beneficiary_count`). Throughput does not depend on the tick
   interval, so the interval only trades assignment latency against transaction
   cost.
