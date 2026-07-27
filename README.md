@@ -162,6 +162,16 @@ The database file path can be overridden with the `--db` CLI flag.
 | `DECPM_CANTON_LEDGER_PORT` | Canton Ledger API port | `5001` |
 | `DECPM_CANTON_SYNCHRONIZER` | Canton synchronizer name | `global` |
 | `DECPM_CANTON_NETWORK` | Canton network environment (`devnet`, `testnet`, `mainnet`) | `devnet` |
+| `DECPM_CANTON_ADMIN_TLS` | Speak TLS to the Canton Admin API (see [TLS to the participant](#tls-to-the-participant)) | `false` |
+| `DECPM_CANTON_ADMIN_TLS_CA_CERT` | PEM of the CA that issued the Admin API certificate. Needed when that CA is private | _(platform trust store)_ |
+| `DECPM_CANTON_ADMIN_TLS_CLIENT_CERT` | PEM client certificate, for an Admin API that requires mTLS | _(none)_ |
+| `DECPM_CANTON_ADMIN_TLS_CLIENT_KEY` | PEM client key matching `DECPM_CANTON_ADMIN_TLS_CLIENT_CERT` | _(none)_ |
+| `DECPM_CANTON_ADMIN_TLS_DOMAIN` | Name to validate the Admin API certificate against, when it differs from the host being dialed | _(the configured host)_ |
+| `DECPM_CANTON_LEDGER_TLS` | Speak TLS to the Canton Ledger API | `false` |
+| `DECPM_CANTON_LEDGER_TLS_CA_CERT` | Ledger API equivalent of `DECPM_CANTON_ADMIN_TLS_CA_CERT` | _(platform trust store)_ |
+| `DECPM_CANTON_LEDGER_TLS_CLIENT_CERT` | Ledger API equivalent of `DECPM_CANTON_ADMIN_TLS_CLIENT_CERT` | _(none)_ |
+| `DECPM_CANTON_LEDGER_TLS_CLIENT_KEY` | Ledger API equivalent of `DECPM_CANTON_ADMIN_TLS_CLIENT_KEY` | _(none)_ |
+| `DECPM_CANTON_LEDGER_TLS_DOMAIN` | Ledger API equivalent of `DECPM_CANTON_ADMIN_TLS_DOMAIN` | _(the configured host)_ |
 | `DECPM_KEYCLOAK_URL` | Keycloak server URL for frontend auth | _(none)_ |
 | `DECPM_KEYCLOAK_REALM` | Keycloak realm name for frontend auth | _(none)_ |
 | `DECPM_KEYCLOAK_CLIENT_ID` | Keycloak client ID for frontend auth | _(none)_ |
@@ -182,6 +192,38 @@ The database file path can be overridden with the `--db` CLI flag.
 | `DECPM_NOISE_RETRY_BACKOFF_MS` | Backoff between attempts of the bounded peer-Noise retry wrapper, in milliseconds | `250` |
 
 All environment variables can also be passed as CLI arguments (e.g., `--canton-admin-host`).
+
+### TLS to the participant
+
+DecMan talks to the participant over two gRPC channels, the Admin API and the
+Ledger API, and each is configured independently. Both default to plaintext
+h2c, which is the right setting when the participant is only reachable over a
+trusted private network — loopback, a Docker network, or a pod.
+
+Turn TLS on per endpoint when the participant serves it:
+
+```bash
+# Participant behind a private CA (the usual case).
+DECPM_CANTON_ADMIN_TLS=true
+DECPM_CANTON_ADMIN_TLS_CA_CERT=/etc/decman/tls/canton-ca.pem
+DECPM_CANTON_LEDGER_TLS=true
+DECPM_CANTON_LEDGER_TLS_CA_CERT=/etc/decman/tls/canton-ca.pem
+```
+
+- **Publicly-issued certificate**: set only the `_TLS` flag. With no CA file
+  the platform trust store is used.
+- **mTLS**: add `_TLS_CLIENT_CERT` and `_TLS_CLIENT_KEY`. Setting one without
+  the other is rejected at startup rather than silently ignored.
+- **Certificate issued to a name you are not dialing** — e.g. a cert for a
+  Kubernetes service DNS name while DecMan connects by IP: set `_TLS_DOMAIN`
+  to the name on the certificate.
+
+A mismatch between these settings and what the endpoint actually speaks
+surfaces on the first call, because a plaintext client against a TLS listener
+gets its connection closed on the first bytes. The connect error names the
+variable to change in either direction, so `transport error` /
+`BrokenPipe` on every Canton call is worth reading in full before digging
+further.
 
 ### Insecure mode (local development without an IdP)
 
