@@ -681,13 +681,18 @@ where
         let (primary, additional) = assignable[offset..end]
             .split_first()
             .expect("offset < len, so the chunk is non-empty");
+        // Halve from what was actually submitted, not from `size`. A `size`
+        // larger than the remaining set produces a smaller chunk, and halving
+        // `size` would then resubmit the identical command until `size` decayed
+        // below the set length — log2(size) wasted attempts per contended tick.
+        let submitted = end - offset;
         match submit(primary, additional).await {
             Ok(()) => {
-                assigned += end - offset;
+                assigned += submitted;
                 offset = end;
             }
-            Err(e) if size > 1 => {
-                size /= 2;
+            Err(e) if submitted > 1 => {
+                size = submitted / 2;
                 tracing::warn!(%decparty, error = %e, new_chunk = size, "assign chunk failed; retrying smaller");
             }
             Err(e) => {
@@ -1067,6 +1072,23 @@ mod tests {
         assert_eq!(assigned, 0);
         // 4, 2, then 1 three times -> 5 attempts, then stop.
         assert_eq!(*seen.borrow(), vec![4, 2, 1, 1, 1]);
+    }
+
+    #[tokio::test]
+    async fn drain_does_not_resubmit_an_identical_chunk_when_the_set_is_smaller() {
+        // Regression (devnet, 2026-07-27): with one assignable coupon and a
+        // chunk of 50, the submitted chunk is 1 either way, so halving `size`
+        // resent the SAME command 5 times before the give-up path could fire.
+        // Contention must cost one attempt, not log2(chunk).
+        let all = cids(1);
+        let (seen, submit) = recorder(vec![false]);
+        let assigned = drain_assignable(&all, 50, 3, &alice(), submit).await;
+        assert_eq!(assigned, 0);
+        assert_eq!(
+            *seen.borrow(),
+            vec![1],
+            "one attempt, not a halving cascade"
+        );
     }
 
     #[tokio::test]
