@@ -243,8 +243,7 @@ pub async fn create_proposals(
         tracing::info!("  Key {index}: fingerprint={fp}", index = idx + 1);
     }
 
-    let mut topology_client =
-        TopologyManagerWriteServiceClient::connect(config.admin_api_url()).await?;
+    let mut topology_client = TopologyManagerWriteServiceClient::new(config.admin_channel().await?);
 
     // Create DNS proposal in Authorized store
     // The coordinator creates this proposal locally, which will later be shared with peers

@@ -365,9 +365,7 @@ async fn supplement_owner_keys_from_topology(
     db: &SqlitePool,
     parties: &[DecentralizedParty],
 ) -> Result {
-    let channel = tonic::transport::Channel::from_shared(config.admin_api_url())?
-        .connect()
-        .await?;
+    let channel = config.admin_channel().await?;
     let mut topology_client = TopologyManagerReadServiceClient::new(channel)
         .max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
@@ -661,9 +659,7 @@ pub async fn fetch_decentralized_parties(
     auth: Option<WorkflowAuth>,
     _party_credentials: &[PartyCredentials], // TODO: remove this parameter, packages are now hardcoded
 ) -> Result<DecentralizedPartiesResponse> {
-    let channel = tonic::transport::Channel::from_shared(config.admin_api_url())?
-        .connect()
-        .await?;
+    let channel = config.admin_channel().await?;
 
     let mut topology_client = TopologyManagerReadServiceClient::new(channel.clone())
         .max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
@@ -856,8 +852,8 @@ pub async fn fetch_decentralized_parties(
 )]
 #[get("/packages/vetted")]
 pub async fn get_vetted_packages(data: web::Data<AppState>) -> impl Responder {
-    let mut client = match PackageServiceClient::connect(data.config.admin_api_url()).await {
-        Ok(c) => c,
+    let mut client = match data.config.admin_channel().await {
+        Ok(channel) => PackageServiceClient::new(channel),
         Err(e) => {
             return HttpResponse::InternalServerError().json(ErrorResponse {
                 error: format!("Failed to connect to Canton: {e}"),
@@ -1069,7 +1065,7 @@ async fn fetch_peer_packages(
     config: &NodeConfig,
     db: &SqlitePool,
 ) -> Result<PeerPackageComparison> {
-    let mut client = PackageServiceClient::connect(config.admin_api_url()).await?;
+    let mut client = PackageServiceClient::new(config.admin_channel().await?);
     let local_response = client
         .list_packages(tonic::Request::new(ListPackagesRequest {
             limit: 0,
@@ -1179,9 +1175,7 @@ async fn fetch_peer_packages(
 /// Query the local participant's vault for namespace key fingerprints.
 /// Returns a set of fingerprints that identify this node as an owner.
 async fn get_local_namespace_fingerprints(config: &NodeConfig) -> Result<HashSet<String>> {
-    let channel = tonic::transport::Channel::from_shared(config.admin_api_url())?
-        .connect()
-        .await?;
+    let channel = config.admin_channel().await?;
 
     let mut vault_client =
         VaultServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);

@@ -152,6 +152,14 @@ stringData:
   DECPM_CANTON_NETWORK: "mainnet"          # mainnet | testnet | devnet
   DECPM_CANTON_SYNCHRONIZER: "global"
 
+  # Set when the participant serves its APIs over TLS. Point the CA vars at
+  # the issuing CA if it is a private one; omit them to use the platform
+  # trust store. See the environment table below for mTLS and SNI overrides.
+  # DECPM_CANTON_ADMIN_TLS: "true"
+  # DECPM_CANTON_ADMIN_TLS_CA_CERT: "/etc/decman/tls/canton-ca.pem"
+  # DECPM_CANTON_LEDGER_TLS: "true"
+  # DECPM_CANTON_LEDGER_TLS_CA_CERT: "/etc/decman/tls/canton-ca.pem"
+
   # Keycloak (gates the admin UI).
   DECPM_KEYCLOAK_URL: "https://<your-keycloak-host>"
   DECPM_KEYCLOAK_REALM: "<your-realm>"
@@ -367,6 +375,16 @@ Most variables have a default that's only useful for local development (loopback
 | `DECPM_CANTON_LEDGER_HOST` | `127.0.0.1` | **yes** | Canton Ledger API host |
 | `DECPM_CANTON_LEDGER_PORT` | `5001` | optional | Canton Ledger API port |
 | `DECPM_CANTON_SYNCHRONIZER` | `global` | optional | Synchronizer name |
+| `DECPM_CANTON_ADMIN_TLS` | `false` | optional | Speak TLS to the Admin API. Leave off for a participant reachable only over a trusted private network |
+| `DECPM_CANTON_ADMIN_TLS_CA_CERT` | unset | optional | PEM of the CA that issued the Admin API certificate. Required when that CA is private; the platform trust store is used when unset |
+| `DECPM_CANTON_ADMIN_TLS_CLIENT_CERT` | unset | optional | PEM client certificate, for an Admin API requiring mTLS. Set with the key |
+| `DECPM_CANTON_ADMIN_TLS_CLIENT_KEY` | unset | optional | PEM client key matching the certificate |
+| `DECPM_CANTON_ADMIN_TLS_DOMAIN` | unset | optional | Name to validate the Admin API certificate against, when it differs from the host — e.g. a certificate issued for a service DNS name while DecMan connects by IP |
+| `DECPM_CANTON_LEDGER_TLS` | `false` | optional | As above, for the Ledger API |
+| `DECPM_CANTON_LEDGER_TLS_CA_CERT` | unset | optional | |
+| `DECPM_CANTON_LEDGER_TLS_CLIENT_CERT` | unset | optional | |
+| `DECPM_CANTON_LEDGER_TLS_CLIENT_KEY` | unset | optional | |
+| `DECPM_CANTON_LEDGER_TLS_DOMAIN` | unset | optional | |
 | `DECPM_CANTON_NETWORK` | `devnet` | **yes** | `mainnet`, `testnet`, or `devnet` |
 | `DECPM_KEYCLOAK_URL` | unset | **yes**¹ | Keycloak server URL for frontend auth |
 | `DECPM_KEYCLOAK_REALM` | unset | **yes**¹ | Keycloak realm |

@@ -3,7 +3,7 @@ mod cli;
 use std::path::PathBuf;
 
 use dec_party_manager::{
-    config::{Auth0Config, KeycloakConfig, NodeConfig},
+    config::{Auth0Config, CantonTlsConfig, KeycloakConfig, NodeConfig},
     db,
     error::Result,
     utils,
@@ -11,6 +11,35 @@ use dec_party_manager::{
 use tracing_subscriber::{filter::EnvFilter, prelude::*};
 
 use cli::{Cli, Commands, Parser};
+
+/// The TLS flags for one Canton endpoint, as parsed from the CLI/env.
+struct TlsOverrides<'a> {
+    enabled: &'a Option<bool>,
+    ca_cert: &'a Option<String>,
+    client_cert: &'a Option<String>,
+    client_key: &'a Option<String>,
+    domain: &'a Option<String>,
+}
+
+/// Apply whichever TLS flags the operator set, leaving the rest at their
+/// defaults (TLS off, platform trust store, no client identity).
+fn apply_tls_overrides(tls: &mut CantonTlsConfig, overrides: TlsOverrides<'_>) {
+    if let Some(enabled) = overrides.enabled {
+        tls.enabled = *enabled;
+    }
+    if let Some(path) = overrides.ca_cert {
+        tls.ca_cert = Some(path.clone());
+    }
+    if let Some(path) = overrides.client_cert {
+        tls.client_cert = Some(path.clone());
+    }
+    if let Some(path) = overrides.client_key {
+        tls.client_key = Some(path.clone());
+    }
+    if let Some(domain) = overrides.domain {
+        tls.domain = Some(domain.clone());
+    }
+}
 
 /// Extract the --dir / -d value from raw args before clap parses,
 /// so we can load the .env file from that directory first.
@@ -65,6 +94,16 @@ async fn main() -> Result {
             canton_admin_port,
             canton_ledger_host,
             canton_ledger_port,
+            canton_admin_tls,
+            canton_admin_tls_ca_cert,
+            canton_admin_tls_client_cert,
+            canton_admin_tls_client_key,
+            canton_admin_tls_domain,
+            canton_ledger_tls,
+            canton_ledger_tls_ca_cert,
+            canton_ledger_tls_client_cert,
+            canton_ledger_tls_client_key,
+            canton_ledger_tls_domain,
             canton_synchronizer,
             canton_network,
             keycloak_url,
@@ -113,6 +152,26 @@ async fn main() -> Result {
             if let Some(p) = canton_ledger_port {
                 config.canton.ledger_api_port = *p;
             }
+            apply_tls_overrides(
+                &mut config.canton.admin_api_tls,
+                TlsOverrides {
+                    enabled: canton_admin_tls,
+                    ca_cert: canton_admin_tls_ca_cert,
+                    client_cert: canton_admin_tls_client_cert,
+                    client_key: canton_admin_tls_client_key,
+                    domain: canton_admin_tls_domain,
+                },
+            );
+            apply_tls_overrides(
+                &mut config.canton.ledger_api_tls,
+                TlsOverrides {
+                    enabled: canton_ledger_tls,
+                    ca_cert: canton_ledger_tls_ca_cert,
+                    client_cert: canton_ledger_tls_client_cert,
+                    client_key: canton_ledger_tls_client_key,
+                    domain: canton_ledger_tls_domain,
+                },
+            );
             if let Some(sync) = canton_synchronizer {
                 config.canton.synchronizer = sync.clone();
             }

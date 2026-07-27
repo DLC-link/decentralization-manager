@@ -147,7 +147,7 @@ pub async fn sign_submissions(
     tracing::debug!("This is the key that was generated in step 1 and added to P2P mapping");
 
     // Verify this key exists in Canton's vault
-    let mut vault_client = VaultServiceClient::connect(config.admin_api_url()).await?;
+    let mut vault_client = VaultServiceClient::new(config.admin_channel().await?);
 
     let keys_response = vault_client
         .list_my_keys(tonic::Request::new(ListMyKeysRequest {
@@ -473,8 +473,7 @@ async fn backfill_peer_keys_from_chain(
     };
 
     // 1. Current format: signing keys embedded on the PartyToParticipant.
-    let mut topology_client =
-        TopologyManagerReadServiceClient::connect(config.admin_api_url()).await?;
+    let mut topology_client = TopologyManagerReadServiceClient::new(config.admin_channel().await?);
     let p2p_response = topology_client
         .list_party_to_participant(tonic::Request::new(ListPartyToParticipantRequest {
             base_query: Some(base_query.clone()),
@@ -525,7 +524,7 @@ async fn backfill_peer_keys_from_chain(
     // 3. Walk the on-chain keys and pick the one our vault recognizes — that's
     //    this node's contribution. Other entries belong to peer participants
     //    and their private halves are not in our vault.
-    let mut vault_client = VaultServiceClient::connect(config.admin_api_url()).await?;
+    let mut vault_client = VaultServiceClient::new(config.admin_channel().await?);
     for key in &signing_keys {
         let fingerprint = utils::compute_fingerprint(key);
         let resp = vault_client

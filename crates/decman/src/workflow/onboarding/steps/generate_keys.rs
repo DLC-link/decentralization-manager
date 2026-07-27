@@ -50,7 +50,7 @@ pub async fn generate_keys(
 ) -> Result {
     tracing::info!("Generating cryptographic keys...");
 
-    let mut vault_client = VaultServiceClient::connect(config.admin_api_url()).await?;
+    let mut vault_client = VaultServiceClient::new(config.admin_channel().await?);
 
     // Derive key names from party_id_prefix
     let namespace_key_name = onboarding_config.namespace_key_name();
@@ -207,7 +207,7 @@ async fn namespace_delegation_exists(
     namespace_fingerprint: &str,
 ) -> Result<bool> {
     let mut topology_read_client =
-        TopologyManagerReadServiceClient::connect(config.admin_api_url()).await?;
+        TopologyManagerReadServiceClient::new(config.admin_channel().await?);
 
     let response = topology_read_client
         .list_namespace_delegation(tonic::Request::new(ListNamespaceDelegationRequest {
@@ -262,8 +262,7 @@ pub(crate) async fn propose_namespace_delegation(
         )),
     };
 
-    let mut topology_client =
-        TopologyManagerWriteServiceClient::connect(config.admin_api_url()).await?;
+    let mut topology_client = TopologyManagerWriteServiceClient::new(config.admin_channel().await?);
 
     let request = tonic::Request::new(AuthorizeRequest {
         r#type: Some(authorize_request::Type::Proposal(

@@ -73,7 +73,10 @@ tokio-rustls = { version = "0.26", default-features = false, features = [
 ] }
 tokio-stream = { version = "0.1" }
 toml = { version = "1.1.2" }
-tonic = { version = "0.14.2" }
+tonic = { version = "0.14.2", features = [
+    "tls-aws-lc",
+    "tls-native-roots",
+] }
 tonic-prost = { version = "0.14.2" }
 tracing = { version = "0.1" }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
