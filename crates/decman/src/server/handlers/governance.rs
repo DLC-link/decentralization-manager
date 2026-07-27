@@ -1328,18 +1328,11 @@ pub async fn propose_action(
         prefetch_contract_keys: vec![],
     };
 
-    let channel = match tonic::transport::Channel::from_shared(data.config.ledger_api_url()) {
-        Ok(endpoint) => match endpoint.connect().await {
-            Ok(ch) => ch,
-            Err(e) => {
-                return HttpResponse::InternalServerError().json(ErrorResponse {
-                    error: format!("Failed to connect to ledger API: {e}"),
-                });
-            }
-        },
+    let channel = match data.config.ledger_channel().await {
+        Ok(channel) => channel,
         Err(e) => {
             return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Invalid ledger API URL: {e}"),
+                error: format!("Failed to connect to ledger API: {e:#}"),
             });
         }
     };
@@ -2022,11 +2015,7 @@ async fn get_party_token(data: &web::Data<AppState>, party_id: &CantonId) -> Opt
 async fn get_party_threshold(data: &web::Data<AppState>, party_id: &CantonId) -> Option<usize> {
     let namespace = party_id.namespace.to_hex();
 
-    let channel = tonic::transport::Channel::from_shared(data.config.admin_api_url())
-        .ok()?
-        .connect()
-        .await
-        .ok()?;
+    let channel = data.config.admin_channel().await.ok()?;
 
     let mut topology_client = TopologyManagerReadServiceClient::new(channel)
         .max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
@@ -2181,9 +2170,7 @@ async fn execute_confirm_action(
         .await;
     }
 
-    let channel = tonic::transport::Channel::from_shared(config.ledger_api_url())?
-        .connect()
-        .await?;
+    let channel = config.ledger_channel().await?;
 
     let mut client =
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
@@ -2354,9 +2341,7 @@ async fn execute_confirmed_action(
         }
     }
 
-    let channel = tonic::transport::Channel::from_shared(config.ledger_api_url())?
-        .connect()
-        .await?;
+    let channel = config.ledger_channel().await?;
 
     let mut client =
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
@@ -2522,9 +2507,7 @@ async fn execute_expire_confirmation(
         .await;
     }
 
-    let channel = tonic::transport::Channel::from_shared(config.ledger_api_url())?
-        .connect()
-        .await?;
+    let channel = config.ledger_channel().await?;
 
     let mut client =
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
@@ -2641,9 +2624,7 @@ async fn execute_cancel_confirmation(
         .await;
     }
 
-    let channel = tonic::transport::Channel::from_shared(config.ledger_api_url())?
-        .connect()
-        .await?;
+    let channel = config.ledger_channel().await?;
 
     let mut client =
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);

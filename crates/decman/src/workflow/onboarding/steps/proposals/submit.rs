@@ -78,7 +78,7 @@ pub async fn submit_dns_proposals(
 
     tracing::info!("Submitting aggregated DNS proposal...");
     let mut topology_write_client =
-        TopologyManagerWriteServiceClient::connect(config.admin_api_url()).await?;
+        TopologyManagerWriteServiceClient::new(config.admin_channel().await?);
 
     let request = tonic::Request::new(AddTransactionsRequest {
         transactions: vec![dns_transaction],
@@ -123,7 +123,7 @@ async fn wait_for_dns_in_topology(
     namespace: &str,
 ) -> Result {
     let mut topology_read_client =
-        TopologyManagerReadServiceClient::connect(config.admin_api_url()).await?;
+        TopologyManagerReadServiceClient::new(config.admin_channel().await?);
 
     let max_attempts = topology_retry_max_attempts();
     let retry_delay = time::Duration::from_secs(topology_retry_delay_secs());
@@ -257,7 +257,7 @@ pub async fn submit_final_proposals(
 
     tracing::info!("Submitting aggregated P2P proposal...");
     let mut topology_write_client =
-        TopologyManagerWriteServiceClient::connect(config.admin_api_url()).await?;
+        TopologyManagerWriteServiceClient::new(config.admin_channel().await?);
 
     let request = tonic::Request::new(AddTransactionsRequest {
         transactions: vec![p2p_transaction.clone()],
@@ -437,7 +437,7 @@ async fn wait_for_p2p_in_topology(
 ) -> Result<prost_types::Timestamp> {
     let party_id_str = party_id.to_string();
     let mut topology_read_client =
-        TopologyManagerReadServiceClient::connect(config.admin_api_url()).await?;
+        TopologyManagerReadServiceClient::new(config.admin_channel().await?);
 
     let max_attempts = topology_retry_max_attempts();
     let retry_delay = time::Duration::from_secs(topology_retry_delay_secs());

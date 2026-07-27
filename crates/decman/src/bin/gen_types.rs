@@ -19,8 +19,8 @@ use ts_rs::{Config, TS};
 use common::{api::*, types::*};
 use dec_party_manager::{
     config::{
-        Auth0Config, CantonConfig, KeycloakConfig, Network, NetworkConfig, NodeConfig, NodeInfo,
-        NoiseRetryConfig, Peer, Timeouts,
+        Auth0Config, CantonConfig, CantonTlsConfig, KeycloakConfig, Network, NetworkConfig,
+        NodeConfig, NodeInfo, NoiseRetryConfig, Peer, Timeouts,
     },
     server::{
         AcceptTransferDetails, ActionType, AppRewardBeneficiary, BillingParams,
@@ -175,6 +175,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // node config DTOs
         Auth0Config,
         CantonConfig,
+        CantonTlsConfig,
         KeycloakConfig,
         Network,
         NetworkConfig,

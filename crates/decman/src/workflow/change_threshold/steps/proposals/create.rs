@@ -103,8 +103,7 @@ pub async fn create_proposals(
     };
 
     // Create proposals using topology manager
-    let mut topology_client =
-        TopologyManagerWriteServiceClient::connect(config.admin_api_url()).await?;
+    let mut topology_client = TopologyManagerWriteServiceClient::new(config.admin_channel().await?);
 
     // Create DNS proposal
     tracing::info!("Creating DNS change-threshold proposal...");

@@ -85,6 +85,48 @@ pub enum Commands {
         #[arg(long, env = "DECPM_CANTON_LEDGER_PORT")]
         canton_ledger_port: Option<u16>,
 
+        /// Speak TLS to the Canton Admin API
+        #[arg(long, env = "DECPM_CANTON_ADMIN_TLS")]
+        canton_admin_tls: Option<bool>,
+
+        /// PEM file of the CA that issued the Admin API certificate
+        #[arg(long, env = "DECPM_CANTON_ADMIN_TLS_CA_CERT")]
+        canton_admin_tls_ca_cert: Option<String>,
+
+        /// PEM client certificate for Admin API mTLS
+        #[arg(long, env = "DECPM_CANTON_ADMIN_TLS_CLIENT_CERT")]
+        canton_admin_tls_client_cert: Option<String>,
+
+        /// PEM client key for Admin API mTLS
+        #[arg(long, env = "DECPM_CANTON_ADMIN_TLS_CLIENT_KEY")]
+        canton_admin_tls_client_key: Option<String>,
+
+        /// Name to validate the Admin API certificate against, when it
+        /// differs from the configured host
+        #[arg(long, env = "DECPM_CANTON_ADMIN_TLS_DOMAIN")]
+        canton_admin_tls_domain: Option<String>,
+
+        /// Speak TLS to the Canton Ledger API
+        #[arg(long, env = "DECPM_CANTON_LEDGER_TLS")]
+        canton_ledger_tls: Option<bool>,
+
+        /// PEM file of the CA that issued the Ledger API certificate
+        #[arg(long, env = "DECPM_CANTON_LEDGER_TLS_CA_CERT")]
+        canton_ledger_tls_ca_cert: Option<String>,
+
+        /// PEM client certificate for Ledger API mTLS
+        #[arg(long, env = "DECPM_CANTON_LEDGER_TLS_CLIENT_CERT")]
+        canton_ledger_tls_client_cert: Option<String>,
+
+        /// PEM client key for Ledger API mTLS
+        #[arg(long, env = "DECPM_CANTON_LEDGER_TLS_CLIENT_KEY")]
+        canton_ledger_tls_client_key: Option<String>,
+
+        /// Name to validate the Ledger API certificate against, when it
+        /// differs from the configured host
+        #[arg(long, env = "DECPM_CANTON_LEDGER_TLS_DOMAIN")]
+        canton_ledger_tls_domain: Option<String>,
+
         /// Canton synchronizer name
         #[arg(long, env = "DECPM_CANTON_SYNCHRONIZER")]
         canton_synchronizer: Option<String>,

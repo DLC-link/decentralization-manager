@@ -63,8 +63,7 @@ pub async fn sign_transactions_with_topology_retry(
     request: SignTransactionsRequest,
     label: &str,
 ) -> Result<SignTransactionsResponse> {
-    let mut topology_client =
-        TopologyManagerWriteServiceClient::connect(config.admin_api_url()).await?;
+    let mut topology_client = TopologyManagerWriteServiceClient::new(config.admin_channel().await?);
 
     let max_attempts = topology_retry_max_attempts();
     let retry_delay = Duration::from_secs(topology_retry_delay_secs());
@@ -114,8 +113,7 @@ pub async fn authorize_with_topology_retry(
     request: AuthorizeRequest,
     label: &str,
 ) -> Result<AuthorizeResponse> {
-    let mut topology_client =
-        TopologyManagerWriteServiceClient::connect(config.admin_api_url()).await?;
+    let mut topology_client = TopologyManagerWriteServiceClient::new(config.admin_channel().await?);
 
     let max_attempts = topology_retry_max_attempts();
     let retry_delay = Duration::from_secs(topology_retry_delay_secs());
@@ -228,7 +226,7 @@ pub async fn fetch_p2p_mapping(
     party_id: &CantonId,
 ) -> Result<PartyToParticipant> {
     let mut topology_read_client =
-        TopologyManagerReadServiceClient::connect(config.admin_api_url()).await?;
+        TopologyManagerReadServiceClient::new(config.admin_channel().await?);
 
     let request = tonic::Request::new(ListPartyToParticipantRequest {
         base_query: Some(head_state_query(synchronizer_id)),
@@ -257,7 +255,7 @@ pub async fn fetch_namespace_definition(
     namespace_hex: &str,
 ) -> Result<DecentralizedNamespaceDefinition> {
     let mut topology_read_client =
-        TopologyManagerReadServiceClient::connect(config.admin_api_url()).await?;
+        TopologyManagerReadServiceClient::new(config.admin_channel().await?);
 
     let request = tonic::Request::new(ListDecentralizedNamespaceDefinitionRequest {
         base_query: Some(head_state_query(synchronizer_id)),
@@ -480,7 +478,7 @@ where
     P2pFut: Future<Output = Result>,
 {
     let mut topology_write_client =
-        TopologyManagerWriteServiceClient::connect(config.admin_api_url()).await?;
+        TopologyManagerWriteServiceClient::new(config.admin_channel().await?);
 
     tracing::info!("Submitting DNS {label} proposal...");
     topology_write_client

@@ -4,6 +4,7 @@ pub mod add_party;
 pub mod add_party_edge_cases;
 pub mod cancel_cascades;
 pub mod cancel_stuck_contracts;
+pub mod canton_admin_tls;
 pub mod check_peer_dars;
 pub mod concurrent_cross_workflows;
 pub mod concurrent_sibling_cancel;

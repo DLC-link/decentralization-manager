@@ -141,7 +141,6 @@ struct WorkflowTriggers {
     /// identity, admin URL, or synchronizer alias as a bundle (e.g.
     /// `list_my_owner_keys`'s P2P filter, see #149).
     config: NodeConfig,
-    admin_api_url: String,
     /// Cache for chunked ListPackages responses, keyed by the requesting
     /// peer's pubkey (hex). Populated when a ListPackages response exceeds
     /// `MAX_PAYLOAD_SIZE`; consumed by subsequent GetChunk requests from the
@@ -1006,7 +1005,6 @@ pub async fn start_server(
     let heartbeat_triggers = WorkflowTriggers {
         pending_invitations: pending_invitations.clone(),
         config: config.clone(),
-        admin_api_url: config.admin_api_url(),
         list_packages_chunk_cache: Arc::new(Mutex::new(HashMap::new())),
         db: db.clone(),
         party_credentials: party_credentials.clone(),
@@ -1455,8 +1453,7 @@ async fn handle_incoming_connection(
                         }
                         MessageType::ListPackages => {
                             tracing::debug!("Received ListPackages request");
-                            let admin_url = triggers.admin_api_url.clone();
-                            let payload = match list_local_packages(&admin_url).await {
+                            let payload = match list_local_packages(&triggers.config).await {
                                 Ok(data) => data,
                                 Err(e) => {
                                     tracing::error!("Failed to list packages: {e}");
@@ -2226,9 +2223,7 @@ async fn list_my_owner_keys(
         return Ok(b"[]".to_vec());
     }
 
-    let channel = tonic::transport::Channel::from_shared(config.admin_api_url())?
-        .connect()
-        .await?;
+    let channel = config.admin_channel().await?;
 
     let mut vault_client = VaultServiceClient::new(channel.clone());
     let mut topology_client = TopologyManagerReadServiceClient::new(channel);
@@ -2300,8 +2295,8 @@ async fn list_my_owner_keys(
     Ok(serde_json::to_vec(&entries)?)
 }
 
-async fn list_local_packages(admin_api_url: &str) -> Result<Vec<u8>> {
-    let mut client = PackageServiceClient::connect(admin_api_url.to_string()).await?;
+async fn list_local_packages(config: &NodeConfig) -> Result<Vec<u8>> {
+    let mut client = PackageServiceClient::new(config.admin_channel().await?);
     let response = client
         .list_packages(tonic::Request::new(ListPackagesRequest {
             limit: 0,

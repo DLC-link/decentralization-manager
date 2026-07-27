@@ -41,7 +41,7 @@ pub async fn generate_keys(
 ) -> Result {
     tracing::info!("Generating cryptographic keys for add-party...");
 
-    let mut vault_client = VaultServiceClient::connect(config.admin_api_url()).await?;
+    let mut vault_client = VaultServiceClient::new(config.admin_channel().await?);
 
     let namespace_key_name = add_party_config.namespace_key_name();
     let daml_key_name = add_party_config.daml_key_name();
@@ -157,7 +157,7 @@ pub(crate) async fn current_ledger_offset(
     // fails Canton's fingerprint decoding with a reserved-delimiter error.
     let synchronizer_id =
         utils::extract_synchronizer_fingerprint(&get_synchronizer_id(config).await?)?;
-    let mut client = PartyManagementServiceClient::connect(config.admin_api_url()).await?;
+    let mut client = PartyManagementServiceClient::new(config.admin_channel().await?);
 
     for force in [false, true] {
         let now = std::time::SystemTime::now();

@@ -37,7 +37,7 @@ pub async fn export_state(
     tracing::info!("Querying namespace: {namespace_hex}");
 
     let mut topology_read_client =
-        TopologyManagerReadServiceClient::connect(config.admin_api_url()).await?;
+        TopologyManagerReadServiceClient::new(config.admin_channel().await?);
 
     let request = tonic::Request::new(ListDecentralizedNamespaceDefinitionRequest {
         base_query: Some(topology::head_state_query(&synchronizer_id)),

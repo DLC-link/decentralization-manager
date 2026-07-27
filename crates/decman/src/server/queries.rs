@@ -375,7 +375,7 @@ pub(crate) fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
 /// Load `(package_id → version)` from the participant's Admin PackageService.
 /// One call per request — small map (~hundreds of rows), no caching needed.
 async fn fetch_package_versions(config: &NodeConfig) -> Result<HashMap<String, String>> {
-    let mut client = PackageServiceClient::connect(config.admin_api_url()).await?;
+    let mut client = PackageServiceClient::new(config.admin_channel().await?);
     let response = client
         .list_packages(tonic::Request::new(ListPackagesRequest {
             limit: 0,
