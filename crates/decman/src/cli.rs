@@ -245,7 +245,8 @@ pub enum Commands {
         reward_automation_interval_secs: Option<u64>,
         /// Output contracts one Delegation_Assign may create, bounding the
         /// coupons per transaction. Raise stepwise to find the ledger's real
-        /// ceiling; a too-high value self-corrects by halving. Defaults to 100.
+        /// ceiling; set too high, assigns fail and nothing is assigned.
+        /// Defaults to 100.
         #[arg(long, env = "DECPM_REWARD_MAX_CREATES")]
         reward_max_creates: Option<usize>,
         /// Seconds a coupon must have left before expiry to be assigned. Guards

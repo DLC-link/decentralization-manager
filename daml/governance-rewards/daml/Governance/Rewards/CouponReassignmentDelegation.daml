@@ -13,7 +13,7 @@ import Splice.Api.Token.MetadataV1
   (ExtraArgs(..), emptyChoiceContext, emptyMetadata)
 
 -- `Splice.Api.Token.MetadataV1` exports no ready-made `emptyExtraArgs`; build it from
--- the exported primitives (carried over from the now-removed per-round assign template).
+-- the exported primitives.
 emptyExtraArgs : ExtraArgs
 emptyExtraArgs = ExtraArgs with
   context = emptyChoiceContext
@@ -45,7 +45,7 @@ template CouponReassignmentDelegation
                extraArgs = emptyExtraArgs
         pure ()
 
-    -- Governance-only revoke (consuming → archives). Invoked via a GovernableAction (Task 2).
+    -- Governance-only revoke (consuming → archives). Invoked via a GovernableAction.
     choice Delegation_Revoke : ()
       controller decparty
       do pure ()

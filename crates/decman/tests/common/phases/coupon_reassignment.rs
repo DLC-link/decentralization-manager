@@ -1,4 +1,4 @@
-//! CIP-104 Mode A coupon-reassignment e2e (M4, Task 9). Runs on **localnet**
+//! CIP-104 Mode A coupon-reassignment e2e. Runs on **localnet**
 //! every CI run (the harness seeds its own coupons — see `seed_reward_coupons`)
 //! and, opt-in, against **devnet**.
 //!
@@ -9,10 +9,8 @@
 //! reward-automation loop (`run_reward_automation_loop`, spawned in
 //! `start_server`) reads the active delegation and — if this node's member
 //! party is a listed assigner — exercises `Delegation_Assign` directly to
-//! reassign the decparty's ripe unassigned `RewardCouponV2` coupons to the
-//! baked-in beneficiaries. Only ONE member instance needs to run to reassign
-//! (contrast the deleted auto-confirm engine, which required >= threshold
-//! confirmers per round).
+//! reassign the decparty's unassigned `RewardCouponV2` coupons to the
+//! baked-in beneficiaries. Only ONE member instance needs to run to reassign.
 //!
 //! ## Why this cannot run in normal CI (and how it stays harmless)
 //!
@@ -26,7 +24,7 @@
 //!      visible after a short poll — there is no silent no-op path there.
 //!
 //! To actually observe reassignment on devnet, operational preconditions
-//! (spec §13, plan Task 9) must hold — none are reproducible from this harness:
+//! (spec §13) must hold — none are reproducible from this harness:
 //!   - The decparty (`f.party_id()`) must be an app-provider whose coupons
 //!     carry `provider == decparty` and are **unassigned** (`beneficiary =
 //!     null`). On devnet that is `cbtc-network`; a fresh harness-allocated
@@ -52,8 +50,7 @@
 //! keyless-singleton invariant: exactly one `CouponReassignmentDelegation`) and
 //! coupon **archival** (an originally-visible unassigned coupon cid is gone
 //! after a tick). It **cannot** assert, at the HTTP layer, that each resulting
-//! coupon carries a specific `beneficiary` or the 0.8 / 0.2 `amount` share
-//! (Task 9 step 1(b)).
+//! coupon carries a specific `beneficiary` or the 0.8 / 0.2 `amount` shares.
 //!
 //! On **localnet**, the split IS asserted by value: each beneficiary party is
 //! an observer of its own assigned `RewardCouponV2`, so the phase reads the
@@ -65,13 +62,13 @@
 //! self-minting (spec §4.3) is a separate precondition (the beneficiaries' own
 //! agents) and is likewise verified out-of-band.
 //!
-//! ## Security property (Task 9 step 2)
+//! ## Security property
 //!
 //! The split is baked into the delegation and `Delegation_Assign` reads it, so
 //! a caller cannot alter it, and only a listed `assigner` may exercise the
-//! choice. There are no proposals anymore, so there is no "craft a mismatched
-//! proposal" case. The authoritative coverage is the DAML unit test
-//! `test_non_assigner_cannot_reassign` (Task 1) plus the baked-split assertion.
+//! choice. The per-round path involves no proposal at all, so there is no
+//! "craft a mismatched proposal" case. The authoritative coverage is the DAML unit test
+//! `test_non_assigner_cannot_reassign` plus the baked-split assertion.
 //! The devnet ledger-level negative (submit `Delegation_Assign` as a party not
 //! in `assigners`, expect ledger rejection) is **not expressible through this
 //! HTTP harness**: DecMan exposes no endpoint to submit an arbitrary ledger
@@ -150,7 +147,7 @@ async fn query_reward_coupons(f: &Fixture, party_id: &str) -> anyhow::Result<Has
 }
 
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
-    info!("Phase: coupon_reassignment (CIP-104 Mode A delegation model, Task 9)");
+    info!("Phase: coupon_reassignment (CIP-104 Mode A delegation model)");
 
     let decparty = f.party_id()?.to_string();
 
@@ -186,7 +183,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             if cids.is_empty() {
                 warn!(
                     "coupon_reassignment IT SKIPPED: no unassigned RewardCouponV2 for {decparty} — \
-                     needs live coupons with Mode-B collection paused (Task 9 precondition)"
+                     needs live coupons with Mode-B collection paused (precondition)"
                 );
                 return Ok(());
             }
@@ -303,7 +300,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     // coupon and creates one per beneficiary.
                     //
                     // TODO(devnet/PQS): the per-beneficiary field-level
-                    // checks (Task 9 step 1(b): one RewardCouponV2 per
+                    // checks (one RewardCouponV2 per
                     // beneficiary with `beneficiary ∈ {benef_a, benef_b}` and
                     // the 0.8 / 0.2 `amount` shares) require decoded reads not
                     // exposed by /contracts/query — verify them against devnet
@@ -395,7 +392,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     }
 
     // ------------------------------------------------------------------
-    // Negative (security property, Task 9 step 2). See the module doc: the
+    // Negative (security property). See the module doc: the
     // authoritative coverage is DAML (`test_non_assigner_cannot_reassign` +
     // the baked-split assertion). The devnet ledger-level negative is a manual
     // ops step because this HTTP harness cannot submit Delegation_Assign as a
@@ -404,25 +401,25 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     run_negative_case(f, &decparty).await
 }
 
-/// Documents the security-property negative (Task 9 step 2) rather than
+/// Documents the security-property negative rather than
 /// exercising it here.
 ///
 /// The property — only a listed `assigner` may exercise `Delegation_Assign`,
 /// and the split is baked in so a caller cannot alter it — is enforced in DAML
-/// and covered by the `test_non_assigner_cannot_reassign` unit test (Task 1).
+/// and covered by the `test_non_assigner_cannot_reassign` unit test.
 /// The devnet ledger-level assertion (submit `Delegation_Assign` as
 /// `p3_member`, a party **not** in `assigners`, and expect the ledger to reject
 /// it) is **not expressible through this harness**: DecMan exposes no endpoint
 /// to submit an arbitrary ledger command as a chosen party (the reward
 /// automation only ever submits as an authorized assigner). Inventing such an
-/// endpoint is out of scope for Task 9 (no new runtime code), so the devnet
+/// endpoint is out of scope here (no new runtime code), so the devnet
 /// negative is deferred to the pre-merge ops run (submit via the ledger API /
 /// a daml script as the non-assigner and confirm rejection).
 async fn run_negative_case(f: &Fixture, decparty: &str) -> anyhow::Result<()> {
     let non_assigner = f.p3_member_party()?;
     info!(
         "coupon_reassignment security property: enforced in DAML \
-         (test_non_assigner_cannot_reassign, Task 1). Devnet ledger-level negative — \
+         (test_non_assigner_cannot_reassign). Devnet ledger-level negative — \
          submit Delegation_Assign for {decparty} as non-assigner {non_assigner}, expect \
          rejection — is a manual pre-merge ops step (no HTTP path to submit as an \
          arbitrary party)."

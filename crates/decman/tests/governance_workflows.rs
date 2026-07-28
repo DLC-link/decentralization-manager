@@ -181,7 +181,7 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     // Onboarding + DARs coordinators on every node.
     phases::concurrent_cross_workflows::run(&mut f).await?; // G11
 
-    // CIP-104 Mode A coupon-reassignment e2e (delegation model, Task 9).
+    // CIP-104 Mode A coupon-reassignment e2e (delegation model).
     // On localnet the harness seeds its own unassigned RewardCouponV2 coupons,
     // so the assign + 0.8/0.2 split run and assert on EVERY CI run. On devnet
     // there is no way to synthesize coupons, so it stays opt-in

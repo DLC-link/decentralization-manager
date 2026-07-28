@@ -16,10 +16,10 @@ import Governance.Action (GovernableAction)
 import Governance.Rules (GovernanceRules, GovernanceRules_ExecuteConfirmedAction(..))
 import TestHarness                            -- Test{given,when,then_}, run, Failures, shouldBe
 
--- mkUnassignedCoupon lives in AssignTestUtils (relocated in Step 0b) — shared, survives Task 8.
+-- mkUnassignedCoupon lives in AssignTestUtils (shared with the other reward tests).
 
 -- GWT fixture: parties + a delegation created DIRECTLY (in production it is created by
--- the SetupCouponReassignmentDelegation governance action — Task 2). decparty is the
+-- the SetupCouponReassignmentDelegation governance action). decparty is the
 -- coupons' provider; assigners are the member parties (1-of-n).
 data Fixture = Fixture with
     parties : TestParties
@@ -136,7 +136,7 @@ test_already_assigned_coupon_rejected = script do
 -- Governance-path tests: the delegation is created/replaced/revoked via the
 -- SetupCouponReassignmentDelegation / RevokeCouponReassignmentDelegation
 -- GovernableActions, through a real propose -> confirm -> execute vote
--- (Task 2), rather than the direct-create fixture above (Task 1's `given_delegation`).
+-- via the governance action, rather than the direct-create fixture above.
 -- ============================================================================
 
 -- GWT fixture for the governance-created path: parties + a GovernanceRules + the split.

@@ -257,8 +257,9 @@ pub struct NodeConfig {
     /// Output contracts one `Delegation_Assign` may create, which bounds the
     /// coupons per transaction (`/ beneficiary_count`). The ledger's real
     /// ceiling for this transaction shape is unmeasured — configurable so it can
-    /// be raised stepwise against a live ledger without a rebuild. A failed
-    /// chunk halves, so a too-high value self-corrects. Default 100.
+    /// be raised stepwise against a live ledger without a rebuild. Set too high,
+    /// the ledger rejects each chunk and the tick ends having assigned nothing,
+    /// so lower it if assigns start failing. Default 100.
     pub reward_max_creates: usize,
     /// How much time (seconds) a coupon must have left before expiry to be
     /// assigned. This guards against a coupon vanishing between the ACS read

@@ -1041,12 +1041,9 @@ pub async fn get_governance_chain_audit(
 // ============================================================================
 
 /// Error from [`submit_proposal`], pairing a message with the HTTP status the
-/// handler should surface. Extracting `submit_proposal` out of the handler must
-/// not flatten every failure to 500: bad input is 400, upstream-registry fetch
-/// failures are 502, an unprovisioned governance package is 503, and only true
-/// internal faults are 500. (The pre-extraction handler mapped the package case
-/// to 400, which was wrong — the request is valid; the node just isn't
-/// configured to serve it — so it is corrected to 503 here.)
+/// handler should surface: bad input is 400, an upstream-registry fetch failure
+/// is 502, an unprovisioned governance package is 503, and only a true internal
+/// fault is 500.
 #[derive(Debug)]
 pub(crate) struct SubmitProposalError {
     status: actix_web::http::StatusCode,
@@ -1101,14 +1098,12 @@ impl std::error::Error for SubmitProposalError {}
 /// Build and submit a `GovernableAction` proposal-create command, returning the
 /// created proposal contract id.
 ///
-/// Extracted verbatim from the `propose_action` HTTP handler so the CIP-104
-/// reward automation (Mode A proposer) can create proposals without going
-/// through HTTP. Behavior-preserving for the create path: it resolves any
-/// registry-backed transfer choice-context, builds the create arguments,
-/// resolves the target package id, and submits over a fresh
-/// `CommandServiceClient`. Errors surface as [`SubmitProposalError`], which
-/// pairs the message with the HTTP status the handler should return (the
-/// automation just logs the message and ignores the status).
+/// Resolves any registry-backed transfer choice-context, builds the create
+/// arguments, resolves the target package id, and submits over a fresh
+/// `CommandServiceClient`. Callable off the HTTP path: failures surface as
+/// [`SubmitProposalError`], which carries both a message and the status an HTTP
+/// caller should return, so a non-HTTP caller can log the message and ignore
+/// the status.
 ///
 /// `_rules_contract_id` is part of the propose API surface (used by the caller's
 /// subsequent confirm step) but is not needed to create the proposal.
