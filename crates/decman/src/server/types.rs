@@ -643,6 +643,11 @@ pub enum ProposalType {
     /// Create (or replace) the decparty's on-ledger CouponReassignmentDelegation.
     /// `prior_delegation` is the cid of the delegation being replaced (None for the first).
     SetupCouponReassignmentDelegation {
+        /// The DSO whose coupons the delegation may assign. Fixed by this vote:
+        /// `dso` is `RewardCouponV2`'s only signatory, so any party can mint one
+        /// naming itself `dso` and the decparty as `provider`, and the
+        /// automation must be able to tell those apart from the real ones.
+        dso: CantonId,
         assigners: Vec<CantonId>,
         new_beneficiaries: Vec<RewardBeneficiary>,
         #[serde(default)]
@@ -800,12 +805,22 @@ impl ProposalType {
                 ..
             } => validate_beneficiary_weights(beneficiaries),
             ProposalType::SetupCouponReassignmentDelegation {
+                dso,
                 assigners,
                 new_beneficiaries,
                 ..
             } => {
                 if assigners.is_empty() {
                     return Err("assigners must not be empty".to_string());
+                }
+                let mut seen = std::collections::HashSet::new();
+                for a in assigners {
+                    if !seen.insert(a) {
+                        return Err(format!("duplicate assigner not allowed: {a}"));
+                    }
+                }
+                if assigners.contains(dso) {
+                    return Err("the dso must not be an assigner".to_string());
                 }
                 validate_reward_beneficiaries(new_beneficiaries)
             }
@@ -1543,18 +1558,21 @@ mod tests {
         // embedded "::") -- unlike the brief's example.
         let execs = vec![rb("m1", "1.0").beneficiary, rb("m2", "1.0").beneficiary];
         let ok = ProposalType::SetupCouponReassignmentDelegation {
+            dso: rb("dso", "1.0").beneficiary,
             assigners: execs.clone(),
             new_beneficiaries: vec![rb("a", "0.8"), rb("b", "0.2")],
             prior_delegation: None,
         };
         assert!(ok.validate().is_ok());
         let no_exec = ProposalType::SetupCouponReassignmentDelegation {
+            dso: rb("dso", "1.0").beneficiary,
             assigners: vec![],
             new_beneficiaries: vec![rb("a", "1.0")],
             prior_delegation: None,
         };
         assert!(no_exec.validate().is_err());
         let bad_sum = ProposalType::SetupCouponReassignmentDelegation {
+            dso: rb("dso", "1.0").beneficiary,
             assigners: execs,
             new_beneficiaries: vec![rb("a", "0.5")],
             prior_delegation: None,

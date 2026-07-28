@@ -1200,6 +1200,7 @@ pub fn build_proposal_create_args(
             },
         ),
         ProposalType::SetupCouponReassignmentDelegation {
+            dso,
             assigners,
             new_beneficiaries,
             prior_delegation,
@@ -1216,6 +1217,7 @@ pub fn build_proposal_create_args(
                         "priorDelegation",
                         make_optional_contract_id(prior_delegation),
                     ),
+                    field("dso", make_party(dso)),
                     field(
                         "assigners",
                         make_list(assigners.iter().map(make_party).collect()),
@@ -2544,6 +2546,7 @@ mod tests {
     #[test]
     fn build_proposal_setup_delegation_shape() -> Result {
         let proposal = ProposalType::SetupCouponReassignmentDelegation {
+            dso: party_id(),
             assigners: vec![party_id(), party_id()],
             new_beneficiaries: vec![
                 RewardBeneficiary {
@@ -2571,6 +2574,7 @@ mod tests {
                 "governanceParty",
                 "proposer",
                 "priorDelegation",
+                "dso",
                 "assigners",
                 "beneficiaries"
             ]

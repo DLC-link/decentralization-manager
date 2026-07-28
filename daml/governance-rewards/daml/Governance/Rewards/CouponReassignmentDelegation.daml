@@ -7,6 +7,7 @@
 -- split with a plain Delegation_Assign exercise — no per-round vote (spec §5, §7, §12).
 module Governance.Rewards.CouponReassignmentDelegation where
 
+import Splice.Amulet (RewardCouponV2)
 import Splice.Api.RewardAssignmentV1
   (RewardCoupon, RewardBeneficiary, RewardCoupon_AssignBeneficiaries(..))
 import Splice.Api.Token.MetadataV1
@@ -22,8 +23,9 @@ emptyExtraArgs = ExtraArgs with
 template CouponReassignmentDelegation
   with
     decparty  : Party                 -- = governanceParty = the coupons' provider
+    dso       : Party                 -- the DSO whose coupons may be assigned; see Delegation_Assign
     assigners : [Party]               -- = all member parties; any one may reassign (1-of-n)
-    split     : [RewardBeneficiary]   -- BAKED IN; validated at create (Task 2 executeImpl)
+    split     : [RewardBeneficiary]   -- BAKED IN; validated at create
   where
     signatory decparty
     observer assigners
@@ -37,7 +39,24 @@ template CouponReassignmentDelegation
         additionalCoupons : [ContractId RewardCoupon]
       controller assigner                             -- 1-of-n: any listed assigner, NOT a threshold
       do
-        assert (assigner `elem` assigners)            -- the caller must be a listed assigner
+        assertMsg "assigner must be listed on the delegation" (assigner `elem` assigners)
+        -- Pin the coupon before exercising the interface choice. Two distinct
+        -- guards, both required:
+        --
+        -- 1. Fetching as splice's concrete RewardCouponV2 fails unless the
+        --    contract really is one. `RewardCoupon_AssignBeneficiaries` is
+        --    `controller (view this).provider`, so a look-alike implementation
+        --    whose view claims `provider = decparty` would otherwise satisfy
+        --    that controller with THIS delegation's decparty authority and run
+        --    its own code with it.
+        -- 2. A genuine RewardCouponV2 only needs its own `dso`'s authority to
+        --    create, so any party can mint one naming itself `dso` and this
+        --    decparty as `provider`. Such a coupon is a real RewardCouponV2 and
+        --    passes guard 1, but assigning it is not this delegation's business
+        --    and, as the batch's primary, it makes splice reject every genuine
+        --    coupon alongside it (they are fetched with the primary's `dso`).
+        coupon <- fetch (fromInterfaceContractId @RewardCouponV2 primaryCoupon)
+        assertMsg "coupon dso must match the delegation's dso" (coupon.dso == dso)
         -- newBeneficiaries is the contract's `split`, NEVER a caller argument (security boundary).
         _ <- exercise primaryCoupon RewardCoupon_AssignBeneficiaries with
                additionalCoupons

@@ -160,21 +160,28 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     // ------------------------------------------------------------------
     let initial_coupon_cids = match f.target {
         crate::common::TestTarget::Localnet => {
-            // seed_reward_coupons committed the coupon synchronously; poll only
+            // seed_reward_coupons committed the coupons synchronously; poll only
             // to absorb any ledger->DecMan read lag, then hard-fail. A silent
             // skip here would turn the whole phase into a false-positive no-op.
+            //
+            // Wait for the FULL seeded set, not merely a non-empty one: the seed
+            // commits in several transactions, so an early read can return a
+            // subset, and the "every seeded coupon archived" assertion below
+            // would then be evaluated over that subset instead of all of them.
             let deadline = std::time::Instant::now() + Duration::from_secs(60);
             let cids = loop {
                 let cids = query_reward_coupons(f, &decparty).await?;
-                if !cids.is_empty() || std::time::Instant::now() >= deadline {
+                if cids.len() >= SEED_COUPON_COUNT || std::time::Instant::now() >= deadline {
                     break cids;
                 }
                 tokio::time::sleep(Duration::from_secs(2)).await;
             };
             anyhow::ensure!(
-                !cids.is_empty(),
-                "coupon_reassignment (localnet): no unassigned RewardCouponV2 for {decparty} \
-                 after seeding — seed_reward_coupons must run first and commit the coupon"
+                cids.len() >= SEED_COUPON_COUNT,
+                "coupon_reassignment (localnet): saw {} unassigned RewardCouponV2 for {decparty}, \
+                 expected the {SEED_COUPON_COUNT} seeded — seed_reward_coupons must run first \
+                 and commit them all",
+                cids.len()
             );
             cids
         }
@@ -215,6 +222,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     //   p3_member is deliberately NOT an assigner — it is the non-assigner used
     //   by the security note below. (A beneficiary is not thereby an assigner.)
     // ------------------------------------------------------------------
+    let dso_party = f.p1_member_party()?.to_string(); // localnet DSO stand-in
     let assigner_a = f.p1_member_party()?.to_string();
     let assigner_b = f.p2_member_party()?.to_string();
     // Beneficiaries must be disjoint from assigners. On localnet the seed phase
@@ -234,6 +242,9 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         "SetupCouponReassignmentDelegation",
         json!({
             "type": "setup_coupon_reassignment_delegation",
+            // On localnet the harness substitutes p1_member for the DSO, which is
+            // the party seed_reward_coupons mints the coupons as.
+            "dso": dso_party,
             "assigners": [assigner_a, assigner_b],
             "new_beneficiaries": [
                 {"beneficiary": benef_a, "percentage": "0.8"},

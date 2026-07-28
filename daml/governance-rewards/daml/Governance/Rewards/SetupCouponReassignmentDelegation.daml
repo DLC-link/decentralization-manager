@@ -18,6 +18,10 @@ template SetupCouponReassignmentDelegation
     proposer : Party
     priorDelegation : Optional (ContractId CouponReassignmentDelegation)
       -- ^ cid of the delegation to replace (None for the first create); revoked at execute.
+    dso : Party
+      -- ^ the DSO whose coupons the delegation may assign. Fixed by this vote so
+      -- Delegation_Assign can reject a coupon minted by anyone else: any party can
+      -- create a RewardCouponV2 naming itself dso and this decparty as provider.
     assigners : [Party]
     beneficiaries : [RewardBeneficiary]
   where
@@ -45,7 +49,10 @@ template SetupCouponReassignmentDelegation
         let total = sum (map (.percentage) beneficiaries)
         assertMsg "percentages must sum to 1.0" (total == 1.0)   -- exact Decimal
         assertMsg "assigners must not be empty" (not (null assigners))
+        assertMsg "assigners must be unique" (unique assigners)
+        assertMsg "the decparty must not be its own assigner"
+          (governanceParty `notElem` assigners)
         forA_ priorDelegation (`exercise` Delegation_Revoke)      -- atomic replace when Some
         _ <- create CouponReassignmentDelegation with
-               decparty = governanceParty; assigners; split = beneficiaries
+               decparty = governanceParty; dso; assigners; split = beneficiaries
         pure ()

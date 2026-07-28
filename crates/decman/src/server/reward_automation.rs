@@ -248,6 +248,12 @@ pub(crate) async fn active_created_records(
 /// `coupons × beneficiaries` contracts (see [`chunk_size`]).
 pub(crate) struct ActiveDelegation {
     pub cid: String,
+    /// The DSO whose coupons this delegation may assign. Any party can mint a
+    /// `RewardCouponV2` naming itself `dso` and this decparty as `provider`, so
+    /// a coupon from any other DSO must never enter a batch: as the batch's
+    /// primary it makes splice reject every genuine coupon alongside it, and a
+    /// failed chunk ends the tick.
+    pub dso: CantonId,
     pub assigners: Vec<CantonId>,
     pub beneficiary_count: usize,
 }
@@ -291,6 +297,7 @@ fn parse_delegation_record(cid: &str, rec: &Record) -> anyhow::Result<ActiveDele
     }
     Ok(ActiveDelegation {
         cid: cid.to_string(),
+        dso: field_party_id(rec, "dso")?,
         assigners: field_party_list(rec, "assigners")?,
         beneficiary_count,
     })
@@ -364,13 +371,15 @@ pub(crate) struct CouponInfo {
 }
 
 /// Read every reward coupon for `decparty` that is still unassigned
-/// (`provider == decparty` and `beneficiary` is `None`).
+/// (`provider == decparty`, `beneficiary` is `None`, and `dso` is the
+/// delegation's DSO — see [`parse_unassigned_coupon`]).
 ///
 /// Uses the `RewardCoupon` interface view (`#splice-api-reward-assignment-v1`);
 /// on devnet the concrete implementer is `RewardCouponV2`.
 pub(crate) async fn unassigned_coupons(
     config: &NodeConfig,
     decparty: &CantonId,
+    dso: &CantonId,
     token: Option<String>,
     test_mode: bool,
     packages: &PackageConfig,
@@ -390,7 +399,7 @@ pub(crate) async fn unassigned_coupons(
 
     let mut out = Vec::new();
     for (cid, rec) in records {
-        if let Some(coupon) = parse_unassigned_coupon(&cid, &rec, decparty)? {
+        if let Some(coupon) = parse_unassigned_coupon(&cid, &rec, decparty, dso)? {
             out.push(coupon);
         }
     }
@@ -406,9 +415,20 @@ fn parse_unassigned_coupon(
     cid: &str,
     rec: &Record,
     decparty: &CantonId,
+    dso: &CantonId,
 ) -> anyhow::Result<Option<CouponInfo>> {
     let provider = field_party_id(rec, "provider")?;
     if &provider != decparty {
+        return Ok(None);
+    }
+    // `dso` is the only signatory of `RewardCouponV2`, so any party can mint one
+    // naming itself `dso` and this decparty as `provider`, and it lands in the
+    // decparty's ACS. Such a coupon is a genuine RewardCouponV2 — it is simply
+    // not ours to assign, and letting it into a batch is a denial of service:
+    // sorted most-urgent-first it becomes the primary, splice fetches every
+    // other coupon with the primary's `dso`, the whole chunk is rejected, and
+    // the tick ends having assigned nothing.
+    if field_party_id(rec, "dso")? != *dso {
         return Ok(None);
     }
     if !field_optional_is_none(rec, "beneficiary") {
@@ -617,6 +637,7 @@ pub(crate) async fn run_reassign_once(
     let coupons = unassigned_coupons(
         config,
         decparty,
+        &delegation.dso,
         Some(token.to_string()),
         test_mode,
         packages,
@@ -855,6 +876,7 @@ mod tests {
         // takes a value::Sum, so pass `value::Sum::List(..)` directly.
         let rec = record(vec![
             field("decparty", party(GOV)),
+            field("dso", party(GOV)),
             field(
                 "assigners",
                 value::Sum::List(List {
@@ -877,6 +899,7 @@ mod tests {
         // Only the split's *length* is read, to size a chunk; its contents stay
         // DAML-enforced and are never used to build a command.
         assert_eq!(d.beneficiary_count, 2);
+        assert_eq!(d.dso.to_string(), GOV);
     }
 
     #[test]
@@ -884,6 +907,7 @@ mod tests {
         // DAML rejects an empty split at create, so this is a decode problem;
         // accepting it would size chunks off a meaningless beneficiary count.
         let rec = record(vec![
+            field("dso", party(GOV)),
             field(
                 "assigners",
                 value::Sum::List(List {
@@ -901,38 +925,66 @@ mod tests {
     fn parse_unassigned_coupon_keeps_only_unassigned_for_decparty() {
         let alice = CantonId::parse(ALICE).unwrap();
         let bob = CantonId::parse(BOB).unwrap();
+        let dso = CantonId::parse(GOV).unwrap();
 
         let unassigned = record(vec![
+            field("dso", party(GOV)),
             field("provider", party(ALICE)),
             field("beneficiary", optional_none()),
             field("amount", numeric("100.0")),
             field("expiresAt", timestamp(1_700_000_000_000_000)),
         ]);
 
-        // provider == decparty and beneficiary is None -> kept.
-        let got = parse_unassigned_coupon("00c1", &unassigned, &alice).unwrap();
+        // provider == decparty, beneficiary is None, dso matches -> kept.
+        let got = parse_unassigned_coupon("00c1", &unassigned, &alice, &dso).unwrap();
         let coupon = got.expect("unassigned coupon for the decparty is kept");
         assert_eq!(coupon.cid, "00c1");
         assert_eq!(coupon.amount, "100.0".parse().unwrap());
 
         // provider != decparty -> skipped (fail-safe).
         assert!(
-            parse_unassigned_coupon("00c1", &unassigned, &bob)
+            parse_unassigned_coupon("00c1", &unassigned, &bob, &dso)
                 .unwrap()
                 .is_none()
         );
 
         // beneficiary already set -> skipped (never reassign an assigned coupon).
         let assigned = record(vec![
+            field("dso", party(GOV)),
             field("provider", party(ALICE)),
             field("beneficiary", optional_some_party(BOB)),
             field("amount", numeric("100.0")),
             field("expiresAt", timestamp(1_700_000_000_000_000)),
         ]);
         assert!(
-            parse_unassigned_coupon("00c2", &assigned, &alice)
+            parse_unassigned_coupon("00c2", &assigned, &alice, &dso)
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn parse_unassigned_coupon_rejects_a_foreign_dso() {
+        // `dso` is RewardCouponV2's only signatory, so any party can mint one
+        // naming itself dso and this decparty as provider. Letting it into a
+        // batch is a denial of service: sorted most-urgent-first it becomes the
+        // primary, splice fetches the genuine coupons with the primary's dso,
+        // the chunk is rejected, and the tick ends having assigned nothing.
+        let alice = CantonId::parse(ALICE).unwrap();
+        let real_dso = CantonId::parse(GOV).unwrap();
+
+        let planted = record(vec![
+            field("dso", party(BOB)), // minted by BOB as its own dso
+            field("provider", party(ALICE)),
+            field("beneficiary", optional_none()),
+            field("amount", numeric("100.0")),
+            field("expiresAt", timestamp(1_700_000_000_000_000)),
+        ]);
+        assert!(
+            parse_unassigned_coupon("00bad", &planted, &alice, &real_dso)
+                .unwrap()
+                .is_none(),
+            "a coupon from another dso must never enter the batch"
         );
     }
 

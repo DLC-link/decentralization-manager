@@ -33,7 +33,7 @@ given_delegation = do
   let split = [ RewardBeneficiary with beneficiary = parties.member2; percentage = 0.8
               , RewardBeneficiary with beneficiary = parties.member3; percentage = 0.2 ]
   delId <- submit gp $ createCmd CouponReassignmentDelegation with
-    decparty = gp; assigners = [parties.member1, parties.member2]; split
+    decparty = gp; dso = parties.dso; assigners = [parties.member1, parties.member2]; split
   pure Fixture with ..
 
 -- shared no-assertion then_ for negative cases (when : Fixture -> Script ())
@@ -126,6 +126,25 @@ when_reassign_same_coupon_fails f = do
   submitMustFail (memberContext f.parties.member1 gp) $ exerciseCmd f.delId Delegation_Assign with
     assigner = f.parties.member1; primaryCoupon = c1; additionalCoupons = []
 
+-- security: a coupon minted by a DIFFERENT dso is rejected. Any party can create
+-- a RewardCouponV2 naming itself dso and this decparty as provider (dso is the
+-- only signatory), so without this guard a stranger's coupon would be assignable
+-- and, as a batch's primary, would make splice reject every genuine coupon
+-- alongside it -- stopping the reward engine for the cost of one contract.
+when_foreign_dso_coupon_rejected : Fixture -> Script ()
+when_foreign_dso_coupon_rejected f = do
+  let gp = f.parties.governanceParty
+  -- member3 mints it as its own dso, naming gp as provider.
+  bad <- mkUnassignedCoupon f.parties.member3 gp 100.0
+  submitMustFail (memberContext f.parties.member1 gp) $ exerciseCmd f.delId Delegation_Assign with
+    assigner = f.parties.member1; primaryCoupon = bad; additionalCoupons = []
+
+test_foreign_dso_coupon_rejected = script do
+  run Test with
+    given = given_delegation
+    when = when_foreign_dso_coupon_rejected
+    then_ = then_nothing
+
 test_already_assigned_coupon_rejected = script do
   run Test with
     given = given_delegation
@@ -168,6 +187,7 @@ when_setup_executed f = do
   let gp = f.parties.governanceParty
   actionCid <- submit f.parties.member1 $ createCmd SetupCouponReassignmentDelegation with
     governanceParty = gp; proposer = f.parties.member1; priorDelegation = None
+    dso = f.parties.dso
     assigners = [f.parties.member1, f.parties.member2]; beneficiaries = f.split
   let iface : ContractId GovernableAction = toInterfaceContractId actionCid
   _ <- confirmAndExecute f.parties f.rulesCid iface [f.parties.member1, f.parties.member2] f.parties.member1
@@ -189,6 +209,7 @@ when_setup_replaces f = do
       mk prior bene = do
         a <- submit f.parties.member1 $ createCmd SetupCouponReassignmentDelegation with
           governanceParty = gp; proposer = f.parties.member1; priorDelegation = prior
+          dso = f.parties.dso
           assigners = [f.parties.member1, f.parties.member2]
           beneficiaries = [RewardBeneficiary with beneficiary = bene; percentage = 1.0]
         let iface : ContractId GovernableAction = toInterfaceContractId a
@@ -209,6 +230,7 @@ when_revoke_via_governance f = do
   let gp = f.parties.governanceParty
   s <- submit f.parties.member1 $ createCmd SetupCouponReassignmentDelegation with
     governanceParty = gp; proposer = f.parties.member1; priorDelegation = None
+    dso = f.parties.dso
     assigners = [f.parties.member1, f.parties.member2]; beneficiaries = f.split
   _ <- confirmAndExecute f.parties f.rulesCid (toInterfaceContractId s : ContractId GovernableAction)
          [f.parties.member1, f.parties.member2] f.parties.member1
@@ -233,6 +255,7 @@ setupExecuteMustFail f assigners beneficiaries = do
   let gp = f.parties.governanceParty
   actionCid <- submit f.parties.member1 $ createCmd SetupCouponReassignmentDelegation with
     governanceParty = gp; proposer = f.parties.member1; priorDelegation = None
+    dso = f.parties.dso
     assigners; beneficiaries
   let iface : ContractId GovernableAction = toInterfaceContractId actionCid
   confs <- submitConfirmations gp f.rulesCid iface [f.parties.member1, f.parties.member2]
