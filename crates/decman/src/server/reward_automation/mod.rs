@@ -596,17 +596,10 @@ pub(crate) async fn submit_delegation_assign(
 /// interval is a latency/cost knob, not a safety-critical one. The chunk bounds
 /// one *transaction* (spec §9/§11; see [`chunk_size`]).
 ///
-/// Failure handling, since the real transaction-size ceiling is unmeasured:
-/// a failed chunk is retried at half the size, down to a single coupon, which
-/// lets an oversized chunk find a size the ledger accepts. Failures at a single
-/// coupon are almost always contention instead — another assigner took the
-/// coupon and this node's view is stale — so after
-/// `MAX_SINGLE_COUPON_FAILURES` of them the tick stops and lets the next tick
-/// re-read the ledger, rather than grinding through a set that is already gone.
+/// A failed chunk ends the tick (see [`drain_assignable`]).
 ///
 /// The create budget and the expiry margin come from [`NodeConfig`] so they can
-/// be tuned against a live ledger without a rebuild; only the give-up count is
-/// fixed, since nothing about a deployment changes the right value for it.
+/// be tuned against a live ledger without a rebuild.
 pub(crate) async fn run_reassign_once(
     config: &NodeConfig,
     decparty: &CantonId,
@@ -616,7 +609,6 @@ pub(crate) async fn run_reassign_once(
     test_mode: bool,
     packages: &PackageConfig,
 ) -> anyhow::Result<()> {
-    const MAX_SINGLE_COUPON_FAILURES: usize = 3;
     let expiry_margin =
         chrono::Duration::seconds(config.reward_min_expiry_margin_secs.min(i64::MAX as u64) as i64);
 
@@ -636,7 +628,6 @@ pub(crate) async fn run_reassign_once(
     let assigned = drain_assignable(
         &assignable,
         chunk_size(config.reward_max_creates, delegation.beneficiary_count),
-        MAX_SINGLE_COUPON_FAILURES,
         decparty,
         |primary, additional| {
             submit_delegation_assign(
@@ -658,20 +649,29 @@ pub(crate) async fn run_reassign_once(
     Ok(())
 }
 
-/// Assign `assignable` in successive chunks via `submit`, returning how many
-/// coupons were assigned. The submit step is injected so the chunking, halving
-/// and give-up rules are unit-testable without a ledger.
+/// Assign `assignable` in `chunk`-sized batches via `submit`, returning how many
+/// coupons were assigned. The submit step is injected so the chunking and the
+/// failure rule are unit-testable without a ledger.
 ///
-/// Chunks start at `initial_chunk` and halve on failure down to one coupon, so
-/// an oversized chunk converges on a size the ledger accepts. A failure at a
-/// single coupon is treated as contention rather than size: that coupon is
-/// skipped, and after `max_single_failures` of them the drain stops so the
-/// caller's next tick re-reads the ledger instead of grinding through a set
-/// another assigner already took. A failed chunk never aborts the rest.
+/// **A failed chunk ends the drain.** Every assign failure seen in practice
+/// means this node's view is stale — another assigner committed first
+/// (`CONTRACT_NOT_FOUND`, `LOCAL_VERDICT_LOCKED_CONTRACTS`) or the coupon
+/// expired — and the only cure is a fresh read, which the next tick performs.
+/// Retrying the chunk smaller cannot help, because a smaller chunk is not a
+/// newer view; and skipping the coupon to continue would grind through failure
+/// after failure, since an assigner that took the first coupon has very likely
+/// taken the rest of the batch too. Ending the tick costs at most one interval
+/// of latency for the coupons left behind, and they keep their full TTL.
+///
+/// The exposure this accepts: a coupon that is genuinely un-exerciseable — a
+/// package-version mismatch being the realistic case — heads the deterministic
+/// most-urgent-first order on every tick and stalls assignment indefinitely.
+/// Skipping it would not repair that; it would lose the coupon anyway while
+/// hiding the cause. So the failing coupon id is logged for alerting to pick up
+/// and a human to diagnose.
 async fn drain_assignable<'a, F, Fut>(
     assignable: &'a [String],
-    initial_chunk: usize,
-    max_single_failures: usize,
+    chunk: usize,
     decparty: &CantonId,
     mut submit: F,
 ) -> usize
@@ -679,44 +679,27 @@ where
     F: FnMut(&'a str, &'a [String]) -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<()>>,
 {
-    let mut size = initial_chunk.max(1);
+    let size = chunk.max(1);
     let mut offset = 0;
     let mut assigned = 0;
-    let mut single_coupon_failures = 0;
     while offset < assignable.len() {
         let end = (offset + size).min(assignable.len());
         let (primary, additional) = assignable[offset..end]
             .split_first()
             .expect("offset < len, so the chunk is non-empty");
-        // Halve from what was actually submitted, not from `size`. A `size`
-        // larger than the remaining set produces a smaller chunk, and halving
-        // `size` would then resubmit the identical command until `size` decayed
-        // below the set length — log2(size) wasted attempts per contended tick.
-        let submitted = end - offset;
-        match submit(primary, additional).await {
-            Ok(()) => {
-                assigned += submitted;
-                offset = end;
-            }
-            Err(e) if submitted > 1 => {
-                size = submitted / 2;
-                tracing::warn!(%decparty, error = %e, new_chunk = size, "assign chunk failed; retrying smaller");
-            }
-            Err(e) => {
-                single_coupon_failures += 1;
-                tracing::warn!(%decparty, error = %e, coupon = %primary, "assign failed for a single coupon; skipping");
-                offset += 1;
-                if single_coupon_failures >= max_single_failures {
-                    tracing::warn!(
-                        %decparty,
-                        assigned,
-                        remaining = assignable.len() - offset,
-                        "too many single-coupon failures; ending tick to re-read the ledger"
-                    );
-                    break;
-                }
-            }
+        if let Err(e) = submit(primary, additional).await {
+            tracing::warn!(
+                %decparty,
+                error = %e,
+                coupon = %primary,
+                assigned,
+                remaining = assignable.len() - offset,
+                "assign chunk failed; ending tick to re-read the ledger"
+            );
+            break;
         }
+        assigned += end - offset;
+        offset = end;
     }
     assigned
 }
@@ -1064,62 +1047,45 @@ mod tests {
         // transactions in ONE tick, not one transaction and a wait.
         let all = cids(120);
         let (seen, submit) = recorder(vec![]);
-        let assigned = drain_assignable(&all, 50, 3, &alice(), submit).await;
+        let assigned = drain_assignable(&all, 50, &alice(), submit).await;
         assert_eq!(assigned, 120);
         assert_eq!(*seen.borrow(), vec![50, 50, 20]);
     }
 
     #[tokio::test]
-    async fn drain_halves_the_chunk_on_failure() {
-        // An oversized chunk must converge on a size the ledger accepts rather
-        // than failing identically forever. First two attempts rejected: 40 ->
-        // 20 -> 10, then 10-coupon chunks succeed.
-        let all = cids(40);
-        let (seen, submit) = recorder(vec![false, false]);
-        let assigned = drain_assignable(&all, 40, 3, &alice(), submit).await;
-        assert_eq!(assigned, 40);
-        assert_eq!(*seen.borrow(), vec![40, 20, 10, 10, 10, 10]);
-    }
-
-    #[tokio::test]
-    async fn drain_gives_up_after_repeated_single_coupon_failures() {
-        // Everything fails: halve 4 -> 2 -> 1, then three single-coupon failures
-        // end the tick so the next one re-reads the ledger. Without the budget
-        // this would grind through all 100 coupons one at a time.
-        let all = cids(100);
-        let (seen, submit) = recorder(vec![false; 100]);
-        let assigned = drain_assignable(&all, 4, 3, &alice(), submit).await;
+    async fn drain_ends_the_tick_on_a_failed_chunk() {
+        // A failure means the view is stale, and only a fresh read fixes that.
+        // Exactly one attempt: no retry at a smaller size (a smaller chunk is
+        // not a newer view) and no skip-and-continue (an assigner that took the
+        // first coupon has most likely taken the rest).
+        let all = cids(120);
+        let (seen, submit) = recorder(vec![false]);
+        let assigned = drain_assignable(&all, 50, &alice(), submit).await;
         assert_eq!(assigned, 0);
-        // 4, 2, then 1 three times -> 5 attempts, then stop.
-        assert_eq!(*seen.borrow(), vec![4, 2, 1, 1, 1]);
+        assert_eq!(*seen.borrow(), vec![50], "one attempt, then end the tick");
     }
 
     #[tokio::test]
-    async fn drain_does_not_resubmit_an_identical_chunk_when_the_set_is_smaller() {
-        // Regression (devnet, 2026-07-27): with one assignable coupon and a
-        // chunk of 50, the submitted chunk is 1 either way, so halving `size`
-        // resent the SAME command 5 times before the give-up path could fire.
-        // Contention must cost one attempt, not log2(chunk).
+    async fn drain_keeps_the_chunks_it_already_committed() {
+        // Ending the tick must not discard earlier successes: the first chunk is
+        // assigned, the second fails, and the remainder waits for the next tick
+        // with its full TTL intact.
+        let all = cids(120);
+        let (seen, submit) = recorder(vec![true, false]);
+        let assigned = drain_assignable(&all, 50, &alice(), submit).await;
+        assert_eq!(assigned, 50);
+        assert_eq!(*seen.borrow(), vec![50, 50]);
+    }
+
+    #[tokio::test]
+    async fn drain_attempts_once_when_the_set_is_smaller_than_the_chunk() {
+        // One assignable coupon against a chunk of 50 is the shape devnet
+        // contention actually takes. It must cost a single submission.
         let all = cids(1);
         let (seen, submit) = recorder(vec![false]);
-        let assigned = drain_assignable(&all, 50, 3, &alice(), submit).await;
+        let assigned = drain_assignable(&all, 50, &alice(), submit).await;
         assert_eq!(assigned, 0);
-        assert_eq!(
-            *seen.borrow(),
-            vec![1],
-            "one attempt, not a halving cascade"
-        );
-    }
-
-    #[tokio::test]
-    async fn drain_skips_a_poisoned_coupon_and_keeps_going() {
-        // A single contended coupon must not cost the coupons behind it. Chunk
-        // of 1: first fails and is skipped, the remaining two succeed.
-        let all = cids(3);
-        let (seen, submit) = recorder(vec![false]);
-        let assigned = drain_assignable(&all, 1, 3, &alice(), submit).await;
-        assert_eq!(assigned, 2);
-        assert_eq!(*seen.borrow(), vec![1, 1, 1]);
+        assert_eq!(*seen.borrow(), vec![1]);
     }
 
     #[test]
