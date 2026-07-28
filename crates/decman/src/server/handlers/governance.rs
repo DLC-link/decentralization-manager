@@ -1385,6 +1385,25 @@ pub(crate) async fn submit_proposal(
         })
 }
 
+/// True when this proposal would create a SECOND live `CouponReassignmentDelegation`.
+///
+/// Canton cannot enforce the per-decparty singleton — contract keys do not give
+/// cross-participant uniqueness — and `executeImpl` cannot query the ACS, so the
+/// propose boundary is the only place the accident is catchable. Replacing an
+/// existing delegation is fine; leaving `prior_delegation` empty while one is live
+/// is not: the automation then refuses to act on an ambiguous split so every
+/// coupon expires, and an assigner can still pay the superseded split.
+fn creates_second_delegation(proposal: &ProposalType, delegation_is_active: bool) -> bool {
+    delegation_is_active
+        && matches!(
+            proposal,
+            ProposalType::SetupCouponReassignmentDelegation {
+                prior_delegation: None,
+                ..
+            }
+        )
+}
+
 /// Propose a domain governance action (creates a GovernableAction proposal contract)
 #[utoipa::path(
     tag = "Governance",
@@ -1394,6 +1413,7 @@ pub(crate) async fn submit_proposal(
         (status = 400, description = "Bad request", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
+        (status = 409, description = "A CouponReassignmentDelegation is already active; set prior_delegation to replace it", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
         (status = 502, description = "Failed to fetch transfer context from registry", body = ErrorResponse),
         (status = 503, description = "Governance package not configured on this node", body = ErrorResponse)
@@ -1422,6 +1442,29 @@ pub async fn propose_action(
             });
         }
     };
+
+    // Canton cannot enforce the per-decparty singleton (contract keys do not give
+    // cross-participant uniqueness) and executeImpl cannot query the ACS, so the
+    // propose boundary is the only place the accident is catchable.
+    if let Ok(active) = crate::server::reward_automation::active_delegation(
+        &data.config,
+        &packages(),
+        data.test_mode,
+        party_id,
+        &token,
+    )
+    .await
+        && creates_second_delegation(&body.proposal, active.is_some())
+    {
+        let cid = active.map(|a| a.cid).unwrap_or_default();
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!(
+                "a CouponReassignmentDelegation is already active ({cid}); set \
+                 prior_delegation to replace it — creating a second one stops \
+                 assignment entirely"
+            ),
+        });
+    }
 
     let audit_pool = data.db.clone();
     let audit_summary = crate::server::audit::proposal_summary(&body.proposal);
@@ -2775,6 +2818,38 @@ mod submit_proposal_status_tests {
     fn party() -> CantonId {
         // `prefix::<68 hex chars>` = a 34-byte all-zero namespace: a well-formed id.
         CantonId::parse(&format!("p::{}", "0".repeat(68))).expect("valid canton id")
+    }
+
+    /// Only a Setup that omits `prior_delegation` conflicts with an active
+    /// delegation. Replacing one is the normal path and must stay allowed, and no
+    /// other proposal type is affected — a rule broad enough to block either would
+    /// make the reward action unusable.
+    #[test]
+    fn creates_second_delegation_only_for_an_unnamed_replacement() {
+        let setup_without_prior = ProposalType::SetupCouponReassignmentDelegation {
+            dso: party(),
+            assigners: vec![party()],
+            new_beneficiaries: vec![],
+            prior_delegation: None,
+        };
+        let setup_with_prior = ProposalType::SetupCouponReassignmentDelegation {
+            dso: party(),
+            assigners: vec![party()],
+            new_beneficiaries: vec![],
+            prior_delegation: Some("00abc".to_string()),
+        };
+        let unrelated = ProposalType::GenericVote {
+            description: "unrelated".to_string(),
+        };
+
+        // the accident: a second delegation while one is live
+        assert!(creates_second_delegation(&setup_without_prior, true));
+        // no delegation yet -> the first create must be allowed
+        assert!(!creates_second_delegation(&setup_without_prior, false));
+        // replacement names what it replaces -> always allowed
+        assert!(!creates_second_delegation(&setup_with_prior, true));
+        // unrelated proposals are never blocked by an active delegation
+        assert!(!creates_second_delegation(&unrelated, true));
     }
 
     /// A proposal whose target governance package is not configured is a node
