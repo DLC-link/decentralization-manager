@@ -12,6 +12,7 @@ pub mod db;
 pub mod error;
 pub mod noise;
 pub mod server;
+pub mod signing;
 pub mod utils;
 pub mod workflow;
 

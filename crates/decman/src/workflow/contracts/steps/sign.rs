@@ -4,10 +4,9 @@ use canton_proto_rs::com::{
     digitalasset::canton::{
         crypto::{
             admin::v30::{
-                ExportKeyPairRequest, ListKeysFilters, ListMyKeysRequest,
-                vault_service_client::VaultServiceClient,
+                ListKeysFilters, ListMyKeysRequest, vault_service_client::VaultServiceClient,
             },
-            v30::{Signature, SignatureFormat, SigningAlgorithmSpec, SigningPublicKey},
+            v30::SigningPublicKey,
         },
         topology::admin::v30::{
             BaseQuery, ListPartyToKeyMappingRequest, ListPartyToParticipantRequest, StoreId,
@@ -16,24 +15,16 @@ use canton_proto_rs::com::{
         },
     },
 };
-use ed25519_dalek::{Signature as DalekSignature, Signer, SigningKey, Verifier};
 use sqlx::SqlitePool;
-use zeroize::Zeroizing;
 
 use crate::{
     canton_id::CantonId,
     config::NodeConfig,
-    consts::CANTON_PROTOCOL_VERSION,
     error::Result,
+    signing::{SigningKeyContext, select_signer},
     utils,
     workflow::storage::{WorkflowStorage, artifact_kinds, identity_kinds},
 };
-
-/// DER OCTET STRING tag
-const DER_OCTET_STRING_TAG: u8 = 0x04;
-
-/// Expected length of Ed25519 private key in bytes (32 bytes)
-const ED25519_PRIVATE_KEY_LENGTH: u8 = 0x20;
 
 /// Sign prepared ledger submissions with Daml key
 ///
@@ -173,6 +164,13 @@ pub async fn sign_submissions(
         count = keys_response.private_keys_metadata.len()
     );
 
+    // Capture the underlying KMS key id, present only for KMS-backed keys. The
+    // signer selection uses it to route a non-exportable key to a KMS backend.
+    let kms_key_id = keys_response
+        .private_keys_metadata
+        .first()
+        .and_then(|m| m.kms_key_id.clone());
+
     // Step 3: Dynamically load all prepared submissions from storage. They were
     // written by `prepare_submissions` keyed by zero-padded ordinal so
     // `list_artifacts` returns them sorted by their original creation order.
@@ -203,186 +201,26 @@ pub async fn sign_submissions(
         count = prepared_submissions.len()
     );
 
-    // Step 4: Export the private key
-    tracing::info!("Exporting private key from Canton...");
-    tracing::debug!("Key fingerprint: {key_fingerprint}");
+    // Step 4: Sign each prepared-transaction hash with the party's Daml key via
+    // the selected signing backend. The backend abstracts *how* the key signs —
+    // exporting it and signing locally with Ed25519 today (JCE keys), or asking
+    // a KMS to sign a non-exportable key (follow-up). Everything else in this
+    // step is provider-independent.
+    let hashes: Vec<Vec<u8>> = prepared_submissions
+        .iter()
+        .map(|s| s.prepared_transaction_hash.clone())
+        .collect();
 
-    let mut export_response = vault_client
-        .export_key_pair(tonic::Request::new(ExportKeyPairRequest {
-            fingerprint: key_fingerprint.clone(),
-            protocol_version: CANTON_PROTOCOL_VERSION,
-            password: String::new(), // Empty: the exported key pair is not passphrase-protected.
-        }))
-        .await
-        .map_err(|e| {
-            tracing::error!("ExportKeyPair RPC failed with error: {e:?}");
-            tracing::error!("Attempted fingerprint: {key_fingerprint}");
-            e
-        })?
-        .into_inner();
+    let key_context = SigningKeyContext {
+        fingerprint: key_fingerprint.clone(),
+        public_key: signing_public_key.clone(),
+        kms_key_id,
+    };
 
-    // Step 5: Extract Ed25519 private key from Canton's export response.
-    // Canton returns the key in a custom format with embedded metadata.
-    //
-    // Move the bytes directly out of the proto struct with `std::mem::take`
-    // into a zeroizing buffer — avoids a second heap copy of the secret that
-    // `.clone()` would create. The proto's `key_pair` is left as an empty
-    // `Vec` and dropped along with `export_response` shortly after. All
-    // 32-byte candidates derived below are also held in `Zeroizing<[u8; 32]>`
-    // so they self-wipe on drop.
-    let exported_key_data: Zeroizing<Vec<u8>> =
-        Zeroizing::new(std::mem::take(&mut export_response.key_pair));
-    tracing::debug!(
-        "Parsing exported key pair ({len} bytes)",
-        len = exported_key_data.len()
-    );
+    let signer = select_signer(config, &key_context).await?;
+    let signatures = signer.sign(&hashes, &key_context).await?;
 
-    // Strategy: Try ALL possible 32-byte sequences and test each one.
-    // The correct private key should verify against the public key.
-    let key_size = ED25519_PRIVATE_KEY_LENGTH as usize;
-    let max_offset = exported_key_data.len().saturating_sub(key_size);
-
-    tracing::info!("Searching for valid Ed25519 private key among {max_offset} possible positions");
-
-    let mut candidate_keys: Vec<(usize, Zeroizing<[u8; 32]>, &str)> = Vec::new();
-
-    // First, try DER-tagged sequences (0x04 0x20 pattern)
-    for offset in 0..max_offset.saturating_sub(2) {
-        if exported_key_data[offset] == DER_OCTET_STRING_TAG
-            && exported_key_data[offset + 1] == ED25519_PRIVATE_KEY_LENGTH
-        {
-            let mut key_bytes = [0u8; 32];
-            key_bytes.copy_from_slice(&exported_key_data[offset + 2..offset + 2 + key_size]);
-            candidate_keys.push((offset + 2, Zeroizing::new(key_bytes), "DER-tagged"));
-        }
-    }
-    tracing::debug!(
-        "Found {count} DER-tagged candidates",
-        count = candidate_keys.len()
-    );
-
-    if candidate_keys.is_empty() {
-        tracing::warn!("No DER-tagged sequences found, trying all possible 32-byte sequences");
-
-        // Try every possible 32-byte sequence in the exported data
-        for offset in (0..max_offset).step_by(4) {
-            let mut key_bytes = [0u8; 32];
-            key_bytes.copy_from_slice(&exported_key_data[offset..offset + key_size]);
-            candidate_keys.push((offset, Zeroizing::new(key_bytes), "raw"));
-        }
-
-        tracing::debug!(
-            "Found {count} raw 32-byte candidates",
-            count = candidate_keys.len()
-        );
-    }
-
-    if candidate_keys.is_empty() {
-        anyhow::bail!("Could not find any Ed25519 key candidates in exported data");
-    }
-
-    tracing::info!(
-        "Found {count} candidate Ed25519 key positions to try",
-        count = candidate_keys.len()
-    );
-
-    // Step 6: Try each candidate key and verify it produces the correct public key
-    tracing::info!("Verifying candidates against expected public key...");
-
-    // Get the public key bytes from Canton's metadata for verification
-    // Canton stores Ed25519 public keys in DER format with this structure:
-    // - Bytes 0-11: DER wrapper (SEQUENCE + algorithm OID + BIT STRING header)
-    // - Bytes 12-43: Raw 32-byte Ed25519 public key
-    let expected_public_key_der = &signing_public_key.public_key;
-
-    // Extract raw Ed25519 public key from DER format
-    const DER_HEADER_LENGTH: usize = 12;
-    const ED25519_PUBLIC_KEY_LENGTH: usize = 32;
-
-    if expected_public_key_der.len() < DER_HEADER_LENGTH + ED25519_PUBLIC_KEY_LENGTH {
-        anyhow::bail!(
-            "Expected public key is too short: {result_count} bytes (need at least {expected_count})",
-            result_count = expected_public_key_der.len(),
-            expected_count = DER_HEADER_LENGTH + ED25519_PUBLIC_KEY_LENGTH
-        );
-    }
-
-    let expected_raw_public_key = &expected_public_key_der[DER_HEADER_LENGTH..];
-
-    let mut verified_key_bytes: Option<Zeroizing<[u8; 32]>> = None;
-
-    for (offset, key_bytes, source) in &candidate_keys {
-        let signing_key = SigningKey::from_bytes(key_bytes);
-        let derived_public_bytes = signing_key.verifying_key().to_bytes();
-
-        // Compare raw Ed25519 public keys (32 bytes)
-        if derived_public_bytes.as_slice() == expected_raw_public_key {
-            tracing::info!("Found matching private key at offset {offset} ({source})");
-            verified_key_bytes = Some(Zeroizing::new(**key_bytes));
-            break;
-        }
-    }
-
-    let key_bytes = verified_key_bytes.ok_or_else(|| {
-        anyhow::anyhow!(
-            "None of the {count} candidate keys produced the expected public key. \
-            This indicates the private key is not in the expected format in the exported data.",
-            count = candidate_keys.len()
-        )
-    })?;
-    // Drop the remaining candidates; each Zeroizing<[u8; 32]> wipes on drop.
-    drop(candidate_keys);
-
-    tracing::info!("Successfully verified Ed25519 private key");
-
-    // Step 7: Sign transaction hashes with verified key.
-    // `SigningKey` impls `Zeroize` (via the `zeroize` feature on
-    // `ed25519-dalek`) and zeros its inner secret on drop.
-    tracing::info!(
-        "Signing {count} transaction hashes...",
-        count = prepared_submissions.len()
-    );
-
-    let signing_key = SigningKey::from_bytes(&key_bytes);
-    let verifying_key = signing_key.verifying_key();
-    tracing::debug!("Key fingerprint used in signatures: {key_fingerprint}");
-
-    // Sign each prepared transaction hash and create Signature protobuf messages
-    let mut signatures: Vec<Signature> = Vec::new();
-
-    for (idx, prepared_sub) in prepared_submissions.iter().enumerate() {
-        let signature_bytes = signing_key
-            .sign(&prepared_sub.prepared_transaction_hash)
-            .to_bytes();
-
-        // Verify locally
-        let sig = DalekSignature::from_bytes(&signature_bytes);
-        if verifying_key
-            .verify(&prepared_sub.prepared_transaction_hash, &sig)
-            .is_ok()
-        {
-            tracing::info!("Signature {index} verified locally", index = idx + 1);
-        } else {
-            tracing::error!(
-                "Signature {index} failed local verification!",
-                index = idx + 1
-            );
-        }
-
-        // Create Signature protobuf message
-        // Ed25519 signatures use CONCAT format (r || s in little-endian)
-        signatures.push(Signature {
-            format: SignatureFormat::Concat as i32,
-            signature: signature_bytes.to_vec(),
-            signed_by: key_fingerprint.clone(),
-            signing_algorithm_spec: SigningAlgorithmSpec::Ed25519 as i32,
-            signature_delegation: None,
-        });
-    }
-
-    tracing::debug!("Generated {count} signatures", count = signatures.len());
-
-    // Step 8: Persist signatures bundle as `SUBMISSION_SIGNATURES` artefact.
+    // Step 5: Persist signatures bundle as `SUBMISSION_SIGNATURES` artefact.
     // The blob is the same multi-message `varint(len)||proto` framing the
     // previous on-disk `submission-signatures-{node_id}.bin` used; the
     // execute step will read it back via `read_all_messages_from_bytes`.
