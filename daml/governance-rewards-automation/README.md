@@ -1,4 +1,4 @@
-# governance-rewards
+# governance-rewards-automation-v1-rc1
 
 A decman governance plugin (`GovernableAction` implementations) that lets a
 decentralized party manage collection of its CIP-104 rewards. Each action is
@@ -27,10 +27,15 @@ documented below.
 ## Prerequisites
 
 - A `GovernanceRules` contract deployed (from `#governance-core-<version>`).
-- This `governance-rewards` DAR uploaded and vetted on all participants (from
-  `#governance-rewards-<version>`). decman resolves the package by name, so
-  Canton package-preference selects the highest vetted version; the package is
-  upgrade-compatible (SCU) across additive version bumps.
+- This `governance-rewards-automation-v1-rc1` DAR uploaded and vetted on all participants. decman resolves the
+  package by name (`#governance-rewards-automation-v1-rc1`), so Canton package-preference selects the highest
+  vetted version.
+
+  **Not upgrade-compatible with `governance-rewards-v1`.** This is a new package
+  lineage, not a version bump of it: `CouponReassignmentDelegation` gained a
+  required `dso` field, which SCU does not permit as an in-place upgrade. The
+  rename avoids the clash. `governance-rewards-v1` had reached devnet only, never
+  production, so no upgrade path was owed.
 - The `splice-wallet` DAR (containing `Splice.Wallet.MintingDelegation`) and
   `splice-amulet` DAR (containing `Splice.AmuletRules:ExternalPartySetupProposal`,
   `Splice.Amulet:ValidatorRight`) uploaded on all participants.
@@ -106,7 +111,7 @@ Establishing those is a two-step onboarding.
 
    This creates an on-ledger `Splice.AmuletRules:ExternalPartySetupProposal`
    (signed by the validator + DSO, observed by the decparty) and returns its
-   contract id. Manual operator action — not part of `governance-rewards`.
+   contract id. Manual operator action — not part of `governance-rewards-automation-v1-rc1`.
 
 2. **Governance votes `AcceptExternalPartySetup`.** A member proposes the action
    with the proposal's contract id; after threshold confirmations, execution

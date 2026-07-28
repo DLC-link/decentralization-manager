@@ -17,7 +17,7 @@ const DAR_FILES: &[&str] = &[
     "governance-core-v1-0.1.0.dar",
     "governance-token-custody-v1-0.1.0.dar",
     "governance-utility-onboarding-v1-0.1.0.dar",
-    "governance-rewards-v1-0.1.4.dar",
+    "governance-rewards-automation-v1-rc1-0.1.0.dar",
 ];
 
 /// Map of expected package_id → (module_name, entity_name) of a well-known
@@ -47,7 +47,7 @@ const DAR_PROBES: &[(&str, &str, &str)] = &[
         "SetupUtility",
     ),
     (
-        "%23governance-rewards-v1",
+        "%23governance-rewards-automation-v1-rc1",
         "Governance.Rewards.CouponReassignmentDelegation",
         "CouponReassignmentDelegation",
     ),

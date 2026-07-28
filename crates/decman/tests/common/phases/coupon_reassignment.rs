@@ -94,9 +94,9 @@ use crate::common::{
 /// `#splice-api-reward-assignment-v1`, URL-encoded — the `RewardCoupon`
 /// interface package (concrete implementer on devnet: `RewardCouponV2`).
 const REWARD_ASSIGN_PKG: &str = "%23splice-api-reward-assignment-v1";
-/// `#governance-rewards-v1`, URL-encoded — holds the
+/// `#governance-rewards-automation-v1-rc1`, URL-encoded — holds the
 /// `CouponReassignmentDelegation` template.
-const GOVERNANCE_REWARDS_PKG: &str = "%23governance-rewards-v1";
+const GOVERNANCE_REWARDS_PKG: &str = "%23governance-rewards-automation-v1-rc1";
 
 /// Generous ceiling for the reassignment step. Under a short
 /// `DECPM_REWARD_AUTOMATION_INTERVAL_SECS` (see the module doc) the loop
