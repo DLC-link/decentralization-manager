@@ -266,6 +266,18 @@ test_setup_percentage_out_of_range_rejected = script do
     when = \f -> setupExecuteMustFail f [f.parties.member1] [rb f.parties.member2 1.5]
     then_ = then_gov_nothing
 
+-- a duplicated beneficiary rejected at execute. Percentages sum to 1.0 and are
+-- each in range, so only the uniqueness guard can reject this. Without it the
+-- delegation would be created, and every later Delegation_Assign would fail
+-- splice's "Beneficaries are unique" requirement — stalling assignment behind a
+-- coupon that can never be exercised.
+test_setup_duplicate_beneficiary_rejected = script do
+  run Test with
+    given = given_governance
+    when = \f -> setupExecuteMustFail f [f.parties.member1]
+                   [rb f.parties.member2 0.5, rb f.parties.member2 0.5]
+    then_ = then_gov_nothing
+
 -- more than 20 beneficiaries rejected at execute
 test_setup_too_many_beneficiaries_rejected = script do
   run Test with

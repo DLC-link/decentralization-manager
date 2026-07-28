@@ -60,7 +60,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     grant_rights(&*f, P1_JSON_API, &beneficiary_party, "participant-1").await?;
     grant_rights(&*f, P1_JSON_API, &operator_party, "participant-1").await?;
 
-    // Freshly issued coupons at the real 36h TTL: well clear of the 2h minting
+    // Freshly issued coupons at the real 36h TTL: well clear of the expiry
     // margin, so select_assignable takes them on the next tick. Distinct rounds
     // keep the seeded contracts distinguishable in a failure dump.
     let expires_at = (Utc::now() + chrono::Duration::hours(36))
