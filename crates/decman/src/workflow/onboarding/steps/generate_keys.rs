@@ -163,9 +163,16 @@ pub(crate) async fn get_or_create_signing_key(
     }
 
     tracing::debug!("Generating new signing key with name '{name}'");
+    // Leave the key spec UNSPECIFIED so the node picks its own configured
+    // default: EC-Curve25519 (Ed25519) on the JCE provider, EC-P256 on a
+    // KMS-backed node. Hardcoding EcCurve25519 broke party creation on
+    // KMS nodes (AWS, MPCH), which treat Curve25519 as verification-only and
+    // reject generation with SIGNING_KEY_GENERATION_ERROR / UnsupportedKeySpec.
+    // Deferring to the node default also avoids decman requesting a spec that
+    // the node's `crypto.signing.keys.allowed` set forbids. See #264.
     let response = vault_client
         .generate_signing_key(tonic::Request::new(GenerateSigningKeyRequest {
-            key_spec: SigningKeySpec::EcCurve25519 as i32,
+            key_spec: SigningKeySpec::Unspecified as i32,
             name: name.to_string(),
             usage: vec![usage as i32],
         }))
