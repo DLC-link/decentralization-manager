@@ -805,7 +805,6 @@ impl ProposalType {
                 ..
             } => validate_beneficiary_weights(beneficiaries),
             ProposalType::SetupCouponReassignmentDelegation {
-                dso,
                 assigners,
                 new_beneficiaries,
                 ..
@@ -818,9 +817,6 @@ impl ProposalType {
                     if !seen.insert(a) {
                         return Err(format!("duplicate assigner not allowed: {a}"));
                     }
-                }
-                if assigners.contains(dso) {
-                    return Err("the dso must not be an assigner".to_string());
                 }
                 validate_reward_beneficiaries(new_beneficiaries)
             }
