@@ -69,9 +69,12 @@ fn version_tail(name: &str, prefix: &str) -> String {
 /// Load the names of all packages uploaded to the participant from the Admin
 /// API's PackageService.
 pub(crate) async fn fetch_package_names(config: &NodeConfig) -> Result<Vec<String>> {
-    let mut client = PackageServiceClient::connect(config.admin_api_url())
-        .await
-        .context("Failed to connect to participant Admin API")?;
+    let mut client = PackageServiceClient::new(
+        config
+            .admin_channel()
+            .await
+            .context("Failed to connect to participant Admin API")?,
+    );
     let response = client
         .list_packages(tonic::Request::new(ListPackagesRequest {
             limit: 0,
@@ -92,9 +95,12 @@ pub(crate) async fn fetch_package_names(config: &NodeConfig) -> Result<Vec<Strin
 pub(crate) async fn fetch_package_id_to_name(
     config: &NodeConfig,
 ) -> Result<HashMap<String, String>> {
-    let mut client = PackageServiceClient::connect(config.admin_api_url())
-        .await
-        .context("Failed to connect to participant Admin API")?;
+    let mut client = PackageServiceClient::new(
+        config
+            .admin_channel()
+            .await
+            .context("Failed to connect to participant Admin API")?,
+    );
     let response = client
         .list_packages(tonic::Request::new(ListPackagesRequest {
             limit: 0,

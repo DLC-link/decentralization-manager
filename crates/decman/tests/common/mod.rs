@@ -11,6 +11,7 @@ pub mod operator;
 pub mod phases;
 pub mod processes;
 pub mod scenario;
+pub mod tls_proxy;
 pub mod types;
 
 use std::{

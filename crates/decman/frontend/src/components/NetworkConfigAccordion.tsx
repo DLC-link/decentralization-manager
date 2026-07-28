@@ -444,8 +444,8 @@ export const NetworkConfigAccordion = ({
                   <TableCell
                     sx={{ fontFamily: "monospace", fontSize: "0.75rem", py: 1, whiteSpace: "nowrap" }}
                   >
-                    {getStat(selfEntry.participant_id)?.version ??
-                      nodeConfig?.version ??
+                    {getStat(selfEntry.participant_id)?.build_version ??
+                      nodeConfig?.build_version ??
                       "—"}
                   </TableCell>
                 </TableRow>
@@ -499,7 +499,7 @@ export const NetworkConfigAccordion = ({
                     <TableCell
                       sx={{ fontFamily: "monospace", fontSize: "0.75rem", py: 1, whiteSpace: "nowrap" }}
                     >
-                      {st?.version ?? "—"}
+                      {st?.build_version ?? "—"}
                     </TableCell>
                   </TableRow>
                 );

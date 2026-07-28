@@ -2,10 +2,15 @@ import { Box, Container, IconButton, Tooltip } from "@mui/material";
 import LogoutIcon from "@mui/icons-material/Logout";
 
 import { useAuth } from "../contexts";
-import { Logo } from "./Logo";
+import { Logo, type BuildInfo } from "./Logo";
 import { ThemeSwitcher } from "./ThemeSwitcher";
 
-export const Header = () => {
+interface HeaderProps {
+  /** Build identity for the header's hidden build-info reveal. */
+  buildInfo?: BuildInfo;
+}
+
+export const Header = ({ buildInfo }: HeaderProps) => {
   const { token, logout } = useAuth();
 
   return (
@@ -35,7 +40,10 @@ export const Header = () => {
           justifyContent: "space-between",
         }}
       >
-        <Logo subtitle="Monitor and manage your decentralized parties" />
+        <Logo
+          subtitle="Monitor and manage your decentralized parties"
+          buildInfo={buildInfo}
+        />
         <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
           <ThemeSwitcher />
           {token && (

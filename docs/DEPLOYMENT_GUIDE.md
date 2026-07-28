@@ -152,6 +152,14 @@ stringData:
   DECPM_CANTON_NETWORK: "mainnet"          # mainnet | testnet | devnet
   DECPM_CANTON_SYNCHRONIZER: "global"
 
+  # Set when the participant serves its APIs over TLS. Point the CA vars at
+  # the issuing CA if it is a private one; omit them to use the platform
+  # trust store. See the environment table below for mTLS and SNI overrides.
+  # DECPM_CANTON_ADMIN_TLS: "true"
+  # DECPM_CANTON_ADMIN_TLS_CA_CERT: "/etc/decman/tls/canton-ca.pem"
+  # DECPM_CANTON_LEDGER_TLS: "true"
+  # DECPM_CANTON_LEDGER_TLS_CA_CERT: "/etc/decman/tls/canton-ca.pem"
+
   # Keycloak (gates the admin UI).
   DECPM_KEYCLOAK_URL: "https://<your-keycloak-host>"
   DECPM_KEYCLOAK_REALM: "<your-realm>"
@@ -367,6 +375,16 @@ Most variables have a default that's only useful for local development (loopback
 | `DECPM_CANTON_LEDGER_HOST` | `127.0.0.1` | **yes** | Canton Ledger API host |
 | `DECPM_CANTON_LEDGER_PORT` | `5001` | optional | Canton Ledger API port |
 | `DECPM_CANTON_SYNCHRONIZER` | `global` | optional | Synchronizer name |
+| `DECPM_CANTON_ADMIN_TLS` | `false` | optional | Speak TLS to the Admin API. Leave off for a participant reachable only over a trusted private network |
+| `DECPM_CANTON_ADMIN_TLS_CA_CERT` | unset | optional | PEM of the CA that issued the Admin API certificate. Required when that CA is private; the platform trust store is used when unset |
+| `DECPM_CANTON_ADMIN_TLS_CLIENT_CERT` | unset | optional | PEM client certificate, for an Admin API requiring mTLS. Set with the key |
+| `DECPM_CANTON_ADMIN_TLS_CLIENT_KEY` | unset | optional | PEM client key matching the certificate |
+| `DECPM_CANTON_ADMIN_TLS_DOMAIN` | unset | optional | Name to validate the Admin API certificate against, when it differs from the host — e.g. a certificate issued for a service DNS name while DecMan connects by IP |
+| `DECPM_CANTON_LEDGER_TLS` | `false` | optional | As above, for the Ledger API |
+| `DECPM_CANTON_LEDGER_TLS_CA_CERT` | unset | optional | |
+| `DECPM_CANTON_LEDGER_TLS_CLIENT_CERT` | unset | optional | |
+| `DECPM_CANTON_LEDGER_TLS_CLIENT_KEY` | unset | optional | |
+| `DECPM_CANTON_LEDGER_TLS_DOMAIN` | unset | optional | |
 | `DECPM_CANTON_NETWORK` | `devnet` | **yes** | `mainnet`, `testnet`, or `devnet` |
 | `DECPM_KEYCLOAK_URL` | unset | **yes**¹ | Keycloak server URL for frontend auth |
 | `DECPM_KEYCLOAK_REALM` | unset | **yes**¹ | Keycloak realm |
@@ -428,4 +446,5 @@ or dismiss them first).
 - **Pod is `CrashLoopBackOff`**: `kubectl logs` will usually show a missing required env var. Compare against the configuration reference above.
 - **UI loads but login fails**: confirm `<your-ui-host>` is registered as a valid redirect URI on your IdP client, and that the `DECPM_KEYCLOAK_*` (or `DECPM_AUTH0_*`) env vars match the IdP. For Auth0, the SPA application must also have the configured audience listed in its Allowed Callback / API Authorization.
 - **Peers shown as unreachable**: check that the Noise port (9000) is exposed publicly, that `DECPM_PUBLIC_ADDRESS` resolves to that endpoint, and that the peer has your current public key.
+- **Every Canton call fails with `transport error` / `BrokenPipe`, immediately and permanently**: the channel's TLS setting does not match what the endpoint speaks. A plaintext client against a TLS listener has its connection closed on the first bytes, which looks identical to the participant being down. Confirm with `grpcurl -plaintext <host>:<port> list` — if that fails but `grpcurl <host>:<port> list` succeeds, the endpoint is TLS: set `DECPM_CANTON_ADMIN_TLS=true` (and `DECPM_CANTON_LEDGER_TLS=true` for the ledger API), plus `..._TLS_CA_CERT` when a private CA issued the certificate. The connect error message names the variable to change in either direction.
 - **Privileged endpoints return 403**: you have `DECPM_ADMIN_ROLE` set but the calling user doesn't have that role assigned in the IdP. Either grant the role or unset the variable.

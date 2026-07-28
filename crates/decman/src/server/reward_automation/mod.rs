@@ -547,9 +547,11 @@ pub(crate) async fn submit_delegation_assign(
     )
     .await;
     let template_id = delegation_template_id(package_id);
-    let channel = tonic::transport::Channel::from_shared(config.ledger_api_url())?
-        .connect()
-        .await?;
+    // `ledger_channel` (not a raw `Channel::from_shared`) so this respects the
+    // configured Canton TLS/mTLS settings — the automation's own reads go through
+    // it via `create_state_client`, and an assign that bypassed it would be the
+    // one path unable to talk to a TLS-enabled ledger.
+    let channel = config.ledger_channel().await?;
     let mut client =
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
     let cmd = Command {

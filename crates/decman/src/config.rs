@@ -1,10 +1,13 @@
 use std::path::{Path, PathBuf};
 
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
+use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 
 use crate::{
     canton_id::CantonId,
     consts::{DARS_DIR, DATA_DIR, DB_FILENAME, NOISE_KEY_FILENAME},
+    error::Result,
 };
 
 /// Network configuration - list of peers in the network
@@ -430,6 +433,31 @@ pub fn default_package_config() -> PackageConfig {
     }
 }
 
+/// TLS settings for one Canton gRPC endpoint.
+///
+/// Off by default: a participant reachable only over a trusted private
+/// network (loopback, a Docker network, a pod) serves plaintext h2c, which is
+/// what every deployment did before this existed.
+#[derive(Clone, Debug, Default, Serialize, utoipa::ToSchema)]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct CantonTlsConfig {
+    /// Speak TLS to this endpoint.
+    pub enabled: bool,
+    /// PEM file holding the CA that issued the endpoint's certificate. Needed
+    /// for the usual case of a participant behind a private CA; when unset,
+    /// the platform trust store is used.
+    pub ca_cert: Option<String>,
+    /// PEM client certificate, for endpoints that require mTLS. Must be set
+    /// together with `client_key`.
+    pub client_cert: Option<String>,
+    /// PEM private key matching `client_cert`.
+    pub client_key: Option<String>,
+    /// Name to validate the server certificate against, when it differs from
+    /// the configured host — the common case being a certificate issued for a
+    /// service DNS name while DecMan connects by IP.
+    pub domain: Option<String>,
+}
+
 /// Canton participant configuration
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
@@ -441,6 +469,12 @@ pub struct CantonConfig {
     pub synchronizer: String,
     /// Canton Network environment (devnet, testnet, mainnet)
     pub network: Network,
+    /// TLS for the Admin API channel.
+    #[serde(default)]
+    pub admin_api_tls: CantonTlsConfig,
+    /// TLS for the Ledger API channel.
+    #[serde(default)]
+    pub ledger_api_tls: CantonTlsConfig,
 }
 
 impl Default for CantonConfig {
@@ -452,6 +486,8 @@ impl Default for CantonConfig {
             ledger_api_port: 5001,
             synchronizer: "global".to_string(),
             network: Network::Devnet,
+            admin_api_tls: CantonTlsConfig::default(),
+            ledger_api_tls: CantonTlsConfig::default(),
         }
     }
 }
@@ -466,17 +502,49 @@ impl NodeConfig {
     /// Get the full Admin API URL
     pub fn admin_api_url(&self) -> String {
         format!(
-            "http://{}:{}",
-            self.canton.admin_api_host, self.canton.admin_api_port
+            "{scheme}://{host}:{port}",
+            scheme = scheme(&self.canton.admin_api_tls),
+            host = self.canton.admin_api_host,
+            port = self.canton.admin_api_port
         )
     }
 
     /// Get the full Ledger API URL
     pub fn ledger_api_url(&self) -> String {
         format!(
-            "http://{}:{}",
-            self.canton.ledger_api_host, self.canton.ledger_api_port
+            "{scheme}://{host}:{port}",
+            scheme = scheme(&self.canton.ledger_api_tls),
+            host = self.canton.ledger_api_host,
+            port = self.canton.ledger_api_port
         )
+    }
+
+    /// Connect a gRPC channel to the participant's Admin API, applying the
+    /// configured TLS settings.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the TLS material cannot be read or the endpoint
+    /// cannot be reached. A plaintext/TLS mismatch — the failure mode that
+    /// otherwise shows up as a bare `transport error` — is annotated with
+    /// what to change.
+    pub async fn admin_channel(&self) -> Result<Channel> {
+        connect_channel(&self.admin_api_url(), &self.canton.admin_api_tls, "admin").await
+    }
+
+    /// Connect a gRPC channel to the participant's Ledger API, applying the
+    /// configured TLS settings.
+    ///
+    /// # Errors
+    ///
+    /// As [`NodeConfig::admin_channel`].
+    pub async fn ledger_channel(&self) -> Result<Channel> {
+        connect_channel(
+            &self.ledger_api_url(),
+            &self.canton.ledger_api_tls,
+            "ledger",
+        )
+        .await
     }
 
     /// Get the synchronizer name
@@ -522,6 +590,195 @@ impl NodeConfig {
     /// Check if participant_id is already set
     pub fn has_participant_id(&self) -> bool {
         self.node.participant_id.is_some()
+    }
+}
+
+fn scheme(tls: &CantonTlsConfig) -> &'static str {
+    if tls.enabled { "https" } else { "http" }
+}
+
+/// Build the tonic TLS settings for an endpoint.
+///
+/// With no `ca_cert` the platform trust store is used, which covers a
+/// publicly-issued certificate; a participant behind a private CA needs the
+/// CA PEM. `client_cert` + `client_key` are only for endpoints demanding
+/// mTLS.
+async fn client_tls_config(tls: &CantonTlsConfig, label: &str) -> Result<ClientTlsConfig> {
+    let mut config = match &tls.ca_cert {
+        Some(path) => {
+            let pem = tokio::fs::read(path).await.with_context(|| {
+                format!("reading the {label} API TLS CA certificate from {path}")
+            })?;
+            ClientTlsConfig::new().ca_certificate(Certificate::from_pem(pem))
+        }
+        None => ClientTlsConfig::new().with_enabled_roots(),
+    };
+
+    match (&tls.client_cert, &tls.client_key) {
+        (Some(cert_path), Some(key_path)) => {
+            let cert = tokio::fs::read(cert_path).await.with_context(|| {
+                format!("reading the {label} API TLS client certificate from {cert_path}")
+            })?;
+            let key = tokio::fs::read(key_path).await.with_context(|| {
+                format!("reading the {label} API TLS client key from {key_path}")
+            })?;
+            config = config.identity(Identity::from_pem(cert, key));
+        }
+        (None, None) => {}
+        (cert, _) => {
+            let (set, missing) = if cert.is_some() {
+                ("certificate", "key")
+            } else {
+                ("key", "certificate")
+            };
+            anyhow::bail!(
+                "{label} API mTLS is half-configured: the client {set} is set but the \
+                 client {missing} is not. Set both or neither."
+            );
+        }
+    }
+
+    if let Some(domain) = &tls.domain {
+        config = config.domain_name(domain);
+    }
+
+    Ok(config)
+}
+
+/// Connect a channel to `url`, applying `tls`.
+///
+/// The error path is the point of this function as much as the happy path:
+/// a plaintext client against a TLS listener (and the reverse) fails deep in
+/// the transport with nothing that names TLS, which is exactly how #260 was
+/// reported — a permanent `transport error` / BrokenPipe on every call.
+async fn connect_channel(url: &str, tls: &CantonTlsConfig, label: &str) -> Result<Channel> {
+    let mut endpoint = Endpoint::from_shared(url.to_string())
+        .with_context(|| format!("{url} is not a valid {label} API endpoint"))?;
+
+    if tls.enabled {
+        endpoint = endpoint
+            .tls_config(client_tls_config(tls, label).await?)
+            .with_context(|| format!("applying TLS settings to the {label} API channel"))?;
+    }
+
+    endpoint.connect().await.map_err(|e| {
+        let hint = if tls.enabled {
+            format!(
+                "TLS is enabled for the {label} API. If the endpoint actually serves \
+                 plaintext h2c, unset DECPM_CANTON_{upper}_TLS; if it serves TLS under a \
+                 private CA, point DECPM_CANTON_{upper}_TLS_CA_CERT at that CA",
+                upper = label.to_uppercase()
+            )
+        } else {
+            format!(
+                "the {label} API channel is plaintext. If the endpoint serves TLS it closes \
+                 the connection on the first bytes, which looks exactly like this; set \
+                 DECPM_CANTON_{upper}_TLS=true",
+                upper = label.to_uppercase()
+            )
+        };
+        anyhow::Error::new(e).context(format!("connecting to {url}: {hint}"))
+    })
+}
+
+#[cfg(test)]
+mod tls_tests {
+    use super::*;
+
+    /// A port nothing listens on, so `connect` fails immediately and the test
+    /// only exercises how that failure is reported.
+    const CLOSED: &str = "http://127.0.0.1:1";
+
+    #[test]
+    fn urls_carry_the_scheme_the_tls_flag_implies() {
+        let mut config = NodeConfig::default();
+        assert_eq!(config.admin_api_url(), "http://127.0.0.1:5002");
+        assert_eq!(config.ledger_api_url(), "http://127.0.0.1:5001");
+
+        config.canton.admin_api_tls.enabled = true;
+        assert_eq!(config.admin_api_url(), "https://127.0.0.1:5002");
+        // Each endpoint is configured on its own: a TLS admin API says
+        // nothing about the ledger API.
+        assert_eq!(config.ledger_api_url(), "http://127.0.0.1:5001");
+
+        config.canton.ledger_api_tls.enabled = true;
+        assert_eq!(config.ledger_api_url(), "https://127.0.0.1:5001");
+    }
+
+    #[tokio::test]
+    async fn half_configured_mtls_is_rejected() {
+        let tls = CantonTlsConfig {
+            enabled: true,
+            client_cert: Some("/tmp/client.pem".to_string()),
+            ..Default::default()
+        };
+
+        let message = match client_tls_config(&tls, "admin").await {
+            Ok(_) => panic!("a client certificate without a key must be rejected"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(
+            message.contains("half-configured"),
+            "unhelpful error: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_ca_file_names_the_path() {
+        let tls = CantonTlsConfig {
+            enabled: true,
+            ca_cert: Some("/nonexistent/ca.pem".to_string()),
+            ..Default::default()
+        };
+
+        let message = match client_tls_config(&tls, "ledger").await {
+            Ok(_) => panic!("an unreadable CA certificate must be rejected"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(
+            message.contains("/nonexistent/ca.pem"),
+            "unhelpful error: {message}"
+        );
+    }
+
+    /// #260's reported symptom: a plaintext client against a TLS endpoint
+    /// fails with a bare transport error naming nothing. The connect error
+    /// must point at the knob that fixes it.
+    #[tokio::test]
+    async fn a_plaintext_failure_points_at_the_tls_flag() {
+        let tls = CantonTlsConfig::default();
+
+        let message = match connect_channel(CLOSED, &tls, "admin").await {
+            Ok(_) => panic!("nothing listens on port 1"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(
+            message.contains("DECPM_CANTON_ADMIN_TLS=true"),
+            "unhelpful error: {message}"
+        );
+    }
+
+    /// And the mirror case, so an operator who turned TLS on against a
+    /// plaintext endpoint is not left guessing either.
+    #[tokio::test]
+    async fn a_tls_failure_points_back_at_plaintext_and_the_ca() {
+        let tls = CantonTlsConfig {
+            enabled: true,
+            ..Default::default()
+        };
+
+        let message = match connect_channel("https://127.0.0.1:1", &tls, "ledger").await {
+            Ok(_) => panic!("nothing listens on port 1"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(
+            message.contains("unset DECPM_CANTON_LEDGER_TLS"),
+            "unhelpful error: {message}"
+        );
+        assert!(
+            message.contains("DECPM_CANTON_LEDGER_TLS_CA_CERT"),
+            "unhelpful error: {message}"
+        );
     }
 }
 

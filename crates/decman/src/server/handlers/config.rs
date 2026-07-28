@@ -78,22 +78,30 @@ pub async fn save_network_config(
 /// `config` is owned (not borrowed) so the type can derive `ts_rs::TS` for the
 /// frontend type generator — `TS` needs an owned, `'static` type. The handler
 /// clones the node config once per request, which is cheap relative to the I/O.
-#[derive(Serialize)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
+#[derive(Serialize, utoipa::ToSchema)]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct NodeConfigResponse {
     #[serde(flatten)]
     config: NodeConfig,
     test_mode: bool,
-    /// dec-party-manager binary version, so the Config tab can show which
-    /// build this node is running.
+    /// Cargo package semver. This is the *compatibility* version peers gate on
+    /// (`MIN_PEER_VERSION`), not necessarily the release identity — see
+    /// `build_version`.
     version: &'static str,
+    /// Display build identity: the git tag on release images, the short commit
+    /// SHA on per-commit images, or `<semver>-dev` outside CI. This is what the
+    /// Config tab's Version column and the header build-info easter egg show.
+    build_version: &'static str,
+    /// When this image was built (RFC 3339), if CI stamped it; `None` outside CI.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    build_time: Option<&'static str>,
 }
 
 /// Get the node configuration
 #[utoipa::path(
     tag = "Configuration",
     responses(
-        (status = 200, description = "Node configuration", body = NodeConfig)
+        (status = 200, description = "Node configuration", body = NodeConfigResponse)
     )
 )]
 #[get("/node-config")]
@@ -101,7 +109,9 @@ pub async fn get_node_config(data: web::Data<AppState>) -> impl Responder {
     HttpResponse::Ok().json(NodeConfigResponse {
         config: data.config.clone(),
         test_mode: data.test_mode,
-        version: env!("CARGO_PKG_VERSION"),
+        version: crate::build_info::SEMVER,
+        build_version: crate::build_info::build_version(),
+        build_time: crate::build_info::build_time(),
     })
 }
 
@@ -136,4 +146,26 @@ async fn save_peers_to_db(db: &SqlitePool, peers: &[Peer]) -> Result {
         tx.insert_peer(peer).await?;
     }
     Commitable::commit(tx).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use utoipa::PartialSchema;
+
+    // The `/node-config` OpenAPI response is documented as `NodeConfigResponse`,
+    // not the flattened `NodeConfig`. Guard that its schema builds (flatten can
+    // fail at spec-assembly, not compile time) and actually documents the build
+    // identity fields, so the generated Swagger stays honest.
+    #[test]
+    fn node_config_response_schema_documents_build_fields() {
+        let schema = NodeConfigResponse::schema();
+        let json = serde_json::to_string(&schema).expect("schema should serialize");
+        for field in ["version", "build_version", "build_time"] {
+            assert!(
+                json.contains(field),
+                "OpenAPI schema missing `{field}`: {json}"
+            );
+        }
+    }
 }

@@ -9,27 +9,61 @@ import { BITSAFE_BRANDING } from "../constants";
 
 declare const __BUILD_DATE__: string;
 
-interface LogoProps {
-  subtitle?: string;
+export interface BuildInfo {
+  /** Cargo semver (compatibility version). */
+  version?: string;
+  /** Display build identity: image tag / short SHA / `<semver>-dev`. */
+  buildVersion?: string;
+  /** Image build time (RFC 3339), if CI stamped it. */
+  buildTime?: string;
 }
 
-export const Logo = ({ subtitle = "Decentralization Manager" }: LogoProps) => {
+interface LogoProps {
+  subtitle?: string;
+  /** Build identity for the hidden build-info reveal. Absent before login. */
+  buildInfo?: BuildInfo;
+}
+
+const formatTimestamp = (iso: string) =>
+  new Date(iso).toLocaleString("hu-HU", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+
+export const Logo = ({
+  subtitle = "Decentralization Manager",
+  buildInfo,
+}: LogoProps) => {
   const theme = useTheme();
   const wordmark =
     theme.palette.mode === "light" ? BitSafeLogoDark : BitSafeLogoLight;
-  const [showBuildDate, setShowBuildDate] = useState(false);
+  const [showBuildInfo, setShowBuildInfo] = useState(false);
   const clickCount = useRef(0);
 
   const handleSubtitleClick = () => {
     clickCount.current += 1;
     if (clickCount.current >= 10) {
       clickCount.current = 0;
-      setShowBuildDate(false);
+      setShowBuildInfo(false);
       window.location.href = "/swagger-ui/";
     } else if (clickCount.current >= 5) {
-      setShowBuildDate(true);
+      setShowBuildInfo(true);
     }
   };
+
+  // Prefer the CI-stamped image build time (matches the running image); fall
+  // back to the frontend bundle's build date when the backend didn't stamp one
+  // (e.g. before login, or a local build).
+  const builtAt = buildInfo?.buildTime ?? __BUILD_DATE__;
+  const buildLabel = buildInfo?.buildVersion
+    ? `Build ${buildInfo.buildVersion}${
+        buildInfo.version ? ` · v${buildInfo.version}` : ""
+      } · ${formatTimestamp(builtAt)}`
+    : `Build: ${formatTimestamp(builtAt)}`;
 
   if (!BITSAFE_BRANDING) {
     // Co-brand mode: replace the "itsafe" wordmark with "Decentralization
@@ -52,9 +86,7 @@ export const Logo = ({ subtitle = "Decentralization Manager" }: LogoProps) => {
             userSelect: "none",
           }}
         >
-          {showBuildDate
-            ? `Build: ${new Date(__BUILD_DATE__).toLocaleString("hu-HU", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false })}`
-            : "Decentralization Manager"}
+          {showBuildInfo ? buildLabel : "Decentralization Manager"}
         </Typography>
       </Box>
     );
@@ -74,9 +106,7 @@ export const Logo = ({ subtitle = "Decentralization Manager" }: LogoProps) => {
         onClick={handleSubtitleClick}
         sx={{ mt: 0.5, cursor: "default", userSelect: "none" }}
       >
-        {showBuildDate
-          ? `Build: ${new Date(__BUILD_DATE__).toLocaleString("hu-HU", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false })}`
-          : subtitle}
+        {showBuildInfo ? buildLabel : subtitle}
       </Typography>
     </Box>
   );

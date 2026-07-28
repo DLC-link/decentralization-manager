@@ -1790,6 +1790,7 @@ mod tests {
             status: ConnectionStatus::Connected,
             latency_ms: Some(12),
             version: Some("1.2.3".to_owned()),
+            build_version: Some("v1.2.3".to_owned()),
             workflow,
         }
     }

@@ -303,20 +303,18 @@ static SYNCHRONIZER_ID_CACHE: OnceCell<String> = OnceCell::const_new();
 /// return the cached value without any network round trip.
 pub async fn get_synchronizer_id(config: &NodeConfig) -> Result<String> {
     SYNCHRONIZER_ID_CACHE
-        .get_or_try_init(|| async {
-            get_synchronizer_id_from_url(&config.admin_api_url(), config.synchronizer()).await
-        })
+        .get_or_try_init(|| async { fetch_synchronizer_id(config, config.synchronizer()).await })
         .await
         .cloned()
 }
 
-/// Get the physical synchronizer ID from a Canton Admin API URL and alias
-pub async fn get_synchronizer_id_from_url(
-    admin_api_url: &str,
+/// Get the physical synchronizer ID for an alias, over the configured Admin
+/// API channel.
+pub async fn fetch_synchronizer_id(
+    config: &NodeConfig,
     synchronizer_alias: &str,
 ) -> Result<String> {
-    let mut conn_client =
-        SynchronizerConnectivityServiceClient::connect(admin_api_url.to_string()).await?;
+    let mut conn_client = SynchronizerConnectivityServiceClient::new(config.admin_channel().await?);
 
     let response = conn_client
         .get_synchronizer_id(tonic::Request::new(GetSynchronizerIdRequest {
@@ -364,8 +362,7 @@ pub fn extract_synchronizer_fingerprint(synchronizer_id: &str) -> Result<String>
 ///
 /// Queries the participant's identity initialization service to get the unique participant ID.
 pub async fn get_participant_id(config: &NodeConfig) -> Result<CantonId> {
-    let mut id_client =
-        IdentityInitializationServiceClient::connect(config.admin_api_url()).await?;
+    let mut id_client = IdentityInitializationServiceClient::new(config.admin_channel().await?);
     let response = id_client
         .get_id(tonic::Request::new(GetIdRequest {}))
         .await?
@@ -450,9 +447,7 @@ macro_rules! define_client_creator {
                 >,
             >,
         > {
-            let channel = tonic::transport::Channel::from_shared(config.ledger_api_url())?
-                .connect()
-                .await?;
+            let channel = config.ledger_channel().await?;
 
             let interceptor = move |mut req: tonic::Request<()>| {
                 if let Some(ref token) = token {

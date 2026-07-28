@@ -30,6 +30,11 @@ pub struct NodeSpawn {
     pub canton_admin_port: u16,
     pub canton_ledger_port: u16,
     pub initial_pid: u32,
+    /// Extra environment applied on top of the boot env, last, so it can
+    /// override any of it. Used by phases that need a node to come up with a
+    /// different Canton wiring than `integration-tests/run.sh` gave it (e.g.
+    /// pointed at a TLS-terminating proxy).
+    pub extra_env: Vec<(String, String)>,
 }
 
 fn read_env(key: &str) -> Result<String> {
@@ -85,6 +90,7 @@ impl Fixture {
             canton_admin_port: read_port(admin)?,
             canton_ledger_port: read_port(ledger)?,
             initial_pid: read_pid(pid_var)?,
+            extra_env: Vec::new(),
         })
     }
 }
@@ -206,6 +212,12 @@ pub async fn spawn_node(spawn: &NodeSpawn, restarted_pids_file: &PathBuf) -> Res
         )
         .env("DECPM_CANTON_NETWORK", "devnet")
         .env("DECPM_NOISE_PORT", spawn.noise_port.to_string())
+        .envs(
+            spawn
+                .extra_env
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str())),
+        )
         .stdout(Stdio::from(log_file))
         .stderr(Stdio::from(log_clone))
         .kill_on_drop(false)

@@ -88,7 +88,7 @@ pub async fn clear_onboarding_flag(
         .parse()
         .map_err(|e| anyhow::anyhow!("Failed to parse pre-activation offset: {e}"))?;
 
-    let mut client = PartyManagementServiceClient::connect(config.admin_api_url()).await?;
+    let mut client = PartyManagementServiceClient::new(config.admin_channel().await?);
     let waited_start = time::Instant::now();
 
     loop {
@@ -309,7 +309,7 @@ pub async fn submit_clear_proposal(
     dedupe_signatures(&mut transaction);
 
     let mut topology_write_client =
-        TopologyManagerWriteServiceClient::connect(config.admin_api_url()).await?;
+        TopologyManagerWriteServiceClient::new(config.admin_channel().await?);
     tracing::info!("Submitting onboarding-flag clearing transaction...");
     topology_write_client
         .add_transactions(tonic::Request::new(add_transactions_request(

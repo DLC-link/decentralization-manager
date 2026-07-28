@@ -67,7 +67,7 @@ pub async fn export_party_acs(
         member = add_party_config.new_participant_id
     );
 
-    let mut client = PartyManagementServiceClient::connect(config.admin_api_url()).await?;
+    let mut client = PartyManagementServiceClient::new(config.admin_channel().await?);
 
     // Bounded retry on INVALID_STATE: the export locates the party's MOST
     // RECENT activation on the target in this participant's published
@@ -166,7 +166,7 @@ pub async fn import_party_acs(
     let party_id = add_party_config.decentralized_party_id.to_string();
 
     let mut connectivity =
-        SynchronizerConnectivityServiceClient::connect(config.admin_api_url()).await?;
+        SynchronizerConnectivityServiceClient::new(config.admin_channel().await?);
     tracing::info!("Disconnecting from all synchronizers for the ACS import...");
     connectivity
         .disconnect_all_synchronizers(tonic::Request::new(DisconnectAllSynchronizersRequest {}))
@@ -205,7 +205,7 @@ async fn run_import(
         len = snapshot.len()
     );
 
-    let mut client = PartyManagementServiceClient::connect(config.admin_api_url()).await?;
+    let mut client = PartyManagementServiceClient::new(config.admin_channel().await?);
 
     let requests: Vec<ImportPartyAcsRequest> = snapshot
         .chunks(IMPORT_CHUNK_SIZE)

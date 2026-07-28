@@ -15,9 +15,18 @@ COPY --chmod=0755 dec-party-manager /usr/local/bin/dec-party-manager
 
 EXPOSE 8080 9000
 
+# Build identity, stamped by CI (build.yml / release.yml). DECPM_BUILD_VERSION
+# is the pushed image tag (releases) or short commit SHA (per-commit images);
+# it's what the UI shows as the build version. Left blank on a plain
+# `docker build`, in which case the app falls back to `<cargo-semver>-dev`.
+ARG DECPM_BUILD_VERSION=
+ARG DECPM_BUILD_TIME=
+
 # Image defaults; override via env at run time.
 ENV DECPM_DIR=/ \
     DECPM_HOST=0.0.0.0 \
-    DECPM_PORT=8080
+    DECPM_PORT=8080 \
+    DECPM_BUILD_VERSION=$DECPM_BUILD_VERSION \
+    DECPM_BUILD_TIME=$DECPM_BUILD_TIME
 
 ENTRYPOINT ["dec-party-manager", "serve"]

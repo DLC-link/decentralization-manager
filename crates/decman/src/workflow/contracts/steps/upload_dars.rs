@@ -19,7 +19,7 @@ pub async fn upload_dars(config: &NodeConfig, dar_files: &[DarFile]) -> Result {
 
     tracing::info!("Uploading {count} DAR file(s)...", count = dar_files.len());
 
-    let mut client = PackageServiceClient::connect(config.admin_api_url()).await?;
+    let mut client = PackageServiceClient::new(config.admin_channel().await?);
 
     for dar_file in dar_files {
         // Decode base64 data
@@ -53,7 +53,7 @@ pub async fn upload_dars_from_bytes(
 
     tracing::info!("Uploading {count} DAR file(s)...", count = dar_files.len());
 
-    let mut client = PackageServiceClient::connect(config.admin_api_url()).await?;
+    let mut client = PackageServiceClient::new(config.admin_channel().await?);
 
     for (filename, data) in dar_files {
         upload_dar_bytes(&mut client, &filename, data).await?;

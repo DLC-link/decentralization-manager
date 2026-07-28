@@ -11,8 +11,27 @@ jobs:
     uses: ./.github/workflows/ci.yml
     secrets: inherit
 
+  # Guard the peer-compatibility semver: the version peers gate on
+  # (MIN_PEER_VERSION) is decman's Cargo.toml version, so a release tag must
+  # match it. Runs in parallel with `ci` and gates `binary`, so a mismatched
+  # tag fails fast before the expensive compile.
+  verify-tag:
+    name: Verify tag matches crate version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check crates/decman/Cargo.toml version == tag
+        run: |
+          crate_version=$(grep -m1 '^version = ' crates/decman/Cargo.toml \
+            | sed -E 's/^version = "(.*)"/\1/')
+          if [ "v$crate_version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Release tag $GITHUB_REF_NAME does not match crates/decman/Cargo.toml version v$crate_version"
+            exit 1
+          fi
+          echo "Tag $GITHUB_REF_NAME matches crate version v$crate_version"
+
   binary:
-    needs: ci
+    needs: [ci, verify-tag]
     uses: ./.github/workflows/build-binary.yml
     with:
       profile: release
@@ -61,5 +80,7 @@ jobs:
         run: |
           cp Dockerfile ctx/Dockerfile
           docker buildx build ctx \
+            --build-arg DECPM_BUILD_VERSION=$VERSION_TAG \
+            --build-arg DECPM_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
             -t public.ecr.aws/dlc-link/decentralization-manager:$VERSION_TAG \
             --push

@@ -12,7 +12,9 @@ use canton_proto_rs::com::digitalasset::canton::{
         topology_mapping,
     },
     topology::admin::v30::{
-        AuthorizeRequest, StoreId, authorize_request, store_id,
+        AuthorizeRequest, BaseQuery, ListNamespaceDelegationRequest, StoreId, authorize_request,
+        base_query, store_id,
+        topology_manager_read_service_client::TopologyManagerReadServiceClient,
         topology_manager_write_service_client::TopologyManagerWriteServiceClient,
     },
 };
@@ -48,7 +50,7 @@ pub async fn generate_keys(
 ) -> Result {
     tracing::info!("Generating cryptographic keys...");
 
-    let mut vault_client = VaultServiceClient::connect(config.admin_api_url()).await?;
+    let mut vault_client = VaultServiceClient::new(config.admin_channel().await?);
 
     // Derive key names from party_id_prefix
     let namespace_key_name = onboarding_config.namespace_key_name();
@@ -68,15 +70,23 @@ pub async fn generate_keys(
     let namespace_fingerprint = compute_fingerprint(&namespace_key);
     tracing::debug!("Namespace key fingerprint: {namespace_fingerprint}");
 
-    // Only propose the namespace delegation when we just created the key — if
-    // the key already existed, its delegation was authorized by the prior run
-    // and re-proposing at the same serial would error.
-    if !namespace_was_existing {
+    // Propose the namespace delegation unless the topology already carries it.
+    // Re-proposing an authorized delegation errors, but keying the skip on
+    // "the vault has the key" is not the same question: a run interrupted
+    // between GenerateSigningKey and the authorize below leaves the key
+    // present and the delegation absent, and every retry would then skip it —
+    // silently dropping this node's namespace key out of Canton's signing-key
+    // auto-selection for the rest of the party's life (#261). Ask the topology
+    // instead. The check is skipped for a freshly-minted key, which cannot
+    // have a delegation yet.
+    if !namespace_was_existing
+        || !namespace_delegation_exists(config, &namespace_fingerprint).await?
+    {
         propose_namespace_delegation(config, &namespace_key, &namespace_fingerprint).await?;
     } else {
         tracing::info!(
             "Reusing existing namespace key {namespace_fingerprint}; \
-             skipping namespace delegation proposal (already authorized)"
+             its namespace delegation is already authorized"
         );
     }
 
@@ -185,6 +195,41 @@ pub(crate) fn encode_keys_payload(
     buffer.to_vec()
 }
 
+/// Is a namespace delegation for `namespace_fingerprint` — targeting that same
+/// key, i.e. the root delegation [`propose_namespace_delegation`] issues —
+/// already authorized in this participant's Authorized store?
+///
+/// The Authorized store is queried rather than the synchronizer store because
+/// that is where the delegation is written; it answers "did we authorize it"
+/// without depending on synchronizer propagation having caught up.
+async fn namespace_delegation_exists(
+    config: &NodeConfig,
+    namespace_fingerprint: &str,
+) -> Result<bool> {
+    let mut topology_read_client =
+        TopologyManagerReadServiceClient::new(config.admin_channel().await?);
+
+    let response = topology_read_client
+        .list_namespace_delegation(tonic::Request::new(ListNamespaceDelegationRequest {
+            base_query: Some(BaseQuery {
+                store: Some(StoreId {
+                    store: Some(store_id::Store::Authorized(store_id::Authorized {})),
+                }),
+                proposals: false,
+                operation: 0,
+                time_query: Some(base_query::TimeQuery::HeadState(())),
+                filter_signed_key: String::new(),
+                protocol_version: None,
+            }),
+            filter_namespace: namespace_fingerprint.to_string(),
+            filter_target_key_fingerprint: namespace_fingerprint.to_string(),
+        }))
+        .await?
+        .into_inner();
+
+    Ok(!response.results.is_empty())
+}
+
 /// Propose namespace delegation for the generated namespace key
 ///
 /// `pub(crate)` so the add-party workflow's new-member key generation reuses
@@ -217,8 +262,7 @@ pub(crate) async fn propose_namespace_delegation(
         )),
     };
 
-    let mut topology_client =
-        TopologyManagerWriteServiceClient::connect(config.admin_api_url()).await?;
+    let mut topology_client = TopologyManagerWriteServiceClient::new(config.admin_channel().await?);
 
     let request = tonic::Request::new(AuthorizeRequest {
         r#type: Some(authorize_request::Type::Proposal(
