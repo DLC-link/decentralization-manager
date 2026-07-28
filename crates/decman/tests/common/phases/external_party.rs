@@ -97,7 +97,11 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             move |f, _| {
                 let hint = hint.clone();
                 Box::pin(async move {
-                    let resp: Value = f.get_json(f.p1.http, "/external-parties").await.ok()?;
+                    let resp: Value = match f.get_json(f.p1.http, "/external-parties").await {
+                        Ok(r) => r,
+                        // Surface a real HTTP error instead of retrying it away.
+                        Err(e) => return Some(Err(e)),
+                    };
                     let parties = resp.get("parties").and_then(Value::as_array)?;
                     // Find the party this run onboarded by its hint segment.
                     let party = parties.iter().find(|p| {

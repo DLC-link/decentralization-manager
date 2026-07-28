@@ -137,10 +137,14 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             move |f, _| {
                 let party_id = party_id.clone();
                 Box::pin(async move {
-                    let resp: Value = f
+                    let resp: Value = match f
                         .get_json(f.p1.http, &format!("/v0/tenant/{party_id}/acs"))
                         .await
-                        .ok()?;
+                    {
+                        Ok(r) => r,
+                        // Surface a real HTTP error instead of retrying it away.
+                        Err(e) => return Some(Err(e)),
+                    };
                     // A freshly onboarded party has no contracts yet; the check is
                     // that the endpoint answers with a contracts array.
                     resp.get("contracts")

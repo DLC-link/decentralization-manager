@@ -1839,7 +1839,10 @@ async fn send_external_party_invites(
         .await
         {
             Ok(response) => interpret_invite_reply(peer_id, "external-party", &response)?,
-            Err(e) => tracing::error!("Failed to send invite to {peer_id}: {e}"),
+            // Every host is required and WaitingForPeers has no timeout, so a
+            // host that never receives its invite would hang the run forever —
+            // fail the start instead, marking the run Failed.
+            Err(e) => anyhow::bail!("Failed to send external-party invite to {peer_id}: {e}"),
         }
     }
 

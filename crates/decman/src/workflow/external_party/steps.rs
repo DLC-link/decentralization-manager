@@ -80,7 +80,7 @@ pub async fn prepare_topology(
         observing_participant_uids: Vec::new(),
     };
 
-    let mut client = utils::create_party_client(config, external_party_token()).await?;
+    let mut client = utils::create_party_client(config, external_party_token_required()?).await?;
     let response = client
         .generate_external_party_topology(tonic::Request::new(request))
         .await
@@ -186,7 +186,7 @@ pub async fn allocate_party(
         identity_provider_id: String::new(),
     };
 
-    let mut client = utils::create_party_client(config, external_party_token()).await?;
+    let mut client = utils::create_party_client(config, external_party_token_required()?).await?;
     match client
         .allocate_external_party(tonic::Request::new(request))
         .await
@@ -274,4 +274,20 @@ fn external_party_token() -> Option<String> {
     {
         None
     }
+}
+
+/// The external-party Ledger-API token, or a clear error when it isn't
+/// configured. In non-test builds [`external_party_token`] is `None` (the open
+/// item), so calling Canton would fail with an opaque `Unauthenticated`; fail
+/// fast here with an explicit message instead.
+///
+/// # Errors
+/// Returns an error in production builds, where no participant token is wired yet.
+fn external_party_token_required() -> Result<Option<String>> {
+    external_party_token().map(Some).ok_or_else(|| {
+        anyhow::anyhow!(
+            "external-party ledger operations require a participant Ledger-API token, which is \
+             not yet configured in production (open item)"
+        )
+    })
 }
