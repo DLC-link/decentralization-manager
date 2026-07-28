@@ -51,6 +51,7 @@ use crate::{
     utils,
     workflow::external_party::{
         ExternalPartyConfig,
+        keys::fingerprint_from_public_key,
         steps::{ExternalPartyAllocatePayload, prepare_topology},
     },
 };
@@ -172,10 +173,24 @@ pub async fn tenant_onboard(
         return HttpResponse::BadRequest().json(ErrorResponse { error: msg });
     }
 
-    // Validate the public key is well-formed even though the bundle carries the
-    // key material inside the (already-built) topology transactions.
-    if let Err(resp) = decode_public_key(&body.public_key) {
-        return resp;
+    // The party id is built from the client-supplied `signed_by`, so it must be
+    // the real fingerprint of `public_key`; otherwise a mismatched pair would
+    // have us record and return a party id that doesn't match the key the
+    // topology was signed with. Fail fast rather than let Canton reject the
+    // allocate after DPM has already persisted a wrong id.
+    let public_key = match decode_public_key(&body.public_key) {
+        Ok(key) => key,
+        Err(resp) => return resp,
+    };
+    let derived_fingerprint = fingerprint_from_public_key(&public_key);
+    if derived_fingerprint != body.signed_by {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: format!(
+                "signed_by ({signed_by}) does not match the fingerprint derived from public_key \
+                 ({derived_fingerprint})",
+                signed_by = body.signed_by
+            ),
+        });
     }
     let signature = match STANDARD.decode(&body.multi_hash_signature) {
         Ok(bytes) => bytes,
