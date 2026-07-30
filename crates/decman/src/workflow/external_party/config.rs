@@ -18,14 +18,11 @@ pub struct ExternalPartyConfig {
     /// Canton default it to the number of hosting participants.
     #[serde(default)]
     pub confirmation_threshold: Option<u32>,
-    /// Wallet-driven onboarding: the party-signed onboarding bundle the wallet
-    /// produced (key generated + multi-hash signed client-side). When `Some`,
-    /// the coordinator skips key generation, Canton topology generation, and
-    /// signing — it allocates directly from this bundle and fans it out. `None`
-    /// is the UI/DPM-custody flow where the coordinator holds the key.
-    #[serde(default)]
-    pub prepared_bundle:
-        Option<crate::workflow::external_party::steps::ExternalPartyAllocatePayload>,
+    /// The party-signed onboarding bundle the wallet produced (key generated +
+    /// multi-hash signed client-side). The coordinator never holds the key: it
+    /// allocates directly from this bundle on its own participant and fans the
+    /// same bundle out to the hosting peers.
+    pub prepared_bundle: crate::workflow::external_party::steps::ExternalPartyAllocatePayload,
 }
 
 impl ExternalPartyConfig {
@@ -35,9 +32,7 @@ impl ExternalPartyConfig {
         instance_name: String,
         hosting_peers: Vec<CantonId>,
         confirmation_threshold: Option<u32>,
-        prepared_bundle: Option<
-            crate::workflow::external_party::steps::ExternalPartyAllocatePayload,
-        >,
+        prepared_bundle: crate::workflow::external_party::steps::ExternalPartyAllocatePayload,
     ) -> Self {
         Self {
             party_hint,

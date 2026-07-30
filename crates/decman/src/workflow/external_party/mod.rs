@@ -1,15 +1,16 @@
 //! Decentrally-hosted external-party onboarding workflow.
 //!
 //! This workflow onboards a sovereign external party whose Ed25519 namespace key
-//! is generated and held client-side (by DPM, standing in for a wallet) and
-//! hosted with Confirmation permission across N participants at an M-of-N
-//! confirmation threshold.
+//! is generated and held client-side by the wallet — DPM never sees the private
+//! key — and hosted with Confirmation permission across N participants at an
+//! M-of-N confirmation threshold.
 //!
-//! The coordinator generates the key, builds the multi-host onboarding topology
-//! naming every host, signs the multi-hash once, allocates on its own
-//! participant, then fans the party-signed bundle out to each hosting peer over
-//! Noise; each peer authorizes hosting on its own participant. The topology
-//! stays a proposal until the last host signs.
+//! The wallet generates the key, asks DPM (`/v0/tenant/prepare`) to build the
+//! multi-host onboarding topology naming every host, signs the multi-hash
+//! locally, and submits the signed bundle (`/v0/tenant/onboard`). The
+//! coordinator allocates that bundle on its own participant, then fans the same
+//! bundle out to each hosting peer over Noise; each peer authorizes hosting on
+//! its own participant. The topology stays a proposal until the last host signs.
 
 pub mod config;
 pub mod coordinator;
@@ -21,17 +22,16 @@ pub use config::ExternalPartyConfig;
 
 use crate::{noise::MessageType, server::WorkflowKind, workflow::state::WorkflowStep};
 
-/// External-party workflow steps. The coordinator holds the single party key
-/// and drives the coordinator-local steps; `AllocatePeers` is the one peer-gated
+/// External-party workflow steps. The coordinator allocates the wallet-signed
+/// bundle on its own participant, then `AllocatePeers` is the one peer-gated
 /// step — each hosting peer authorizes hosting on its own participant.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ExternalPartyStep {
     /// Wait for every hosting peer to connect before onboarding.
     WaitingForPeers,
-    /// Generate (or reload) the party's client-side Ed25519 key.
-    GenerateKeys,
-    /// Build the multi-host onboarding topology + multi-hash, sign it, and
-    /// allocate on the coordinator's own participant.
+    /// Allocate the wallet-signed party on the coordinator's own participant
+    /// (submitting the prepared topology transactions) and stage the bundle for
+    /// fan-out.
     PrepareTopology,
     /// Peer-gated: each hosting peer runs `AllocateExternalParty` on its own
     /// participant with the party-signed bundle.
@@ -45,14 +45,13 @@ impl WorkflowStep for ExternalPartyStep {
         match self {
             Self::AllocatePeers => Some(MessageType::AllocateExternalParty),
             Self::Complete => Some(MessageType::Disconnect),
-            Self::WaitingForPeers | Self::GenerateKeys | Self::PrepareTopology => None,
+            Self::WaitingForPeers | Self::PrepareTopology => None,
         }
     }
 
     fn next(&self) -> Option<Self> {
         match self {
-            Self::WaitingForPeers => Some(Self::GenerateKeys),
-            Self::GenerateKeys => Some(Self::PrepareTopology),
+            Self::WaitingForPeers => Some(Self::PrepareTopology),
             Self::PrepareTopology => Some(Self::AllocatePeers),
             Self::AllocatePeers => Some(Self::Complete),
             Self::Complete => None,
@@ -70,21 +69,19 @@ impl WorkflowStep for ExternalPartyStep {
     fn step_index(&self) -> i64 {
         match self {
             Self::WaitingForPeers => 0,
-            Self::GenerateKeys => 1,
-            Self::PrepareTopology => 2,
-            Self::AllocatePeers => 3,
-            Self::Complete => 4,
+            Self::PrepareTopology => 1,
+            Self::AllocatePeers => 2,
+            Self::Complete => 3,
         }
     }
 
     fn step_total() -> i64 {
-        5
+        4
     }
 
     fn step_name(&self) -> &'static str {
         match self {
             Self::WaitingForPeers => "WaitingForPeers",
-            Self::GenerateKeys => "GenerateKeys",
             Self::PrepareTopology => "PrepareTopology",
             Self::AllocatePeers => "AllocatePeers",
             Self::Complete => "Complete",
@@ -94,7 +91,6 @@ impl WorkflowStep for ExternalPartyStep {
     fn try_from_step_name(name: &str) -> Option<Self> {
         match name {
             "WaitingForPeers" => Some(Self::WaitingForPeers),
-            "GenerateKeys" => Some(Self::GenerateKeys),
             "PrepareTopology" => Some(Self::PrepareTopology),
             "AllocatePeers" => Some(Self::AllocatePeers),
             "Complete" => Some(Self::Complete),

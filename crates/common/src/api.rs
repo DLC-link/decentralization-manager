@@ -214,30 +214,6 @@ pub struct OnboardingRequest {
     pub threshold: Option<i32>,
 }
 
-/// Request to onboard a decentrally-hosted external party.
-///
-/// The party's Ed25519 namespace key is generated client-side by DPM; the party
-/// is hosted with Confirmation permission across the coordinator node and
-/// `hosting_peers`, at the given confirmation threshold.
-#[derive(Clone, Debug, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct ExternalPartyRequest {
-    /// Human-readable hint forming the party id's identifier segment
-    /// (`{party_hint}::{namespace_fingerprint}`).
-    pub party_hint: String,
-    /// The other participants that will host the party (beyond this
-    /// coordinator node). Each runs DPM and authorizes hosting on its own
-    /// participant. A decentrally-hosted party needs at least one.
-    #[serde(default)]
-    pub hosting_peers: Vec<CantonId>,
-    /// Confirmation threshold for the hosting participant set (how many hosts
-    /// must confirm a transaction). Optional: when omitted Canton defaults it
-    /// to the number of hosting participants.
-    #[serde(default)]
-    pub confirmation_threshold: Option<u32>,
-}
-
 /// Why a directed edge was reported missing. The frontend renders different
 /// remediation hints depending on which kind it sees: `MeshHole` is a true
 /// peer↔peer config gap ("on `from`, add `to` to the network config"), while

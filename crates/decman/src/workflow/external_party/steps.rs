@@ -17,13 +17,11 @@ use canton_proto_rs::com::daml::ledger::api::v2::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    canton_id::CantonId,
     config::NodeConfig,
     error::Result,
     utils::{self, extract_synchronizer_fingerprint},
-    workflow::external_party::{
-        ExternalPartyConfig,
-        keys::{self, ExternalKeyPair},
-    },
+    workflow::external_party::keys,
 };
 
 /// The unsigned onboarding topology returned by `GenerateExternalPartyTopology`.
@@ -49,7 +47,9 @@ pub struct PreparedTopology {
 /// `GenerateExternalPartyTopology` RPC fails.
 pub async fn prepare_topology(
     config: &NodeConfig,
-    external: &ExternalPartyConfig,
+    party_hint: &str,
+    hosting_peers: &[CantonId],
+    confirmation_threshold: Option<u32>,
     public_key: &[u8; 32],
 ) -> Result<PreparedTopology> {
     let synchronizer = external_party_synchronizer(config).await?;
@@ -60,19 +60,16 @@ pub async fn prepare_topology(
         key_spec: SigningKeySpec::EcCurve25519 as i32,
     };
 
-    let other_confirming_participant_uids: Vec<String> = external
-        .hosting_peers
-        .iter()
-        .map(|p| p.to_string())
-        .collect();
+    let other_confirming_participant_uids: Vec<String> =
+        hosting_peers.iter().map(|p| p.to_string()).collect();
     // Hosts = the coordinator's own participant + the confirming peers. Default
     // the confirmation threshold to all hosts when the caller didn't set one.
     let num_hosts = 1 + other_confirming_participant_uids.len();
-    let confirmation_threshold = external.confirmation_threshold.unwrap_or(num_hosts as u32);
+    let confirmation_threshold = confirmation_threshold.unwrap_or(num_hosts as u32);
 
     let request = GenerateExternalPartyTopologyRequest {
         synchronizer,
-        party_hint: external.party_hint.clone(),
+        party_hint: party_hint.to_string(),
         public_key: Some(signing_public_key),
         local_participant_observation_only: false,
         other_confirming_participant_uids,
@@ -131,19 +128,6 @@ pub struct ExternalPartyAllocatePayload {
     pub signature: Vec<u8>,
     /// Fingerprint of the party key that produced the signature (`signed_by`).
     pub signed_by: String,
-}
-
-impl ExternalPartyAllocatePayload {
-    /// Sign the prepared multi-hash with the party key and package the bundle
-    /// for hosting.
-    pub fn sign(prepared: &PreparedTopology, keypair: &ExternalKeyPair) -> Self {
-        Self {
-            party_id: prepared.party_id.clone(),
-            topology_transactions: prepared.topology_transactions.clone(),
-            signature: keypair.sign(&prepared.multi_hash).to_vec(),
-            signed_by: prepared.public_key_fingerprint.clone(),
-        }
-    }
 }
 
 /// Authorize hosting the external party on this node's participant by submitting

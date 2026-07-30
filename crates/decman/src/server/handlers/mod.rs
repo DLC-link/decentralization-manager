@@ -41,6 +41,5 @@ pub use workflows::{
     dismiss_workflow, get_add_party_status, get_change_threshold_status, get_contracts_status,
     get_dars_status, get_external_party_status, get_kick_status, get_onboarding_status,
     list_external_parties, list_workflows, retry_workflow, start_add_party, start_change_threshold,
-    start_contracts, start_dars, start_external_party, start_kick, start_onboarding,
-    upload_dars_local,
+    start_contracts, start_dars, start_kick, start_onboarding, upload_dars_local,
 };

@@ -127,20 +127,9 @@ pub mod artifact_kinds {
     pub const CHANGE_THRESHOLD_PARTY_ID: &str = "change_threshold_party_id";
 
     // External-party onboarding (workflow_artifacts during a run)
-    /// Raw 32-byte Ed25519 public key of the external party. Shared.
-    pub const EXTERNAL_PARTY_PUBLIC_KEY: &str = "external_party_public_key";
-    /// Raw 32-byte Ed25519 private seed. AES-GCM encrypted at rest like every
-    /// artifact (see `db::sqlite` `write_workflow_artifact`), but this is a
-    /// transient run store, not a dedicated secret store — the seed is copied
-    /// into `dec_party_identity` at completion. Shared.
-    pub const EXTERNAL_PARTY_SEED: &str = "external_party_seed";
-    /// Canton namespace fingerprint of the external party's key. Plaintext.
-    pub const EXTERNAL_PARTY_FINGERPRINT: &str = "external_party_fingerprint";
-    /// Combined multi-hash returned by `GenerateExternalPartyTopology`, signed
-    /// by the party during allocation. Raw bytes, shared.
-    pub const EXTERNAL_PARTY_MULTI_HASH: &str = "external_party_multi_hash";
     /// Resolved external party id (`{hint}::{fingerprint}`). Plaintext UTF-8,
-    /// shared. Read by the coordinator's HTTP path after the run finishes.
+    /// shared. Read by the coordinator's HTTP path after the run finishes. The
+    /// wallet holds the key, so DPM stores no key material of its own.
     pub const EXTERNAL_PARTY_ID: &str = "external_party_id";
 }
 
@@ -154,15 +143,6 @@ pub mod identity_kinds {
     /// Each peer's `participant_id` file content. Coordinator's row set
     /// holds one per peer; a peer's row set holds just their own.
     pub const PARTICIPANT_ID: &str = "participant_id";
-
-    /// An external party's 32-byte Ed25519 private seed, copied out of the
-    /// transient `workflow_artifacts` into the durable identity store at
-    /// onboarding completion (AES-GCM encrypted, sub-keyed by the party's
-    /// namespace fingerprint). v0 stand-in for a wallet holding the key.
-    pub const EXTERNAL_PARTY_SEED: &str = "external_party_seed";
-    /// An external party's raw 32-byte Ed25519 public key. Same lifecycle as
-    /// [`EXTERNAL_PARTY_SEED`].
-    pub const EXTERNAL_PARTY_PUBLIC_KEY: &str = "external_party_public_key";
 }
 
 /// Read/write surface for workflow runtime artefacts. Replaces the file-backed

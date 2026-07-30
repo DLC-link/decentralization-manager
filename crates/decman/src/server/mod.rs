@@ -1185,7 +1185,6 @@ pub async fn start_server(
             .service(handlers::start_change_threshold)
             .service(handlers::get_change_threshold_status)
             .service(handlers::cancel_change_threshold)
-            .service(handlers::start_external_party)
             .service(handlers::get_external_party_status)
             .service(handlers::cancel_external_party)
             .service(handlers::list_external_parties)

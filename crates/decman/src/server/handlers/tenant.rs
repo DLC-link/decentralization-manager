@@ -50,7 +50,6 @@ use crate::{
     },
     utils,
     workflow::external_party::{
-        ExternalPartyConfig,
         keys::fingerprint_from_public_key,
         steps::{ExternalPartyAllocatePayload, prepare_topology},
     },
@@ -106,18 +105,17 @@ pub async fn tenant_prepare(
         Err(resp) => return resp,
     };
 
-    // Throwaway config: `prepare_topology` only reads the hint, hosting peers,
-    // and threshold. No run is registered here — the wallet signs and calls
-    // `/v0/tenant/onboard` next.
-    let config = ExternalPartyConfig::new(
-        body.party_hint.clone(),
-        format!("{hint}-external", hint = body.party_hint),
-        body.hosting_peers.clone(),
+    // No run is registered here — the wallet signs the returned multi-hash and
+    // calls `/v0/tenant/onboard` next.
+    match prepare_topology(
+        &data.config,
+        &body.party_hint,
+        &body.hosting_peers,
         body.confirmation_threshold,
-        None,
-    );
-
-    match prepare_topology(&data.config, &config, &public_key).await {
+        &public_key,
+    )
+    .await
+    {
         Ok(prep) => HttpResponse::Ok().json(TenantPrepareResponse {
             party_id: prep.party_id,
             multi_hash: STANDARD.encode(&prep.multi_hash),
@@ -225,7 +223,7 @@ pub async fn tenant_onboard(
         body.party_hint.clone(),
         body.hosting_peers.clone(),
         body.confirmation_threshold,
-        Some(bundle),
+        bundle,
     )
     .await
     {

@@ -101,12 +101,10 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     // terminator — this is the point in the suite where P3 is idle. It puts
     // P3 back on the plaintext port before returning.
     phases::canton_admin_tls::run(&mut f).await?;
-    // Decentrally-hosted external-party onboarding: P1 generates the party's
-    // client-side Ed25519 key and hosts it across P1+P2+P3 at a 2-of-3
-    // confirmation threshold. Runs early, while the mesh is healthy.
-    phases::external_party::run(&mut f).await?;
-    // Same, but wallet-driven via the /v0/tenant/* API: the key is generated
-    // client-side and DPM only relays the signed onboarding bundle.
+    // Decentrally-hosted external-party onboarding, wallet-driven via the
+    // /v0/tenant/* API: the key is generated + the multi-hash signed client-side
+    // and DPM only relays the signed bundle, hosting it across P1+P2+P3 at a
+    // 2-of-3 confirmation threshold. Runs early, while the mesh is healthy.
     phases::external_party_tenant::run(&mut f).await?;
     phases::create_dec_party::run(&mut f).await?;
     phases::distribute_dars::run(&mut f).await?;
@@ -190,8 +188,8 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Runs ONLY the decentrally-hosted external-party onboarding phase against a
-/// running localnet. This is the whole-suite's `external_party` phase in
+/// Runs ONLY the wallet-driven external-party onboarding phase against a running
+/// localnet. This is the whole-suite's `external_party_tenant` phase in
 /// isolation, so you can iterate on that one workflow without the full sequence
 /// above.
 ///
@@ -206,6 +204,6 @@ async fn external_party_e2e() -> anyhow::Result<()> {
 
     let mut f = Fixture::from_env()?;
     f.discover_network_parties().await?;
-    phases::external_party::run(&mut f).await?;
+    phases::external_party_tenant::run(&mut f).await?;
     Ok(())
 }

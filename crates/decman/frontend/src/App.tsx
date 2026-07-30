@@ -32,7 +32,6 @@ import { LoadingSkeleton, ConfigTabSkeleton } from "./components/LoadingSkeleton
 import { DarsDialog } from "./components/DarsDialog";
 import { OnboardingDialog } from "./components/OnboardingDialog";
 import { ExternalPartyList } from "./components/ExternalPartyList";
-import { ExternalPartyDialog } from "./components/ExternalPartyDialog";
 import { NotificationsView } from "./components/NotificationsView";
 import type { PartyActions } from "./components/NotificationsView";
 import { useSnackbar } from "./contexts";
@@ -92,7 +91,6 @@ const App = () => {
   const [partiesView, setPartiesView] = useState<"decentralized" | "external">(
     "decentralized",
   );
-  const [externalPartyDialogOpen, setExternalPartyDialogOpen] = useState(false);
   const [nodeConfig, setNodeConfig] = useState<NodeConfig | null>(null);
   const [networkConfig, setNetworkConfig] = useState<NetworkConfig | null>(
     null,
@@ -871,13 +869,6 @@ const App = () => {
                 goToNotifications();
               }}
             />
-
-            <ExternalPartyDialog
-              open={externalPartyDialogOpen}
-              onClose={() => setExternalPartyDialogOpen(false)}
-              onCreated={() => refreshExternalParties()}
-            />
-
           </>
         )}
       </Container>
@@ -1001,27 +992,12 @@ const App = () => {
             </>
           )}
 
-          {ADMIN_ACCESS && !selectedPartyId && (
-            <Tooltip
-              title={
-                partiesView === "external"
-                  ? "Create External Party"
-                  : "Create Party"
-              }
-              arrow
-            >
+          {ADMIN_ACCESS && !selectedPartyId && partiesView === "decentralized" && (
+            <Tooltip title="Create Party" arrow>
               <Fab
                 color="primary"
-                aria-label={
-                  partiesView === "external"
-                    ? "Create External Party"
-                    : "Create Party"
-                }
-                onClick={() =>
-                  partiesView === "external"
-                    ? setExternalPartyDialogOpen(true)
-                    : setOnboardingDialogOpen(true)
-                }
+                aria-label="Create Party"
+                onClick={() => setOnboardingDialogOpen(true)}
                 sx={{
                   position: "fixed",
                   bottom: 24,

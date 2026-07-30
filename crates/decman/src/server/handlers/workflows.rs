@@ -31,12 +31,12 @@ use crate::{
             AddPartyInvitePayload, AddPartyRequest, ChangeThresholdInvitePayload,
             ChangeThresholdRequest, ContractsInvitePayload, ContractsRequest, DarsInvitePayload,
             DarsRequest, ErrorResponse, ExternalPartiesResponse, ExternalPartyInfo,
-            ExternalPartyInvitePayload, ExternalPartyRequest, KickInvitePayload, KickRequest,
-            KickResponse, KickStatus, MessageResponse, MissingEdgeKind, MissingPeerEdge,
-            OnboardingInvitePayload, OnboardingMeshErrorResponse, OnboardingRequest,
-            OnboardingResponse, OnboardingStatus, SuccessResponse, WorkflowGuard, WorkflowInstance,
-            WorkflowKind, WorkflowProgress, WorkflowResponse, WorkflowRole, WorkflowRun,
-            WorkflowRunsResponse, WorkflowStatusResponse,
+            ExternalPartyInvitePayload, KickInvitePayload, KickRequest, KickResponse, KickStatus,
+            MessageResponse, MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload,
+            OnboardingMeshErrorResponse, OnboardingRequest, OnboardingResponse, OnboardingStatus,
+            SuccessResponse, WorkflowGuard, WorkflowInstance, WorkflowKind, WorkflowProgress,
+            WorkflowResponse, WorkflowRole, WorkflowRun, WorkflowRunsResponse,
+            WorkflowStatusResponse,
         },
     },
     utils,
@@ -1530,86 +1530,19 @@ pub(crate) fn validate_confirmation_threshold(
     Ok(())
 }
 
-/// Start a decentrally-hosted external-party onboarding workflow: DPM generates
-/// the party's client-side Ed25519 key, builds the multi-host onboarding
-/// topology naming every host, authorizes hosting on its own participant, and
-/// fans the party-signed bundle out to each hosting peer to authorize on theirs.
-#[utoipa::path(
-    tag = "Workflows",
-    request_body = ExternalPartyRequest,
-    responses(
-        (status = 202, description = "External-party workflow started", body = WorkflowResponse),
-        (status = 400, description = "Bad request", body = ErrorResponse),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
-        (status = 409, description = "Workflow already in progress", body = ErrorResponse),
-        (status = 422, description = "Selected peers are not mutually meshed", body = OnboardingMeshErrorResponse)
-    )
-)]
-#[post("/external-party")]
-pub async fn start_external_party(
-    http_req: HttpRequest,
-    data: web::Data<AppState>,
-    body: web::Json<ExternalPartyRequest>,
-) -> impl Responder {
-    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
-        return resp;
-    }
-
-    // The hint becomes the identifier segment of the party id
-    // (`<hint>::<fingerprint>`); reject bad characters up-front with a clear
-    // 400 rather than failing deep in a Canton proto error later.
-    if let Err(msg) = validate_party_id_prefix(&body.party_hint) {
-        return HttpResponse::BadRequest().json(ErrorResponse { error: msg });
-    }
-
-    // A decentrally-hosted party needs at least one other host.
-    let hosting_peers = body.hosting_peers.clone();
-    if hosting_peers.is_empty() {
-        return HttpResponse::BadRequest().json(ErrorResponse {
-            error: "hosting_peers must name at least one other participant to host the party"
-                .to_string(),
-        });
-    }
-
-    let num_hosts = hosting_peers.len() + 1;
-    if let Err(msg) = validate_confirmation_threshold(body.confirmation_threshold, num_hosts) {
-        return HttpResponse::BadRequest().json(ErrorResponse { error: msg });
-    }
-
-    // DPM-custody flow: the coordinator generates and holds the party key, so no
-    // prepared bundle. The wallet-driven `/v0/tenant/onboard` passes Some(bundle).
-    match spawn_external_party_onboarding(
-        &data,
-        body.party_hint.clone(),
-        hosting_peers,
-        body.confirmation_threshold,
-        None,
-    )
-    .await
-    {
-        Ok(instance_name) => HttpResponse::Accepted().json(WorkflowResponse {
-            status: WorkflowProgress::InProgress,
-            message: "External-party workflow started".to_string(),
-            instance_name,
-        }),
-        Err(resp) => resp,
-    }
-}
-
-/// Core of external-party onboarding, shared by the admin `/external-party`
-/// endpoint (DPM holds the key, `prepared_bundle = None`) and the wallet-facing
-/// `/v0/tenant/onboard` endpoint (the wallet holds the key, `prepared_bundle =
-/// Some`). Runs the mesh pre-flight, the peer version gate, registers + persists
-/// the run, records the invited peers, and spawns the coordinator task. Returns
-/// the run's `instance_name` on success, or the `HttpResponse` the caller should
-/// return (422 mesh hole, 409 incompatible peer / duplicate run, 500 mesh error).
+/// Core of external-party onboarding, driven by the wallet-facing
+/// `/v0/tenant/onboard` endpoint: the wallet holds the key and supplies the
+/// party-signed `prepared_bundle`. Runs the mesh pre-flight, the peer version
+/// gate, registers + persists the run, records the invited peers, and spawns the
+/// coordinator task. Returns the run's `instance_name` on success, or the
+/// `HttpResponse` the caller should return (422 mesh hole, 409 incompatible peer
+/// / duplicate run, 500 mesh error).
 pub(crate) async fn spawn_external_party_onboarding(
     data: &web::Data<AppState>,
     party_hint: String,
     hosting_peers: Vec<CantonId>,
     confirmation_threshold: Option<u32>,
-    prepared_bundle: Option<ExternalPartyAllocatePayload>,
+    prepared_bundle: ExternalPartyAllocatePayload,
 ) -> std::result::Result<String, HttpResponse> {
     // Pre-flight: every hosting peer must have every other hosting peer in its
     // network config, otherwise the coordinator hangs waiting for peer
