@@ -78,10 +78,6 @@ pub enum MessageType {
     /// Command: every party member signs the change-threshold DNS + P2P
     /// proposals.
     SignChangeThreshold = 0x0025,
-    /// Command: each hosting participant authorizes hosting the external party
-    /// by running `AllocateExternalParty` on its own node with the party-signed
-    /// onboarding bundle. Payload is a JSON `ExternalPartyAllocatePayload`.
-    AllocateExternalParty = 0x0026,
 
     // Invites (0x0010 - 0x001F)
     InviteOnboarding = 0x0010,
@@ -104,9 +100,6 @@ pub enum MessageType {
     /// Invite to participate in changing a decentralized party's threshold.
     /// Payload is a JSON `ChangeThresholdInvitePayload`.
     InviteChangeThreshold = 0x0018,
-    /// Invite a participant to host a decentrally-hosted external party.
-    /// Payload is a JSON `ExternalPartyInvitePayload`.
-    InviteExternalParty = 0x0019,
 
     // Responses (0x0100 - 0x01FF)
     Ack = 0x0101,
@@ -210,9 +203,7 @@ impl TryFrom<u16> for MessageType {
             0x0023 => Ok(Self::ClearOnboardingFlag),
             0x0024 => Ok(Self::SignClearOnboarding),
             0x0025 => Ok(Self::SignChangeThreshold),
-            0x0026 => Ok(Self::AllocateExternalParty),
             0x0018 => Ok(Self::InviteChangeThreshold),
-            0x0019 => Ok(Self::InviteExternalParty),
             0x0101 => Ok(Self::Ack),
             0x0102 => Ok(Self::Data),
             0x0103 => Ok(Self::Error),
@@ -1110,17 +1101,6 @@ mod tests {
             MessageType::SignChangeThreshold,
             MessageType::InviteChangeThreshold,
             MessageType::ChangeThresholdSignatures,
-        ] {
-            assert_eq!(MessageType::try_from(mt.to_u16())?, mt);
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn external_party_message_types_round_trip() -> Result {
-        for mt in [
-            MessageType::AllocateExternalParty,
-            MessageType::InviteExternalParty,
         ] {
             assert_eq!(MessageType::try_from(mt.to_u16())?, mt);
         }

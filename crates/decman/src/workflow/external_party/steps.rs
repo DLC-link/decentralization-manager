@@ -14,6 +14,14 @@ use canton_proto_rs::com::daml::ledger::api::v2::{
         allocate_external_party_request::SignedTransaction,
     },
 };
+use canton_proto_rs::com::digitalasset::canton::{
+    protocol::v30::enums::ParticipantPermission,
+    topology::admin::v30::{
+        BaseQuery, ListDecentralizedNamespaceDefinitionRequest, ListPartyToParticipantRequest,
+        StoreId, Synchronizer, base_query, store_id, synchronizer,
+        topology_manager_read_service_client::TopologyManagerReadServiceClient,
+    },
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -188,6 +196,157 @@ pub async fn allocate_party(
             "AllocateExternalParty RPC failed: {status}"
         )),
     }
+}
+
+/// A head-state (or proposal) topology query against the synchronizer store.
+fn party_query(synchronizer_id: &str, proposals: bool) -> BaseQuery {
+    BaseQuery {
+        store: Some(StoreId {
+            store: Some(store_id::Store::Synchronizer(Synchronizer {
+                kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.to_string())),
+            })),
+        }),
+        proposals,
+        operation: 0,
+        time_query: Some(base_query::TimeQuery::HeadState(())),
+        filter_signed_key: String::new(),
+        protocol_version: None,
+    }
+}
+
+/// Whether this participant hosts an external party yet, from its own topology.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HostOnboardingStatus {
+    /// An authorized `PartyToParticipant` names this participant with
+    /// Confirmation — hosting is live.
+    Hosted,
+    /// A proposal exists but is not yet fully authorized (waiting on more hosts).
+    Pending,
+    /// No mapping — authorized or proposed — for this party on this participant.
+    Absent,
+}
+
+/// Read whether this participant hosts `party_id` from its own topology state via
+/// the tokenless Canton Admin API. There is no local run row: each host answers
+/// only for itself, and the wallet aggregates across hosts.
+///
+/// # Errors
+/// Returns an error if the synchronizer id cannot be resolved or the
+/// `ListPartyToParticipant` RPC fails.
+pub async fn host_onboarding_status(
+    config: &NodeConfig,
+    party_id: &str,
+) -> Result<HostOnboardingStatus> {
+    let synchronizer_id = utils::get_synchronizer_id(config).await?;
+    let self_uid = config.participant_id().to_string();
+    let mut client = TopologyManagerReadServiceClient::new(config.admin_channel().await?);
+
+    // Authorized head state first (proposals = false); if absent, a pending
+    // proposal (proposals = true) means this host has not finished signing.
+    for proposals in [false, true] {
+        let response = client
+            .list_party_to_participant(tonic::Request::new(ListPartyToParticipantRequest {
+                base_query: Some(party_query(&synchronizer_id, proposals)),
+                filter_party: party_id.to_string(),
+                filter_participant: self_uid.clone(),
+            }))
+            .await?
+            .into_inner();
+        let names_self = response.results.iter().any(|r| {
+            r.item.as_ref().is_some_and(|p| {
+                p.participants.iter().any(|h| {
+                    h.participant_uid == self_uid
+                        && h.permission == ParticipantPermission::Confirmation as i32
+                })
+            })
+        });
+        if names_self {
+            return Ok(if proposals {
+                HostOnboardingStatus::Pending
+            } else {
+                HostOnboardingStatus::Hosted
+            });
+        }
+    }
+    Ok(HostOnboardingStatus::Absent)
+}
+
+/// One external party this participant hosts, read from topology.
+pub struct HostedExternalParty {
+    pub party_id: String,
+    pub fingerprint: String,
+    pub threshold: u32,
+    pub host_count: u32,
+}
+
+/// List the external parties this participant hosts with Confirmation permission,
+/// from its own topology (tokenless Admin API). External = a self-owned
+/// single-key namespace: excludes decentralized parties (their namespace is a
+/// `DecentralizedNamespaceDefinition`) and this node's own local namespace.
+///
+/// # Errors
+/// Returns an error if the synchronizer id cannot be resolved or a topology RPC
+/// fails.
+pub async fn list_hosted_external_parties(config: &NodeConfig) -> Result<Vec<HostedExternalParty>> {
+    let synchronizer_id = utils::get_synchronizer_id(config).await?;
+    let self_uid = config.participant_id().to_string();
+    let own_namespace = self_uid
+        .rsplit_once("::")
+        .map(|(_, ns)| ns.to_string())
+        .unwrap_or_default();
+    let mut client = TopologyManagerReadServiceClient::new(config.admin_channel().await?)
+        .max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
+
+    let decentralized: std::collections::HashSet<String> = client
+        .list_decentralized_namespace_definition(tonic::Request::new(
+            ListDecentralizedNamespaceDefinitionRequest {
+                base_query: Some(party_query(&synchronizer_id, false)),
+                filter_namespace: String::new(),
+            },
+        ))
+        .await?
+        .into_inner()
+        .results
+        .into_iter()
+        .filter_map(|r| r.item.map(|i| i.decentralized_namespace))
+        .collect();
+
+    let p2p = client
+        .list_party_to_participant(tonic::Request::new(ListPartyToParticipantRequest {
+            base_query: Some(party_query(&synchronizer_id, false)),
+            filter_party: String::new(),
+            filter_participant: self_uid.clone(),
+        }))
+        .await?
+        .into_inner();
+
+    let mut parties = Vec::new();
+    for result in p2p.results {
+        let Some(mapping) = result.item else { continue };
+        let hosts_us_confirming = mapping.participants.iter().any(|h| {
+            h.participant_uid == self_uid
+                && h.permission == ParticipantPermission::Confirmation as i32
+        });
+        if !hosts_us_confirming {
+            continue;
+        }
+        let Some((_, fingerprint)) = mapping.party.rsplit_once("::") else {
+            continue;
+        };
+        let fingerprint = fingerprint.to_string();
+        // Skip this node's own local namespace and any decentralized party — what
+        // remains is an external party with a self-owned single-key namespace.
+        if fingerprint == own_namespace || decentralized.contains(&fingerprint) {
+            continue;
+        }
+        parties.push(HostedExternalParty {
+            party_id: mapping.party.clone(),
+            fingerprint,
+            threshold: mapping.threshold,
+            host_count: mapping.participants.len() as u32,
+        });
+    }
+    Ok(parties)
 }
 
 /// Grant this participant's ledger user `CanReadAs` the hosted external party, so

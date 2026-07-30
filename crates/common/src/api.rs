@@ -302,21 +302,21 @@ pub struct WorkflowRunsResponse {
     pub runs: Vec<WorkflowRun>,
 }
 
-/// One external party this node has onboarded. Derived from an allocated
-/// `ExternalParty` workflow run. Runs still onboarding (no party id yet) or that
-/// failed before allocation are not listed here — they show in `/workflows`.
+/// One external party this participant hosts, read from its own topology state
+/// (an authorized `PartyToParticipant` mapping that names this participant with
+/// Confirmation permission and whose namespace is a single self-signed key).
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ExternalPartyInfo {
-    /// The onboarding run's `instance_name` (its primary key).
-    pub instance_name: String,
-    /// The allocated party id (`{hint}::{fingerprint}`).
+    /// The party id (`{hint}::{fingerprint}`).
     pub party_id: String,
     /// The party's namespace fingerprint (the `{fingerprint}` half of the id).
     pub fingerprint: String,
-    /// Unix-seconds creation time of the run.
-    pub created_at: i64,
+    /// Confirmation threshold from the mapping (the M in M-of-N).
+    pub threshold: u32,
+    /// Number of participants hosting the party (the N in M-of-N).
+    pub host_count: u32,
 }
 
 /// Response wrapper for `GET /external-parties`.
@@ -378,11 +378,9 @@ pub struct TenantOnboardRequest {
     pub party_hint: String,
     /// The party's raw Ed25519 public key, base64-encoded.
     pub public_key: String,
-    #[serde(default)]
-    pub hosting_peers: Vec<CantonId>,
-    #[serde(default)]
-    pub confirmation_threshold: Option<u32>,
-    /// The (unchanged) topology transactions from `TenantPrepareResponse`.
+    /// The (unchanged) topology transactions from `TenantPrepareResponse`. The
+    /// host set and confirmation threshold are carried inside these signed
+    /// transactions, so they are not (and must not be) passed separately.
     pub topology_transactions: Vec<String>,
     /// The wallet's Ed25519 signature over the multi-hash, base64-encoded.
     pub multi_hash_signature: String,
@@ -390,14 +388,16 @@ pub struct TenantOnboardRequest {
     pub signed_by: String,
 }
 
-/// Response to a wallet onboarding request.
+/// Response to a wallet onboarding request. Reports this host's view only: the
+/// wallet calls `/onboard` on every host and aggregates. `Completed` means this
+/// host's authorized `PartyToParticipant` names it; `InProgress` means the
+/// topology is still a proposal here (more hosts must sign).
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct TenantOnboardResponse {
     pub status: WorkflowProgress,
     pub party_id: String,
-    pub instance_name: String,
 }
 
 /// A Daml template identifier for a tenant create command.
@@ -490,26 +490,6 @@ pub struct OnboardingInvitePayload {
     /// The coordinator's `workflow_runs` instance name for this run. Echoed
     /// back in `DeclineInvitationPayload` so the coordinator can tell a
     /// decline of THIS run apart from a stale invite of an earlier run.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workflow_instance: Option<String>,
-}
-
-/// Payload sent inside an `InviteExternalParty` Noise message. The coordinator
-/// invites each hosting participant to authorize hosting the external party on
-/// its own node.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct ExternalPartyInvitePayload {
-    /// The party hint (identifier segment), so the invite card can show it.
-    pub party_hint: String,
-    /// The full hosting participant set (coordinator + peers).
-    pub participants: Vec<CantonId>,
-    /// Confirmation threshold the coordinator chose, for the invite/run cards.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub confirmation_threshold: Option<u32>,
-    /// The coordinator's `workflow_runs` instance name for this run, echoed
-    /// back on decline so the coordinator only fails the matching run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_instance: Option<String>,
 }

@@ -16,8 +16,8 @@ use crate::{
     },
     workflow::{
         WorkflowState, add_party::AddPartyStep, change_threshold::ChangeThresholdStep,
-        contracts::ContractsStep, dars::DarsStep, external_party::ExternalPartyStep,
-        kick::KickStep, onboarding::OnboardingStep, state::WorkflowStep,
+        contracts::ContractsStep, dars::DarsStep, kick::KickStep, onboarding::OnboardingStep,
+        state::WorkflowStep,
     },
 };
 
@@ -77,7 +77,6 @@ pub enum ActiveWorkflow {
     Dars(Arc<NoiseServer<DarsStep>>),
     AddParty(Arc<NoiseServer<AddPartyStep>>),
     ChangeThreshold(Arc<NoiseServer<ChangeThresholdStep>>),
-    ExternalParty(Arc<NoiseServer<ExternalPartyStep>>),
 }
 
 impl ActiveWorkflow {
@@ -94,7 +93,6 @@ impl ActiveWorkflow {
             Self::Dars(s) => s.handle_command(peer_id, message).await,
             Self::AddParty(s) => s.handle_command(peer_id, message).await,
             Self::ChangeThreshold(s) => s.handle_command(peer_id, message).await,
-            Self::ExternalParty(s) => s.handle_command(peer_id, message).await,
         }
     }
 }
@@ -124,11 +122,7 @@ async fn resolve_peer_threshold(
         WorkflowKind::Onboarding
         | WorkflowKind::Dars
         | WorkflowKind::AddParty
-        | WorkflowKind::ChangeThreshold
-        // Every hosting participant must authorize hosting the external party
-        // (the topology stays a proposal until the last host signs), so require
-        // all invited peers.
-        | WorkflowKind::ExternalParty => None,
+        | WorkflowKind::ChangeThreshold => None,
         // Existing M-of-N party: a quorum is enough.
         WorkflowKind::Kick | WorkflowKind::Contracts => {
             let party_id = dec_party_id?;

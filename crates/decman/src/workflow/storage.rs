@@ -125,12 +125,6 @@ pub mod artifact_kinds {
     pub const SIGNED_CHANGE_THRESHOLD_P2P: &str = "signed_change_threshold_p2p";
     /// Full party id (plaintext) — used by submit to poll the P2P mapping.
     pub const CHANGE_THRESHOLD_PARTY_ID: &str = "change_threshold_party_id";
-
-    // External-party onboarding (workflow_artifacts during a run)
-    /// Resolved external party id (`{hint}::{fingerprint}`). Plaintext UTF-8,
-    /// shared. Read by the coordinator's HTTP path after the run finishes. The
-    /// wallet holds the key, so DPM stores no key material of its own.
-    pub const EXTERNAL_PARTY_ID: &str = "external_party_id";
 }
 
 /// Identity-table artefact kinds. These survive the originating workflow run's

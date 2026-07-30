@@ -1678,34 +1678,21 @@ const WorkflowRunCard = ({
                 color="text.secondary"
                 sx={{ minWidth: 96 }}
               >
-                {run.kind === "ExternalParty" ? "External party" : "Dec party"}
+                Dec party
               </Typography>
-              {run.kind === "ExternalParty" ? (
-                // External parties aren't in the decentralized-parties list, so
-                // there's no detail page to navigate to — show the id as plain
-                // text rather than a dead link.
-                <Typography
-                  component="span"
-                  variant="caption"
-                  sx={{ fontFamily: "monospace", color: "text.primary" }}
-                >
-                  {truncatePartyId(run.dec_party_id)}
-                </Typography>
-              ) : (
-                <Typography
-                  component="span"
-                  variant="caption"
-                  onClick={() => onSelectParty(run.dec_party_id!)}
-                  sx={{
-                    fontFamily: "monospace",
-                    color: "primary.main",
-                    cursor: "pointer",
-                    "&:hover": { textDecoration: "underline" },
-                  }}
-                >
-                  {truncatePartyId(run.dec_party_id)}
-                </Typography>
-              )}
+              <Typography
+                component="span"
+                variant="caption"
+                onClick={() => onSelectParty(run.dec_party_id!)}
+                sx={{
+                  fontFamily: "monospace",
+                  color: "primary.main",
+                  cursor: "pointer",
+                  "&:hover": { textDecoration: "underline" },
+                }}
+              >
+                {truncatePartyId(run.dec_party_id)}
+              </Typography>
             </Box>
           )}
           {run.kicked_participant && (

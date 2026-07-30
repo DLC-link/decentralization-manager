@@ -1009,7 +1009,6 @@ impl DecmanClient {
             WorkflowKind::Dars => "/dars/cancel",
             WorkflowKind::AddParty => "/add-party/cancel",
             WorkflowKind::ChangeThreshold => "/change-threshold/cancel",
-            WorkflowKind::ExternalParty => "/external-party/cancel",
         };
         self.post(path, None)
     }

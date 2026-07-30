@@ -22,7 +22,6 @@ pub use governance::{
     get_transfer_instructions_handler, get_transfer_preapprovals_handler,
     get_user_services_handler, get_vaults_handler, propose_action, query_contracts_handler,
 };
-pub(crate) use invitations::insert_peer_run;
 pub use invitations::{accept_invitation, decline_invitation, get_invitations};
 pub use keys::get_key_status;
 pub use parties::{
@@ -36,10 +35,10 @@ pub use tenant::{
     tenant_prepare_submission, tenant_status,
 };
 pub use workflows::{
-    cancel_add_party, cancel_change_threshold, cancel_contracts, cancel_dars,
-    cancel_external_party, cancel_kick, cancel_onboarding, cancel_workflow_instance,
-    dismiss_workflow, get_add_party_status, get_change_threshold_status, get_contracts_status,
-    get_dars_status, get_external_party_status, get_kick_status, get_onboarding_status,
-    list_external_parties, list_workflows, retry_workflow, start_add_party, start_change_threshold,
-    start_contracts, start_dars, start_kick, start_onboarding, upload_dars_local,
+    cancel_add_party, cancel_change_threshold, cancel_contracts, cancel_dars, cancel_kick,
+    cancel_onboarding, cancel_workflow_instance, dismiss_workflow, get_add_party_status,
+    get_change_threshold_status, get_contracts_status, get_dars_status, get_kick_status,
+    get_onboarding_status, list_external_parties, list_workflows, retry_workflow, start_add_party,
+    start_change_threshold, start_contracts, start_dars, start_kick, start_onboarding,
+    upload_dars_local,
 };

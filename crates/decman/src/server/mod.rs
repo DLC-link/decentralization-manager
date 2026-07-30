@@ -167,7 +167,6 @@ enum InvitationMeta {
     Contracts(ContractsInvitePayload),
     AddParty(AddPartyInvitePayload),
     ChangeThreshold(ChangeThresholdInvitePayload),
-    ExternalParty(ExternalPartyInvitePayload),
 }
 
 /// On boot, re-spawn any InProgress workflow runs that were interrupted by the
@@ -258,7 +257,6 @@ pub(crate) async fn respawn_coordinator(
     let mut dars_config = None;
     let mut add_party_config = None;
     let mut change_threshold_config = None;
-    let mut external_party_config = None;
     let parsed = match kind {
         WorkflowKind::Onboarding => {
             serde_json::from_str::<workflow::OnboardingConfig>(&run.config_json)
@@ -279,10 +277,6 @@ pub(crate) async fn respawn_coordinator(
         WorkflowKind::ChangeThreshold => {
             serde_json::from_str::<workflow::ChangeThresholdConfig>(&run.config_json)
                 .map(|c| change_threshold_config = Some(c))
-        }
-        WorkflowKind::ExternalParty => {
-            serde_json::from_str::<workflow::ExternalPartyConfig>(&run.config_json)
-                .map(|c| external_party_config = Some(c))
         }
     };
     if let Err(e) = parsed {
@@ -339,7 +333,6 @@ pub(crate) async fn respawn_coordinator(
         dars_config,
         add_party_config,
         change_threshold_config,
-        external_party_config,
         auth_snapshot,
         last_seen,
     );
@@ -363,7 +356,6 @@ fn spawn_coordinator_run(
     dars_config: Option<workflow::DarsConfig>,
     add_party_config: Option<workflow::AddPartyConfig>,
     change_threshold_config: Option<workflow::ChangeThresholdConfig>,
-    external_party_config: Option<workflow::ExternalPartyConfig>,
     auth: Option<WorkflowAuth>,
     last_seen: LastSeen,
 ) -> tokio::task::JoinHandle<()> {
@@ -374,7 +366,6 @@ fn spawn_coordinator_run(
         WorkflowKind::Dars => WorkflowType::Dars,
         WorkflowKind::AddParty => WorkflowType::AddParty,
         WorkflowKind::ChangeThreshold => WorkflowType::ChangeThreshold,
-        WorkflowKind::ExternalParty => WorkflowType::ExternalParty,
     };
     tokio::spawn(async move {
         let instance_name = instance.instance_name.clone();
@@ -391,7 +382,6 @@ fn spawn_coordinator_run(
             dars_config,
             add_party_config,
             change_threshold_config,
-            external_party_config,
             auth,
             last_seen,
             instance.clone(),
@@ -549,15 +539,6 @@ impl WorkflowTriggers {
                 participants = p.participants;
                 workflow_instance = p.workflow_instance;
             }
-            InvitationMeta::ExternalParty(p) => {
-                // Reuse the `prefix` card field for the party hint (the id's
-                // identifier segment). The peer only needs the participant set
-                // and the coordinator run instance; the key material arrives in
-                // the AllocateExternalParty command payload.
-                prefix = Some(p.party_hint);
-                participants = p.participants;
-                workflow_instance = p.workflow_instance;
-            }
         }
         // Key the id on the coordinator's run instance when available so a
         // NEW run's invite never silently morphs an older card in place — an
@@ -591,41 +572,6 @@ impl WorkflowTriggers {
             package_names,
             workflow_instance,
         };
-
-        // External-party hosting is a safe operation — the party's namespace key
-        // is client-held, and a host only authorizes hosting the party on its own
-        // participant. So auto-accept without a manual approval step: spawn the
-        // peer run directly and record no pending card (mirrors the core of
-        // `accept_invitation`).
-        if invitation_type == InvitationType::ExternalParty {
-            if let Some(peer_instance) = handlers::insert_peer_run(&self.db, &invitation).await {
-                let job = PeerJob {
-                    kind: invitation_type.into(),
-                    instance_name: peer_instance,
-                    coordinator_instance: invitation.workflow_instance.clone().unwrap_or_default(),
-                    coordinator_pubkey: invitation.coordinator_pubkey.clone(),
-                };
-                if self.peer_job_sender.send(job).is_ok() {
-                    tracing::info!(
-                        "Auto-accepted external-party hosting invite from {coordinator_pubkey}"
-                    );
-                    return;
-                }
-                tracing::error!(
-                    "auto-accept external-party invite: peer job listener unavailable; recording a \
-                     pending card for manual retry"
-                );
-            } else {
-                tracing::error!(
-                    "auto-accept external-party invite: failed to record peer run; recording a \
-                     pending card for manual retry"
-                );
-            }
-            // Auto-accept failed — fall through to persist a normal pending card
-            // so the operator can retry the accept manually, rather than dropping
-            // the invite and leaving the coordinator waiting for a host that
-            // never starts.
-        }
 
         // Dedup by `id` (which includes the coordinator's run `instance`), not
         // by (type, coordinator): a coordinator can now run several workflows
@@ -1185,8 +1131,6 @@ pub async fn start_server(
             .service(handlers::start_change_threshold)
             .service(handlers::get_change_threshold_status)
             .service(handlers::cancel_change_threshold)
-            .service(handlers::get_external_party_status)
-            .service(handlers::cancel_external_party)
             .service(handlers::list_external_parties)
             .service(handlers::tenant_prepare)
             .service(handlers::tenant_onboard)
@@ -1855,8 +1799,7 @@ async fn handle_incoming_connection(
                         | MessageType::InviteContracts
                         | MessageType::InviteDars
                         | MessageType::InviteAddParty
-                        | MessageType::InviteChangeThreshold
-                        | MessageType::InviteExternalParty => {
+                        | MessageType::InviteChangeThreshold => {
                             // Invites are accepted unconditionally: workflows are
                             // multi-instance now, so a node already coordinating or
                             // participating in runs can take part in more
@@ -1873,7 +1816,6 @@ async fn handle_incoming_connection(
                                 MessageType::InviteChangeThreshold => {
                                     InvitationType::ChangeThreshold
                                 }
-                                MessageType::InviteExternalParty => InvitationType::ExternalParty,
                                 _ => unreachable!(),
                             };
                             tracing::info!(
@@ -1956,19 +1898,6 @@ async fn handle_incoming_connection(
                                             Err(e) => {
                                                 tracing::warn!(
                                                     "Change-threshold invite payload was unparseable: {e}"
-                                                );
-                                                InvitationMeta::None
-                                            }
-                                        }
-                                    }
-                                    InvitationType::ExternalParty => {
-                                        match serde_json::from_slice::<ExternalPartyInvitePayload>(
-                                            &msg.payload,
-                                        ) {
-                                            Ok(p) => InvitationMeta::ExternalParty(p),
-                                            Err(e) => {
-                                                tracing::warn!(
-                                                    "External-party invite payload was unparseable: {e}"
                                                 );
                                                 InvitationMeta::None
                                             }

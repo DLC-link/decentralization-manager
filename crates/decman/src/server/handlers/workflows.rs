@@ -31,18 +31,16 @@ use crate::{
             AddPartyInvitePayload, AddPartyRequest, ChangeThresholdInvitePayload,
             ChangeThresholdRequest, ContractsInvitePayload, ContractsRequest, DarsInvitePayload,
             DarsRequest, ErrorResponse, ExternalPartiesResponse, ExternalPartyInfo,
-            ExternalPartyInvitePayload, KickInvitePayload, KickRequest, KickResponse, KickStatus,
-            MessageResponse, MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload,
-            OnboardingMeshErrorResponse, OnboardingRequest, OnboardingResponse, OnboardingStatus,
-            SuccessResponse, WorkflowGuard, WorkflowInstance, WorkflowKind, WorkflowProgress,
-            WorkflowResponse, WorkflowRole, WorkflowRun, WorkflowRunsResponse,
-            WorkflowStatusResponse,
+            KickInvitePayload, KickRequest, KickResponse, KickStatus, MessageResponse,
+            MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload, OnboardingMeshErrorResponse,
+            OnboardingRequest, OnboardingResponse, OnboardingStatus, SuccessResponse,
+            WorkflowGuard, WorkflowInstance, WorkflowKind, WorkflowProgress, WorkflowResponse,
+            WorkflowRole, WorkflowRun, WorkflowRunsResponse, WorkflowStatusResponse,
         },
     },
     utils,
     workflow::{
-        self, AddPartyStep, ChangeThresholdStep, ContractsStep, DarsStep, ExternalPartyStep,
-        KickStep, OnboardingStep, external_party::steps::ExternalPartyAllocatePayload,
+        self, AddPartyStep, ChangeThresholdStep, ContractsStep, DarsStep, KickStep, OnboardingStep,
         state::WorkflowStep,
     },
 };
@@ -152,7 +150,6 @@ where
         WorkflowKind::Dars => "DARs",
         WorkflowKind::AddParty => "add-party",
         WorkflowKind::ChangeThreshold => "change-threshold",
-        WorkflowKind::ExternalParty => "external-party",
     };
 
     if !data.workflows.insert(instance.clone()) {
@@ -507,7 +504,6 @@ pub async fn start_kick(
             None, // No dars config
             None, // No add-party config
             None, // No change-threshold config
-            None, // No external-party config
             None, // No auth registry for kick
             last_seen,
             instance_for_coord,
@@ -980,7 +976,6 @@ pub async fn start_add_party(
             None, // No dars config
             Some(add_party_config),
             None, // No change-threshold config
-            None, // No external-party config
             workflow_auth,
             last_seen,
             instance_for_coord,
@@ -1349,7 +1344,6 @@ pub async fn start_change_threshold(
             None, // No dars config
             None, // No add-party config
             Some(change_config),
-            None, // No external-party config
             None, // No auth registry for change-threshold
             last_seen,
             instance_for_coord,
@@ -1512,304 +1506,25 @@ async fn send_change_threshold_invites(
 // ============================================================================
 
 /// Validate the requested confirmation threshold for a decentrally-hosted
-/// external party. The hosting set is the coordinator plus its hosting peers, so
-/// a reachable threshold is `1..=num_hosts`. Reject 0 and anything above the
-/// host count up-front instead of failing deep in a Canton proto error. Unset
-/// lets Canton default it to the number of hosts.
+/// external party. The hosting set is the local participant plus the hosting
+/// peers, and the threshold is capped at `N-1`: Canton requires the threshold to
+/// be at most the number of confirming hosts remaining after a change, so a
+/// threshold of `N` would block any later unhost. Reject 0 and anything above
+/// `N-1` up-front instead of failing deep in a Canton proto error. Unset lets
+/// Canton default it.
 pub(crate) fn validate_confirmation_threshold(
     threshold: Option<u32>,
     num_hosts: usize,
 ) -> Result<(), String> {
     let Some(t) = threshold else { return Ok(()) };
-    if !(1..=num_hosts as u32).contains(&t) {
+    let max = num_hosts.saturating_sub(1) as u32;
+    if t < 1 || t > max {
         return Err(format!(
-            "confirmation_threshold must be between 1 and {num_hosts} (the number of hosting \
-             participants); got {t}"
+            "confirmation_threshold must be between 1 and {max} (one less than the {num_hosts} \
+             hosting participants, so a host can still exit); got {t}"
         ));
     }
     Ok(())
-}
-
-/// Core of external-party onboarding, driven by the wallet-facing
-/// `/v0/tenant/onboard` endpoint: the wallet holds the key and supplies the
-/// party-signed `prepared_bundle`. Runs the mesh pre-flight, the peer version
-/// gate, registers + persists the run, records the invited peers, and spawns the
-/// coordinator task. Returns the run's `instance_name` on success, or the
-/// `HttpResponse` the caller should return (422 mesh hole, 409 incompatible peer
-/// / duplicate run, 500 mesh error).
-pub(crate) async fn spawn_external_party_onboarding(
-    data: &web::Data<AppState>,
-    party_hint: String,
-    hosting_peers: Vec<CantonId>,
-    confirmation_threshold: Option<u32>,
-    prepared_bundle: ExternalPartyAllocatePayload,
-) -> std::result::Result<String, HttpResponse> {
-    // Pre-flight: every hosting peer must have every other hosting peer in its
-    // network config, otherwise the coordinator hangs waiting for peer
-    // connections that can never be established (mirrors onboarding).
-    match verify_peer_mesh(&data.config, &data.db, &hosting_peers).await {
-        Ok(missing) if !missing.is_empty() => {
-            let edge_summary = missing
-                .iter()
-                .map(|e| match e.kind {
-                    MissingEdgeKind::UnreachableFromCoordinator => {
-                        format!("[unreachable from coordinator] {} → {}", e.from, e.to)
-                    }
-                    MissingEdgeKind::MeshHole => format!("[mesh hole] {} → {}", e.from, e.to),
-                })
-                .collect::<Vec<_>>()
-                .join("; ");
-            tracing::warn!(
-                "External-party onboarding rejected: {n} missing peer mesh edge(s): {edge_summary}",
-                n = missing.len()
-            );
-            return Err(
-                HttpResponse::UnprocessableEntity().json(OnboardingMeshErrorResponse {
-                    error: format!("Could not verify a full peer mesh. Edges: {edge_summary}"),
-                    missing_edges: missing,
-                }),
-            );
-        }
-        Ok(_) => {}
-        Err(e) => {
-            tracing::error!("Failed to run mesh pre-flight: {e:#}");
-            return Err(HttpResponse::InternalServerError().json(ErrorResponse {
-                error: "Failed to verify peer mesh".into(),
-            }));
-        }
-    }
-
-    let instance_name = format!("{party_hint}-external");
-    let instance = WorkflowInstance::new(
-        instance_name.clone(),
-        WorkflowKind::ExternalParty,
-        WorkflowRole::Coordinator,
-    );
-    let external_config = workflow::ExternalPartyConfig::new(
-        party_hint.clone(),
-        instance_name.clone(),
-        hosting_peers.clone(),
-        confirmation_threshold,
-        prepared_bundle,
-    );
-
-    // Refuse to invite any peer that can't speak the concurrent-workflows wire
-    // format — NO invites are sent if even one invitee fails the version gate.
-    let incompatible = preflight_incompatible_peers(&data.config, &data.db, &hosting_peers).await;
-    if !incompatible.is_empty() {
-        return Err(HttpResponse::Conflict().json(ErrorResponse {
-            error: format_incompatible_peers(&incompatible),
-        }));
-    }
-
-    register_and_persist(
-        data,
-        &instance,
-        ExternalPartyStep::WaitingForPeers,
-        &external_config,
-        &hosting_peers,
-        None,
-    )
-    .await?;
-
-    let config = data.config.clone();
-    let db = data.db.clone();
-    let workflows = data.workflows.clone();
-    let last_seen = data.last_seen.clone();
-    let http_state_for_task = instance.http.clone();
-    let instance_for_coord = instance.clone();
-    let instance_for_task = instance_name.clone();
-    let party_hint_for_task = party_hint.clone();
-    let hosting_peers_for_task = hosting_peers.clone();
-    *instance.http.invited_peers.write().await = hosting_peers;
-
-    // Flip abort_handle, status, and error under simultaneously-held locks so a
-    // concurrent /external-party/cancel can never observe
-    // "status=InProgress + abort_handle=None" and bail (mirrors start_onboarding).
-    let mut abort_guard = instance.http.abort_handle.lock().await;
-    let mut status_guard = instance.http.status.write().await;
-    let mut error_guard = instance.http.error.write().await;
-
-    let join_handle = tokio::spawn(async move {
-        let _workflow_guard = WorkflowGuard::new(workflows, instance_for_task.clone());
-
-        // Invite every hosting peer before starting the coordinator workflow.
-        let invite_result = send_external_party_invites(
-            &config,
-            &db,
-            &hosting_peers_for_task,
-            &party_hint_for_task,
-            confirmation_threshold,
-            &instance_for_task,
-        )
-        .await;
-        if let Err(e) = invite_result {
-            let msg = format!("Failed to send invites: {e}");
-            {
-                let mut status = http_state_for_task.status.write().await;
-                let mut error = http_state_for_task.error.write().await;
-                *status = WorkflowProgress::Failed;
-                *error = Some(msg.clone());
-            }
-            tracing::error!("Failed to send external-party invites: {e}");
-            mark_run_failed(&db, &instance_for_task, &msg).await;
-            return;
-        }
-
-        // Give peers time to start their peer workflows.
-        tokio::time::sleep(Duration::from_secs(2)).await;
-
-        let result = workflow::start_coordinator(
-            config,
-            db.clone(),
-            workflow::WorkflowType::ExternalParty,
-            None, // No onboarding config
-            None, // No kick config
-            None, // No contracts config
-            None, // No dars config
-            None, // No add-party config
-            None, // No change-threshold config
-            Some(external_config),
-            None, // No auth registry
-            last_seen,
-            instance_for_coord,
-        )
-        .await;
-
-        match result {
-            Ok(_) => {
-                *http_state_for_task.status.write().await = WorkflowProgress::Completed;
-                tracing::info!("External-party workflow completed successfully");
-                mark_run_completed(&db, &instance_for_task).await;
-            }
-            Err(e) => {
-                let msg = format!("{e}");
-                {
-                    let mut status = http_state_for_task.status.write().await;
-                    let mut error = http_state_for_task.error.write().await;
-                    *status = WorkflowProgress::Failed;
-                    *error = Some(msg.clone());
-                }
-                tracing::error!("External-party workflow failed: {e}");
-                mark_run_failed(&db, &instance_for_task, &msg).await;
-            }
-        }
-    });
-    *abort_guard = Some(join_handle.abort_handle());
-    *status_guard = WorkflowProgress::InProgress;
-    *error_guard = None;
-    drop(error_guard);
-    drop(status_guard);
-    drop(abort_guard);
-
-    Ok(instance_name)
-}
-
-/// Send external-party hosting invites to the selected peers using Noise.
-/// Mirrors `send_onboarding_invites`.
-async fn send_external_party_invites(
-    config: &NodeConfig,
-    db: &SqlitePool,
-    peer_ids: &[CantonId],
-    party_hint: &str,
-    confirmation_threshold: Option<u32>,
-    instance_name: &str,
-) -> Result {
-    let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
-    let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
-
-    let payload = ExternalPartyInvitePayload {
-        party_hint: party_hint.to_string(),
-        participants: peer_ids.to_vec(),
-        confirmation_threshold,
-        workflow_instance: Some(instance_name.to_string()),
-    };
-    let payload_bytes = serde_json::to_vec(&payload)?;
-    let invite_message = Message::new(MessageType::InviteExternalParty, payload_bytes);
-
-    for peer_id in peer_ids {
-        let peer = match network_config
-            .peers
-            .iter()
-            .find(|p| &p.participant_id == peer_id)
-        {
-            Some(p) => p,
-            None => {
-                tracing::warn!("Skipping invite to {peer_id} - peer not found in network config");
-                continue;
-            }
-        };
-
-        if peer.public_key.is_empty() {
-            tracing::warn!("Skipping invite to {peer_id} - no public key configured");
-            continue;
-        }
-
-        let peer_pub_key = match parse_public_key(&peer.public_key) {
-            Ok(pk) => pk,
-            Err(e) => {
-                tracing::warn!("Skipping invite to {peer_id} - invalid public key: {e}");
-                continue;
-            }
-        };
-
-        let psk = keypair.derive_psk(&peer_pub_key);
-        let identity = config.participant_id().to_string();
-
-        tracing::info!(
-            "Sending external-party invite to {peer_id} at {addr}:{port}",
-            addr = peer.address,
-            port = peer.port
-        );
-
-        match send_noise_message(
-            &peer.address,
-            peer.port,
-            &psk,
-            identity.as_bytes(),
-            &invite_message,
-        )
-        .await
-        {
-            Ok(response) => interpret_invite_reply(peer_id, "external-party", &response)?,
-            // Every host is required and WaitingForPeers has no timeout, so a
-            // host that never receives its invite would hang the run forever —
-            // fail the start instead, marking the run Failed.
-            Err(e) => anyhow::bail!("Failed to send external-party invite to {peer_id}: {e}"),
-        }
-    }
-
-    Ok(())
-}
-
-/// Get the current status of the external-party workflow
-#[utoipa::path(
-    tag = "Workflows",
-    responses(
-        (status = 200, description = "External-party workflow status", body = WorkflowStatusResponse)
-    )
-)]
-#[get("/external-party/status")]
-pub async fn get_external_party_status(data: web::Data<AppState>) -> impl Responder {
-    HttpResponse::Ok().json(kind_status(&data, WorkflowKind::ExternalParty).await)
-}
-
-#[utoipa::path(
-    tag = "Workflows",
-    responses(
-        (status = 200, description = "Workflow cancelled", body = MessageResponse),
-        (status = 409, description = "No workflow in progress", body = ErrorResponse)
-    )
-)]
-#[post("/external-party/cancel")]
-pub async fn cancel_external_party(
-    http_req: HttpRequest,
-    data: web::Data<AppState>,
-) -> impl Responder {
-    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
-        return resp;
-    }
-    cancel_workflow_state(&data, "External-party", WorkflowKind::ExternalParty).await
 }
 
 // ============================================================================
@@ -2030,7 +1745,6 @@ pub async fn start_onboarding(
             None, // No dars config
             None, // No add-party config
             None, // No change-threshold config
-            None, // No external-party config
             None, // No auth registry for onboarding
             last_seen,
             instance_for_coord,
@@ -2572,7 +2286,6 @@ pub async fn start_contracts(
             None, // No dars config
             None, // No add-party config
             None, // No change-threshold config
-            None, // No external-party config
             workflow_auth,
             last_seen,
             instance_for_coord,
@@ -2841,7 +2554,6 @@ pub async fn start_dars(
             Some(dars_config),
             None, // No add-party config
             None, // No change-threshold config
-            None, // No external-party config
             None, // No auth
             last_seen,
             instance_for_coord,
@@ -3294,54 +3006,36 @@ pub async fn list_workflows(data: web::Data<AppState>) -> impl Responder {
     HttpResponse::Ok().json(WorkflowRunsResponse { runs: resolved })
 }
 
-/// List every external party this node has onboarded (or is onboarding),
-/// derived from each `ExternalParty` workflow run's durable `dec_party_id`
-/// column (set once the party is allocated; runtime artifacts are wiped on
-/// completion). Newest run first.
+/// List the external parties this participant currently hosts, read from its own
+/// Canton topology (an authorized `PartyToParticipant` naming this participant
+/// with Confirmation and a self-owned single-key namespace). Wallet-driven
+/// onboarding keeps no local run row, so there is nothing DB-side to read.
 #[utoipa::path(
     tag = "Workflows",
     responses((status = 200, description = "External parties", body = ExternalPartiesResponse))
 )]
 #[get("/external-parties")]
 pub async fn list_external_parties(data: web::Data<AppState>) -> impl Responder {
-    let runs = match data
-        .db
-        .get_workflow_runs_by_kind(WorkflowKind::ExternalParty)
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!("Failed to list external parties: {e:#}");
-            return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to list external parties: {e}"),
-            });
+    match workflow::external_party::steps::list_hosted_external_parties(&data.config).await {
+        Ok(hosted) => {
+            let parties = hosted
+                .into_iter()
+                .map(|p| ExternalPartyInfo {
+                    party_id: p.party_id,
+                    fingerprint: p.fingerprint,
+                    threshold: p.threshold,
+                    host_count: p.host_count,
+                })
+                .collect();
+            HttpResponse::Ok().json(ExternalPartiesResponse { parties })
         }
-    };
-
-    let parties = runs
-        .into_iter()
-        // Only surface external parties that were actually allocated. The id is
-        // read from the run's durable `dec_party_id` column (set once the party
-        // is allocated — see the external_party coordinator), NOT from
-        // `workflow_artifacts`, which are wiped when a run completes. Runs still
-        // onboarding or failed-before-allocation have no id and stay in /workflows.
-        .filter_map(|run| {
-            let party_id = run.dec_party_id.as_ref()?.to_string();
-            // A party id is `{hint}::{fingerprint}` — surface the fingerprint half.
-            let fingerprint = party_id
-                .split_once("::")
-                .map(|(_, fp)| fp.to_string())
-                .unwrap_or_default();
-            Some(ExternalPartyInfo {
-                instance_name: run.instance_name,
-                party_id,
-                fingerprint,
-                created_at: run.created_at,
+        Err(e) => {
+            tracing::error!("Failed to list external parties from topology: {e:#}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to list external parties: {e}"),
             })
-        })
-        .collect();
-
-    HttpResponse::Ok().json(ExternalPartiesResponse { parties })
+        }
+    }
 }
 
 /// Pull `prefix` + `participants` out of the run's `config_json` and lift
@@ -3980,13 +3674,13 @@ mod tests {
 
     #[test]
     fn external_party_threshold_bounded_by_host_count() {
-        // 3 hosts (coordinator + 2 peers): 1..=3 are reachable.
+        // 3 hosts (local + 2 peers): capped at N-1 = 2 so a host can still exit.
         assert!(validate_confirmation_threshold(None, 3).is_ok());
         assert!(validate_confirmation_threshold(Some(1), 3).is_ok());
         assert!(validate_confirmation_threshold(Some(2), 3).is_ok());
-        assert!(validate_confirmation_threshold(Some(3), 3).is_ok());
-        // 0 can never reach quorum; above the host count is unsatisfiable.
+        // 0 can never reach quorum; N and above would block any unhost.
         assert!(validate_confirmation_threshold(Some(0), 3).is_err());
+        assert!(validate_confirmation_threshold(Some(3), 3).is_err());
         assert!(validate_confirmation_threshold(Some(4), 3).is_err());
     }
 

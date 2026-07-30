@@ -15,9 +15,6 @@ interface ExternalPartyListProps {
   parties: ExternalPartyInfo[];
 }
 
-const formatCreated = (unixSecs: number): string =>
-  unixSecs ? new Date(unixSecs * 1000).toLocaleString() : "-";
-
 export const ExternalPartyList = ({ parties }: ExternalPartyListProps) => {
   if (parties.length === 0) {
     return (
@@ -26,7 +23,7 @@ export const ExternalPartyList = ({ parties }: ExternalPartyListProps) => {
         color="text.secondary"
         sx={{ textAlign: "center", py: 6 }}
       >
-        No external parties found
+        No external parties hosted on this node
       </Typography>
     );
   }
@@ -39,13 +36,13 @@ export const ExternalPartyList = ({ parties }: ExternalPartyListProps) => {
             <TableCell sx={{ py: 1 }}>Party ID</TableCell>
             <TableCell sx={{ py: 1 }}>Fingerprint</TableCell>
             <TableCell sx={{ py: 1 }} align="right">
-              Created
+              Hosting
             </TableCell>
           </TableRow>
         </TableHead>
         <TableBody>
           {parties.map((party, idx) => (
-            <TableRow key={party.instance_name} sx={{ ...zebraRow(idx) }}>
+            <TableRow key={party.party_id} sx={{ ...zebraRow(idx) }}>
               <TableCell sx={{ py: 1.5 }}>
                 <CopyableText
                   text={party.party_id}
@@ -62,7 +59,7 @@ export const ExternalPartyList = ({ parties }: ExternalPartyListProps) => {
               </TableCell>
               <TableCell sx={{ py: 1.5 }} align="right">
                 <Typography variant="caption" color="text.secondary">
-                  {formatCreated(party.created_at)}
+                  {party.threshold} of {party.host_count}
                 </Typography>
               </TableCell>
             </TableRow>

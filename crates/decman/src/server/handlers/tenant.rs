@@ -36,7 +36,6 @@ use uuid::Uuid;
 use crate::{
     canton_id::{CantonId, validate_party_id_prefix},
     config::NodeConfig,
-    db::schema::SchemaRead,
     error::Result,
     server::{
         AppState,
@@ -45,20 +44,20 @@ use crate::{
             ErrorResponse, TenantAcsResponse, TenantContract, TenantExecuteSubmissionRequest,
             TenantOnboardRequest, TenantOnboardResponse, TenantPrepareRequest,
             TenantPrepareResponse, TenantPrepareSubmissionRequest, TenantPrepareSubmissionResponse,
-            WorkflowKind, WorkflowProgress, WorkflowStatusResponse,
+            WorkflowProgress, WorkflowStatusResponse,
         },
     },
     utils,
     workflow::external_party::{
         keys::fingerprint_from_public_key,
-        steps::{ExternalPartyAllocatePayload, prepare_topology},
+        steps::{
+            ExternalPartyAllocatePayload, HostOnboardingStatus, allocate_party,
+            host_onboarding_status, prepare_topology,
+        },
     },
 };
 
-use super::{
-    governance::get_party_token,
-    workflows::{spawn_external_party_onboarding, validate_confirmation_threshold},
-};
+use super::{governance::get_party_token, workflows::validate_confirmation_threshold};
 
 // ============================================================================
 // Onboarding (wallet-driven)
@@ -160,22 +159,11 @@ pub async fn tenant_onboard(
     if let Err(msg) = validate_party_id_prefix(&body.party_hint) {
         return HttpResponse::BadRequest().json(ErrorResponse { error: msg });
     }
-    if body.hosting_peers.is_empty() {
-        return HttpResponse::BadRequest().json(ErrorResponse {
-            error: "hosting_peers must name at least one other participant to host the party"
-                .to_string(),
-        });
-    }
-    let num_hosts = body.hosting_peers.len() + 1;
-    if let Err(msg) = validate_confirmation_threshold(body.confirmation_threshold, num_hosts) {
-        return HttpResponse::BadRequest().json(ErrorResponse { error: msg });
-    }
 
     // The party id is built from the client-supplied `signed_by`, so it must be
     // the real fingerprint of `public_key`; otherwise a mismatched pair would
     // have us record and return a party id that doesn't match the key the
-    // topology was signed with. Fail fast rather than let Canton reject the
-    // allocate after DPM has already persisted a wrong id.
+    // topology was signed with. Fail fast with a 400.
     let public_key = match decode_public_key(&body.public_key) {
         Ok(key) => key,
         Err(resp) => return resp,
@@ -218,34 +206,42 @@ pub async fn tenant_onboard(
         signed_by: body.signed_by.clone(),
     };
 
-    match spawn_external_party_onboarding(
-        &data,
-        body.party_hint.clone(),
-        body.hosting_peers.clone(),
-        body.confirmation_threshold,
-        bundle,
-    )
-    .await
-    {
-        Ok(instance_name) => HttpResponse::Accepted().json(TenantOnboardResponse {
-            status: WorkflowProgress::InProgress,
-            party_id,
-            instance_name,
-        }),
-        Err(resp) => resp,
+    // Allocate on THIS participant only. The wallet calls `/onboard` on every
+    // host itself; no host relays to another. Canton keeps the topology a
+    // proposal until the last host signs, and `allocate_party` treats
+    // `ALREADY_EXISTS` as success, so re-sends converge.
+    if let Err(e) = allocate_party(&data.config, &bundle).await {
+        tracing::error!("tenant onboard: allocate on this participant failed: {e:#}");
+        return HttpResponse::InternalServerError().json(ErrorResponse {
+            error: format!("Failed to allocate external party on this host: {e}"),
+        });
     }
+
+    // Report this host's view: `Completed` once its authorized mapping names it,
+    // else `InProgress` (still a proposal here — other hosts must sign).
+    let status = match host_onboarding_status(&data.config, &party_id).await {
+        Ok(HostOnboardingStatus::Hosted) => WorkflowProgress::Completed,
+        Ok(_) => WorkflowProgress::InProgress,
+        Err(e) => {
+            tracing::warn!("tenant onboard: post-allocate status read failed: {e:#}");
+            WorkflowProgress::InProgress
+        }
+    };
+    HttpResponse::Accepted().json(TenantOnboardResponse { status, party_id })
 }
 
-/// Status of a wallet-held party's onboarding run. `party` may be the full party
-/// id or just the hint — the run's `instance_name` is `{hint}-external`, and a
-/// full id is also matched against the run's `dec_party_id`.
+/// Onboarding status of a wallet-held party on THIS host, read from the
+/// participant's topology. `party` must be the full party id (`{hint}::{fp}`).
+/// `Completed` = this host's authorized `PartyToParticipant` names it;
+/// `InProgress` = still a proposal here (this host has not finished signing);
+/// 404 = no mapping at all. The wallet queries every host and aggregates.
 #[utoipa::path(
     tag = "Tenant",
-    params(("party" = String, Path, description = "Party id or hint")),
+    params(("party" = String, Path, description = "Full party id")),
     responses(
-        (status = 200, description = "Onboarding status", body = WorkflowStatusResponse),
+        (status = 200, description = "Onboarding status on this host", body = WorkflowStatusResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
-        (status = 404, description = "No onboarding run for this party", body = ErrorResponse)
+        (status = 404, description = "This host does not host this party", body = ErrorResponse)
     )
 )]
 #[get("/v0/tenant/{party}/status")]
@@ -258,39 +254,23 @@ pub async fn tenant_status(
         return resp;
     }
     let party = path.into_inner();
-    let hint = party.split("::").next().unwrap_or(&party);
-    let instance_name = format!("{hint}-external");
 
-    // A live run reports its in-memory status; once it reaches a terminal state
-    // its registry entry is dropped, so fall back to the persisted row.
-    if let Some(inst) = data.workflows.get(&instance_name) {
-        return HttpResponse::Ok().json(WorkflowStatusResponse {
-            status: *inst.http.status.read().await,
-            error: inst.http.error.read().await.clone(),
-        });
-    }
-
-    match data
-        .db
-        .get_workflow_runs_by_kind(WorkflowKind::ExternalParty)
-        .await
-    {
-        Ok(runs) => match runs.into_iter().find(|r| {
-            r.instance_name == instance_name
-                || r.dec_party_id.as_ref().map(ToString::to_string).as_deref() == Some(&party)
-        }) {
-            Some(run) => HttpResponse::Ok().json(WorkflowStatusResponse {
-                status: run.status,
-                error: run.error,
-            }),
-            None => HttpResponse::NotFound().json(ErrorResponse {
-                error: format!("No external-party onboarding found for {party}"),
-            }),
-        },
+    match host_onboarding_status(&data.config, &party).await {
+        Ok(HostOnboardingStatus::Hosted) => HttpResponse::Ok().json(WorkflowStatusResponse {
+            status: WorkflowProgress::Completed,
+            error: None,
+        }),
+        Ok(HostOnboardingStatus::Pending) => HttpResponse::Ok().json(WorkflowStatusResponse {
+            status: WorkflowProgress::InProgress,
+            error: None,
+        }),
+        Ok(HostOnboardingStatus::Absent) => HttpResponse::NotFound().json(ErrorResponse {
+            error: format!("This host does not host external party {party}"),
+        }),
         Err(e) => {
-            tracing::error!("tenant status: failed to load runs: {e:#}");
+            tracing::error!("tenant status: topology read failed: {e:#}");
             HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to load onboarding status: {e}"),
+                error: format!("Failed to read onboarding status: {e}"),
             })
         }
     }
