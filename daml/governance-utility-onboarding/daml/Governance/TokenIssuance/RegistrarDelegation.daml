@@ -1,0 +1,74 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Standing delegation of registrar authority to a named set of operators.
+--
+-- The registrar dec party signs this contract, so a choice body runs with the
+-- registrar's authority while an operator submits the command. That is the same
+-- delegation shape `GovernanceRules` uses: members hold readAs rights on the dec
+-- party and never submit as it.
+--
+-- Governance creates the contract once, through `RegistrarDelegationProposal`.
+-- Any operator ends it with `RegistrarDelegation_Revoke`. Granting the power
+-- takes a vote; withdrawing it does not.
+module Governance.TokenIssuance.RegistrarDelegation where
+
+import DA.List (unique)
+import DA.Set as Set hiding (filter)
+import Splice.Util (require)
+
+import Utility.Registry.Holding.V0.Holding (Holding, Holding_Merge(..))
+
+-- | One consolidation: the holding that survives, and the holdings folded into
+-- it. `Holding_Merge` requires every holding to share operator, provider,
+-- registrar, owner, instrument, and label, and rejects locked holdings.
+data MergeGroup = MergeGroup
+  with
+    targetCid : ContractId Holding
+      -- ^ The holding that survives and receives the total amount.
+    sourceCids : [ContractId Holding]
+      -- ^ The holdings archived into the target.
+  deriving (Eq, Show)
+
+template RegistrarDelegation
+  with
+    registrar : Party
+      -- ^ The dec party whose authority this contract delegates.
+    operators : Set Party
+      -- ^ Parties that may exercise the delegated choices, and may revoke.
+  where
+    signatory registrar
+
+    ensure not (Set.null operators)
+
+    -- | Consolidate holdings, one `Holding_Merge` per group. Value cannot move:
+    -- `Holding_Merge` pins the owner and preserves the amount.
+    nonconsuming choice RegistrarDelegation_MergeHoldings : [ContractId Holding]
+      with
+        operator : Party
+          -- ^ The submitting operator. Must be in `operators`.
+        groups : [MergeGroup]
+          -- ^ Consolidations to apply.
+      controller operator
+      do
+        require "Operator is authorized" (operator `Set.member` operators)
+        require "Groups must be non-empty" (not (Prelude.null groups))
+        -- A repeated contract id would otherwise fail on the second archive
+        -- with an unhelpful "contract inactive" error.
+        let allCids = concatMap (\g -> g.targetCid :: g.sourceCids) groups
+        require "No holding appears twice" (unique allCids)
+        forA groups $ \g -> do
+          result <- exercise g.targetCid Holding_Merge with
+            holdingCids = g.sourceCids
+          pure result.holdingCid
+
+    -- | End the delegation. One operator is enough: withdrawing authority is
+    -- always safe.
+    choice RegistrarDelegation_Revoke : ()
+      with
+        operator : Party
+          -- ^ The submitting operator. Must be in `operators`.
+      controller operator
+      do
+        require "Operator is authorized" (operator `Set.member` operators)
+        pure ()
