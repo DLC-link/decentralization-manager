@@ -5,12 +5,20 @@
 --
 -- The registrar dec party signs this contract, so a choice body runs with the
 -- registrar's authority while an operator submits the command. That is the same
--- delegation shape `GovernanceRules` uses: members hold readAs rights on the dec
--- party and never submit as it.
+-- delegation shape the governance-vote path uses: a member holds readAs rights
+-- on the dec party and never submits as it on that path. Other paths in this
+-- system do grant actAs on a dec party, so this claim is scoped to governance
+-- votes only.
 --
 -- Governance creates the contract once, through `RegistrarDelegationProposal`.
 -- Any operator ends it with `RegistrarDelegation_Revoke`. Granting the power
 -- takes a vote; withdrawing it does not.
+--
+-- Observer question: this template ships with no `observer operators` clause.
+-- An operator resolves this contract only by reading as the registrar. The
+-- companion CLI submits with `readAs` set to the registrar (governance) party.
+-- Nobody has verified this against a live ledger yet. If the first real run
+-- cannot resolve the contract, add `observer operators`.
 module Governance.TokenIssuance.RegistrarDelegation where
 
 import DA.List (unique)
@@ -53,6 +61,10 @@ template RegistrarDelegation
           -- ^ Consolidations to apply.
       controller operator
       do
+        -- Load-bearing: `controller operator` binds to the choice argument, not
+        -- a fixed party, so the ledger offers this choice to any submitter.
+        -- This line is the entire authorization boundary. Remove or weaken it
+        -- and any party can merge holdings under the registrar's authority.
         require "Operator is authorized" (operator `Set.member` operators)
         require "Groups must be non-empty" (not (Prelude.null groups))
         -- A repeated contract id would otherwise fail on the second archive
@@ -65,7 +77,9 @@ template RegistrarDelegation
           pure result.holdingCid
 
     -- | End the delegation. One operator is enough: withdrawing authority is
-    -- always safe.
+    -- always safe. Any single operator archives the contract for every
+    -- operator, not only for themselves. Re-granting always needs a fresh
+    -- governance vote; there is no lighter path back.
     choice RegistrarDelegation_Revoke : ()
       with
         operator : Party
