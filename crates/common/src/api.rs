@@ -345,11 +345,12 @@ pub struct TenantPrepareRequest {
     pub party_hint: String,
     /// The party's raw 32-byte Ed25519 public key, base64-encoded.
     pub public_key: String,
-    /// Participants that will host the party (beyond this coordinator node).
+    /// Participants that will host the party (beyond this host).
     #[serde(default)]
     pub hosting_peers: Vec<CantonId>,
-    /// Confirmation threshold for the hosting set; `None` defaults to the number
-    /// of hosting participants.
+    /// Confirmation threshold for the hosting set. `None` defaults to `N-1` (one
+    /// less than the number of hosting participants), never `N`, so a host can
+    /// always exit later.
     #[serde(default)]
     pub confirmation_threshold: Option<u32>,
 }
