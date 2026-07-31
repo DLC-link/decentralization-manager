@@ -30,12 +30,12 @@ use crate::{
         types::{
             AddPartyInvitePayload, AddPartyRequest, ChangeThresholdInvitePayload,
             ChangeThresholdRequest, ContractsInvitePayload, ContractsRequest, DarsInvitePayload,
-            DarsRequest, ErrorResponse, KickInvitePayload, KickRequest, KickResponse, KickStatus,
-            MessageResponse, MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload,
-            OnboardingMeshErrorResponse, OnboardingRequest, OnboardingResponse, OnboardingStatus,
-            SuccessResponse, WorkflowGuard, WorkflowInstance, WorkflowKind, WorkflowProgress,
-            WorkflowResponse, WorkflowRole, WorkflowRun, WorkflowRunsResponse,
-            WorkflowStatusResponse,
+            DarsRequest, ErrorResponse, ExternalPartiesResponse, ExternalPartyInfo,
+            KickInvitePayload, KickRequest, KickResponse, KickStatus, MessageResponse,
+            MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload, OnboardingMeshErrorResponse,
+            OnboardingRequest, OnboardingResponse, OnboardingStatus, SuccessResponse,
+            WorkflowGuard, WorkflowInstance, WorkflowKind, WorkflowProgress, WorkflowResponse,
+            WorkflowRole, WorkflowRun, WorkflowRunsResponse, WorkflowStatusResponse,
         },
     },
     utils,
@@ -1498,6 +1498,34 @@ async fn send_change_threshold_invites(
         }
     }
 
+    Ok(())
+}
+
+// ============================================================================
+// External-Party Workflow
+// ============================================================================
+
+/// Validate the requested confirmation threshold for a decentrally-hosted
+/// external party. The hosting set is the local participant plus the hosting
+/// peers, and the threshold is capped at `N-1`: Canton requires the threshold to
+/// be at most the number of confirming hosts remaining after a change, so a
+/// threshold of `N` would block any later unhost. Reject 0 and anything above
+/// `N-1` up-front instead of failing deep in a Canton proto error. An unset
+/// value passes here and is defaulted to `N-1` by
+/// [`prepare_topology`](crate::workflow::external_party::steps::prepare_topology),
+/// so it also stays within the cap.
+pub(crate) fn validate_confirmation_threshold(
+    threshold: Option<u32>,
+    num_hosts: usize,
+) -> Result<(), String> {
+    let Some(t) = threshold else { return Ok(()) };
+    let max = num_hosts.saturating_sub(1) as u32;
+    if t < 1 || t > max {
+        return Err(format!(
+            "confirmation_threshold must be between 1 and {max} (one less than the {num_hosts} \
+             hosting participants, so a host can still exit); got {t}"
+        ));
+    }
     Ok(())
 }
 
@@ -2980,6 +3008,38 @@ pub async fn list_workflows(data: web::Data<AppState>) -> impl Responder {
     HttpResponse::Ok().json(WorkflowRunsResponse { runs: resolved })
 }
 
+/// List the external parties this participant currently hosts, read from its own
+/// Canton topology (an authorized `PartyToParticipant` naming this participant
+/// with Confirmation and a self-owned single-key namespace). Wallet-driven
+/// onboarding keeps no local run row, so there is nothing DB-side to read.
+#[utoipa::path(
+    tag = "Workflows",
+    responses((status = 200, description = "External parties", body = ExternalPartiesResponse))
+)]
+#[get("/external-parties")]
+pub async fn list_external_parties(data: web::Data<AppState>) -> impl Responder {
+    match workflow::external_party::steps::list_hosted_external_parties(&data.config).await {
+        Ok(hosted) => {
+            let parties = hosted
+                .into_iter()
+                .map(|p| ExternalPartyInfo {
+                    party_id: p.party_id,
+                    fingerprint: p.fingerprint,
+                    threshold: p.threshold,
+                    host_count: p.host_count,
+                })
+                .collect();
+            HttpResponse::Ok().json(ExternalPartiesResponse { parties })
+        }
+        Err(e) => {
+            tracing::error!("Failed to list external parties from topology: {e:#}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to list external parties: {e}"),
+            })
+        }
+    }
+}
+
 /// Pull `prefix` + `participants` out of the run's `config_json` and lift
 /// them onto the response struct so the frontend can show them without
 /// parsing JSON blobs. Coordinator configs spell the prefix field
@@ -3612,6 +3672,18 @@ mod tests {
         assert!(interpret_invite_reply(&peer, "onboarding", &other).is_ok());
 
         Ok(())
+    }
+
+    #[test]
+    fn external_party_threshold_bounded_by_host_count() {
+        // 3 hosts (local + 2 peers): capped at N-1 = 2 so a host can still exit.
+        assert!(validate_confirmation_threshold(None, 3).is_ok());
+        assert!(validate_confirmation_threshold(Some(1), 3).is_ok());
+        assert!(validate_confirmation_threshold(Some(2), 3).is_ok());
+        // 0 can never reach quorum; N and above would block any unhost.
+        assert!(validate_confirmation_threshold(Some(0), 3).is_err());
+        assert!(validate_confirmation_threshold(Some(3), 3).is_err());
+        assert!(validate_confirmation_threshold(Some(4), 3).is_err());
     }
 
     fn test_cid(prefix: &str) -> anyhow::Result<CantonId> {

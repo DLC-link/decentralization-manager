@@ -162,6 +162,47 @@ pub fn require_admin(
     Ok(principal)
 }
 
+/// Authorize a `/v0/tenant/*` request by its bearer API key. Tenant callers
+/// (wallet providers) present a provider-issued API key, not a Keycloak JWT, so
+/// this compares the presented bearer against the configured tenant keys rather
+/// than reading the `Principal` the middleware attaches for admin routes. In
+/// insecure/test mode the key set isn't required, matching how the Keycloak path
+/// relaxes under `--insecure` (so dev + the e2e harness run without keys).
+///
+/// # Errors
+/// Returns a 401 `HttpResponse` when the bearer is missing or not a configured key.
+pub fn require_tenant_api_key(req: &HttpRequest, state: &AppState) -> Result<(), HttpResponse> {
+    if state.test_mode {
+        return Ok(());
+    }
+    let presented = req
+        .headers()
+        .get(AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(parse_bearer)
+        .unwrap_or_default();
+    let ok = !presented.is_empty()
+        && state
+            .config
+            .tenant_api_keys
+            .iter()
+            .any(|k| constant_time_eq(k.as_bytes(), presented.as_bytes()));
+    if ok {
+        Ok(())
+    } else {
+        Err(HttpResponse::Unauthorized().json(json!({"error": "invalid tenant API key"})))
+    }
+}
+
+/// Constant-time byte-slice equality, so a tenant API-key check doesn't leak the
+/// matched prefix via response timing.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 /// Extract the bearer token from the request.
 fn bearer_token(req: &ServiceRequest) -> Option<String> {
     let header = req.headers().get(AUTHORIZATION)?.to_str().ok()?;
@@ -207,6 +248,10 @@ fn is_always_public(path: &str) -> bool {
         || path.starts_with("/swagger-ui/")
         || path.starts_with("/api-docs/")
         || path.starts_with("/.well-known/")
+        // Tenant API: wallet providers authenticate with a provider-issued API
+        // key (not a Keycloak JWT), so bypass the JWT middleware here — each
+        // /v0/tenant/* handler enforces `require_tenant_api_key` itself.
+        || path.starts_with("/v0/tenant/")
 }
 
 #[cfg(test)]

@@ -125,6 +125,7 @@ async fn main() -> Result {
             canton_hmac_secret,
             canton_hmac_audience,
             canton_hmac_subject,
+            tenant_api_keys,
             ..
         } => {
             if let Some(key) = db_encryption_key {
@@ -240,6 +241,17 @@ async fn main() -> Result {
             if let Some(v) = noise_retry_backoff_ms {
                 config.noise_retry.backoff_ms = *v;
             }
+
+            config.tenant_api_keys = tenant_api_keys
+                .as_deref()
+                .map(|s| {
+                    s.split(',')
+                        .map(str::trim)
+                        .filter(|k| !k.is_empty())
+                        .map(String::from)
+                        .collect()
+                })
+                .unwrap_or_default();
 
             config.insecure = *insecure;
             // Only ingest the unsafe HMAC settings when insecure mode is on;

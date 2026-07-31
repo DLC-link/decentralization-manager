@@ -69,6 +69,14 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Operate on THIS script's own repo, regardless of the caller's CWD. Without
+# this, invoking the script by path from another checkout (e.g. a git worktree's
+# run.sh called from the main clone) makes cargo build the CALLER's workspace
+# into the caller's target/ — so the binary is missing from $SCRIPT_DIR/target/
+# and, worse, the wrong branch's code gets tested. Every build/output/relative
+# path below assumes repo root == SCRIPT_DIR.
+cd "$SCRIPT_DIR"
+
 case "$TARGET" in
     localnet)
         ENV_FILE="$SCRIPT_DIR/integration-tests/env.sh"
@@ -172,7 +180,7 @@ log_phase "Configuring peers"
 configure_peers
 
 # Workflows
-log_phase "Running governance workflow e2e (Rust)"
+log_phase "Running e2e: ${DECPM_E2E_TEST:-governance_workflows_e2e} (Rust)"
 
 export P1_HTTP P2_HTTP P3_HTTP
 export P1_NOISE P2_NOISE P3_NOISE
@@ -202,9 +210,59 @@ fi
 # $FEATURES_FLAG must match the value used in `cargo build` above to avoid
 # cargo rebuilding the binary under a different feature unification and
 # overwriting the artifact. See the build comment block for full details.
-cargo test --profile release-ci -p decman ${FEATURES_FLAG[@]+"${FEATURES_FLAG[@]}"} --test governance_workflows -- --ignored --nocapture
+#
+# DECPM_E2E_TEST picks which #[ignore]d test in the governance_workflows binary
+# to run. Defaults to the full suite (governance_workflows_e2e); the wrapper
+# run-external-party.sh sets it to external_party_e2e to exercise only that one
+# feature. Run with `--exact` so the name matches exactly one test, never a
+# substring set.
+E2E_TEST="${DECPM_E2E_TEST:-governance_workflows_e2e}"
 
-echo ""
-echo "=========================================="
-echo "Integration tests completed successfully!"
-echo "=========================================="
+# Run the selected e2e test against the already-running stack.
+run_e2e() {
+    cargo test --profile release-ci -p decman ${FEATURES_FLAG[@]+"${FEATURES_FLAG[@]}"} \
+        --test governance_workflows -- --ignored --nocapture --exact "$E2E_TEST"
+}
+
+# DECPM_E2E_HOLD=1 switches to interactive mode: bring the stack up, wait for the
+# operator to press ENTER before running the test, then hold everything up for
+# manual inspection until Ctrl-C tears it down. Unset (the default) preserves the
+# original run-and-exit behaviour used by CI.
+if [ -n "${DECPM_E2E_HOLD:-}" ]; then
+    # Ctrl-C -> INT trap -> exit -> the already-installed EXIT trap (cleanup)
+    # runs exactly once.
+    trap 'exit 0' INT
+
+    echo ""
+    echo "=========================================="
+    echo "Nodes are UP. HTTP endpoints:"
+    echo "  P1  http://localhost:${P1_HTTP}"
+    echo "  P2  http://localhost:${P2_HTTP}"
+    echo "  P3  http://localhost:${P3_HTTP}"
+    echo "=========================================="
+    read -r -p "Press ENTER to run ${E2E_TEST}  (or Ctrl-C to quit)... " _ || true
+
+    # Don't let a test failure abort before the hold — the operator still wants
+    # the stack up to inspect what happened.
+    set +e
+    run_e2e
+    test_rc=$?
+    set -e
+    echo ""
+    if [ "$test_rc" -eq 0 ]; then
+        echo "✓ ${E2E_TEST} passed."
+    else
+        echo "✗ ${E2E_TEST} failed (exit ${test_rc})."
+    fi
+
+    echo ""
+    echo "Stack still running for inspection (endpoints above). Press Ctrl-C to tear down."
+    # Block until Ctrl-C. Portable busy-wait (macOS/BSD sleep has no 'infinity').
+    while true; do sleep 1; done
+else
+    run_e2e
+    echo ""
+    echo "=========================================="
+    echo "Integration tests completed successfully!"
+    echo "=========================================="
+fi

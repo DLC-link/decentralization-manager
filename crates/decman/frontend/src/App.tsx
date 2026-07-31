@@ -31,6 +31,7 @@ import { PackagesPanel } from "./components/PackagesPanel";
 import { LoadingSkeleton, ConfigTabSkeleton } from "./components/LoadingSkeleton";
 import { DarsDialog } from "./components/DarsDialog";
 import { OnboardingDialog } from "./components/OnboardingDialog";
+import { ExternalPartyList } from "./components/ExternalPartyList";
 import { NotificationsView } from "./components/NotificationsView";
 import type { PartyActions } from "./components/NotificationsView";
 import { useSnackbar } from "./contexts";
@@ -49,6 +50,8 @@ import type {
   PartyAuthStatus,
   AuthStatusResponse,
   WorkflowRun,
+  ExternalPartyInfo,
+  ExternalPartiesResponse,
 } from "./types";
 
 const TAB_HASHES = ["parties", "packages", "config", "notifications"] as const;
@@ -84,6 +87,10 @@ const App = () => {
   const isLargeScreen = useMediaQuery(muiTheme.breakpoints.up("lg"));
   const [activeTab, setActiveTab] = useState(INITIAL_ROUTE.tab);
   const [parties, setParties] = useState<DecentralizedParty[]>([]);
+  const [externalParties, setExternalParties] = useState<ExternalPartyInfo[]>([]);
+  const [partiesView, setPartiesView] = useState<"decentralized" | "external">(
+    "decentralized",
+  );
   const [nodeConfig, setNodeConfig] = useState<NodeConfig | null>(null);
   const [networkConfig, setNetworkConfig] = useState<NetworkConfig | null>(
     null,
@@ -253,6 +260,18 @@ const App = () => {
     [showSnackbar, partyFilter],
   );
 
+  const refreshExternalParties = useCallback(async () => {
+    try {
+      const res = await authenticatedFetch(`${API_BASE}/external-parties`);
+      if (res.ok) {
+        const data: ExternalPartiesResponse = await res.json();
+        setExternalParties(data.parties);
+      }
+    } catch {
+      // Non-fatal: the external-parties list just stays as-is.
+    }
+  }, []);
+
   const savePeers = useCallback(
     async (peers: Peer[]) => {
       const res = await authenticatedFetch(`${API_BASE}/network-config`, {
@@ -362,6 +381,13 @@ const App = () => {
     partiesLoaded.current = true;
     refreshParties();
   }, [activeTab, refreshParties]);
+
+  // Load external parties when the External Parties view is shown.
+  useEffect(() => {
+    if (activeTab === 0 && partiesView === "external") {
+      refreshExternalParties();
+    }
+  }, [activeTab, partiesView, refreshExternalParties]);
 
   // Lazy-load config tab data when first opened
   useEffect(() => {
@@ -843,7 +869,6 @@ const App = () => {
                 goToNotifications();
               }}
             />
-
           </>
         )}
       </Container>
@@ -939,22 +964,35 @@ const App = () => {
                 </Box>
               )}
 
-              <PartyList
-                parties={visibleParties}
-                authStatuses={authStatuses}
-                onSelectParty={(id) => {
-                  savedScrollY.current = window.scrollY;
-                  setSelectedPartyId(id);
-                  navigate(0, id);
-                  window.scrollTo(0, 0);
-                }}
-                isHidden={isHidden}
-                onToggleHidden={toggleHidden}
-              />
+              <Tabs
+                value={partiesView}
+                onChange={(_e, v) => setPartiesView(v)}
+                sx={{ px: 2, mb: 1 }}
+              >
+                <Tab value="decentralized" label="Decentralized Parties" />
+                <Tab value="external" label="External Parties" />
+              </Tabs>
+
+              {partiesView === "decentralized" ? (
+                <PartyList
+                  parties={visibleParties}
+                  authStatuses={authStatuses}
+                  onSelectParty={(id) => {
+                    savedScrollY.current = window.scrollY;
+                    setSelectedPartyId(id);
+                    navigate(0, id);
+                    window.scrollTo(0, 0);
+                  }}
+                  isHidden={isHidden}
+                  onToggleHidden={toggleHidden}
+                />
+              ) : (
+                <ExternalPartyList parties={externalParties} />
+              )}
             </>
           )}
 
-          {ADMIN_ACCESS && !selectedPartyId && (
+          {ADMIN_ACCESS && !selectedPartyId && partiesView === "decentralized" && (
             <Tooltip title="Create Party" arrow>
               <Fab
                 color="primary"

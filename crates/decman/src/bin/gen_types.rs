@@ -82,6 +82,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         DiscoverMemberPartyResponse,
         ErrorResponse,
         ExpireConfirmationRequest,
+        ExternalPartiesResponse,
+        ExternalPartyInfo,
         FieldDefinition,
         GovernanceState,
         GovernanceStateResponse,

@@ -1328,7 +1328,7 @@ checksum = "092966b41edc516079bdf31ec78a2e0588d1d0c08f78b91d8307215928642b2b"
 
 [[package]]
 name = "decman"
-version = "1.4.3"
+version = "1.6.0"
 dependencies = [
  "actix-cors",
  "actix-web",
@@ -1353,6 +1353,7 @@ dependencies = [
  "mime_guess",
  "prost",
  "prost-types",
+ "rand 0.10.1",
  "rcgen",
  "registry",
  "reqwest 0.13.3",
