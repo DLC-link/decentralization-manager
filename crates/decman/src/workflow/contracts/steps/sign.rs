@@ -137,8 +137,10 @@ pub async fn sign_submissions(
     tracing::info!("Using Daml key with fingerprint: {key_fingerprint}");
     tracing::debug!("This is the key that was generated in step 1 and added to P2P mapping");
 
-    // Verify this key exists in Canton's vault
-    let mut vault_client = VaultServiceClient::new(config.admin_channel().await?);
+    // Verify this key exists in Canton's vault. Keep the channel: the signing
+    // backend reuses it instead of opening a second connection.
+    let admin_channel = config.admin_channel().await?;
+    let mut vault_client = VaultServiceClient::new(admin_channel.clone());
 
     let keys_response = vault_client
         .list_my_keys(tonic::Request::new(ListMyKeysRequest {
@@ -207,8 +209,8 @@ pub async fn sign_submissions(
     // a KMS to sign a non-exportable key (follow-up). Everything else in this
     // step is provider-independent.
     let hashes: Vec<Vec<u8>> = prepared_submissions
-        .iter()
-        .map(|s| s.prepared_transaction_hash.clone())
+        .into_iter()
+        .map(|s| s.prepared_transaction_hash)
         .collect();
 
     let key_context = SigningKeyContext {
@@ -217,7 +219,7 @@ pub async fn sign_submissions(
         kms_key_id,
     };
 
-    let signer = select_signer(config, &key_context).await?;
+    let signer = select_signer(&key_context, admin_channel).await?;
     let signatures = signer.sign(&hashes, &key_context).await?;
 
     // Step 5: Persist signatures bundle as `SUBMISSION_SIGNATURES` artefact.

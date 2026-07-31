@@ -23,8 +23,9 @@ pub mod vault_export;
 
 use async_trait::async_trait;
 use canton_proto_rs::com::digitalasset::canton::crypto::v30::{Signature, SigningPublicKey};
+use tonic::transport::Channel;
 
-use crate::{config::NodeConfig, error::Result};
+use crate::error::Result;
 
 /// Everything a signing backend needs to sign for one party key. Resolved once
 /// by the caller from Canton's vault metadata (`VaultService.ListMyKeys`).
@@ -62,16 +63,14 @@ pub trait TransactionSigner: Send + Sync {
 /// export exactly as before — the KMS backend lands with its own change. This
 /// is the single extension point for new backends.
 ///
-/// Async because building a backend may need an admin-API channel (which
-/// applies the configured TLS settings); a future KMS backend would build its
-/// own KMS client here instead.
+/// Takes the caller's already-open admin-API `channel` so the export backend
+/// reuses one connection instead of opening a second. Async so a future KMS
+/// backend can build its own KMS client here.
 pub async fn select_signer(
-    config: &NodeConfig,
     _key: &SigningKeyContext,
+    channel: Channel,
 ) -> Result<Box<dyn TransactionSigner>> {
     // TODO(#264 Phase 2): when `_key.kms_key_id.is_some()`, return the KMS
     // backend (AWS KMS / MPCH) instead of the export backend.
-    Ok(Box::new(vault_export::VaultExportSigner::new(
-        config.admin_channel().await?,
-    )))
+    Ok(Box::new(vault_export::VaultExportSigner::new(channel)))
 }
