@@ -17,6 +17,8 @@ import DA.List (unique)
 import DA.Set as Set hiding (filter)
 import Splice.Util (require)
 
+import Governance.Action
+
 import Utility.Registry.Holding.V0.Holding (Holding, Holding_Merge(..))
 
 -- | One consolidation: the holding that survives, and the holdings folded into
@@ -71,4 +73,42 @@ template RegistrarDelegation
       controller operator
       do
         require "Operator is authorized" (operator `Set.member` operators)
+        pure ()
+
+-- | Governance route that creates a `RegistrarDelegation`. This is the only part
+-- of the delegation that needs a vote.
+--
+-- `registrar` must equal `governanceParty`: `executeImpl` holds the governance
+-- party's authority and the proposer's, and nothing else, so it cannot create a
+-- contract signed by a third party. The `ensure` clause fails at proposal
+-- creation, before any member votes.
+template RegistrarDelegationProposal
+  with
+    governanceParty : Party
+      -- ^ The governance party whose authority executes this action.
+    proposer : Party
+      -- ^ Sole signatory; a committee member or an additional proposer.
+    description : Text
+      -- ^ Human-readable reason recorded in GovernanceExecutionResult.
+    registrar : Party
+      -- ^ The dec party whose authority the delegation grants.
+    operators : Set Party
+      -- ^ Parties the delegation authorizes.
+  where
+    signatory proposer
+    observer governanceParty
+
+    ensure registrar == governanceParty && not (Set.null operators)
+
+    interface instance GovernableAction for RegistrarDelegationProposal where
+      view = GovernableActionView with
+        governanceParty
+        proposer
+        actionLabel = "RegistrarDelegation"
+        description
+
+      executeImpl = do
+        _ <- create RegistrarDelegation with
+          registrar
+          operators
         pure ()
