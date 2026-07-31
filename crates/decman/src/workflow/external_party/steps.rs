@@ -1,9 +1,11 @@
-//! Canton Ledger-API calls for external-party onboarding.
+//! Canton calls behind the wallet-driven external-party tenant API.
 //!
-//! Two steps wrap the participant's `PartyManagementService` external-party
-//! RPCs: [`prepare_topology`] builds the unsigned onboarding transactions and
-//! the multi-hash, and [`allocate_party`] submits them with the party's own
-//! Ed25519 signature over that multi-hash.
+//! [`prepare_topology`] builds the unsigned onboarding transactions and the
+//! multi-hash (Ledger API), [`allocate_party`] submits them with the party's own
+//! Ed25519 signature on the local participant (Ledger API), and
+//! [`host_onboarding_status`] / [`list_hosted_external_parties`] read this
+//! participant's topology state (tokenless Admin API). There is no coordinator
+//! and no inter-DPM coordination: the wallet calls each host itself.
 
 use anyhow::Context;
 use canton_proto_rs::com::daml::ledger::api::v2::{
@@ -44,11 +46,20 @@ pub struct PreparedTopology {
     pub topology_transactions: Vec<Vec<u8>>,
 }
 
+/// Resolve the confirmation threshold DPM writes into the topology. An unset
+/// value defaults to `N-1` (never `N`) so a host can always exit later — the same
+/// cap `validate_confirmation_threshold` enforces on an explicit value. Floors at
+/// 1 for the degenerate single-host case.
+fn resolve_confirmation_threshold(requested: Option<u32>, num_hosts: usize) -> u32 {
+    requested.unwrap_or_else(|| num_hosts.saturating_sub(1).max(1) as u32)
+}
+
 /// Ask Canton to build the external party's onboarding topology
 /// (`NamespaceDelegation` + `PartyToKeyMapping` + `PartyToParticipant`) and the
 /// multi-hash to sign. Multi-host: the local participant plus every hosting peer
-/// confirm, at the configured confirmation threshold (defaulting to the number
-/// of hosting participants when unset).
+/// confirm, at the requested confirmation threshold — defaulting to `N-1` when
+/// unset (see [`resolve_confirmation_threshold`]), never `N`, so a host can
+/// always exit later.
 ///
 /// # Errors
 /// Returns an error if the synchronizer id cannot be resolved or the
@@ -70,10 +81,9 @@ pub async fn prepare_topology(
 
     let other_confirming_participant_uids: Vec<String> =
         hosting_peers.iter().map(|p| p.to_string()).collect();
-    // Hosts = the coordinator's own participant + the confirming peers. Default
-    // the confirmation threshold to all hosts when the caller didn't set one.
+    // Hosts = the local participant + the confirming peers.
     let num_hosts = 1 + other_confirming_participant_uids.len();
-    let confirmation_threshold = confirmation_threshold.unwrap_or(num_hosts as u32);
+    let confirmation_threshold = resolve_confirmation_threshold(confirmation_threshold, num_hosts);
 
     let request = GenerateExternalPartyTopologyRequest {
         synchronizer,
@@ -121,14 +131,14 @@ pub async fn prepare_topology(
     })
 }
 
-/// The party-signed onboarding bundle the coordinator fans out to each hosting
-/// peer: the unsigned topology transactions plus the party's single signature
-/// over the multi-hash. Each host reconstructs the allocate request against its
-/// own synchronizer and adds its own participant authorization.
+/// The party-signed onboarding bundle the wallet submits to each host's
+/// `/v0/tenant/onboard`: the unsigned topology transactions plus the party's
+/// single signature over the multi-hash. Each host reconstructs the allocate
+/// request against its own synchronizer and adds its own participant
+/// authorization.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ExternalPartyAllocatePayload {
-    /// The allocated party id (`{hint}::{fingerprint}`), so each host can record
-    /// the party it is hosting on its own run.
+    /// The allocated party id (`{hint}::{fingerprint}`).
     pub party_id: String,
     /// The serialized (versioned) topology transactions to submit.
     pub topology_transactions: Vec<Vec<u8>>,
@@ -140,10 +150,10 @@ pub struct ExternalPartyAllocatePayload {
 
 /// Authorize hosting the external party on this node's participant by submitting
 /// the party-signed onboarding `bundle` via `AllocateExternalParty`. Called by
-/// the coordinator for its own participant and by each hosting peer for theirs.
+/// `/v0/tenant/onboard`, which the wallet invokes on each host independently.
 ///
-/// An `ALREADY_EXISTS` response is treated as success so a resumed run or a
-/// re-sent fan-out converges instead of failing.
+/// An `ALREADY_EXISTS` response is treated as success so a re-sent `/onboard`
+/// (the wallet's retry against a host) converges instead of failing.
 ///
 /// # Errors
 /// Returns an error if the synchronizer id cannot be resolved or the
@@ -433,4 +443,22 @@ fn external_party_token_required() -> Result<Option<String>> {
              not yet configured in production (open item)"
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unset_threshold_defaults_to_n_minus_1_not_n() {
+        // The bug this guards: an unset threshold must NOT default to N (which
+        // the N-1 cap rejects) — it defaults to N-1 so a host can still exit.
+        assert_eq!(resolve_confirmation_threshold(None, 3), 2);
+        assert_eq!(resolve_confirmation_threshold(None, 2), 1);
+        // Degenerate single-host case floors at 1 rather than 0.
+        assert_eq!(resolve_confirmation_threshold(None, 1), 1);
+        // An explicit value is passed through unchanged.
+        assert_eq!(resolve_confirmation_threshold(Some(1), 3), 1);
+        assert_eq!(resolve_confirmation_threshold(Some(2), 3), 2);
+    }
 }

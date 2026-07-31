@@ -1510,8 +1510,10 @@ async fn send_change_threshold_invites(
 /// peers, and the threshold is capped at `N-1`: Canton requires the threshold to
 /// be at most the number of confirming hosts remaining after a change, so a
 /// threshold of `N` would block any later unhost. Reject 0 and anything above
-/// `N-1` up-front instead of failing deep in a Canton proto error. Unset lets
-/// Canton default it.
+/// `N-1` up-front instead of failing deep in a Canton proto error. An unset
+/// value passes here and is defaulted to `N-1` by
+/// [`prepare_topology`](crate::workflow::external_party::steps::prepare_topology),
+/// so it also stays within the cap.
 pub(crate) fn validate_confirmation_threshold(
     threshold: Option<u32>,
     num_hosts: usize,

@@ -133,18 +133,18 @@ pub async fn tenant_prepare(
     }
 }
 
-/// Onboard a wallet-held external party from its signed topology: DPM allocates
-/// the party from the wallet-signed bundle on its own participant and fans the
-/// bundle out to the hosting peers.
+/// Onboard a wallet-held external party from its signed topology on THIS host:
+/// DPM allocates the wallet-signed bundle on its own participant only. The wallet
+/// calls this on every host itself; no host relays to another. Idempotent
+/// (`ALREADY_EXISTS` counts as success), so the wallet can safely retry a host.
 #[utoipa::path(
     tag = "Tenant",
     request_body = TenantOnboardRequest,
     responses(
-        (status = 202, description = "Onboarding started", body = TenantOnboardResponse),
-        (status = 400, description = "Bad request", body = ErrorResponse),
+        (status = 202, description = "Allocated on this host (status reflects this host's view)", body = TenantOnboardResponse),
+        (status = 400, description = "Bad request (bad base64, or signed_by != public_key fingerprint)", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
-        (status = 409, description = "Incompatible peer or duplicate run", body = ErrorResponse),
-        (status = 422, description = "Selected peers are not mutually meshed", body = ErrorResponse)
+        (status = 500, description = "AllocateExternalParty failed on this participant", body = ErrorResponse)
     )
 )]
 #[post("/v0/tenant/onboard")]
