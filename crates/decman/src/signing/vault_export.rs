@@ -18,7 +18,7 @@ use zeroize::Zeroizing;
 use crate::{
     consts::CANTON_PROTOCOL_VERSION,
     error::Result,
-    signing::{SigningKeyContext, TransactionSigner},
+    signing::{PreparedTransactionHash, SigningError, SigningKeyContext, TransactionSigner},
 };
 
 /// DER OCTET STRING tag
@@ -42,7 +42,11 @@ impl VaultExportSigner {
 
 #[async_trait]
 impl TransactionSigner for VaultExportSigner {
-    async fn sign(&self, hashes: &[Vec<u8>], key: &SigningKeyContext) -> Result<Vec<Signature>> {
+    async fn sign(
+        &self,
+        hashes: &[PreparedTransactionHash],
+        key: &SigningKeyContext,
+    ) -> Result<Vec<Signature>, SigningError> {
         let key_fingerprint = &key.fingerprint;
 
         let mut vault_client = VaultServiceClient::new(self.admin_channel.clone());
@@ -124,7 +128,10 @@ impl TransactionSigner for VaultExportSigner {
         }
 
         if candidate_keys.is_empty() {
-            anyhow::bail!("Could not find any Ed25519 key candidates in exported data");
+            return Err(anyhow::anyhow!(
+                "Could not find any Ed25519 key candidates in exported data"
+            )
+            .into());
         }
 
         tracing::info!(
@@ -146,11 +153,12 @@ impl TransactionSigner for VaultExportSigner {
         const ED25519_PUBLIC_KEY_LENGTH: usize = 32;
 
         if expected_public_key_der.len() < DER_HEADER_LENGTH + ED25519_PUBLIC_KEY_LENGTH {
-            anyhow::bail!(
+            return Err(anyhow::anyhow!(
                 "Expected public key is too short: {result_count} bytes (need at least {expected_count})",
                 result_count = expected_public_key_der.len(),
                 expected_count = DER_HEADER_LENGTH + ED25519_PUBLIC_KEY_LENGTH
-            );
+            )
+            .into());
         }
 
         let expected_raw_public_key = &expected_public_key_der[DER_HEADER_LENGTH..];
@@ -197,11 +205,11 @@ impl TransactionSigner for VaultExportSigner {
         let mut signatures: Vec<Signature> = Vec::with_capacity(hashes.len());
 
         for (idx, hash) in hashes.iter().enumerate() {
-            let signature_bytes = signing_key.sign(hash).to_bytes();
+            let signature_bytes = signing_key.sign(hash.as_bytes()).to_bytes();
 
             // Verify locally
             let sig = DalekSignature::from_bytes(&signature_bytes);
-            if verifying_key.verify(hash, &sig).is_ok() {
+            if verifying_key.verify(hash.as_bytes(), &sig).is_ok() {
                 tracing::info!("Signature {index} verified locally", index = idx + 1);
             } else {
                 tracing::error!(

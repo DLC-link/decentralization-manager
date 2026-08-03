@@ -21,7 +21,7 @@ use crate::{
     canton_id::CantonId,
     config::NodeConfig,
     error::Result,
-    signing::{SigningKeyContext, select_signer},
+    signing::{PreparedTransactionHash, SigningKeyContext, select_signer},
     utils,
     workflow::storage::{WorkflowStorage, artifact_kinds, identity_kinds},
 };
@@ -208,9 +208,9 @@ pub async fn sign_submissions(
     // exporting it and signing locally with Ed25519 today (JCE keys), or asking
     // a KMS to sign a non-exportable key (follow-up). Everything else in this
     // step is provider-independent.
-    let hashes: Vec<Vec<u8>> = prepared_submissions
+    let hashes: Vec<PreparedTransactionHash> = prepared_submissions
         .into_iter()
-        .map(|s| s.prepared_transaction_hash)
+        .map(|s| PreparedTransactionHash::new(s.prepared_transaction_hash))
         .collect();
 
     let key_context = SigningKeyContext {
