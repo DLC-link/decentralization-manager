@@ -4,21 +4,11 @@
 -- | Standing delegation of registrar authority to a named set of operators.
 --
 -- The registrar dec party signs this contract, so a choice body runs with the
--- registrar's authority while an operator submits the command. That is the same
--- delegation shape the governance-vote path uses: a member holds readAs rights
--- on the dec party and never submits as it on that path. Other paths in this
--- system do grant actAs on a dec party, so this claim is scoped to governance
--- votes only.
+-- registrar's authority while an operator submits the command.
 --
 -- Governance creates the contract once, through `RegistrarDelegationProposal`.
 -- Any operator ends it with `RegistrarDelegation_Revoke`. Granting the power
 -- takes a vote; withdrawing it does not.
---
--- Observer question: this template ships with no `observer operators` clause.
--- An operator resolves this contract only by reading as the registrar. The
--- companion CLI submits with `readAs` set to the registrar (governance) party.
--- Nobody has verified this against a live ledger yet. If the first real run
--- cannot resolve the contract, add `observer operators`.
 module Governance.TokenIssuance.RegistrarDelegation where
 
 import DA.List (unique)
@@ -29,13 +19,16 @@ import Governance.Action
 
 import Utility.Registry.Holding.V0.Holding (Holding, Holding_Merge(..))
 
--- | One consolidation: the holding that survives, and the holdings folded into
--- it. `Holding_Merge` requires every holding to share operator, provider,
--- registrar, owner, instrument, and label, and rejects locked holdings.
+-- | One consolidation: the target holding and the source holdings folded
+-- into it. `Holding_Merge` archives every holding, including the target,
+-- then creates one holding with the aggregate amount. It requires every
+-- holding to share operator, provider, registrar, owner, instrument, and
+-- label. It rejects locked holdings.
 data MergeGroup = MergeGroup
   with
     targetCid : ContractId Holding
-      -- ^ The holding that survives and receives the total amount.
+      -- ^ The holding whose `Holding_Merge` choice runs. The new holding
+      -- inherits its field values, then gets the aggregate amount.
     sourceCids : [ContractId Holding]
       -- ^ The holdings archived into the target.
   deriving (Eq, Show)
@@ -61,10 +54,6 @@ template RegistrarDelegation
           -- ^ Consolidations to apply.
       controller operator
       do
-        -- Load-bearing: `controller operator` binds to the choice argument, not
-        -- a fixed party, so the ledger offers this choice to any submitter.
-        -- This line is the entire authorization boundary. Remove or weaken it
-        -- and any party can merge holdings under the registrar's authority.
         require "Operator is authorized" (operator `Set.member` operators)
         require "Groups must be non-empty" (not (Prelude.null groups))
         -- A repeated contract id would otherwise fail on the second archive
@@ -76,10 +65,7 @@ template RegistrarDelegation
             holdingCids = g.sourceCids
           pure result.holdingCid
 
-    -- | End the delegation. One operator is enough: withdrawing authority is
-    -- always safe. Any single operator archives the contract for every
-    -- operator, not only for themselves. Re-granting always needs a fresh
-    -- governance vote; there is no lighter path back.
+    -- | Any single operator ends the delegation for everyone.
     choice RegistrarDelegation_Revoke : ()
       with
         operator : Party
