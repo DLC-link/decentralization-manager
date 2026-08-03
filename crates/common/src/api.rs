@@ -302,6 +302,171 @@ pub struct WorkflowRunsResponse {
     pub runs: Vec<WorkflowRun>,
 }
 
+/// One external party this participant hosts, read from its own topology state
+/// (an authorized `PartyToParticipant` mapping that names this participant with
+/// Confirmation permission and whose namespace is a single self-signed key).
+#[derive(Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct ExternalPartyInfo {
+    /// The party id (`{hint}::{fingerprint}`).
+    pub party_id: String,
+    /// The party's namespace fingerprint (the `{fingerprint}` half of the id).
+    pub fingerprint: String,
+    /// Confirmation threshold from the mapping (the M in M-of-N).
+    pub threshold: u32,
+    /// Number of participants hosting the party (the N in M-of-N).
+    pub host_count: u32,
+}
+
+/// Response wrapper for `GET /external-parties`.
+#[derive(Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct ExternalPartiesResponse {
+    pub parties: Vec<ExternalPartyInfo>,
+}
+
+// ============================================================================
+// Tenant API DTOs (wallet-facing `/v0/tenant/*`)
+//
+// Wallet-driven flow: the wallet generates and holds the Ed25519 key and DPM
+// relays. Every binary field on the wire is base64 (STANDARD engine).
+// ============================================================================
+
+/// Request to prepare the onboarding topology for a wallet-held external party.
+/// The wallet sends only its public key; DPM relays it to Canton and returns the
+/// unsigned topology for the wallet to sign.
+#[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantPrepareRequest {
+    /// Human-readable hint forming the party id's identifier segment.
+    pub party_hint: String,
+    /// The party's raw 32-byte Ed25519 public key, base64-encoded.
+    pub public_key: String,
+    /// Participants that will host the party (beyond this host).
+    #[serde(default)]
+    pub hosting_peers: Vec<CantonId>,
+    /// Confirmation threshold for the hosting set. `None` defaults to `N-1` (one
+    /// less than the number of hosting participants), never `N`, so a host can
+    /// always exit later.
+    #[serde(default)]
+    pub confirmation_threshold: Option<u32>,
+}
+
+/// The unsigned onboarding topology for the wallet to sign. `multi_hash` and
+/// each entry of `topology_transactions` are base64-encoded.
+#[derive(Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantPrepareResponse {
+    /// The party id Canton derived (`{party_hint}::{fingerprint}`).
+    pub party_id: String,
+    /// The combined multi-hash the wallet signs, base64-encoded.
+    pub multi_hash: String,
+    /// The serialized topology transactions, each base64-encoded.
+    pub topology_transactions: Vec<String>,
+}
+
+/// Request to onboard a wallet-held external party from its signed topology.
+/// `public_key`, each `topology_transactions` entry, and `multi_hash_signature`
+/// are base64-encoded.
+#[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantOnboardRequest {
+    pub party_hint: String,
+    /// The party's raw Ed25519 public key, base64-encoded.
+    pub public_key: String,
+    /// The (unchanged) topology transactions from `TenantPrepareResponse`. The
+    /// host set and confirmation threshold are carried inside these signed
+    /// transactions, so they are not (and must not be) passed separately.
+    pub topology_transactions: Vec<String>,
+    /// The wallet's Ed25519 signature over the multi-hash, base64-encoded.
+    pub multi_hash_signature: String,
+    /// Fingerprint of the signing key (the `{fingerprint}` party-id segment).
+    pub signed_by: String,
+}
+
+/// Response to a wallet onboarding request. Reports this host's view only: the
+/// wallet calls `/onboard` on every host and aggregates. `Completed` means this
+/// host's authorized `PartyToParticipant` names it; `InProgress` means the
+/// topology is still a proposal here (more hosts must sign).
+#[derive(Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantOnboardResponse {
+    pub status: WorkflowProgress,
+    pub party_id: String,
+}
+
+/// A Daml template identifier for a tenant create command.
+#[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantTemplateId {
+    pub package_id: String,
+    pub module_name: String,
+    pub entity_name: String,
+}
+
+/// Request to prepare an interactive submission for a wallet-held party. Only a
+/// single CREATE command is supported; `create_arguments` is JSON that maps to
+/// the template's Daml record.
+#[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantPrepareSubmissionRequest {
+    pub template_id: TenantTemplateId,
+    #[cfg_attr(feature = "typegen", ts(type = "any"))]
+    pub create_arguments: serde_json::Value,
+}
+
+/// The prepared transaction for the wallet to sign. `prepared_transaction` and
+/// `prepared_transaction_hash` are base64-encoded.
+#[derive(Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantPrepareSubmissionResponse {
+    pub prepared_transaction: String,
+    pub prepared_transaction_hash: String,
+    pub hashing_scheme_version: i32,
+}
+
+/// Request to execute a wallet-signed interactive submission.
+/// `prepared_transaction` and `signature` are base64-encoded.
+#[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantExecuteSubmissionRequest {
+    pub prepared_transaction: String,
+    pub signature: String,
+    pub signed_by: String,
+    pub hashing_scheme_version: i32,
+}
+
+/// One active contract owned by a tenant party.
+#[derive(Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantContract {
+    pub contract_id: String,
+    /// `package_id:module_name:entity_name`.
+    pub template_id: String,
+    /// The contract's payload rendered as JSON.
+    #[cfg_attr(feature = "typegen", ts(type = "any"))]
+    pub create_arguments: serde_json::Value,
+}
+
+/// Response wrapper for `GET /v0/tenant/{party}/acs`.
+#[derive(Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantAcsResponse {
+    pub contracts: Vec<TenantContract>,
+}
+
 /// Response for key status check
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

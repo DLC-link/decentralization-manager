@@ -2,6 +2,7 @@ pub mod add_party;
 pub mod change_threshold;
 pub mod contracts;
 pub mod dars;
+pub mod external_party;
 pub mod kick;
 pub mod onboarding;
 pub mod state;

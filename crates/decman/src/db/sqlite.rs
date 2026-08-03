@@ -385,6 +385,17 @@ impl SchemaRead for SqlitePool {
         rows.into_iter().map(|r| r.into_domain()).collect()
     }
 
+    async fn get_workflow_runs_by_kind(&self, kind: WorkflowKind) -> Result<Vec<WorkflowRun>> {
+        let rows = sqlx::query_as::<_, WorkflowRunRow>(
+            "SELECT * FROM workflow_runs WHERE kind = ? ORDER BY created_at DESC",
+        )
+        .bind(kind.as_str())
+        .fetch_all(self)
+        .await?;
+
+        rows.into_iter().map(|r| r.into_domain()).collect()
+    }
+
     async fn read_workflow_artifact(
         &self,
         instance_name: &str,
@@ -1003,6 +1014,19 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 .await?;
         }
 
+        Ok(())
+    }
+
+    async fn set_workflow_run_dec_party_id(
+        &mut self,
+        instance_name: &str,
+        dec_party_id: &CantonId,
+    ) -> Result {
+        sqlx::query("UPDATE workflow_runs SET dec_party_id = ? WHERE instance_name = ?")
+            .bind(dec_party_id.to_string())
+            .bind(instance_name)
+            .execute(&mut **self)
+            .await?;
         Ok(())
     }
 

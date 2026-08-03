@@ -1,6 +1,7 @@
 use std::{collections::HashMap, time::Duration};
 
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
+use sqlx::SqlitePool;
 
 use crate::{
     config::Peer,
@@ -81,8 +82,8 @@ fn step_total_for(kind: WorkflowKind) -> i64 {
 /// re-accept resumes the same row instead of duplicating it). Invites from
 /// coordinators that predate instance routing carry no `workflow_instance`;
 /// they fall back to the old timestamp suffix.
-async fn insert_peer_run(
-    data: &web::Data<AppState>,
+pub(crate) async fn insert_peer_run(
+    db: &SqlitePool,
     invitation: &PendingInvitation,
 ) -> Option<String> {
     let kind: WorkflowKind = invitation.invitation_type.into();
@@ -151,7 +152,7 @@ async fn insert_peer_run(
         updated_at: now,
     };
 
-    let mut tx = match data.db.begin_transaction().await {
+    let mut tx = match db.begin_transaction().await {
         Ok(t) => t,
         Err(e) => {
             tracing::warn!("peer run: begin_transaction failed: {e}");
@@ -269,7 +270,7 @@ pub async fn accept_invitation(
 
     // Persist a peer-side workflow_runs row so the operator's feed shows
     // "I'm participating in <kind>" until completion.
-    let Some(peer_instance) = insert_peer_run(&data, &invitation).await else {
+    let Some(peer_instance) = insert_peer_run(&data.db, &invitation).await else {
         // Put the card back so the operator can retry the accept.
         restore_invitation(&data, &invitation).await;
         return HttpResponse::InternalServerError().json(serde_json::json!({

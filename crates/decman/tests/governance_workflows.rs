@@ -101,6 +101,12 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     // terminator — this is the point in the suite where P3 is idle. It puts
     // P3 back on the plaintext port before returning.
     phases::canton_admin_tls::run(&mut f).await?;
+    // Decentrally-hosted external-party onboarding, wallet-driven via the
+    // /v0/tenant/* API: the key is generated + the multi-hash signed client-side
+    // and the wallet calls /onboard on each host itself, hosting it across
+    // P1+P2+P3 at a 2-of-3 confirmation threshold. No Noise mesh is involved (the
+    // calls are plain HTTP to each host), so it can run anywhere in the suite.
+    phases::external_party_tenant::run(&mut f).await?;
     phases::create_dec_party::run(&mut f).await?;
     phases::distribute_dars::run(&mut f).await?;
     phases::check_peer_dars::run(&mut f).await?;
@@ -200,5 +206,25 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// Runs ONLY the wallet-driven external-party onboarding phase against a running
+/// localnet. This is the whole-suite's `external_party_tenant` phase in
+/// isolation, so you can iterate on that one workflow without the full sequence
+/// above.
+///
+/// Invoke via `integration-tests/run-external-party.sh`, which brings up the
+/// localnet + 3 dec-party-manager nodes and runs just this test. The phase talks
+/// to each host over plain HTTP (no Noise mesh), so all it needs is fixture setup
+/// + `discover_network_parties`, no earlier phases.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires running localnet — invoke via integration-tests/run-external-party.sh"]
+async fn external_party_e2e() -> anyhow::Result<()> {
+    init_tracing();
+
+    let mut f = Fixture::from_env()?;
+    f.discover_network_parties().await?;
+    phases::external_party_tenant::run(&mut f).await?;
     Ok(())
 }

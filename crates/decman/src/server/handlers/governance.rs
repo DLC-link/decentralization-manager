@@ -2128,7 +2128,10 @@ pub async fn get_token_standard_contracts(
 // ============================================================================
 
 /// Get token for a party from auth registry
-async fn get_party_token(data: &web::Data<AppState>, party_id: &CantonId) -> Option<String> {
+pub(crate) async fn get_party_token(
+    data: &web::Data<AppState>,
+    party_id: &CantonId,
+) -> Option<String> {
     let auth = data.auth.read().await;
     match &*auth {
         Some(WorkflowAuth::Keycloak(registry)) => registry.get(party_id)?.get_token().await.ok(),

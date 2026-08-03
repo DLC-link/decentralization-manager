@@ -90,8 +90,10 @@ export const GrantRightsDialog = ({
           <Typography variant="body2" color="text.secondary">
             Used once to grant <code>actAs</code> + <code>readAs</code> on the
             member and dec parties. Credentials are not stored — paste the
-            Keycloak client whose service account has{" "}
-            <code>ParticipantAdmin</code> on this participant.
+            client credentials whose identity has <code>ParticipantAdmin</code>{" "}
+            on this participant, from whichever provider this party is
+            configured with (a Keycloak client's service account, or an Auth0
+            machine-to-machine application).
           </Typography>
 
           <TextField
@@ -106,7 +108,7 @@ export const GrantRightsDialog = ({
             slotProps={{
               input: {
                 endAdornment: fieldHelpAdornment(
-                  "The Keycloak client ID whose service account has ParticipantAdmin rights on this participant.",
+                  "The client ID whose identity has ParticipantAdmin rights on this participant — a Keycloak client's service account, or an Auth0 machine-to-machine application, matching the provider configured for this party.",
                   "Help for Client ID",
                 ),
               },

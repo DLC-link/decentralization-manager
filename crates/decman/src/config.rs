@@ -282,6 +282,11 @@ pub struct NodeConfig {
     /// (carries the signing secret).
     #[serde(skip)]
     pub insecure_auth: InsecureAuthConfig,
+    /// Bearer API keys a wallet provider presents to the `/v0/tenant/*`
+    /// endpoints, authenticated separately from the Keycloak UI token. Empty
+    /// disables the tenant API (except in insecure/test mode). Not serialized.
+    #[serde(skip)]
+    pub tenant_api_keys: std::collections::HashSet<String>,
     /// Root directory containing data/ subdirectory
     #[serde(skip)]
     root_dir: PathBuf,
@@ -301,6 +306,7 @@ impl Default for NodeConfig {
             auth0: None,
             insecure: false,
             insecure_auth: InsecureAuthConfig::default(),
+            tenant_api_keys: std::collections::HashSet::new(),
             root_dir: PathBuf::new(),
         }
     }

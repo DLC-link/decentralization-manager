@@ -9,7 +9,7 @@ use keycloak::login::{ClientCredentialsParams, client_credentials, token_url};
 use crate::{
     auth::WorkflowAuth,
     canton_id::CantonId,
-    config::NodeConfig,
+    config::{Auth0M2MConfig, NodeConfig, PartyCredentials},
     error::Result,
     server::{
         AppState,
@@ -353,6 +353,141 @@ pub async fn test_auth(data: web::Data<AppState>) -> impl Responder {
     HttpResponse::Ok().json(AuthTestResponse { results })
 }
 
+/// Where the grant-rights admin token gets minted, resolved from whichever IdP
+/// the party is actually configured with.
+///
+/// `/auth/test` and the workflow token managers already branch this way; the
+/// grant-rights mint was the one path that assumed Keycloak, and an Auth0 party
+/// leaves `PartyCredentials.keycloak` empty (#259).
+#[derive(Debug)]
+enum AdminTokenSource {
+    /// Auth0 `client_credentials`. Auth0 requires an explicit `audience`, and
+    /// the admin token is presented to the same ledger API as the party's own
+    /// token — Canton validates `aud` against its configured target audience —
+    /// so the party's audience is the one that can work.
+    Auth0 { domain: String, audience: String },
+    /// Keycloak `client_credentials` against the realm's token endpoint.
+    Keycloak { url: String, realm: String },
+}
+
+impl AdminTokenSource {
+    /// Mirrors the precedence the rest of the file uses: Auth0 when the party
+    /// has a tenant, Keycloak otherwise.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message naming what is missing when the party carries neither
+    /// a usable Auth0 tenant nor a Keycloak realm. Previously such a party
+    /// produced a relative token URL that failed inside reqwest as an opaque
+    /// "builder error".
+    fn from_party(creds: &PartyCredentials) -> std::result::Result<Self, String> {
+        if let Some(auth0) = &creds.auth0 {
+            let domain = auth0.domain.trim();
+            let audience = auth0.audience.trim();
+            if domain.is_empty() || audience.is_empty() {
+                return Err(format!(
+                    "Party {party} has an incomplete Auth0 configuration \
+                     (domain{domain_state}, audience{audience_state}); \
+                     re-enter the party credentials before granting rights",
+                    party = creds.dec_party_id,
+                    domain_state = if domain.is_empty() {
+                        " missing"
+                    } else {
+                        " set"
+                    },
+                    audience_state = if audience.is_empty() {
+                        " missing"
+                    } else {
+                        " set"
+                    },
+                ));
+            }
+            return Ok(Self::Auth0 {
+                domain: domain.to_string(),
+                audience: audience.to_string(),
+            });
+        }
+
+        let url = creds.keycloak.url.trim();
+        let realm = creds.keycloak.realm.trim();
+        if url.is_empty() || realm.is_empty() {
+            return Err(format!(
+                "Party {party} has neither an Auth0 tenant nor a Keycloak realm configured, \
+                 so there is no token endpoint to mint an admin token from",
+                party = creds.dec_party_id,
+            ));
+        }
+        Ok(Self::Keycloak {
+            url: url.to_string(),
+            realm: realm.to_string(),
+        })
+    }
+
+    /// The absolute `client_credentials` token endpoint for this source.
+    fn token_endpoint(&self) -> String {
+        match self {
+            Self::Auth0 { domain, .. } => {
+                format!(
+                    "https://{domain}/oauth/token",
+                    domain = domain.trim_end_matches('/')
+                )
+            }
+            Self::Keycloak { url, realm } => token_url(url, realm),
+        }
+    }
+
+    /// IdP name for operator-facing messages, so a failed mint says which
+    /// system rejected the credentials.
+    fn idp(&self) -> &'static str {
+        match self {
+            Self::Auth0 { .. } => "Auth0",
+            Self::Keycloak { .. } => "Keycloak",
+        }
+    }
+}
+
+/// Mint an admin access token from `source` using the operator-supplied client
+/// credentials.
+///
+/// # Errors
+///
+/// Propagates the IdP's rejection or transport failure.
+async fn mint_admin_token(
+    http: &reqwest::Client,
+    source: &AdminTokenSource,
+    client_id: String,
+    client_secret: String,
+) -> Result<String> {
+    match source {
+        AdminTokenSource::Auth0 { domain, audience } => {
+            let response = crate::auth::auth0_client_credentials(
+                http,
+                &Auth0M2MConfig {
+                    domain: domain.clone(),
+                    audience: audience.clone(),
+                    client_id,
+                    client_secret,
+                },
+            )
+            .await?;
+            Ok(response.access_token)
+        }
+        AdminTokenSource::Keycloak { .. } => {
+            // The keycloak crate builds its own client (it is on a different
+            // reqwest major than this crate, so `http` cannot be shared with
+            // it) and reports failures as a plain String.
+            let response = client_credentials(ClientCredentialsParams {
+                url: source.token_endpoint(),
+                client_id,
+                client_secret,
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("Keycloak client_credentials failed: {e}"))?;
+            Ok(response.access_token)
+        }
+    }
+}
+
 /// Grant actAs + readAs rights on the member party and the dec party to the
 /// configured coordinator user, using the participant admin API
 #[utoipa::path(
@@ -434,26 +569,35 @@ pub async fn grant_rights(
     let member_party_id = party_creds.member_party_id.clone();
     let dec_party_id = party_creds.dec_party_id.clone();
     let user_id = party_creds.user_id.clone();
-    let token_endpoint = token_url(&party_creds.keycloak.url, &party_creds.keycloak.realm);
+    let admin_source = match AdminTokenSource::from_party(party_creds) {
+        Ok(source) => source,
+        Err(error) => {
+            tracing::warn!("Cannot mint a grant-rights admin token: {error}");
+            drop(party_creds_list);
+            drop(auth);
+            return HttpResponse::BadRequest().json(ErrorResponse { error });
+        }
+    };
 
     drop(party_creds_list);
     drop(auth);
 
-    let admin_token = match client_credentials(ClientCredentialsParams {
-        url: token_endpoint,
-        client_id: admin_client_id,
-        client_secret: admin_client_secret,
-    })
+    let admin_token = match mint_admin_token(
+        &data.http_client,
+        &admin_source,
+        admin_client_id,
+        admin_client_secret,
+    )
     .await
     {
-        Ok(resp) => resp.access_token,
+        Ok(token) => token,
         Err(e) => {
-            // Full chain to logs (the keycloak crate's Display can include
-            // request URL / response body — keep it server-side); generic
-            // message in the response so we don't surface reflected secrets.
+            // Full chain to logs (the IdP client's Display can include request
+            // URL / response body — keep it server-side); generic message in
+            // the response so we don't surface reflected secrets.
             tracing::warn!("Failed to mint admin token for grant-rights: {e:#}");
             return HttpResponse::Unauthorized().json(ErrorResponse {
-                error: "Admin Keycloak auth failed".into(),
+                error: format!("Admin {idp} auth failed", idp = admin_source.idp()),
             });
         }
     };
@@ -594,10 +738,11 @@ mod tests {
     use sqlx::SqlitePool;
     use tokio::sync::{Mutex, RwLock};
 
-    use super::grant_rights;
+    use super::{AdminTokenSource, grant_rights};
     use crate::{
         auth::{MockAuthRegistry, MockValidator, TokenValidator, WorkflowAuth},
-        config::NodeConfig,
+        canton_id::CantonId,
+        config::{Auth0M2MConfig, KeycloakConfig, NodeConfig, PackageConfig, PartyCredentials},
         server::{AppState, middleware::AuthMiddleware},
     };
 
@@ -682,6 +827,143 @@ mod tests {
                 "expected canned `{field}: true` in mock-mode RightsStatus, got {body}"
             );
         }
+    }
+
+    const AUTH0_DOMAIN: &str = "bitsafe-test.eu.auth0.com";
+    const LEDGER_AUDIENCE: &str = "https://canton.network.global";
+
+    /// Party credentials as they look once the operator picks Auth0: `auth0`
+    /// carries the tenant, and `keycloak` stays at its `#[serde(default)]`
+    /// empty shape because nothing fills it in.
+    fn auth0_party() -> PartyCredentials {
+        PartyCredentials {
+            dec_party_id: CantonId::parse(VALID_CANTON_ID).expect("valid dec party id"),
+            member_party_id: CantonId::parse(VALID_CANTON_ID).expect("valid member party id"),
+            user_id: "attestor-1".to_string(),
+            keycloak: KeycloakConfig::default(),
+            auth0: Some(Auth0M2MConfig {
+                domain: AUTH0_DOMAIN.to_string(),
+                audience: LEDGER_AUDIENCE.to_string(),
+                client_id: "party-m2m".to_string(),
+                client_secret: "party-secret".to_string(),
+            }),
+            packages: PackageConfig::default(),
+        }
+    }
+
+    /// A Keycloak-configured party: `auth0` unset, realm details filled in.
+    fn keycloak_party() -> PartyCredentials {
+        PartyCredentials {
+            keycloak: KeycloakConfig {
+                url: "https://keycloak.example.com".to_string(),
+                realm: "decman".to_string(),
+                client_id: "party-client".to_string(),
+                ..KeycloakConfig::default()
+            },
+            auth0: None,
+            ..auth0_party()
+        }
+    }
+
+    fn endpoint_of(creds: &PartyCredentials) -> String {
+        match AdminTokenSource::from_party(creds) {
+            Ok(source) => source.token_endpoint(),
+            Err(e) => panic!("expected a usable admin token source, got: {e}"),
+        }
+    }
+
+    /// #259: the endpoint used to be built from the party's Keycloak config
+    /// unconditionally, so an Auth0 party produced the relative
+    /// `/realms//protocol/openid-connect/token`. reqwest refuses to send a
+    /// relative URL, which is the operator-visible "Keycloak
+    /// client_credentials login request error: builder error" — and the admin
+    /// client id and secret from the dialog never left the process.
+    ///
+    /// The admin token has to come from whichever IdP the party is actually
+    /// configured with, so the endpoint must be absolute and must point there.
+    #[test]
+    fn admin_token_endpoint_for_an_auth0_party_targets_auth0() {
+        let creds = auth0_party();
+        let endpoint = endpoint_of(&creds);
+
+        let parsed = match reqwest::Url::parse(&endpoint) {
+            Ok(url) => url,
+            Err(e) => panic!("admin-token endpoint {endpoint:?} is not a usable URL: {e}"),
+        };
+        assert_eq!(
+            parsed.host_str(),
+            Some(AUTH0_DOMAIN),
+            "admin token must be minted from the party's own IdP, got {endpoint}"
+        );
+        assert_eq!(parsed.path(), "/oauth/token");
+    }
+
+    /// Auth0 rejects a `client_credentials` request without an `audience`, and
+    /// the admin token is presented to the same ledger API as the party's own
+    /// token — so it has to carry the party's audience.
+    #[test]
+    fn an_auth0_admin_token_carries_the_party_audience() {
+        match AdminTokenSource::from_party(&auth0_party()) {
+            Ok(AdminTokenSource::Auth0 { audience, domain }) => {
+                assert_eq!(audience, LEDGER_AUDIENCE);
+                assert_eq!(domain, AUTH0_DOMAIN);
+            }
+            other => panic!("expected an Auth0 source, got {other:?}"),
+        }
+    }
+
+    /// The Keycloak path is the one that worked before and must be untouched.
+    #[test]
+    fn a_keycloak_party_still_mints_from_its_realm() {
+        assert_eq!(
+            endpoint_of(&keycloak_party()),
+            "https://keycloak.example.com/realms/decman/protocol/openid-connect/token"
+        );
+    }
+
+    /// A party with neither IdP configured used to reach reqwest as a relative
+    /// URL and fail as an opaque "builder error". Name the gap instead.
+    #[test]
+    fn a_party_with_no_idp_is_rejected_by_name() {
+        let creds = PartyCredentials {
+            keycloak: KeycloakConfig::default(),
+            auth0: None,
+            ..auth0_party()
+        };
+
+        let message = match AdminTokenSource::from_party(&creds) {
+            Ok(source) => panic!(
+                "expected no token source, got {endpoint}",
+                endpoint = source.token_endpoint()
+            ),
+            Err(e) => e,
+        };
+        assert!(
+            message.contains("neither an Auth0 tenant nor a Keycloak realm"),
+            "unhelpful error: {message}"
+        );
+    }
+
+    /// Half-filled Auth0 credentials would otherwise mint against
+    /// `https:///oauth/token` or send an empty audience Auth0 rejects.
+    #[test]
+    fn an_incomplete_auth0_config_is_rejected_by_name() {
+        let mut creds = auth0_party();
+        if let Some(auth0) = creds.auth0.as_mut() {
+            auth0.audience = String::new();
+        }
+
+        let message = match AdminTokenSource::from_party(&creds) {
+            Ok(source) => panic!(
+                "expected no token source, got {endpoint}",
+                endpoint = source.token_endpoint()
+            ),
+            Err(e) => e,
+        };
+        assert!(
+            message.contains("audience missing"),
+            "unhelpful error: {message}"
+        );
     }
 
     /// `require_admin` rejects requests that arrive without a `Principal`

@@ -113,6 +113,10 @@ pub trait SchemaRead {
     /// yet. Newest-updated first.
     async fn get_visible_workflow_runs(&self) -> Result<Vec<WorkflowRun>>;
 
+    /// Get every workflow run of a given kind (any role, any status),
+    /// newest-created first. Used to list e.g. external-party onboardings.
+    async fn get_workflow_runs_by_kind(&self, kind: WorkflowKind) -> Result<Vec<WorkflowRun>>;
+
     /// Read a single artefact for a workflow run. `peer` may be None for
     /// shared artefacts (proposals, namespace defs).
     async fn read_workflow_artifact(
@@ -249,6 +253,16 @@ pub trait Commitable {
         status: WorkflowProgress,
         error: Option<&str>,
         updated_at: i64,
+    ) -> Result;
+
+    /// Persist the resolved party id on a run whose party is created mid-workflow
+    /// (e.g. an external party, whose id isn't known until its key is generated).
+    /// Unlike `workflow_artifacts` — wiped when the run reaches a terminal state —
+    /// this column survives, so a completed run still carries its party id.
+    async fn set_workflow_run_dec_party_id(
+        &mut self,
+        instance_name: &str,
+        dec_party_id: &CantonId,
     ) -> Result;
 
     /// Mark a terminal-state run as dismissed by the operator, hiding it
