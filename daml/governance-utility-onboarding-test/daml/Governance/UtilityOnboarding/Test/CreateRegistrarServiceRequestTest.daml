@@ -1,0 +1,76 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+module Governance.UtilityOnboarding.Test.CreateRegistrarServiceRequestTest where
+
+import Daml.Script
+
+import Utility.Registry.App.V0.Service.Registrar (RegistrarServiceRequest(..))
+
+import Governance.Action (GovernableAction)
+
+import Governance.UtilityOnboarding.CreateRegistrarServiceRequest
+import Governance.UtilityOnboarding.DualDecpartyTestUtils
+
+import TestHarness
+
+given_dual_governance : Script DualGovFixture
+given_dual_governance = givenDualGovernance
+
+-- | Flags exercise the Bool -> Optional Bool mapping: True -> Some True,
+-- False -> None (the SDK treats None like Some False).
+when_create_request_mixed_flags : DualGovFixture -> Script ()
+when_create_request_mixed_flags f = do
+  proposalCid <- submit f.registrarStack.member1 $ createCmd CreateRegistrarServiceRequest with
+    governanceParty = f.parties.registrarGov
+    proposer = f.registrarStack.member1
+    operator = f.parties.operator
+    provider = f.parties.providerGov
+    createTransferRule = True
+    createAllocationFactory = False
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  _ <- confirmAndExecuteAs f.parties f.registrarStack proposalInterfaceCid
+  pure ()
+
+then_request_created_with_mapped_flags : DualGovFixture -> () -> Script Failures
+then_request_created_with_mapped_flags f _ = do
+  requests <- query @RegistrarServiceRequest f.parties.registrarGov
+  -- The provider decparty must see the request to accept it later.
+  requestsSeenByProvider <- query @RegistrarServiceRequest f.parties.providerGov
+  case requests of
+    [(_, request)] -> pure $
+      shouldBe "registrar" f.parties.registrarGov request.registrar <>
+      shouldBe "provider" f.parties.providerGov request.provider <>
+      shouldBe "operator" f.parties.operator request.operator <>
+      shouldBe "createTransferRule" (Some True) request.createTransferRule <>
+      shouldBe "createAllocationFactory" None request.createAllocationFactory <>
+      shouldBe "provider sees request" 1 (length requestsSeenByProvider)
+    _ -> pure $ shouldBe "RegistrarServiceRequest count" 1 (length requests)
+
+test_when_create_request_then_flags_mapped = script do
+  run Test with
+    given = given_dual_governance
+    when = when_create_request_mixed_flags
+    then_ = then_request_created_with_mapped_flags
+
+-- * Non-member confirm is rejected.
+
+when_outsider_confirms : DualGovFixture -> Script ()
+when_outsider_confirms f = do
+  proposalCid <- submit f.registrarStack.member1 $ createCmd CreateRegistrarServiceRequest with
+    governanceParty = f.parties.registrarGov
+    proposer = f.registrarStack.member1
+    operator = f.parties.operator
+    provider = f.parties.providerGov
+    createTransferRule = True
+    createAllocationFactory = True
+  outsiderCannotConfirm f.parties f.registrarStack (toInterfaceContractId proposalCid)
+
+then_nothing : DualGovFixture -> () -> Script Failures
+then_nothing _ _ = pure []
+
+test_when_outsider_confirms_then_rejected = script do
+  run Test with
+    given = given_dual_governance
+    when = when_outsider_confirms
+    then_ = then_nothing
