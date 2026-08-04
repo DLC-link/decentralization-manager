@@ -10,7 +10,9 @@ use canton_proto_rs::com::{
         },
         topology::admin::v30::{
             BaseQuery, ListPartyToKeyMappingRequest, ListPartyToParticipantRequest, StoreId,
-            Synchronizer, base_query, store_id, synchronizer,
+            Synchronizer, base_query,
+            list_party_to_key_mapping_response::result::Item as PartyToKeyItem,
+            list_party_to_participant_response::result::Item as P2pItem, store_id, synchronizer,
             topology_manager_read_service_client::TopologyManagerReadServiceClient,
         },
     },
@@ -148,8 +150,9 @@ pub async fn sign_submissions(
                 fingerprint: key_fingerprint.clone(),
                 name: String::new(), // Search by fingerprint, not name
                 purpose: vec![],
-                usage: vec![],
+                usage_v30: vec![],
             }),
+            base_request: None,
         }))
         .await?
         .into_inner();
@@ -310,6 +313,7 @@ async fn backfill_peer_keys_from_chain(
         time_query: Some(base_query::TimeQuery::HeadState(())),
         filter_signed_key: String::new(),
         protocol_version: None,
+        client_version: None,
     };
 
     // 1. Current format: signing keys embedded on the PartyToParticipant.
@@ -326,7 +330,7 @@ async fn backfill_peer_keys_from_chain(
     let mut signing_keys: Vec<SigningPublicKey> = p2p_response
         .results
         .into_iter()
-        .find_map(|r| r.item)
+        .find_map(|r| r.item.map(|P2pItem::V30(mapping)| mapping))
         .and_then(|item| item.party_signing_keys)
         .map(|k| k.keys)
         .unwrap_or_default();
@@ -348,7 +352,7 @@ async fn backfill_peer_keys_from_chain(
         signing_keys = ptk_response
             .results
             .into_iter()
-            .find_map(|r| r.item)
+            .find_map(|r| r.item.map(|PartyToKeyItem::V30(mapping)| mapping))
             .map(|item| item.signing_keys)
             .unwrap_or_default();
     }
@@ -373,8 +377,9 @@ async fn backfill_peer_keys_from_chain(
                     fingerprint: fingerprint.clone(),
                     name: String::new(),
                     purpose: vec![],
-                    usage: vec![],
+                    usage_v30: vec![],
                 }),
+                base_request: None,
             }))
             .await?
             .into_inner();

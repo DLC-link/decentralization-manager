@@ -1326,6 +1326,7 @@ pub async fn propose_action(
         synchronizer_id: String::new(),
         package_id_selection_preference: vec![],
         prefetch_contract_keys: vec![],
+        taps_max_passes: None,
     };
 
     let channel = match data.config.ledger_channel().await {
@@ -1449,6 +1450,7 @@ pub async fn propose_action(
         synchronizer_id: String::new(),
         package_id_selection_preference: vec![],
         prefetch_contract_keys: vec![],
+        taps_max_passes: None,
     };
 
     let mut confirm_req = tonic::Request::new(SubmitAndWaitRequest {
@@ -2039,6 +2041,7 @@ async fn get_party_threshold(data: &web::Data<AppState>, party_id: &CantonId) ->
                     time_query: Some(base_query::TimeQuery::HeadState(())),
                     filter_signed_key: String::new(),
                     protocol_version: None,
+                    client_version: None,
                 }),
                 filter_namespace: namespace,
             },
@@ -2202,6 +2205,7 @@ async fn execute_confirm_action(
         synchronizer_id: String::new(),
         package_id_selection_preference: vec![],
         prefetch_contract_keys: vec![],
+        taps_max_passes: None,
     };
 
     let mut req = tonic::Request::new(SubmitAndWaitRequest {
@@ -2399,6 +2403,7 @@ async fn execute_confirmed_action(
         synchronizer_id: String::new(),
         package_id_selection_preference: vec![],
         prefetch_contract_keys: vec![],
+        taps_max_passes: None,
     };
 
     let mut req = tonic::Request::new(SubmitAndWaitRequest {
@@ -2539,6 +2544,7 @@ async fn execute_expire_confirmation(
         synchronizer_id: String::new(),
         package_id_selection_preference: vec![],
         prefetch_contract_keys: vec![],
+        taps_max_passes: None,
     };
 
     let mut req = tonic::Request::new(SubmitAndWaitRequest {
@@ -2664,6 +2670,7 @@ async fn execute_cancel_confirmation(
         synchronizer_id: String::new(),
         package_id_selection_preference: vec![],
         prefetch_contract_keys: vec![],
+        taps_max_passes: None,
     };
 
     let mut req = tonic::Request::new(SubmitAndWaitRequest {
