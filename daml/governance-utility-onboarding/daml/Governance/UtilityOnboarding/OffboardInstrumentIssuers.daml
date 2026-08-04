@@ -5,6 +5,12 @@
 -- credentials it self-issued for instrument issuers, removing their
 -- issuing privileges. Externally-issued credentials are out of scope: the
 -- checked fetch on issuer == holder == governanceParty rejects them.
+--
+-- The action revokes only the credentials the caller lists. On-chain checks
+-- cannot enumerate a party's credentials, so completeness is the caller's
+-- responsibility: an issuer keeps minting rights through any live credential
+-- the proposal omits. Proposal tooling must list every credential the
+-- governance party self-issued for the subject.
 module Governance.UtilityOnboarding.OffboardInstrumentIssuers where
 
 import Splice.Util (fetchChecked)
@@ -28,9 +34,11 @@ template OffboardInstrumentIssuers
   where
     signatory proposer
     observer governanceParty
-    -- An offboard action for zero issuers does no work; reject it at
-    -- creation rather than record a no-op governance result.
+    -- An offboard action for zero issuers, or an entry that revokes no
+    -- credentials, does no work; reject it at creation rather than record a
+    -- no-op governance result.
     ensure not (null instrumentIssuers)
+        && all (\entry -> not (null entry.credentialCids)) instrumentIssuers
 
     interface instance GovernableAction for OffboardInstrumentIssuers where
       view = GovernableActionView with
