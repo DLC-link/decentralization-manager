@@ -1,0 +1,262 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | End-to-end dual-decparty journey: provider decparty configures and
+-- onboards a registrar decparty; the registrar provisions a credentialed
+-- instrument; instrument issuers mint and burn holdings using their
+-- governance-minted credentials. Scenarios also prove that late onboarding
+-- grants minting ability and offboarding removes it.
+module Governance.UtilityOnboarding.Test.DualGovernanceUtilityOnboardingTest where
+
+import DA.TextMap qualified as TextMap
+import DA.Time (addRelTime, hours)
+import Daml.Script
+
+import Splice.Api.Token.HoldingV1 (InstrumentId(..))
+import Splice.Api.Token.MetadataV1
+  (AnyValue(..), ChoiceContext(..), ExtraArgs(..), Metadata(..))
+
+import Utility.Credential.V0.Credential (Credential)
+import Utility.Registry.App.V0.Model.Burn (Burn(..), BurnRequest)
+import Utility.Registry.App.V0.Model.Mint (Mint(..), MintRequest)
+import Utility.Registry.App.V0.Service.AllocationFactory
+  (AllocationFactory_RequestBurn(..), AllocationFactory_RequestMint(..))
+import Utility.Registry.Holding.V0.Holding (Holding(..))
+import Utility.Registry.V0.Holding.TokenApiUtils
+  (instrumentConfigurationContextKey, issuerCredentialsContextKey)
+
+import Governance.Action (GovernableAction)
+
+import Governance.TokenIssuance.AcceptBurnRequest
+import Governance.TokenIssuance.AcceptMintRequest
+import Governance.UtilityOnboarding.DualDecpartyTestUtils
+import Governance.UtilityOnboarding.OffboardInstrumentIssuers
+import Governance.UtilityOnboarding.OnboardInstrumentIssuers
+
+import TestHarness
+
+data Fixture = Fixture
+  with
+    f : DualGovFixture
+    artifacts : ProvisionedInstrumentArtifacts
+  deriving (Eq, Show)
+
+-- | The full onboarding chain with real credential requirements on both
+-- sides: a registrar requirement (provider-issued) and an issuer
+-- requirement (registrar-issued). issuer1 is credentialed at provisioning.
+given_full_onboarding : Script Fixture
+given_full_onboarding = do
+  f <- givenDualGovernance
+  artifacts <- setupProvisionedInstrument f
+    [defaultIssuerRequirement f.parties] [f.parties.issuer1]
+  pure Fixture with ..
+
+launchInstrumentId : DualDecpartyParties -> InstrumentId
+launchInstrumentId parties = InstrumentId with
+  admin = parties.registrarGov
+  id = "LAUNCH-TOKEN"
+
+emptyMeta : Metadata
+emptyMeta = Metadata with values = TextMap.empty
+
+credentialedContext : Fixture -> [ContractId Credential] -> ChoiceContext
+credentialedContext fx credentialCids = ChoiceContext with
+  values = TextMap.fromList
+    [ (instrumentConfigurationContextKey,
+       AV_ContractId $ coerceContractId fx.artifacts.instrumentConfigurationCid)
+    , (issuerCredentialsContextKey,
+       AV_List $ map (AV_ContractId . coerceContractId) credentialCids)
+    ]
+
+issuerCredentials : Party -> Script [ContractId Credential]
+issuerCredentials issuer = map fst <$> query @Credential issuer
+
+requestMintAs : Fixture -> Party -> Decimal -> Script (ContractId MintRequest)
+requestMintAs fx issuer amount = do
+  now <- getTime
+  credentialCids <- issuerCredentials issuer
+  result <- submit (actAs issuer <> readAs fx.f.parties.registrarGov) $
+    exerciseCmd fx.artifacts.onboarded.allocationFactoryCid AllocationFactory_RequestMint with
+      expectedAdmin = fx.f.parties.registrarGov
+      mint = Mint with
+        instrumentId = launchInstrumentId fx.f.parties
+        amount
+        holder = issuer
+        reference = "Issuer-initiated mint"
+        requestedAt = now
+        executeBefore = now `addRelTime` hours 24
+        meta = emptyMeta
+      extraArgs = ExtraArgs with
+        context = credentialedContext fx credentialCids
+        meta = emptyMeta
+  pure result.mintRequestCid
+
+acceptMintViaGovernance : Fixture -> ContractId MintRequest -> Party -> Script ()
+acceptMintViaGovernance fx mintRequestCid issuer = do
+  credentialCids <- issuerCredentials issuer
+  proposalCid <- submit fx.f.registrarStack.member1 $ createCmd AcceptMintRequest with
+    governanceParty = fx.f.parties.registrarGov
+    proposer = fx.f.registrarStack.member1
+    mintRequestCid
+    instrumentConfigurationCid = fx.artifacts.instrumentConfigurationCid
+    issuerCredentialCids = credentialCids
+    description = "Accept issuer-initiated mint"
+    extraArgsMeta = emptyMeta
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  _ <- confirmAndExecuteAs fx.f.parties fx.f.registrarStack proposalInterfaceCid
+  pure ()
+
+requestBurnAs
+  : Fixture -> Party -> Decimal -> [ContractId Holding] -> Script (ContractId BurnRequest)
+requestBurnAs fx issuer amount holdingCids = do
+  now <- getTime
+  credentialCids <- issuerCredentials issuer
+  result <- submit (actAs issuer <> readAs fx.f.parties.registrarGov) $
+    exerciseCmd fx.artifacts.onboarded.allocationFactoryCid AllocationFactory_RequestBurn with
+      expectedAdmin = fx.f.parties.registrarGov
+      burn = Burn with
+        instrumentId = launchInstrumentId fx.f.parties
+        amount
+        holder = issuer
+        reference = "Issuer-initiated burn"
+        requestedAt = now
+        executeBefore = now `addRelTime` hours 24
+        meta = emptyMeta
+      holdingCids
+      extraArgs = ExtraArgs with
+        context = credentialedContext fx credentialCids
+        meta = emptyMeta
+  pure result.burnRequestCid
+
+acceptBurnViaGovernance : Fixture -> ContractId BurnRequest -> Party -> Script ()
+acceptBurnViaGovernance fx burnRequestCid issuer = do
+  credentialCids <- issuerCredentials issuer
+  proposalCid <- submit fx.f.registrarStack.member1 $ createCmd AcceptBurnRequest with
+    governanceParty = fx.f.parties.registrarGov
+    proposer = fx.f.registrarStack.member1
+    burnRequestCid
+    instrumentConfigurationCid = fx.artifacts.instrumentConfigurationCid
+    issuerCredentialCids = credentialCids
+    description = "Accept issuer-initiated burn"
+    extraArgsMeta = emptyMeta
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  _ <- confirmAndExecuteAs fx.f.parties fx.f.registrarStack proposalInterfaceCid
+  pure ()
+
+mintAndBurnRoundTrip : Fixture -> Party -> Script ()
+mintAndBurnRoundTrip fx issuer = do
+  mintRequestCid <- requestMintAs fx issuer 150.0
+  acceptMintViaGovernance fx mintRequestCid issuer
+  holdings <- query @Holding issuer
+  let holdingCids = map fst holdings
+  burnRequestCid <- requestBurnAs fx issuer 150.0 holdingCids
+  acceptBurnViaGovernance fx burnRequestCid issuer
+
+-- * Scenario 1: initial issuer mints then burns the full amount.
+
+when_issuer1_mints_and_burns : Fixture -> Script ()
+when_issuer1_mints_and_burns fx = mintAndBurnRoundTrip fx fx.f.parties.issuer1
+
+then_issuer1_ends_with_no_holdings : Fixture -> () -> Script Failures
+then_issuer1_ends_with_no_holdings fx _ = do
+  holdings <- query @Holding fx.f.parties.issuer1
+  pure $ shouldBe "issuer1 holdings after burn" 0 (length holdings)
+
+test_full_flow_mint_and_burn_as_initial_issuer = script do
+  run Test with
+    given = given_full_onboarding
+    when = when_issuer1_mints_and_burns
+    then_ = then_issuer1_ends_with_no_holdings
+
+-- * Scenario 1b: the mint alone leaves a holding with the right shape.
+
+when_issuer1_mints : Fixture -> Script ()
+when_issuer1_mints fx = do
+  mintRequestCid <- requestMintAs fx fx.f.parties.issuer1 150.0
+  acceptMintViaGovernance fx mintRequestCid fx.f.parties.issuer1
+
+then_issuer1_holds_minted_amount : Fixture -> () -> Script Failures
+then_issuer1_holds_minted_amount fx _ = do
+  holdings <- query @Holding fx.f.parties.issuer1
+  case holdings of
+    [(_, holding)] -> pure $
+      shouldBe "holding.owner" fx.f.parties.issuer1 holding.owner <>
+      shouldBe "holding.amount" 150.0 holding.amount <>
+      shouldBe "holding.registrar" fx.f.parties.registrarGov holding.registrar
+    _ -> pure $ shouldBe "Holding count" 1 (length holdings)
+
+test_full_flow_mint_as_initial_issuer = script do
+  run Test with
+    given = given_full_onboarding
+    when = when_issuer1_mints
+    then_ = then_issuer1_holds_minted_amount
+
+-- * Scenario 2: issuer onboarded AFTER provisioning can mint.
+
+when_issuer2_onboarded_then_mints : Fixture -> Script ()
+when_issuer2_onboarded_then_mints fx = do
+  proposalCid <- submit fx.f.registrarStack.member1 $ createCmd OnboardInstrumentIssuers with
+    governanceParty = fx.f.parties.registrarGov
+    proposer = fx.f.registrarStack.member1
+    instrumentConfigurationCid = fx.artifacts.instrumentConfigurationCid
+    instrumentIssuers = [fx.f.parties.issuer2]
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  _ <- confirmAndExecuteAs fx.f.parties fx.f.registrarStack proposalInterfaceCid
+  mintRequestCid <- requestMintAs fx fx.f.parties.issuer2 25.0
+  acceptMintViaGovernance fx mintRequestCid fx.f.parties.issuer2
+
+then_issuer2_holds_minted_amount : Fixture -> () -> Script Failures
+then_issuer2_holds_minted_amount fx _ = do
+  holdings <- query @Holding fx.f.parties.issuer2
+  case holdings of
+    [(_, holding)] -> pure $ shouldBe "holding.amount" 25.0 holding.amount
+    _ -> pure $ shouldBe "Holding count" 1 (length holdings)
+
+test_late_onboarded_issuer_can_mint = script do
+  run Test with
+    given = given_full_onboarding
+    when = when_issuer2_onboarded_then_mints
+    then_ = then_issuer2_holds_minted_amount
+
+-- * Scenario 3: offboarded issuer can no longer mint. The stale credential
+-- cids are archived, so the mint request's credential fetch fails.
+
+when_issuer1_offboarded_then_mint_fails : Fixture -> Script ()
+when_issuer1_offboarded_then_mint_fails fx = do
+  let parties = fx.f.parties
+  staleCredentialCids <- issuerCredentials parties.issuer1
+  proposalCid <- submit fx.f.registrarStack.member1 $ createCmd OffboardInstrumentIssuers with
+    governanceParty = parties.registrarGov
+    proposer = fx.f.registrarStack.member1
+    instrumentIssuers =
+      [InstrumentIssuerOffboardingConfiguration with
+         instrumentIssuer = parties.issuer1
+         credentialCids = staleCredentialCids]
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  _ <- confirmAndExecuteAs fx.f.parties fx.f.registrarStack proposalInterfaceCid
+  now <- getTime
+  submitMustFail (actAs parties.issuer1 <> readAs parties.registrarGov) $
+    exerciseCmd fx.artifacts.onboarded.allocationFactoryCid AllocationFactory_RequestMint with
+      expectedAdmin = parties.registrarGov
+      mint = Mint with
+        instrumentId = launchInstrumentId parties
+        amount = 10.0
+        holder = parties.issuer1
+        reference = "Mint after offboarding must fail"
+        requestedAt = now
+        executeBefore = now `addRelTime` hours 24
+        meta = emptyMeta
+      extraArgs = ExtraArgs with
+        context = credentialedContext fx staleCredentialCids
+        meta = emptyMeta
+
+then_issuer1_has_no_credentials : Fixture -> () -> Script Failures
+then_issuer1_has_no_credentials fx _ = do
+  credentials <- query @Credential fx.f.parties.issuer1
+  pure $ shouldBe "issuer1 credentials after offboard" 0 (length credentials)
+
+test_offboarded_issuer_cannot_mint = script do
+  run Test with
+    given = given_full_onboarding
+    when = when_issuer1_offboarded_then_mint_fails
+    then_ = then_issuer1_has_no_credentials
