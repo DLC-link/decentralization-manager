@@ -20,7 +20,8 @@ use canton_proto_rs::com::digitalasset::canton::{
     protocol::v30::enums::ParticipantPermission,
     topology::admin::v30::{
         BaseQuery, ListDecentralizedNamespaceDefinitionRequest, ListPartyToParticipantRequest,
-        StoreId, Synchronizer, base_query, store_id, synchronizer,
+        StoreId, Synchronizer, base_query,
+        list_party_to_participant_response::result::Item as P2pItem, store_id, synchronizer,
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
     },
 };
@@ -186,6 +187,8 @@ pub async fn allocate_party(
         onboarding_transactions,
         multi_hash_signatures: vec![signature],
         identity_provider_id: String::new(),
+        user_id: String::new(),
+        wait_for_allocation: None,
     };
 
     let mut client = utils::create_party_client(config, external_party_token_required()?).await?;
@@ -221,6 +224,7 @@ fn party_query(synchronizer_id: &str, proposals: bool) -> BaseQuery {
         time_query: Some(base_query::TimeQuery::HeadState(())),
         filter_signed_key: String::new(),
         protocol_version: None,
+        client_version: None,
     }
 }
 
@@ -263,7 +267,7 @@ pub async fn host_onboarding_status(
             .await?
             .into_inner();
         let names_self = response.results.iter().any(|r| {
-            r.item.as_ref().is_some_and(|p| {
+            matches!(&r.item, Some(P2pItem::V30(p)) if {
                 p.participants.iter().any(|h| {
                     h.participant_uid == self_uid
                         && h.permission == ParticipantPermission::Confirmation as i32
@@ -332,7 +336,9 @@ pub async fn list_hosted_external_parties(config: &NodeConfig) -> Result<Vec<Hos
 
     let mut parties = Vec::new();
     for result in p2p.results {
-        let Some(mapping) = result.item else { continue };
+        let Some(P2pItem::V30(mapping)) = result.item else {
+            continue;
+        };
         let hosts_us_confirming = mapping.participants.iter().any(|h| {
             h.participant_uid == self_uid
                 && h.permission == ParticipantPermission::Confirmation as i32

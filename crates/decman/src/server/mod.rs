@@ -32,7 +32,9 @@ use actix_web::{App, HttpServer, web};
 use canton_proto_rs::com::digitalasset::canton::{
     admin::participant::v30::{ListPackagesRequest, package_service_client::PackageServiceClient},
     crypto::{
-        admin::v30::{ListMyKeysRequest, vault_service_client::VaultServiceClient},
+        admin::v30::{
+            ListMyKeysRequest, private_key_metadata, vault_service_client::VaultServiceClient,
+        },
         v30::public_key,
     },
     topology::admin::v30::{
@@ -2237,13 +2239,17 @@ async fn list_my_owner_keys(
 
     // Get this node's namespace key fingerprints
     let keys_response = vault_client
-        .list_my_keys(tonic::Request::new(ListMyKeysRequest { filters: None }))
+        .list_my_keys(tonic::Request::new(ListMyKeysRequest {
+            filters: None,
+            base_request: None,
+        }))
         .await?
         .into_inner();
 
     let mut my_fingerprints = Vec::new();
     for key_meta in keys_response.private_keys_metadata {
-        if let Some(pub_key_with_name) = &key_meta.public_key_with_name
+        if let Some(private_key_metadata::PublicKeyWithName::V30(pub_key_with_name)) =
+            &key_meta.public_key_with_name
             && let Some(pub_key) = &pub_key_with_name.public_key
             && let Some(public_key::Key::SigningPublicKey(signing_key)) = &pub_key.key
             && signing_key.usage.contains(&1)
@@ -2266,6 +2272,7 @@ async fn list_my_owner_keys(
         time_query: Some(base_query::TimeQuery::HeadState(())),
         filter_signed_key: String::new(),
         protocol_version: None,
+        client_version: None,
     };
 
     // Get all decentralized namespace definitions. The response is bounded by

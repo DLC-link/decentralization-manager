@@ -353,6 +353,8 @@ pub async fn tenant_prepare_submission(
         verbose_hashing: false,
         prefetch_contract_keys: vec![],
         estimate_traffic_cost: None,
+        hashing_scheme_version: None,
+        taps_max_passes: None,
     };
 
     match client
@@ -559,6 +561,7 @@ async fn fetch_party_acs(
             // `create_arguments` render as a labelled JSON object.
             verbose: true,
         }),
+        stream_continuation_token: None,
     };
 
     let mut stream = client.get_active_contracts(request).await?.into_inner();

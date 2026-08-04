@@ -3,6 +3,7 @@ use canton_proto_rs::com::digitalasset::canton::{
     crypto::{
         admin::v30::{
             GenerateSigningKeyRequest, ListKeysFilters, ListMyKeysRequest,
+            generate_signing_key_response, private_key_metadata,
             vault_service_client::VaultServiceClient,
         },
         v30::{SigningKeySpec, SigningKeyUsage, SigningPublicKey, public_key},
@@ -146,14 +147,15 @@ pub(crate) async fn get_or_create_signing_key(
                 fingerprint: String::new(),
                 name: name.to_string(),
                 purpose: vec![],
-                usage: vec![usage as i32],
+                usage_v30: vec![usage as i32],
             }),
+            base_request: None,
         }))
         .await?
         .into_inner();
 
     for meta in existing.private_keys_metadata {
-        if let Some(pkn) = meta.public_key_with_name
+        if let Some(private_key_metadata::PublicKeyWithName::V30(pkn)) = meta.public_key_with_name
             && let Some(pk) = pkn.public_key
             && let Some(public_key::Key::SigningPublicKey(spk)) = pk.key
         {
@@ -174,13 +176,14 @@ pub(crate) async fn get_or_create_signing_key(
         .generate_signing_key(tonic::Request::new(GenerateSigningKeyRequest {
             key_spec: SigningKeySpec::Unspecified as i32,
             name: name.to_string(),
-            usage: vec![usage as i32],
+            usage_v30: vec![usage as i32],
+            base_request: None,
         }))
         .await?
         .into_inner();
-    let spk = response
-        .public_key
-        .ok_or_else(|| anyhow::anyhow!("No public key returned from VaultService"))?;
+    let Some(generate_signing_key_response::PublicKey::V30(spk)) = response.public_key else {
+        anyhow::bail!("No public key returned from VaultService");
+    };
     Ok((spk, false))
 }
 
@@ -227,6 +230,7 @@ async fn namespace_delegation_exists(
                 time_query: Some(base_query::TimeQuery::HeadState(())),
                 filter_signed_key: String::new(),
                 protocol_version: None,
+                client_version: None,
             }),
             filter_namespace: namespace_fingerprint.to_string(),
             filter_target_key_fingerprint: namespace_fingerprint.to_string(),
@@ -276,11 +280,11 @@ pub(crate) async fn propose_namespace_delegation(
             authorize_request::Proposal {
                 change: TopologyChangeOp::AddReplace as i32,
                 serial: 0,
-                mapping: Some(TopologyMapping {
+                mapping: Some(authorize_request::proposal::Mapping::V30(TopologyMapping {
                     mapping: Some(topology_mapping::Mapping::NamespaceDelegation(
                         namespace_delegation,
                     )),
-                }),
+                })),
             },
         )),
         must_fully_authorize: true,
