@@ -39,7 +39,7 @@ use crate::{
     db::schema::SchemaRead,
     error::Result,
     server::{
-        AppState,
+        AppState, WorkflowAuth,
         middleware::require_tenant_api_key,
         types::{
             ErrorResponse, TenantAcsResponse, TenantContract, TenantExecuteSubmissionRequest,
@@ -614,11 +614,15 @@ async fn fetch_party_acs(
 /// The ledger identity the tenant API's onboarding calls act under.
 ///
 /// Neither `GenerateExternalPartyTopology` nor `AllocateExternalParty` needs an
-/// admin right (see [`LedgerIdentity`]), so this reuses a per-party credential
-/// the operator has already configured rather than requiring a node-admin secret.
-/// A freshly onboarded external party has no credential of its own yet, hence a
-/// node-level identity is used for onboarding; once the party exists, its own
+/// admin right (see [`LedgerIdentity`]), so this reuses a credential the operator
+/// has already configured rather than requiring a node-admin secret. The external
+/// party being onboarded has no credential of its own yet — it does not exist — so
+/// this is necessarily a node-level identity; once the party is live, its own
 /// submissions authenticate via [`get_party_token`].
+///
+/// Insecure mode resolves without any configuration: the mock registry mints one
+/// identity for everything, and `party_credentials` is legitimately empty on a node
+/// that hosts external parties but no decentralized party of its own.
 ///
 /// # Errors
 /// Returns the response to send when the node has no usable credential.
@@ -634,6 +638,23 @@ async fn onboarding_identity(
         })
     };
 
+    let auth = data.auth.read().await;
+    let Some(auth) = auth.as_ref() else {
+        return Err(unavailable(
+            "the auth registry is not initialized".to_string(),
+        ));
+    };
+
+    // Insecure mode: one identity covers every party, so no lookup is needed and
+    // an empty credential table is not an error.
+    if let WorkflowAuth::Mock(registry) = auth {
+        let manager = registry.get_by_str("").await;
+        return Ok(LedgerIdentity {
+            token: manager.get_token(),
+            user_id: manager.user_id().to_string(),
+        });
+    }
+
     let mut credentials = data.db.get_all_party_credentials().await.map_err(|e| {
         tracing::error!("tenant onboarding: reading party credentials failed: {e:#}");
         unavailable("could not read the configured credentials".to_string())
@@ -642,7 +663,9 @@ async fn onboarding_identity(
     // user rather than varying by row order.
     credentials.sort_by_key(|c| c.dec_party_id.to_string());
     let Some(chosen) = credentials.first() else {
-        return Err(unavailable("none are configured".to_string()));
+        return Err(unavailable(
+            "none are configured, and this node is not in insecure mode".to_string(),
+        ));
     };
     if credentials.len() > 1 {
         tracing::info!(
@@ -652,12 +675,6 @@ async fn onboarding_identity(
         );
     }
 
-    let auth = data.auth.read().await;
-    let Some(auth) = auth.as_ref() else {
-        return Err(unavailable(
-            "the auth registry is not initialized".to_string(),
-        ));
-    };
     let credentials = auth
         .get_credentials(&chosen.dec_party_id)
         .await
