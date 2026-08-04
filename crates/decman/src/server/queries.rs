@@ -4380,7 +4380,7 @@ mod tests {
     // ------------------------------------------------------------------------
 
     use canton_proto_rs::com::daml::ledger::api::v2::{
-        InterfaceView, Optional, RecordField, Variant,
+        InterfaceView, List, Optional, RecordField, Variant,
     };
 
     fn field(label: &str, value: Value) -> RecordField {
@@ -4777,5 +4777,108 @@ mod tests {
             record.fields.retain(|f| f.label != "holder");
         }
         assert!(extract_credential_offer_info(&event).is_none());
+    }
+
+    // ------------------------------------------------------------------------
+    // extract_credential_info
+    //
+    // `Utility.Credential.V0.Credential:Credential` carries issuer/holder,
+    // the credential id/description, and a `claims` list whose `subject`
+    // names the party each claim attests for. The extractor feeds the
+    // issuer-credential picker on the accept mint/burn request forms.
+    // ------------------------------------------------------------------------
+
+    fn list_value(elements: Vec<Value>) -> Value {
+        Value {
+            sum: Some(value::Sum::List(List { elements })),
+        }
+    }
+
+    fn claim_value(subject: &str, property: &str, value: &str) -> Value {
+        record_value(vec![
+            field("subject", text_value(subject)),
+            field("property", text_value(property)),
+            field("value", text_value(value)),
+        ])
+    }
+
+    /// A Credential created event; `claims` is the raw value of the
+    /// template's `claims : [Claim]` field.
+    fn credential_event(claims: Value) -> CreatedEvent {
+        let record = Record {
+            record_id: None,
+            fields: vec![
+                field("issuer", party_value(&format!("issuer::{SR_FP}"))),
+                field("holder", party_value(&format!("holder::{SR_FP}"))),
+                field("id", text_value("instrument-issuer-credential/subject/0-0")),
+                field("description", text_value("Governance-minted credential")),
+                field("validFrom", optional_value(None)),
+                field("validUntil", optional_value(None)),
+                field("claims", claims),
+                field("observers", list_value(vec![])),
+            ],
+        };
+        CreatedEvent {
+            offset: 0,
+            node_id: 0,
+            contract_id: "credential-cid-1".to_string(),
+            template_id: None,
+            contract_key: None,
+            create_arguments: Some(record),
+            created_event_blob: vec![],
+            interface_views: vec![],
+            witness_parties: vec![],
+            signatories: vec![],
+            observers: vec![],
+            created_at: None,
+            package_name: String::new(),
+            representative_package_id: String::new(),
+            acs_delta: false,
+        }
+    }
+
+    #[test]
+    fn extract_credential_info_reads_credential_with_claims() {
+        let claims = list_value(vec![
+            claim_value("subject-party", "role", "instrument-issuer"),
+            claim_value("subject-party", "kyc", "passed"),
+        ]);
+        let Some(info) = extract_credential_info(&credential_event(claims)) else {
+            panic!("credential should yield info");
+        };
+        assert_eq!(info.contract_id, "credential-cid-1");
+        assert_eq!(info.issuer.to_string(), format!("issuer::{SR_FP}"));
+        assert_eq!(info.holder.to_string(), format!("holder::{SR_FP}"));
+        assert_eq!(
+            info.credential_id,
+            "instrument-issuer-credential/subject/0-0"
+        );
+        assert_eq!(info.description, "Governance-minted credential");
+        assert_eq!(info.claims.len(), 2);
+        assert_eq!(info.claims[0].subject, "subject-party");
+        assert_eq!(info.claims[0].property, "role");
+        assert_eq!(info.claims[0].value, "instrument-issuer");
+    }
+
+    #[test]
+    fn extract_credential_info_defaults_missing_description_and_empty_claims() {
+        let mut event = credential_event(list_value(vec![]));
+        if let Some(record) = event.create_arguments.as_mut() {
+            record.fields.retain(|f| f.label != "description");
+        }
+        let Some(info) = extract_credential_info(&event) else {
+            panic!("claimless credential should still yield info");
+        };
+        assert!(info.claims.is_empty());
+        assert_eq!(info.description, "");
+    }
+
+    #[test]
+    fn extract_credential_info_skips_event_without_holder() {
+        let mut event = credential_event(list_value(vec![]));
+        if let Some(record) = event.create_arguments.as_mut() {
+            record.fields.retain(|f| f.label != "holder");
+        }
+        assert!(extract_credential_info(&event).is_none());
     }
 }

@@ -2777,4 +2777,45 @@ mod tests {
         }
         Ok(())
     }
+
+    #[test]
+    fn build_proposal_accept_requests_serialize_issuer_credentials() -> Result {
+        // The accept arms forward the supplied credential cids into the
+        // `issuerCredentialCids` list as ContractId values. Labels alone
+        // cannot catch a regression to the old hardcoded empty list.
+        let proposals = [
+            ProposalType::AcceptMintRequest {
+                mint_request_cid: "mrc".to_string(),
+                instrument_configuration_cid: "icc".to_string(),
+                issuer_credential_cids: vec!["cred-1".to_string(), "cred-2".to_string()],
+                description: "accept mint".to_string(),
+            },
+            ProposalType::AcceptBurnRequest {
+                burn_request_cid: "brc".to_string(),
+                instrument_configuration_cid: "icc".to_string(),
+                issuer_credential_cids: vec!["cred-1".to_string(), "cred-2".to_string()],
+                description: "accept burn".to_string(),
+            },
+        ];
+        for proposal in proposals {
+            let (_, module, _, record) =
+                build_proposal_create_args("gov", "proposer", &proposal, None, None)?;
+            let credentials = field_value(&record, "issuerCredentialCids");
+            let elements = match &credentials.sum {
+                Some(value::Sum::List(l)) => &l.elements,
+                other => {
+                    panic!("expected List for issuerCredentialCids in {module}, got {other:?}")
+                }
+            };
+            let cids: Vec<_> = elements
+                .iter()
+                .map(|v| match &v.sum {
+                    Some(value::Sum::ContractId(cid)) => cid.as_str(),
+                    other => panic!("expected ContractId element in {module}, got {other:?}"),
+                })
+                .collect();
+            assert_eq!(cids, ["cred-1", "cred-2"], "cids for {module}");
+        }
+        Ok(())
+    }
 }
