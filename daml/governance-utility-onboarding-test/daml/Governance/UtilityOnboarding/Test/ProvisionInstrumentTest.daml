@@ -6,6 +6,7 @@ module Governance.UtilityOnboarding.Test.ProvisionInstrumentTest where
 import Daml.Script
 
 import Utility.Credential.V0.Credential (Claim(..), Credential(..), PartyCredentialRequirement(..))
+import Utility.Registry.App.V0.Service.Registrar (RegistrarService(..))
 import Utility.Registry.V0.Configuration.Instrument (InstrumentConfiguration(..))
 
 import Governance.Action (GovernableAction)
@@ -157,6 +158,43 @@ test_when_claimless_self_requirement_then_execute_fails = script do
     given = given_onboarded_registrar
     when = when_provision_claimless_requirement
     then_ = then_nothing_provisioned
+
+-- * Authorization: a service owned by the proposer, not the governance
+-- party, is refused. Controller authorization alone does not protect this:
+-- the proposer's authority is in scope during execution, so a proposer who
+-- self-issues a RegistrarService could otherwise provision against it and
+-- mint real governance-issued credentials. The registrar assert stops it.
+
+when_provision_against_proposer_owned_service : Fixture -> Script ()
+when_provision_against_proposer_owned_service fx = do
+  let parties = fx.f.parties
+      proposer = fx.f.registrarStack.member1
+  foreignServiceCid <- submit proposer $ createCmd RegistrarService with
+    operator = parties.registrarGov
+    provider = proposer
+    registrar = proposer
+    enableResultContracts = None
+  proposalCid <- submit proposer $ createCmd ProvisionInstrument with
+    governanceParty = parties.registrarGov
+    proposer
+    registrarServiceCid = foreignServiceCid
+    instrumentIdText = "LAUNCH-TOKEN"
+    additionalIdentifiers = []
+    issuerRequirements = [defaultIssuerRequirement parties]
+    holderRequirements = []
+    initialInstrumentIssuers = [parties.issuer1]
+  confirmThenExecuteMustFail fx.f.parties fx.f.registrarStack (toInterfaceContractId proposalCid)
+
+then_no_credentials_minted : Fixture -> () -> Script Failures
+then_no_credentials_minted fx _ = do
+  credentials <- query @Credential fx.f.parties.issuer1
+  pure $ shouldBe "issuer1 credentials" 0 (length credentials)
+
+test_when_proposer_owned_service_then_execute_fails = script do
+  run Test with
+    given = given_onboarded_registrar
+    when = when_provision_against_proposer_owned_service
+    then_ = then_no_credentials_minted
 
 -- * Non-member confirm is rejected.
 

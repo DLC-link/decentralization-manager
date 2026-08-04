@@ -38,8 +38,12 @@ template ProvisionInstrument
           <> " (" <> show (length initialInstrumentIssuers) <> " initial issuers)"
 
       executeImpl = do
-        -- The choice controller is the registrar, so a RegistrarService whose
-        -- registrar is not the governance party fails on authorization.
+        -- Controller authorization alone is not enough: the proposer's
+        -- authority is in scope during execution, so a service owned by the
+        -- proposer would pass it. Pin the service to the governance party.
+        registrarService <- fetch registrarServiceCid
+        assertMsg "ProvisionInstrument: registrar service registrar does not match the governance party"
+          (registrarService.registrar == governanceParty)
         _ <- exercise registrarServiceCid RegistrarService_CreateInstrumentConfiguration with
           instrumentId = instrumentIdText
           additionalIdentifiers

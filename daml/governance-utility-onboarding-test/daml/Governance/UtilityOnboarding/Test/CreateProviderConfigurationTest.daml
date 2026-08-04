@@ -6,7 +6,7 @@ module Governance.UtilityOnboarding.Test.CreateProviderConfigurationTest where
 import Daml.Script
 
 import Utility.Registry.App.V0.Configuration.Provider (ProviderConfiguration(..))
-import Utility.Registry.App.V0.Service.Provider (ProviderService)
+import Utility.Registry.App.V0.Service.Provider (ProviderService(..))
 
 import Governance.Action (GovernableAction)
 
@@ -56,6 +56,37 @@ test_when_create_provider_configuration_then_requirements_recorded = script do
     given = given_provider_service
     when = when_create_provider_configuration
     then_ = then_configuration_records_requirements
+
+-- * Authorization: a ProviderService owned by a different provider is
+-- refused. The service's provider is the outsider, so the choice's provider
+-- controller rejects the exercise; operator = providerGov keeps the service
+-- fetchable by the governance party, isolating the authorization failure.
+
+when_create_against_foreign_service : Fixture -> Script ()
+when_create_against_foreign_service fx = do
+  let parties = fx.f.parties
+  foreignServiceCid <- submit (actAs parties.outsider <> actAs parties.providerGov) $
+    createCmd ProviderService with
+      operator = parties.providerGov
+      provider = parties.outsider
+  proposalCid <- submit fx.f.providerStack.member1 $ createCmd CreateProviderConfiguration with
+    governanceParty = parties.providerGov
+    proposer = fx.f.providerStack.member1
+    providerServiceCid = foreignServiceCid
+    registrarRequirements = []
+    holderRequirements = []
+  confirmThenExecuteMustFail fx.f.parties fx.f.providerStack (toInterfaceContractId proposalCid)
+
+then_no_configuration : Fixture -> () -> Script Failures
+then_no_configuration fx _ = do
+  configurations <- query @ProviderConfiguration fx.f.parties.providerGov
+  pure $ shouldBe "ProviderConfiguration count" 0 (length configurations)
+
+test_when_foreign_service_then_execute_fails = script do
+  run Test with
+    given = given_provider_service
+    when = when_create_against_foreign_service
+    then_ = then_no_configuration
 
 -- * Non-member confirm is rejected.
 
