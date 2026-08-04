@@ -446,16 +446,20 @@ The table below is a curated subset. A complete, interactive API reference is av
 
 ## Development
 
-This repository is a Cargo workspace with three crates under `crates/`:
+This repository is a Cargo workspace with four crates under `crates/`:
 
 - **`decman`** — the server (HTTP API, Noise P2P, Canton gRPC, workflows) and
   the embedded React frontend. Its binary is `dec-party-manager`.
-- **`common`** — shared wire DTOs and the Canton-ID helpers, consumed by both
-  `decman` and `decman-cli`. Kept dependency-light; OpenAPI (`utoipa`) schema
-  derives are behind its `openapi` feature.
+- **`common`** — shared wire DTOs, the Canton-ID helpers, and the external-party
+  fingerprint derivation, consumed by the other crates. Kept dependency-light;
+  OpenAPI (`utoipa`) schema derives are behind its `openapi` feature.
 - **`decman-cli`** — a terminal UI client for the server.
+- **`decman-wallet`** — the client side of the tenant API (`/v0/tenant/*`): the
+  library a wallet provider embeds to run a co-validated party from a key it holds
+  itself, plus a demo wallet (its own UI, behind the `demo` feature) that drives
+  the whole flow. See [crates/decman-wallet/README.md](crates/decman-wallet/README.md).
 
-Workspace-wide `cargo` commands build all three; pass `-p decman` to act on
+Workspace-wide `cargo` commands build all four; pass `-p decman` to act on
 just the server (e.g. `cargo run -p decman -- serve`).
 
 ### Building

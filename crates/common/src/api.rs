@@ -332,12 +332,16 @@ pub struct ExternalPartiesResponse {
 //
 // Wallet-driven flow: the wallet generates and holds the Ed25519 key and DPM
 // relays. Every binary field on the wire is base64 (STANDARD engine).
+//
+// Both halves of each pair derive `Serialize` + `Deserialize`: the server reads
+// the requests and writes the responses, and the `decman-wallet` client does the
+// mirror image. One definition per message keeps the two ends from drifting.
 // ============================================================================
 
 /// Request to prepare the onboarding topology for a wallet-held external party.
 /// The wallet sends only its public key; DPM relays it to Canton and returns the
 /// unsigned topology for the wallet to sign.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct TenantPrepareRequest {
@@ -357,7 +361,7 @@ pub struct TenantPrepareRequest {
 
 /// The unsigned onboarding topology for the wallet to sign. `multi_hash` and
 /// each entry of `topology_transactions` are base64-encoded.
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct TenantPrepareResponse {
@@ -372,7 +376,7 @@ pub struct TenantPrepareResponse {
 /// Request to onboard a wallet-held external party from its signed topology.
 /// `public_key`, each `topology_transactions` entry, and `multi_hash_signature`
 /// are base64-encoded.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct TenantOnboardRequest {
@@ -393,7 +397,7 @@ pub struct TenantOnboardRequest {
 /// wallet calls `/onboard` on every host and aggregates. `Completed` means this
 /// host's authorized `PartyToParticipant` names it; `InProgress` means the
 /// topology is still a proposal here (more hosts must sign).
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct TenantOnboardResponse {
@@ -402,7 +406,7 @@ pub struct TenantOnboardResponse {
 }
 
 /// A Daml template identifier for a tenant create command.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct TenantTemplateId {
@@ -414,7 +418,7 @@ pub struct TenantTemplateId {
 /// Request to prepare an interactive submission for a wallet-held party. Only a
 /// single CREATE command is supported; `create_arguments` is JSON that maps to
 /// the template's Daml record.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct TenantPrepareSubmissionRequest {
@@ -425,7 +429,7 @@ pub struct TenantPrepareSubmissionRequest {
 
 /// The prepared transaction for the wallet to sign. `prepared_transaction` and
 /// `prepared_transaction_hash` are base64-encoded.
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct TenantPrepareSubmissionResponse {
@@ -436,7 +440,7 @@ pub struct TenantPrepareSubmissionResponse {
 
 /// Request to execute a wallet-signed interactive submission.
 /// `prepared_transaction` and `signature` are base64-encoded.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct TenantExecuteSubmissionRequest {
@@ -447,7 +451,7 @@ pub struct TenantExecuteSubmissionRequest {
 }
 
 /// One active contract owned by a tenant party.
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct TenantContract {
@@ -460,7 +464,7 @@ pub struct TenantContract {
 }
 
 /// Response wrapper for `GET /v0/tenant/{party}/acs`.
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct TenantAcsResponse {
@@ -1238,7 +1242,7 @@ pub struct SuccessResponse {
 }
 
 /// Response for workflow status check endpoints
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct WorkflowStatusResponse {

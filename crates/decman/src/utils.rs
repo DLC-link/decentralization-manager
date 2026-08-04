@@ -31,10 +31,7 @@ use canton_proto_rs::com::{
 
 use crate::{canton_id::CantonId, config::NodeConfig, error::Result};
 
-/// Multihash prefix for SHA-256 hashes in Canton
-/// - 0x12 = SHA-256 hash algorithm identifier
-/// - 0x20 = 32 bytes (length of SHA-256 output)
-pub const MULTIHASH_SHA256_PREFIX: &str = "1220";
+pub use common::fingerprint::MULTIHASH_SHA256_PREFIX;
 
 /// Read all protobuf messages from a file
 ///

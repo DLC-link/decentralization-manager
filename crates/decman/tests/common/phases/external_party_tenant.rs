@@ -1,7 +1,9 @@
 //! Wallet-driven external-party onboarding via the tenant API (`/v0/tenant/*`).
 //!
-//! Stands in for a wallet: generates an Ed25519 key locally (see
-//! [`crate::common::wallet`]), calls `POST /v0/tenant/prepare` on one host to get
+//! Stands in for a wallet: generates an Ed25519 key locally with the shipped
+//! wallet library ([`decman_wallet::ExternalKeyPair`] — the same type a wallet
+//! provider uses, so there is one implementation of the key handling and the
+//! fingerprint derivation), calls `POST /v0/tenant/prepare` on one host to get
 //! the multi-host onboarding topology + the multi-hash, signs the multi-hash
 //! locally, then submits the same signed bundle to `POST /v0/tenant/onboard` on
 //! EACH host itself — DPM never relays between hosts and never sees the private
@@ -20,9 +22,10 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use tracing::info;
 
+use decman_wallet::ExternalKeyPair;
+
 use crate::common::{
     Fixture, chaos::fresh_prefix, http::probe_workflow_status, scenario::Scenario,
-    wallet::ExternalKeyPair,
 };
 
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
@@ -31,10 +34,12 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     // The "wallet": key generated + held client-side; DPM only ever sees the
     // public key and the signature.
     let wallet = ExternalKeyPair::generate();
-    let seed = wallet.seed();
+    // Copied out of its `Zeroizing` wrapper so the closure below can rebuild the
+    // key; the wrapper itself is not `Copy`.
+    let seed = *wallet.seed();
     let hint = fresh_prefix("tenant-ext");
     let party_id = wallet.party_id(&hint);
-    let public_key = STANDARD.encode(wallet.public_key_bytes());
+    let public_key = wallet.public_key_b64();
     info!("Wallet-driven external party: {party_id}");
 
     Scenario::with_ctx(
