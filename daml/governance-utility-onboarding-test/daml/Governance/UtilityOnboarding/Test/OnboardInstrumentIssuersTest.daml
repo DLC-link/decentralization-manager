@@ -136,6 +136,23 @@ test_when_only_external_requirements_then_zero_minted = script do
     when = when_onboard_one_issuer
     then_ = then_no_credentials
 
+-- * Empty issuer list is refused at creation: the template's ensure clause
+-- rejects a proposal for zero issuers, so it can never reach a vote.
+
+when_onboard_no_issuers : Fixture -> Script ()
+when_onboard_no_issuers fx =
+  submitMustFail fx.f.registrarStack.member1 $ createCmd OnboardInstrumentIssuers with
+    governanceParty = fx.f.parties.registrarGov
+    proposer = fx.f.registrarStack.member1
+    instrumentConfigurationCid = fx.artifacts.instrumentConfigurationCid
+    instrumentIssuers = []
+
+test_when_empty_issuers_then_create_fails = script do
+  run Test with
+    given = given_provisioned_instrument
+    when = when_onboard_no_issuers
+    then_ = then_no_credentials
+
 -- * Non-member confirm is rejected.
 
 when_outsider_confirms : Fixture -> Script ()
