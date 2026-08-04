@@ -11,11 +11,15 @@ import DA.Set qualified as Set
 import DA.Time (minutes)
 import Daml.Script
 
+import Utility.Credential.V0.Credential (PartyCredentialRequirement(..))
+import Utility.Registry.App.V0.Configuration.Provider (ProviderConfiguration)
 import Utility.Registry.App.V0.Service.Provider (ProviderService(..))
 
 import Governance.Action (GovernableAction)
 import Governance.ExecutionResult
 import Governance.Rules
+
+import Governance.UtilityOnboarding.CreateProviderConfiguration
 
 data DualDecpartyParties = DualDecpartyParties
   with
@@ -146,3 +150,31 @@ setupProviderService parties =
     createCmd ProviderService with
       operator = parties.operator
       provider = parties.providerGov
+
+defaultRegistrarRequirement : DualDecpartyParties -> PartyCredentialRequirement
+defaultRegistrarRequirement parties = PartyCredentialRequirement with
+  issuer = parties.providerGov
+  requiredClaims = [("role", "registrar")]
+
+defaultIssuerRequirement : DualDecpartyParties -> PartyCredentialRequirement
+defaultIssuerRequirement parties = PartyCredentialRequirement with
+  issuer = parties.registrarGov
+  requiredClaims = [("role", "instrument-issuer")]
+
+-- | Run CreateProviderConfiguration through provider governance and return
+-- the single resulting configuration cid.
+setupProviderConfiguration
+  : DualGovFixture -> ContractId ProviderService
+  -> [PartyCredentialRequirement] -> [PartyCredentialRequirement]
+  -> Script (ContractId ProviderConfiguration)
+setupProviderConfiguration f providerServiceCid registrarRequirements holderRequirements = do
+  proposalCid <- submit f.providerStack.member1 $ createCmd CreateProviderConfiguration with
+    governanceParty = f.parties.providerGov
+    proposer = f.providerStack.member1
+    providerServiceCid
+    registrarRequirements
+    holderRequirements
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  _ <- confirmAndExecuteAs f.parties f.providerStack proposalInterfaceCid
+  [(configurationCid, _)] <- query @ProviderConfiguration f.parties.providerGov
+  pure configurationCid
