@@ -1,0 +1,56 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Granular onboarding action: the registrar decparty revokes the
+-- credentials it self-issued for instrument issuers, removing their
+-- issuing privileges. Externally-issued credentials are out of scope: the
+-- checked fetch on issuer == holder == governanceParty rejects them.
+module Governance.UtilityOnboarding.OffboardInstrumentIssuers where
+
+import Splice.Util (fetchChecked)
+import Utility.Credential.V0.Credential
+  (Credential, Credential_Revoke(..), WithIssuerHolder(..))
+
+import Governance.Action
+
+data InstrumentIssuerOffboardingConfiguration = InstrumentIssuerOffboardingConfiguration
+  with
+    instrumentIssuer : Party
+    credentialCids : [ContractId Credential]
+  deriving (Eq, Show)
+
+template OffboardInstrumentIssuers
+  with
+    governanceParty : Party
+      -- ^ The registrar decparty that issued the credentials.
+    proposer : Party
+    instrumentIssuers : [InstrumentIssuerOffboardingConfiguration]
+  where
+    signatory proposer
+    observer governanceParty
+
+    interface instance GovernableAction for OffboardInstrumentIssuers where
+      view = GovernableActionView with
+        governanceParty
+        proposer
+        actionLabel = "OffboardInstrumentIssuers"
+        description = "Offboard " <> show (length instrumentIssuers)
+          <> " instrument issuer(s)"
+
+      executeImpl = do
+        _ <- forA instrumentIssuers $ \offboarding ->
+          forA offboarding.credentialCids $ \credentialCid -> do
+            credential <- fetchChecked
+              (WithIssuerHolder with
+                 issuer = governanceParty
+                 holder = governanceParty)
+              credentialCid
+            -- A claimless credential attests for nobody; refuse to treat it
+            -- as belonging to any particular issuer.
+            assertMsg "OffboardInstrumentIssuers: credential has no claims"
+              (not $ null credential.claims)
+            assertMsg "OffboardInstrumentIssuers: credential claims name a different subject than the offboarded instrument issuer"
+              (all (\claim -> claim.subject == partyToText offboarding.instrumentIssuer)
+                 credential.claims)
+            exercise credentialCid Credential_Revoke with actor = governanceParty
+        pure ()

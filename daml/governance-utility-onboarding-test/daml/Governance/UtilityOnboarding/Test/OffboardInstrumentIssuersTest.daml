@@ -1,0 +1,193 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+module Governance.UtilityOnboarding.Test.OffboardInstrumentIssuersTest where
+
+import DA.Set qualified as Set
+import Daml.Script
+
+import Utility.Credential.V0.Credential (Claim(..), Credential(..))
+
+import Governance.Action (GovernableAction)
+
+import Governance.UtilityOnboarding.DualDecpartyTestUtils
+import Governance.UtilityOnboarding.OffboardInstrumentIssuers
+
+import TestHarness
+
+data Fixture = Fixture
+  with
+    f : DualGovFixture
+    issuer1CredentialCids : [ContractId Credential]
+    issuer2CredentialCids : [ContractId Credential]
+  deriving (Eq, Show)
+
+-- | Two issuers credentialed at provisioning; offboarding removes one.
+given_two_credentialed_issuers : Script Fixture
+given_two_credentialed_issuers = do
+  f <- givenDualGovernance
+  _ <- setupProvisionedInstrument f [defaultIssuerRequirement f.parties]
+    [f.parties.issuer1, f.parties.issuer2]
+  issuer1CredentialCids <- map fst <$> query @Credential f.parties.issuer1
+  issuer2CredentialCids <- map fst <$> query @Credential f.parties.issuer2
+  pure Fixture with ..
+
+offboardProposal
+  : Fixture -> [InstrumentIssuerOffboardingConfiguration]
+  -> Script (ContractId GovernableAction)
+offboardProposal fx instrumentIssuers = do
+  proposalCid <- submit fx.f.registrarStack.member1 $ createCmd OffboardInstrumentIssuers with
+    governanceParty = fx.f.parties.registrarGov
+    proposer = fx.f.registrarStack.member1
+    instrumentIssuers
+  pure (toInterfaceContractId proposalCid)
+
+-- * Happy path: issuer1's credentials revoked, issuer2's untouched.
+
+when_offboard_issuer1 : Fixture -> Script ()
+when_offboard_issuer1 fx = do
+  proposalCid <- offboardProposal fx
+    [InstrumentIssuerOffboardingConfiguration with
+       instrumentIssuer = fx.f.parties.issuer1
+       credentialCids = fx.issuer1CredentialCids]
+  _ <- confirmAndExecuteAs fx.f.parties fx.f.registrarStack proposalCid
+  pure ()
+
+then_issuer1_revoked_issuer2_kept : Fixture -> () -> Script Failures
+then_issuer1_revoked_issuer2_kept fx _ = do
+  credentials1 <- query @Credential fx.f.parties.issuer1
+  credentials2 <- query @Credential fx.f.parties.issuer2
+  pure $
+    shouldBe "issuer1 credentials after offboard" 0 (length credentials1) <>
+    shouldBe "issuer2 credentials after offboard" 1 (length credentials2)
+
+test_when_offboard_issuer1_then_only_their_credentials_revoked = script do
+  run Test with
+    given = given_two_credentialed_issuers
+    when = when_offboard_issuer1
+    then_ = then_issuer1_revoked_issuer2_kept
+
+-- * Multiple entries processed in one action.
+
+when_offboard_both : Fixture -> Script ()
+when_offboard_both fx = do
+  proposalCid <- offboardProposal fx
+    [ InstrumentIssuerOffboardingConfiguration with
+        instrumentIssuer = fx.f.parties.issuer1
+        credentialCids = fx.issuer1CredentialCids
+    , InstrumentIssuerOffboardingConfiguration with
+        instrumentIssuer = fx.f.parties.issuer2
+        credentialCids = fx.issuer2CredentialCids
+    ]
+  _ <- confirmAndExecuteAs fx.f.parties fx.f.registrarStack proposalCid
+  pure ()
+
+then_both_revoked : Fixture -> () -> Script Failures
+then_both_revoked fx _ = do
+  credentials1 <- query @Credential fx.f.parties.issuer1
+  credentials2 <- query @Credential fx.f.parties.issuer2
+  pure $
+    shouldBe "issuer1 credentials" 0 (length credentials1) <>
+    shouldBe "issuer2 credentials" 0 (length credentials2)
+
+test_when_offboard_both_then_all_revoked = script do
+  run Test with
+    given = given_two_credentialed_issuers
+    when = when_offboard_both
+    then_ = then_both_revoked
+
+-- * Foreign credential (issuer == holder == outsider): checked fetch fails.
+-- registrarGov observes it so the failure is the group check, not visibility.
+
+when_offboard_foreign_credential : Fixture -> Script ()
+when_offboard_foreign_credential fx = do
+  let parties = fx.f.parties
+  foreignCredentialCid <- submit parties.outsider $ createCmd Credential with
+    issuer = parties.outsider
+    holder = parties.outsider
+    id = "foreign-credential"
+    description = "Credential issued outside governance"
+    validFrom = None
+    validUntil = None
+    claims = [Claim with
+      subject = partyToText parties.issuer1
+      property = "role"
+      value = "instrument-issuer"]
+    observers = Set.fromList [parties.registrarGov]
+  proposalCid <- offboardProposal fx
+    [InstrumentIssuerOffboardingConfiguration with
+       instrumentIssuer = parties.issuer1
+       credentialCids = [foreignCredentialCid]]
+  confirmThenExecuteMustFail fx.f.parties fx.f.registrarStack proposalCid
+
+then_nothing : Fixture -> () -> Script Failures
+then_nothing _ _ = pure []
+
+test_when_foreign_credential_then_execute_fails = script do
+  run Test with
+    given = given_two_credentialed_issuers
+    when = when_offboard_foreign_credential
+    then_ = then_nothing
+
+-- * Credential listed under the wrong issuer: subject assert fails.
+
+when_offboard_wrong_subject : Fixture -> Script ()
+when_offboard_wrong_subject fx = do
+  proposalCid <- offboardProposal fx
+    [InstrumentIssuerOffboardingConfiguration with
+       instrumentIssuer = fx.f.parties.issuer2
+       credentialCids = fx.issuer1CredentialCids]
+  confirmThenExecuteMustFail fx.f.parties fx.f.registrarStack proposalCid
+
+then_credentials_kept : Fixture -> () -> Script Failures
+then_credentials_kept fx _ = do
+  credentials1 <- query @Credential fx.f.parties.issuer1
+  pure $ shouldBe "issuer1 credentials kept" 1 (length credentials1)
+
+test_when_wrong_subject_then_execute_fails = script do
+  run Test with
+    given = given_two_credentialed_issuers
+    when = when_offboard_wrong_subject
+    then_ = then_credentials_kept
+
+-- * Claimless credential: attests for nobody, refuse to revoke.
+
+when_offboard_claimless_credential : Fixture -> Script ()
+when_offboard_claimless_credential fx = do
+  let parties = fx.f.parties
+  claimlessCredentialCid <- submit parties.registrarGov $ createCmd Credential with
+    issuer = parties.registrarGov
+    holder = parties.registrarGov
+    id = "claimless"
+    description = "Governance credential with no claims"
+    validFrom = None
+    validUntil = None
+    claims = []
+    observers = Set.fromList [parties.issuer1]
+  proposalCid <- offboardProposal fx
+    [InstrumentIssuerOffboardingConfiguration with
+       instrumentIssuer = parties.issuer1
+       credentialCids = [claimlessCredentialCid]]
+  confirmThenExecuteMustFail fx.f.parties fx.f.registrarStack proposalCid
+
+test_when_claimless_credential_then_execute_fails = script do
+  run Test with
+    given = given_two_credentialed_issuers
+    when = when_offboard_claimless_credential
+    then_ = then_nothing
+
+-- * Non-member confirm is rejected.
+
+when_outsider_confirms : Fixture -> Script ()
+when_outsider_confirms fx = do
+  proposalCid <- offboardProposal fx
+    [InstrumentIssuerOffboardingConfiguration with
+       instrumentIssuer = fx.f.parties.issuer1
+       credentialCids = fx.issuer1CredentialCids]
+  outsiderCannotConfirm fx.f.parties fx.f.registrarStack proposalCid
+
+test_when_outsider_confirms_then_rejected = script do
+  run Test with
+    given = given_two_credentialed_issuers
+    when = when_outsider_confirms
+    then_ = then_nothing
