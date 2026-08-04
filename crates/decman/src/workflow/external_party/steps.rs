@@ -47,6 +47,29 @@ pub struct PreparedTopology {
     pub topology_transactions: Vec<Vec<u8>>,
 }
 
+/// DER prefix for an Ed25519 `SubjectPublicKeyInfo` (RFC 8410 §4): a 42-byte
+/// SEQUENCE holding the `id-Ed25519` (1.3.101.112) AlgorithmIdentifier and a
+/// 33-byte BIT STRING (unused-bits octet + the 32-byte key). Fixed for Ed25519,
+/// so the whole encoding is this prefix followed by the raw key.
+const ED25519_SPKI_DER_PREFIX: [u8; 12] = [
+    0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+];
+
+/// Wrap a raw 32-byte Ed25519 public key as DER-encoded X.509
+/// `SubjectPublicKeyInfo`.
+///
+/// Canton's external-party RPCs parse the supplied key as X.509 SPKI and reject a
+/// bare 32-byte key, even when the format field says `RAW`. The party's namespace
+/// fingerprint is still computed over the *raw* key (Canton unwraps the SPKI
+/// first — see `utils::compute_fingerprint`), so wrapping here does not change the
+/// party id the wallet derived.
+fn ed25519_spki_der(public_key: &[u8; 32]) -> Vec<u8> {
+    let mut der = Vec::with_capacity(ED25519_SPKI_DER_PREFIX.len() + public_key.len());
+    der.extend_from_slice(&ED25519_SPKI_DER_PREFIX);
+    der.extend_from_slice(public_key);
+    der
+}
+
 /// Resolve the confirmation threshold DPM writes into the topology. An unset
 /// value defaults to `N-1` (never `N`) so a host can always exit later — the same
 /// cap `validate_confirmation_threshold` enforces on an explicit value. Floors at
@@ -67,6 +90,7 @@ fn resolve_confirmation_threshold(requested: Option<u32>, num_hosts: usize) -> u
 /// `GenerateExternalPartyTopology` RPC fails.
 pub async fn prepare_topology(
     config: &NodeConfig,
+    identity: &LedgerIdentity,
     party_hint: &str,
     hosting_peers: &[CantonId],
     confirmation_threshold: Option<u32>,
@@ -75,8 +99,8 @@ pub async fn prepare_topology(
     let synchronizer = external_party_synchronizer(config).await?;
 
     let signing_public_key = SigningPublicKey {
-        format: CryptoKeyFormat::Raw as i32,
-        key_data: public_key.to_vec(),
+        format: CryptoKeyFormat::DerX509SubjectPublicKeyInfo as i32,
+        key_data: ed25519_spki_der(public_key),
         key_spec: SigningKeySpec::EcCurve25519 as i32,
     };
 
@@ -96,7 +120,9 @@ pub async fn prepare_topology(
         observing_participant_uids: Vec::new(),
     };
 
-    let mut client = utils::create_party_client(config, external_party_token_required()?).await?;
+    // `GenerateExternalPartyTopology` is authorized with `RequiredClaim.Public()`
+    // — any authenticated ledger user will do, no admin right involved.
+    let mut client = utils::create_party_client(config, Some(identity.token.clone())).await?;
     let response = client
         .generate_external_party_topology(tonic::Request::new(request))
         .await
@@ -162,6 +188,7 @@ pub struct ExternalPartyAllocatePayload {
 /// already existing.
 pub async fn allocate_party(
     config: &NodeConfig,
+    identity: &LedgerIdentity,
     bundle: &ExternalPartyAllocatePayload,
 ) -> Result<()> {
     let synchronizer = external_party_synchronizer(config).await?;
@@ -182,27 +209,31 @@ pub async fn allocate_party(
         })
         .collect();
 
+    // Canton authorizes this with `AdminOrIdpAdminOrSelfAdmin(user_id)`: naming
+    // the calling ledger user in `user_id` satisfies the self-admin branch, so no
+    // ParticipantAdmin right is needed. `identity_provider_id` stays empty to
+    // match whatever IDP the token came from (`MatchIdentityProviderId`).
     let request = AllocateExternalPartyRequest {
         synchronizer,
         onboarding_transactions,
         multi_hash_signatures: vec![signature],
         identity_provider_id: String::new(),
-        user_id: String::new(),
         wait_for_allocation: None,
+        user_id: identity.user_id.clone(),
     };
 
-    let mut client = utils::create_party_client(config, external_party_token_required()?).await?;
+    let mut client = utils::create_party_client(config, Some(identity.token.clone())).await?;
     match client
         .allocate_external_party(tonic::Request::new(request))
         .await
     {
         Ok(_) => {
-            grant_read_as_hosted_party(config, &bundle.party_id).await;
+            grant_read_as_hosted_party(config, identity, &bundle.party_id).await;
             Ok(())
         }
         Err(status) if status.code() == tonic::Code::AlreadyExists => {
             tracing::info!("external-party already allocated on this node; treating as success");
-            grant_read_as_hosted_party(config, &bundle.party_id).await;
+            grant_read_as_hosted_party(config, identity, &bundle.party_id).await;
             Ok(())
         }
         Err(status) => Err(anyhow::anyhow!(
@@ -370,40 +401,47 @@ pub async fn list_hosted_external_parties(config: &NodeConfig) -> Result<Vec<Hos
 /// through the participant's token. Deliberately read-only: never `CanActAs`,
 /// which would let a host impersonate the sovereign party without its signature.
 ///
-/// Best-effort — a failure is logged, not propagated (the party is hosted either
-/// way). Wired only for insecure/test builds, mirroring [`external_party_token`];
-/// production external-party ledger auth is the open item tracked in the design
-/// doc.
-async fn grant_read_as_hosted_party(config: &NodeConfig, party_id: &str) {
-    #[cfg(any(test, feature = "test-mode"))]
-    {
-        use canton_proto_rs::com::daml::ledger::api::v2::admin::{
-            GrantUserRightsRequest, Right,
-            right::{CanReadAs, Kind},
-        };
-        let mut client = match utils::create_user_client(config, external_party_token()).await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!("external-party: user client for read-as grant failed: {e}");
-                return;
-            }
-        };
-        let request = GrantUserRightsRequest {
-            user_id: crate::auth::mock::MOCK_USER_ID.to_string(),
-            rights: vec![Right {
-                kind: Some(Kind::CanReadAs(CanReadAs {
-                    party: party_id.to_string(),
-                })),
-            }],
-            identity_provider_id: String::new(),
-        };
-        if let Err(e) = client.grant_user_rights(tonic::Request::new(request)).await {
-            tracing::warn!("external-party: grant CanReadAs {party_id} failed: {e}");
+/// Best-effort — a failure is logged, not propagated, because the party is hosted
+/// either way and only the host's *convenience* read path depends on this.
+///
+/// Unlike the two onboarding RPCs, `GrantUserRights` genuinely does require
+/// `ParticipantAdmin OR IdentityProviderAdmin`, so an ordinary per-party
+/// credential cannot perform it. When that is the case this logs and moves on;
+/// the equivalent grant can be made by an operator through the grant-rights
+/// endpoint, which takes admin credentials per call.
+async fn grant_read_as_hosted_party(
+    config: &NodeConfig,
+    identity: &LedgerIdentity,
+    party_id: &str,
+) {
+    use canton_proto_rs::com::daml::ledger::api::v2::admin::{
+        GrantUserRightsRequest, Right,
+        right::{CanReadAs, Kind},
+    };
+
+    let mut client = match utils::create_user_client(config, Some(identity.token.clone())).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("external-party: user client for read-as grant failed: {e}");
+            return;
         }
-    }
-    #[cfg(not(any(test, feature = "test-mode")))]
-    {
-        let _ = (config, party_id);
+    };
+    let request = GrantUserRightsRequest {
+        user_id: identity.user_id.clone(),
+        rights: vec![Right {
+            kind: Some(Kind::CanReadAs(CanReadAs {
+                party: party_id.to_string(),
+            })),
+        }],
+        identity_provider_id: String::new(),
+    };
+    if let Err(e) = client.grant_user_rights(tonic::Request::new(request)).await {
+        tracing::warn!(
+            user_id = %identity.user_id,
+            "external-party: granting CanReadAs {party_id} failed (needs ParticipantAdmin or \
+             IdentityProviderAdmin); the party is hosted, but this host cannot read its \
+             contracts until the right is granted: {e}"
+        );
     }
 }
 
@@ -414,41 +452,24 @@ async fn external_party_synchronizer(config: &NodeConfig) -> Result<String> {
     extract_synchronizer_fingerprint(&synchronizer_id)
 }
 
-/// Bearer token for the external-party Ledger-API admin calls.
+/// The ledger user the external-party calls act as.
 ///
 /// The participant's Ledger API is authenticated (unlike the tokenless Canton
-/// Admin API the topology/vault workflows use), so these calls need a bearer:
-/// - On the localnet e2e (built with `--features test-mode`) we send the same
-///   `MOCK_TOKEN` (`sub: ledger-api-user`) every other ledger call resolves via
-///   the mock auth registry.
-/// - In production we currently have no token: `AllocateExternalParty` requires
-///   `ParticipantAdmin OR IdentityProviderAdmin`, and there is no node-admin
-///   token in the per-party auth registry yet. Wiring one in is the open item.
-fn external_party_token() -> Option<String> {
-    #[cfg(any(test, feature = "test-mode"))]
-    {
-        Some(crate::auth::mock::MOCK_TOKEN.to_string())
-    }
-    #[cfg(not(any(test, feature = "test-mode")))]
-    {
-        None
-    }
-}
-
-/// The external-party Ledger-API token, or a clear error when it isn't
-/// configured. In non-test builds [`external_party_token`] is `None` (the open
-/// item), so calling Canton would fail with an opaque `Unauthenticated`; fail
-/// fast here with an explicit message instead.
+/// Admin API the topology/vault workflows use), so these calls need a bearer —
+/// and, for allocation, the user id that bearer authenticates as.
 ///
-/// # Errors
-/// Returns an error in production builds, where no participant token is wired yet.
-fn external_party_token_required() -> Result<Option<String>> {
-    external_party_token().map(Some).ok_or_else(|| {
-        anyhow::anyhow!(
-            "external-party ledger operations require a participant Ledger-API token, which is \
-             not yet configured in production (open item)"
-        )
-    })
+/// Neither RPC needs an admin right, which is why an ordinary per-party
+/// credential is enough:
+/// - `GenerateExternalPartyTopology` is `RequiredClaim.Public()`.
+/// - `AllocateExternalParty` is `AdminOrIdpAdminOrSelfAdmin(request.user_id)`, so
+///   naming this same user in the request satisfies the self-admin branch.
+///
+/// `user_id` must be the `sub` the token authenticates as, or Canton rejects the
+/// allocation: the self-admin check compares the two directly.
+#[derive(Clone, Debug)]
+pub struct LedgerIdentity {
+    pub token: String,
+    pub user_id: String,
 }
 
 #[cfg(test)]
