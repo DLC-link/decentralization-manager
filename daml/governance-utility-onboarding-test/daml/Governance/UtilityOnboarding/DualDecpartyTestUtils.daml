@@ -16,6 +16,7 @@ import Utility.Registry.App.V0.Configuration.Provider (ProviderConfiguration)
 import Utility.Registry.App.V0.Service.AllocationFactory (AllocationFactory)
 import Utility.Registry.App.V0.Service.Provider (ProviderService(..))
 import Utility.Registry.App.V0.Service.Registrar (RegistrarService, RegistrarServiceRequest)
+import Utility.Registry.V0.Configuration.Instrument (InstrumentConfiguration)
 
 import Governance.Action (GovernableAction)
 import Governance.ExecutionResult
@@ -24,6 +25,7 @@ import Governance.Rules
 import Governance.UtilityOnboarding.CreateProviderConfiguration
 import Governance.UtilityOnboarding.CreateRegistrarServiceRequest
 import Governance.UtilityOnboarding.OnboardRegistrar
+import Governance.UtilityOnboarding.ProvisionInstrument
 
 data DualDecpartyParties = DualDecpartyParties
   with
@@ -230,3 +232,30 @@ setupOnboardedRegistrar f registrarRequirements = do
   [(registrarServiceCid, _)] <- query @RegistrarService f.parties.registrarGov
   [(allocationFactoryCid, _)] <- query @AllocationFactory f.parties.registrarGov
   pure OnboardedRegistrarArtifacts with ..
+
+data ProvisionedInstrumentArtifacts = ProvisionedInstrumentArtifacts
+  with
+    onboarded : OnboardedRegistrarArtifacts
+    instrumentConfigurationCid : ContractId InstrumentConfiguration
+  deriving (Eq, Show)
+
+-- | Walk the flow to a provisioned instrument named LAUNCH-TOKEN, with the
+-- default registrar requirement on the provider side.
+setupProvisionedInstrument
+  : DualGovFixture -> [PartyCredentialRequirement] -> [Party]
+  -> Script ProvisionedInstrumentArtifacts
+setupProvisionedInstrument f issuerRequirements initialInstrumentIssuers = do
+  onboarded <- setupOnboardedRegistrar f [defaultRegistrarRequirement f.parties]
+  proposalCid <- submit f.registrarStack.member1 $ createCmd ProvisionInstrument with
+    governanceParty = f.parties.registrarGov
+    proposer = f.registrarStack.member1
+    registrarServiceCid = onboarded.registrarServiceCid
+    instrumentIdText = "LAUNCH-TOKEN"
+    additionalIdentifiers = []
+    issuerRequirements
+    holderRequirements = []
+    initialInstrumentIssuers
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  _ <- confirmAndExecuteAs f.parties f.registrarStack proposalInterfaceCid
+  [(instrumentConfigurationCid, _)] <- query @InstrumentConfiguration f.parties.registrarGov
+  pure ProvisionedInstrumentArtifacts with ..
