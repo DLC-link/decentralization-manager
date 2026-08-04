@@ -6,13 +6,13 @@ module Governance.UtilityOnboarding.Test.ProvisionInstrumentTest where
 import Daml.Script
 
 import Utility.Credential.V0.Credential (Claim(..), Credential(..), PartyCredentialRequirement(..))
-import Utility.Registry.Holding.V0.Types (InstrumentIdentifier(..))
 import Utility.Registry.V0.Configuration.Instrument (InstrumentConfiguration(..))
 
 import Governance.Action (GovernableAction)
 
 import Governance.UtilityOnboarding.DualDecpartyTestUtils
 import Governance.UtilityOnboarding.ProvisionInstrument
+import Governance.UtilityOnboarding.Utils (mkCredentialId)
 
 import TestHarness
 
@@ -56,6 +56,8 @@ then_configuration_and_credential_created fx _ = do
   let parties = fx.f.parties
   configurations <- query @InstrumentConfiguration parties.registrarGov
   issuerCredentials <- query @Credential parties.issuer1
+  -- Script time is static, so getTime here equals the mint-time timestamp.
+  now <- getTime
   let configurationChecks = case configurations of
         [(_, configuration)] ->
           shouldBe "issuerRequirements"
@@ -68,7 +70,7 @@ then_configuration_and_credential_created fx _ = do
           shouldBe "credential.issuer" parties.registrarGov credential.issuer <>
           shouldBe "credential.holder" parties.registrarGov credential.holder <>
           shouldBe "credential.id"
-            ("instrument-issuer-credential/" <> partyToText parties.issuer1 <> "/0")
+            (mkCredentialId "instrument-issuer-credential" parties.issuer1 now 0)
             credential.id <>
           shouldBe "credential.claims"
             [Claim with
