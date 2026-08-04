@@ -36,12 +36,12 @@ use super::{
         fetch_package_id_to_name, fetch_package_names, newest_matching_names, package_name_prefix,
     },
     types::{
-        AcceptTransferDetails, ActionType, ContractInfo, ContractWithBlob, CredentialOfferInfo,
-        DomainGovernanceAction, GovernanceAction, GovernanceConfirmation, GovernanceState,
-        HoldingInfo, InstrumentInfo, PartyMetadata, PendingAction, ProviderServiceInfo,
-        RegistrarServiceInfo, ServiceRequestDetails, TokenRequestInfo, TransferFactoryInfo,
-        TransferInstructionInfo, TransferInstructionStatus, TransferProposalDetails,
-        UserServiceInfo, VaultInfo,
+        AcceptTransferDetails, ActionType, Claim, ContractInfo, ContractWithBlob, CredentialInfo,
+        CredentialOfferInfo, DomainGovernanceAction, GovernanceAction, GovernanceConfirmation,
+        GovernanceState, HoldingInfo, InstrumentInfo, PartyMetadata, PendingAction,
+        ProviderServiceInfo, RegistrarServiceInfo, ServiceRequestDetails, TokenRequestInfo,
+        TransferFactoryInfo, TransferInstructionInfo, TransferInstructionStatus,
+        TransferProposalDetails, UserServiceInfo, VaultInfo,
     },
 };
 
@@ -200,6 +200,15 @@ fn credential_offer_template(packages: &PackageConfig) -> Option<TemplateId> {
         package_id: pkg.clone(),
         module_name: "Utility.Credential.App.V0.Model.Offer",
         entity_name: "CredentialOffer",
+    })
+}
+
+/// Credential template identifier
+fn credential_template(packages: &PackageConfig) -> Option<TemplateId> {
+    packages.utility_credential.as_ref().map(|pkg| TemplateId {
+        package_id: pkg.clone(),
+        module_name: "Utility.Credential.V0.Credential",
+        entity_name: "Credential",
     })
 }
 
@@ -2647,6 +2656,188 @@ fn extract_credential_offer_info(created: &CreatedEvent) -> Option<CredentialOff
         credential_id,
         description,
         is_free: !has_billing_params,
+    })
+}
+
+/// Get all Credential contracts visible to a party
+pub async fn get_credentials(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    test_mode: bool,
+    packages: &PackageConfig,
+) -> Result<Vec<CredentialInfo>> {
+    if test_mode {
+        fetch_credentials_with_wildcard(config, party_id, token).await
+    } else {
+        match credential_template(packages) {
+            Some(template) => {
+                fetch_credentials_for_template(config, party_id, token, &template).await
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+}
+
+/// Fetch credentials using WildcardFilter (for test mode)
+async fn fetch_credentials_with_wildcard(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+) -> Result<Vec<CredentialInfo>> {
+    let mut state_client = utils::create_state_client(config, token).await?;
+
+    let ledger_end = state_client
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .await?
+        .into_inner()
+        .offset;
+
+    let mut filters_by_party = HashMap::new();
+    filters_by_party.insert(
+        party_id.to_string(),
+        Filters {
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
+                    WildcardFilter {
+                        include_created_event_blob: false,
+                    },
+                )),
+            }],
+        },
+    );
+
+    let acs_request = GetActiveContractsRequest {
+        active_at_offset: ledger_end,
+        event_format: Some(EventFormat {
+            filters_by_party,
+            filters_for_any_party: None,
+            verbose: true,
+        }),
+    };
+
+    let mut stream = state_client
+        .get_active_contracts(acs_request)
+        .await?
+        .into_inner();
+
+    let mut credentials = Vec::new();
+    while let Some(response) = stream.message().await? {
+        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
+            && let Some(created) = active.created_event
+            && let Some(template_id) = &created.template_id
+            && template_id.module_name == "Utility.Credential.V0.Credential"
+            && template_id.entity_name == "Credential"
+            && let Some(info) = extract_credential_info(&created)
+        {
+            credentials.push(info);
+        }
+    }
+
+    Ok(credentials)
+}
+
+/// Fetch credentials using TemplateFilter
+async fn fetch_credentials_for_template(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    template: &TemplateId,
+) -> Result<Vec<CredentialInfo>> {
+    let mut state_client = utils::create_state_client(config, token).await?;
+
+    let ledger_end = state_client
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .await?
+        .into_inner()
+        .offset;
+
+    let mut filters_by_party = HashMap::new();
+    filters_by_party.insert(
+        party_id.to_string(),
+        Filters {
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
+                    TemplateFilter {
+                        template_id: Some(Identifier {
+                            package_id: template.package_id.clone(),
+                            module_name: template.module_name.to_string(),
+                            entity_name: template.entity_name.to_string(),
+                        }),
+                        include_created_event_blob: false,
+                    },
+                )),
+            }],
+        },
+    );
+
+    let acs_request = GetActiveContractsRequest {
+        active_at_offset: ledger_end,
+        event_format: Some(EventFormat {
+            filters_by_party,
+            filters_for_any_party: None,
+            verbose: true,
+        }),
+    };
+
+    let mut stream = state_client
+        .get_active_contracts(acs_request)
+        .await?
+        .into_inner();
+
+    let mut credentials = Vec::new();
+    while let Some(response) = stream.message().await? {
+        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
+            && let Some(created) = active.created_event
+            && let Some(info) = extract_credential_info(&created)
+        {
+            credentials.push(info);
+        }
+    }
+
+    Ok(credentials)
+}
+
+/// Extract CredentialInfo from a Credential created event.
+fn extract_credential_info(created: &CreatedEvent) -> Option<CredentialInfo> {
+    let record = created.create_arguments.as_ref()?;
+
+    let issuer: CantonId = field_party(record, "issuer")?.parse().ok()?;
+    let holder: CantonId = field_party(record, "holder")?.parse().ok()?;
+    let credential_id = field_text(record, "id")?;
+    let description = field_text(record, "description").unwrap_or_default();
+
+    let claims = record
+        .fields
+        .iter()
+        .find(|f| f.label == "claims")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::List(l)) => Some(&l.elements),
+            _ => None,
+        })
+        .map(|elements| {
+            elements
+                .iter()
+                .filter_map(|v| match &v.sum {
+                    Some(value::Sum::Record(r)) => Some(Claim {
+                        subject: field_text(r, "subject")?,
+                        property: field_text(r, "property")?,
+                        value: field_text(r, "value")?,
+                    }),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Some(CredentialInfo {
+        contract_id: created.contract_id.clone(),
+        issuer,
+        holder,
+        credential_id,
+        description,
+        claims,
     })
 }
 

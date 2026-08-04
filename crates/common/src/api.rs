@@ -1048,6 +1048,32 @@ pub struct CredentialOffersResponse {
     pub credential_offers: Vec<CredentialOfferInfo>,
 }
 
+/// A `Utility.Credential.V0.Credential:Credential` contract visible to the
+/// party. The accept mint/burn request forms list these so the issuer
+/// credentials backing the accept no longer have to be pasted in by hand.
+#[derive(Clone, Debug, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct CredentialInfo {
+    pub contract_id: String,
+    pub issuer: CantonId,
+    pub holder: CantonId,
+    /// The template's `id` field — the credential's identifier.
+    pub credential_id: String,
+    pub description: String,
+    /// The credential's claims. Each claim's `subject` names the party the
+    /// credential attests for.
+    pub claims: Vec<Claim>,
+}
+
+/// Response for the credentials endpoint
+#[derive(Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct CredentialsResponse {
+    pub credentials: Vec<CredentialInfo>,
+}
+
 /// Information about a RegistrarService contract
 #[derive(Clone, Debug, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
