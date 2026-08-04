@@ -13,8 +13,9 @@ import Daml.Script
 
 import Utility.Credential.V0.Credential (PartyCredentialRequirement(..))
 import Utility.Registry.App.V0.Configuration.Provider (ProviderConfiguration)
+import Utility.Registry.App.V0.Service.AllocationFactory (AllocationFactory)
 import Utility.Registry.App.V0.Service.Provider (ProviderService(..))
-import Utility.Registry.App.V0.Service.Registrar (RegistrarServiceRequest)
+import Utility.Registry.App.V0.Service.Registrar (RegistrarService, RegistrarServiceRequest)
 
 import Governance.Action (GovernableAction)
 import Governance.ExecutionResult
@@ -22,6 +23,7 @@ import Governance.Rules
 
 import Governance.UtilityOnboarding.CreateProviderConfiguration
 import Governance.UtilityOnboarding.CreateRegistrarServiceRequest
+import Governance.UtilityOnboarding.OnboardRegistrar
 
 data DualDecpartyParties = DualDecpartyParties
   with
@@ -196,3 +198,35 @@ setupRegistrarServiceRequest f = do
   _ <- confirmAndExecuteAs f.parties f.registrarStack proposalInterfaceCid
   [(requestCid, _)] <- query @RegistrarServiceRequest f.parties.registrarGov
   pure requestCid
+
+data OnboardedRegistrarArtifacts = OnboardedRegistrarArtifacts
+  with
+    providerServiceCid : ContractId ProviderService
+    providerConfigurationCid : ContractId ProviderConfiguration
+    registrarServiceCid : ContractId RegistrarService
+    allocationFactoryCid : ContractId AllocationFactory
+  deriving (Eq, Show)
+
+-- | Walk the flow to an accepted RegistrarService: provider service +
+-- configuration, registrar request, then OnboardRegistrar through provider
+-- governance. Requirements must be self-issuable by the provider.
+setupOnboardedRegistrar
+  : DualGovFixture -> [PartyCredentialRequirement] -> Script OnboardedRegistrarArtifacts
+setupOnboardedRegistrar f registrarRequirements = do
+  providerServiceCid <- setupProviderService f.parties
+  providerConfigurationCid <-
+    setupProviderConfiguration f providerServiceCid registrarRequirements []
+  requestCid <- setupRegistrarServiceRequest f
+  proposalCid <- submit f.providerStack.member1 $ createCmd OnboardRegistrar with
+    governanceParty = f.parties.providerGov
+    proposer = f.providerStack.member1
+    registrar = f.parties.registrarGov
+    providerServiceCid
+    registrarServiceRequestCid = requestCid
+    providerConfigurationCid
+    extraRegistrarCredentialCids = []
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  _ <- confirmAndExecuteAs f.parties f.providerStack proposalInterfaceCid
+  [(registrarServiceCid, _)] <- query @RegistrarService f.parties.registrarGov
+  [(allocationFactoryCid, _)] <- query @AllocationFactory f.parties.registrarGov
+  pure OnboardedRegistrarArtifacts with ..
