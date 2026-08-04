@@ -17,7 +17,8 @@ Each decentralized-party member holds two keys:
 
 Canton has no API that signs a ledger transaction with a vault key, so decman
 must reach the KMS itself. decman discovers the KMS key id automatically from
-the participant (`VaultService.ListMyKeys` reports `kms_key_id`).
+the participant (`VaultService.ListMyKeys` reports `kms_key_id`; grpcurl's
+JSON output renders the same field as `kmsKeyId`).
 
 ## What the operator must set up
 
