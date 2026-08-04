@@ -1,0 +1,15 @@
+-- | Minimal leaf package used only by the integration-test reproduction of
+-- the add-party "onboarding a member missing the contracts' DAR" failure.
+--
+-- Nothing depends on this package (so it can be withheld from / removed on a
+-- participant without dependency conflicts), and its one template is signed by
+-- the decentralized party alone — so the coordinated Contracts workflow (which
+-- signs as the dec party) can bulk-create instances into the party's ACS.
+module OrphanMarker where
+
+template OrphanMarker
+  with
+    governanceParty : Party
+    marker : Int
+  where
+    signatory governanceParty

@@ -186,6 +186,11 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     // multi-instance workflows — full-mesh cross-acceptance of simultaneous
     // Onboarding + DARs coordinators on every node.
     phases::concurrent_cross_workflows::run(&mut f).await?; // G11
+
+    // Runs dead last: kicks P3, seeds contracts of a package P3 lacks, and
+    // drives a re-add that the DAR-preflight must reject — leaving P3 out of the
+    // party, so nothing may run after it.
+    phases::add_party_missing_dar::run(&mut f).await?;
     Ok(())
 }
 
