@@ -143,30 +143,33 @@ acceptBurnViaGovernance fx burnRequestCid issuer = do
   _ <- confirmAndExecuteAs fx.f.parties fx.f.registrarStack proposalInterfaceCid
   pure ()
 
-mintAndBurnRoundTrip : Fixture -> Party -> Script ()
-mintAndBurnRoundTrip fx issuer = do
-  mintRequestCid <- requestMintAs fx issuer 150.0
+mintThenPartialBurn : Fixture -> Party -> Decimal -> Decimal -> Script ()
+mintThenPartialBurn fx issuer mintAmount burnAmount = do
+  mintRequestCid <- requestMintAs fx issuer mintAmount
   acceptMintViaGovernance fx mintRequestCid issuer
   holdings <- query @Holding issuer
   let holdingCids = map fst holdings
-  burnRequestCid <- requestBurnAs fx issuer 150.0 holdingCids
+  burnRequestCid <- requestBurnAs fx issuer burnAmount holdingCids
   acceptBurnViaGovernance fx burnRequestCid issuer
 
--- * Scenario 1: initial issuer mints then burns the full amount.
+-- * Scenario 1: initial issuer mints, then burns part of the holding. The
+-- remaining holding total equals the minted amount minus the burned amount.
 
-when_issuer1_mints_and_burns : Fixture -> Script ()
-when_issuer1_mints_and_burns fx = mintAndBurnRoundTrip fx fx.f.parties.issuer1
+when_issuer1_mints_and_partially_burns : Fixture -> Script ()
+when_issuer1_mints_and_partially_burns fx =
+  mintThenPartialBurn fx fx.f.parties.issuer1 150.0 100.0
 
-then_issuer1_ends_with_no_holdings : Fixture -> () -> Script Failures
-then_issuer1_ends_with_no_holdings fx _ = do
+then_issuer1_holds_remainder : Fixture -> () -> Script Failures
+then_issuer1_holds_remainder fx _ = do
   holdings <- query @Holding fx.f.parties.issuer1
-  pure $ shouldBe "issuer1 holdings after burn" 0 (length holdings)
+  let total = sum $ map (\(_, holding) -> holding.amount) holdings
+  pure $ shouldBe "issuer1 remaining holding total" 50.0 total
 
-test_full_flow_mint_and_burn_as_initial_issuer = script do
+test_full_flow_mint_and_partial_burn_as_initial_issuer = script do
   run Test with
     given = given_full_onboarding
-    when = when_issuer1_mints_and_burns
-    then_ = then_issuer1_ends_with_no_holdings
+    when = when_issuer1_mints_and_partially_burns
+    then_ = then_issuer1_holds_remainder
 
 -- * Scenario 1b: the mint alone leaves a holding with the right shape.
 
