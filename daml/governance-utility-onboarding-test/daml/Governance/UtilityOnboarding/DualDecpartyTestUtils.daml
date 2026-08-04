@@ -1,0 +1,148 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Fixtures emulating two decentralized parties: a provider decparty and a
+-- registrar decparty, each with its own GovernanceRules and members. Tests
+-- drive provider-side actions through the provider stack and registrar-side
+-- actions through the registrar stack, mirroring the production topology.
+module Governance.UtilityOnboarding.DualDecpartyTestUtils where
+
+import DA.Set qualified as Set
+import DA.Time (minutes)
+import Daml.Script
+
+import Utility.Registry.App.V0.Service.Provider (ProviderService(..))
+
+import Governance.Action (GovernableAction)
+import Governance.ExecutionResult
+import Governance.Rules
+
+data DualDecpartyParties = DualDecpartyParties
+  with
+    providerGov : Party
+    providerMember1 : Party
+    providerMember2 : Party
+    providerMember3 : Party
+    registrarGov : Party
+    registrarMember1 : Party
+    registrarMember2 : Party
+    registrarMember3 : Party
+    operator : Party
+    issuer1 : Party
+    issuer2 : Party
+    outsider : Party
+  deriving (Show, Eq)
+
+data GovStack = GovStack
+  with
+    governanceParty : Party
+    member1 : Party
+    member2 : Party
+    member3 : Party
+    rulesCid : ContractId GovernanceRules
+  deriving (Show, Eq)
+
+data DualGovFixture = DualGovFixture
+  with
+    parties : DualDecpartyParties
+    providerStack : GovStack
+    registrarStack : GovStack
+  deriving (Show, Eq)
+
+allocateDualDecpartyParties : Script DualDecpartyParties
+allocateDualDecpartyParties = do
+  providerGov <- allocateParty "ProviderGov"
+  providerMember1 <- allocateParty "ProviderMember1"
+  providerMember2 <- allocateParty "ProviderMember2"
+  providerMember3 <- allocateParty "ProviderMember3"
+  registrarGov <- allocateParty "RegistrarGov"
+  registrarMember1 <- allocateParty "RegistrarMember1"
+  registrarMember2 <- allocateParty "RegistrarMember2"
+  registrarMember3 <- allocateParty "RegistrarMember3"
+  operator <- allocateParty "Operator"
+  issuer1 <- allocateParty "Issuer1"
+  issuer2 <- allocateParty "Issuer2"
+  outsider <- allocateParty "Outsider"
+  pure DualDecpartyParties with ..
+
+createGovStack : Party -> Party -> Party -> Party -> Script GovStack
+createGovStack governanceParty member1 member2 member3 = do
+  rulesCid <- submit governanceParty $ createCmd GovernanceRules with
+    governanceParty
+    members = Set.fromList [member1, member2, member3]
+    threshold = 2
+    actionConfirmationTimeout = minutes 30
+    additionalProposers = None
+  pure GovStack with ..
+
+givenDualGovernance : Script DualGovFixture
+givenDualGovernance = do
+  parties <- allocateDualDecpartyParties
+  providerStack <- createGovStack
+    parties.providerGov parties.providerMember1 parties.providerMember2 parties.providerMember3
+  registrarStack <- createGovStack
+    parties.registrarGov parties.registrarMember1 parties.registrarMember2 parties.registrarMember3
+  pure DualGovFixture with ..
+
+-- | Confirm with two members of the given stack, then execute as member1.
+-- The executor reads as every fixture party so `executeImpl` bodies can
+-- fetch contracts visible to any of them.
+confirmAndExecuteAs
+  : DualDecpartyParties -> GovStack -> ContractId GovernableAction
+  -> Script ExecuteConfirmedActionResult
+confirmAndExecuteAs parties stack proposalCid = do
+  confirmations <- forA [stack.member1, stack.member2] $ \confirmer -> do
+    result <- submit (actAs confirmer <> readAs stack.governanceParty) $
+      exerciseCmd stack.rulesCid GovernanceRules_ConfirmAction with
+        confirmer
+        actionProposalCid = proposalCid
+    pure result.confirmationCid
+  submit (executeContext parties stack) $
+    exerciseCmd stack.rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor = stack.member1
+      actionProposalCid = proposalCid
+      confirmations = confirmations
+
+-- | Same as confirmAndExecuteAs, but the execute submit must fail.
+-- Used to test the assert guards inside executeImpl bodies.
+confirmThenExecuteMustFail
+  : DualDecpartyParties -> GovStack -> ContractId GovernableAction -> Script ()
+confirmThenExecuteMustFail parties stack proposalCid = do
+  confirmations <- forA [stack.member1, stack.member2] $ \confirmer -> do
+    result <- submit (actAs confirmer <> readAs stack.governanceParty) $
+      exerciseCmd stack.rulesCid GovernanceRules_ConfirmAction with
+        confirmer
+        actionProposalCid = proposalCid
+    pure result.confirmationCid
+  submitMustFail (executeContext parties stack) $
+    exerciseCmd stack.rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor = stack.member1
+      actionProposalCid = proposalCid
+      confirmations = confirmations
+
+executeContext : DualDecpartyParties -> GovStack -> SubmitOptions
+executeContext parties stack =
+  actAs stack.member1
+    <> readAs stack.governanceParty
+    <> readAs parties.providerGov
+    <> readAs parties.registrarGov
+    <> readAs parties.operator
+    <> readAs parties.issuer1
+    <> readAs parties.issuer2
+
+outsiderCannotConfirm
+  : DualDecpartyParties -> GovStack -> ContractId GovernableAction -> Script ()
+outsiderCannotConfirm parties stack proposalCid =
+  submitMustFail (actAs parties.outsider <> readAs stack.governanceParty) $
+    exerciseCmd stack.rulesCid GovernanceRules_ConfirmAction with
+      confirmer = parties.outsider
+      actionProposalCid = proposalCid
+
+-- | ProviderService requires operator + provider signatures; multi-party
+-- submit stands in for the utility-registry provider onboarding chain.
+setupProviderService : DualDecpartyParties -> Script (ContractId ProviderService)
+setupProviderService parties =
+  submit (actAs parties.providerGov <> actAs parties.operator) $
+    createCmd ProviderService with
+      operator = parties.operator
+      provider = parties.providerGov
