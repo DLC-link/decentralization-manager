@@ -200,6 +200,30 @@ test_when_empty_issuers_then_create_fails = script do
     when = when_offboard_no_issuers
     then_ = then_both_kept
 
+-- * An entry that revokes no credentials is refused at creation, even
+-- alongside a valid entry: one empty credentialCids list fails the whole
+-- proposal, so a vacuous per-issuer offboarding cannot be recorded.
+
+when_offboard_entry_without_credentials : Fixture -> Script ()
+when_offboard_entry_without_credentials fx =
+  submitMustFail fx.f.registrarStack.member1 $ createCmd OffboardInstrumentIssuers with
+    governanceParty = fx.f.parties.registrarGov
+    proposer = fx.f.registrarStack.member1
+    instrumentIssuers =
+      [ InstrumentIssuerOffboardingConfiguration with
+          instrumentIssuer = fx.f.parties.issuer1
+          credentialCids = fx.issuer1CredentialCids
+      , InstrumentIssuerOffboardingConfiguration with
+          instrumentIssuer = fx.f.parties.issuer2
+          credentialCids = []
+      ]
+
+test_when_entry_without_credentials_then_create_fails = script do
+  run Test with
+    given = given_two_credentialed_issuers
+    when = when_offboard_entry_without_credentials
+    then_ = then_both_kept
+
 -- * Non-member confirm is rejected.
 
 when_outsider_confirms : Fixture -> Script ()
