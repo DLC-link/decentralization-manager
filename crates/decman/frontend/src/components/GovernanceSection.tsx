@@ -62,6 +62,8 @@ import type {
   UserServicesResponse,
   CredentialOfferInfo,
   CredentialOffersResponse,
+  CredentialInfo,
+  CredentialsResponse,
   ContractWithBlob,
   ContractQueryResponse,
   Network,
@@ -227,6 +229,9 @@ export const GovernanceSection = ({
   // Accept holder-initiated mint/burn request state
   const [proposalMintRequestCid, setProposalMintRequestCid] = useState("");
   const [proposalBurnRequestCid, setProposalBurnRequestCid] = useState("");
+  // Credential cids proving the request's holder meets the instrument's
+  // issuer requirements. Passed into the accept's choice context.
+  const [proposalIssuerCredentialCids, setProposalIssuerCredentialCids] = useState<string[]>([]);
   // Accept External Party Setup: contract id of the validator-created
   // ExternalPartySetupProposal to accept.
   const [
@@ -342,6 +347,10 @@ export const GovernanceSection = ({
   const [burnRequestContracts, setBurnRequestContracts] = useState<TokenRequestInfo[]>([]);
   const [mintRequestsLoading, setMintRequestsLoading] = useState(false);
   const [burnRequestsLoading, setBurnRequestsLoading] = useState(false);
+  // `Credential` contracts visible to this party. Powers the issuer
+  // credential picker on the Accept Mint/Burn Request forms.
+  const [availableCredentials, setAvailableCredentials] = useState<CredentialInfo[]>([]);
+  const [credentialsLoading, setCredentialsLoading] = useState(false);
   // InstrumentConfiguration contracts fetched from /instruments. Each one
   // represents a token the governance party can mint/burn against and exposes
   // its parsed instrument_admin + instrument_id, so we can drive a real
@@ -595,6 +604,25 @@ export const GovernanceSection = ({
       console.error("Failed to fetch credential offers:", e);
     } finally {
       setCredentialOffersLoading(false);
+    }
+  }, [partyId]);
+
+  // Fetch `Credential` contracts so the Accept Mint/Burn Request forms can
+  // offer an issuer-credential picker instead of hand-pasted contract ids.
+  const fetchCredentials = useCallback(async () => {
+    setCredentialsLoading(true);
+    try {
+      const res = await authenticatedFetch(
+        `${API_BASE}/credentials?party_id=${encodeURIComponent(partyId)}`,
+      );
+      if (res.ok) {
+        const response: CredentialsResponse = await res.json();
+        setAvailableCredentials(response.credentials);
+      }
+    } catch (e) {
+      console.error("Failed to fetch credentials:", e);
+    } finally {
+      setCredentialsLoading(false);
     }
   }, [partyId]);
 
@@ -949,7 +977,18 @@ export const GovernanceSection = ({
     if (proposalType === "accept_burn_request") {
       fetchOpenBurnRequests();
     }
-  }, [proposalType, fetchContractsByTemplate, fetchOpenMintRequests, fetchOpenBurnRequests]);
+    // The accept forms also need the party's credentials for the issuer
+    // credential picker.
+    if (proposalType === "accept_mint_request" || proposalType === "accept_burn_request") {
+      fetchCredentials();
+    }
+  }, [
+    proposalType,
+    fetchContractsByTemplate,
+    fetchOpenMintRequests,
+    fetchOpenBurnRequests,
+    fetchCredentials,
+  ]);
 
   // Fetch all deployment-related contracts for vault_deployment
   const fetchDeployContracts = useCallback(async () => {
@@ -1406,6 +1445,7 @@ export const GovernanceSection = ({
     setProposalCredentialId("");
     setProposalCredentialClaimsText("");
     setProposalCredentialOfferCid("");
+    setProposalIssuerCredentialCids([]);
     setProposalDelegate("");
     setProposalDelegationExpiresAt("");
     setProposalAmuletMergeLimit("10");
@@ -1603,6 +1643,7 @@ export const GovernanceSection = ({
             type: "accept_mint_request",
             mint_request_cid: proposalMintRequestCid,
             instrument_configuration_cid: proposalInstrumentConfigurationCid,
+            issuer_credential_cids: proposalIssuerCredentialCids,
             description: proposalDescription,
           };
           break;
@@ -1611,6 +1652,7 @@ export const GovernanceSection = ({
             type: "accept_burn_request",
             burn_request_cid: proposalBurnRequestCid,
             instrument_configuration_cid: proposalInstrumentConfigurationCid,
+            issuer_credential_cids: proposalIssuerCredentialCids,
             description: proposalDescription,
           };
           break;
@@ -5049,6 +5091,80 @@ export const GovernanceSection = ({
                         )}
                       </Select>
                     </FormControl>
+                    <Autocomplete
+                      size="small"
+                      multiple
+                      freeSolo
+                      options={availableCredentials}
+                      value={proposalIssuerCredentialCids}
+                      loading={credentialsLoading}
+                      onChange={(_event, values) => {
+                        setProposalIssuerCredentialCids(
+                          values.map((value) =>
+                            typeof value === "string" ? value : value.contract_id,
+                          ),
+                        );
+                      }}
+                      getOptionLabel={(option) => {
+                        // Selected values are stored as bare cids; label them
+                        // with the credential id when the contract is known.
+                        const cid = typeof option === "string" ? option : option.contract_id;
+                        const known =
+                          typeof option === "string"
+                            ? availableCredentials.find((c) => c.contract_id === option)
+                            : option;
+                        const cidTail = cid.slice(-8);
+                        return known ? `${known.credential_id} (…${cidTail})` : cid;
+                      }}
+                      isOptionEqualToValue={(option, value) =>
+                        typeof value === "string"
+                          ? option.contract_id === value
+                          : option.contract_id === value.contract_id
+                      }
+                      renderOption={(props, option) => {
+                        const cidTail = option.contract_id.slice(-8);
+                        // The claims' subjects name the parties the credential
+                        // attests for — usually the request's holder.
+                        const subjects = [
+                          ...new Set(option.claims.map((claim) => claim.subject.split("::")[0])),
+                        ].join(", ");
+                        return (
+                          <li {...props} key={option.contract_id}>
+                            <Box sx={{ display: "flex", flexDirection: "column", gap: 0.25 }}>
+                              <Typography variant="body2">
+                                {option.credential_id} (…{cidTail})
+                              </Typography>
+                              {subjects && (
+                                <Typography variant="caption" color="text.secondary">
+                                  attests for {subjects}
+                                </Typography>
+                              )}
+                            </Box>
+                          </li>
+                        );
+                      }}
+                      renderInput={(params) => (
+                        <TextField
+                          {...params}
+                          label={
+                            <TextHelp
+                              text={
+                                isMint
+                                  ? "Credentials proving the mint holder meets the instrument's issuer requirements. Leave empty for instruments without issuer requirements."
+                                  : "Credentials proving the burn holder meets the instrument's issuer requirements. Leave empty for instruments without issuer requirements."
+                              }
+                            >
+                              Issuer Credentials
+                            </TextHelp>
+                          }
+                          helperText={
+                            credentialsLoading
+                              ? "Loading credentials…"
+                              : "Pick the holder's credentials, or paste contract ids. Optional for instruments without issuer requirements."
+                          }
+                        />
+                      )}
+                    />
                     <TextField
                       size="small"
                       label="Description"

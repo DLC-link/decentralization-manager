@@ -30,7 +30,7 @@ use crate::{
         chain_audit,
         middleware::require_admin,
         queries::{
-            ContractQueryParams as QueryContractParams, get_credential_offers,
+            ContractQueryParams as QueryContractParams, get_credential_offers, get_credentials,
             get_governance_confirmations, get_governance_state as query_governance_state,
             get_holdings, get_instruments, get_open_burn_requests, get_open_mint_requests,
             get_open_transfer_instructions, get_provider_services, get_registrar_services,
@@ -45,14 +45,14 @@ use crate::{
         types::{
             AuditLogEntry, AuditLogQuery, AuditLogResponse, BurnRequestsResponse,
             CancelConfirmationRequest, ChainAuditEntry, ChainAuditQuery, ChainAuditResponse,
-            ConfirmActionRequest, ContractQueryResponse, CredentialOffersResponse, ErrorResponse,
-            ExecuteActionRequest, ExpireConfirmationRequest, GovernanceResponse,
-            GovernanceStateResponse, GovernanceType, HoldingsResponse, InstrumentsResponse,
-            KnownMember, KnownMembersResponse, MessageResponse, MintRequestsResponse, NetworkInfo,
-            OperatorInfo, ProposalType, ProposeActionRequest, ProviderServicesResponse,
-            RegistrarServicesResponse, TransferFactoriesResponse, TransferFactoryInfo,
-            TransferInstructionsResponse, TransferPreapprovalsResponse, UserServicesResponse,
-            VaultsResponse, chain_audit_entry_from_row,
+            ConfirmActionRequest, ContractQueryResponse, CredentialOffersResponse,
+            CredentialsResponse, ErrorResponse, ExecuteActionRequest, ExpireConfirmationRequest,
+            GovernanceResponse, GovernanceStateResponse, GovernanceType, HoldingsResponse,
+            InstrumentsResponse, KnownMember, KnownMembersResponse, MessageResponse,
+            MintRequestsResponse, NetworkInfo, OperatorInfo, ProposalType, ProposeActionRequest,
+            ProviderServicesResponse, RegistrarServicesResponse, TransferFactoriesResponse,
+            TransferFactoryInfo, TransferInstructionsResponse, TransferPreapprovalsResponse,
+            UserServicesResponse, VaultsResponse, chain_audit_entry_from_row,
         },
     },
     utils,
@@ -440,6 +440,39 @@ pub async fn get_credential_offers_handler(
             tracing::error!("Failed to fetch credential offers: {e}");
             HttpResponse::InternalServerError().json(ErrorResponse {
                 error: format!("Failed to fetch credential offers: {e}"),
+            })
+        }
+    }
+}
+
+/// Get `Credential` contracts visible to the party. The accept mint/burn
+/// request forms list these so the issuer credentials backing the accept can
+/// be picked instead of pasted in by hand.
+#[utoipa::path(
+    tag = "Services",
+    params(GovernanceQuery),
+    responses(
+        (status = 200, description = "Credentials", body = CredentialsResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[get("/credentials")]
+pub async fn get_credentials_handler(
+    data: web::Data<AppState>,
+    query: web::Query<GovernanceQuery>,
+) -> impl Responder {
+    let party_id = &query.party_id;
+
+    let token = get_party_token(&data, party_id).await;
+    let test_mode = data.test_mode;
+    let packages = packages();
+
+    match get_credentials(&data.config, party_id, token, test_mode, &packages).await {
+        Ok(credentials) => HttpResponse::Ok().json(CredentialsResponse { credentials }),
+        Err(e) => {
+            tracing::error!("Failed to fetch credentials: {e}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch credentials: {e}"),
             })
         }
     }

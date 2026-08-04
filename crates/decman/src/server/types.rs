@@ -18,9 +18,9 @@ pub use common::api::{
     AuthTestResponse, AuthTestResult, CancelConfirmationRequest, ChainAuditEntry,
     ChainAuditResponse, ChangeThresholdInvitePayload, ChangeThresholdRequest, Claim,
     ContractQueryResponse, ContractWithBlob, ContractsInvitePayload, ContractsRequest,
-    CredentialOfferInfo, CredentialOffersResponse, DarsInvitePayload, DarsRequest,
-    DecentralizedPartiesResponse, DeclineInvitationPayload, DisclosedContractInput,
-    DiscoverMemberPartyRequest, DiscoverMemberPartyResponse, ErrorResponse,
+    CredentialInfo, CredentialOfferInfo, CredentialOffersResponse, CredentialsResponse,
+    DarsInvitePayload, DarsRequest, DecentralizedPartiesResponse, DeclineInvitationPayload,
+    DisclosedContractInput, DiscoverMemberPartyRequest, DiscoverMemberPartyResponse, ErrorResponse,
     ExpireConfirmationRequest, ExternalPartiesResponse, ExternalPartyInfo, GovernanceState,
     GovernanceStateResponse, GovernanceType, GrantRightsRequest, GrantRightsResponse,
     InstrumentAllowance, InstrumentId, InstrumentIdentifier, InstrumentInfo, InstrumentsResponse,
@@ -727,6 +727,11 @@ pub enum ProposalType {
     AcceptMintRequest {
         mint_request_cid: String,
         instrument_configuration_cid: String,
+        /// Credential contract ids proving the mint holder meets the
+        /// instrument's issuer requirements. Empty for instruments without
+        /// issuer requirements.
+        #[serde(default)]
+        issuer_credential_cids: Vec<String>,
         description: String,
     },
     /// Accept a holder-initiated `BurnRequest` via `BurnRequest_Accept`. The
@@ -735,6 +740,11 @@ pub enum ProposalType {
     AcceptBurnRequest {
         burn_request_cid: String,
         instrument_configuration_cid: String,
+        /// Credential contract ids proving the burn holder meets the
+        /// instrument's issuer requirements. Empty for instruments without
+        /// issuer requirements.
+        #[serde(default)]
+        issuer_credential_cids: Vec<String>,
         description: String,
     },
 }

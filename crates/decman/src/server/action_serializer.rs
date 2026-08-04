@@ -1436,6 +1436,7 @@ pub fn build_proposal_create_args(
         ProposalType::AcceptMintRequest {
             mint_request_cid,
             instrument_configuration_cid,
+            issuer_credential_cids,
             description,
         } => (
             ProposalPackage::GovernanceUtilityOnboarding,
@@ -1451,7 +1452,15 @@ pub fn build_proposal_create_args(
                         "instrumentConfigurationCid",
                         make_contract_id(instrument_configuration_cid),
                     ),
-                    field("issuerCredentialCids", make_list(vec![])),
+                    field(
+                        "issuerCredentialCids",
+                        make_list(
+                            issuer_credential_cids
+                                .iter()
+                                .map(|cid| make_contract_id(cid))
+                                .collect(),
+                        ),
+                    ),
                     field("description", make_text(description)),
                     field("extraArgsMeta", make_empty_metadata()),
                 ],
@@ -1460,6 +1469,7 @@ pub fn build_proposal_create_args(
         ProposalType::AcceptBurnRequest {
             burn_request_cid,
             instrument_configuration_cid,
+            issuer_credential_cids,
             description,
         } => (
             ProposalPackage::GovernanceUtilityOnboarding,
@@ -1475,7 +1485,15 @@ pub fn build_proposal_create_args(
                         "instrumentConfigurationCid",
                         make_contract_id(instrument_configuration_cid),
                     ),
-                    field("issuerCredentialCids", make_list(vec![])),
+                    field(
+                        "issuerCredentialCids",
+                        make_list(
+                            issuer_credential_cids
+                                .iter()
+                                .map(|cid| make_contract_id(cid))
+                                .collect(),
+                        ),
+                    ),
                     field("description", make_text(description)),
                     field("extraArgsMeta", make_empty_metadata()),
                 ],
@@ -2711,6 +2729,7 @@ mod tests {
                 proposal: ProposalType::AcceptMintRequest {
                     mint_request_cid: "mrc".to_string(),
                     instrument_configuration_cid: "icc".to_string(),
+                    issuer_credential_cids: vec!["cred-1".to_string(), "cred-2".to_string()],
                     description: "accept mint".to_string(),
                 },
                 package: ProposalPackage::GovernanceUtilityOnboarding,
@@ -2730,6 +2749,7 @@ mod tests {
                 proposal: ProposalType::AcceptBurnRequest {
                     burn_request_cid: "brc".to_string(),
                     instrument_configuration_cid: "icc".to_string(),
+                    issuer_credential_cids: vec!["cred-1".to_string()],
                     description: "accept burn".to_string(),
                 },
                 package: ProposalPackage::GovernanceUtilityOnboarding,
