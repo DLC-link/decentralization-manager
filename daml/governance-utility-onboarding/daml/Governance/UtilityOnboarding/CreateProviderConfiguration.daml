@@ -1,0 +1,42 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Granular onboarding action: create the provider decparty's
+-- ProviderConfiguration with credential requirements for registrars and
+-- holders. Executed once by the provider decparty at platform setup.
+module Governance.UtilityOnboarding.CreateProviderConfiguration where
+
+import Utility.Credential.V0.Credential (PartyCredentialRequirement)
+import Utility.Registry.App.V0.Service.Provider
+  (ProviderService, ProviderService_CreateProviderConfiguration(..))
+
+import Governance.Action
+
+template CreateProviderConfiguration
+  with
+    governanceParty : Party
+      -- ^ The provider decparty. Must equal the ProviderService's provider.
+    proposer : Party
+    providerServiceCid : ContractId ProviderService
+    registrarRequirements : [PartyCredentialRequirement]
+    holderRequirements : [PartyCredentialRequirement]
+  where
+    signatory proposer
+    observer governanceParty
+
+    interface instance GovernableAction for CreateProviderConfiguration where
+      view = GovernableActionView with
+        governanceParty
+        proposer
+        actionLabel = "CreateProviderConfiguration"
+        description = "Create ProviderConfiguration ("
+          <> show (length registrarRequirements) <> " registrar requirements, "
+          <> show (length holderRequirements) <> " holder requirements)"
+
+      executeImpl = do
+        -- The choice controller is the provider, so a ProviderService whose
+        -- provider is not the governance party fails on authorization.
+        _ <- exercise providerServiceCid ProviderService_CreateProviderConfiguration with
+          registrarRequirements
+          holderRequirements
+        pure ()
