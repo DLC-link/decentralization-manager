@@ -4,10 +4,26 @@
 -- | Shared helpers for the utility onboarding governance actions.
 module Governance.UtilityOnboarding.Utils where
 
+import DA.Date (Month(Jan), date)
 import DA.Set qualified as Set
+import DA.Time (convertRelTimeToMicroseconds, subTime, time)
 
 import Utility.Credential.V0.Credential
   (Claim(..), Credential(..), PartyCredentialRequirement(..))
+
+-- | Render a governance-minted credential id:
+-- {roleTag}/{subject}/{timestamp}-{index}. The timestamp is the minting
+-- transaction's ledger time in seconds since epoch: onboarding actions are
+-- low-frequency, so second resolution keeps ids distinct across
+-- transactions in practice. The index separates credentials minted for the
+-- same subject within one transaction.
+mkCredentialId : Text -> Party -> Time -> Int -> Text
+mkCredentialId roleTag subject now index =
+  roleTag <> "/" <> partyToText subject <> "/"
+    <> show (convertRelTimeToMicroseconds (subTime now epoch) / 1000000)
+    <> "-" <> show index
+  where
+    epoch = time (date 1970 Jan 1) 0 0 0
 
 -- | Mint the credentials that make `subject` meet every requirement the
 -- governance party can self-issue. Requirements from other issuers are
@@ -34,6 +50,7 @@ mintCredentialsMeetingRequirements
     -- ^ Full requirement list. Filtered internally.
   -> Update [ContractId Credential]
 mintCredentialsMeetingRequirements governanceParty subject roleTag requirements = do
+  now <- getTime
   let selfIssuable = filter (\requirement -> requirement.issuer == governanceParty) requirements
       mkClaim (property, value) = Claim with
         subject = partyToText subject
@@ -47,7 +64,7 @@ mintCredentialsMeetingRequirements governanceParty subject roleTag requirements 
     create Credential with
       issuer = governanceParty
       holder = governanceParty
-      id = roleTag <> "/" <> partyToText subject <> "/" <> show index
+      id = mkCredentialId roleTag subject now index
       description = "Governance-minted " <> roleTag <> " for " <> partyToText subject
       validFrom = None
       validUntil = None

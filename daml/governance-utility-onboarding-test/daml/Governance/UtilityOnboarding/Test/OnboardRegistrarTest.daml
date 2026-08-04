@@ -17,6 +17,7 @@ import Governance.Action (GovernableAction)
 
 import Governance.UtilityOnboarding.DualDecpartyTestUtils
 import Governance.UtilityOnboarding.OnboardRegistrar
+import Governance.UtilityOnboarding.Utils (mkCredentialId)
 
 import TestHarness
 
@@ -66,6 +67,8 @@ then_registrar_onboarded fx _ = do
   remainingRequests <- query @RegistrarServiceRequest parties.registrarGov
   -- Registrar visibility of the minted credential proves the observer wiring.
   credentials <- query @Credential parties.registrarGov
+  -- Script time is static, so getTime here equals the mint-time timestamp.
+  now <- getTime
   let serviceChecks = case services of
         [(_, service)] ->
           shouldBe "service.registrar" parties.registrarGov service.registrar <>
@@ -77,7 +80,7 @@ then_registrar_onboarded fx _ = do
           shouldBe "credential.issuer" parties.providerGov credential.issuer <>
           shouldBe "credential.holder" parties.providerGov credential.holder <>
           shouldBe "credential.id"
-            ("registrar-credential/" <> partyToText parties.registrarGov <> "/0")
+            (mkCredentialId "registrar-credential" parties.registrarGov now 0)
             credential.id <>
           shouldBe "credential.claims"
             [Claim with
