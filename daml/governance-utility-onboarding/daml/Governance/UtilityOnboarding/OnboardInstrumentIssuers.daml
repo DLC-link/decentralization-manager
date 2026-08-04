@@ -21,6 +21,9 @@ template OnboardInstrumentIssuers
   where
     signatory proposer
     observer governanceParty
+    -- An onboard action for zero issuers does no work; reject it at
+    -- creation rather than record a no-op governance result.
+    ensure not (null instrumentIssuers)
 
     interface instance GovernableAction for OnboardInstrumentIssuers where
       view = GovernableActionView with
