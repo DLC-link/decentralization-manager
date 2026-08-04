@@ -15,4 +15,10 @@ ignore = [
   # by ratatui (the decman-cli TUI). Trivial compile-time proc-macro, no
   # runtime/security surface. Mirrors the ignore in deny.toml.
   "RUSTSEC-2024-0436",
+  # rkyv 0.7 appears in the lockfile only through rust_decimal's disabled
+  # optional "rkyv" feature. It is never compiled into any artifact
+  # (`cargo tree -i rkyv` resolves to nothing), so the archive-validation
+  # out-of-bounds read is unreachable. cargo-deny agrees (graph-based, does
+  # not flag it).
+  "RUSTSEC-2026-0235",
 ]
