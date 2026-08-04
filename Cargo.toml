@@ -11,6 +11,8 @@ actix-cors = { version = "0.7" }
 actix-web = { version = "4" }
 aes-gcm = { version = "0.11" }
 anyhow = { version = "1.0.98" }
+aws-config = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio", "rustls"] }
+aws-sdk-kms = { version = "1", default-features = false, features = ["rt-tokio", "rustls"] }
 async-trait = { version = "0.1" }
 base64 = { version = "0.23" }
 bytes = { version = "1.11.1" }
@@ -29,6 +31,7 @@ hyper = { version = "0.14", features = ["full"] }
 hyper-noise = { version = "0.0.3" }
 jsonwebtoken = { version = "11.0", features = ["aws_lc_rs"] }
 mime_guess = { version = "2.0" }
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pkcs8", "std"] }
 prost = { version = "0.14.1" }
 prost-types = { version = "0.14.1" }
 rand = { version = "0.10" }

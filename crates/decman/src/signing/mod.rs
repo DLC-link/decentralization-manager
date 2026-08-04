@@ -19,6 +19,7 @@
 //! submissions, persisting the signature bundle) is provider-independent and
 //! stays in `workflow::contracts::steps::sign`.
 
+pub mod aws_kms;
 mod error;
 mod signer;
 pub mod vault_export;
