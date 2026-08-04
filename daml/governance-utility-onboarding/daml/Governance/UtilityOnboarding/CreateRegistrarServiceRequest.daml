@@ -1,0 +1,43 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Granular onboarding action: the registrar decparty requests registrar
+-- service from a provider. The request's only signatory is the registrar,
+-- so governance authority alone creates it; the provider accepts later via
+-- OnboardRegistrar on its own decparty.
+module Governance.UtilityOnboarding.CreateRegistrarServiceRequest where
+
+import Utility.Registry.App.V0.Service.Registrar (RegistrarServiceRequest(..))
+
+import Governance.Action
+
+template CreateRegistrarServiceRequest
+  with
+    governanceParty : Party
+      -- ^ The registrar decparty. Becomes the request's registrar.
+    proposer : Party
+    operator : Party
+    provider : Party
+    createTransferRule : Bool
+    createAllocationFactory : Bool
+  where
+    signatory proposer
+    observer governanceParty
+
+    interface instance GovernableAction for CreateRegistrarServiceRequest where
+      view = GovernableActionView with
+        governanceParty
+        proposer
+        actionLabel = "CreateRegistrarServiceRequest"
+        description = "Request registrar service (operator " <> show operator
+          <> ", provider " <> show provider <> ")"
+
+      executeImpl = do
+        -- The SDK treats None like Some False for both flags.
+        _ <- create RegistrarServiceRequest with
+          operator
+          provider
+          registrar = governanceParty
+          createTransferRule = if createTransferRule then Some True else None
+          createAllocationFactory = if createAllocationFactory then Some True else None
+        pure ()

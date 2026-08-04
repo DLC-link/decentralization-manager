@@ -14,12 +14,14 @@ import Daml.Script
 import Utility.Credential.V0.Credential (PartyCredentialRequirement(..))
 import Utility.Registry.App.V0.Configuration.Provider (ProviderConfiguration)
 import Utility.Registry.App.V0.Service.Provider (ProviderService(..))
+import Utility.Registry.App.V0.Service.Registrar (RegistrarServiceRequest)
 
 import Governance.Action (GovernableAction)
 import Governance.ExecutionResult
 import Governance.Rules
 
 import Governance.UtilityOnboarding.CreateProviderConfiguration
+import Governance.UtilityOnboarding.CreateRegistrarServiceRequest
 
 data DualDecpartyParties = DualDecpartyParties
   with
@@ -178,3 +180,19 @@ setupProviderConfiguration f providerServiceCid registrarRequirements holderRequ
   _ <- confirmAndExecuteAs f.parties f.providerStack proposalInterfaceCid
   [(configurationCid, _)] <- query @ProviderConfiguration f.parties.providerGov
   pure configurationCid
+
+-- | Run CreateRegistrarServiceRequest through registrar governance with both
+-- optional artifacts enabled, returning the single resulting request cid.
+setupRegistrarServiceRequest : DualGovFixture -> Script (ContractId RegistrarServiceRequest)
+setupRegistrarServiceRequest f = do
+  proposalCid <- submit f.registrarStack.member1 $ createCmd CreateRegistrarServiceRequest with
+    governanceParty = f.parties.registrarGov
+    proposer = f.registrarStack.member1
+    operator = f.parties.operator
+    provider = f.parties.providerGov
+    createTransferRule = True
+    createAllocationFactory = True
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  _ <- confirmAndExecuteAs f.parties f.registrarStack proposalInterfaceCid
+  [(requestCid, _)] <- query @RegistrarServiceRequest f.parties.registrarGov
+  pure requestCid
