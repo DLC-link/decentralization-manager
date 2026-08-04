@@ -62,38 +62,37 @@ impl TransactionSigner for AwsKmsSigner {
         key: &SigningKeyContext,
     ) -> Result<Vec<Signature>, SigningError> {
         let kms_key_id = key.kms_key_id.as_deref().ok_or_else(|| {
-            SigningError::Other(anyhow::anyhow!(
+            anyhow::anyhow!(
                 "AwsKmsSigner selected for key {fingerprint} but the key carries no kms_key_id",
                 fingerprint = key.fingerprint
-            ))
+            )
         })?;
 
+        // Only EC-P256 is supported: it is the spec KMS-backed nodes generate
+        // (the KMS provider default), and the only one whose Canton signature
+        // rules and local verification this backend implements. Other specs
+        // are rejected here rather than signed on unverified assumptions.
         let (kms_algorithm, canton_algorithm) = algorithms_for(key.public_key.key_spec())
             .ok_or_else(|| {
-                SigningError::Other(anyhow::anyhow!(
+                anyhow::anyhow!(
                     "AwsKmsSigner does not support key spec {spec:?} \
-                     (key {fingerprint}); AWS KMS signs EC-P256 / EC-P384 only",
+                     (key {fingerprint}); only EC-P256 is supported",
                     spec = key.public_key.key_spec(),
                     fingerprint = key.fingerprint
-                ))
+                )
             })?;
 
         // Local verification key, parsed from the X.509 SPKI public key Canton
         // returned at generation time. Verifying each signature locally before
         // submission catches a wrong key or wrong signing semantics here,
         // instead of as an opaque rejection at ExecuteSubmission.
-        // P-384 keys skip the local check (`p256` covers only P-256).
-        let verifying_key = match key.public_key.key_spec() {
-            SigningKeySpec::EcP256 => Some(
-                VerifyingKey::from_public_key_der(&key.public_key.public_key).map_err(|e| {
-                    SigningError::Other(anyhow::anyhow!(
-                        "Failed to parse P-256 public key for {fingerprint}: {e}",
-                        fingerprint = key.fingerprint
-                    ))
-                })?,
-            ),
-            _ => None,
-        };
+        let verifying_key =
+            VerifyingKey::from_public_key_der(&key.public_key.public_key).map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to parse P-256 public key for {fingerprint}: {e}",
+                    fingerprint = key.fingerprint
+                )
+            })?;
 
         tracing::info!(
             "Signing {count} transaction hashes via AWS KMS key {kms_key_id}...",
@@ -119,9 +118,7 @@ impl TransactionSigner for AwsKmsSigner {
             let signature_der = output
                 .signature()
                 .ok_or_else(|| {
-                    SigningError::Other(anyhow::anyhow!(
-                        "AWS KMS Sign returned no signature for key {kms_key_id}"
-                    ))
+                    anyhow::anyhow!("AWS KMS Sign returned no signature for key {kms_key_id}")
                 })?
                 .as_ref()
                 .to_vec();
@@ -129,23 +126,21 @@ impl TransactionSigner for AwsKmsSigner {
             // Verify locally before submission. A signature that fails here is
             // guaranteed to be rejected at ExecuteSubmission, so fail loudly
             // with context instead of producing an opaque ledger error.
-            if let Some(vk) = &verifying_key {
-                let der_sig = DerSignature::from_bytes(&signature_der).map_err(|e| {
-                    SigningError::Other(anyhow::anyhow!(
-                        "AWS KMS returned a signature that is not valid DER: {e}"
-                    ))
-                })?;
-                vk.verify(hash.as_bytes(), &der_sig).map_err(|e| {
-                    SigningError::Other(anyhow::anyhow!(
+            let der_sig = DerSignature::from_bytes(&signature_der).map_err(|e| {
+                anyhow::anyhow!("AWS KMS returned a signature that is not valid DER: {e}")
+            })?;
+            verifying_key
+                .verify(hash.as_bytes(), &der_sig)
+                .map_err(|e| {
+                    anyhow::anyhow!(
                         "Signature {index} from KMS key {kms_key_id} failed local \
                          verification against the registered public key \
                          {fingerprint}: {e}",
                         index = idx + 1,
                         fingerprint = key.fingerprint
-                    ))
+                    )
                 })?;
-                tracing::info!("Signature {index} verified locally", index = idx + 1);
-            }
+            tracing::info!("Signature {index} verified locally", index = idx + 1);
 
             signatures.push(Signature {
                 format: SignatureFormat::Der as i32,
@@ -163,17 +158,13 @@ impl TransactionSigner for AwsKmsSigner {
 
 /// Map a Canton signing key spec to the AWS KMS signing algorithm and the
 /// Canton algorithm spec recorded on the produced signature. Returns `None`
-/// for specs AWS KMS cannot sign (Ed25519 is verify-only on KMS nodes;
-/// secp256k1 party keys do not occur in this deployment).
+/// for every spec except EC-P256 — the spec KMS-backed nodes generate, and the
+/// only one this backend's Canton format rules and local verification cover.
 fn algorithms_for(key_spec: SigningKeySpec) -> Option<(KmsSigningAlgorithm, SigningAlgorithmSpec)> {
     match key_spec {
         SigningKeySpec::EcP256 => Some((
             KmsSigningAlgorithm::EcdsaSha256,
             SigningAlgorithmSpec::EcDsaSha256,
-        )),
-        SigningKeySpec::EcP384 => Some((
-            KmsSigningAlgorithm::EcdsaSha384,
-            SigningAlgorithmSpec::EcDsaSha384,
         )),
         _ => None,
     }
@@ -184,22 +175,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn p256_maps_to_ecdsa_sha256_der_pipeline() {
+    fn p256_maps_to_ecdsa_sha256() {
         let (kms, canton) = algorithms_for(SigningKeySpec::EcP256).unwrap();
         assert_eq!(kms, KmsSigningAlgorithm::EcdsaSha256);
         assert_eq!(canton, SigningAlgorithmSpec::EcDsaSha256);
     }
 
     #[test]
-    fn p384_maps_to_ecdsa_sha384() {
-        let (kms, canton) = algorithms_for(SigningKeySpec::EcP384).unwrap();
-        assert_eq!(kms, KmsSigningAlgorithm::EcdsaSha384);
-        assert_eq!(canton, SigningAlgorithmSpec::EcDsaSha384);
-    }
-
-    #[test]
-    fn ed25519_and_secp256k1_are_unsupported() {
+    fn other_specs_are_unsupported() {
         assert!(algorithms_for(SigningKeySpec::EcCurve25519).is_none());
+        assert!(algorithms_for(SigningKeySpec::EcP384).is_none());
         assert!(algorithms_for(SigningKeySpec::EcSecp256k1).is_none());
         assert!(algorithms_for(SigningKeySpec::Unspecified).is_none());
     }

@@ -28,8 +28,9 @@ the participant (`VaultService.ListMyKeys` reports `kms_key_id`).
 
 2. **`kms:Sign` on the party's Daml keys.** The keys are created by the
    participant under its own KMS role, so decman's role gets no access by
-   default. Add a statement to the key policy of each party Daml key, or grant
-   it via an IAM policy on decman's role:
+   default. Edit the **key policy** of each party Daml key — this is the
+   reliable route, because it works regardless of how the key policy handles
+   IAM delegation:
 
    ```json
    {
@@ -41,9 +42,35 @@ the participant (`VaultService.ListMyKeys` reports `kms_key_id`).
    }
    ```
 
-   To find the key: run a workflow once and read the key id from the error, or
-   list the participant's keys — the party Daml key is the one whose name is
-   `<party-prefix>-daml-transactions` and whose metadata carries `kmsKeyId`.
+   In a key policy, `"Resource": "*"` means "this key" and is safe.
+
+   An **IAM policy** on decman's role works only when the key policy delegates
+   to IAM. If you take that route, the statement has no `Principal`, and the
+   `Resource` must name the specific key ARNs. Never use `"Resource": "*"` in
+   an IAM policy — that grants signing with **every** key in the account,
+   including the participant's namespace key:
+
+   ```json
+   {
+     "Sid": "AllowDecmanPartyKeySigning",
+     "Effect": "Allow",
+     "Action": "kms:Sign",
+     "Resource": "arn:aws:kms:<region>:<account>:key/<party-daml-key-id>"
+   }
+   ```
+
+   To find the key id, list the participant's keys over the Admin API — the
+   party Daml key is named `<party-prefix>-daml-transactions` and its metadata
+   carries `kmsKeyId`:
+
+   ```bash
+   grpcurl -plaintext -d '{"filters":{"name":"<party-prefix>-daml-transactions"}}' \
+     <admin-host>:<admin-port> \
+     com.digitalasset.canton.crypto.admin.v30.VaultService/ListMyKeys
+   ```
+
+   Alternatively, run the contracts workflow once and read the key id from the
+   `AccessDeniedException` error, which names the key ARN.
 
 3. Nothing else. Key discovery, algorithm selection (EC-P256 → ECDSA-SHA-256),
    signature format (DER), and local pre-submission verification are automatic.

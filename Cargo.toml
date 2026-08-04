@@ -11,9 +11,9 @@ actix-cors = { version = "0.7" }
 actix-web = { version = "4" }
 aes-gcm = { version = "0.11" }
 anyhow = { version = "1.0.98" }
+async-trait = { version = "0.1" }
 aws-config = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio", "default-https-client"] }
 aws-sdk-kms = { version = "1", default-features = false, features = ["rt-tokio", "default-https-client"] }
-async-trait = { version = "0.1" }
 base64 = { version = "0.23" }
 bytes = { version = "1.11.1" }
 chrono = { version = "0.4", default-features = false, features = [
