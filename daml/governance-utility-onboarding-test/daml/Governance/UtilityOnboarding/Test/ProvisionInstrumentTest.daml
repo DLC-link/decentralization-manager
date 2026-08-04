@@ -1,0 +1,173 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+module Governance.UtilityOnboarding.Test.ProvisionInstrumentTest where
+
+import Daml.Script
+
+import Utility.Credential.V0.Credential (Claim(..), Credential(..), PartyCredentialRequirement(..))
+import Utility.Registry.Holding.V0.Types (InstrumentIdentifier(..))
+import Utility.Registry.V0.Configuration.Instrument (InstrumentConfiguration(..))
+
+import Governance.Action (GovernableAction)
+
+import Governance.UtilityOnboarding.DualDecpartyTestUtils
+import Governance.UtilityOnboarding.ProvisionInstrument
+
+import TestHarness
+
+data Fixture = Fixture
+  with
+    f : DualGovFixture
+    onboarded : OnboardedRegistrarArtifacts
+  deriving (Eq, Show)
+
+given_onboarded_registrar : Script Fixture
+given_onboarded_registrar = do
+  f <- givenDualGovernance
+  onboarded <- setupOnboardedRegistrar f [defaultRegistrarRequirement f.parties]
+  pure Fixture with ..
+
+provisionProposal
+  : Fixture -> [PartyCredentialRequirement] -> [Party] -> Script (ContractId GovernableAction)
+provisionProposal fx issuerRequirements initialInstrumentIssuers = do
+  proposalCid <- submit fx.f.registrarStack.member1 $ createCmd ProvisionInstrument with
+    governanceParty = fx.f.parties.registrarGov
+    proposer = fx.f.registrarStack.member1
+    registrarServiceCid = fx.onboarded.registrarServiceCid
+    instrumentIdText = "LAUNCH-TOKEN"
+    additionalIdentifiers = []
+    issuerRequirements
+    holderRequirements = []
+    initialInstrumentIssuers
+  pure (toInterfaceContractId proposalCid)
+
+-- * Happy path: configuration created, initial issuer credentialed.
+
+when_provision_with_initial_issuer : Fixture -> Script ()
+when_provision_with_initial_issuer fx = do
+  proposalCid <- provisionProposal fx
+    [defaultIssuerRequirement fx.f.parties] [fx.f.parties.issuer1]
+  _ <- confirmAndExecuteAs fx.f.parties fx.f.registrarStack proposalCid
+  pure ()
+
+then_configuration_and_credential_created : Fixture -> () -> Script Failures
+then_configuration_and_credential_created fx _ = do
+  let parties = fx.f.parties
+  configurations <- query @InstrumentConfiguration parties.registrarGov
+  issuerCredentials <- query @Credential parties.issuer1
+  let configurationChecks = case configurations of
+        [(_, configuration)] ->
+          shouldBe "issuerRequirements"
+            [defaultIssuerRequirement parties] configuration.issuerRequirements <>
+          shouldBe "registrar" parties.registrarGov configuration.registrar <>
+          shouldBe "defaultIdentifier.id" "LAUNCH-TOKEN" configuration.defaultIdentifier.id
+        _ -> shouldBe "InstrumentConfiguration count" 1 (length configurations)
+      credentialChecks = case issuerCredentials of
+        [(_, credential)] ->
+          shouldBe "credential.issuer" parties.registrarGov credential.issuer <>
+          shouldBe "credential.holder" parties.registrarGov credential.holder <>
+          shouldBe "credential.id"
+            ("instrument-issuer-credential/" <> partyToText parties.issuer1 <> "/0")
+            credential.id <>
+          shouldBe "credential.claims"
+            [Claim with
+               subject = partyToText parties.issuer1
+               property = "role"
+               value = "instrument-issuer"]
+            credential.claims
+        _ -> shouldBe "Credential count seen by issuer1" 1 (length issuerCredentials)
+  pure $ configurationChecks <> credentialChecks
+
+test_when_provision_then_configuration_and_credential = script do
+  run Test with
+    given = given_onboarded_registrar
+    when = when_provision_with_initial_issuer
+    then_ = then_configuration_and_credential_created
+
+-- * No initial issuers: configuration only.
+
+when_provision_without_issuers : Fixture -> Script ()
+when_provision_without_issuers fx = do
+  proposalCid <- provisionProposal fx [defaultIssuerRequirement fx.f.parties] []
+  _ <- confirmAndExecuteAs fx.f.parties fx.f.registrarStack proposalCid
+  pure ()
+
+then_no_issuer_credentials : Fixture -> () -> Script Failures
+then_no_issuer_credentials fx _ = do
+  configurations <- query @InstrumentConfiguration fx.f.parties.registrarGov
+  credentials1 <- query @Credential fx.f.parties.issuer1
+  credentials2 <- query @Credential fx.f.parties.issuer2
+  pure $
+    shouldBe "InstrumentConfiguration count" 1 (length configurations) <>
+    shouldBe "issuer1 credentials" 0 (length credentials1) <>
+    shouldBe "issuer2 credentials" 0 (length credentials2)
+
+test_when_no_initial_issuers_then_no_credentials = script do
+  run Test with
+    given = given_onboarded_registrar
+    when = when_provision_without_issuers
+    then_ = then_no_issuer_credentials
+
+-- * Mixed requirements: only the self-issuable one is minted.
+
+when_provision_mixed_requirements : Fixture -> Script ()
+when_provision_mixed_requirements fx = do
+  let externalRequirement = PartyCredentialRequirement with
+        issuer = fx.f.parties.outsider
+        requiredClaims = [("audit", "done")]
+  proposalCid <- provisionProposal fx
+    [defaultIssuerRequirement fx.f.parties, externalRequirement] [fx.f.parties.issuer1]
+  _ <- confirmAndExecuteAs fx.f.parties fx.f.registrarStack proposalCid
+  pure ()
+
+then_only_self_issuable_minted : Fixture -> () -> Script Failures
+then_only_self_issuable_minted fx _ = do
+  credentials <- query @Credential fx.f.parties.issuer1
+  case credentials of
+    [(_, credential)] -> pure $
+      shouldBe "credential.issuer" fx.f.parties.registrarGov credential.issuer
+    _ -> pure $ shouldBe "Credential count for issuer1" 1 (length credentials)
+
+test_when_mixed_requirements_then_only_self_issuable_minted = script do
+  run Test with
+    given = given_onboarded_registrar
+    when = when_provision_mixed_requirements
+    then_ = then_only_self_issuable_minted
+
+-- * Minting guard: a self-issuable requirement with no claims is refused.
+
+when_provision_claimless_requirement : Fixture -> Script ()
+when_provision_claimless_requirement fx = do
+  let claimlessRequirement = PartyCredentialRequirement with
+        issuer = fx.f.parties.registrarGov
+        requiredClaims = []
+  proposalCid <- provisionProposal fx [claimlessRequirement] [fx.f.parties.issuer1]
+  confirmThenExecuteMustFail fx.f.parties fx.f.registrarStack proposalCid
+
+then_nothing_provisioned : Fixture -> () -> Script Failures
+then_nothing_provisioned fx _ = do
+  configurations <- query @InstrumentConfiguration fx.f.parties.registrarGov
+  pure $ shouldBe "InstrumentConfiguration count" 0 (length configurations)
+
+test_when_claimless_self_requirement_then_execute_fails = script do
+  run Test with
+    given = given_onboarded_registrar
+    when = when_provision_claimless_requirement
+    then_ = then_nothing_provisioned
+
+-- * Non-member confirm is rejected.
+
+when_outsider_confirms : Fixture -> Script ()
+when_outsider_confirms fx = do
+  proposalCid <- provisionProposal fx [] []
+  outsiderCannotConfirm fx.f.parties fx.f.registrarStack proposalCid
+
+then_nothing : Fixture -> () -> Script Failures
+then_nothing _ _ = pure []
+
+test_when_outsider_confirms_then_rejected = script do
+  run Test with
+    given = given_onboarded_registrar
+    when = when_outsider_confirms
+    then_ = then_nothing
