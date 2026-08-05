@@ -1679,6 +1679,15 @@ export const GovernanceSection = ({
           throw new Error(
             "Paid credential proposal forms are not implemented yet — use the Free direction or call the API directly.",
           );
+        // The registrar-onboarding proposal types ship backend-first; the
+        // selector offers no entry for them until their forms land.
+        case "create_registrar_service_request":
+        case "onboard_registrar":
+        case "onboard_instrument_issuers":
+        case "offboard_instrument_issuers":
+          throw new Error(
+            "Registrar onboarding proposal forms are not implemented yet — call the API directly.",
+          );
       }
 
       const request: ProposeActionRequest = {
