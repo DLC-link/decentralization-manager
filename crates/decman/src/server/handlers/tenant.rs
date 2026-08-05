@@ -229,7 +229,8 @@ pub async fn tenant_onboard(
     // itself; no host relays to another. Canton keeps the topology a proposal until
     // every host has authorized it, and re-submitting an identical transaction is a
     // no-op, so a wallet retry converges.
-    if let Err(e) = allocate_party(&data.config, &bundle).await {
+    let ledger_token = node_ledger_token(&data).await;
+    if let Err(e) = allocate_party(&data.config, &bundle, ledger_token).await {
         tracing::error!("tenant onboard: allocate on this participant failed: {e:#}");
         return HttpResponse::InternalServerError().json(ErrorResponse {
             error: format!("Failed to allocate external party on this host: {e}"),
