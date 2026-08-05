@@ -252,9 +252,12 @@ pub async fn allocate_party(
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
     let store = topology::synchronizer_store_id(&synchronizer_id);
 
-    // Each transaction carries the party's signature over its own hash. `proposal`
-    // stays false: the signature fully authorizes the party's side, and the node
-    // adds its participant authorization next.
+    // Each transaction carries the party's signature over its own hash, and is
+    // submitted as a proposal: this host can only add its own participant
+    // authorization, so until every hosting participant has submitted, the
+    // signatures are valid but insufficient. Canton accumulates them and promotes
+    // the mapping once the last host signs — the same convergence the dec-party
+    // workflows rely on.
     let signed: Vec<SignedTopologyTransaction> = bundle
         .topology_transactions
         .iter()
@@ -268,7 +271,7 @@ pub async fn allocate_party(
                 signing_algorithm_spec: SigningAlgorithmSpec::Ed25519 as i32,
                 signature_delegation: None,
             }],
-            proposal: false,
+            proposal: true,
             multi_transaction_signatures: vec![],
         })
         .collect();

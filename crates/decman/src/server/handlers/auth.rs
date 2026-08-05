@@ -2,7 +2,7 @@ use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 use base64::Engine;
 use canton_proto_rs::com::daml::ledger::api::v2::admin::{
     GrantUserRightsRequest, ListUserRightsRequest, Right,
-    right::{CanActAs, CanReadAs, Kind},
+    right::{CanActAs, CanExecuteAsAnyParty, CanReadAs, CanReadAsAnyParty, Kind},
 };
 use keycloak::login::{ClientCredentialsParams, client_credentials, token_url};
 
@@ -649,6 +649,18 @@ async fn grant_user_rights(
         right_read_as(&member_party_id_str),
         right_act_as(&dec_party_id_str),
         right_read_as(&dec_party_id_str),
+        // Wallet-held external parties (`/v0/tenant/*`) exist only as topology, so
+        // they have no credential of their own and this user relays for them. Canton
+        // scopes those calls to the caller's rights: `readAs` covers the ACS read and
+        // prepare-submission, `executeAs` covers executing a submission the wallet
+        // signed. Granted as any-party so onboarding a new external party needs no
+        // further grant.
+        //
+        // Deliberately NOT `CanActAsAnyParty`: the node must be able to relay a
+        // wallet-signed submission and nothing more. Originating transactions as the
+        // party stays impossible without the party's key.
+        right_read_as_any_party(),
+        right_execute_as_any_party(),
     ];
 
     let response = client
@@ -681,6 +693,23 @@ fn right_read_as(party: &str) -> Right {
         kind: Some(Kind::CanReadAs(CanReadAs {
             party: party.to_string(),
         })),
+    }
+}
+
+/// Read any party's contracts — needed for the tenant API's ACS read and
+/// prepare-submission on wallet-held external parties, which have no credential of
+/// their own.
+fn right_read_as_any_party() -> Right {
+    Right {
+        kind: Some(Kind::CanReadAsAnyParty(CanReadAsAnyParty {})),
+    }
+}
+
+/// Execute a submission on any party's behalf. This authorizes *relaying* a
+/// transaction the party already signed; it does not permit acting as the party.
+fn right_execute_as_any_party() -> Right {
+    Right {
+        kind: Some(Kind::CanExecuteAsAnyParty(CanExecuteAsAnyParty {})),
     }
 }
 

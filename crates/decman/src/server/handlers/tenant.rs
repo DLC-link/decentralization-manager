@@ -36,9 +36,10 @@ use uuid::Uuid;
 use crate::{
     canton_id::{CantonId, validate_party_id_prefix},
     config::NodeConfig,
+    db::schema::SchemaRead,
     error::Result,
     server::{
-        AppState,
+        AppState, WorkflowAuth,
         middleware::require_tenant_api_key,
         types::{
             ErrorResponse, TenantAcsResponse, TenantContract, TenantExecuteSubmissionRequest,
@@ -57,7 +58,7 @@ use crate::{
     },
 };
 
-use super::{governance::get_party_token, workflows::validate_confirmation_threshold};
+use super::workflows::validate_confirmation_threshold;
 
 // ============================================================================
 // Onboarding (wallet-driven)
@@ -346,7 +347,7 @@ pub async fn tenant_prepare_submission(
         })),
     };
 
-    let token = get_party_token(&data, &party_id).await;
+    let token = node_ledger_token(&data).await;
     let mut client = match utils::create_submission_client(&data.config, token).await {
         Ok(c) => c,
         Err(e) => {
@@ -467,7 +468,7 @@ pub async fn tenant_execute_submission(
         }],
     };
 
-    let token = get_party_token(&data, &party_id).await;
+    let token = node_ledger_token(&data).await;
     let mut client = match utils::create_submission_client(&data.config, token).await {
         Ok(c) => c,
         Err(e) => {
@@ -531,7 +532,7 @@ pub async fn tenant_acs(
         }
     };
 
-    let token = get_party_token(&data, &party_id).await;
+    let token = node_ledger_token(&data).await;
     match fetch_party_acs(&data.config, token, &party_id).await {
         Ok(contracts) => HttpResponse::Ok().json(TenantAcsResponse { contracts }),
         Err(e) => {
@@ -617,6 +618,43 @@ async fn fetch_party_acs(
 // ============================================================================
 // Helpers
 // ============================================================================
+
+/// The ledger token the tenant API's *transacting* half acts under.
+///
+/// Onboarding needs no ledger credential at all (it writes topology over the admin
+/// API), but reading a party's contracts and relaying its signed submissions are
+/// Ledger-API calls, and Canton scopes those to the caller's rights:
+///
+/// - `GetActiveContracts` and `PrepareSubmission` need `readAs` for the party
+/// - `ExecuteSubmission` needs `executeAs` for the party
+///
+/// A freshly onboarded external party has no credential of its own — it exists only
+/// as topology — so this is necessarily the node's own ledger user. For that user's
+/// token to carry the required rights, it needs `CanReadAsAnyParty` and
+/// `CanExecuteAsAnyParty`, granted once per node via `POST /auth/grant-rights`.
+/// Deliberately not `CanActAsAnyParty`: the node relays submissions the wallet
+/// signed and must not be able to originate them.
+///
+/// `None` when the node has no credential configured, which surfaces as an
+/// authentication error from Canton rather than a silent empty result.
+async fn node_ledger_token(data: &web::Data<AppState>) -> Option<String> {
+    let auth = data.auth.read().await;
+    let auth = auth.as_ref()?;
+
+    // Insecure mode mints one identity for everything, so no lookup is needed.
+    if let WorkflowAuth::Mock(registry) = auth {
+        return Some(registry.get_by_str("").await.get_token());
+    }
+
+    let mut credentials = data.db.get_all_party_credentials().await.ok()?;
+    // Deterministic pick, so a multi-party node always presents the same user.
+    credentials.sort_by_key(|c| c.dec_party_id.to_string());
+    let chosen = credentials.first()?;
+    auth.get_credentials(&chosen.dec_party_id)
+        .await
+        .ok()
+        .map(|c| c.token)
+}
 
 /// Base64-decode a raw Ed25519 public key into its fixed 32-byte array, or the
 /// 400 response to return.
