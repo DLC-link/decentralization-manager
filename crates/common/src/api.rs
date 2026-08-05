@@ -313,10 +313,14 @@ pub struct ExternalPartyInfo {
     pub party_id: String,
     /// The party's namespace fingerprint (the `{fingerprint}` half of the id).
     pub fingerprint: String,
-    /// Confirmation threshold from the mapping (the M in M-of-N).
+    /// How many of the hosting participants must confirm a transaction involving
+    /// this party (the M in M-of-N). Distinct from the party's *signing* threshold,
+    /// which for a wallet-held party is 1 — one key authorizes, M hosts confirm.
     pub threshold: u32,
-    /// Number of participants hosting the party (the N in M-of-N).
+    /// How many participants host the party (the N in M-of-N).
     pub host_count: u32,
+    /// When the hosting mapping became effective, RFC 3339.
+    pub created_at: Option<String>,
 }
 
 /// Response wrapper for `GET /external-parties`.

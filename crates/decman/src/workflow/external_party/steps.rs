@@ -464,8 +464,20 @@ pub async fn host_onboarding_status(
 pub struct HostedExternalParty {
     pub party_id: String,
     pub fingerprint: String,
+    /// How many of the hosting participants must confirm a transaction (the M).
     pub threshold: u32,
+    /// How many participants host the party (the N).
     pub host_count: u32,
+    /// When the mapping became effective, RFC 3339. `None` if Canton did not
+    /// report it.
+    pub created_at: Option<String>,
+}
+
+/// Render a protobuf timestamp as RFC 3339 (UTC), for display.
+fn timestamp_to_rfc3339(ts: &prost_types::Timestamp) -> String {
+    chrono::DateTime::from_timestamp(ts.seconds, ts.nanos.max(0) as u32)
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_default()
 }
 
 /// List the external parties this participant hosts with Confirmation permission,
@@ -511,6 +523,13 @@ pub async fn list_hosted_external_parties(config: &NodeConfig) -> Result<Vec<Hos
 
     let mut parties = Vec::new();
     for result in p2p.results {
+        // `valid_from` is when this mapping became effective — the party's creation
+        // time for a serial-1 mapping. Read before `item` is moved out.
+        let created_at = result
+            .context
+            .as_ref()
+            .and_then(|c| c.valid_from.as_ref())
+            .map(timestamp_to_rfc3339);
         let Some(P2pItem::V30(mapping)) = result.item else {
             continue;
         };
@@ -535,6 +554,7 @@ pub async fn list_hosted_external_parties(config: &NodeConfig) -> Result<Vec<Hos
             fingerprint,
             threshold: mapping.threshold,
             host_count: mapping.participants.len() as u32,
+            created_at,
         });
     }
     Ok(parties)
