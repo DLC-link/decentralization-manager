@@ -39,9 +39,10 @@ use super::{
         AcceptTransferDetails, ActionType, Claim, ContractInfo, ContractWithBlob, CredentialInfo,
         CredentialOfferInfo, DomainGovernanceAction, GovernanceAction, GovernanceConfirmation,
         GovernanceState, HoldingInfo, InstrumentInfo, PartyMetadata, PendingAction,
-        ProviderServiceInfo, RegistrarServiceInfo, ServiceRequestDetails, TokenRequestInfo,
-        TransferFactoryInfo, TransferInstructionInfo, TransferInstructionStatus,
-        TransferProposalDetails, UserServiceInfo, VaultInfo,
+        ProviderConfigurationInfo, ProviderServiceInfo, RegistrarServiceInfo,
+        RegistrarServiceRequestInfo, ServiceRequestDetails, TokenRequestInfo, TransferFactoryInfo,
+        TransferInstructionInfo, TransferInstructionStatus, TransferProposalDetails,
+        UserServiceInfo, VaultInfo,
     },
 };
 
@@ -218,6 +219,24 @@ fn registrar_service_template(packages: &PackageConfig) -> Option<TemplateId> {
         package_id: pkg.clone(),
         module_name: "Utility.Registry.App.V0.Service.Registrar",
         entity_name: "RegistrarService",
+    })
+}
+
+/// RegistrarServiceRequest template identifier
+fn registrar_service_request_template(packages: &PackageConfig) -> Option<TemplateId> {
+    packages.utility_registry.as_ref().map(|pkg| TemplateId {
+        package_id: pkg.clone(),
+        module_name: "Utility.Registry.App.V0.Service.Registrar",
+        entity_name: "RegistrarServiceRequest",
+    })
+}
+
+/// ProviderConfiguration template identifier
+fn provider_configuration_template(packages: &PackageConfig) -> Option<TemplateId> {
+    packages.utility_registry.as_ref().map(|pkg| TemplateId {
+        package_id: pkg.clone(),
+        module_name: "Utility.Registry.App.V0.Configuration.Provider",
+        entity_name: "ProviderConfiguration",
     })
 }
 
@@ -3016,6 +3035,372 @@ fn extract_registrar_service_info(created: &CreatedEvent) -> Option<RegistrarSer
 }
 
 // ============================================================================
+// Registrar Service Request Queries
+// ============================================================================
+
+/// Get all RegistrarServiceRequest contracts visible to a party. The
+/// OnboardRegistrar form lists these so the request backing the onboard can
+/// be picked instead of pasted in by hand.
+pub async fn get_registrar_service_requests(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    test_mode: bool,
+    packages: &PackageConfig,
+) -> Result<Vec<RegistrarServiceRequestInfo>> {
+    if test_mode {
+        fetch_registrar_service_requests_with_wildcard(config, party_id, token).await
+    } else {
+        match registrar_service_request_template(packages) {
+            Some(template) => {
+                fetch_registrar_service_requests_for_template(config, party_id, token, &template)
+                    .await
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+}
+
+/// Fetch registrar service requests using WildcardFilter (for test mode)
+async fn fetch_registrar_service_requests_with_wildcard(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+) -> Result<Vec<RegistrarServiceRequestInfo>> {
+    let mut state_client = utils::create_state_client(config, token).await?;
+
+    let ledger_end = state_client
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .await?
+        .into_inner()
+        .offset;
+
+    let mut filters_by_party = HashMap::new();
+    filters_by_party.insert(
+        party_id.to_string(),
+        Filters {
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
+                    WildcardFilter {
+                        include_created_event_blob: false,
+                    },
+                )),
+            }],
+        },
+    );
+
+    let acs_request = GetActiveContractsRequest {
+        active_at_offset: ledger_end,
+        event_format: Some(EventFormat {
+            filters_by_party,
+            filters_for_any_party: None,
+            verbose: true,
+        }),
+    };
+
+    let mut stream = state_client
+        .get_active_contracts(acs_request)
+        .await?
+        .into_inner();
+
+    let mut requests = Vec::new();
+    while let Some(response) = stream.message().await? {
+        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
+            && let Some(created) = active.created_event
+            && let Some(template_id) = &created.template_id
+            && template_id.module_name == "Utility.Registry.App.V0.Service.Registrar"
+            && template_id.entity_name == "RegistrarServiceRequest"
+            && let Some(info) = extract_registrar_service_request_info(&created)
+        {
+            requests.push(info);
+        }
+    }
+
+    Ok(requests)
+}
+
+/// Fetch registrar service requests using TemplateFilter
+async fn fetch_registrar_service_requests_for_template(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    template: &TemplateId,
+) -> Result<Vec<RegistrarServiceRequestInfo>> {
+    let mut state_client = utils::create_state_client(config, token).await?;
+
+    let ledger_end = state_client
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .await?
+        .into_inner()
+        .offset;
+
+    let mut filters_by_party = HashMap::new();
+    filters_by_party.insert(
+        party_id.to_string(),
+        Filters {
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
+                    TemplateFilter {
+                        template_id: Some(Identifier {
+                            package_id: template.package_id.clone(),
+                            module_name: template.module_name.to_string(),
+                            entity_name: template.entity_name.to_string(),
+                        }),
+                        include_created_event_blob: false,
+                    },
+                )),
+            }],
+        },
+    );
+
+    let acs_request = GetActiveContractsRequest {
+        active_at_offset: ledger_end,
+        event_format: Some(EventFormat {
+            filters_by_party,
+            filters_for_any_party: None,
+            verbose: true,
+        }),
+    };
+
+    let mut stream = state_client
+        .get_active_contracts(acs_request)
+        .await?
+        .into_inner();
+
+    let mut requests = Vec::new();
+    while let Some(response) = stream.message().await? {
+        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
+            && let Some(created) = active.created_event
+            && let Some(info) = extract_registrar_service_request_info(&created)
+        {
+            requests.push(info);
+        }
+    }
+
+    Ok(requests)
+}
+
+/// Read an `Optional Bool` field. An absent field or a `None` value reads as
+/// `false`, matching the SDK's treatment of the request's flags.
+fn field_optional_bool_or_false(record: &Record, label: &str) -> bool {
+    record
+        .fields
+        .iter()
+        .find(|f| f.label == label)
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Optional(opt)) => {
+                opt.value.as_deref().and_then(|inner| match &inner.sum {
+                    Some(value::Sum::Bool(b)) => Some(*b),
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .unwrap_or(false)
+}
+
+/// Extract RegistrarServiceRequestInfo from a RegistrarServiceRequest
+/// created event.
+fn extract_registrar_service_request_info(
+    created: &CreatedEvent,
+) -> Option<RegistrarServiceRequestInfo> {
+    let record = created.create_arguments.as_ref()?;
+
+    let operator: CantonId = field_party(record, "operator")?.parse().ok()?;
+    let provider: CantonId = field_party(record, "provider")?.parse().ok()?;
+    let registrar: CantonId = field_party(record, "registrar")?.parse().ok()?;
+
+    Some(RegistrarServiceRequestInfo {
+        contract_id: created.contract_id.clone(),
+        operator,
+        provider,
+        registrar,
+        create_transfer_rule: field_optional_bool_or_false(record, "createTransferRule"),
+        create_allocation_factory: field_optional_bool_or_false(record, "createAllocationFactory"),
+    })
+}
+
+// ============================================================================
+// Provider Configuration Queries
+// ============================================================================
+
+/// Get all ProviderConfiguration contracts visible to a party. The
+/// OnboardRegistrar form lists these so the configuration backing the
+/// onboard can be picked instead of pasted in by hand.
+pub async fn get_provider_configurations(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    test_mode: bool,
+    packages: &PackageConfig,
+) -> Result<Vec<ProviderConfigurationInfo>> {
+    if test_mode {
+        fetch_provider_configurations_with_wildcard(config, party_id, token).await
+    } else {
+        match provider_configuration_template(packages) {
+            Some(template) => {
+                fetch_provider_configurations_for_template(config, party_id, token, &template).await
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+}
+
+/// Fetch provider configurations using WildcardFilter (for test mode)
+async fn fetch_provider_configurations_with_wildcard(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+) -> Result<Vec<ProviderConfigurationInfo>> {
+    let mut state_client = utils::create_state_client(config, token).await?;
+
+    let ledger_end = state_client
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .await?
+        .into_inner()
+        .offset;
+
+    let mut filters_by_party = HashMap::new();
+    filters_by_party.insert(
+        party_id.to_string(),
+        Filters {
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
+                    WildcardFilter {
+                        include_created_event_blob: false,
+                    },
+                )),
+            }],
+        },
+    );
+
+    let acs_request = GetActiveContractsRequest {
+        active_at_offset: ledger_end,
+        event_format: Some(EventFormat {
+            filters_by_party,
+            filters_for_any_party: None,
+            verbose: true,
+        }),
+    };
+
+    let mut stream = state_client
+        .get_active_contracts(acs_request)
+        .await?
+        .into_inner();
+
+    let mut configurations = Vec::new();
+    while let Some(response) = stream.message().await? {
+        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
+            && let Some(created) = active.created_event
+            && let Some(template_id) = &created.template_id
+            && template_id.module_name == "Utility.Registry.App.V0.Configuration.Provider"
+            && template_id.entity_name == "ProviderConfiguration"
+            && let Some(info) = extract_provider_configuration_info(&created)
+        {
+            configurations.push(info);
+        }
+    }
+
+    Ok(configurations)
+}
+
+/// Fetch provider configurations using TemplateFilter
+async fn fetch_provider_configurations_for_template(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    template: &TemplateId,
+) -> Result<Vec<ProviderConfigurationInfo>> {
+    let mut state_client = utils::create_state_client(config, token).await?;
+
+    let ledger_end = state_client
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .await?
+        .into_inner()
+        .offset;
+
+    let mut filters_by_party = HashMap::new();
+    filters_by_party.insert(
+        party_id.to_string(),
+        Filters {
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
+                    TemplateFilter {
+                        template_id: Some(Identifier {
+                            package_id: template.package_id.clone(),
+                            module_name: template.module_name.to_string(),
+                            entity_name: template.entity_name.to_string(),
+                        }),
+                        include_created_event_blob: false,
+                    },
+                )),
+            }],
+        },
+    );
+
+    let acs_request = GetActiveContractsRequest {
+        active_at_offset: ledger_end,
+        event_format: Some(EventFormat {
+            filters_by_party,
+            filters_for_any_party: None,
+            verbose: true,
+        }),
+    };
+
+    let mut stream = state_client
+        .get_active_contracts(acs_request)
+        .await?
+        .into_inner();
+
+    let mut configurations = Vec::new();
+    while let Some(response) = stream.message().await? {
+        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
+            && let Some(created) = active.created_event
+            && let Some(info) = extract_provider_configuration_info(&created)
+        {
+            configurations.push(info);
+        }
+    }
+
+    Ok(configurations)
+}
+
+/// Length of a list field. An absent or non-list field reads as empty.
+fn field_list_len(record: &Record, label: &str) -> usize {
+    record
+        .fields
+        .iter()
+        .find(|f| f.label == label)
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::List(l)) => Some(l.elements.len()),
+            _ => None,
+        })
+        .unwrap_or(0)
+}
+
+/// Extract ProviderConfigurationInfo from a ProviderConfiguration created
+/// event. The requirement lists are surfaced as counts: the picker labels
+/// configurations by how many requirements they hold, not by their content.
+fn extract_provider_configuration_info(
+    created: &CreatedEvent,
+) -> Option<ProviderConfigurationInfo> {
+    let record = created.create_arguments.as_ref()?;
+
+    let operator: CantonId = field_party(record, "operator")?.parse().ok()?;
+    let provider: CantonId = field_party(record, "provider")?.parse().ok()?;
+
+    Some(ProviderConfigurationInfo {
+        contract_id: created.contract_id.clone(),
+        operator,
+        provider,
+        registrar_requirement_count: field_list_len(record, "registrarRequirements"),
+        holder_requirement_count: field_list_len(record, "holderRequirements"),
+    })
+}
+
+// ============================================================================
 // InstrumentConfiguration Queries
 // ============================================================================
 
@@ -4880,5 +5265,210 @@ mod tests {
             record.fields.retain(|f| f.label != "holder");
         }
         assert!(extract_credential_info(&event).is_none());
+    }
+
+    // ------------------------------------------------------------------------
+    // extract_registrar_service_request_info
+    //
+    // `Utility.Registry.App.V0.Service.Registrar:RegistrarServiceRequest`
+    // carries the operator/provider/registrar parties plus two
+    // `Optional Bool` flags the SDK reads as `false` when absent. The
+    // extractor feeds the request picker on the OnboardRegistrar form.
+    // ------------------------------------------------------------------------
+
+    fn bool_value(b: bool) -> Value {
+        Value {
+            sum: Some(value::Sum::Bool(b)),
+        }
+    }
+
+    /// A RegistrarServiceRequest created event; the two arguments are the
+    /// raw values of the template's `Optional Bool` flag fields.
+    fn registrar_service_request_event(
+        create_transfer_rule: Value,
+        create_allocation_factory: Value,
+    ) -> CreatedEvent {
+        let record = Record {
+            record_id: None,
+            fields: vec![
+                field("operator", party_value(&format!("operator::{SR_FP}"))),
+                field("provider", party_value(&format!("provider::{SR_FP}"))),
+                field("registrar", party_value(&format!("registrar::{SR_FP}"))),
+                field("createTransferRule", create_transfer_rule),
+                field("createAllocationFactory", create_allocation_factory),
+            ],
+        };
+        CreatedEvent {
+            offset: 0,
+            node_id: 0,
+            contract_id: "rsr-cid-1".to_string(),
+            template_id: None,
+            contract_key: None,
+            create_arguments: Some(record),
+            created_event_blob: vec![],
+            interface_views: vec![],
+            witness_parties: vec![],
+            signatories: vec![],
+            observers: vec![],
+            created_at: None,
+            package_name: String::new(),
+            representative_package_id: String::new(),
+            acs_delta: false,
+        }
+    }
+
+    #[test]
+    fn extract_registrar_service_request_info_reads_request_with_flags() {
+        let event = registrar_service_request_event(
+            optional_value(Some(bool_value(true))),
+            optional_value(Some(bool_value(false))),
+        );
+        let Some(info) = extract_registrar_service_request_info(&event) else {
+            panic!("request should yield info");
+        };
+        assert_eq!(info.contract_id, "rsr-cid-1");
+        assert_eq!(info.operator.to_string(), format!("operator::{SR_FP}"));
+        assert_eq!(info.provider.to_string(), format!("provider::{SR_FP}"));
+        assert_eq!(info.registrar.to_string(), format!("registrar::{SR_FP}"));
+        assert!(info.create_transfer_rule);
+        assert!(!info.create_allocation_factory);
+    }
+
+    #[test]
+    fn extract_registrar_service_request_info_defaults_absent_flags_to_false() {
+        // `None` flags — and fields missing outright — read as `false`,
+        // matching the SDK's treatment.
+        let mut event = registrar_service_request_event(optional_value(None), optional_value(None));
+        if let Some(record) = event.create_arguments.as_mut() {
+            record
+                .fields
+                .retain(|f| f.label != "createAllocationFactory");
+        }
+        let Some(info) = extract_registrar_service_request_info(&event) else {
+            panic!("flagless request should still yield info");
+        };
+        assert!(!info.create_transfer_rule);
+        assert!(!info.create_allocation_factory);
+    }
+
+    #[test]
+    fn extract_registrar_service_request_info_skips_event_without_registrar() {
+        let mut event = registrar_service_request_event(optional_value(None), optional_value(None));
+        if let Some(record) = event.create_arguments.as_mut() {
+            record.fields.retain(|f| f.label != "registrar");
+        }
+        assert!(extract_registrar_service_request_info(&event).is_none());
+    }
+
+    // ------------------------------------------------------------------------
+    // extract_provider_configuration_info
+    //
+    // `Utility.Registry.App.V0.Configuration.Provider:ProviderConfiguration`
+    // carries the operator/provider parties plus the registrar and holder
+    // requirement lists, surfaced as counts. The extractor feeds the
+    // configuration picker on the OnboardRegistrar form.
+    // ------------------------------------------------------------------------
+
+    /// A PartyCredentialRequirement value: an issuer plus a list of
+    /// `(property, value)` claim tuples (`DA.Types:Tuple2`, fields `_1`/`_2`).
+    fn requirement_value(issuer: &str, required_claims: Vec<(&str, &str)>) -> Value {
+        record_value(vec![
+            field("issuer", party_value(issuer)),
+            field(
+                "requiredClaims",
+                list_value(
+                    required_claims
+                        .into_iter()
+                        .map(|(property, value)| {
+                            record_value(vec![
+                                field("_1", text_value(property)),
+                                field("_2", text_value(value)),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ),
+        ])
+    }
+
+    /// A ProviderConfiguration created event; the arguments are the raw
+    /// values of the template's requirement list fields.
+    fn provider_configuration_event(
+        registrar_requirements: Value,
+        holder_requirements: Value,
+    ) -> CreatedEvent {
+        let record = Record {
+            record_id: None,
+            fields: vec![
+                field("operator", party_value(&format!("operator::{SR_FP}"))),
+                field("provider", party_value(&format!("provider::{SR_FP}"))),
+                field("registrarRequirements", registrar_requirements),
+                field("holderRequirements", holder_requirements),
+            ],
+        };
+        CreatedEvent {
+            offset: 0,
+            node_id: 0,
+            contract_id: "pc-cid-1".to_string(),
+            template_id: None,
+            contract_key: None,
+            create_arguments: Some(record),
+            created_event_blob: vec![],
+            interface_views: vec![],
+            witness_parties: vec![],
+            signatories: vec![],
+            observers: vec![],
+            created_at: None,
+            package_name: String::new(),
+            representative_package_id: String::new(),
+            acs_delta: false,
+        }
+    }
+
+    #[test]
+    fn extract_provider_configuration_info_counts_requirements() {
+        let event = provider_configuration_event(
+            list_value(vec![
+                requirement_value(
+                    &format!("provider::{SR_FP}"),
+                    vec![("role", "registrar"), ("kyc", "passed")],
+                ),
+                requirement_value(&format!("external::{SR_FP}"), vec![("role", "auditor")]),
+            ]),
+            list_value(vec![requirement_value(
+                &format!("provider::{SR_FP}"),
+                vec![("role", "holder")],
+            )]),
+        );
+        let Some(info) = extract_provider_configuration_info(&event) else {
+            panic!("configuration should yield info");
+        };
+        assert_eq!(info.contract_id, "pc-cid-1");
+        assert_eq!(info.operator.to_string(), format!("operator::{SR_FP}"));
+        assert_eq!(info.provider.to_string(), format!("provider::{SR_FP}"));
+        assert_eq!(info.registrar_requirement_count, 2);
+        assert_eq!(info.holder_requirement_count, 1);
+    }
+
+    #[test]
+    fn extract_provider_configuration_info_defaults_missing_lists_to_zero() {
+        let mut event = provider_configuration_event(list_value(vec![]), list_value(vec![]));
+        if let Some(record) = event.create_arguments.as_mut() {
+            record.fields.retain(|f| f.label != "registrarRequirements");
+        }
+        let Some(info) = extract_provider_configuration_info(&event) else {
+            panic!("requirementless configuration should still yield info");
+        };
+        assert_eq!(info.registrar_requirement_count, 0);
+        assert_eq!(info.holder_requirement_count, 0);
+    }
+
+    #[test]
+    fn extract_provider_configuration_info_skips_event_without_provider() {
+        let mut event = provider_configuration_event(list_value(vec![]), list_value(vec![]));
+        if let Some(record) = event.create_arguments.as_mut() {
+            record.fields.retain(|f| f.label != "provider");
+        }
+        assert!(extract_provider_configuration_info(&event).is_none());
     }
 }
