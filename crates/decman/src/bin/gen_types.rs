@@ -96,6 +96,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         InstrumentId,
         InstrumentIdentifier,
         InstrumentInfo,
+        InstrumentIssuerOffboardingConfiguration,
         InstrumentsResponse,
         InvitationActionRequest,
         InvitationType,

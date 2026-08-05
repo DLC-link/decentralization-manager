@@ -820,6 +820,18 @@ pub struct Claim {
     pub value: String,
 }
 
+/// One entry of an `OffboardInstrumentIssuers` proposal: the instrument
+/// issuer to offboard plus the credential contracts to revoke. The action
+/// revokes only the listed credentials, so the caller must list every
+/// credential the governance party self-issued for the issuer.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct InstrumentIssuerOffboardingConfiguration {
+    pub instrument_issuer: CantonId,
+    pub credential_cids: Vec<String>,
+}
+
 /// Which governance system a request targets
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
