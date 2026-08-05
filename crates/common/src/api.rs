@@ -1104,6 +1104,57 @@ pub struct RegistrarServicesResponse {
     pub services: Vec<RegistrarServiceInfo>,
 }
 
+/// A pending `RegistrarServiceRequest` contract visible to the party. The
+/// OnboardRegistrar form lists these so the request backing the onboard can
+/// be picked instead of pasted in by hand.
+#[derive(Clone, Debug, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct RegistrarServiceRequestInfo {
+    pub contract_id: String,
+    pub operator: CantonId,
+    pub provider: CantonId,
+    pub registrar: CantonId,
+    /// The request's `createTransferRule` flag. The SDK treats an absent
+    /// flag like `false`, and this field mirrors that reading.
+    pub create_transfer_rule: bool,
+    /// The request's `createAllocationFactory` flag, read like
+    /// `create_transfer_rule`.
+    pub create_allocation_factory: bool,
+}
+
+/// Response for the registrar service requests endpoint
+#[derive(Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct RegistrarServiceRequestsResponse {
+    pub registrar_service_requests: Vec<RegistrarServiceRequestInfo>,
+}
+
+/// A `ProviderConfiguration` contract visible to the party. The
+/// OnboardRegistrar form lists these so the configuration backing the
+/// onboard can be picked instead of pasted in by hand.
+#[derive(Clone, Debug, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct ProviderConfigurationInfo {
+    pub contract_id: String,
+    pub operator: CantonId,
+    pub provider: CantonId,
+    /// Number of registrar credential requirements the configuration holds.
+    pub registrar_requirement_count: usize,
+    /// Number of holder credential requirements the configuration holds.
+    pub holder_requirement_count: usize,
+}
+
+/// Response for the provider configurations endpoint
+#[derive(Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct ProviderConfigurationsResponse {
+    pub provider_configurations: Vec<ProviderConfigurationInfo>,
+}
+
 /// A contract ID with its blob
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

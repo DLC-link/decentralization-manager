@@ -33,8 +33,9 @@ use crate::{
             ContractQueryParams as QueryContractParams, get_credential_offers, get_credentials,
             get_governance_confirmations, get_governance_state as query_governance_state,
             get_holdings, get_instruments, get_open_burn_requests, get_open_mint_requests,
-            get_open_transfer_instructions, get_provider_services, get_registrar_services,
-            get_transfer_factories, get_user_services, get_vaults, query_contracts_by_template,
+            get_open_transfer_instructions, get_provider_configurations, get_provider_services,
+            get_registrar_service_requests, get_registrar_services, get_transfer_factories,
+            get_user_services, get_vaults, query_contracts_by_template,
             resolve_contract_package_ref, select_input_holdings,
         },
         transfer_context::{
@@ -50,7 +51,8 @@ use crate::{
             GovernanceResponse, GovernanceStateResponse, GovernanceType, HoldingsResponse,
             InstrumentsResponse, KnownMember, KnownMembersResponse, MessageResponse,
             MintRequestsResponse, NetworkInfo, OperatorInfo, ProposalType, ProposeActionRequest,
-            ProviderServicesResponse, RegistrarServicesResponse, TransferFactoriesResponse,
+            ProviderConfigurationsResponse, ProviderServicesResponse,
+            RegistrarServiceRequestsResponse, RegistrarServicesResponse, TransferFactoriesResponse,
             TransferFactoryInfo, TransferInstructionsResponse, TransferPreapprovalsResponse,
             UserServicesResponse, VaultsResponse, chain_audit_entry_from_row,
         },
@@ -473,6 +475,87 @@ pub async fn get_credentials_handler(
             tracing::error!("Failed to fetch credentials: {e}");
             HttpResponse::InternalServerError().json(ErrorResponse {
                 error: format!("Failed to fetch credentials: {e}"),
+            })
+        }
+    }
+}
+
+/// Get `RegistrarServiceRequest` contracts visible to the party. The
+/// OnboardRegistrar form lists these so the request backing the onboard can
+/// be picked instead of pasted in by hand.
+#[utoipa::path(
+    tag = "Services",
+    params(GovernanceQuery),
+    responses(
+        (
+            status = 200,
+            description = "Registrar service requests",
+            body = RegistrarServiceRequestsResponse,
+        ),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[get("/registrar-service-requests")]
+pub async fn get_registrar_service_requests_handler(
+    data: web::Data<AppState>,
+    query: web::Query<GovernanceQuery>,
+) -> impl Responder {
+    let party_id = &query.party_id;
+
+    let token = get_party_token(&data, party_id).await;
+    let test_mode = data.test_mode;
+    let packages = packages();
+
+    match get_registrar_service_requests(&data.config, party_id, token, test_mode, &packages).await
+    {
+        Ok(registrar_service_requests) => {
+            HttpResponse::Ok().json(RegistrarServiceRequestsResponse {
+                registrar_service_requests,
+            })
+        }
+        Err(e) => {
+            tracing::error!("Failed to fetch registrar service requests: {e}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch registrar service requests: {e}"),
+            })
+        }
+    }
+}
+
+/// Get `ProviderConfiguration` contracts visible to the party. The
+/// OnboardRegistrar form lists these so the configuration backing the
+/// onboard can be picked instead of pasted in by hand.
+#[utoipa::path(
+    tag = "Services",
+    params(GovernanceQuery),
+    responses(
+        (
+            status = 200,
+            description = "Provider configurations",
+            body = ProviderConfigurationsResponse,
+        ),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[get("/provider-configurations")]
+pub async fn get_provider_configurations_handler(
+    data: web::Data<AppState>,
+    query: web::Query<GovernanceQuery>,
+) -> impl Responder {
+    let party_id = &query.party_id;
+
+    let token = get_party_token(&data, party_id).await;
+    let test_mode = data.test_mode;
+    let packages = packages();
+
+    match get_provider_configurations(&data.config, party_id, token, test_mode, &packages).await {
+        Ok(provider_configurations) => HttpResponse::Ok().json(ProviderConfigurationsResponse {
+            provider_configurations,
+        }),
+        Err(e) => {
+            tracing::error!("Failed to fetch provider configurations: {e}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch provider configurations: {e}"),
             })
         }
     }
