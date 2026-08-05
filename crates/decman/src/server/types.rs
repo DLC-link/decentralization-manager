@@ -23,14 +23,15 @@ pub use common::api::{
     DisclosedContractInput, DiscoverMemberPartyRequest, DiscoverMemberPartyResponse, ErrorResponse,
     ExpireConfirmationRequest, ExternalPartiesResponse, ExternalPartyInfo, GovernanceState,
     GovernanceStateResponse, GovernanceType, GrantRightsRequest, GrantRightsResponse,
-    InstrumentAllowance, InstrumentId, InstrumentIdentifier, InstrumentInfo, InstrumentsResponse,
-    InvitationActionRequest, KeyStatusResponse, KickInvitePayload, KickRequest, KnownMember,
-    KnownMembersResponse, MessageResponse, MissingEdgeKind, MissingPeerEdge, NetworkInfo,
-    OnboardingInvitePayload, OnboardingMeshErrorResponse, OnboardingRequest, OperatorInfo,
-    PartyAuthStatus, PartyConfigRequest, PartyConfigResponse, PendingInvitationsResponse,
-    ProviderServiceInfo, ProviderServicesResponse, RegistrarServiceInfo, RegistrarServicesResponse,
-    ResponseSource, RightsStatus, SuccessResponse, TenantAcsResponse, TenantContract,
-    TenantExecuteSubmissionRequest, TenantOnboardRequest, TenantOnboardResponse,
+    InstrumentAllowance, InstrumentId, InstrumentIdentifier, InstrumentInfo,
+    InstrumentIssuerOffboardingConfiguration, InstrumentsResponse, InvitationActionRequest,
+    KeyStatusResponse, KickInvitePayload, KickRequest, KnownMember, KnownMembersResponse,
+    MessageResponse, MissingEdgeKind, MissingPeerEdge, NetworkInfo, OnboardingInvitePayload,
+    OnboardingMeshErrorResponse, OnboardingRequest, OperatorInfo, PartyAuthStatus,
+    PartyConfigRequest, PartyConfigResponse, PendingInvitationsResponse, ProviderServiceInfo,
+    ProviderServicesResponse, RegistrarServiceInfo, RegistrarServicesResponse, ResponseSource,
+    RightsStatus, SuccessResponse, TenantAcsResponse,
+    TenantContract, TenantExecuteSubmissionRequest, TenantOnboardRequest, TenantOnboardResponse,
     TenantPrepareRequest, TenantPrepareResponse, TenantPrepareSubmissionRequest,
     TenantPrepareSubmissionResponse, TenantTemplateId, TransferFactoriesResponse,
     TransferFactoryInfo, TransferPreapprovalsResponse, UserServiceInfo, UserServicesResponse,
@@ -747,6 +748,41 @@ pub enum ProposalType {
         issuer_credential_cids: Vec<String>,
         description: String,
     },
+    /// Create a `RegistrarServiceRequest` asking `provider` for registrar
+    /// service, with the governance party as the registrar. The provider
+    /// accepts later via `OnboardRegistrar` on its own decparty.
+    CreateRegistrarServiceRequest {
+        operator: CantonId,
+        provider: CantonId,
+        create_transfer_rule: bool,
+        create_allocation_factory: bool,
+    },
+    /// Accept a `RegistrarServiceRequest` on the provider decparty: mint the
+    /// registrar credentials the governance party can self-issue against the
+    /// `ProviderConfiguration`'s registrar requirements, then accept the
+    /// request in the same vote.
+    OnboardRegistrar {
+        registrar: CantonId,
+        provider_service_cid: String,
+        registrar_service_request_cid: String,
+        provider_configuration_cid: String,
+        /// Credential contract ids from issuers other than the governance
+        /// party, covering externally-issued registrar requirements. Empty
+        /// when every requirement is self-issuable.
+        #[serde(default)]
+        extra_registrar_credential_cids: Vec<String>,
+    },
+    /// Credential new instrument issuers against an existing
+    /// `InstrumentConfiguration`'s issuer requirements.
+    OnboardInstrumentIssuers {
+        instrument_configuration_cid: String,
+        instrument_issuers: Vec<CantonId>,
+    },
+    /// Revoke the credentials the governance party self-issued for
+    /// instrument issuers, removing their issuing privileges.
+    OffboardInstrumentIssuers {
+        instrument_issuers: Vec<InstrumentIssuerOffboardingConfiguration>,
+    },
 }
 
 impl ProposalType {
@@ -792,6 +828,31 @@ impl ProposalType {
                 provider_app_reward_beneficiaries: Some(beneficiaries),
                 ..
             } => validate_beneficiary_weights(beneficiaries),
+            // Mirrors the templates' `ensure` guards: an on/offboard action
+            // for zero issuers (or an offboard entry revoking no credentials)
+            // does no work, so reject it with a 400 before the ledger sees it.
+            ProposalType::OnboardInstrumentIssuers {
+                instrument_issuers, ..
+            } => {
+                if instrument_issuers.is_empty() {
+                    return Err("instrument_issuers must not be empty".to_string());
+                }
+                Ok(())
+            }
+            ProposalType::OffboardInstrumentIssuers { instrument_issuers } => {
+                if instrument_issuers.is_empty() {
+                    return Err("instrument_issuers must not be empty".to_string());
+                }
+                if instrument_issuers
+                    .iter()
+                    .any(|entry| entry.credential_cids.is_empty())
+                {
+                    return Err(
+                        "every offboard entry must list at least one credential_cid".to_string()
+                    );
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -1445,5 +1506,49 @@ mod tests {
         // A custom (positive) window is accepted; a zero-hour window is rejected.
         assert!(mk("1.0", Some(48)).validate().is_ok());
         assert!(mk("1.0", Some(0)).validate().is_err());
+    }
+
+    #[test]
+    fn proposal_onboard_instrument_issuers_rejects_empty_issuer_list() {
+        // Mirrors the template's `ensure not (null instrumentIssuers)` so the
+        // rejection surfaces as a 400 before the ledger sees the proposal.
+        let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
+        let issuer = CantonId::parse(&format!("issuer::{ns}")).unwrap();
+        let mk = |issuers: Vec<CantonId>| ProposalType::OnboardInstrumentIssuers {
+            instrument_configuration_cid: "icc".to_string(),
+            instrument_issuers: issuers,
+        };
+        assert!(mk(Vec::new()).validate().is_err());
+        assert!(mk(vec![issuer]).validate().is_ok());
+    }
+
+    #[test]
+    fn proposal_offboard_instrument_issuers_rejects_empty_lists() {
+        // Mirrors the template's `ensure`: the issuer list must be non-empty
+        // and every entry must revoke at least one credential.
+        let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
+        let issuer = CantonId::parse(&format!("issuer::{ns}")).unwrap();
+        let mk = |entries: Vec<InstrumentIssuerOffboardingConfiguration>| {
+            ProposalType::OffboardInstrumentIssuers {
+                instrument_issuers: entries,
+            }
+        };
+        assert!(mk(Vec::new()).validate().is_err());
+        assert!(
+            mk(vec![InstrumentIssuerOffboardingConfiguration {
+                instrument_issuer: issuer.clone(),
+                credential_cids: Vec::new(),
+            }])
+            .validate()
+            .is_err()
+        );
+        assert!(
+            mk(vec![InstrumentIssuerOffboardingConfiguration {
+                instrument_issuer: issuer,
+                credential_cids: vec!["cred-1".to_string()],
+            }])
+            .validate()
+            .is_ok()
+        );
     }
 }
