@@ -36,10 +36,9 @@ use uuid::Uuid;
 use crate::{
     canton_id::{CantonId, validate_party_id_prefix},
     config::NodeConfig,
-    db::schema::SchemaRead,
     error::Result,
     server::{
-        AppState, WorkflowAuth,
+        AppState,
         middleware::require_tenant_api_key,
         types::{
             ErrorResponse, TenantAcsResponse, TenantContract, TenantExecuteSubmissionRequest,
@@ -52,7 +51,7 @@ use crate::{
     workflow::external_party::{
         keys::fingerprint_from_public_key,
         steps::{
-            ExternalPartyAllocatePayload, HostOnboardingStatus, LedgerIdentity, allocate_party,
+            ExternalPartyAllocatePayload, HostOnboardingStatus, allocate_party,
             host_onboarding_status, prepare_topology,
         },
     },
@@ -66,7 +65,7 @@ use super::{governance::get_party_token, workflows::validate_confirmation_thresh
 
 /// Prepare the onboarding topology for a wallet-held external party: DPM relays
 /// the wallet's public key to Canton and returns the unsigned topology + the
-/// multi-hash for the wallet to sign.
+/// per-transaction hashes for the wallet to sign.
 #[utoipa::path(
     tag = "Tenant",
     request_body = TenantPrepareRequest,
@@ -105,16 +104,10 @@ pub async fn tenant_prepare(
         Err(resp) => return resp,
     };
 
-    let identity = match onboarding_identity(&data).await {
-        Ok(identity) => identity,
-        Err(resp) => return resp,
-    };
-
-    // No run is registered here — the wallet signs the returned multi-hash and
-    // calls `/v0/tenant/onboard` next.
+    // No run is registered here — the wallet signs the returned hashes and calls
+    // `/v0/tenant/onboard` next.
     match prepare_topology(
         &data.config,
-        &identity,
         &body.party_hint,
         &body.hosting_peers,
         body.confirmation_threshold,
@@ -124,7 +117,11 @@ pub async fn tenant_prepare(
     {
         Ok(prep) => HttpResponse::Ok().json(TenantPrepareResponse {
             party_id: prep.party_id,
-            multi_hash: STANDARD.encode(&prep.multi_hash),
+            transaction_hashes: prep
+                .transaction_hashes
+                .iter()
+                .map(|h| STANDARD.encode(h))
+                .collect(),
             topology_transactions: prep
                 .topology_transactions
                 .iter()
@@ -185,14 +182,17 @@ pub async fn tenant_onboard(
             ),
         });
     }
-    let signature = match STANDARD.decode(&body.multi_hash_signature) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            return HttpResponse::BadRequest().json(ErrorResponse {
-                error: format!("multi_hash_signature is not valid base64: {e}"),
-            });
+    let mut signatures = Vec::with_capacity(body.signatures.len());
+    for sig in &body.signatures {
+        match STANDARD.decode(sig) {
+            Ok(bytes) => signatures.push(bytes),
+            Err(e) => {
+                return HttpResponse::BadRequest().json(ErrorResponse {
+                    error: format!("signature is not valid base64: {e}"),
+                });
+            }
         }
-    };
+    }
     let mut topology_transactions = Vec::with_capacity(body.topology_transactions.len());
     for tx in &body.topology_transactions {
         match STANDARD.decode(tx) {
@@ -205,23 +205,30 @@ pub async fn tenant_onboard(
         }
     }
 
+    if signatures.len() != topology_transactions.len() {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: format!(
+                "expected one signature per topology transaction, got {sigs} signature(s) for \
+                 {txs} transaction(s)",
+                sigs = signatures.len(),
+                txs = topology_transactions.len()
+            ),
+        });
+    }
+
     let party_id = format!("{hint}::{fp}", hint = body.party_hint, fp = body.signed_by);
     let bundle = ExternalPartyAllocatePayload {
         party_id: party_id.clone(),
         topology_transactions,
-        signature,
+        signatures,
         signed_by: body.signed_by.clone(),
     };
 
-    // Allocate on THIS participant only. The wallet calls `/onboard` on every
-    // host itself; no host relays to another. Canton keeps the topology a
-    // proposal until the last host signs, and `allocate_party` treats
-    // `ALREADY_EXISTS` as success, so re-sends converge.
-    let identity = match onboarding_identity(&data).await {
-        Ok(identity) => identity,
-        Err(resp) => return resp,
-    };
-    if let Err(e) = allocate_party(&data.config, &identity, &bundle).await {
+    // Submit on THIS participant only. The wallet calls `/onboard` on every host
+    // itself; no host relays to another. Canton keeps the topology a proposal until
+    // every host has authorized it, and re-submitting an identical transaction is a
+    // no-op, so a wallet retry converges.
+    if let Err(e) = allocate_party(&data.config, &bundle).await {
         tracing::error!("tenant onboard: allocate on this participant failed: {e:#}");
         return HttpResponse::InternalServerError().json(ErrorResponse {
             error: format!("Failed to allocate external party on this host: {e}"),
@@ -610,87 +617,6 @@ async fn fetch_party_acs(
 // ============================================================================
 // Helpers
 // ============================================================================
-
-/// The ledger identity the tenant API's onboarding calls act under.
-///
-/// Neither `GenerateExternalPartyTopology` nor `AllocateExternalParty` needs an
-/// admin right (see [`LedgerIdentity`]), so this reuses a credential the operator
-/// has already configured rather than requiring a node-admin secret. The external
-/// party being onboarded has no credential of its own yet — it does not exist — so
-/// this is necessarily a node-level identity; once the party is live, its own
-/// submissions authenticate via [`get_party_token`].
-///
-/// Insecure mode resolves without any configuration: the mock registry mints one
-/// identity for everything, and `party_credentials` is legitimately empty on a node
-/// that hosts external parties but no decentralized party of its own.
-///
-/// # Errors
-/// Returns the response to send when the node has no usable credential.
-async fn onboarding_identity(
-    data: &web::Data<AppState>,
-) -> std::result::Result<LedgerIdentity, HttpResponse> {
-    let unavailable = |detail: String| {
-        HttpResponse::ServiceUnavailable().json(ErrorResponse {
-            error: format!(
-                "external-party onboarding needs a configured ledger credential on this node: \
-                 {detail}"
-            ),
-        })
-    };
-
-    let auth = data.auth.read().await;
-    let Some(auth) = auth.as_ref() else {
-        return Err(unavailable(
-            "the auth registry is not initialized".to_string(),
-        ));
-    };
-
-    // Insecure mode: one identity covers every party, so no lookup is needed and
-    // an empty credential table is not an error.
-    if let WorkflowAuth::Mock(registry) = auth {
-        let manager = registry.get_by_str("").await;
-        return Ok(LedgerIdentity {
-            token: manager.get_token(),
-            user_id: manager.user_id().to_string(),
-        });
-    }
-
-    let mut credentials = data.db.get_all_party_credentials().await.map_err(|e| {
-        tracing::error!("tenant onboarding: reading party credentials failed: {e:#}");
-        unavailable("could not read the configured credentials".to_string())
-    })?;
-    // Deterministic pick, so a multi-party node always presents the same ledger
-    // user rather than varying by row order.
-    credentials.sort_by_key(|c| c.dec_party_id.to_string());
-    let Some(chosen) = credentials.first() else {
-        return Err(unavailable(
-            "none are configured, and this node is not in insecure mode".to_string(),
-        ));
-    };
-    if credentials.len() > 1 {
-        tracing::info!(
-            dec_party_id = %chosen.dec_party_id,
-            user_id = %chosen.user_id,
-            "tenant onboarding: several credentials configured; using the first by party id"
-        );
-    }
-
-    let credentials = auth
-        .get_credentials(&chosen.dec_party_id)
-        .await
-        .map_err(|e| {
-            tracing::error!("tenant onboarding: minting a ledger token failed: {e:#}");
-            unavailable(format!(
-                "could not mint a token for {}",
-                chosen.dec_party_id
-            ))
-        })?;
-
-    Ok(LedgerIdentity {
-        token: credentials.token,
-        user_id: credentials.user_id,
-    })
-}
 
 /// Base64-decode a raw Ed25519 public key into its fixed 32-byte array, or the
 /// 400 response to return.

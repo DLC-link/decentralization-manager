@@ -80,7 +80,7 @@ impl TenantClient {
     }
 
     /// `POST /v0/tenant/prepare` — hand the node the party's public key and get
-    /// back the unsigned multi-host topology plus the multi-hash to sign.
+    /// back the unsigned multi-host topology plus one hash per transaction to sign.
     pub async fn prepare(&self, req: &TenantPrepareRequest) -> Result<TenantPrepareResponse> {
         self.post("/v0/tenant/prepare", req).await
     }

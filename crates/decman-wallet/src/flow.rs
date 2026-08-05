@@ -109,7 +109,7 @@ fn progress_to_status(progress: WorkflowProgress) -> HostStatus {
 /// Onboard a co-validated external party across `hosts`.
 ///
 /// Prepares the topology on the first host (naming the rest as hosting peers),
-/// signs the returned multi-hash with `key` locally, then submits that one signed
+/// signs each returned transaction hash with `key` locally, then submits that one signed
 /// bundle to every host. A host that rejects the bundle is recorded in its
 /// [`HostReport`] rather than aborting the run: onboarding is idempotent, so the
 /// caller can retry the stragglers.
@@ -156,14 +156,29 @@ pub async fn onboard_co_validated(
         });
     }
 
-    let multi_hash = preparer
-        .client
-        .decode_b64("multi_hash", &prepared.multi_hash)?;
+    // One signature per transaction, over the hash Canton computed for it. Signing
+    // Canton's hashes directly means nothing here re-derives a Canton hash.
+    if prepared.transaction_hashes.len() != prepared.topology_transactions.len() {
+        return Err(Error::MalformedPreparation {
+            host: preparer.client.base_url().to_string(),
+            detail: format!(
+                "{hashes} hash(es) for {txs} transaction(s)",
+                hashes = prepared.transaction_hashes.len(),
+                txs = prepared.topology_transactions.len()
+            ),
+        });
+    }
+    let mut signatures = Vec::with_capacity(prepared.transaction_hashes.len());
+    for encoded in &prepared.transaction_hashes {
+        let hash = preparer.client.decode_b64("transaction_hash", encoded)?;
+        signatures.push(key.sign_b64(&hash));
+    }
+
     let onboard_request = TenantOnboardRequest {
         party_hint: party_hint.to_string(),
         public_key: public_key.clone(),
         topology_transactions: prepared.topology_transactions,
-        multi_hash_signature: key.sign_b64(&multi_hash),
+        signatures,
         signed_by: key.fingerprint(),
     };
 

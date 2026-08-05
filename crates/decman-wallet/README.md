@@ -44,6 +44,17 @@ the last host signs, so the party is only live once all of them report it —
 `onboard_co_validated` records a failed host in its report rather than aborting,
 and onboarding is idempotent, so stragglers can simply be retried.
 
+The wallet signs one hash per topology transaction, each hash computed by Canton and
+returned by the prepare step. Nothing on either side re-derives a Canton hash.
+
+Onboarding rides Canton's **admin** API rather than the Ledger API's
+`AllocateExternalParty`. That RPC is a convenience wrapper around the same topology
+write, and the wrapper is where the authorization check and the party-allocation
+quota live — it wants either `ParticipantAdmin` or a `user_id` matching the caller,
+and naming a user turns on a quota that defaults to zero. Writing topology directly
+needs no ledger credential, so onboarding does not depend on how a node's ledger
+users happen to be provisioned.
+
 `confirmation_threshold` is how many hosts must confirm a transaction. Passing
 `None` lets DecMan default it to `N-1`, which is what keeps a host able to exit
 later; a threshold of `N` is rejected.

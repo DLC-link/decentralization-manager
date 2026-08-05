@@ -102,7 +102,7 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     // P3 back on the plaintext port before returning.
     phases::canton_admin_tls::run(&mut f).await?;
     // Decentrally-hosted external-party onboarding, wallet-driven via the
-    // /v0/tenant/* API: the key is generated + the multi-hash signed client-side
+    // /v0/tenant/* API: the key is generated + each transaction hash signed client-side
     // and the wallet calls /onboard on each host itself, hosting it across
     // P1+P2+P3 at a 2-of-3 confirmation threshold. No Noise mesh is involved (the
     // calls are plain HTTP to each host), so it can run anywhere in the suite.

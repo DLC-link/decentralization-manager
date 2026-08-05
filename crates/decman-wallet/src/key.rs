@@ -135,7 +135,7 @@ mod tests {
     #[test]
     fn signature_verifies_against_the_published_public_key() {
         let key = ExternalKeyPair::generate();
-        let message = b"the onboarding multi-hash";
+        let message = b"an onboarding transaction hash";
         let signature = key.sign(message);
 
         let verifying = match VerifyingKey::from_bytes(&key.public_key_bytes()) {
@@ -150,7 +150,7 @@ mod tests {
     #[test]
     fn sign_b64_encodes_the_same_signature() {
         let key = ExternalKeyPair::from_seed([4u8; 32]);
-        let message = b"multi-hash";
+        let message = b"transaction hash";
         assert_eq!(
             key.sign_b64(message),
             STANDARD.encode(key.sign(message)),

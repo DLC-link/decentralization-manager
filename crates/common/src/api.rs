@@ -359,23 +359,30 @@ pub struct TenantPrepareRequest {
     pub confirmation_threshold: Option<u32>,
 }
 
-/// The unsigned onboarding topology for the wallet to sign. `multi_hash` and
-/// each entry of `topology_transactions` are base64-encoded.
+/// The unsigned onboarding topology for the wallet to sign. Every entry of
+/// `transaction_hashes` and `topology_transactions` is base64-encoded, and the two
+/// are index-aligned: `transaction_hashes[i]` is the hash to sign for
+/// `topology_transactions[i]`.
+///
+/// The wallet signs each hash separately rather than one combined hash. Canton
+/// hands us these hashes, so nothing here re-derives a Canton hash — and the
+/// signatures go straight onto the transactions the node submits.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct TenantPrepareResponse {
     /// The party id Canton derived (`{party_hint}::{fingerprint}`).
     pub party_id: String,
-    /// The combined multi-hash the wallet signs, base64-encoded.
-    pub multi_hash: String,
+    /// The hash to sign for each transaction, base64-encoded, index-aligned with
+    /// `topology_transactions`.
+    pub transaction_hashes: Vec<String>,
     /// The serialized topology transactions, each base64-encoded.
     pub topology_transactions: Vec<String>,
 }
 
 /// Request to onboard a wallet-held external party from its signed topology.
-/// `public_key`, each `topology_transactions` entry, and `multi_hash_signature`
-/// are base64-encoded.
+/// `public_key` and every `topology_transactions` / `signatures` entry are
+/// base64-encoded.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
@@ -387,8 +394,10 @@ pub struct TenantOnboardRequest {
     /// host set and confirmation threshold are carried inside these signed
     /// transactions, so they are not (and must not be) passed separately.
     pub topology_transactions: Vec<String>,
-    /// The wallet's Ed25519 signature over the multi-hash, base64-encoded.
-    pub multi_hash_signature: String,
+    /// One base64-encoded Ed25519 signature per transaction, index-aligned with
+    /// `topology_transactions`: `signatures[i]` signs the hash the prepare step
+    /// returned for `topology_transactions[i]`.
+    pub signatures: Vec<String>,
     /// Fingerprint of the signing key (the `{fingerprint}` party-id segment).
     pub signed_by: String,
 }

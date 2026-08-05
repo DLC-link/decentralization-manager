@@ -31,19 +31,16 @@ fn participant_id(tag: u8) -> CantonId {
     }
 }
 
-/// The multi-hash a stub host hands back for signing.
-const MULTI_HASH: &[u8] = b"canton-multi-hash-for-the-onboarding-topology";
-
-fn multi_hash_b64() -> String {
-    STANDARD.encode(MULTI_HASH)
-}
+/// The per-transaction hashes a stub host hands back for signing. Two entries, so
+/// the tests also cover that each signature lands on its own transaction.
+const TX_HASHES: [&[u8]; 2] = [b"canton-hash-for-tx-one", b"canton-hash-for-tx-two"];
 
 async fn stub_prepare(server: &MockServer, party_id: &str) {
     Mock::given(method("POST"))
         .and(path("/v0/tenant/prepare"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "party_id": party_id,
-            "multi_hash": multi_hash_b64(),
+            "transaction_hashes": TX_HASHES.map(|h| STANDARD.encode(h)),
             "topology_transactions": ["dHgtb25l", "dHgtdHdv"],
         })))
         .mount(server)
@@ -167,7 +164,7 @@ async fn onboarding_prepares_once_and_submits_the_same_signed_bundle_to_every_ho
         }
     }
     for bundle in &bundles[1..] {
-        assert_eq!(bundle.multi_hash_signature, bundles[0].multi_hash_signature);
+        assert_eq!(bundle.signatures, bundles[0].signatures);
         assert_eq!(
             bundle.topology_transactions,
             bundles[0].topology_transactions
@@ -176,7 +173,7 @@ async fn onboarding_prepares_once_and_submits_the_same_signed_bundle_to_every_ho
         assert_eq!(bundle.signed_by, bundles[0].signed_by);
     }
 
-    // The signature verifies over the multi-hash the host returned, under the
+    // Each signature verifies over its own transaction's hash, under the
     // public key the wallet published — and `signed_by` is that key's fingerprint.
     let bundle = &bundles[0];
     assert_eq!(bundle.signed_by, key.fingerprint());
@@ -193,17 +190,28 @@ async fn onboarding_prepares_once_and_submits_the_same_signed_bundle_to_every_ho
         Ok(v) => v,
         Err(e) => panic!("public_key must be a valid Ed25519 key: {e}"),
     };
-    let signature = match STANDARD
-        .decode(&bundle.multi_hash_signature)
-        .map(TryInto::try_into)
-    {
-        Ok(Ok(bytes)) => ed25519_dalek::Signature::from_bytes(&bytes),
-        _ => panic!("multi_hash_signature must be 64 base64-encoded bytes"),
-    };
-    assert!(
-        verifying.verify(MULTI_HASH, &signature).is_ok(),
-        "the signature must verify over the multi-hash, under the published key"
+    assert_eq!(
+        bundle.signatures.len(),
+        TX_HASHES.len(),
+        "one signature per transaction"
     );
+    for (i, encoded) in bundle.signatures.iter().enumerate() {
+        let signature = match STANDARD.decode(encoded).map(TryInto::try_into) {
+            Ok(Ok(bytes)) => ed25519_dalek::Signature::from_bytes(&bytes),
+            _ => panic!("signature {i} must be 64 base64-encoded bytes"),
+        };
+        assert!(
+            verifying.verify(TX_HASHES[i], &signature).is_ok(),
+            "signature {i} must verify over transaction {i}'s own hash, under the published key"
+        );
+        // And must NOT verify against a different transaction's hash — proves the
+        // signatures are per-transaction rather than one hash reused.
+        let other = TX_HASHES[(i + 1) % TX_HASHES.len()];
+        assert!(
+            verifying.verify(other, &signature).is_err(),
+            "signature {i} must not authorize a different transaction"
+        );
+    }
 
     // Nothing on the wire may carry the private seed.
     let seed_b64 = key.seed_b64();

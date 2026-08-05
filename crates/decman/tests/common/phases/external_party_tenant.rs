@@ -4,7 +4,7 @@
 //! wallet library ([`decman_wallet::ExternalKeyPair`] — the same type a wallet
 //! provider uses, so there is one implementation of the key handling and the
 //! fingerprint derivation), calls `POST /v0/tenant/prepare` on one host to get
-//! the multi-host onboarding topology + the multi-hash, signs the multi-hash
+//! the multi-host onboarding topology + one hash per transaction, signs each hash
 //! locally, then submits the same signed bundle to `POST /v0/tenant/onboard` on
 //! EACH host itself — DPM never relays between hosts and never sees the private
 //! key. Asserts each host reports the party hosted via
@@ -66,21 +66,33 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     let prep: Value = f
                         .post_json(f.p1.http, "/v0/tenant/prepare", &prepare_req)
                         .await?;
-                    let multi_hash_b64 = prep
-                        .get("multi_hash")
-                        .and_then(Value::as_str)
-                        .context("prepare response missing multi_hash")?;
-                    let multi_hash = STANDARD
-                        .decode(multi_hash_b64)
-                        .context("multi_hash is not valid base64")?;
+                    let hashes = prep
+                        .get("transaction_hashes")
+                        .and_then(Value::as_array)
+                        .context("prepare response missing transaction_hashes")?
+                        .iter()
+                        .map(|h| {
+                            let encoded = h
+                                .as_str()
+                                .context("transaction_hashes entry is not a string")?;
+                            STANDARD
+                                .decode(encoded)
+                                .context("transaction hash is not valid base64")
+                        })
+                        .collect::<anyhow::Result<Vec<_>>>()?;
                     let topology_transactions = prep
                         .get("topology_transactions")
                         .cloned()
                         .context("prepare response missing topology_transactions")?;
 
-                    // 2) The wallet signs the multi-hash locally with its own key.
+                    // 2) The wallet signs each transaction hash locally with its own key.
                     let wallet = ExternalKeyPair::from_seed(seed);
-                    let signature = STANDARD.encode(wallet.sign(&multi_hash));
+                    // One signature per transaction, over the hash Canton returned
+                    // for it.
+                    let signatures: Vec<String> = hashes
+                        .iter()
+                        .map(|h| STANDARD.encode(wallet.sign(h)))
+                        .collect();
 
                     // 3) The wallet submits the SAME signed bundle to every host
                     // itself — no host relays to another. `onboard` carries no host
@@ -89,7 +101,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         "party_hint": hint,
                         "public_key": public_key,
                         "topology_transactions": topology_transactions,
-                        "multi_hash_signature": signature,
+                        "signatures": signatures,
                         "signed_by": wallet.fingerprint(),
                     });
                     for host in [f.p1.http, f.p2.http, f.p3.http] {

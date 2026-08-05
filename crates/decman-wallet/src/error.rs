@@ -63,6 +63,12 @@ pub enum Error {
         returned: String,
     },
 
+    /// The preparing host returned a topology this client cannot sign — e.g. a
+    /// different number of hashes than transactions, so it is unclear which hash
+    /// authorizes which transaction.
+    #[error("{host} returned a topology this client cannot sign: {detail}")]
+    MalformedPreparation { host: String, detail: String },
+
     #[error("a co-validated party needs at least two hosts, got {0}")]
     NotEnoughHosts(usize),
 }
@@ -76,7 +82,8 @@ impl Error {
             | Self::Api { host, .. }
             | Self::Decode { host, .. }
             | Self::Base64 { host, .. }
-            | Self::PartyIdMismatch { host, .. } => host,
+            | Self::PartyIdMismatch { host, .. }
+            | Self::MalformedPreparation { host, .. } => host,
             Self::NotEnoughHosts(_) => "",
         }
     }
