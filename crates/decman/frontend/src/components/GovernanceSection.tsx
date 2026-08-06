@@ -64,6 +64,11 @@ import type {
   CredentialOffersResponse,
   CredentialInfo,
   CredentialsResponse,
+  RegistrarServiceRequestInfo,
+  RegistrarServiceRequestsResponse,
+  ProviderConfigurationInfo,
+  ProviderConfigurationsResponse,
+  PartyCredentialRequirement,
   ContractWithBlob,
   ContractQueryResponse,
   Network,
@@ -232,6 +237,29 @@ export const GovernanceSection = ({
   // Credential cids proving the request's holder meets the instrument's
   // issuer requirements. Passed into the accept's choice context.
   const [proposalIssuerCredentialCids, setProposalIssuerCredentialCids] = useState<string[]>([]);
+  // Registrar-onboarding proposal state
+  const [proposalRegistrar, setProposalRegistrar] = useState("");
+  const [proposalRegistrarServiceRequestCid, setProposalRegistrarServiceRequestCid] = useState("");
+  const [proposalProviderConfigurationCid, setProposalProviderConfigurationCid] = useState("");
+  const [proposalExtraRegistrarCredentialCids, setProposalExtraRegistrarCredentialCids] = useState<string[]>([]);
+  // Requirement-editor rows: an issuer party id plus its required claims as
+  // "property,value" lines. Parsed into PartyCredentialRequirement on submit.
+  const [proposalRegistrarRequirements, setProposalRegistrarRequirements] = useState<
+    { issuer: string; claimsText: string }[]
+  >([]);
+  const [proposalHolderRequirements, setProposalHolderRequirements] = useState<
+    { issuer: string; claimsText: string }[]
+  >([]);
+  const [proposalIssuerRequirements, setProposalIssuerRequirements] = useState<
+    { issuer: string; claimsText: string }[]
+  >([]);
+  // Party-list textareas, one party id per line.
+  const [proposalInitialInstrumentIssuersText, setProposalInitialInstrumentIssuersText] = useState("");
+  const [proposalInstrumentIssuersText, setProposalInstrumentIssuersText] = useState("");
+  // Offboard rows: the instrument issuer plus the credential cids to revoke.
+  const [proposalOffboardEntries, setProposalOffboardEntries] = useState<
+    { issuer: string; credentialCids: string[] }[]
+  >([]);
   // Accept External Party Setup: contract id of the validator-created
   // ExternalPartySetupProposal to accept.
   const [
@@ -351,6 +379,12 @@ export const GovernanceSection = ({
   // credential picker on the Accept Mint/Burn Request forms.
   const [availableCredentials, setAvailableCredentials] = useState<CredentialInfo[]>([]);
   const [credentialsLoading, setCredentialsLoading] = useState(false);
+  // Pending `RegistrarServiceRequest` and `ProviderConfiguration` contracts.
+  // Power the pickers on the Onboard Registrar form.
+  const [registrarServiceRequests, setRegistrarServiceRequests] = useState<RegistrarServiceRequestInfo[]>([]);
+  const [registrarServiceRequestsLoading, setRegistrarServiceRequestsLoading] = useState(false);
+  const [providerConfigurations, setProviderConfigurations] = useState<ProviderConfigurationInfo[]>([]);
+  const [providerConfigurationsLoading, setProviderConfigurationsLoading] = useState(false);
   // InstrumentConfiguration contracts fetched from /instruments. Each one
   // represents a token the governance party can mint/burn against and exposes
   // its parsed instrument_admin + instrument_id, so we can drive a real
@@ -582,7 +616,9 @@ export const GovernanceSection = ({
       proposalType === "create_provider_service_request" ||
       proposalType === "setup_utility" ||
       proposalType === "offer_free_credential" ||
-      proposalType === "accept_free_credential"
+      proposalType === "accept_free_credential" ||
+      proposalType === "create_provider_configuration" ||
+      proposalType === "onboard_registrar"
     ) {
       fetchServices();
     }
@@ -623,6 +659,44 @@ export const GovernanceSection = ({
       console.error("Failed to fetch credentials:", e);
     } finally {
       setCredentialsLoading(false);
+    }
+  }, [partyId]);
+
+  // Fetch pending `RegistrarServiceRequest` contracts so the Onboard
+  // Registrar form can offer a picker instead of a hand-pasted contract id.
+  const fetchRegistrarServiceRequests = useCallback(async () => {
+    setRegistrarServiceRequestsLoading(true);
+    try {
+      const res = await authenticatedFetch(
+        `${API_BASE}/registrar-service-requests?party_id=${encodeURIComponent(partyId)}`,
+      );
+      if (res.ok) {
+        const response: RegistrarServiceRequestsResponse = await res.json();
+        setRegistrarServiceRequests(response.registrar_service_requests);
+      }
+    } catch (e) {
+      console.error("Failed to fetch registrar service requests:", e);
+    } finally {
+      setRegistrarServiceRequestsLoading(false);
+    }
+  }, [partyId]);
+
+  // Fetch `ProviderConfiguration` contracts so the Onboard Registrar form
+  // can offer a picker instead of a hand-pasted contract id.
+  const fetchProviderConfigurations = useCallback(async () => {
+    setProviderConfigurationsLoading(true);
+    try {
+      const res = await authenticatedFetch(
+        `${API_BASE}/provider-configurations?party_id=${encodeURIComponent(partyId)}`,
+      );
+      if (res.ok) {
+        const response: ProviderConfigurationsResponse = await res.json();
+        setProviderConfigurations(response.provider_configurations);
+      }
+    } catch (e) {
+      console.error("Failed to fetch provider configurations:", e);
+    } finally {
+      setProviderConfigurationsLoading(false);
     }
   }, [partyId]);
 
@@ -755,6 +829,83 @@ export const GovernanceSection = ({
     />
   );
 
+  // Requirement-list editor shared by the Create Provider Configuration and
+  // Provision Instrument forms. Each row is an issuer party id plus the
+  // claims a credential from that issuer must carry, one "property,value"
+  // per line. Mirrors the beneficiaries row editor.
+  const renderRequirementRows = (
+    label: string,
+    help: string,
+    rows: { issuer: string; claimsText: string }[],
+    setRows: (rows: { issuer: string; claimsText: string }[]) => void,
+  ) => (
+    <>
+      <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+        <TextHelp text={help}>{label} (add issuer + required claims)</TextHelp>
+      </Typography>
+      {rows.map((row, idx) => (
+        <Box key={idx} sx={{ display: "flex", gap: 1, mb: 1, alignItems: "flex-start" }}>
+          <TextField
+            label="Issuer Party"
+            value={row.issuer}
+            onChange={(e) => {
+              const updated = [...rows];
+              updated[idx] = { ...row, issuer: e.target.value };
+              setRows(updated);
+            }}
+            size="small"
+            sx={{ flex: 2 }}
+            slotProps={{
+              input: {
+                endAdornment: fieldHelpAdornment(
+                  "Party id whose credential satisfies this requirement. The governance party mints the credential itself when it is the issuer; other issuers must credential the party out-of-band.",
+                  "Help for Issuer Party",
+                ),
+              },
+            }}
+          />
+          <TextField
+            label="Required claims (one per line: property,value)"
+            value={row.claimsText}
+            onChange={(e) => {
+              const updated = [...rows];
+              updated[idx] = { ...row, claimsText: e.target.value };
+              setRows(updated);
+            }}
+            size="small"
+            sx={{ flex: 3 }}
+            multiline
+            minRows={1}
+            maxRows={4}
+            slotProps={{
+              input: {
+                endAdornment: fieldHelpAdornment(
+                  'Claims the issuer\'s credential must contain. One per line, each formatted as "property,value" (e.g. role,registrar).',
+                  "Help for Required Claims",
+                ),
+              },
+            }}
+          />
+          <Button
+            size="small"
+            color="error"
+            onClick={() => setRows(rows.filter((_, i) => i !== idx))}
+          >
+            Remove
+          </Button>
+        </Box>
+      ))}
+      <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
+        <Button
+          size="small"
+          onClick={() => setRows([...rows, { issuer: partyId, claimsText: "" }])}
+        >
+          Add Requirement
+        </Button>
+      </Box>
+    </>
+  );
+
   // Fetch InstrumentConfiguration contracts (a.k.a. "our tokens"). Used by
   // Mint/Burn (for instrument_id + instrument_configuration_cid) and by
   // set_provider_app_reward_beneficiaries (for instrument_configuration_cid).
@@ -782,7 +933,8 @@ export const GovernanceSection = ({
       proposalType === "burn" ||
       proposalType === "accept_mint_request" ||
       proposalType === "accept_burn_request" ||
-      proposalType === "set_provider_app_reward_beneficiaries"
+      proposalType === "set_provider_app_reward_beneficiaries" ||
+      proposalType === "onboard_instrument_issuers"
     ) {
       fetchInstruments();
     }
@@ -968,7 +1120,10 @@ export const GovernanceSection = ({
     if (proposalType === "mint" || proposalType === "burn") {
       fetchContractsByTemplate(TEMPLATE_ALLOCATION_FACTORY).then(setAllocationFactoryContracts);
     }
-    if (proposalType === "set_enable_result_contracts") {
+    if (
+      proposalType === "set_enable_result_contracts" ||
+      proposalType === "provision_instrument"
+    ) {
       fetchContractsByTemplate(TEMPLATE_REGISTRAR_SERVICE).then(setRegistrarServiceContracts);
     }
     if (proposalType === "accept_mint_request") {
@@ -977,10 +1132,22 @@ export const GovernanceSection = ({
     if (proposalType === "accept_burn_request") {
       fetchOpenBurnRequests();
     }
-    // The accept forms also need the party's credentials for the issuer
-    // credential picker.
-    if (proposalType === "accept_mint_request" || proposalType === "accept_burn_request") {
+    // The accept forms need the party's credentials for the issuer
+    // credential picker; the Onboard Registrar form for its extra-credentials
+    // picker; the Offboard form for its per-issuer credential pickers.
+    if (
+      proposalType === "accept_mint_request" ||
+      proposalType === "accept_burn_request" ||
+      proposalType === "onboard_registrar" ||
+      proposalType === "offboard_instrument_issuers"
+    ) {
       fetchCredentials();
+    }
+    // The Onboard Registrar pickers list the pending requests and the
+    // provider's configurations.
+    if (proposalType === "onboard_registrar") {
+      fetchRegistrarServiceRequests();
+      fetchProviderConfigurations();
     }
   }, [
     proposalType,
@@ -988,6 +1155,8 @@ export const GovernanceSection = ({
     fetchOpenMintRequests,
     fetchOpenBurnRequests,
     fetchCredentials,
+    fetchRegistrarServiceRequests,
+    fetchProviderConfigurations,
   ]);
 
   // Fetch all deployment-related contracts for vault_deployment
@@ -1271,6 +1440,51 @@ export const GovernanceSection = ({
     });
   };
 
+  // Parse one requirement row's claims textarea. Each line is
+  // "<property>,<value>" — parseClaimsText minus the subject, because a
+  // requirement applies to whichever party gets credentialed.
+  const parseRequiredClaimsText = (
+    text: string,
+  ): { property: string; value: string }[] => {
+    const lines = text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    return lines.map((line, idx) => {
+      const parts = line.split(",").map((s) => s.trim());
+      if (parts.length !== 2 || !parts[0] || !parts[1]) {
+        throw new Error(
+          `Claim line ${idx + 1}: expected "<property>,<value>", got "${line}"`,
+        );
+      }
+      return { property: parts[0], value: parts[1] };
+    });
+  };
+
+  // Turn requirement-editor rows into PartyCredentialRequirement payloads.
+  // `label` names the list in error messages.
+  const buildRequirements = (
+    rows: { issuer: string; claimsText: string }[],
+    label: string,
+  ): PartyCredentialRequirement[] =>
+    rows.map((row, idx) => {
+      const issuer = row.issuer.trim();
+      if (!issuer) {
+        throw new Error(`${label} requirement ${idx + 1}: issuer party is required`);
+      }
+      return {
+        issuer,
+        required_claims: parseRequiredClaimsText(row.claimsText),
+      };
+    });
+
+  // Split a one-party-per-line textarea into party ids.
+  const parsePartyLines = (text: string): string[] =>
+    text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+
   const validateBeneficiaryWeights = (
     beneficiaries: AppRewardBeneficiary[],
   ): string | null => {
@@ -1449,6 +1663,16 @@ export const GovernanceSection = ({
     setProposalDelegate("");
     setProposalDelegationExpiresAt("");
     setProposalAmuletMergeLimit("10");
+    setProposalRegistrar("");
+    setProposalRegistrarServiceRequestCid("");
+    setProposalProviderConfigurationCid("");
+    setProposalExtraRegistrarCredentialCids([]);
+    setProposalRegistrarRequirements([]);
+    setProposalHolderRequirements([]);
+    setProposalIssuerRequirements([]);
+    setProposalInitialInstrumentIssuersText("");
+    setProposalInstrumentIssuersText("");
+    setProposalOffboardEntries([]);
   };
 
   const handleSubmitProposal = async () => {
@@ -1679,15 +1903,84 @@ export const GovernanceSection = ({
           throw new Error(
             "Paid credential proposal forms are not implemented yet — use the Free direction or call the API directly.",
           );
-        // The registrar-onboarding proposal types ship backend-first; the
-        // selector offers no entry for them until their forms land.
+        case "create_provider_configuration":
+          proposal = {
+            type: "create_provider_configuration",
+            provider_service_cid: proposalProviderServiceCid,
+            registrar_requirements: buildRequirements(
+              proposalRegistrarRequirements,
+              "Registrar",
+            ),
+            holder_requirements: buildRequirements(
+              proposalHolderRequirements,
+              "Holder",
+            ),
+          };
+          break;
         case "create_registrar_service_request":
+          proposal = {
+            type: "create_registrar_service_request",
+            operator: proposalOperator,
+            provider: proposalProvider,
+            create_transfer_rule: proposalCreateTransferRule,
+            create_allocation_factory: proposalCreateAllocationFactory,
+          };
+          break;
         case "onboard_registrar":
+          proposal = {
+            type: "onboard_registrar",
+            registrar: proposalRegistrar,
+            provider_service_cid: proposalProviderServiceCid,
+            registrar_service_request_cid: proposalRegistrarServiceRequestCid,
+            provider_configuration_cid: proposalProviderConfigurationCid,
+            extra_registrar_credential_cids: proposalExtraRegistrarCredentialCids,
+          };
+          break;
+        case "provision_instrument":
+          proposal = {
+            type: "provision_instrument",
+            registrar_service_cid: proposalRegistrarServiceCid,
+            instrument_id_text: proposalInstrumentIdText,
+            // No identifier editor, matching the Setup Utility form; extra
+            // identifiers go through the API directly.
+            additional_identifiers: [],
+            issuer_requirements: buildRequirements(
+              proposalIssuerRequirements,
+              "Issuer",
+            ),
+            holder_requirements: buildRequirements(
+              proposalHolderRequirements,
+              "Holder",
+            ),
+            initial_instrument_issuers: parsePartyLines(
+              proposalInitialInstrumentIssuersText,
+            ),
+          };
+          break;
         case "onboard_instrument_issuers":
+          proposal = {
+            type: "onboard_instrument_issuers",
+            instrument_configuration_cid: proposalInstrumentConfigurationCid,
+            instrument_issuers: parsePartyLines(proposalInstrumentIssuersText),
+          };
+          break;
         case "offboard_instrument_issuers":
-          throw new Error(
-            "Registrar onboarding proposal forms are not implemented yet — call the API directly.",
-          );
+          proposal = {
+            type: "offboard_instrument_issuers",
+            instrument_issuers: proposalOffboardEntries.map((entry, idx) => {
+              const issuer = entry.issuer.trim();
+              if (!issuer) {
+                throw new Error(
+                  `Offboard entry ${idx + 1}: instrument issuer party is required`,
+                );
+              }
+              return {
+                instrument_issuer: issuer,
+                credential_cids: entry.credentialCids,
+              };
+            }),
+          };
+          break;
       }
 
       const request: ProposeActionRequest = {
@@ -3809,6 +4102,18 @@ export const GovernanceSection = ({
                   <MenuItem value="accept_mint_request">Accept Mint Request</MenuItem>
                   <MenuItem value="accept_burn_request">Accept Burn Request</MenuItem>
                   <Divider />
+                  <ListSubheader sx={{ color: "primary.main", fontWeight: 600 }}>Dual Governance Utility Onboarding</ListSubheader>
+                  <ListSubheader sx={{ fontStyle: "italic", lineHeight: 1.5, pl: 4 }}>Onboarding (in order)</ListSubheader>
+                  <MenuItem value="create_user_service_request">1. Create User Service Request (as Provider/Registrar)</MenuItem>
+                  <MenuItem value="create_provider_service_request">2. Create Provider Service Request (as Provider)</MenuItem>
+                  <MenuItem value="create_provider_configuration">3. Create Provider Configuration (as Provider)</MenuItem>
+                  <MenuItem value="create_registrar_service_request">4. Create Registrar Service Request (as Registrar)</MenuItem>
+                  <MenuItem value="onboard_registrar">5. Onboard Registrar (as Provider)</MenuItem>
+                  <MenuItem value="provision_instrument">6. Provision Instrument (as Registrar)</MenuItem>
+                  <ListSubheader sx={{ fontStyle: "italic", lineHeight: 1.5, pl: 4 }}>Instrument Management</ListSubheader>
+                  <MenuItem value="onboard_instrument_issuers">Onboard Instrument Issuers (as Registrar)</MenuItem>
+                  <MenuItem value="offboard_instrument_issuers">Offboard Instrument Issuers (as Registrar)</MenuItem>
+                  <Divider />
                   <ListSubheader sx={{ color: "primary.main", fontWeight: 600 }}>Rewards</ListSubheader>
                   <MenuItem value="setup_minting_delegation">Setup Minting Delegation</MenuItem>
                   <MenuItem value="accept_external_party_setup">Accept External Party Setup</MenuItem>
@@ -5322,6 +5627,509 @@ export const GovernanceSection = ({
                     proposalCredentialOfferCid,
                     setProposalCredentialOfferCid,
                   )}
+                </>
+              )}
+
+              {proposalType === "create_provider_configuration" && (
+                <>
+                  <FormControl size="small" fullWidth required>
+                    <InputLabel>
+                      <TextHelp text="ProviderService contract of this provider decparty. Its provider must be the governance party.">
+                        ProviderService
+                      </TextHelp>
+                    </InputLabel>
+                    <Select
+                      label="ProviderService"
+                      value={proposalProviderServiceCid}
+                      onChange={(e) => setProposalProviderServiceCid(e.target.value)}
+                      MenuProps={{ disableScrollLock: true }}
+                    >
+                      {servicesLoading ? (
+                        <MenuItem disabled>Loading services…</MenuItem>
+                      ) : providerServices.length > 0 ? (
+                        providerServices.map((svc) => (
+                          <MenuItem key={svc.contract_id} value={svc.contract_id}>
+                            {svc.contract_id}
+                          </MenuItem>
+                        ))
+                      ) : (
+                        <MenuItem disabled>
+                          No ProviderService found — run "Create Provider Service Request" first
+                        </MenuItem>
+                      )}
+                    </Select>
+                  </FormControl>
+                  {renderRequirementRows(
+                    "Registrar Requirements",
+                    "Credential requirements a registrar must meet before the provider onboards it. Rows whose issuer is this governance party are minted automatically during Onboard Registrar.",
+                    proposalRegistrarRequirements,
+                    setProposalRegistrarRequirements,
+                  )}
+                  {renderRequirementRows(
+                    "Holder Requirements",
+                    "Credential requirements a token holder must meet on this provider's utility.",
+                    proposalHolderRequirements,
+                    setProposalHolderRequirements,
+                  )}
+                </>
+              )}
+
+              {proposalType === "create_registrar_service_request" && (
+                <>
+                  <TextField
+                    size="small"
+                    label="Operator Party"
+                    value={proposalOperator}
+                    onChange={(e) => setProposalOperator(e.target.value)}
+                    fullWidth
+                    required
+                    slotProps={{
+                      input: {
+                        endAdornment: fieldHelpAdornment(
+                          "Party id of the utility operator the registrar service runs under.",
+                          "Help for Operator Party",
+                        ),
+                      },
+                    }}
+                  />
+                  <TextField
+                    size="small"
+                    label="Provider Party"
+                    value={proposalProvider}
+                    onChange={(e) => setProposalProvider(e.target.value)}
+                    fullWidth
+                    required
+                    slotProps={{
+                      input: {
+                        endAdornment: fieldHelpAdornment(
+                          "Party id of the provider decparty this request asks for registrar service. The provider accepts via Onboard Registrar.",
+                          "Help for Provider Party",
+                        ),
+                      },
+                    }}
+                  />
+                  <FormControlLabel
+                    control={<Checkbox size="small" checked={proposalCreateTransferRule} onChange={(e) => setProposalCreateTransferRule(e.target.checked)} />}
+                    label={
+                      <TextHelp text="Also create a TransferRule contract during the accept, so holders can transfer this registrar's tokens without per-transfer governance.">
+                        Create TransferRule
+                      </TextHelp>
+                    }
+                  />
+                  <FormControlLabel
+                    control={<Checkbox size="small" checked={proposalCreateAllocationFactory} onChange={(e) => setProposalCreateAllocationFactory(e.target.checked)} />}
+                    label={
+                      <TextHelp text="Also create an AllocationFactory contract during the accept, so this registrar's tokens can be allocated by external apps.">
+                        Create AllocationFactory
+                      </TextHelp>
+                    }
+                  />
+                </>
+              )}
+
+              {proposalType === "onboard_registrar" && (
+                <>
+                  <TextField
+                    size="small"
+                    label="Registrar Party"
+                    value={proposalRegistrar}
+                    onChange={(e) => setProposalRegistrar(e.target.value)}
+                    fullWidth
+                    required
+                    slotProps={{
+                      input: {
+                        endAdornment: fieldHelpAdornment(
+                          "Party id of the registrar decparty to onboard. Checked against the selected request at execution.",
+                          "Help for Registrar Party",
+                        ),
+                      },
+                    }}
+                  />
+                  <FormControl size="small" fullWidth required>
+                    <InputLabel>
+                      <TextHelp text="ProviderService contract of this provider decparty, used to accept the request.">
+                        ProviderService
+                      </TextHelp>
+                    </InputLabel>
+                    <Select
+                      label="ProviderService"
+                      value={proposalProviderServiceCid}
+                      onChange={(e) => setProposalProviderServiceCid(e.target.value)}
+                      MenuProps={{ disableScrollLock: true }}
+                    >
+                      {servicesLoading ? (
+                        <MenuItem disabled>Loading services…</MenuItem>
+                      ) : providerServices.length > 0 ? (
+                        providerServices.map((svc) => (
+                          <MenuItem key={svc.contract_id} value={svc.contract_id}>
+                            {svc.contract_id}
+                          </MenuItem>
+                        ))
+                      ) : (
+                        <MenuItem disabled>
+                          No ProviderService found — run "Create Provider Service Request" first
+                        </MenuItem>
+                      )}
+                    </Select>
+                  </FormControl>
+                  <FormControl size="small" fullWidth required>
+                    <InputLabel>
+                      <TextHelp text="Pending RegistrarServiceRequest to accept. Its provider must be this governance party and its registrar the party above.">
+                        RegistrarServiceRequest
+                      </TextHelp>
+                    </InputLabel>
+                    <Select
+                      label="RegistrarServiceRequest"
+                      value={proposalRegistrarServiceRequestCid}
+                      onChange={(e) => setProposalRegistrarServiceRequestCid(e.target.value)}
+                      MenuProps={{ disableScrollLock: true }}
+                    >
+                      {registrarServiceRequestsLoading ? (
+                        <MenuItem disabled>Loading requests…</MenuItem>
+                      ) : registrarServiceRequests.length > 0 ? (
+                        registrarServiceRequests.map((req) => (
+                          <MenuItem key={req.contract_id} value={req.contract_id}>
+                            {req.registrar.split("::")[0]} → {req.provider.split("::")[0]} (…{req.contract_id.slice(-8)})
+                          </MenuItem>
+                        ))
+                      ) : (
+                        <MenuItem disabled>
+                          No pending requests — the registrar runs "Create Registrar Service Request" first
+                        </MenuItem>
+                      )}
+                    </Select>
+                  </FormControl>
+                  <FormControl size="small" fullWidth required>
+                    <InputLabel>
+                      <TextHelp text="ProviderConfiguration holding the registrar requirements to mint and validate against.">
+                        ProviderConfiguration
+                      </TextHelp>
+                    </InputLabel>
+                    <Select
+                      label="ProviderConfiguration"
+                      value={proposalProviderConfigurationCid}
+                      onChange={(e) => setProposalProviderConfigurationCid(e.target.value)}
+                      MenuProps={{ disableScrollLock: true }}
+                    >
+                      {providerConfigurationsLoading ? (
+                        <MenuItem disabled>Loading configurations…</MenuItem>
+                      ) : providerConfigurations.length > 0 ? (
+                        providerConfigurations.map((cfg) => (
+                          <MenuItem key={cfg.contract_id} value={cfg.contract_id}>
+                            {cfg.provider.split("::")[0]} — {cfg.registrar_requirement_count} registrar / {cfg.holder_requirement_count} holder req(s) (…{cfg.contract_id.slice(-8)})
+                          </MenuItem>
+                        ))
+                      ) : (
+                        <MenuItem disabled>
+                          No ProviderConfiguration found — run "Create Provider Configuration" first
+                        </MenuItem>
+                      )}
+                    </Select>
+                  </FormControl>
+                  <Autocomplete
+                    size="small"
+                    multiple
+                    freeSolo
+                    options={availableCredentials}
+                    value={proposalExtraRegistrarCredentialCids}
+                    loading={credentialsLoading}
+                    onChange={(_event, values) => {
+                      setProposalExtraRegistrarCredentialCids(
+                        values.map((value) =>
+                          typeof value === "string" ? value : value.contract_id,
+                        ),
+                      );
+                    }}
+                    getOptionLabel={(option) => {
+                      const cid = typeof option === "string" ? option : option.contract_id;
+                      const known =
+                        typeof option === "string"
+                          ? availableCredentials.find((c) => c.contract_id === option)
+                          : option;
+                      const cidTail = cid.slice(-8);
+                      return known ? `${known.credential_id} (…${cidTail})` : cid;
+                    }}
+                    isOptionEqualToValue={(option, value) =>
+                      typeof value === "string"
+                        ? option.contract_id === value
+                        : option.contract_id === value.contract_id
+                    }
+                    renderOption={(props, option) => {
+                      const cidTail = option.contract_id.slice(-8);
+                      const issuerName = option.issuer.split("::")[0];
+                      return (
+                        <li {...props} key={option.contract_id}>
+                          <Box sx={{ display: "flex", flexDirection: "column", gap: 0.25 }}>
+                            <Typography variant="body2">
+                              {option.credential_id} (…{cidTail})
+                            </Typography>
+                            <Typography variant="caption" color="text.secondary">
+                              issued by {issuerName}
+                            </Typography>
+                          </Box>
+                        </li>
+                      );
+                    }}
+                    renderInput={(params) => (
+                      <TextField
+                        {...params}
+                        label={
+                          <TextHelp text="Credentials from issuers other than this governance party, covering externally-issued registrar requirements. Leave empty when every requirement is self-issuable.">
+                            Extra Registrar Credentials
+                          </TextHelp>
+                        }
+                        helperText={
+                          credentialsLoading
+                            ? "Loading credentials…"
+                            : "Pick the registrar's externally-issued credentials, or paste contract ids. Optional."
+                        }
+                      />
+                    )}
+                  />
+                </>
+              )}
+
+              {proposalType === "provision_instrument" && (
+                <>
+                  <FormControl size="small" fullWidth required>
+                    <InputLabel>
+                      <TextHelp text="RegistrarService contract of this registrar decparty, used to create the InstrumentConfiguration.">
+                        RegistrarService
+                      </TextHelp>
+                    </InputLabel>
+                    <Select
+                      label="RegistrarService"
+                      value={proposalRegistrarServiceCid}
+                      onChange={(e) => setProposalRegistrarServiceCid(e.target.value)}
+                      MenuProps={{ disableScrollLock: true }}
+                    >
+                      {registrarServiceContracts.length > 0 ? (
+                        registrarServiceContracts.map((c) => (
+                          <MenuItem key={c.contract_id} value={c.contract_id}>
+                            {c.contract_id}
+                          </MenuItem>
+                        ))
+                      ) : (
+                        <MenuItem disabled>
+                          No RegistrarService found — run "Onboard Registrar" first
+                        </MenuItem>
+                      )}
+                    </Select>
+                  </FormControl>
+                  <TextField
+                    size="small"
+                    label="Instrument ID"
+                    value={proposalInstrumentIdText}
+                    onChange={(e) => setProposalInstrumentIdText(e.target.value)}
+                    fullWidth
+                    required
+                    slotProps={{
+                      input: {
+                        endAdornment: fieldHelpAdornment(
+                          "Token name for the instrument this registrar will manage (e.g. \"cTM\").",
+                          "Help for Instrument ID",
+                        ),
+                      },
+                    }}
+                  />
+                  {renderRequirementRows(
+                    "Issuer Requirements",
+                    "Credential requirements an instrument issuer must meet. Rows whose issuer is this governance party are minted automatically for the initial issuers below.",
+                    proposalIssuerRequirements,
+                    setProposalIssuerRequirements,
+                  )}
+                  {renderRequirementRows(
+                    "Holder Requirements",
+                    "Credential requirements a holder of this instrument must meet.",
+                    proposalHolderRequirements,
+                    setProposalHolderRequirements,
+                  )}
+                  <TextField
+                    size="small"
+                    label="Initial Instrument Issuers (one party id per line)"
+                    value={proposalInitialInstrumentIssuersText}
+                    onChange={(e) => setProposalInitialInstrumentIssuersText(e.target.value)}
+                    fullWidth
+                    multiline
+                    minRows={2}
+                    maxRows={6}
+                    slotProps={{
+                      input: {
+                        endAdornment: fieldHelpAdornment(
+                          "Parties credentialed as instrument issuers at provisioning, one party id per line. Leave empty to onboard issuers later.",
+                          "Help for Initial Instrument Issuers",
+                        ),
+                      },
+                    }}
+                  />
+                </>
+              )}
+
+              {proposalType === "onboard_instrument_issuers" && (
+                <>
+                  <FormControl size="small" fullWidth required>
+                    <InputLabel>
+                      <TextHelp text="InstrumentConfiguration whose issuer requirements the new issuers are credentialed against.">
+                        InstrumentConfiguration
+                      </TextHelp>
+                    </InputLabel>
+                    <Select
+                      label="InstrumentConfiguration"
+                      value={proposalInstrumentConfigurationCid}
+                      onChange={(e) => setProposalInstrumentConfigurationCid(e.target.value)}
+                      MenuProps={{ disableScrollLock: true }}
+                    >
+                      {instrumentsLoading ? (
+                        <MenuItem disabled>Loading instruments…</MenuItem>
+                      ) : availableInstruments.length > 0 ? (
+                        availableInstruments.map((inst) => (
+                          <MenuItem key={inst.contract_id} value={inst.contract_id}>
+                            {inst.instrument_id} ({inst.contract_id.slice(0, 8)}…)
+                          </MenuItem>
+                        ))
+                      ) : (
+                        <MenuItem disabled>
+                          No instruments found — run "Provision Instrument" first
+                        </MenuItem>
+                      )}
+                    </Select>
+                  </FormControl>
+                  <TextField
+                    size="small"
+                    label="Instrument Issuers (one party id per line)"
+                    value={proposalInstrumentIssuersText}
+                    onChange={(e) => setProposalInstrumentIssuersText(e.target.value)}
+                    fullWidth
+                    required
+                    multiline
+                    minRows={2}
+                    maxRows={6}
+                    slotProps={{
+                      input: {
+                        endAdornment: fieldHelpAdornment(
+                          "Parties to credential as instrument issuers, one party id per line. At least one is required.",
+                          "Help for Instrument Issuers",
+                        ),
+                      },
+                    }}
+                  />
+                </>
+              )}
+
+              {proposalType === "offboard_instrument_issuers" && (
+                <>
+                  <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+                    <TextHelp text="The action revokes only the credentials listed here. An issuer keeps minting rights through any credential a row omits, so list every credential this governance party self-issued for the issuer.">
+                      Issuers to offboard (add issuer + credentials to revoke)
+                    </TextHelp>
+                  </Typography>
+                  {proposalOffboardEntries.map((entry, idx) => {
+                    const rowIssuer = entry.issuer.trim();
+                    // The template only revokes credentials this governance
+                    // party issued to itself whose claims all name the
+                    // offboarded issuer; offer exactly those.
+                    const rowOptions = availableCredentials.filter(
+                      (c) =>
+                        c.issuer === partyId &&
+                        c.holder === partyId &&
+                        c.claims.length > 0 &&
+                        rowIssuer !== "" &&
+                        c.claims.every((claim) => claim.subject === rowIssuer),
+                    );
+                    return (
+                      <Box key={idx} sx={{ display: "flex", gap: 1, mb: 1, alignItems: "flex-start" }}>
+                        <TextField
+                          label="Instrument Issuer Party"
+                          value={entry.issuer}
+                          onChange={(e) => {
+                            const updated = [...proposalOffboardEntries];
+                            updated[idx] = { ...entry, issuer: e.target.value };
+                            setProposalOffboardEntries(updated);
+                          }}
+                          size="small"
+                          sx={{ flex: 2 }}
+                          slotProps={{
+                            input: {
+                              endAdornment: fieldHelpAdornment(
+                                "Party id of the instrument issuer to offboard. The listed credentials' claims must name this party.",
+                                "Help for Instrument Issuer Party",
+                              ),
+                            },
+                          }}
+                        />
+                        <Autocomplete
+                          size="small"
+                          multiple
+                          freeSolo
+                          sx={{ flex: 3 }}
+                          options={rowOptions}
+                          value={entry.credentialCids}
+                          loading={credentialsLoading}
+                          onChange={(_event, values) => {
+                            const updated = [...proposalOffboardEntries];
+                            updated[idx] = {
+                              ...entry,
+                              credentialCids: values.map((value) =>
+                                typeof value === "string" ? value : value.contract_id,
+                              ),
+                            };
+                            setProposalOffboardEntries(updated);
+                          }}
+                          getOptionLabel={(option) => {
+                            const cid = typeof option === "string" ? option : option.contract_id;
+                            const known =
+                              typeof option === "string"
+                                ? availableCredentials.find((c) => c.contract_id === option)
+                                : option;
+                            const cidTail = cid.slice(-8);
+                            return known ? `${known.credential_id} (…${cidTail})` : cid;
+                          }}
+                          isOptionEqualToValue={(option, value) =>
+                            typeof value === "string"
+                              ? option.contract_id === value
+                              : option.contract_id === value.contract_id
+                          }
+                          renderInput={(params) => (
+                            <TextField
+                              {...params}
+                              label="Credentials to revoke"
+                              helperText={
+                                credentialsLoading
+                                  ? "Loading credentials…"
+                                  : rowIssuer === ""
+                                    ? "Enter the issuer party to see its credentials"
+                                    : "Pick every self-issued credential for this issuer, or paste contract ids"
+                              }
+                            />
+                          )}
+                        />
+                        <Button
+                          size="small"
+                          color="error"
+                          onClick={() =>
+                            setProposalOffboardEntries(
+                              proposalOffboardEntries.filter((_, i) => i !== idx),
+                            )
+                          }
+                        >
+                          Remove
+                        </Button>
+                      </Box>
+                    );
+                  })}
+                  <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
+                    <Button
+                      size="small"
+                      onClick={() =>
+                        setProposalOffboardEntries([
+                          ...proposalOffboardEntries,
+                          { issuer: "", credentialCids: [] },
+                        ])
+                      }
+                    >
+                      Add Issuer
+                    </Button>
+                  </Box>
                 </>
               )}
 
