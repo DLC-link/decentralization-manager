@@ -16,8 +16,8 @@ use crate::{canton_id::CantonId, error::Result};
 
 use super::types::{
     ActionType, AppRewardBeneficiary, BillingParams, Claim, FarConfig, InstrumentAllowance,
-    InstrumentId, InstrumentIdentifier, InstrumentIssuerOffboardingConfiguration, ProposalType,
-    VaultLimits,
+    InstrumentId, InstrumentIdentifier, InstrumentIssuerOffboardingConfiguration,
+    PartyCredentialRequirement, ProposalType, VaultLimits,
 };
 
 // ============================================================================
@@ -1500,6 +1500,31 @@ pub fn build_proposal_create_args(
                 ],
             },
         ),
+        ProposalType::CreateProviderConfiguration {
+            provider_service_cid,
+            registrar_requirements,
+            holder_requirements,
+        } => (
+            ProposalPackage::GovernanceUtilityOnboarding,
+            "Governance.UtilityOnboarding.CreateProviderConfiguration",
+            "CreateProviderConfiguration",
+            Record {
+                record_id: None,
+                fields: vec![
+                    field("governanceParty", make_party(governance_party)),
+                    field("proposer", make_party(proposer)),
+                    field("providerServiceCid", make_contract_id(provider_service_cid)),
+                    field(
+                        "registrarRequirements",
+                        serialize_party_credential_requirements(registrar_requirements),
+                    ),
+                    field(
+                        "holderRequirements",
+                        serialize_party_credential_requirements(holder_requirements),
+                    ),
+                ],
+            },
+        ),
         ProposalType::CreateRegistrarServiceRequest {
             operator,
             provider,
@@ -1561,6 +1586,51 @@ pub fn build_proposal_create_args(
                 ],
             },
         ),
+        ProposalType::ProvisionInstrument {
+            registrar_service_cid,
+            instrument_id_text,
+            additional_identifiers,
+            issuer_requirements,
+            holder_requirements,
+            initial_instrument_issuers,
+        } => (
+            ProposalPackage::GovernanceUtilityOnboarding,
+            "Governance.UtilityOnboarding.ProvisionInstrument",
+            "ProvisionInstrument",
+            Record {
+                record_id: None,
+                fields: vec![
+                    field("governanceParty", make_party(governance_party)),
+                    field("proposer", make_party(proposer)),
+                    field(
+                        "registrarServiceCid",
+                        make_contract_id(registrar_service_cid),
+                    ),
+                    field("instrumentIdText", make_text(instrument_id_text)),
+                    field(
+                        "additionalIdentifiers",
+                        make_list(
+                            additional_identifiers
+                                .iter()
+                                .map(serialize_instrument_identifier)
+                                .collect(),
+                        ),
+                    ),
+                    field(
+                        "issuerRequirements",
+                        serialize_party_credential_requirements(issuer_requirements),
+                    ),
+                    field(
+                        "holderRequirements",
+                        serialize_party_credential_requirements(holder_requirements),
+                    ),
+                    field(
+                        "initialInstrumentIssuers",
+                        make_list(initial_instrument_issuers.iter().map(make_party).collect()),
+                    ),
+                ],
+            },
+        ),
         ProposalType::OnboardInstrumentIssuers {
             instrument_configuration_cid,
             instrument_issuers,
@@ -1606,6 +1676,38 @@ pub fn build_proposal_create_args(
             },
         ),
     })
+}
+
+/// Serialize a `[PartyCredentialRequirement]` field. Field order matches the
+/// Daml record: `issuer`, then `requiredClaims`. Each required claim is a
+/// `DA.Types:Tuple2 Text Text`, which the Ledger API encodes as a record
+/// with fields `_1` (the property) and `_2` (the value).
+fn serialize_party_credential_requirements(requirements: &[PartyCredentialRequirement]) -> Value {
+    make_list(
+        requirements
+            .iter()
+            .map(|requirement| {
+                make_record(vec![
+                    field("issuer", make_party(&requirement.issuer)),
+                    field(
+                        "requiredClaims",
+                        make_list(
+                            requirement
+                                .required_claims
+                                .iter()
+                                .map(|claim| {
+                                    make_record(vec![
+                                        field("_1", make_text(&claim.property)),
+                                        field("_2", make_text(&claim.value)),
+                                    ])
+                                })
+                                .collect(),
+                        ),
+                    ),
+                ])
+            })
+            .collect(),
+    )
 }
 
 /// Serialize one `InstrumentIssuerOffboardingConfiguration` entry of an
@@ -2105,7 +2207,10 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::canton_id::{NAMESPACE_LENGTH, Namespace};
+    use crate::{
+        canton_id::{NAMESPACE_LENGTH, Namespace},
+        server::types::RequiredClaim,
+    };
 
     #[test]
     fn transfer_validity_from_now_bounds_the_window() {
@@ -2893,6 +2998,46 @@ mod tests {
                 ],
             },
             Case {
+                proposal: ProposalType::CreateProviderConfiguration {
+                    provider_service_cid: "psc".to_string(),
+                    registrar_requirements: vec![],
+                    holder_requirements: vec![],
+                },
+                package: ProposalPackage::GovernanceUtilityOnboarding,
+                module: "Governance.UtilityOnboarding.CreateProviderConfiguration",
+                entity: "CreateProviderConfiguration",
+                labels: &[
+                    "governanceParty",
+                    "proposer",
+                    "providerServiceCid",
+                    "registrarRequirements",
+                    "holderRequirements",
+                ],
+            },
+            Case {
+                proposal: ProposalType::ProvisionInstrument {
+                    registrar_service_cid: "rsc".to_string(),
+                    instrument_id_text: "uuid-1".to_string(),
+                    additional_identifiers: vec![],
+                    issuer_requirements: vec![],
+                    holder_requirements: vec![],
+                    initial_instrument_issuers: vec![party_id()],
+                },
+                package: ProposalPackage::GovernanceUtilityOnboarding,
+                module: "Governance.UtilityOnboarding.ProvisionInstrument",
+                entity: "ProvisionInstrument",
+                labels: &[
+                    "governanceParty",
+                    "proposer",
+                    "registrarServiceCid",
+                    "instrumentIdText",
+                    "additionalIdentifiers",
+                    "issuerRequirements",
+                    "holderRequirements",
+                    "initialInstrumentIssuers",
+                ],
+            },
+            Case {
                 proposal: ProposalType::CreateRegistrarServiceRequest {
                     operator: party_id(),
                     provider: party_id(),
@@ -3106,6 +3251,149 @@ mod tests {
             })
             .collect();
         assert_eq!(cids, ["cred-1", "cred-2"]);
+        Ok(())
+    }
+
+    /// Decode a serialized `[PartyCredentialRequirement]` field into
+    /// `(issuer, [(property, value)])` tuples for terse assertions. Panics on
+    /// any shape mismatch, including tuple fields not labeled `_1`/`_2`.
+    fn requirement_tuples(record: &Record, label: &str) -> Vec<(String, Vec<(String, String)>)> {
+        as_list_elements(field_value(record, label), label)
+            .iter()
+            .map(|element| {
+                let requirement = as_record(element);
+                assert_eq!(
+                    owned_labels(requirement),
+                    ["issuer", "requiredClaims"],
+                    "requirement labels in {label}"
+                );
+                let issuer = match &field_value(requirement, "issuer").sum {
+                    Some(value::Sum::Party(p)) => p.clone(),
+                    other => panic!("expected Party for issuer in {label}, got {other:?}"),
+                };
+                let claims =
+                    as_list_elements(field_value(requirement, "requiredClaims"), "requiredClaims")
+                        .iter()
+                        .map(|claim| {
+                            let pair = as_record(claim);
+                            assert_eq!(owned_labels(pair), ["_1", "_2"], "tuple labels in {label}");
+                            let text = |l: &str| match &field_value(pair, l).sum {
+                                Some(value::Sum::Text(t)) => t.clone(),
+                                other => panic!("expected Text for {l} in {label}, got {other:?}"),
+                            };
+                            (text("_1"), text("_2"))
+                        })
+                        .collect();
+                (issuer, claims)
+            })
+            .collect()
+    }
+
+    fn requirement(issuer: &CantonId, claims: &[(&str, &str)]) -> PartyCredentialRequirement {
+        PartyCredentialRequirement {
+            issuer: issuer.clone(),
+            required_claims: claims
+                .iter()
+                .map(|(property, value)| RequiredClaim {
+                    property: property.to_string(),
+                    value: value.to_string(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn build_proposal_create_provider_configuration_serializes_requirements() -> Result {
+        // Each requirement is a nested record whose `requiredClaims` list
+        // holds `DA.Types:Tuple2 Text Text` records (fields `_1`/`_2`). The
+        // registrar and holder lists carry distinct content, so a swap of
+        // the two fields cannot pass.
+        let issuer = party_id();
+        let proposal = ProposalType::CreateProviderConfiguration {
+            provider_service_cid: "psc".to_string(),
+            registrar_requirements: vec![requirement(
+                &issuer,
+                &[("role", "registrar"), ("kyc", "passed")],
+            )],
+            holder_requirements: vec![requirement(&issuer, &[("role", "holder")])],
+        };
+        let (_, _, _, record) =
+            build_proposal_create_args("gov", "proposer", &proposal, None, None)?;
+
+        let registrar = requirement_tuples(&record, "registrarRequirements");
+        assert_eq!(
+            registrar,
+            [(
+                issuer.to_string(),
+                vec![
+                    ("role".to_string(), "registrar".to_string()),
+                    ("kyc".to_string(), "passed".to_string()),
+                ],
+            )]
+        );
+        let holder = requirement_tuples(&record, "holderRequirements");
+        assert_eq!(
+            holder,
+            [(
+                issuer.to_string(),
+                vec![("role".to_string(), "holder".to_string())],
+            )]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn build_proposal_provision_instrument_shape_and_nested_values() -> Result {
+        let issuer = party_id();
+        let proposal = ProposalType::ProvisionInstrument {
+            registrar_service_cid: "rsc".to_string(),
+            instrument_id_text: "uuid-1".to_string(),
+            additional_identifiers: vec![InstrumentIdentifier {
+                source: party_id(),
+                id: "TICK".to_string(),
+                scheme: "Ticker".to_string(),
+            }],
+            issuer_requirements: vec![requirement(&issuer, &[("role", "instrument-issuer")])],
+            holder_requirements: vec![requirement(&issuer, &[("role", "holder")])],
+            initial_instrument_issuers: vec![issuer.clone()],
+        };
+        let (_, _, _, record) =
+            build_proposal_create_args("gov", "proposer", &proposal, None, None)?;
+
+        // The identifier nesting mirrors the SetupUtility precedent.
+        let identifiers = field_value(&record, "additionalIdentifiers");
+        let first = as_list_elements(identifiers, "additionalIdentifiers")
+            .first()
+            .unwrap_or_else(|| panic!("additionalIdentifiers list is empty"));
+        assert_eq!(owned_labels(as_record(first)), ["source", "id", "scheme"]);
+
+        // Distinct issuer/holder requirement content, so a swap cannot pass.
+        let issuer_reqs = requirement_tuples(&record, "issuerRequirements");
+        assert_eq!(
+            issuer_reqs,
+            [(
+                issuer.to_string(),
+                vec![("role".to_string(), "instrument-issuer".to_string())],
+            )]
+        );
+        let holder_reqs = requirement_tuples(&record, "holderRequirements");
+        assert_eq!(
+            holder_reqs,
+            [(
+                issuer.to_string(),
+                vec![("role".to_string(), "holder".to_string())],
+            )]
+        );
+
+        let issuers: Vec<_> =
+            as_list_elements(field_value(&record, "initialInstrumentIssuers"), "issuers")
+                .iter()
+                .map(|v| match &v.sum {
+                    Some(value::Sum::Party(p)) => p.as_str(),
+                    other => panic!("expected Party element, got {other:?}"),
+                })
+                .collect();
+        assert_eq!(issuers, [issuer.to_string().as_str()]);
         Ok(())
     }
 }

@@ -28,10 +28,11 @@ pub use common::api::{
     KeyStatusResponse, KickInvitePayload, KickRequest, KnownMember, KnownMembersResponse,
     MessageResponse, MissingEdgeKind, MissingPeerEdge, NetworkInfo, OnboardingInvitePayload,
     OnboardingMeshErrorResponse, OnboardingRequest, OperatorInfo, PartyAuthStatus,
-    PartyConfigRequest, PartyConfigResponse, PendingInvitationsResponse, ProviderConfigurationInfo,
-    ProviderConfigurationsResponse, ProviderServiceInfo, ProviderServicesResponse,
-    RegistrarServiceInfo, RegistrarServiceRequestInfo, RegistrarServiceRequestsResponse,
-    RegistrarServicesResponse, ResponseSource, RightsStatus, SuccessResponse, TenantAcsResponse,
+    PartyConfigRequest, PartyConfigResponse, PartyCredentialRequirement,
+    PendingInvitationsResponse, ProviderConfigurationInfo, ProviderConfigurationsResponse,
+    ProviderServiceInfo, ProviderServicesResponse, RegistrarServiceInfo,
+    RegistrarServiceRequestInfo, RegistrarServiceRequestsResponse, RegistrarServicesResponse,
+    RequiredClaim, ResponseSource, RightsStatus, SuccessResponse, TenantAcsResponse,
     TenantContract, TenantExecuteSubmissionRequest, TenantOnboardRequest, TenantOnboardResponse,
     TenantPrepareRequest, TenantPrepareResponse, TenantPrepareSubmissionRequest,
     TenantPrepareSubmissionResponse, TenantTemplateId, TransferFactoriesResponse,
@@ -749,6 +750,16 @@ pub enum ProposalType {
         issuer_credential_cids: Vec<String>,
         description: String,
     },
+    /// Create the provider decparty's `ProviderConfiguration` with
+    /// credential requirements for registrars and holders. Executed once by
+    /// the provider decparty at platform setup.
+    CreateProviderConfiguration {
+        provider_service_cid: String,
+        #[serde(default)]
+        registrar_requirements: Vec<PartyCredentialRequirement>,
+        #[serde(default)]
+        holder_requirements: Vec<PartyCredentialRequirement>,
+    },
     /// Create a `RegistrarServiceRequest` asking `provider` for registrar
     /// service, with the governance party as the registrar. The provider
     /// accepts later via `OnboardRegistrar` on its own decparty.
@@ -772,6 +783,21 @@ pub enum ProposalType {
         /// when every requirement is self-issuable.
         #[serde(default)]
         extra_registrar_credential_cids: Vec<String>,
+    },
+    /// Create an `InstrumentConfiguration` on the registrar decparty and
+    /// credential the initial instrument issuers against its issuer
+    /// requirements. Executed once per instrument.
+    ProvisionInstrument {
+        registrar_service_cid: String,
+        instrument_id_text: String,
+        #[serde(default)]
+        additional_identifiers: Vec<InstrumentIdentifier>,
+        #[serde(default)]
+        issuer_requirements: Vec<PartyCredentialRequirement>,
+        #[serde(default)]
+        holder_requirements: Vec<PartyCredentialRequirement>,
+        #[serde(default)]
+        initial_instrument_issuers: Vec<CantonId>,
     },
     /// Credential new instrument issuers against an existing
     /// `InstrumentConfiguration`'s issuer requirements.
