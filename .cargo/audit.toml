@@ -15,10 +15,16 @@ ignore = [
   # by ratatui (the decman-cli TUI). Trivial compile-time proc-macro, no
   # runtime/security surface. Mirrors the ignore in deny.toml.
   "RUSTSEC-2024-0436",
-  # rkyv 0.7 appears in the lockfile only through rust_decimal's disabled
-  # optional "rkyv" feature. It is never compiled into any artifact
-  # (`cargo tree -i rkyv` resolves to nothing), so the archive-validation
-  # out-of-bounds read is unreachable. cargo-deny agrees (graph-based, does
-  # not flag it).
+  # rkyv 0.7 is an *optional* dependency of rust_decimal (behind its `rkyv`
+  # feature, which nothing here enables), so it is recorded in Cargo.lock but
+  # never compiled: `cargo tree -e normal -i rkyv --target all --all-features`
+  # finds no path to it, and cargo-deny does not flag it. The advisory is an
+  # out-of-bounds read while *deserializing* an rkyv archive; we never call
+  # rkyv, and no untrusted archive reaches it.
+  #
+  # Not fixable by upgrading: rust_decimal requires `rkyv ^0.7.46` and the fix
+  # only landed in 0.8.17, a semver break, so the bump has to come from
+  # rust_decimal upstream. Latest (1.42.1) still requires 0.7. Drop this ignore
+  # once it moves.
   "RUSTSEC-2026-0235",
 ]
