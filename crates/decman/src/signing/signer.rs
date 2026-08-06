@@ -4,7 +4,7 @@ use tonic::transport::Channel;
 
 use crate::{
     error::Result,
-    signing::{SigningError, vault_export::VaultExportSigner},
+    signing::{SigningError, aws_kms::AwsKmsSigner, vault_export::VaultExportSigner},
 };
 
 /// An interactive-submission prepared-transaction hash, as returned by the
@@ -64,25 +64,29 @@ pub trait TransactionSigner: Send + Sync {
 
 /// Choose the signing backend for a given party key.
 ///
-/// The choice is forced by how the key is held, not by preference: a
-/// KMS-backed key can only be signed by the matching KMS backend, an
-/// exportable key by [`VaultExportSigner`]. Today only the export backend
-/// exists; a KMS-backed key still falls through to it and fails at export
-/// exactly as before — the KMS backend lands with its own change. This is the
-/// single extension point for new backends.
+/// The choice is forced by how the key is held, not by preference: a key that
+/// carries a `kms_key_id` is non-exportable and can only be signed through
+/// the KMS ([`AwsKmsSigner`]); an exportable vault key is signed by
+/// [`VaultExportSigner`]. This is the single extension point for new backends
+/// (e.g. an MPCH client-API signer).
 ///
 /// Returns a boxed trait object because the backend is picked at *runtime*
 /// from the key's custody, so the concrete type differs per call; the one
 /// dynamic dispatch is noise next to the signing RPCs themselves.
 ///
 /// Takes the caller's already-open admin-API `channel` so the export backend
-/// reuses one connection instead of opening a second. Async so a future KMS
-/// backend can build its own KMS client here.
+/// reuses one connection instead of opening a second. Async because the KMS
+/// backend resolves AWS credentials when it is built.
 pub async fn select_signer(
-    _key: &SigningKeyContext,
+    key: &SigningKeyContext,
     channel: Channel,
 ) -> Result<Box<dyn TransactionSigner>> {
-    // TODO(#264): when `_key.kms_key_id.is_some()`, return the KMS backend
-    // (AWS KMS / MPCH) instead of the export backend.
-    Ok(Box::new(VaultExportSigner::new(channel)))
+    if key.kms_key_id.is_some() {
+        // Only AWS KMS is supported so far. A key held by a different KMS
+        // driver (e.g. MPCH) also carries a kms_key_id; its Sign call fails
+        // with a clear KMS error until a dedicated backend exists.
+        Ok(Box::new(AwsKmsSigner::new().await))
+    } else {
+        Ok(Box::new(VaultExportSigner::new(channel)))
+    }
 }
