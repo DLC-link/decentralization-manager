@@ -832,6 +832,28 @@ pub struct InstrumentIssuerOffboardingConfiguration {
     pub credential_cids: Vec<String>,
 }
 
+/// One claim a `PartyCredentialRequirement` demands: a credential's claims
+/// must contain this `(property, value)` pair. The Daml side is a
+/// `DA.Types:Tuple2 Text Text`; the wire shape names the halves instead.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct RequiredClaim {
+    pub property: String,
+    pub value: String,
+}
+
+/// A credential requirement on a party: `issuer` must have issued the party
+/// a credential whose claims contain every entry of `required_claims`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct PartyCredentialRequirement {
+    pub issuer: CantonId,
+    #[serde(default)]
+    pub required_claims: Vec<RequiredClaim>,
+}
+
 /// Which governance system a request targets
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
