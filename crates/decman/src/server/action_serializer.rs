@@ -95,7 +95,7 @@ fn make_empty_text_map() -> Value {
     make_text_map(vec![])
 }
 
-fn make_text_map(entries: Vec<(String, Value)>) -> Value {
+pub(crate) fn make_text_map(entries: Vec<(String, Value)>) -> Value {
     Value {
         sum: Some(value::Sum::TextMap(TextMap {
             entries: entries
@@ -175,7 +175,7 @@ impl TransferValidity {
     }
 }
 
-fn make_extra_args(context_values: Value) -> Value {
+pub(crate) fn make_extra_args(context_values: Value) -> Value {
     make_record(vec![
         field(
             "context",

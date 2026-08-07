@@ -1,7 +1,7 @@
 -- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
--- | GovernableAction that disables (archives) the delegation (spec §8, §11).
+-- | GovernableAction that disables (archives) the delegation (design §8, §11).
 module Governance.Rewards.RevokeCouponReassignmentDelegation where
 
 import Governance.Rewards.CouponReassignmentDelegation

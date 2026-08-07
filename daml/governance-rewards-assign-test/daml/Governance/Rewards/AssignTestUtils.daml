@@ -1,10 +1,12 @@
 -- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
--- | Test utilities for the coupon-reassignment-delegation tests. Copied (and
--- adapted with an added `dso` party) from `Governance.TestUtils` in
--- governance-core-test so this package does not need to depend on that
--- test-support package's wallet-bearing closure.
+-- | Test utilities for the coupon-reassignment-delegation tests.
+--
+-- `TestParties` and the helpers typed on it are local because these tests need
+-- an extra `dso` party that `Governance.TestUtils` does not carry. Anything not
+-- typed on that record is imported from there rather than copied.
+--
 -- In real Canton, members have readAs rights on the governance party via
 -- participant topology. In Daml Script, we simulate this with actAs/readAs.
 module Governance.Rewards.AssignTestUtils where
@@ -16,11 +18,21 @@ import Daml.Script
 import Splice.Amulet (RewardCouponV2(..))
 import Splice.Types (Round(..))
 import Splice.Api.RewardAssignmentV1 (RewardCoupon)
+import Splice.Api.Token.MetadataV1
+  (ExtraArgs(..), emptyChoiceContext, emptyMetadata)
 
 import Governance.Action (GovernableAction)
-import Governance.Confirmation
 import Governance.ExecutionResult
 import Governance.Rules
+import Governance.TestUtils (submitConfirmations)
+
+-- | `Splice.Api.Token.MetadataV1` exports no ready-made empty `ExtraArgs`.
+-- Delegation_Assign takes it as a choice argument; every current caller passes
+-- this, and splice ignores it for RewardCouponV2.
+emptyExtraArgs : ExtraArgs
+emptyExtraArgs = ExtraArgs with
+  context = emptyChoiceContext
+  meta = emptyMetadata
 
 -- | Standard test party allocation, plus the DSO party used to create
 -- RewardCouponV2 coupons for the assign tests.
@@ -78,17 +90,6 @@ createTestGovernance parties =
     threshold = 2
     actionConfirmationTimeout = minutes 30
     additionalProposers = None
-
--- | Collect confirmations from a list of members for an interface action.
-submitConfirmations : Party -> ContractId GovernanceRules -> ContractId GovernableAction -> [Party] -> Script [ContractId GovernanceConfirmation]
-submitConfirmations governanceParty rulesCid proposalCid confirmers =
-  mapA (\confirmer -> do
-    result <- submit (memberContext confirmer governanceParty) $
-      exerciseCmd rulesCid GovernanceRules_ConfirmAction with
-        confirmer
-        actionProposalCid = proposalCid
-    pure result.confirmationCid
-  ) confirmers
 
 -- | Confirm and execute an interface action in one go.
 confirmAndExecute : TestParties -> ContractId GovernanceRules -> ContractId GovernableAction -> [Party] -> Party -> Script ExecuteConfirmedActionResult

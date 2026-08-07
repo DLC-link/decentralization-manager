@@ -4,67 +4,52 @@
 -- | Standing delegation that carries the decparty's authority and the fixed
 -- beneficiary split. Created ONCE via governance (SetupCouponReassignmentDelegation);
 -- thereafter any single listed assigner may reassign a coupon batch to the baked-in
--- split with a plain Delegation_Assign exercise — no per-round vote (spec §5, §7, §12).
+-- split with a plain Delegation_Assign exercise — no per-round vote.
 module Governance.Rewards.CouponReassignmentDelegation where
 
 import Splice.Amulet (RewardCouponV2)
 import Splice.Api.RewardAssignmentV1
   (RewardCoupon, RewardBeneficiary, RewardCoupon_AssignBeneficiaries(..))
-import Splice.Api.Token.MetadataV1
-  (ExtraArgs(..), emptyChoiceContext, emptyMetadata)
-
--- `Splice.Api.Token.MetadataV1` exports no ready-made `emptyExtraArgs`; build it from
--- the exported primitives.
-emptyExtraArgs : ExtraArgs
-emptyExtraArgs = ExtraArgs with
-  context = emptyChoiceContext
-  meta = emptyMetadata
+import Splice.Api.Token.MetadataV1 (ExtraArgs)
 
 template CouponReassignmentDelegation
   with
     decparty  : Party                 -- = governanceParty = the coupons' provider
-    dso       : Party                 -- the DSO whose coupons may be assigned; see Delegation_Assign
-    assigners : [Party]               -- = all member parties; any one may reassign (1-of-n)
+    dso       : Party                 -- the DSO whose coupons may be assigned
+    assigners : [Party]               -- any one may reassign (1-of-n)
     split     : [RewardBeneficiary]   -- BAKED IN; validated at create
   where
     signatory decparty
     observer assigners
 
-    -- Per-round reassignment. Nonconsuming: one delegation serves every round
-    -- until governance revokes/replaces it.
     nonconsuming choice Delegation_Assign : ()
       with
-        assigner          : Party                     -- the submitting member; checked below
+        assigner          : Party
         primaryCoupon     : ContractId RewardCoupon
         additionalCoupons : [ContractId RewardCoupon]
-      controller assigner                             -- 1-of-n: any listed assigner, NOT a threshold
+        extraArgs         : ExtraArgs
+          -- ^ passed through to RewardCoupon_AssignBeneficiaries; empty today,
+          -- but a later RewardCoupon version may require a populated context.
+      controller assigner
       do
         assertMsg "assigner must be listed on the delegation" (assigner `elem` assigners)
-        -- Pin the coupon before exercising the interface choice. Two distinct
-        -- guards, both required:
-        --
-        -- 1. Fetching as splice's concrete RewardCouponV2 fails unless the
-        --    contract really is one. `RewardCoupon_AssignBeneficiaries` is
-        --    `controller (view this).provider`, so a look-alike implementation
-        --    whose view claims `provider = decparty` would otherwise satisfy
-        --    that controller with THIS delegation's decparty authority and run
-        --    its own code with it.
-        -- 2. A genuine RewardCouponV2 only needs its own `dso`'s authority to
-        --    create, so any party can mint one naming itself `dso` and this
-        --    decparty as `provider`. Such a coupon is a real RewardCouponV2 and
-        --    passes guard 1, but assigning it is not this delegation's business
-        --    and, as the batch's primary, it makes splice reject every genuine
-        --    coupon alongside it (they are fetched with the primary's `dso`).
+        -- Fetch as the concrete RewardCouponV2, then check the dso. Both guards
+        -- are load-bearing: without the typed fetch, a look-alike implementation
+        -- whose view claims `provider = decparty` satisfies
+        -- RewardCoupon_AssignBeneficiaries' `controller (view this).provider`
+        -- and runs its own code with this delegation's authority; without the
+        -- dso check, any party can mint a genuine RewardCouponV2 naming itself
+        -- dso, and as a batch's primary it makes splice reject every real
+        -- coupon alongside it.
         coupon <- fetch (fromInterfaceContractId @RewardCouponV2 primaryCoupon)
         assertMsg "coupon dso must match the delegation's dso" (coupon.dso == dso)
-        -- newBeneficiaries is the contract's `split`, NEVER a caller argument (security boundary).
         _ <- exercise primaryCoupon RewardCoupon_AssignBeneficiaries with
                additionalCoupons
-               newBeneficiaries = split
-               extraArgs = emptyExtraArgs
+               newBeneficiaries = split   -- the contract's split, never a caller argument
+               extraArgs
         pure ()
 
-    -- Governance-only revoke (consuming → archives). Invoked via a GovernableAction.
+    -- Governance-only revoke. Invoked via a GovernableAction.
     choice Delegation_Revoke : ()
       controller decparty
       do pure ()

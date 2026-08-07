@@ -3,7 +3,7 @@
 
 -- | GovernableAction that creates (or atomically replaces) the decparty's
 -- CouponReassignmentDelegation. The ONLY reassignment step that takes a
--- governance vote (spec §5, §6, §8). Runs with governanceParty authority.
+-- governance vote. Runs with governanceParty authority.
 module Governance.Rewards.SetupCouponReassignmentDelegation where
 
 import DA.Foldable (forA_)
@@ -20,8 +20,7 @@ template SetupCouponReassignmentDelegation
       -- ^ cid of the delegation to replace (None for the first create); revoked at execute.
     dso : Party
       -- ^ the DSO whose coupons the delegation may assign. Fixed by this vote so
-      -- Delegation_Assign can reject a coupon minted by anyone else: any party can
-      -- create a RewardCouponV2 naming itself dso and this decparty as provider.
+      -- Delegation_Assign can reject a coupon minted by anyone else.
     assigners : [Party]
     beneficiaries : [RewardBeneficiary]
   where
@@ -36,23 +35,18 @@ template SetupCouponReassignmentDelegation
         description = "Create (or replace) the coupon-reassignment delegation."
 
       executeImpl = do
-        -- execute-time guards (a direct ledger submit bypasses the Rust boundary).
-        -- Same checks as the Rust validate_reward_beneficiaries + a non-empty assigners set.
+        -- Execute-time guards: a direct ledger submit bypasses the Rust boundary.
         assertMsg "beneficiaries must not be empty" (not (null beneficiaries))
         assertMsg "at most 20 beneficiaries" (length beneficiaries <= 20)
         assertMsg "each percentage must be in (0,1]"
           (all (\b -> b.percentage > 0.0 && b.percentage <= 1.0) beneficiaries)
-        -- Splice's RewardCoupon_AssignBeneficiaries requires unique beneficiaries,
-        -- so a duplicate baked in here would fail every later Delegation_Assign
-        -- and stall assignment behind a coupon that can never be exercised.
+        -- Splice requires unique beneficiaries, so a duplicate baked in here
+        -- would fail every later Delegation_Assign.
         assertMsg "beneficiaries must be unique" (unique (map (.beneficiary) beneficiaries))
         let total = sum (map (.percentage) beneficiaries)
         assertMsg "percentages must sum to 1.0" (total == 1.0)   -- exact Decimal
         assertMsg "assigners must not be empty" (not (null assigners))
-        -- Uniqueness only. A duplicate assigner is meaningless; a decparty or dso
-        -- that is also an assigner is merely unusual, and cannot misdirect
-        -- anything, since the split is fixed. On localnet one party legitimately
-        -- wears several of these hats.
+        -- Uniqueness only: on localnet one party legitimately wears several hats.
         assertMsg "assigners must be unique" (unique assigners)
         forA_ priorDelegation (`exercise` Delegation_Revoke)      -- atomic replace when Some
         _ <- create CouponReassignmentDelegation with

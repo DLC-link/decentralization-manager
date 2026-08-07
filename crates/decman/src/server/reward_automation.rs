@@ -53,7 +53,9 @@ use crate::{
 use std::time::Duration;
 
 use super::AppState;
-use super::action_serializer::{field, make_contract_id, make_list, make_party};
+use super::action_serializer::{
+    field, make_contract_id, make_extra_args, make_list, make_party, make_text_map,
+};
 use super::handlers::{get_party_credentials, packages};
 use super::queries::resolve_contract_package_ref;
 
@@ -125,6 +127,10 @@ fn field_optional_is_none(rec: &Record, label: &str) -> bool {
 /// interface-view `Record`. Field labels are populated because the request is
 /// `verbose`.
 ///
+/// Each entry is `(contract_id, created-event offset, Record)`. The offset
+/// orders contracts by creation, which [`active_delegation`] uses to pick the
+/// newest of several.
+///
 /// Modeled on `queries::fetch_proposal_infos`.
 // The full filter descriptor (package/module/entity + template-vs-interface) is
 // intentionally passed positionally so this stays the single shared read for
@@ -139,7 +145,7 @@ pub(crate) async fn active_created_records(
     module: &str,
     entity: &str,
     interface_view: bool,
-) -> anyhow::Result<Vec<(String, Record)>> {
+) -> anyhow::Result<Vec<(String, i64, Record)>> {
     let mut state_client = utils::create_state_client(config, token).await?;
 
     let ledger_end = state_client
@@ -211,7 +217,7 @@ pub(crate) async fn active_created_records(
                     continue;
                 };
                 if let Some(rec) = view.view_value.clone() {
-                    out.push((created.contract_id.clone(), rec));
+                    out.push((created.contract_id.clone(), created.offset, rec));
                 }
             } else {
                 // Wildcard (test mode) returns every template; keep only the
@@ -226,7 +232,7 @@ pub(crate) async fn active_created_records(
                     continue;
                 }
                 if let Some(rec) = created.create_arguments.clone() {
-                    out.push((created.contract_id.clone(), rec));
+                    out.push((created.contract_id.clone(), created.offset, rec));
                 }
             }
         }
@@ -243,16 +249,14 @@ pub(crate) async fn active_created_records(
 /// of members authorized to execute `Delegation_Assign`, and how many
 /// beneficiaries its split names. The split's *contents* are **not** carried
 /// here — they live in the on-ledger contract and `Delegation_Assign` enforces
-/// them by construction (spec §12), so the Rust side never needs to read them.
+/// them by construction (design §12), so the Rust side never needs to read them.
 /// Only the count is read, to size a chunk: one assign creates
 /// `coupons × beneficiaries` contracts (see [`chunk_size`]).
 pub(crate) struct ActiveDelegation {
     pub cid: String,
-    /// The DSO whose coupons this delegation may assign. Any party can mint a
-    /// `RewardCouponV2` naming itself `dso` and this decparty as `provider`, so
-    /// a coupon from any other DSO must never enter a batch: as the batch's
-    /// primary it makes splice reject every genuine coupon alongside it, and a
-    /// failed chunk ends the tick.
+    /// The DSO whose coupons this delegation may assign. A coupon from any
+    /// other DSO must never enter a batch: as the batch's primary it makes
+    /// splice reject every genuine coupon alongside it.
     pub dso: CantonId,
     pub assigners: Vec<CantonId>,
     pub beneficiary_count: usize,
@@ -305,9 +309,14 @@ fn parse_delegation_record(cid: &str, rec: &Record) -> anyhow::Result<ActiveDele
 
 /// The active `CouponReassignmentDelegation` for a decparty, read from the
 /// ledger, or `None` when there is none (automation not enabled for that
-/// decparty). Defends the keyless-singleton invariant: more than one active
-/// delegation for the same decparty is refused rather than guessed at. This
-/// is the reassign loop's enablement + assigners source.
+/// decparty). This is the reassign loop's enablement + assigners source.
+///
+/// A decparty is meant to have at most one. Canton cannot enforce that without
+/// a contract key, and it has no cross-participant key uniqueness, so the
+/// convention rests on the propose-time 409 guard (design §12). If more than
+/// one is live anyway, take the newest by created-event offset — the one the
+/// most recent vote produced — and warn. Every node reads the same ledger, so
+/// they all pick the same contract.
 pub(crate) async fn active_delegation(
     config: &NodeConfig,
     packages: &PackageConfig,
@@ -331,26 +340,39 @@ pub(crate) async fn active_delegation(
     )
     .await?;
 
-    // Defend the keyless-singleton invariant: keep only delegations whose
-    // `decparty` field is this decparty.
-    let mut mine: Vec<(String, Record)> = records
+    let Some((cid, rec)) = newest_delegation_for(records, decparty) else {
+        return Ok(None);
+    };
+    Ok(Some(parse_delegation_record(&cid, &rec)?))
+}
+
+/// Pick the delegation a decparty should act on (pure): of those naming
+/// `decparty`, the one created last.
+///
+/// A wildcard test-mode read returns every template, and a superseded package
+/// version may still be live, so the `decparty` filter is what makes the result
+/// this decparty's own. `max_by_key` keeps the last maximum, so equal offsets —
+/// impossible for two creates on one participant, but cheap to pin — resolve to
+/// the later entry rather than panicking or picking arbitrarily.
+fn newest_delegation_for(
+    records: Vec<(String, i64, Record)>,
+    decparty: &CantonId,
+) -> Option<(String, Record)> {
+    let mine: Vec<(String, i64, Record)> = records
         .into_iter()
-        .filter(|(_, rec)| field_party_id(rec, "decparty").ok().as_ref() == Some(decparty))
+        .filter(|(_, _, rec)| field_party_id(rec, "decparty").ok().as_ref() == Some(decparty))
         .collect();
 
-    match mine.len() {
-        0 => Ok(None),
-        1 => {
-            let (cid, rec) = mine.remove(0);
-            Ok(Some(parse_delegation_record(&cid, &rec)?))
-        }
-        n => {
-            tracing::warn!(%decparty, count = n, "ambiguous CouponReassignmentDelegation — refusing");
-            Err(anyhow!(
-                "ambiguous CouponReassignmentDelegation: {n} active — refusing"
-            ))
-        }
+    if mine.len() > 1 {
+        tracing::warn!(
+            %decparty,
+            count = mine.len(),
+            "several active CouponReassignmentDelegations; using the newest"
+        );
     }
+    mine.into_iter()
+        .max_by_key(|(_, offset, _)| *offset)
+        .map(|(cid, _, rec)| (cid, rec))
 }
 
 // ============================================================================
@@ -397,13 +419,10 @@ pub(crate) async fn unassigned_coupons(
     )
     .await?;
 
-    let mut out = Vec::new();
-    for (cid, rec) in records {
-        if let Some(coupon) = parse_unassigned_coupon(&cid, &rec, decparty, dso)? {
-            out.push(coupon);
-        }
-    }
-    Ok(out)
+    records
+        .iter()
+        .filter_map(|(cid, _, rec)| parse_unassigned_coupon(cid, rec, decparty, dso).transpose())
+        .collect()
 }
 
 /// Decode one `RewardCoupon` interface-view record into a [`CouponInfo`], or
@@ -421,13 +440,6 @@ fn parse_unassigned_coupon(
     if &provider != decparty {
         return Ok(None);
     }
-    // `dso` is the only signatory of `RewardCouponV2`, so any party can mint one
-    // naming itself `dso` and this decparty as `provider`, and it lands in the
-    // decparty's ACS. Such a coupon is a genuine RewardCouponV2 — it is simply
-    // not ours to assign, and letting it into a batch is a denial of service:
-    // sorted most-urgent-first it becomes the primary, splice fetches every
-    // other coupon with the primary's `dso`, the whole chunk is rejected, and
-    // the tick ends having assigned nothing.
     if field_party_id(rec, "dso")? != *dso {
         return Ok(None);
     }
@@ -498,7 +510,12 @@ pub(crate) fn chunk_size(max_creates: usize, beneficiary_count: usize) -> usize 
 // ============================================================================
 
 /// Build the `Delegation_Assign` choice argument (pure): fields
-/// `assigner, primaryCoupon, additionalCoupons`, in that order.
+/// `assigner, primaryCoupon, additionalCoupons, extraArgs`, in that order.
+///
+/// `extraArgs` is passed through to `RewardCoupon_AssignBeneficiaries`. splice
+/// ignores it for `RewardCouponV2`, so an empty one is correct today; the
+/// choice takes it so a later coupon version needing a context does not force
+/// another DAML change.
 fn build_delegation_assign_arg(
     assigner: &CantonId,
     primary: &str,
@@ -513,6 +530,7 @@ fn build_delegation_assign_arg(
                 "additionalCoupons",
                 make_list(additional.iter().map(|c| make_contract_id(c)).collect()),
             ),
+            field("extraArgs", make_extra_args(make_text_map(vec![]))),
         ],
     }
 }
@@ -535,7 +553,7 @@ fn delegation_template_id(package_id: String) -> Identifier {
 /// (`handlers/governance.rs:2107`); the differences are the target contract
 /// (the delegation cid), the choice (`Delegation_Assign`), the template
 /// (`Governance.Rewards.CouponReassignmentDelegation`), and `act_as =
-/// [assigner]` / `read_as = [decparty]` (co-hosting, spec §4.6).
+/// [assigner]` / `read_as = [decparty]` (co-hosting, design §4.6).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn submit_delegation_assign(
     config: &NodeConfig,
@@ -616,7 +634,7 @@ pub(crate) async fn submit_delegation_assign(
 /// A tick drains the whole set rather than assigning one chunk and waiting for
 /// the next tick, so throughput does not depend on the tick interval: the
 /// interval is a latency/cost knob, not a safety-critical one. The chunk bounds
-/// one *transaction* (spec §9/§11; see [`chunk_size`]).
+/// one *transaction* (design §9/§11; see [`chunk_size`]).
 ///
 /// A failed chunk ends the tick (see [`drain_assignable`]).
 ///
@@ -773,13 +791,13 @@ async fn run_once_for_party(
     let Some((token, member)) = get_party_credentials(data, decparty).await else {
         return Ok(());
     };
-    // Enablement: exactly one active delegation. None => off (no-op). >1 => Err (refuse+alert).
+    // Enablement: an active delegation. None => off (no-op).
     let Some(delegation) =
         active_delegation(&data.config, &pkgs, data.test_mode, decparty, &token).await?
     else {
         return Ok(());
     };
-    // This node must be a listed assigner, else it cannot reassign (spec §9, §11).
+    // This node must be a listed assigner, else it cannot reassign.
     if !delegation.assigners.contains(&member) {
         tracing::debug!(%decparty, %member, "node not an assigner on the delegation — skipping");
         return Ok(());
@@ -917,6 +935,64 @@ mod tests {
             field("split", value::Sum::List(List { elements: vec![] })),
         ]);
         assert!(parse_delegation_record("00del", &rec).is_err());
+    }
+
+    // ---- delegation selection (newest_delegation_for) -----------------------
+
+    /// A delegation record naming `decparty`, enough for the selection filter.
+    fn delegation_of(decparty: &str) -> Record {
+        record(vec![
+            field("decparty", party(decparty)),
+            field("dso", party(GOV)),
+            field(
+                "assigners",
+                value::Sum::List(List {
+                    elements: vec![value(party(ALICE))],
+                }),
+            ),
+            field(
+                "split",
+                value::Sum::List(List {
+                    elements: vec![beneficiary_record(ALICE, "1.0")],
+                }),
+            ),
+        ])
+    }
+
+    #[test]
+    fn newest_delegation_wins_regardless_of_read_order() {
+        // The ACS read order is not creation order, so the newest must be picked
+        // by offset. Feed the newest first to catch a take-the-first bug.
+        let gov = CantonId::parse(GOV).unwrap();
+        let records = vec![
+            ("00new".to_string(), 900, delegation_of(GOV)),
+            ("00old".to_string(), 100, delegation_of(GOV)),
+            ("00mid".to_string(), 500, delegation_of(GOV)),
+        ];
+        let (cid, _) = newest_delegation_for(records, &gov).expect("one is selected");
+        assert_eq!(cid, "00new");
+    }
+
+    #[test]
+    fn newest_delegation_ignores_another_decpartys_delegation() {
+        // A wildcard test-mode read returns every template; a delegation whose
+        // `decparty` is someone else must never be acted on, even when it is
+        // the newest contract in the response.
+        let gov = CantonId::parse(GOV).unwrap();
+        let records = vec![
+            ("00mine".to_string(), 100, delegation_of(GOV)),
+            ("00theirs".to_string(), 999, delegation_of(BOB)),
+        ];
+        let (cid, _) = newest_delegation_for(records, &gov).expect("one is selected");
+        assert_eq!(cid, "00mine");
+    }
+
+    #[test]
+    fn newest_delegation_is_none_when_no_delegation_is_this_decpartys() {
+        let gov = CantonId::parse(GOV).unwrap();
+        let records = vec![("00theirs".to_string(), 999, delegation_of(BOB))];
+        assert!(newest_delegation_for(records, &gov).is_none());
+        assert!(newest_delegation_for(vec![], &gov).is_none());
     }
 
     // ---- unassigned-coupon fail-safe filter (parse_unassigned_coupon) -------
@@ -1159,7 +1235,15 @@ mod tests {
         let rec =
             build_delegation_assign_arg(&rb("m1", "1.0").beneficiary, "00c1", &["00c2".into()]);
         let labels: Vec<&str> = rec.fields.iter().map(|f| f.label.as_str()).collect();
-        assert_eq!(labels, ["assigner", "primaryCoupon", "additionalCoupons"]);
+        assert_eq!(
+            labels,
+            [
+                "assigner",
+                "primaryCoupon",
+                "additionalCoupons",
+                "extraArgs"
+            ]
+        );
     }
 
     #[test]

@@ -646,10 +646,9 @@ pub enum ProposalType {
     /// Create (or replace) the decparty's on-ledger CouponReassignmentDelegation.
     /// `prior_delegation` is the cid of the delegation being replaced (None for the first).
     SetupCouponReassignmentDelegation {
-        /// The DSO whose coupons the delegation may assign. Fixed by this vote:
-        /// `dso` is `RewardCouponV2`'s only signatory, so any party can mint one
-        /// naming itself `dso` and the decparty as `provider`, and the
-        /// automation must be able to tell those apart from the real ones.
+        /// The DSO whose coupons the delegation may assign. Fixed by this vote
+        /// so the automation can tell the decparty's real coupons from ones a
+        /// stranger minted naming itself `dso`.
         dso: CantonId,
         assigners: Vec<CantonId>,
         new_beneficiaries: Vec<RewardBeneficiary>,
@@ -854,13 +853,10 @@ fn validate_reward_beneficiaries(beneficiaries: &[RewardBeneficiary]) -> Result<
     if beneficiaries.len() > 20 {
         return Err("at most 20 beneficiaries per coupon".to_string());
     }
-    let zero = "0"
-        .parse::<DamlDecimal>()
-        .expect("'0' is a valid DamlDecimal");
-    let one: DamlDecimal = "1".parse().expect("'1' is a valid DamlDecimal");
+    let one = DamlDecimal::parse("1").map_err(|e| e.to_string())?;
     let mut seen = std::collections::HashSet::new();
     for b in beneficiaries {
-        if b.percentage.value() <= zero.value() || b.percentage.value() > one.value() {
+        if b.percentage.value() <= DamlDecimal::ZERO.value() || b.percentage.value() > one.value() {
             return Err(format!(
                 "each percentage must be in (0.0, 1.0], got {}",
                 b.percentage

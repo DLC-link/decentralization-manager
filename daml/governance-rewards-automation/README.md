@@ -1,4 +1,4 @@
-# governance-rewards-automation-v1-rc1
+# governance-rewards-automation-v1-rc2
 
 A decman governance plugin (`GovernableAction` implementations) that lets a
 decentralized party manage collection of its CIP-104 rewards. Each action is
@@ -27,8 +27,8 @@ documented below.
 ## Prerequisites
 
 - A `GovernanceRules` contract deployed (from `#governance-core-<version>`).
-- This `governance-rewards-automation-v1-rc1` DAR uploaded and vetted on all participants. decman resolves the
-  package by name (`#governance-rewards-automation-v1-rc1`), so Canton package-preference selects the highest
+- This `governance-rewards-automation-v1-rc2` DAR uploaded and vetted on all participants. decman resolves the
+  package by name (`#governance-rewards-automation-v1-rc2`), so Canton package-preference selects the highest
   vetted version.
 
   **Not upgrade-compatible with `governance-rewards-v1`.** This is a new package
@@ -111,7 +111,7 @@ Establishing those is a two-step onboarding.
 
    This creates an on-ledger `Splice.AmuletRules:ExternalPartySetupProposal`
    (signed by the validator + DSO, observed by the decparty) and returns its
-   contract id. Manual operator action — not part of `governance-rewards-automation-v1-rc1`.
+   contract id. Manual operator action — not part of `governance-rewards-automation-v1-rc2`.
 
 2. **Governance votes `AcceptExternalPartySetup`.** A member proposes the action
    with the proposal's contract id; after threshold confirmations, execution

@@ -24,7 +24,7 @@
 //!      visible after a short poll — there is no silent no-op path there.
 //!
 //! To actually observe reassignment on devnet, operational preconditions
-//! (spec §13) must hold — none are reproducible from this harness:
+//! (design §13) must hold — none are reproducible from this harness:
 //!   - The decparty (`f.party_id()`) must be an app-provider whose coupons
 //!     carry `provider == decparty` and are **unassigned** (`beneficiary =
 //!     null`). On devnet that is `cbtc-network`; a fresh harness-allocated
@@ -59,7 +59,7 @@
 //! per-beneficiary field checks still require decoded reads not exposed by
 //! `/contracts/query` and must be verified against devnet PQS `pqs_cbtc` on the
 //! real run (issue #271) — see the TODO on the final assertion. Beneficiary
-//! self-minting (spec §4.3) is a separate precondition (the beneficiaries' own
+//! self-minting (design §4.3) is a separate precondition (the beneficiaries' own
 //! agents) and is likewise verified out-of-band.
 //!
 //! ## Security property
@@ -94,9 +94,9 @@ use crate::common::{
 /// `#splice-api-reward-assignment-v1`, URL-encoded — the `RewardCoupon`
 /// interface package (concrete implementer on devnet: `RewardCouponV2`).
 const REWARD_ASSIGN_PKG: &str = "%23splice-api-reward-assignment-v1";
-/// `#governance-rewards-automation-v1-rc1`, URL-encoded — holds the
+/// `#governance-rewards-automation-v1-rc2`, URL-encoded — holds the
 /// `CouponReassignmentDelegation` template.
-const GOVERNANCE_REWARDS_PKG: &str = "%23governance-rewards-automation-v1-rc1";
+const GOVERNANCE_REWARDS_PKG: &str = "%23governance-rewards-automation-v1-rc2";
 
 /// Generous ceiling for the reassignment step. Under a short
 /// `DECPM_REWARD_AUTOMATION_INTERVAL_SECS` (see the module doc) the loop

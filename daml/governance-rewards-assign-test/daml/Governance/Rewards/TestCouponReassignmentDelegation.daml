@@ -10,6 +10,7 @@ import Governance.Rewards.CouponReassignmentDelegation
 import Governance.Rewards.SetupCouponReassignmentDelegation
 import Governance.Rewards.RevokeCouponReassignmentDelegation
 import Governance.Rewards.AssignTestUtils   -- allocateRewardsTestParties, TestParties (has .dso)
+import Governance.TestUtils (submitConfirmations)
                                              -- also: createTestGovernance, confirmAndExecute,
                                              -- submitConfirmations, memberContext
 import Governance.Action (GovernableAction)
@@ -47,7 +48,7 @@ when_assigner_reassigns f = do
   let gp = f.parties.governanceParty
   c1 <- mkUnassignedCoupon f.parties.dso gp 100.0
   submit (memberContext f.parties.member1 gp) $ exerciseCmd f.delId Delegation_Assign with
-    assigner = f.parties.member1; primaryCoupon = c1; additionalCoupons = []
+    assigner = f.parties.member1; primaryCoupon = c1; additionalCoupons = []; extraArgs = emptyExtraArgs
   coupons <- query @RewardCouponV2 gp
   pure (length coupons)
 
@@ -68,7 +69,7 @@ when_non_assigner_rejected f = do
   -- member3 has the same readAs visibility a real member would; the rejection
   -- must come from the `elem` gate, not from incidental lack of visibility.
   submitMustFail (memberContext f.parties.member3 gp) $ exerciseCmd f.delId Delegation_Assign with
-    assigner = f.parties.member3; primaryCoupon = c1; additionalCoupons = []
+    assigner = f.parties.member3; primaryCoupon = c1; additionalCoupons = []; extraArgs = emptyExtraArgs
 
 test_non_assigner_cannot_reassign = script do
   run Test with
@@ -83,9 +84,9 @@ when_two_rounds f = do
   c1 <- mkUnassignedCoupon f.parties.dso gp 100.0
   c2 <- mkUnassignedCoupon f.parties.dso gp 50.0
   submit (memberContext f.parties.member1 gp) $ exerciseCmd f.delId Delegation_Assign with
-    assigner = f.parties.member1; primaryCoupon = c1; additionalCoupons = []
+    assigner = f.parties.member1; primaryCoupon = c1; additionalCoupons = []; extraArgs = emptyExtraArgs
   submit (memberContext f.parties.member1 gp) $ exerciseCmd f.delId Delegation_Assign with
-    assigner = f.parties.member1; primaryCoupon = c2; additionalCoupons = []
+    assigner = f.parties.member1; primaryCoupon = c2; additionalCoupons = []; extraArgs = emptyExtraArgs
   coupons <- query @RewardCouponV2 gp
   pure (length coupons)
 
@@ -121,10 +122,10 @@ when_reassign_same_coupon_fails f = do
   let gp = f.parties.governanceParty
   c1 <- mkUnassignedCoupon f.parties.dso gp 100.0
   submit (memberContext f.parties.member1 gp) $ exerciseCmd f.delId Delegation_Assign with
-    assigner = f.parties.member1; primaryCoupon = c1; additionalCoupons = []
+    assigner = f.parties.member1; primaryCoupon = c1; additionalCoupons = []; extraArgs = emptyExtraArgs
   -- c1 is now consumed/assigned; re-assigning the same cid fails the whole tx (all-or-nothing)
   submitMustFail (memberContext f.parties.member1 gp) $ exerciseCmd f.delId Delegation_Assign with
-    assigner = f.parties.member1; primaryCoupon = c1; additionalCoupons = []
+    assigner = f.parties.member1; primaryCoupon = c1; additionalCoupons = []; extraArgs = emptyExtraArgs
 
 -- security: a coupon minted by a DIFFERENT dso is rejected. Any party can create
 -- a RewardCouponV2 naming itself dso and this decparty as provider (dso is the
@@ -137,7 +138,7 @@ when_foreign_dso_coupon_rejected f = do
   -- member3 mints it as its own dso, naming gp as provider.
   bad <- mkUnassignedCoupon f.parties.member3 gp 100.0
   submitMustFail (memberContext f.parties.member1 gp) $ exerciseCmd f.delId Delegation_Assign with
-    assigner = f.parties.member1; primaryCoupon = bad; additionalCoupons = []
+    assigner = f.parties.member1; primaryCoupon = bad; additionalCoupons = []; extraArgs = emptyExtraArgs
 
 test_foreign_dso_coupon_rejected = script do
   run Test with
