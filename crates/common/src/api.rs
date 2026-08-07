@@ -1163,10 +1163,6 @@ pub struct ProviderConfigurationInfo {
     pub contract_id: String,
     pub operator: CantonId,
     pub provider: CantonId,
-    /// Number of registrar credential requirements the configuration holds.
-    pub registrar_requirement_count: usize,
-    /// Number of holder credential requirements the configuration holds.
-    pub holder_requirement_count: usize,
 }
 
 /// Response for the provider configurations endpoint

@@ -5816,7 +5816,7 @@ export const GovernanceSection = ({
                       ) : providerConfigurations.length > 0 ? (
                         providerConfigurations.map((cfg) => (
                           <MenuItem key={cfg.contract_id} value={cfg.contract_id}>
-                            {cfg.provider.split("::")[0]} — {cfg.registrar_requirement_count} registrar / {cfg.holder_requirement_count} holder req(s) (…{cfg.contract_id.slice(-8)})
+                            {cfg.contract_id}
                           </MenuItem>
                         ))
                       ) : (
