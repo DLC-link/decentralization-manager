@@ -3,9 +3,8 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use canton_proto_rs::com::daml::ledger::api::v2::{
     CumulativeFilter, EventFormat, Filters, GetLatestPrunedOffsetsRequest, GetLedgerEndRequest,
-    GetUpdatesRequest, Identifier, InterfaceFilter, Record, TemplateFilter, TransactionFormat,
-    TransactionShape, UpdateFormat, Value, WildcardFilter, cumulative_filter, event::Event,
-    get_updates_response::Update, value,
+    Identifier, InterfaceFilter, Record, TemplateFilter, Transaction, TransactionFormat,
+    TransactionShape, UpdateFormat, Value, WildcardFilter, cumulative_filter, event::Event, value,
 };
 use serde_json::{Value as JsonValue, json};
 use sqlx::SqlitePool;
@@ -17,6 +16,7 @@ use crate::{
 };
 
 use super::{
+    ledger_paging::fetch_transactions_page,
     package_inventory::{fetch_package_names, matching_names, package_name_prefix},
     types::ChainAuditEntry,
 };
@@ -310,6 +310,7 @@ pub async fn get_chain_audit(
     token: Option<String>,
     packages: &PackageConfig,
     limit: usize,
+    before_offset: Option<i64>,
 ) -> Result<Vec<ChainAuditEntry>> {
     let party_id_str = party_id.to_string();
     let party_id = party_id_str.as_str();
@@ -333,6 +334,22 @@ pub async fn get_chain_audit(
         .participant_pruned_up_to_inclusive;
 
     let begin_offset = pruned_offset.max(0);
+
+    // Paging back through the trail means capping the range instead of moving
+    // a Canton page token across HTTP requests: ledger offsets are stable and
+    // survive a cache round trip, whereas a page token is only valid against
+    // the exact query that produced it.
+    let end_offset = match before_offset {
+        Some(cursor) => cursor.saturating_sub(1).min(ledger_end),
+        None => ledger_end,
+    };
+    if end_offset <= begin_offset {
+        return Ok(Vec::new());
+    }
+    let range = OffsetRange {
+        begin_exclusive: begin_offset,
+        end_inclusive: end_offset,
+    };
 
     let filters = chain_filters(packages);
     if filters.templates.is_empty() && filters.interfaces.is_empty() {
@@ -382,16 +399,18 @@ pub async fn get_chain_audit(
         }
     };
 
-    let mut entries = match canton_filters {
+    // `collect_entries` already keeps governance entries only, sorted newest
+    // first and capped at `limit`.
+    let entries = match canton_filters {
         Some(cumulative) => {
-            let filtered = stream_entries(
+            let filtered = collect_entries(
                 config,
                 token.clone(),
                 party_id,
-                begin_offset,
-                ledger_end,
+                range,
                 cumulative,
                 &template_index,
+                limit,
             )
             .await;
             match filtered {
@@ -400,39 +419,32 @@ pub async fn get_chain_audit(
                     tracing::warn!(
                         "Filtered chain audit query failed: {e:#}; retrying with wildcard"
                     );
-                    stream_entries(
+                    collect_entries(
                         config,
                         token,
                         party_id,
-                        begin_offset,
-                        ledger_end,
+                        range,
                         wildcard_filters(),
                         &template_index,
+                        limit,
                     )
                     .await?
                 }
             }
         }
         None => {
-            stream_entries(
+            collect_entries(
                 config,
                 token,
                 party_id,
-                begin_offset,
-                ledger_end,
+                range,
                 wildcard_filters(),
                 &template_index,
+                limit,
             )
             .await?
         }
     };
-
-    // The trail shows governance actions only — drop downstream creates,
-    // unrelated choices and the like before caching and returning.
-    entries.retain(is_governance_entry);
-
-    entries.sort_by_key(|e| std::cmp::Reverse(e.offset));
-    entries.truncate(limit);
 
     tracing::info!(
         "Chain audit for {party_id}: {count} entries (ledger_end={ledger_end})",
@@ -442,16 +454,29 @@ pub async fn get_chain_audit(
     Ok(entries)
 }
 
-/// Stream `GetUpdates` between the offsets with the given event filters and
-/// convert matching Created/Exercised events into audit entries.
-async fn stream_entries(
+/// The ledger-offset window a chain-audit read covers.
+#[derive(Clone, Copy)]
+struct OffsetRange {
+    begin_exclusive: i64,
+    end_inclusive: i64,
+}
+
+/// Read governance audit entries newest-first until `limit` of them have been
+/// collected.
+///
+/// Paging descending is what makes the early exit sound: every later page holds
+/// strictly lower offsets, so the first `limit` governance entries seen *are*
+/// the most recent `limit`. The previous implementation drained the whole
+/// retained ledger before sorting and truncating, which grew without bound as
+/// the ledger aged.
+async fn collect_entries(
     config: &NodeConfig,
     token: Option<String>,
     party_id: &str,
-    begin_exclusive: i64,
-    end_inclusive: i64,
+    range: OffsetRange,
     cumulative: Vec<CumulativeFilter>,
     template_index: &HashMap<(String, String), &'static str>,
+    limit: usize,
 ) -> Result<Vec<ChainAuditEntry>> {
     let mut filters_by_party = HashMap::new();
     filters_by_party.insert(party_id.to_string(), Filters { cumulative });
@@ -471,126 +496,164 @@ async fn stream_entries(
         include_topology_events: None,
     };
 
-    let mut update_client = utils::create_update_client(config, token).await?;
-    let req = GetUpdatesRequest {
-        begin_exclusive,
-        end_inclusive: Some(end_inclusive),
-        update_format: Some(update_format),
-        descending_order: false,
-    };
-
-    let mut stream = update_client
-        .get_updates(tonic::Request::new(req))
-        .await
-        .context("Failed to call GetUpdates")?
-        .into_inner();
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
 
     let mut entries: Vec<ChainAuditEntry> = Vec::new();
+    let mut page_token = None;
 
-    while let Some(response) = stream
-        .message()
+    loop {
+        let page = fetch_transactions_page(
+            config,
+            token.clone(),
+            range.begin_exclusive,
+            range.end_inclusive,
+            update_format.clone(),
+            page_token,
+        )
         .await
-        .context("Stream error while reading ledger updates")?
-    {
-        let Some(Update::Transaction(tx)) = response.update else {
-            continue;
-        };
+        .context("Failed to read ledger updates")?;
 
-        let tx_ts = tx.effective_at.as_ref().map(|t| t.seconds).unwrap_or(0);
-        let update_id = tx.update_id.clone();
+        for tx in page.transactions {
+            entries.extend(
+                transaction_entries(tx, template_index)
+                    .into_iter()
+                    .filter(is_governance_entry),
+            );
+        }
 
-        // Collect (node_id, last_descendant_node_id) for every Exercise in this
-        // transaction so we can later detect Created events that are downstream
-        // effects of an Exercise — those aren't fresh proposals.
-        let exercise_ranges: Vec<(i32, i32)> = tx
-            .events
+        if entries.len() >= limit {
+            break;
+        }
+
+        match page.next_page_token {
+            Some(next) => page_token = Some(next),
+            None => break,
+        }
+    }
+
+    entries.sort_by_key(|e| std::cmp::Reverse(e.offset));
+
+    // Never end a page part-way through an offset. One transaction can yield
+    // several entries that all share its offset, and the cursor handed to the
+    // client is an offset — so a page cut mid-offset would make the next page
+    // (`offset < cursor`) skip the remainder outright. Overshooting `limit` by
+    // the tail of one transaction is the cheaper trade. Everything for a given
+    // offset is already in hand: `GetUpdatesPage` returns whole transactions,
+    // and the loop above consumes a full page before stopping.
+    if entries.len() > limit {
+        let boundary = entries[limit - 1].offset;
+        let keep = entries
             .iter()
-            .filter_map(|evt| match evt.event.as_ref()? {
-                Event::Exercised(x) => Some((x.node_id, x.last_descendant_node_id)),
-                _ => None,
-            })
-            .collect();
+            .position(|e| e.offset < boundary)
+            .unwrap_or(entries.len());
+        entries.truncate(keep);
+    }
 
-        for evt in tx.events {
-            let Some(e) = evt.event else { continue };
-            match e {
-                Event::Created(c) => {
-                    let Some(tid) = c.template_id.as_ref() else {
-                        continue;
-                    };
-                    let gov_type = template_index
-                        .get(&(tid.module_name.clone(), tid.entity_name.clone()))
-                        .copied()
-                        .or_else(|| {
-                            c.interface_views.iter().find_map(|iv| {
-                                let iid = iv.interface_id.as_ref()?;
-                                template_index
-                                    .get(&(iid.module_name.clone(), iid.entity_name.clone()))
-                                    .copied()
-                            })
-                        })
-                        .unwrap_or("unknown");
+    Ok(entries)
+}
 
-                    let is_child_of_exercise = exercise_ranges
-                        .iter()
-                        .any(|(start, end)| c.node_id > *start && c.node_id <= *end);
-                    let (event_type, action_summary) = classify_created(tid, is_child_of_exercise);
+/// Convert one transaction's Created/Exercised events into audit entries.
+fn transaction_entries(
+    tx: Transaction,
+    template_index: &HashMap<(String, String), &'static str>,
+) -> Vec<ChainAuditEntry> {
+    let mut entries: Vec<ChainAuditEntry> = Vec::new();
+    let tx_ts = tx.effective_at.as_ref().map(|t| t.seconds).unwrap_or(0);
+    let update_id = tx.update_id.clone();
 
-                    entries.push(ChainAuditEntry {
-                        offset: c.offset,
-                        timestamp: tx_ts,
-                        event_type,
-                        contract_id: c.contract_id,
-                        template_id: format!("{}:{}", tid.module_name, tid.entity_name),
-                        package_id: tid.package_id.clone(),
-                        governance_type: gov_type.to_string(),
-                        action_summary,
-                        choice: None,
-                        acting_parties: c.signatories,
-                        update_id: update_id.clone(),
-                        details: record_to_json(&c.create_arguments),
-                    });
-                }
-                Event::Exercised(x) => {
-                    let Some(tid) = x.template_id.as_ref() else {
-                        continue;
-                    };
-                    let gov_type = template_index
-                        .get(&(tid.module_name.clone(), tid.entity_name.clone()))
-                        .copied()
-                        .or_else(|| {
-                            let iid = x.interface_id.as_ref()?;
+    // Collect (node_id, last_descendant_node_id) for every Exercise in this
+    // transaction so we can later detect Created events that are downstream
+    // effects of an Exercise — those aren't fresh proposals.
+    let exercise_ranges: Vec<(i32, i32)> = tx
+        .events
+        .iter()
+        .filter_map(|evt| match evt.event.as_ref()? {
+            Event::Exercised(x) => Some((x.node_id, x.last_descendant_node_id)),
+            _ => None,
+        })
+        .collect();
+
+    for evt in tx.events {
+        let Some(e) = evt.event else { continue };
+        match e {
+            Event::Created(c) => {
+                let Some(tid) = c.template_id.as_ref() else {
+                    continue;
+                };
+                let gov_type = template_index
+                    .get(&(tid.module_name.clone(), tid.entity_name.clone()))
+                    .copied()
+                    .or_else(|| {
+                        c.interface_views.iter().find_map(|iv| {
+                            let iid = iv.interface_id.as_ref()?;
                             template_index
                                 .get(&(iid.module_name.clone(), iid.entity_name.clone()))
                                 .copied()
                         })
-                        .unwrap_or("unknown");
+                    })
+                    .unwrap_or("unknown");
 
-                    let event_type = classify_choice(&x.choice);
-                    let choice = x.choice.clone();
-                    entries.push(ChainAuditEntry {
-                        offset: x.offset,
-                        timestamp: tx_ts,
-                        event_type,
-                        contract_id: x.contract_id,
-                        template_id: format!("{}:{}", tid.module_name, tid.entity_name),
-                        package_id: tid.package_id.clone(),
-                        governance_type: gov_type.to_string(),
-                        action_summary: choice.clone(),
-                        choice: Some(choice),
-                        acting_parties: x.acting_parties,
-                        update_id: update_id.clone(),
-                        details: optional_value_to_json(&x.choice_argument),
-                    });
-                }
-                Event::Archived(_) => {
-                    // Under LedgerEffects we get Exercised (consuming) instead; skip.
-                }
+                let is_child_of_exercise = exercise_ranges
+                    .iter()
+                    .any(|(start, end)| c.node_id > *start && c.node_id <= *end);
+                let (event_type, action_summary) = classify_created(tid, is_child_of_exercise);
+
+                entries.push(ChainAuditEntry {
+                    offset: c.offset,
+                    timestamp: tx_ts,
+                    event_type,
+                    contract_id: c.contract_id,
+                    template_id: format!("{}:{}", tid.module_name, tid.entity_name),
+                    package_id: tid.package_id.clone(),
+                    governance_type: gov_type.to_string(),
+                    action_summary,
+                    choice: None,
+                    acting_parties: c.signatories,
+                    update_id: update_id.clone(),
+                    details: record_to_json(&c.create_arguments),
+                });
+            }
+            Event::Exercised(x) => {
+                let Some(tid) = x.template_id.as_ref() else {
+                    continue;
+                };
+                let gov_type = template_index
+                    .get(&(tid.module_name.clone(), tid.entity_name.clone()))
+                    .copied()
+                    .or_else(|| {
+                        let iid = x.interface_id.as_ref()?;
+                        template_index
+                            .get(&(iid.module_name.clone(), iid.entity_name.clone()))
+                            .copied()
+                    })
+                    .unwrap_or("unknown");
+
+                let event_type = classify_choice(&x.choice);
+                let choice = x.choice.clone();
+                entries.push(ChainAuditEntry {
+                    offset: x.offset,
+                    timestamp: tx_ts,
+                    event_type,
+                    contract_id: x.contract_id,
+                    template_id: format!("{}:{}", tid.module_name, tid.entity_name),
+                    package_id: tid.package_id.clone(),
+                    governance_type: gov_type.to_string(),
+                    action_summary: choice.clone(),
+                    choice: Some(choice),
+                    acting_parties: x.acting_parties,
+                    update_id: update_id.clone(),
+                    details: optional_value_to_json(&x.choice_argument),
+                });
+            }
+            Event::Archived(_) => {
+                // Under LedgerEffects we get Exercised (consuming) instead; skip.
             }
         }
     }
 
-    Ok(entries)
+    entries
 }
 
 /// Save chain audit entries to the cache table.

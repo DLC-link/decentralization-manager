@@ -18,6 +18,8 @@ import { TextHelp } from "./FieldHelp";
 import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
 import { zebraRow } from "../styles";
+import { PaginationControls } from "./Pagination";
+import { usePagination } from "../usePagination";
 import type { Holding, HoldingsResponse } from "../types";
 
 interface HoldingsSectionProps {
@@ -41,6 +43,7 @@ export const HoldingsSection = ({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [holdings, setHoldings] = useState<Holding[]>([]);
+  const { page, setPage, pageCount, pageItems, total } = usePagination(holdings);
 
   const fetchHoldings = useCallback(async () => {
     setLoading(true);
@@ -155,7 +158,7 @@ export const HoldingsSection = ({
           </TableRow>
         </TableHead>
         <TableBody>
-          {holdings.map((h, idx) => (
+          {pageItems.map((h, idx) => (
             <TableRow
               key={`${h.instrument_admin}::${h.instrument_id}`}
               sx={zebraRow(idx)}
@@ -204,6 +207,12 @@ export const HoldingsSection = ({
           ))}
         </TableBody>
       </Table>
+      <PaginationControls
+        page={page}
+        pageCount={pageCount}
+        total={total}
+        onChange={setPage}
+      />
     </Box>
   );
 };

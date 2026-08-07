@@ -40,6 +40,7 @@ use crate::{
     server::{
         AppState,
         health::classify_health_reply,
+        ledger_paging::fetch_vetted_packages,
         queries::{get_contracts, get_party_metadata, sort_contracts},
         types::{
             ConnectionStatus, ContractInfo, DecentralizedPartiesResponse, DecentralizedParty,
@@ -865,37 +866,25 @@ pub async fn fetch_decentralized_parties(
 )]
 #[get("/packages/vetted")]
 pub async fn get_vetted_packages(data: web::Data<AppState>) -> impl Responder {
-    let mut client = match data.config.admin_channel().await {
-        Ok(channel) => PackageServiceClient::new(channel),
+    // Reads the participant's topology vetting state via the ledger API's
+    // paginated `ListVettedPackages`. The admin `ListPackages` this used to
+    // call lists every *uploaded* DAR, which is a strictly larger set — an
+    // uploaded-but-unvetted package was previously reported as vetted.
+    let vetted = match fetch_vetted_packages(&data.config, None).await {
+        Ok(vetted) => vetted,
         Err(e) => {
             return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to connect to Canton: {e}"),
+                error: format!("Failed to list vetted packages: {e}"),
             });
         }
     };
 
-    let response = match client
-        .list_packages(tonic::Request::new(ListPackagesRequest {
-            limit: 0,
-            filter_name: String::new(),
-        }))
-        .await
-    {
-        Ok(r) => r.into_inner(),
-        Err(e) => {
-            return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to list packages: {e}"),
-            });
-        }
-    };
-
-    let packages: Vec<VettedPackageInfo> = response
-        .package_descriptions
+    let packages: Vec<VettedPackageInfo> = vetted
         .into_iter()
         .map(|p| VettedPackageInfo {
             package_id: p.package_id,
-            package_name: p.name,
-            package_version: p.version,
+            package_name: p.package_name,
+            package_version: p.package_version,
         })
         .collect();
 

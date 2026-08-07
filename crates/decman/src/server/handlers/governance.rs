@@ -968,6 +968,23 @@ pub async fn get_governance_audit(
     }
 }
 
+/// Wrap a page of audit entries, deriving the cursor for the next (older) page.
+///
+/// A short page means the trail is exhausted, so no cursor is handed back and
+/// the UI stops asking.
+fn chain_audit_response(entries: Vec<ChainAuditEntry>, limit: usize) -> ChainAuditResponse {
+    let total_returned = entries.len();
+    let next_before_offset = (total_returned >= limit && limit > 0)
+        .then(|| entries.last().map(|e| e.offset))
+        .flatten();
+
+    ChainAuditResponse {
+        entries,
+        total_returned,
+        next_before_offset,
+    }
+}
+
 /// Get on-chain governance audit entries.
 /// Returns cached data by default. Pass `refresh=true` to fetch from Canton and update cache.
 #[utoipa::path(
@@ -986,21 +1003,21 @@ pub async fn get_governance_chain_audit(
     let party_id = &query.party_id;
 
     if !query.refresh {
-        // Return from cache
+        // Return from cache. An empty result is treated as a miss rather than
+        // an answer: the cache only holds the pages fetched so far, so paging
+        // past its tail (or a cold start) has to reach Canton instead of
+        // reporting the trail as exhausted.
         match data
             .db
-            .get_chain_audit_cache(party_id, query.limit as i64)
+            .get_chain_audit_cache(party_id, query.limit as i64, query.before_offset)
             .await
         {
-            Ok(rows) => {
+            Ok(rows) if !rows.is_empty() => {
                 let entries: Vec<ChainAuditEntry> =
                     rows.into_iter().map(chain_audit_entry_from_row).collect();
-                let total_returned = entries.len();
-                return HttpResponse::Ok().json(ChainAuditResponse {
-                    entries,
-                    total_returned,
-                });
+                return HttpResponse::Ok().json(chain_audit_response(entries, query.limit));
             }
+            Ok(_) => {}
             Err(e) => {
                 tracing::warn!("Failed to read chain audit cache: {e}");
                 // Fall through to live query
@@ -1012,7 +1029,16 @@ pub async fn get_governance_chain_audit(
     let token = get_party_token(&data, party_id).await;
     let pkgs = packages();
 
-    match chain_audit::get_chain_audit(&data.config, party_id, token, &pkgs, query.limit).await {
+    match chain_audit::get_chain_audit(
+        &data.config,
+        party_id,
+        token,
+        &pkgs,
+        query.limit,
+        query.before_offset,
+    )
+    .await
+    {
         Ok(entries) => {
             // Save to cache in background
             let pool = data.db.clone();
@@ -1022,11 +1048,7 @@ pub async fn get_governance_chain_audit(
                 chain_audit::save_chain_audit_cache(&pool, &pid, &cached).await;
             });
 
-            let total_returned = entries.len();
-            HttpResponse::Ok().json(ChainAuditResponse {
-                entries,
-                total_returned,
-            })
+            HttpResponse::Ok().json(chain_audit_response(entries, query.limit))
         }
         Err(e) => {
             tracing::error!("Failed to fetch chain audit for {party_id}: {e:#}");

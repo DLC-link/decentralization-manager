@@ -8,6 +8,8 @@ import {
   Typography,
 } from "@mui/material";
 import { CopyableText } from "./CopyableText";
+import { PaginationControls } from "./Pagination";
+import { usePagination } from "../usePagination";
 import { zebraRow } from "../styles";
 import type { ExternalPartyInfo } from "../types";
 
@@ -16,6 +18,8 @@ interface ExternalPartyListProps {
 }
 
 export const ExternalPartyList = ({ parties }: ExternalPartyListProps) => {
+  const { page, setPage, pageCount, pageItems, total } = usePagination(parties);
+
   if (parties.length === 0) {
     return (
       <Typography
@@ -41,7 +45,7 @@ export const ExternalPartyList = ({ parties }: ExternalPartyListProps) => {
           </TableRow>
         </TableHead>
         <TableBody>
-          {parties.map((party, idx) => (
+          {pageItems.map((party, idx) => (
             <TableRow key={party.party_id} sx={{ ...zebraRow(idx) }}>
               <TableCell sx={{ py: 1.5 }}>
                 <CopyableText
@@ -66,6 +70,12 @@ export const ExternalPartyList = ({ parties }: ExternalPartyListProps) => {
           ))}
         </TableBody>
       </Table>
+      <PaginationControls
+        page={page}
+        pageCount={pageCount}
+        total={total}
+        onChange={setPage}
+      />
     </Box>
   );
 };
