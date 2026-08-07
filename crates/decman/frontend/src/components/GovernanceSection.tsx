@@ -717,6 +717,14 @@ export const GovernanceSection = ({
     [credentialOffers, partyId],
   );
 
+  // Requests this provider decparty can accept via Onboard Registrar: only
+  // those that name it as the provider. With the provider fixed, each row
+  // needs only the registrar and the cid tail.
+  const acceptableRegistrarServiceRequests = useMemo(
+    () => registrarServiceRequests.filter((r) => r.provider === partyId),
+    [registrarServiceRequests, partyId],
+  );
+
   // Prefill the credential proposal form's UserService once the list arrives —
   // parties typically have exactly one.
   useEffect(() => {
@@ -5786,15 +5794,15 @@ export const GovernanceSection = ({
                     >
                       {registrarServiceRequestsLoading ? (
                         <MenuItem disabled>Loading requests…</MenuItem>
-                      ) : registrarServiceRequests.length > 0 ? (
-                        registrarServiceRequests.map((req) => (
+                      ) : acceptableRegistrarServiceRequests.length > 0 ? (
+                        acceptableRegistrarServiceRequests.map((req) => (
                           <MenuItem key={req.contract_id} value={req.contract_id}>
-                            {req.registrar.split("::")[0]} → {req.provider.split("::")[0]} (…{req.contract_id.slice(-8)})
+                            {req.registrar.split("::")[0]} (…{req.contract_id.slice(-8)})
                           </MenuItem>
                         ))
                       ) : (
                         <MenuItem disabled>
-                          No pending requests — the registrar runs "Create Registrar Service Request" first
+                          No pending requests for this provider — the registrar runs "Create Registrar Service Request" first
                         </MenuItem>
                       )}
                     </Select>
