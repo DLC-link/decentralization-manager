@@ -141,6 +141,7 @@ async fn wait_for_dns_in_topology(
                 time_query: Some(base_query::TimeQuery::HeadState(())),
                 filter_signed_key: String::new(),
                 protocol_version: None,
+                client_version: None,
             }),
             filter_namespace: namespace.to_string(),
         });
@@ -455,6 +456,7 @@ async fn wait_for_p2p_in_topology(
                 time_query: Some(base_query::TimeQuery::HeadState(())),
                 filter_signed_key: String::new(),
                 protocol_version: None,
+                client_version: None,
             }),
             filter_party: party_id_str.clone(),
             filter_participant: String::new(),

@@ -21,7 +21,7 @@ use canton_proto_rs::com::digitalasset::canton::{
         AddTransactionsRequest, AuthorizeRequest, AuthorizeResponse, BaseQuery,
         ListDecentralizedNamespaceDefinitionRequest, ListPartyToParticipantRequest,
         SignTransactionsRequest, SignTransactionsResponse, StoreId, Synchronizer, base_query,
-        store_id, synchronizer,
+        list_party_to_participant_response::result::Item as P2pItem, store_id, synchronizer,
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
         topology_manager_write_service_client::TopologyManagerWriteServiceClient,
     },
@@ -197,6 +197,7 @@ pub fn head_state_query(synchronizer_id: &str) -> BaseQuery {
         time_query: Some(base_query::TimeQuery::HeadState(())),
         filter_signed_key: String::new(),
         protocol_version: None,
+        client_version: None,
     }
 }
 
@@ -242,7 +243,7 @@ pub async fn fetch_p2p_mapping(
     response
         .results
         .first()
-        .and_then(|r| r.item.as_ref())
+        .and_then(|r| r.item.as_ref().map(|P2pItem::V30(mapping)| mapping))
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("No P2P mapping found for party {party_id}"))
 }

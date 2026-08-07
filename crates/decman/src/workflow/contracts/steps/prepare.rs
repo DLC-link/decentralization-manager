@@ -159,6 +159,8 @@ pub async fn prepare_submissions(
                 verbose_hashing: false,
                 prefetch_contract_keys: vec![],
                 estimate_traffic_cost: None,
+                hashing_scheme_version: None,
+                taps_max_passes: None,
             }))
             .await?
             .into_inner();

@@ -1,5 +1,6 @@
 use canton_proto_rs::com::digitalasset::canton::topology::admin::v30::{
     ListDecentralizedNamespaceDefinitionRequest, ListPartyToParticipantRequest,
+    list_party_to_participant_response::result::Item as P2pItem,
     topology_manager_read_service_client::TopologyManagerReadServiceClient,
 };
 use sqlx::SqlitePool;
@@ -109,7 +110,7 @@ pub async fn export_state(
     let p2p_mapping = p2p_response
         .results
         .first()
-        .and_then(|r| r.item.as_ref())
+        .and_then(|r| r.item.as_ref().map(|P2pItem::V30(mapping)| mapping))
         .ok_or_else(|| anyhow::anyhow!("No P2P mapping found for party {party_id}"))?;
 
     let kick_participant = &kick_config.participant_id;

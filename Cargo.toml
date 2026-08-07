@@ -11,7 +11,8 @@ actix-cors = { version = "0.7" }
 actix-web = { version = "4" }
 aes-gcm = { version = "0.11" }
 anyhow = { version = "1.0.98" }
-base64 = { version = "0.22" }
+async-trait = { version = "0.1" }
+base64 = { version = "0.23" }
 bytes = { version = "1.11.1" }
 chrono = { version = "0.4", default-features = false, features = [
     "clock",
@@ -20,13 +21,13 @@ chrono = { version = "0.4", default-features = false, features = [
 clap = { version = "4.5.43", features = ["derive", "env"] }
 colored = { version = "3.1.1" }
 dotenvy = { version = "0.15" }
-ed25519-dalek = { version = "2.1", features = ["zeroize"] }
+ed25519-dalek = { version = "3.0", features = ["zeroize"] }
 futures = { version = "0.3" }
 hex = { version = "0.4" }
 http = { version = "0.2" }
 hyper = { version = "0.14", features = ["full"] }
 hyper-noise = { version = "0.0.3" }
-jsonwebtoken = { version = "10.4", features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "11.0", features = ["aws_lc_rs"] }
 mime_guess = { version = "2.0" }
 prost = { version = "0.14.1" }
 prost-types = { version = "0.14.1" }
@@ -89,11 +90,11 @@ wiremock = { version = "0.6" }
 x509-parser = { version = "0.18" }
 zeroize = { version = "1.8", features = ["derive"] }
 
-canton-common = { package = "common", git = "ssh://git@github.com/DLC-link/canton-lib", rev = "e80d7c1acc012a23665dadeaf7c8761e9ea73ef7" }
-canton-proto-rs = { git = "ssh://git@github.com/DLC-link/canton-lib", rev = "e80d7c1acc012a23665dadeaf7c8761e9ea73ef7" }
-canton-registry = { package = "registry", git = "ssh://git@github.com/DLC-link/canton-lib", rev = "e80d7c1acc012a23665dadeaf7c8761e9ea73ef7" }
+canton-common = { package = "common", git = "ssh://git@github.com/DLC-link/canton-lib", rev = "651ea5221b4794f55bd152e9f3e762a92af69afd" }
+canton-proto-rs = { git = "ssh://git@github.com/DLC-link/canton-lib", rev = "651ea5221b4794f55bd152e9f3e762a92af69afd" }
+canton-registry = { package = "registry", git = "ssh://git@github.com/DLC-link/canton-lib", rev = "651ea5221b4794f55bd152e9f3e762a92af69afd" }
 common = { path = "crates/common" }
-keycloak = { git = "ssh://git@github.com/DLC-link/canton-lib", rev = "e80d7c1acc012a23665dadeaf7c8761e9ea73ef7" }
+keycloak = { git = "ssh://git@github.com/DLC-link/canton-lib", rev = "651ea5221b4794f55bd152e9f3e762a92af69afd" }
 
 [profile.release]
 opt-level = 3
