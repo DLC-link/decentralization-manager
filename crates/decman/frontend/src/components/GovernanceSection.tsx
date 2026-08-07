@@ -64,6 +64,8 @@ import type {
   CredentialOffersResponse,
   CredentialInfo,
   CredentialsResponse,
+  RegistrarServiceInfo,
+  RegistrarServicesResponse,
   RegistrarServiceRequestInfo,
   RegistrarServiceRequestsResponse,
   ProviderConfigurationInfo,
@@ -383,6 +385,11 @@ export const GovernanceSection = ({
   // Power the pickers on the Onboard Registrar form.
   const [registrarServiceRequests, setRegistrarServiceRequests] = useState<RegistrarServiceRequestInfo[]>([]);
   const [registrarServiceRequestsLoading, setRegistrarServiceRequestsLoading] = useState(false);
+  // Typed `RegistrarService` contracts. Power the Provision Instrument
+  // picker, which needs the registrar field to filter out services this
+  // decparty co-signed as the provider.
+  const [availableRegistrarServices, setAvailableRegistrarServices] = useState<RegistrarServiceInfo[]>([]);
+  const [registrarServicesLoading, setRegistrarServicesLoading] = useState(false);
   const [providerConfigurations, setProviderConfigurations] = useState<ProviderConfigurationInfo[]>([]);
   const [providerConfigurationsLoading, setProviderConfigurationsLoading] = useState(false);
   // InstrumentConfiguration contracts fetched from /instruments. Each one
@@ -700,6 +707,25 @@ export const GovernanceSection = ({
     }
   }, [partyId]);
 
+  // Fetch typed `RegistrarService` contracts so the Provision Instrument
+  // picker can filter on the registrar field.
+  const fetchRegistrarServices = useCallback(async () => {
+    setRegistrarServicesLoading(true);
+    try {
+      const res = await authenticatedFetch(
+        `${API_BASE}/services/registrar?party_id=${encodeURIComponent(partyId)}`,
+      );
+      if (res.ok) {
+        const response: RegistrarServicesResponse = await res.json();
+        setAvailableRegistrarServices(response.services);
+      }
+    } catch (e) {
+      console.error("Failed to fetch registrar services:", e);
+    } finally {
+      setRegistrarServicesLoading(false);
+    }
+  }, [partyId]);
+
   useEffect(() => {
     if (
       selectedActionType === "credential_accept_free" ||
@@ -724,6 +750,39 @@ export const GovernanceSection = ({
     () => registrarServiceRequests.filter((r) => r.provider === partyId),
     [registrarServiceRequests, partyId],
   );
+
+  // Services this registrar decparty can provision instruments on. The
+  // decparty also co-signs services as the provider side; those fail
+  // ProvisionInstrument's registrar assertion, so hide them.
+  const ownRegistrarServices = useMemo(
+    () => availableRegistrarServices.filter((s) => s.registrar === partyId),
+    [availableRegistrarServices, partyId],
+  );
+
+  // Instruments this registrar decparty administers. The decparty also
+  // co-signs its registrars' instruments as the provider side; those fail
+  // OnboardInstrumentIssuers' registrar assertion, so hide them. The
+  // instrument admin is the configuration's registrar.
+  const ownInstruments = useMemo(
+    () => availableInstruments.filter((inst) => inst.instrument_admin === partyId),
+    [availableInstruments, partyId],
+  );
+
+  // Candidate extra credentials for Onboard Registrar: issued by a party
+  // other than this governance party (self-issuable requirements are minted
+  // automatically) and attesting for the registrar entered on the form.
+  const externalRegistrarCredentials = useMemo(() => {
+    const registrar = proposalRegistrar.trim();
+    if (registrar === "") {
+      return [];
+    }
+    return availableCredentials.filter(
+      (c) =>
+        c.issuer !== partyId &&
+        c.claims.length > 0 &&
+        c.claims.every((claim) => claim.subject === registrar),
+    );
+  }, [availableCredentials, partyId, proposalRegistrar]);
 
   // Prefill the credential proposal form's UserService once the list arrives —
   // parties typically have exactly one.
@@ -1128,11 +1187,13 @@ export const GovernanceSection = ({
     if (proposalType === "mint" || proposalType === "burn") {
       fetchContractsByTemplate(TEMPLATE_ALLOCATION_FACTORY).then(setAllocationFactoryContracts);
     }
-    if (
-      proposalType === "set_enable_result_contracts" ||
-      proposalType === "provision_instrument"
-    ) {
+    if (proposalType === "set_enable_result_contracts") {
       fetchContractsByTemplate(TEMPLATE_REGISTRAR_SERVICE).then(setRegistrarServiceContracts);
+    }
+    // Provision Instrument needs the typed rows to filter on the registrar
+    // field, so it uses /services/registrar instead of the blob query.
+    if (proposalType === "provision_instrument") {
+      fetchRegistrarServices();
     }
     if (proposalType === "accept_mint_request") {
       fetchOpenMintRequests();
@@ -1165,6 +1226,7 @@ export const GovernanceSection = ({
     fetchCredentials,
     fetchRegistrarServiceRequests,
     fetchProviderConfigurations,
+    fetchRegistrarServices,
   ]);
 
   // Fetch all deployment-related contracts for vault_deployment
@@ -5838,7 +5900,7 @@ export const GovernanceSection = ({
                     size="small"
                     multiple
                     freeSolo
-                    options={availableCredentials}
+                    options={externalRegistrarCredentials}
                     value={proposalExtraRegistrarCredentialCids}
                     loading={credentialsLoading}
                     onChange={(_event, values) => {
@@ -5889,7 +5951,9 @@ export const GovernanceSection = ({
                         helperText={
                           credentialsLoading
                             ? "Loading credentials…"
-                            : "Pick the registrar's externally-issued credentials, or paste contract ids. Optional."
+                            : proposalRegistrar.trim() === ""
+                              ? "Enter the registrar party above to see its externally-issued credentials"
+                              : "Pick the registrar's externally-issued credentials, or paste contract ids. Optional."
                         }
                       />
                     )}
@@ -5911,15 +5975,17 @@ export const GovernanceSection = ({
                       onChange={(e) => setProposalRegistrarServiceCid(e.target.value)}
                       MenuProps={{ disableScrollLock: true }}
                     >
-                      {registrarServiceContracts.length > 0 ? (
-                        registrarServiceContracts.map((c) => (
-                          <MenuItem key={c.contract_id} value={c.contract_id}>
-                            {c.contract_id}
+                      {registrarServicesLoading ? (
+                        <MenuItem disabled>Loading services…</MenuItem>
+                      ) : ownRegistrarServices.length > 0 ? (
+                        ownRegistrarServices.map((svc) => (
+                          <MenuItem key={svc.contract_id} value={svc.contract_id}>
+                            {svc.contract_id}
                           </MenuItem>
                         ))
                       ) : (
                         <MenuItem disabled>
-                          No RegistrarService found — run "Onboard Registrar" first
+                          No RegistrarService for this party — run "Onboard Registrar" first
                         </MenuItem>
                       )}
                     </Select>
@@ -5989,15 +6055,15 @@ export const GovernanceSection = ({
                     >
                       {instrumentsLoading ? (
                         <MenuItem disabled>Loading instruments…</MenuItem>
-                      ) : availableInstruments.length > 0 ? (
-                        availableInstruments.map((inst) => (
+                      ) : ownInstruments.length > 0 ? (
+                        ownInstruments.map((inst) => (
                           <MenuItem key={inst.contract_id} value={inst.contract_id}>
                             {inst.instrument_id} ({inst.contract_id.slice(0, 8)}…)
                           </MenuItem>
                         ))
                       ) : (
                         <MenuItem disabled>
-                          No instruments found — run "Provision Instrument" first
+                          No instruments administered by this party — run "Provision Instrument" first
                         </MenuItem>
                       )}
                     </Select>
