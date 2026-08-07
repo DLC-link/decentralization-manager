@@ -1,5 +1,11 @@
 import type { DisclosedContract } from "./types";
 
+// Rows per page for every paginated list. Generated from the Rust
+// `common::api::PAGE_SIZE` so the wire page size and the UI page size are the
+// same number; re-exported here because this is where UI constants are looked
+// for.
+export { PAGE_SIZE } from "./types.generated";
+
 export const API_BASE = "";
 export const ADMIN_ACCESS = import.meta.env.VITE_ADMIN_ACCESS === "true";
 /// When true (default), show the full BitSafe wordmark everywhere.

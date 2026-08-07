@@ -29,6 +29,8 @@ import UploadFileIcon from "@mui/icons-material/UploadFile";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import { CopyableText } from "./CopyableText";
+import { PaginationControls } from "./Pagination";
+import { usePagination } from "../usePagination";
 import { TextHelp } from "./FieldHelp";
 import { AddPartyDialog } from "./AddPartyDialog";
 import { ChangeThresholdDialog } from "./ChangeThresholdDialog";
@@ -216,6 +218,7 @@ export const PartyDetail = ({
   const [auditTrailLoading, setAuditTrailLoading] = useState(false);
   const [canScrollUp, setCanScrollUp] = useState(false);
   const [canScrollDown, setCanScrollDown] = useState(false);
+  const contractsPaging = usePagination(party.contracts ?? []);
   const contractsScrollRef = useRef<HTMLDivElement>(null);
 
   const isGovRulesContract = (template_id: string) =>
@@ -578,7 +581,7 @@ export const PartyDetail = ({
                   </TableRow>
                 </TableHead>
                 <TableBody>
-                  {party.contracts.map((c, idx) => (
+                  {contractsPaging.pageItems.map((c, idx) => (
                     <TableRow key={c.contract_id} sx={zebraRow(idx)}>
                       <TableCell sx={{ py: 1 }}>
                         {c.package_name || "—"}
@@ -626,6 +629,12 @@ export const PartyDetail = ({
               }}
             />
           </Box>
+          <PaginationControls
+            page={contractsPaging.page}
+            pageCount={contractsPaging.pageCount}
+            total={contractsPaging.total}
+            onChange={contractsPaging.setPage}
+          />
         </CollapsibleSection>
       )}
 

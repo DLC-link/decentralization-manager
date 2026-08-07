@@ -302,16 +302,32 @@ impl SchemaRead for SqlitePool {
         &self,
         party_id: &CantonId,
         limit: i64,
+        before_offset: Option<i64>,
     ) -> Result<Vec<ChainAuditCacheRow>> {
+        // Selects whole offset groups for the newest `limit` distinct offsets
+        // rather than the newest `limit` rows. One transaction can produce
+        // several entries sharing an offset, and the cursor handed to the
+        // client is an offset — a page cut mid-offset would make the next page
+        // skip the remainder. Matches how the live path pages.
         let rows = sqlx::query_as::<_, ChainAuditCacheRow>(
             r"
             SELECT * FROM chain_audit_cache
-            WHERE party_id = ?
+            WHERE party_id = ?1
+              AND (?2 IS NULL OR offset < ?2)
+              AND offset >= (
+                SELECT MIN(offset) FROM (
+                  SELECT DISTINCT offset FROM chain_audit_cache
+                  WHERE party_id = ?1
+                    AND (?2 IS NULL OR offset < ?2)
+                  ORDER BY offset DESC
+                  LIMIT ?3
+                )
+              )
             ORDER BY offset DESC
-            LIMIT ?
             ",
         )
         .bind(party_id.to_string())
+        .bind(before_offset)
         .bind(limit)
         .fetch_all(self)
         .await?;

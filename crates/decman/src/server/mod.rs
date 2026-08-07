@@ -12,6 +12,7 @@ mod assets;
 mod audit;
 mod chain_audit;
 mod handlers;
+mod ledger_paging;
 mod middleware;
 mod package_inventory;
 mod queries;
