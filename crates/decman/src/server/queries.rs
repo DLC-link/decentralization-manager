@@ -3366,23 +3366,9 @@ async fn fetch_provider_configurations_for_template(
     Ok(configurations)
 }
 
-/// Length of a list field. An absent or non-list field reads as empty.
-fn field_list_len(record: &Record, label: &str) -> usize {
-    record
-        .fields
-        .iter()
-        .find(|f| f.label == label)
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::List(l)) => Some(l.elements.len()),
-            _ => None,
-        })
-        .unwrap_or(0)
-}
-
 /// Extract ProviderConfigurationInfo from a ProviderConfiguration created
-/// event. The requirement lists are surfaced as counts: the picker labels
-/// configurations by how many requirements they hold, not by their content.
+/// event. The requirement lists stay behind: the picker labels
+/// configurations by contract id alone.
 fn extract_provider_configuration_info(
     created: &CreatedEvent,
 ) -> Option<ProviderConfigurationInfo> {
@@ -3395,8 +3381,6 @@ fn extract_provider_configuration_info(
         contract_id: created.contract_id.clone(),
         operator,
         provider,
-        registrar_requirement_count: field_list_len(record, "registrarRequirements"),
-        holder_requirement_count: field_list_len(record, "holderRequirements"),
     })
 }
 
@@ -5365,45 +5349,21 @@ mod tests {
     //
     // `Utility.Registry.App.V0.Configuration.Provider:ProviderConfiguration`
     // carries the operator/provider parties plus the registrar and holder
-    // requirement lists, surfaced as counts. The extractor feeds the
-    // configuration picker on the OnboardRegistrar form.
+    // requirement lists. The extractor reads the parties only — the picker
+    // labels configurations by contract id — and must tolerate the
+    // requirement lists it ignores. It feeds the configuration picker on the
+    // OnboardRegistrar form.
     // ------------------------------------------------------------------------
 
-    /// A PartyCredentialRequirement value: an issuer plus a list of
-    /// `(property, value)` claim tuples (`DA.Types:Tuple2`, fields `_1`/`_2`).
-    fn requirement_value(issuer: &str, required_claims: Vec<(&str, &str)>) -> Value {
-        record_value(vec![
-            field("issuer", party_value(issuer)),
-            field(
-                "requiredClaims",
-                list_value(
-                    required_claims
-                        .into_iter()
-                        .map(|(property, value)| {
-                            record_value(vec![
-                                field("_1", text_value(property)),
-                                field("_2", text_value(value)),
-                            ])
-                        })
-                        .collect(),
-                ),
-            ),
-        ])
-    }
-
-    /// A ProviderConfiguration created event; the arguments are the raw
-    /// values of the template's requirement list fields.
-    fn provider_configuration_event(
-        registrar_requirements: Value,
-        holder_requirements: Value,
-    ) -> CreatedEvent {
+    /// A ProviderConfiguration created event, with empty requirement lists.
+    fn provider_configuration_event() -> CreatedEvent {
         let record = Record {
             record_id: None,
             fields: vec![
                 field("operator", party_value(&format!("operator::{SR_FP}"))),
                 field("provider", party_value(&format!("provider::{SR_FP}"))),
-                field("registrarRequirements", registrar_requirements),
-                field("holderRequirements", holder_requirements),
+                field("registrarRequirements", list_value(vec![])),
+                field("holderRequirements", list_value(vec![])),
             ],
         };
         CreatedEvent {
@@ -5426,46 +5386,19 @@ mod tests {
     }
 
     #[test]
-    fn extract_provider_configuration_info_counts_requirements() {
-        let event = provider_configuration_event(
-            list_value(vec![
-                requirement_value(
-                    &format!("provider::{SR_FP}"),
-                    vec![("role", "registrar"), ("kyc", "passed")],
-                ),
-                requirement_value(&format!("external::{SR_FP}"), vec![("role", "auditor")]),
-            ]),
-            list_value(vec![requirement_value(
-                &format!("provider::{SR_FP}"),
-                vec![("role", "holder")],
-            )]),
-        );
-        let Some(info) = extract_provider_configuration_info(&event) else {
+    fn extract_provider_configuration_info_reads_parties() {
+        let Some(info) = extract_provider_configuration_info(&provider_configuration_event())
+        else {
             panic!("configuration should yield info");
         };
         assert_eq!(info.contract_id, "pc-cid-1");
         assert_eq!(info.operator.to_string(), format!("operator::{SR_FP}"));
         assert_eq!(info.provider.to_string(), format!("provider::{SR_FP}"));
-        assert_eq!(info.registrar_requirement_count, 2);
-        assert_eq!(info.holder_requirement_count, 1);
-    }
-
-    #[test]
-    fn extract_provider_configuration_info_defaults_missing_lists_to_zero() {
-        let mut event = provider_configuration_event(list_value(vec![]), list_value(vec![]));
-        if let Some(record) = event.create_arguments.as_mut() {
-            record.fields.retain(|f| f.label != "registrarRequirements");
-        }
-        let Some(info) = extract_provider_configuration_info(&event) else {
-            panic!("requirementless configuration should still yield info");
-        };
-        assert_eq!(info.registrar_requirement_count, 0);
-        assert_eq!(info.holder_requirement_count, 0);
     }
 
     #[test]
     fn extract_provider_configuration_info_skips_event_without_provider() {
-        let mut event = provider_configuration_event(list_value(vec![]), list_value(vec![]));
+        let mut event = provider_configuration_event();
         if let Some(record) = event.create_arguments.as_mut() {
             record.fields.retain(|f| f.label != "provider");
         }
