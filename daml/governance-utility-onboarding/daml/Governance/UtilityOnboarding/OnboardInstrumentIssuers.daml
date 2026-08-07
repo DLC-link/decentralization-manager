@@ -1,0 +1,44 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Granular onboarding action: the registrar decparty credentials new
+-- instrument issuers against an existing InstrumentConfiguration's issuer
+-- requirements. Executed whenever issuers join after provisioning.
+module Governance.UtilityOnboarding.OnboardInstrumentIssuers where
+
+import Utility.Registry.V0.Configuration.Instrument (InstrumentConfiguration)
+
+import Governance.Action
+import Governance.UtilityOnboarding.Utils (mintCredentialsMeetingRequirements)
+
+template OnboardInstrumentIssuers
+  with
+    governanceParty : Party
+      -- ^ The registrar decparty. Must equal the configuration's registrar.
+    proposer : Party
+    instrumentConfigurationCid : ContractId InstrumentConfiguration
+    instrumentIssuers : [Party]
+  where
+    signatory proposer
+    observer governanceParty
+    -- An onboard action for zero issuers does no work; reject it at
+    -- creation rather than record a no-op governance result.
+    ensure not (null instrumentIssuers)
+
+    interface instance GovernableAction for OnboardInstrumentIssuers where
+      view = GovernableActionView with
+        governanceParty
+        proposer
+        actionLabel = "OnboardInstrumentIssuers"
+        description = "Onboard " <> show (length instrumentIssuers)
+          <> " instrument issuer(s)"
+
+      executeImpl = do
+        instrumentConfiguration <- fetch instrumentConfigurationCid
+        assertMsg "OnboardInstrumentIssuers: instrument configuration registrar does not match the governance party"
+          (instrumentConfiguration.registrar == governanceParty)
+        _ <- forA instrumentIssuers $ \instrumentIssuer ->
+          mintCredentialsMeetingRequirements
+            governanceParty instrumentIssuer "instrument-issuer-credential"
+            instrumentConfiguration.issuerRequirements
+        pure ()

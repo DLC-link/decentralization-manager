@@ -1,0 +1,72 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Shared helpers for the utility onboarding governance actions.
+module Governance.UtilityOnboarding.Utils where
+
+import DA.Date (Month(Jan), date)
+import DA.Set qualified as Set
+import DA.Time (convertRelTimeToMicroseconds, subTime, time)
+
+import Utility.Credential.V0.Credential
+  (Claim(..), Credential(..), PartyCredentialRequirement(..))
+
+-- | Render a governance-minted credential id:
+-- {roleTag}/{subject}/{timestamp}-{index}. The timestamp is the minting
+-- transaction's ledger time in seconds since epoch: onboarding actions are
+-- low-frequency, so second resolution keeps ids distinct across
+-- transactions in practice. The index separates credentials minted for the
+-- same subject within one transaction.
+mkCredentialId : Text -> Party -> Time -> Int -> Text
+mkCredentialId roleTag subject now index =
+  roleTag <> "/" <> partyToText subject <> "/"
+    <> show (convertRelTimeToMicroseconds (subTime now epoch) / 1000000)
+    <> "-" <> show index
+  where
+    epoch = time (date 1970 Jan 1) 0 0 0
+
+-- | Mint the credentials that make `subject` meet every requirement the
+-- governance party can self-issue. Requirements from other issuers are
+-- skipped; those issuers mint out of band and the credentials arrive as
+-- extra inputs on the consuming action.
+--
+-- Minted credentials have `issuer == holder == governanceParty`. The SDK's
+-- `assertFulfillsAllRequirements` accepts issuer-held credentials
+-- (`holder == issuer`) for any subject whose claims match, so no two-step
+-- offer/accept flow is needed. The subject is an observer because it later
+-- exercises `Credential_Get` and references the cids in mint/burn requests.
+--
+-- A self-issuable requirement with no required claims is refused: the
+-- resulting claimless credential would attest for nobody and could never be
+-- offboarded by `OffboardInstrumentIssuers`.
+mintCredentialsMeetingRequirements
+  : Party
+    -- ^ Governance party. Issuer and holder of every minted credential.
+  -> Party
+    -- ^ Subject the credentials attest for.
+  -> Text
+    -- ^ Role tag used in the credential id, e.g. "registrar-credential".
+  -> [PartyCredentialRequirement]
+    -- ^ Full requirement list. Filtered internally.
+  -> Update [ContractId Credential]
+mintCredentialsMeetingRequirements governanceParty subject roleTag requirements = do
+  now <- getTime
+  let selfIssuable = filter (\requirement -> requirement.issuer == governanceParty) requirements
+      mkClaim (property, value) = Claim with
+        subject = partyToText subject
+        property
+        value
+  forA (zip [0 .. length selfIssuable - 1] selfIssuable) $ \(index, requirement) -> do
+    assertMsg
+      ("mintCredentialsMeetingRequirements: requirement issued by the governance party has no required claims; a claimless credential attests for nobody: "
+        <> show requirement)
+      (not $ null requirement.requiredClaims)
+    create Credential with
+      issuer = governanceParty
+      holder = governanceParty
+      id = mkCredentialId roleTag subject now index
+      description = "Governance-minted " <> roleTag <> " for " <> partyToText subject
+      validFrom = None
+      validUntil = None
+      claims = map mkClaim requirement.requiredClaims
+      observers = Set.fromList [subject]

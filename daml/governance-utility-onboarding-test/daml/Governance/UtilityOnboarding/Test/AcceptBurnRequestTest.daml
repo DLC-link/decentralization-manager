@@ -80,6 +80,7 @@ seedHoldingForRequester parties rulesCid artifacts holder amount = do
     proposer = parties.member1
     mintRequestCid = mintResult.mintRequestCid
     instrumentConfigurationCid = artifacts.instrumentConfigurationCid
+    issuerCredentialCids = []
     description = "Seed mint"
     extraArgsMeta = Metadata with values = TextMap.empty
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
@@ -133,6 +134,7 @@ when_accept_burn_request_executed f = do
     proposer = f.parties.member1
     burnRequestCid = f.burnRequestCid
     instrumentConfigurationCid = f.artifacts.instrumentConfigurationCid
+    issuerCredentialCids = []
     description = "Accept holder-initiated burn"
     extraArgsMeta = Metadata with values = TextMap.empty
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
@@ -163,6 +165,7 @@ when_outsider_confirms_accept_burn f = do
     proposer = f.parties.member1
     burnRequestCid = f.burnRequestCid
     instrumentConfigurationCid = f.artifacts.instrumentConfigurationCid
+    issuerCredentialCids = []
     description = "Accept holder-initiated burn"
     extraArgsMeta = Metadata with values = TextMap.empty
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid

@@ -1,0 +1,56 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Granular onboarding action: the registrar decparty creates an
+-- InstrumentConfiguration and credentials the initial instrument issuers.
+-- Executed once per instrument.
+module Governance.UtilityOnboarding.ProvisionInstrument where
+
+import Utility.Credential.V0.Credential (PartyCredentialRequirement)
+import Utility.Registry.App.V0.Service.Registrar
+  (RegistrarService, RegistrarService_CreateInstrumentConfiguration(..))
+import Utility.Registry.Holding.V0.Types (InstrumentIdentifier)
+
+import Governance.Action
+import Governance.UtilityOnboarding.Utils (mintCredentialsMeetingRequirements)
+
+template ProvisionInstrument
+  with
+    governanceParty : Party
+      -- ^ The registrar decparty. Must equal the RegistrarService's registrar.
+    proposer : Party
+    registrarServiceCid : ContractId RegistrarService
+    instrumentIdText : Text
+    additionalIdentifiers : [InstrumentIdentifier]
+    issuerRequirements : [PartyCredentialRequirement]
+    holderRequirements : [PartyCredentialRequirement]
+    initialInstrumentIssuers : [Party]
+  where
+    signatory proposer
+    observer governanceParty
+
+    interface instance GovernableAction for ProvisionInstrument where
+      view = GovernableActionView with
+        governanceParty
+        proposer
+        actionLabel = "ProvisionInstrument"
+        description = "Provision instrument " <> instrumentIdText
+          <> " (" <> show (length initialInstrumentIssuers) <> " initial issuers)"
+
+      executeImpl = do
+        -- Controller authorization alone is not enough: the proposer's
+        -- authority is in scope during execution, so a service owned by the
+        -- proposer would pass it. Pin the service to the governance party.
+        registrarService <- fetch registrarServiceCid
+        assertMsg "ProvisionInstrument: registrar service registrar does not match the governance party"
+          (registrarService.registrar == governanceParty)
+        _ <- exercise registrarServiceCid RegistrarService_CreateInstrumentConfiguration with
+          instrumentId = instrumentIdText
+          additionalIdentifiers
+          issuerRequirements
+          holderRequirements
+        _ <- forA initialInstrumentIssuers $ \instrumentIssuer ->
+          mintCredentialsMeetingRequirements
+            governanceParty instrumentIssuer "instrument-issuer-credential"
+            issuerRequirements
+        pure ()

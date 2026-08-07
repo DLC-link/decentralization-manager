@@ -1,0 +1,170 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+module Governance.UtilityOnboarding.Test.OnboardInstrumentIssuersTest where
+
+import Daml.Script
+
+import Utility.Credential.V0.Credential (Credential(..), PartyCredentialRequirement(..))
+import Utility.Registry.Holding.V0.Types (InstrumentIdentifier(..))
+import Utility.Registry.V0.Configuration.Instrument (InstrumentConfiguration(..))
+
+import Governance.Action (GovernableAction)
+
+import Governance.UtilityOnboarding.DualDecpartyTestUtils
+import Governance.UtilityOnboarding.OnboardInstrumentIssuers
+import Governance.UtilityOnboarding.Utils (mkCredentialId)
+
+import TestHarness
+
+data Fixture = Fixture
+  with
+    f : DualGovFixture
+    artifacts : ProvisionedInstrumentArtifacts
+  deriving (Eq, Show)
+
+-- | Instrument provisioned with an issuer requirement but NO initial
+-- issuers — late onboarding is the subject under test.
+given_provisioned_instrument : Script Fixture
+given_provisioned_instrument = do
+  f <- givenDualGovernance
+  artifacts <- setupProvisionedInstrument f [defaultIssuerRequirement f.parties] []
+  pure Fixture with ..
+
+onboardIssuersProposal : Fixture -> [Party] -> Script (ContractId GovernableAction)
+onboardIssuersProposal fx instrumentIssuers = do
+  proposalCid <- submit fx.f.registrarStack.member1 $ createCmd OnboardInstrumentIssuers with
+    governanceParty = fx.f.parties.registrarGov
+    proposer = fx.f.registrarStack.member1
+    instrumentConfigurationCid = fx.artifacts.instrumentConfigurationCid
+    instrumentIssuers
+  pure (toInterfaceContractId proposalCid)
+
+-- * Happy path: several issuers onboarded at once.
+
+when_onboard_two_issuers : Fixture -> Script ()
+when_onboard_two_issuers fx = do
+  proposalCid <- onboardIssuersProposal fx [fx.f.parties.issuer1, fx.f.parties.issuer2]
+  _ <- confirmAndExecuteAs fx.f.parties fx.f.registrarStack proposalCid
+  pure ()
+
+then_both_issuers_credentialed : Fixture -> () -> Script Failures
+then_both_issuers_credentialed fx _ = do
+  let parties = fx.f.parties
+  credentials1 <- query @Credential parties.issuer1
+  credentials2 <- query @Credential parties.issuer2
+  -- Script time is static, so getTime here equals the mint-time timestamp.
+  now <- getTime
+  let checks1 = case credentials1 of
+        [(_, credential)] ->
+          shouldBe "issuer1 credential.id"
+            (mkCredentialId "instrument-issuer-credential" parties.issuer1 now 0)
+            credential.id
+        _ -> shouldBe "issuer1 credential count" 1 (length credentials1)
+      checks2 = case credentials2 of
+        [(_, credential)] ->
+          shouldBe "issuer2 credential.id"
+            (mkCredentialId "instrument-issuer-credential" parties.issuer2 now 0)
+            credential.id
+        _ -> shouldBe "issuer2 credential count" 1 (length credentials2)
+  pure $ checks1 <> checks2
+
+test_when_onboard_two_issuers_then_both_credentialed = script do
+  run Test with
+    given = given_provisioned_instrument
+    when = when_onboard_two_issuers
+    then_ = then_both_issuers_credentialed
+
+-- * Configuration registered to a different registrar: assert fails.
+-- operator = registrarGov makes the foreign configuration fetchable by the
+-- governance party, isolating the registrar-mismatch assert.
+
+when_onboard_against_foreign_configuration : Fixture -> Script ()
+when_onboard_against_foreign_configuration fx = do
+  let parties = fx.f.parties
+  foreignConfigurationCid <- submit (actAs parties.outsider <> actAs parties.providerGov) $
+    createCmd InstrumentConfiguration with
+      operator = parties.registrarGov
+      provider = parties.providerGov
+      registrar = parties.outsider
+      defaultIdentifier = InstrumentIdentifier with
+        source = parties.outsider
+        id = "FOREIGN-TOKEN"
+        scheme = "RegistrarInternalScheme"
+      additionalIdentifiers = []
+      issuerRequirements = []
+      holderRequirements = []
+      providerAppRewardBeneficiaries = None
+  proposalCid <- submit fx.f.registrarStack.member1 $ createCmd OnboardInstrumentIssuers with
+    governanceParty = parties.registrarGov
+    proposer = fx.f.registrarStack.member1
+    instrumentConfigurationCid = foreignConfigurationCid
+    instrumentIssuers = [parties.issuer1]
+  confirmThenExecuteMustFail fx.f.parties fx.f.registrarStack (toInterfaceContractId proposalCid)
+
+then_no_credentials : Fixture -> () -> Script Failures
+then_no_credentials fx _ = do
+  credentials <- query @Credential fx.f.parties.issuer1
+  pure $ shouldBe "issuer1 credential count" 0 (length credentials)
+
+test_when_foreign_configuration_then_execute_fails = script do
+  run Test with
+    given = given_provisioned_instrument
+    when = when_onboard_against_foreign_configuration
+    then_ = then_no_credentials
+
+-- * No self-issuable requirements: action succeeds, nothing minted.
+
+given_instrument_with_external_requirements_only : Script Fixture
+given_instrument_with_external_requirements_only = do
+  f <- givenDualGovernance
+  let externalRequirement = PartyCredentialRequirement with
+        issuer = f.parties.outsider
+        requiredClaims = [("role", "instrument-issuer")]
+  artifacts <- setupProvisionedInstrument f [externalRequirement] []
+  pure Fixture with ..
+
+when_onboard_one_issuer : Fixture -> Script ()
+when_onboard_one_issuer fx = do
+  proposalCid <- onboardIssuersProposal fx [fx.f.parties.issuer1]
+  _ <- confirmAndExecuteAs fx.f.parties fx.f.registrarStack proposalCid
+  pure ()
+
+test_when_only_external_requirements_then_zero_minted = script do
+  run Test with
+    given = given_instrument_with_external_requirements_only
+    when = when_onboard_one_issuer
+    then_ = then_no_credentials
+
+-- * Empty issuer list is refused at creation: the template's ensure clause
+-- rejects a proposal for zero issuers, so it can never reach a vote.
+
+when_onboard_no_issuers : Fixture -> Script ()
+when_onboard_no_issuers fx =
+  submitMustFail fx.f.registrarStack.member1 $ createCmd OnboardInstrumentIssuers with
+    governanceParty = fx.f.parties.registrarGov
+    proposer = fx.f.registrarStack.member1
+    instrumentConfigurationCid = fx.artifacts.instrumentConfigurationCid
+    instrumentIssuers = []
+
+test_when_empty_issuers_then_create_fails = script do
+  run Test with
+    given = given_provisioned_instrument
+    when = when_onboard_no_issuers
+    then_ = then_no_credentials
+
+-- * Non-member confirm is rejected.
+
+when_outsider_confirms : Fixture -> Script ()
+when_outsider_confirms fx = do
+  proposalCid <- onboardIssuersProposal fx [fx.f.parties.issuer1]
+  outsiderCannotConfirm fx.f.parties fx.f.registrarStack proposalCid
+
+then_nothing : Fixture -> () -> Script Failures
+then_nothing _ _ = pure []
+
+test_when_outsider_confirms_then_rejected = script do
+  run Test with
+    given = given_provisioned_instrument
+    when = when_outsider_confirms
+    then_ = then_nothing
