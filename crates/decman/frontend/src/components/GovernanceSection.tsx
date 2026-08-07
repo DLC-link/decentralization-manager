@@ -214,6 +214,20 @@ export const GovernanceSection = ({
   const [proposalBeneficiaries, setProposalBeneficiaries] = useState<
     { beneficiary: string; weight: string }[]
   >([]);
+  // Coupon-reassignment delegation (CIP-104 Mode A). The split rows are kept
+  // separate from proposalBeneficiaries: those carry a FAR *weight*, these a
+  // *percentage*, and switching action types must not carry one into the other.
+  const [proposalDelegationDso, setProposalDelegationDso] = useState("");
+  const [proposalDelegationAssigners, setProposalDelegationAssigners] = useState<string[]>([]);
+  // Integer weights, not percentages — the exact decimals are derived from them
+  // (see splitFromWeights). An even 3-way split is not expressible as a repeated
+  // decimal, so asking for percentages here means asking a human to hand-balance
+  // the last entry.
+  const [proposalDelegationSplit, setProposalDelegationSplit] = useState<
+    { beneficiary: string; weight: string }[]
+  >([]);
+  const [proposalPriorDelegation, setProposalPriorDelegation] = useState("");
+  const [proposalRevokeDelegationCid, setProposalRevokeDelegationCid] = useState("");
   const [proposalRegistrarServiceCid, setProposalRegistrarServiceCid] = useState("");
   const [proposalEnableResultContracts, setProposalEnableResultContracts] = useState<"true" | "false" | "clear">("true");
   const [proposalAllocationFactoryCid, setProposalAllocationFactoryCid] = useState("");
@@ -1246,6 +1260,96 @@ export const GovernanceSection = ({
     return null;
   };
 
+  // Daml's Decimal scale for a reward-split percentage: 10 places.
+  const SPLIT_SCALE = 10_000_000_000n;
+
+  /** Render a scaled integer as the fixed-point decimal the ledger stores. */
+  const formatSplitShare = (scaled: bigint): string => {
+    const s = scaled.toString().padStart(11, "0");
+    return `${s.slice(0, -10)}.${s.slice(-10)}`;
+  };
+
+  /**
+   * Turn integer weights into shares that sum to EXACTLY 1.0.
+   *
+   * The ledger compares the sum as exact Decimal, with no tolerance, so an even
+   * 3-way split is not expressible as a repeated decimal: 0.3333333333 three
+   * times is 0.9999999999 and the vote fails at execute, after the
+   * confirmations are already spent. Rather than ask a human to hand-balance
+   * the last entry, take integer weights and derive the decimals.
+   *
+   * Floor each `weight / total`, then give every leftover unit to the LARGEST
+   * weight (ties by row order). The rule is deterministic on purpose: a
+   * confirmer has to be able to reproduce the split from the weights alone, so
+   * "whichever row happened to be picked" is not good enough. Distortion is at
+   * most (n-1) × 1e-10.
+   *
+   * Returns null when the weights cannot produce a valid split.
+   */
+  const splitFromWeights = (weights: bigint[]): bigint[] | null => {
+    const total = weights.reduce((a, w) => a + w, 0n);
+    if (total <= 0n) return null;
+    const shares = weights.map((w) => (w * SPLIT_SCALE) / total);
+    const leftover = SPLIT_SCALE - shares.reduce((a, s) => a + s, 0n);
+    if (leftover > 0n) {
+      let largest = 0;
+      weights.forEach((w, i) => {
+        if (w > weights[largest]) largest = i;
+      });
+      shares[largest] += leftover;
+    }
+    return shares;
+  };
+
+  /** Index of the row that absorbs the rounding remainder, for the UI to mark. */
+  const splitRemainderRow = (weights: bigint[]): number => {
+    let largest = 0;
+    weights.forEach((w, i) => {
+      if (w > weights[largest]) largest = i;
+    });
+    return largest;
+  };
+
+  /** Parse the weight column; null if any entry is not a positive integer. */
+  const parseSplitWeights = (
+    split: { beneficiary: string; weight: string }[],
+  ): bigint[] | null => {
+    const out: bigint[] = [];
+    for (const row of split) {
+      const w = row.weight.trim();
+      if (!/^\d+$/.test(w)) return null;
+      const v = BigInt(w);
+      if (v <= 0n) return null;
+      out.push(v);
+    }
+    return out;
+  };
+
+  const validateDelegationSplit = (
+    split: { beneficiary: string; weight: string }[],
+  ): string | null => {
+    if (split.length === 0) return "Add at least one beneficiary";
+    if (split.length > 20) return "At most 20 beneficiaries";
+    if (split.some((b) => !b.beneficiary.trim())) {
+      return "Every row needs a beneficiary party";
+    }
+    const parties = split.map((b) => b.beneficiary.trim());
+    if (new Set(parties).size !== parties.length) {
+      return "Each beneficiary may appear only once";
+    }
+    const weights = parseSplitWeights(split);
+    if (!weights) return "Each weight must be a whole number greater than 0";
+    const shares = splitFromWeights(weights);
+    if (!shares) return "Weights must add up to more than 0";
+    // Daml requires every percentage in (0, 1]. A weight tiny enough against the
+    // total floors to zero, which the ledger rejects — catch it here instead.
+    const zeroAt = shares.findIndex((s) => s <= 0n);
+    if (zeroAt >= 0) {
+      return `Row ${zeroAt + 1}'s weight is too small against the total — its share rounds to 0, which the ledger rejects`;
+    }
+    return null;
+  };
+
   // Clear the action form fields after a successful submit so the next
   // action starts blank — keeps the form expanded and the submit button
   // visible (the new action shows up in the notification queue on its own).
@@ -1397,6 +1501,11 @@ export const GovernanceSection = ({
     setProposalInstrumentConfigurationCid("");
     setProposalBeneficiaries([]);
     setProposalClearBeneficiaries(false);
+    setProposalDelegationDso("");
+    setProposalDelegationAssigners([]);
+    setProposalDelegationSplit([]);
+    setProposalPriorDelegation("");
+    setProposalRevokeDelegationCid("");
     setProposalRegistrarServiceCid("");
     setProposalEnableResultContracts("true");
     setProposalAllocationFactoryCid("");
@@ -1523,6 +1632,43 @@ export const GovernanceSection = ({
           };
           break;
         }
+        case "setup_coupon_reassignment_delegation": {
+          const assigners = proposalDelegationAssigners
+            .map((a) => a.trim())
+            .filter((a) => a.length > 0);
+          if (assigners.length === 0) {
+            throw new Error("At least one assigner is required");
+          }
+          if (new Set(assigners).size !== assigners.length) {
+            throw new Error("Assigners must be unique");
+          }
+          const splitError = validateDelegationSplit(proposalDelegationSplit);
+          if (splitError) {
+            throw new Error(splitError);
+          }
+          // Submit the derived decimals, not the weights — the delegation bakes
+          // in exact percentages and that is what a confirmer reviews.
+          const weights = parseSplitWeights(proposalDelegationSplit)!;
+          const shares = splitFromWeights(weights)!;
+          const split = proposalDelegationSplit.map((b, idx) => ({
+            beneficiary: b.beneficiary.trim(),
+            percentage: formatSplitShare(shares[idx]),
+          }));
+          proposal = {
+            type: "setup_coupon_reassignment_delegation",
+            dso: proposalDelegationDso.trim(),
+            assigners,
+            new_beneficiaries: split,
+            prior_delegation: proposalPriorDelegation.trim() || undefined,
+          };
+          break;
+        }
+        case "revoke_coupon_reassignment_delegation":
+          proposal = {
+            type: "revoke_coupon_reassignment_delegation",
+            delegation: proposalRevokeDelegationCid.trim(),
+          };
+          break;
         case "set_enable_result_contracts":
           proposal = {
             type: "set_enable_result_contracts",
@@ -1636,6 +1782,12 @@ export const GovernanceSection = ({
         case "offer_paid_credential":
           throw new Error(
             "Paid credential proposal forms are not implemented yet — use the Free direction or call the API directly.",
+          );
+        default:
+          // Proposal types with no UI form are never offered in the menu; guard
+          // the exhaustiveness so `proposal` is always assigned.
+          throw new Error(
+            `Proposal type "${proposalType}" is not available in the UI.`,
           );
       }
 
@@ -3761,6 +3913,8 @@ export const GovernanceSection = ({
                   <ListSubheader sx={{ color: "primary.main", fontWeight: 600 }}>Rewards</ListSubheader>
                   <MenuItem value="setup_minting_delegation">Setup Minting Delegation</MenuItem>
                   <MenuItem value="accept_external_party_setup">Accept External Party Setup</MenuItem>
+                  <MenuItem value="setup_coupon_reassignment_delegation">Setup Coupon Reassignment Delegation</MenuItem>
+                  <MenuItem value="revoke_coupon_reassignment_delegation">Revoke Coupon Reassignment Delegation</MenuItem>
                   <Divider />
                   <ListSubheader sx={{ color: "primary.main", fontWeight: 600 }}>Utility Credential</ListSubheader>
                   <MenuItem value="offer_free_credential">Offer Free Credential</MenuItem>
@@ -4445,6 +4599,221 @@ export const GovernanceSection = ({
                       },
                     }}
                   />
+                </>
+              )}
+
+              {proposalType === "revoke_coupon_reassignment_delegation" && (
+                <TextField
+                  label="Delegation Contract ID"
+                  value={proposalRevokeDelegationCid}
+                  onChange={(e) => setProposalRevokeDelegationCid(e.target.value)}
+                  fullWidth
+                  required
+                  slotProps={{
+                    input: {
+                      endAdornment: fieldHelpAdornment(
+                        "Contract id of the active CouponReassignmentDelegation to archive. Reassignment stops for this party until a new delegation is voted in.",
+                        "Help for Delegation Contract ID",
+                      ),
+                    },
+                  }}
+                />
+              )}
+
+              {proposalType === "setup_coupon_reassignment_delegation" && (
+                <>
+                  <Alert severity="info" sx={{ mb: 1 }}>
+                    <Typography variant="caption" component="div">
+                      The split below is <strong>baked into the delegation</strong>.
+                      Changing it later needs another vote. Two rules the ledger
+                      enforces exactly, and which reject a vote at execute:
+                    </Typography>
+                    <Typography variant="caption" component="ul" sx={{ pl: 2, mb: 0, mt: 0.5 }}>
+                      <li>
+                        Shares must sum to <strong>exactly 1.0</strong>, compared as
+                        exact Decimal — so an even 3-way split is not expressible as
+                        a repeated decimal. Enter <strong>whole-number weights</strong>{" "}
+                        and the exact percentages are derived; the rounding
+                        remainder goes to the largest weight, so a confirmer can
+                        reproduce the split from the weights alone.
+                      </li>
+                      <li>
+                        Nothing is implicitly left to this party. To keep a
+                        remainder, <strong>add this party as its own beneficiary</strong>.
+                      </li>
+                    </Typography>
+                  </Alert>
+                  <TextField
+                    label="DSO Party"
+                    value={proposalDelegationDso}
+                    onChange={(e) => setProposalDelegationDso(e.target.value)}
+                    fullWidth
+                    required
+                    slotProps={{
+                      input: {
+                        endAdornment: fieldHelpAdornment(
+                          "The DSO whose coupons this delegation may assign. Anyone can mint a coupon naming themselves DSO, so the automation ignores every coupon whose DSO is not this one. Getting it wrong silently assigns nothing.",
+                          "Help for DSO Party",
+                        ),
+                      },
+                    }}
+                  />
+                  <TextField
+                    label="Replaces Delegation (optional)"
+                    value={proposalPriorDelegation}
+                    onChange={(e) => setProposalPriorDelegation(e.target.value)}
+                    fullWidth
+                    slotProps={{
+                      input: {
+                        endAdornment: fieldHelpAdornment(
+                          "Contract id of the delegation this one replaces — it is archived in the same transaction. Leave blank only for the first delegation; leaving it blank while one is live is rejected with 409.",
+                          "Help for Replaces Delegation",
+                        ),
+                      },
+                    }}
+                  />
+                  <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+                    <TextHelp text="Member parties allowed to run the reassignment. Any ONE of them suffices (1-of-n), so this is liveness, not a threshold. An assigner's participant must also host this governance party, or it cannot read the coupons.">
+                      Assigners (any one may reassign)
+                    </TextHelp>
+                  </Typography>
+                  {proposalDelegationAssigners.map((a, idx) => (
+                    <Box key={idx} sx={{ display: "flex", gap: 1, mb: 1 }}>
+                      <TextField
+                        label={`Assigner ${idx + 1}`}
+                        value={a}
+                        onChange={(e) => {
+                          const updated = [...proposalDelegationAssigners];
+                          updated[idx] = e.target.value;
+                          setProposalDelegationAssigners(updated);
+                        }}
+                        size="small"
+                        sx={{ flex: 1 }}
+                      />
+                      <Button
+                        size="small"
+                        color="error"
+                        onClick={() =>
+                          setProposalDelegationAssigners(
+                            proposalDelegationAssigners.filter((_, i) => i !== idx),
+                          )
+                        }
+                      >
+                        Remove
+                      </Button>
+                    </Box>
+                  ))}
+                  <Box>
+                    <Button
+                      size="small"
+                      onClick={() =>
+                        setProposalDelegationAssigners([...proposalDelegationAssigners, ""])
+                      }
+                    >
+                      Add Assigner
+                    </Button>
+                  </Box>
+                  <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+                    <TextHelp text="Who receives the reassigned coupons, and in what share. Enter whole-number weights — equal thirds is 1/1/1 — and the exact percentages are derived below. Each beneficiary mints its own coupons afterwards; this party does not mint for them.">
+                      Beneficiary split (party + weight)
+                    </TextHelp>
+                  </Typography>
+                  {(() => {
+                    const weights = parseSplitWeights(proposalDelegationSplit);
+                    const shares = weights ? splitFromWeights(weights) : null;
+                    const remainderRow = weights ? splitRemainderRow(weights) : -1;
+                    return (
+                      <>
+                        {proposalDelegationSplit.map((b, idx) => (
+                          <Box
+                            key={idx}
+                            sx={{ display: "flex", gap: 1, mb: 1, alignItems: "center" }}
+                          >
+                            <TextField
+                              label="Beneficiary Party"
+                              value={b.beneficiary}
+                              onChange={(e) => {
+                                const updated = [...proposalDelegationSplit];
+                                updated[idx] = { ...b, beneficiary: e.target.value };
+                                setProposalDelegationSplit(updated);
+                              }}
+                              size="small"
+                              sx={{ flex: 2 }}
+                            />
+                            <TextField
+                              label="Weight"
+                              value={b.weight}
+                              onChange={(e) => {
+                                const updated = [...proposalDelegationSplit];
+                                updated[idx] = { ...b, weight: e.target.value };
+                                setProposalDelegationSplit(updated);
+                              }}
+                              size="small"
+                              sx={{ width: 110 }}
+                              slotProps={{
+                                input: {
+                                  endAdornment: fieldHelpAdornment(
+                                    "A whole number. Only the ratio matters: 1/1/1 is equal thirds, 80/20 is four to one. The exact percentage is derived.",
+                                    "Help for Weight",
+                                  ),
+                                },
+                              }}
+                            />
+                            <Typography
+                              variant="caption"
+                              sx={{ width: 190, fontFamily: "monospace" }}
+                              color={shares ? "text.primary" : "text.disabled"}
+                            >
+                              {shares
+                                ? `${formatSplitShare(shares[idx])}${idx === remainderRow && shares.length > 1 ? " ⟵ +rem" : ""}`
+                                : "—"}
+                            </Typography>
+                            <Button
+                              size="small"
+                              color="error"
+                              onClick={() =>
+                                setProposalDelegationSplit(
+                                  proposalDelegationSplit.filter((_, i) => i !== idx),
+                                )
+                              }
+                            >
+                              Remove
+                            </Button>
+                          </Box>
+                        ))}
+                        <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
+                          <Button
+                            size="small"
+                            onClick={() =>
+                              setProposalDelegationSplit([
+                                ...proposalDelegationSplit,
+                                { beneficiary: "", weight: "1" },
+                              ])
+                            }
+                          >
+                            Add Beneficiary
+                          </Button>
+                          {proposalDelegationSplit.length > 0 &&
+                            (() => {
+                              const err = validateDelegationSplit(proposalDelegationSplit);
+                              return (
+                                <Typography
+                                  variant="caption"
+                                  color={err ? "error.main" : "success.main"}
+                                >
+                                  {err ??
+                                    `Sums to exactly 1.0${
+                                      shares && shares.length > 1
+                                        ? ` — the rounding remainder goes to the largest weight (row ${remainderRow + 1})`
+                                        : ""
+                                    }`}
+                                </Typography>
+                              );
+                            })()}
+                        </Box>
+                      </>
+                    );
+                  })()}
                 </>
               )}
 

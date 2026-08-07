@@ -16,14 +16,14 @@ use crate::{canton_id::CantonId, error::Result};
 
 use super::types::{
     ActionType, AppRewardBeneficiary, BillingParams, Claim, FarConfig, InstrumentAllowance,
-    InstrumentId, InstrumentIdentifier, ProposalType, VaultLimits,
+    InstrumentId, InstrumentIdentifier, ProposalType, RewardBeneficiary, VaultLimits,
 };
 
 // ============================================================================
 // Helper Functions
 // ============================================================================
 
-fn make_party(p: impl std::fmt::Display) -> Value {
+pub(crate) fn make_party(p: impl std::fmt::Display) -> Value {
     Value {
         sum: Some(value::Sum::Party(p.to_string())),
     }
@@ -53,13 +53,13 @@ fn make_bool(b: bool) -> Value {
     }
 }
 
-fn make_contract_id(c: &str) -> Value {
+pub(crate) fn make_contract_id(c: &str) -> Value {
     Value {
         sum: Some(value::Sum::ContractId(c.to_string())),
     }
 }
 
-fn field(label: &str, value: Value) -> RecordField {
+pub(crate) fn field(label: &str, value: Value) -> RecordField {
     RecordField {
         label: label.to_string(),
         value: Some(value),
@@ -85,7 +85,7 @@ fn make_variant(constructor: &str, value: Value) -> Value {
     }
 }
 
-fn make_list(values: Vec<Value>) -> Value {
+pub(crate) fn make_list(values: Vec<Value>) -> Value {
     Value {
         sum: Some(value::Sum::List(List { elements: values })),
     }
@@ -95,7 +95,7 @@ fn make_empty_text_map() -> Value {
     make_text_map(vec![])
 }
 
-fn make_text_map(entries: Vec<(String, Value)>) -> Value {
+pub(crate) fn make_text_map(entries: Vec<(String, Value)>) -> Value {
     Value {
         sum: Some(value::Sum::TextMap(TextMap {
             entries: entries
@@ -175,7 +175,7 @@ impl TransferValidity {
     }
 }
 
-fn make_extra_args(context_values: Value) -> Value {
+pub(crate) fn make_extra_args(context_values: Value) -> Value {
     make_record(vec![
         field(
             "context",
@@ -245,6 +245,14 @@ fn make_optional_numeric(opt: &Option<DamlDecimal>) -> Value {
     Value {
         sum: Some(value::Sum::Optional(Box::new(Optional {
             value: opt.as_ref().map(|n| Box::new(make_numeric(&n.to_string()))),
+        }))),
+    }
+}
+
+fn make_optional_contract_id(opt: &Option<String>) -> Value {
+    Value {
+        sum: Some(value::Sum::Optional(Box::new(Optional {
+            value: opt.as_ref().map(|c| Box::new(make_contract_id(c))),
         }))),
     }
 }
@@ -325,6 +333,13 @@ fn serialize_app_reward_beneficiary(b: &AppRewardBeneficiary) -> Value {
     make_record(vec![
         field("beneficiary", make_party(&b.beneficiary)),
         field("weight", make_numeric(&b.weight.to_string())),
+    ])
+}
+
+fn serialize_reward_beneficiary(b: &RewardBeneficiary) -> Value {
+    make_record(vec![
+        field("beneficiary", make_party(&b.beneficiary)),
+        field("percentage", make_numeric(&b.percentage.to_string())),
     ])
 }
 
@@ -1181,6 +1196,54 @@ pub fn build_proposal_create_args(
                         "providerAppRewardBeneficiaries",
                         make_optional_beneficiaries(provider_app_reward_beneficiaries),
                     ),
+                ],
+            },
+        ),
+        ProposalType::SetupCouponReassignmentDelegation {
+            dso,
+            assigners,
+            new_beneficiaries,
+            prior_delegation,
+        } => (
+            ProposalPackage::GovernanceRewards,
+            "Governance.Rewards.SetupCouponReassignmentDelegation",
+            "SetupCouponReassignmentDelegation",
+            Record {
+                record_id: None,
+                fields: vec![
+                    field("governanceParty", make_party(governance_party)),
+                    field("proposer", make_party(proposer)),
+                    field(
+                        "priorDelegation",
+                        make_optional_contract_id(prior_delegation),
+                    ),
+                    field("dso", make_party(dso)),
+                    field(
+                        "assigners",
+                        make_list(assigners.iter().map(make_party).collect()),
+                    ),
+                    field(
+                        "beneficiaries",
+                        make_list(
+                            new_beneficiaries
+                                .iter()
+                                .map(serialize_reward_beneficiary)
+                                .collect(),
+                        ),
+                    ),
+                ],
+            },
+        ),
+        ProposalType::RevokeCouponReassignmentDelegation { delegation } => (
+            ProposalPackage::GovernanceRewards,
+            "Governance.Rewards.RevokeCouponReassignmentDelegation",
+            "RevokeCouponReassignmentDelegation",
+            Record {
+                record_id: None,
+                fields: vec![
+                    field("governanceParty", make_party(governance_party)),
+                    field("proposer", make_party(proposer)),
+                    field("delegation", make_contract_id(delegation)),
                 ],
             },
         ),
@@ -2075,6 +2138,11 @@ mod tests {
         CantonId::new("p".to_string(), Namespace::new([0u8; NAMESPACE_LENGTH]))
     }
 
+    /// Parse a decimal literal in test fixtures, panicking on invalid input.
+    fn dec(s: &str) -> DamlDecimal {
+        DamlDecimal::parse(s).expect("valid decimal literal")
+    }
+
     /// Unwrap a `Variant` value into `(constructor, inner)`.
     fn as_variant(value: &Value) -> (&str, &Value) {
         match &value.sum {
@@ -2248,6 +2316,15 @@ mod tests {
         match &value.sum {
             Some(value::Sum::Record(r)) => r,
             other => panic!("expected Record, got {other:?}"),
+        }
+    }
+
+    /// Unwrap a `value::Sum::List` reference (for descending into a list `Value`
+    /// returned by `field_value`).
+    fn as_list(value: &Value) -> &[Value] {
+        match &value.sum {
+            Some(value::Sum::List(l)) => &l.elements,
+            other => panic!("expected List, got {other:?}"),
         }
     }
 
@@ -2462,6 +2539,115 @@ mod tests {
         assert_eq!(
             owned_labels(&record),
             ["governanceParty", "proposer", "proposalCid", "description"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn build_proposal_setup_delegation_shape() -> Result {
+        let proposal = ProposalType::SetupCouponReassignmentDelegation {
+            dso: party_id(),
+            assigners: vec![party_id(), party_id()],
+            new_beneficiaries: vec![
+                RewardBeneficiary {
+                    beneficiary: party_id(),
+                    percentage: dec("0.8"),
+                },
+                RewardBeneficiary {
+                    beneficiary: party_id(),
+                    percentage: dec("0.2"),
+                },
+            ],
+            prior_delegation: Some("00old".to_string()),
+        };
+        let (package, module, entity, record) =
+            build_proposal_create_args("gov", "proposer", &proposal, None, None)?;
+        assert_eq!(package, ProposalPackage::GovernanceRewards);
+        assert_eq!(
+            module,
+            "Governance.Rewards.SetupCouponReassignmentDelegation"
+        );
+        assert_eq!(entity, "SetupCouponReassignmentDelegation");
+        assert_eq!(
+            owned_labels(&record),
+            [
+                "governanceParty",
+                "proposer",
+                "priorDelegation",
+                "dso",
+                "assigners",
+                "beneficiaries"
+            ]
+        );
+
+        // priorDelegation: Some -> Optional(Some(ContractId "00old")).
+        match &field_value(&record, "priorDelegation").sum {
+            Some(value::Sum::Optional(opt)) => {
+                let inner = opt.value.as_ref().expect("priorDelegation should be Some");
+                assert!(
+                    matches!(&inner.sum, Some(value::Sum::ContractId(c)) if c == "00old"),
+                    "priorDelegation inner must be ContractId(\"00old\"), got {:?}",
+                    inner.sum
+                );
+            }
+            other => panic!("priorDelegation must be Optional, got {other:?}"),
+        }
+
+        // assigners: a list of two Party values.
+        let assigners = as_list(field_value(&record, "assigners"));
+        assert_eq!(assigners.len(), 2);
+        assert!(
+            assigners
+                .iter()
+                .all(|v| matches!(v.sum, Some(value::Sum::Party(_)))),
+            "assigners elements must be Party"
+        );
+
+        // beneficiaries: a list of {beneficiary: Party, percentage: Numeric},
+        // carrying the 0.8 / 0.2 split in order. A regression swapping
+        // make_party <-> make_contract_id, or renaming `percentage`, fails here.
+        let benes = as_list(field_value(&record, "beneficiaries"));
+        assert_eq!(benes.len(), 2);
+        for (bene, expected_pct) in benes.iter().zip(["0.8", "0.2"]) {
+            let rec = as_record(bene);
+            assert_eq!(owned_labels(rec), ["beneficiary", "percentage"]);
+            assert!(
+                matches!(
+                    field_value(rec, "beneficiary").sum,
+                    Some(value::Sum::Party(_))
+                ),
+                "beneficiary must be a Party"
+            );
+            match &field_value(rec, "percentage").sum {
+                Some(value::Sum::Numeric(n)) => assert_eq!(n, expected_pct),
+                other => panic!("percentage must be Numeric, got {other:?}"),
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn build_proposal_revoke_delegation_shape() -> Result {
+        let proposal = ProposalType::RevokeCouponReassignmentDelegation {
+            delegation: "00abc".to_string(),
+        };
+        let (package, module, entity, record) =
+            build_proposal_create_args("gov", "proposer", &proposal, None, None)?;
+        assert_eq!(package, ProposalPackage::GovernanceRewards);
+        assert_eq!(
+            module,
+            "Governance.Rewards.RevokeCouponReassignmentDelegation"
+        );
+        assert_eq!(entity, "RevokeCouponReassignmentDelegation");
+        assert_eq!(
+            owned_labels(&record),
+            ["governanceParty", "proposer", "delegation"]
+        );
+        // delegation: a ContractId carrying the passed cid.
+        assert!(
+            matches!(&field_value(&record, "delegation").sum, Some(value::Sum::ContractId(c)) if c == "00abc"),
+            "delegation must be ContractId(\"00abc\"), got {:?}",
+            field_value(&record, "delegation").sum
         );
         Ok(())
     }
