@@ -1386,23 +1386,26 @@ pub(crate) async fn submit_proposal(
         })
 }
 
-/// True when this proposal would create a SECOND live `CouponReassignmentDelegation`.
+/// True when this proposal would create a SECOND live
+/// `CouponReassignmentDelegation`, given that one is already active.
 ///
 /// Canton cannot enforce the per-decparty singleton — contract keys do not give
 /// cross-participant uniqueness — and `executeImpl` cannot query the ACS, so the
 /// propose boundary is the only place the accident is catchable. Replacing an
-/// existing delegation is fine; leaving `prior_delegation` empty while one is live
-/// is not: the automation then refuses to act on an ambiguous split so every
-/// coupon expires, and an assigner can still pay the superseded split.
-fn creates_second_delegation(proposal: &ProposalType, delegation_is_active: bool) -> bool {
-    delegation_is_active
-        && matches!(
-            proposal,
-            ProposalType::SetupCouponReassignmentDelegation {
-                prior_delegation: None,
-                ..
-            }
-        )
+/// existing delegation is fine; leaving `prior_delegation` empty while one is
+/// live is not: an assigner can still pay the superseded split.
+/// This is the proposal shape alone — the handler pairs it with the ACS read.
+/// Keeping the shape test separate is what lets `propose_action` skip that read
+/// entirely for every other proposal type, which would otherwise pay a
+/// `GetLedgerEnd` plus a `GetActiveContracts` for an answer that cannot change.
+fn may_create_second_delegation(proposal: &ProposalType) -> bool {
+    matches!(
+        proposal,
+        ProposalType::SetupCouponReassignmentDelegation {
+            prior_delegation: None,
+            ..
+        }
+    )
 }
 
 /// Propose a domain governance action (creates a GovernableAction proposal contract)
@@ -1447,24 +1450,45 @@ pub async fn propose_action(
     // Canton cannot enforce the per-decparty singleton (contract keys do not give
     // cross-participant uniqueness) and executeImpl cannot query the ACS, so the
     // propose boundary is the only place the accident is catchable.
-    if let Ok(active) = crate::server::reward_automation::active_delegation(
-        &data.config,
-        &packages(),
-        data.test_mode,
-        party_id,
-        &token,
-    )
-    .await
-        && creates_second_delegation(&body.proposal, active.is_some())
-    {
-        let cid = active.map(|a| a.cid).unwrap_or_default();
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format!(
-                "a CouponReassignmentDelegation is already active ({cid}); set \
-                 prior_delegation to replace it — creating a second one stops \
-                 assignment entirely"
-            ),
-        });
+    //
+    // Match on the proposal type BEFORE reading the ledger: only one variant can
+    // trip this guard, and the read is a GetLedgerEnd plus a GetActiveContracts
+    // that every other propose would otherwise pay for nothing.
+    if may_create_second_delegation(&body.proposal) {
+        match crate::server::reward_automation::active_delegation(
+            &data.config,
+            &packages(),
+            data.test_mode,
+            party_id,
+            &token,
+        )
+        .await
+        {
+            Ok(Some(active)) => {
+                return HttpResponse::Conflict().json(ErrorResponse {
+                    error: format!(
+                        "a CouponReassignmentDelegation is already active ({}); set \
+                         prior_delegation to replace it — creating a second one stops \
+                         assignment entirely",
+                        active.cid
+                    ),
+                });
+            }
+            Ok(None) => {}
+            // Do not swallow this. The guard exists for exactly the state a
+            // failed read leaves us blind to, so let the proposer see it rather
+            // than admitting a second delegation on a transport blip.
+            Err(e) => {
+                tracing::warn!(%party_id, error = %e, "delegation singleton check failed");
+                return HttpResponse::ServiceUnavailable().json(ErrorResponse {
+                    error: format!(
+                        "cannot confirm whether a CouponReassignmentDelegation is already \
+                         active, so this proposal is refused rather than risk a second \
+                         one: {e}"
+                    ),
+                });
+            }
+        }
     }
 
     let audit_pool = data.db.clone();
@@ -2830,12 +2854,15 @@ mod submit_proposal_status_tests {
         CantonId::parse(&format!("p::{}", "0".repeat(68))).expect("valid canton id")
     }
 
-    /// Only a Setup that omits `prior_delegation` conflicts with an active
+    /// Only a Setup that omits `prior_delegation` can conflict with an active
     /// delegation. Replacing one is the normal path and must stay allowed, and no
     /// other proposal type is affected — a rule broad enough to block either would
     /// make the reward action unusable.
+    ///
+    /// This also gates the ACS read: a shape that returns false here never
+    /// touches the ledger, so a false positive would tax every propose.
     #[test]
-    fn creates_second_delegation_only_for_an_unnamed_replacement() {
+    fn only_an_unnamed_replacement_can_create_a_second_delegation() {
         let setup_without_prior = ProposalType::SetupCouponReassignmentDelegation {
             dso: party(),
             assigners: vec![party()],
@@ -2852,14 +2879,12 @@ mod submit_proposal_status_tests {
             description: "unrelated".to_string(),
         };
 
-        // the accident: a second delegation while one is live
-        assert!(creates_second_delegation(&setup_without_prior, true));
-        // no delegation yet -> the first create must be allowed
-        assert!(!creates_second_delegation(&setup_without_prior, false));
-        // replacement names what it replaces -> always allowed
-        assert!(!creates_second_delegation(&setup_with_prior, true));
-        // unrelated proposals are never blocked by an active delegation
-        assert!(!creates_second_delegation(&unrelated, true));
+        // the accident: creating one without naming what it replaces
+        assert!(may_create_second_delegation(&setup_without_prior));
+        // replacement names what it replaces -> always allowed, no read needed
+        assert!(!may_create_second_delegation(&setup_with_prior));
+        // unrelated proposals are never blocked, and never pay for the read
+        assert!(!may_create_second_delegation(&unrelated));
     }
 
     /// A proposal whose target governance package is not configured is a node

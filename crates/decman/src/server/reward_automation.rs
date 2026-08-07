@@ -131,6 +131,11 @@ fn field_optional_is_none(rec: &Record, label: &str) -> bool {
 /// orders contracts by creation, which [`active_delegation`] uses to pick the
 /// newest of several.
 ///
+/// `implementer` applies to interface reads only: `Some((module, entity))`
+/// keeps a contract only if that concrete template created it. An interface
+/// read otherwise admits **every** implementation, which is wrong whenever the
+/// consumer needs a specific one — see [`unassigned_coupons`].
+///
 /// Modeled on `queries::fetch_proposal_infos`.
 // The full filter descriptor (package/module/entity + template-vs-interface) is
 // intentionally passed positionally so this stays the single shared read for
@@ -145,6 +150,7 @@ pub(crate) async fn active_created_records(
     module: &str,
     entity: &str,
     interface_view: bool,
+    implementer: Option<(&str, &str)>,
 ) -> anyhow::Result<Vec<(String, i64, Record)>> {
     let mut state_client = utils::create_state_client(config, token).await?;
 
@@ -210,6 +216,16 @@ pub(crate) async fn active_created_records(
             && let Some(created) = active.created_event
         {
             if interface_view {
+                // An interface read admits every implementation. Keep only the
+                // one the caller named, so the reader cannot hand downstream a
+                // contract the exercise will refuse.
+                if let Some((impl_module, impl_entity)) = implementer
+                    && !created.template_id.as_ref().is_some_and(|t| {
+                        t.module_name == impl_module && t.entity_name == impl_entity
+                    })
+                {
+                    continue;
+                }
                 let Some(view) = created.interface_views.iter().find(|v| {
                     v.interface_id
                         .as_ref()
@@ -338,6 +354,7 @@ pub(crate) async fn active_delegation(
         "Governance.Rewards.CouponReassignmentDelegation",
         "CouponReassignmentDelegation",
         false,
+        None, // template read: the template *is* the filter
     )
     .await?;
 
@@ -381,15 +398,11 @@ fn newest_delegation_for(
 // ============================================================================
 
 /// A decparty's unassigned reward coupon (`RewardCoupon` interface view).
+///
+/// Only what selection needs: `expires_at` orders the batch, `cid` names the
+/// coupon to assign.
 pub(crate) struct CouponInfo {
     pub cid: String,
-    /// Currently unused — the batching logic keys off `cid` + `expires_at`
-    /// only. Retained for future operator logging / devnet IT assertions.
-    #[allow(dead_code)]
-    pub provider: CantonId,
-    /// See `provider` — currently unused, retained for the same reason.
-    #[allow(dead_code)]
-    pub amount: DamlDecimal,
     pub expires_at: DateTime<Utc>,
 }
 
@@ -397,8 +410,17 @@ pub(crate) struct CouponInfo {
 /// (`provider == decparty`, `beneficiary` is `None`, and `dso` is the
 /// delegation's DSO — see [`parse_unassigned_coupon`]).
 ///
-/// Uses the `RewardCoupon` interface view (`#splice-api-reward-assignment-v1`);
-/// on devnet the concrete implementer is `RewardCouponV2`.
+/// Reads the `RewardCoupon` interface view
+/// (`#splice-api-reward-assignment-v1`) but admits **only** contracts created
+/// by `Splice.Amulet:RewardCouponV2`.
+///
+/// That restriction is load-bearing, not tidiness. `Delegation_Assign` fetches
+/// the primary as the concrete `RewardCouponV2`, so any other implementation of
+/// the interface would pass this reader and fail the exercise. Sorted
+/// most-urgent-first it would head the batch on every tick and stall the drain
+/// (see [`drain_assignable`]). The reader admitting exactly what the DAML
+/// accepts is what keeps the two in step; a second implementation shipping, or
+/// a package skew, must not wedge the engine.
 pub(crate) async fn unassigned_coupons(
     config: &NodeConfig,
     decparty: &CantonId,
@@ -417,6 +439,7 @@ pub(crate) async fn unassigned_coupons(
         "Splice.Api.RewardAssignmentV1",
         "RewardCoupon",
         true,
+        Some(("Splice.Amulet", "RewardCouponV2")),
     )
     .await?;
 
@@ -447,10 +470,12 @@ fn parse_unassigned_coupon(
     if !field_optional_is_none(rec, "beneficiary") {
         return Ok(None);
     }
+    // Decoded and discarded on purpose: selection does not need the amount, but
+    // a coupon that matches and does not decode is a read we do not understand,
+    // and erroring beats assigning against it.
+    field_decimal(rec, "amount")?;
     Ok(Some(CouponInfo {
         cid: cid.to_string(),
-        provider,
-        amount: field_decimal(rec, "amount")?,
         expires_at: field_time(rec, "expiresAt")?,
     }))
 }
@@ -623,8 +648,13 @@ pub(crate) async fn submit_delegation_assign(
     let mut req = tonic::Request::new(SubmitAndWaitRequest {
         commands: Some(commands),
     });
-    req.metadata_mut()
-        .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    // A non-ASCII byte in the token makes this parse fail. The automation runs
+    // in a detached task whose handle is dropped, so a panic here would kill
+    // reward assignment silently while the process keeps serving HTTP.
+    let auth = format!("Bearer {token}")
+        .parse()
+        .context("authorization header is not a valid metadata value")?;
+    req.metadata_mut().insert("authorization", auth);
     client.submit_and_wait(req).await?; // an assign needs no created-cid readback
     Ok(())
 }
@@ -638,7 +668,8 @@ pub(crate) async fn submit_delegation_assign(
 /// interval is a latency/cost knob, not a safety-critical one. The chunk bounds
 /// one *transaction* (design §9/§11; see [`chunk_size`]).
 ///
-/// A failed chunk ends the tick (see [`drain_assignable`]).
+/// A transient failure ends the tick; a rejected command is isolated to the one
+/// coupon at fault and the drain continues (see [`drain_assignable`]).
 ///
 /// The create budget and the expiry margin come from [`NodeConfig`] so they can
 /// be tuned against a live ledger without a rebuild.
@@ -692,26 +723,73 @@ pub(crate) async fn run_reassign_once(
     Ok(())
 }
 
+/// Canton error ids that mean this node's view is stale, or the network
+/// faltered — not that the command itself was bad.
+///
+/// Keyed on the **error id**, never the gRPC status code. Devnet shows benign
+/// contention arriving as three different codes: `LOCAL_VERDICT_LOCKED_CONTRACTS`
+/// is `ABORTED`, `LOCAL_VERDICT_INACTIVE_CONTRACTS` is `NOT_FOUND`, and
+/// `UNKNOWN_CONTRACT_SYNCHRONIZERS` is `FAILED_PRECONDITION`. A code-based rule
+/// would read that last one as a bad command and bisect a chunk another node
+/// had just assigned correctly. Canton's own retryability flag is no better: it
+/// marks those categories non-retryable because *resubmitting* cannot work,
+/// while this automation re-reads, which does fix them.
+///
+/// The timeouts come from the 2026-07-29 devnet outage, where five consecutive
+/// ticks each hit a different one and recovered unattended.
+const TRANSIENT_ASSIGN_ERROR_IDS: &[&str] = &[
+    "LOCAL_VERDICT_LOCKED_CONTRACTS",
+    "LOCAL_VERDICT_INACTIVE_CONTRACTS",
+    "UNKNOWN_CONTRACT_SYNCHRONIZERS",
+    "CONTRACT_NOT_FOUND",
+    "LOCAL_VERDICT_TIMEOUT",
+    "NOT_SEQUENCED_TIMEOUT",
+    "SEQUENCER_BACKPRESSURE",
+    "REQUEST_TIME_OUT",
+];
+
+/// The Canton error id a failed submission carries, i.e. the message prefix
+/// before `(`. `None` when the error is not a ledger rejection at all.
+fn canton_error_id(e: &anyhow::Error) -> Option<String> {
+    let status = e.downcast_ref::<tonic::Status>()?;
+    let id = status.message().split('(').next()?.trim();
+    (!id.is_empty() && id.bytes().all(|b| b.is_ascii_uppercase() || b == b'_'))
+        .then(|| id.to_string())
+}
+
+/// Whether a fresh read on the next tick is the cure.
+///
+/// A non-ledger failure (config, transport, auth) is transient here too: it is
+/// not attributable to any one coupon, so isolating one would be meaningless.
+fn assign_failure_is_transient(e: &anyhow::Error) -> bool {
+    match canton_error_id(e) {
+        Some(id) => TRANSIENT_ASSIGN_ERROR_IDS.contains(&id.as_str()),
+        None => true,
+    }
+}
+
 /// Assign `assignable` in `chunk`-sized batches via `submit`, returning how many
-/// coupons were assigned. The submit step is injected so the chunking and the
-/// failure rule are unit-testable without a ledger.
+/// coupons were assigned. The submit step is injected so the chunking, the
+/// failure rule and the bisect are unit-testable without a ledger.
 ///
-/// **A failed chunk ends the drain.** Every assign failure seen in practice
-/// means this node's view is stale — another assigner committed first
-/// (`CONTRACT_NOT_FOUND`, `LOCAL_VERDICT_LOCKED_CONTRACTS`) or the coupon
-/// expired — and the only cure is a fresh read, which the next tick performs.
-/// Retrying the chunk smaller cannot help, because a smaller chunk is not a
-/// newer view; and skipping the coupon to continue would grind through failure
-/// after failure, since an assigner that took the first coupon has very likely
-/// taken the rest of the batch too. Ending the tick costs at most one interval
-/// of latency for the coupons left behind, and they keep their full TTL.
+/// **A transient failure ends the drain; a rejected command does not.**
 ///
-/// The exposure this accepts: a coupon that is genuinely un-exerciseable — a
-/// package-version mismatch being the realistic case — heads the deterministic
-/// most-urgent-first order on every tick and stalls assignment indefinitely.
-/// Skipping it would not repair that; it would lose the coupon anyway while
-/// hiding the cause. So the failing coupon id is logged for alerting to pick up
-/// and a human to diagnose.
+/// Contention is the overwhelmingly common failure — on a 3-assigner devnet two
+/// nodes lose every round — and there a fresh read is the only cure, so the tick
+/// ends and the coupons keep their full TTL. That is [`TRANSIENT_ASSIGN_ERROR_IDS`].
+///
+/// Any other rejection is attributable to the batch's contents, so the drain
+/// **bisects** to find the one coupon at fault, logs it at ERROR, and carries on
+/// with the rest. Halving is what makes this work where dropping the primary
+/// would not: splice fetches and validates every `additionalCoupon`, so the
+/// culprit can sit anywhere in the chunk. Each half that commits is real
+/// progress, so the bisect assigns as it narrows.
+///
+/// The skip lasts **one tick only** — there is no cross-tick quarantine, so the
+/// drain stays stateless and a misclassified failure costs one tick rather than
+/// stranding a healthy coupon until restart. A genuinely un-exerciseable coupon
+/// is therefore re-found every tick, which is the point: it keeps producing an
+/// ERROR for alerting while every healthy coupon still gets paid.
 async fn drain_assignable<'a, F, Fut>(
     assignable: &'a [String],
     chunk: usize,
@@ -723,26 +801,63 @@ where
     Fut: std::future::Future<Output = anyhow::Result<()>>,
 {
     let size = chunk.max(1);
-    let mut offset = 0;
     let mut assigned = 0;
-    while offset < assignable.len() {
-        let end = (offset + size).min(assignable.len());
-        let (primary, additional) = assignable[offset..end]
+    let mut skipped = 0;
+
+    // Half-open ranges still to attempt, most-urgent-first. A rejected range is
+    // replaced by its two halves, so the stack is the bisect.
+    let mut pending: Vec<(usize, usize)> = (0..assignable.len())
+        .step_by(size)
+        .map(|lo| (lo, (lo + size).min(assignable.len())))
+        .rev()
+        .collect();
+
+    while let Some((lo, hi)) = pending.pop() {
+        let (primary, additional) = assignable[lo..hi]
             .split_first()
-            .expect("offset < len, so the chunk is non-empty");
-        if let Err(e) = submit(primary, additional).await {
+            .expect("ranges are built non-empty");
+        let Err(e) = submit(primary, additional).await else {
+            assigned += hi - lo;
+            continue;
+        };
+
+        if assign_failure_is_transient(&e) {
+            let remaining: usize = pending.iter().map(|(l, h)| h - l).sum::<usize>() + (hi - lo);
             tracing::warn!(
                 %decparty,
                 error = %e,
                 coupon = %primary,
                 assigned,
-                remaining = assignable.len() - offset,
+                remaining,
                 "assign chunk failed; ending tick to re-read the ledger"
             );
             break;
         }
-        assigned += end - offset;
-        offset = end;
+
+        if hi - lo == 1 {
+            skipped += 1;
+            tracing::error!(
+                %decparty,
+                error = %e,
+                coupon = %primary,
+                error_id = canton_error_id(&e).unwrap_or_default(),
+                "coupon rejected on its own; skipping it for this tick"
+            );
+            continue;
+        }
+
+        let mid = lo + (hi - lo) / 2;
+        pending.push((mid, hi));
+        pending.push((lo, mid));
+    }
+
+    if skipped > 0 {
+        tracing::error!(
+            %decparty,
+            skipped,
+            assigned,
+            "some coupons could not be assigned; they will be retried next tick"
+        );
     }
     assigned
 }
@@ -1017,7 +1132,6 @@ mod tests {
         let got = parse_unassigned_coupon("00c1", &unassigned, &alice, &dso).unwrap();
         let coupon = got.expect("unassigned coupon for the decparty is kept");
         assert_eq!(coupon.cid, "00c1");
-        assert_eq!(coupon.amount, "100.0".parse().unwrap());
 
         // provider != decparty -> skipped (fail-safe).
         assert!(
@@ -1077,8 +1191,6 @@ mod tests {
     fn coupon(id: &str, expires: &str) -> CouponInfo {
         CouponInfo {
             cid: id.to_string(),
-            provider: CantonId::parse(ALICE).expect("valid canton id"),
-            amount: "1".parse().expect("valid decimal"),
             expires_at: dt(expires),
         }
     }
@@ -1218,6 +1330,145 @@ mod tests {
         let assigned = drain_assignable(&all, 50, &alice(), submit).await;
         assert_eq!(assigned, 0);
         assert_eq!(*seen.borrow(), vec![1]);
+    }
+
+    // ---- failure classification + bisect ------------------------------------
+
+    /// A ledger rejection carrying a real Canton error id, shaped exactly as
+    /// the devnet logs show it: `ID(category,hash): message`.
+    fn canton_err(id: &str) -> anyhow::Error {
+        anyhow::Error::new(tonic::Status::aborted(format!(
+            "{id}(2,60893414): Rejected transaction"
+        )))
+    }
+
+    /// Reject any chunk containing `poison` with `err_id`; accept every other
+    /// chunk. Records the size of each attempted chunk.
+    fn poisoned(
+        poison: &'static str,
+        err_id: &'static str,
+    ) -> (
+        ChunkSizes,
+        impl FnMut(&str, &[String]) -> std::future::Ready<anyhow::Result<()>>,
+    ) {
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let log = seen.clone();
+        let f = move |p: &str, additional: &[String]| {
+            log.borrow_mut().push(additional.len() + 1);
+            let hit = p == poison || additional.iter().any(|c| c == poison);
+            std::future::ready(if hit { Err(canton_err(err_id)) } else { Ok(()) })
+        };
+        (seen, f)
+    }
+
+    #[tokio::test]
+    async fn contention_ends_the_tick_without_bisecting() {
+        // The common case: two of three assigners lose every devnet round.
+        // Halving cannot help a stale view, so this must cost ONE submission —
+        // bisecting here would burn ~log2(n) failing transactions per tick.
+        for id in [
+            "LOCAL_VERDICT_LOCKED_CONTRACTS",
+            "LOCAL_VERDICT_INACTIVE_CONTRACTS",
+            "UNKNOWN_CONTRACT_SYNCHRONIZERS",
+        ] {
+            let all = cids(64);
+            let (seen, submit) = poisoned("c0", id);
+            let assigned = drain_assignable(&all, 64, &alice(), submit).await;
+            assert_eq!(assigned, 0, "{id} must not assign");
+            assert_eq!(*seen.borrow(), vec![64], "{id} must not bisect");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rejected_coupon_is_isolated_and_the_rest_still_drain() {
+        // The head-of-line stall this fix exists for: one coupon the ledger
+        // will never accept must not cost the other 63.
+        let all = cids(64);
+        let (seen, submit) = poisoned("c0", "DAML_INTERPRETATION_ERROR");
+        let assigned = drain_assignable(&all, 64, &alice(), submit).await;
+        assert_eq!(assigned, 63, "every healthy coupon is assigned");
+        // Halves down to the culprit (the failing left edge), then commits each
+        // sibling on the way back up: 1+2+4+8+16+32 = 63. Two submissions per
+        // level, so 2*log2(n)+1 for a chunk of n.
+        assert_eq!(
+            *seen.borrow(),
+            vec![64, 32, 16, 8, 4, 2, 1, 1, 2, 4, 8, 16, 32]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rejected_coupon_is_found_mid_chunk() {
+        // splice fetches and validates every additionalCoupon, so the culprit
+        // need not be the primary. Dropping the primary and retrying would
+        // advance one coupon per tick; the bisect finds it wherever it sits.
+        let all = cids(16);
+        let (_, submit) = poisoned("c11", "DAML_INTERPRETATION_ERROR");
+        let assigned = drain_assignable(&all, 16, &alice(), submit).await;
+        assert_eq!(assigned, 15);
+    }
+
+    #[tokio::test]
+    async fn a_rejected_coupon_does_not_stop_later_chunks() {
+        // The poison sits in chunk 1 of 3. Chunks 2 and 3 must still go.
+        let all = cids(30);
+        let (_, submit) = poisoned("c3", "DAML_INTERPRETATION_ERROR");
+        let assigned = drain_assignable(&all, 10, &alice(), submit).await;
+        assert_eq!(assigned, 29);
+    }
+
+    #[tokio::test]
+    async fn an_unrecognized_ledger_rejection_is_isolated_not_swallowed() {
+        // An id we have never seen is treated as a bad command, so a coupon
+        // that can never be exercised is still contained. The cost of being
+        // wrong is one tick: nothing is quarantined across ticks.
+        let all = cids(8);
+        let (_, submit) = poisoned("c0", "SOME_FUTURE_CANTON_ERROR");
+        let assigned = drain_assignable(&all, 8, &alice(), submit).await;
+        assert_eq!(assigned, 7);
+    }
+
+    #[tokio::test]
+    async fn a_non_ledger_failure_ends_the_tick() {
+        // A transport or config failure is not attributable to any one coupon,
+        // so isolating one would be meaningless.
+        let all = cids(8);
+        let (seen, submit) = recorder(vec![false]);
+        let assigned = drain_assignable(&all, 8, &alice(), submit).await;
+        assert_eq!(assigned, 0);
+        assert_eq!(*seen.borrow(), vec![8], "no bisect on a non-ledger error");
+    }
+
+    #[test]
+    fn transient_classification_keys_on_the_error_id_not_the_grpc_code() {
+        // All three devnet contention errors arrive under DIFFERENT gRPC codes
+        // (ABORTED / NOT_FOUND / FAILED_PRECONDITION), so a code-based rule
+        // would misread one of them. Same code here, different ids.
+        assert!(assign_failure_is_transient(&canton_err(
+            "LOCAL_VERDICT_LOCKED_CONTRACTS"
+        )));
+        assert!(!assign_failure_is_transient(&canton_err(
+            "DAML_INTERPRETATION_ERROR"
+        )));
+        // FAILED_PRECONDITION carrying benign contention — the case a
+        // code-based classifier gets wrong.
+        let fp = anyhow::Error::new(tonic::Status::failed_precondition(
+            "UNKNOWN_CONTRACT_SYNCHRONIZERS(9,6a504b42): The following contracts have been archived",
+        ));
+        assert!(assign_failure_is_transient(&fp));
+    }
+
+    #[test]
+    fn canton_error_id_survives_added_context() {
+        // A future `.context(..)` on the submit call must not silently turn
+        // every rejection into an unclassifiable one.
+        let e = Err::<(), _>(canton_err("LOCAL_VERDICT_LOCKED_CONTRACTS"))
+            .context("submitting Delegation_Assign")
+            .unwrap_err();
+        assert_eq!(
+            canton_error_id(&e).as_deref(),
+            Some("LOCAL_VERDICT_LOCKED_CONTRACTS")
+        );
+        assert!(assign_failure_is_transient(&e));
     }
 
     #[test]

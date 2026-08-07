@@ -146,6 +146,30 @@ test_foreign_dso_coupon_rejected = script do
     when = when_foreign_dso_coupon_rejected
     then_ = then_nothing
 
+-- security: a stranger's coupon in additionalCoupons fails the whole exercise.
+--
+-- This pins the OUTCOME, not our guard. Verified 2026-08-07: the test still
+-- passes with Delegation_Assign's check narrowed to the primary, because splice
+-- fetches the additional coupons with the primary's dso and rejects them
+-- itself. So today two layers enforce this and no test can separate them.
+-- Its job is the upstream change: if splice ever stops enforcing it, this test
+-- is what keeps the property, and Delegation_Assign's per-coupon check is what
+-- makes it ours rather than borrowed.
+when_foreign_dso_in_additional_rejected : Fixture -> Script ()
+when_foreign_dso_in_additional_rejected f = do
+  let gp = f.parties.governanceParty
+  good <- mkUnassignedCoupon f.parties.dso gp 100.0
+  bad <- mkUnassignedCoupon f.parties.member3 gp 100.0
+  submitMustFail (memberContext f.parties.member1 gp) $ exerciseCmd f.delId Delegation_Assign with
+    assigner = f.parties.member1; primaryCoupon = good; additionalCoupons = [bad]
+    extraArgs = emptyExtraArgs
+
+test_foreign_dso_in_additional_rejected = script do
+  run Test with
+    given = given_delegation
+    when = when_foreign_dso_in_additional_rejected
+    then_ = then_nothing
+
 test_already_assigned_coupon_rejected = script do
   run Test with
     given = given_delegation

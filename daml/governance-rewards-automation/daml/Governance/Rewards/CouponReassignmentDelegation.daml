@@ -7,6 +7,8 @@
 -- split with a plain Delegation_Assign exercise — no per-round vote.
 module Governance.Rewards.CouponReassignmentDelegation where
 
+import DA.Foldable (forA_)
+
 import Splice.Amulet (RewardCouponV2)
 import Splice.Api.RewardAssignmentV1
   (RewardCoupon, RewardBeneficiary, RewardCoupon_AssignBeneficiaries(..))
@@ -41,8 +43,14 @@ template CouponReassignmentDelegation
         -- dso check, any party can mint a genuine RewardCouponV2 naming itself
         -- dso, and as a batch's primary it makes splice reject every real
         -- coupon alongside it.
-        coupon <- fetch (fromInterfaceContractId @RewardCouponV2 primaryCoupon)
-        assertMsg "coupon dso must match the delegation's dso" (coupon.dso == dso)
+        --
+        -- EVERY coupon is checked, not just the primary. splice is expected to
+        -- fetch the additional ones with the primary's dso, but nothing in this
+        -- choice's contract guarantees that, and leaving the other argument
+        -- position unguarded is the same hole the primary fetch closes.
+        forA_ (primaryCoupon :: additionalCoupons) $ \cid -> do
+          coupon <- fetch (fromInterfaceContractId @RewardCouponV2 cid)
+          assertMsg "coupon dso must match the delegation's dso" (coupon.dso == dso)
         _ <- exercise primaryCoupon RewardCoupon_AssignBeneficiaries with
                additionalCoupons
                newBeneficiaries = split   -- the contract's split, never a caller argument
