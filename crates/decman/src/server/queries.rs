@@ -592,6 +592,7 @@ pub async fn get_party_metadata(
             identity_provider_id: String::new(),
             page_token: String::new(),
             page_size: 1000,
+            // Empty = no server-side filter; this call already filters client-side.
             filter_party: String::new(),
         }))
         .await?

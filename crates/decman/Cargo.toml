@@ -87,10 +87,10 @@ common = { workspace = true, features = ["openapi"] }
 keycloak = { workspace = true }
 
 [dev-dependencies]
-# The e2e "wallet" (tests/common/wallet.rs) generates the party's Ed25519 key
-# client-side; production DPM never holds a party key, so rand backs only the
-# test harness. (ed25519-dalek is already a normal dep, reused here.)
-rand = { workspace = true }
+# The e2e plays the wallet with the shipped wallet library, so the key handling it
+# exercises is the same code a wallet provider runs. Test-only: production DPM
+# never holds a party key.
+decman-wallet = { workspace = true }
 # rcgen + tokio-rustls back the e2e suite's TLS terminator
 # (tests/common/tls_proxy.rs), which puts a Canton admin API behind TLS so the
 # TLS client path has coverage on a plaintext localnet. Test-only.

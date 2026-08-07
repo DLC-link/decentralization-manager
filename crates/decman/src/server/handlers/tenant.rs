@@ -36,9 +36,10 @@ use uuid::Uuid;
 use crate::{
     canton_id::{CantonId, validate_party_id_prefix},
     config::NodeConfig,
+    db::schema::SchemaRead,
     error::Result,
     server::{
-        AppState,
+        AppState, WorkflowAuth,
         middleware::require_tenant_api_key,
         types::{
             ErrorResponse, TenantAcsResponse, TenantContract, TenantExecuteSubmissionRequest,
@@ -57,7 +58,7 @@ use crate::{
     },
 };
 
-use super::{governance::get_party_token, workflows::validate_confirmation_threshold};
+use super::workflows::validate_confirmation_threshold;
 
 // ============================================================================
 // Onboarding (wallet-driven)
@@ -65,7 +66,7 @@ use super::{governance::get_party_token, workflows::validate_confirmation_thresh
 
 /// Prepare the onboarding topology for a wallet-held external party: DPM relays
 /// the wallet's public key to Canton and returns the unsigned topology + the
-/// multi-hash for the wallet to sign.
+/// per-transaction hashes for the wallet to sign.
 #[utoipa::path(
     tag = "Tenant",
     request_body = TenantPrepareRequest,
@@ -104,8 +105,8 @@ pub async fn tenant_prepare(
         Err(resp) => return resp,
     };
 
-    // No run is registered here — the wallet signs the returned multi-hash and
-    // calls `/v0/tenant/onboard` next.
+    // No run is registered here — the wallet signs the returned hashes and calls
+    // `/v0/tenant/onboard` next.
     match prepare_topology(
         &data.config,
         &body.party_hint,
@@ -117,7 +118,11 @@ pub async fn tenant_prepare(
     {
         Ok(prep) => HttpResponse::Ok().json(TenantPrepareResponse {
             party_id: prep.party_id,
-            multi_hash: STANDARD.encode(&prep.multi_hash),
+            transaction_hashes: prep
+                .transaction_hashes
+                .iter()
+                .map(|h| STANDARD.encode(h))
+                .collect(),
             topology_transactions: prep
                 .topology_transactions
                 .iter()
@@ -178,14 +183,17 @@ pub async fn tenant_onboard(
             ),
         });
     }
-    let signature = match STANDARD.decode(&body.multi_hash_signature) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            return HttpResponse::BadRequest().json(ErrorResponse {
-                error: format!("multi_hash_signature is not valid base64: {e}"),
-            });
+    let mut signatures = Vec::with_capacity(body.signatures.len());
+    for sig in &body.signatures {
+        match STANDARD.decode(sig) {
+            Ok(bytes) => signatures.push(bytes),
+            Err(e) => {
+                return HttpResponse::BadRequest().json(ErrorResponse {
+                    error: format!("signature is not valid base64: {e}"),
+                });
+            }
         }
-    };
+    }
     let mut topology_transactions = Vec::with_capacity(body.topology_transactions.len());
     for tx in &body.topology_transactions {
         match STANDARD.decode(tx) {
@@ -198,19 +206,31 @@ pub async fn tenant_onboard(
         }
     }
 
+    if signatures.len() != topology_transactions.len() {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: format!(
+                "expected one signature per topology transaction, got {sigs} signature(s) for \
+                 {txs} transaction(s)",
+                sigs = signatures.len(),
+                txs = topology_transactions.len()
+            ),
+        });
+    }
+
     let party_id = format!("{hint}::{fp}", hint = body.party_hint, fp = body.signed_by);
     let bundle = ExternalPartyAllocatePayload {
         party_id: party_id.clone(),
         topology_transactions,
-        signature,
+        signatures,
         signed_by: body.signed_by.clone(),
     };
 
-    // Allocate on THIS participant only. The wallet calls `/onboard` on every
-    // host itself; no host relays to another. Canton keeps the topology a
-    // proposal until the last host signs, and `allocate_party` treats
-    // `ALREADY_EXISTS` as success, so re-sends converge.
-    if let Err(e) = allocate_party(&data.config, &bundle).await {
+    // Submit on THIS participant only. The wallet calls `/onboard` on every host
+    // itself; no host relays to another. Canton keeps the topology a proposal until
+    // every host has authorized it, and re-submitting an identical transaction is a
+    // no-op, so a wallet retry converges.
+    let ledger_token = node_ledger_token(&data).await;
+    if let Err(e) = allocate_party(&data.config, &bundle, ledger_token).await {
         tracing::error!("tenant onboard: allocate on this participant failed: {e:#}");
         return HttpResponse::InternalServerError().json(ErrorResponse {
             error: format!("Failed to allocate external party on this host: {e}"),
@@ -328,7 +348,7 @@ pub async fn tenant_prepare_submission(
         })),
     };
 
-    let token = get_party_token(&data, &party_id).await;
+    let token = node_ledger_token(&data).await;
     let mut client = match utils::create_submission_client(&data.config, token).await {
         Ok(c) => c,
         Err(e) => {
@@ -449,7 +469,7 @@ pub async fn tenant_execute_submission(
         }],
     };
 
-    let token = get_party_token(&data, &party_id).await;
+    let token = node_ledger_token(&data).await;
     let mut client = match utils::create_submission_client(&data.config, token).await {
         Ok(c) => c,
         Err(e) => {
@@ -513,7 +533,7 @@ pub async fn tenant_acs(
         }
     };
 
-    let token = get_party_token(&data, &party_id).await;
+    let token = node_ledger_token(&data).await;
     match fetch_party_acs(&data.config, token, &party_id).await {
         Ok(contracts) => HttpResponse::Ok().json(TenantAcsResponse { contracts }),
         Err(e) => {
@@ -599,6 +619,43 @@ async fn fetch_party_acs(
 // ============================================================================
 // Helpers
 // ============================================================================
+
+/// The ledger token the tenant API's *transacting* half acts under.
+///
+/// Onboarding needs no ledger credential at all (it writes topology over the admin
+/// API), but reading a party's contracts and relaying its signed submissions are
+/// Ledger-API calls, and Canton scopes those to the caller's rights:
+///
+/// - `GetActiveContracts` and `PrepareSubmission` need `readAs` for the party
+/// - `ExecuteSubmission` needs `executeAs` for the party
+///
+/// A freshly onboarded external party has no credential of its own — it exists only
+/// as topology — so this is necessarily the node's own ledger user. For that user's
+/// token to carry the required rights, it needs `CanReadAsAnyParty` and
+/// `CanExecuteAsAnyParty`, granted once per node via `POST /auth/grant-rights`.
+/// Deliberately not `CanActAsAnyParty`: the node relays submissions the wallet
+/// signed and must not be able to originate them.
+///
+/// `None` when the node has no credential configured, which surfaces as an
+/// authentication error from Canton rather than a silent empty result.
+async fn node_ledger_token(data: &web::Data<AppState>) -> Option<String> {
+    let auth = data.auth.read().await;
+    let auth = auth.as_ref()?;
+
+    // Insecure mode mints one identity for everything, so no lookup is needed.
+    if let WorkflowAuth::Mock(registry) = auth {
+        return Some(registry.get_by_str("").await.get_token());
+    }
+
+    let mut credentials = data.db.get_all_party_credentials().await.ok()?;
+    // Deterministic pick, so a multi-party node always presents the same user.
+    credentials.sort_by_key(|c| c.dec_party_id.to_string());
+    let chosen = credentials.first()?;
+    auth.get_credentials(&chosen.dec_party_id)
+        .await
+        .ok()
+        .map(|c| c.token)
+}
 
 /// Base64-decode a raw Ed25519 public key into its fixed 32-byte array, or the
 /// 400 response to return.
