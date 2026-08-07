@@ -13,6 +13,7 @@ use tokio::sync::RwLock;
 // `crate::server::types::X` (and the glob `pub use types::*` in `server/mod.rs`)
 // keep resolving unchanged. `common::api` holds the HTTP request/response DTOs
 // the frontend's TypeScript is generated from (see `decman/build.rs`).
+pub use common::api::PAGE_SIZE;
 pub use common::api::{
     AddPartyInvitePayload, AddPartyRequest, AuditLogResponse, AuthStatus, AuthStatusResponse,
     AuthTestResponse, AuthTestResult, CancelConfirmationRequest, ChainAuditEntry,
@@ -1139,16 +1140,20 @@ fn default_audit_limit() -> i64 {
 pub struct ChainAuditQuery {
     /// Decentralized party ID to query chain events for
     pub party_id: CantonId,
-    /// Maximum number of entries to return (default 100)
+    /// Maximum number of entries to return (default [`PAGE_SIZE`])
     #[serde(default = "default_chain_audit_limit")]
     pub limit: usize,
+    /// Cursor: return only entries strictly older than this ledger offset.
+    /// Pass the previous response's `next_before_offset` to get the next page.
+    #[serde(default)]
+    pub before_offset: Option<i64>,
     /// When true, fetches fresh data from Canton and updates cache
     #[serde(default)]
     pub refresh: bool,
 }
 
 fn default_chain_audit_limit() -> usize {
-    100
+    PAGE_SIZE as usize
 }
 
 /// Build a [`ChainAuditEntry`] wire DTO from a cached DB row.

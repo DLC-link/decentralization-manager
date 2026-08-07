@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import {
   Alert,
   Box,
@@ -19,6 +19,8 @@ import { copyToClipboard } from "../clipboard";
 import { useSnackbar } from "../contexts";
 import { formatActionDetails, formatActionType } from "../governanceFormat";
 import { ExecuteDialog } from "./ExecuteDialog";
+import { PaginationControls } from "./Pagination";
+import { usePagination } from "../usePagination";
 import type {
   CancelConfirmationRequest,
   ConfirmActionRequest,
@@ -1915,17 +1917,9 @@ export const NotificationsView = ({
   onWorkflowsChanged,
   onSelectParty,
 }: NotificationsViewProps) => {
-  if (loading) {
-    return (
-      <Box sx={{ display: "flex", flexDirection: "column", gap: 1, p: 3 }}>
-        <NotificationSkeleton />
-        <NotificationSkeleton />
-        <NotificationSkeleton />
-      </Box>
-    );
-  }
-
-  const feed: FeedEntry[] = [
+  // Built above the loading early-return so the pagination hook below runs on
+  // every render, loading or not.
+  const feed: FeedEntry[] = useMemo(() => [
     ...pendingInvitations.map<FeedEntry>((invitation) => ({
       kind: "invitation",
       ts: invitation.received_at,
@@ -1958,8 +1952,19 @@ export const NotificationsView = ({
       ts: run.updated_at,
       run,
     })),
-  ];
-  feed.sort((a, b) => b.ts - a.ts);
+  ].sort((a, b) => b.ts - a.ts), [pendingInvitations, partyActions, workflowRuns]);
+
+  const { page, setPage, pageCount, pageItems, total } = usePagination(feed);
+
+  if (loading) {
+    return (
+      <Box sx={{ display: "flex", flexDirection: "column", gap: 1, p: 3 }}>
+        <NotificationSkeleton />
+        <NotificationSkeleton />
+        <NotificationSkeleton />
+      </Box>
+    );
+  }
 
   if (feed.length === 0) {
     return (
@@ -1973,7 +1978,7 @@ export const NotificationsView = ({
 
   return (
     <Box sx={{ display: "flex", flexDirection: "column", gap: 1, p: 3 }}>
-      {feed.map((entry) => {
+      {pageItems.map((entry) => {
         if (entry.kind === "invitation") {
           return (
             <InvitationCard
@@ -2015,6 +2020,12 @@ export const NotificationsView = ({
           />
         );
       })}
+      <PaginationControls
+        page={page}
+        pageCount={pageCount}
+        total={total}
+        onChange={setPage}
+      />
     </Box>
   );
 };
