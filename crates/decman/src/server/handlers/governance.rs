@@ -1045,7 +1045,7 @@ pub async fn get_governance_chain_audit(
 /// is 502, an unprovisioned governance package is 503, and only a true internal
 /// fault is 500.
 #[derive(Debug)]
-pub(crate) struct SubmitProposalError {
+struct SubmitProposalError {
     status: actix_web::http::StatusCode,
     message: String,
 }
@@ -1082,7 +1082,7 @@ impl SubmitProposalError {
     }
 
     /// The HTTP status the handler should return for this failure.
-    pub(crate) fn status(&self) -> actix_web::http::StatusCode {
+    fn status(&self) -> actix_web::http::StatusCode {
         self.status
     }
 }
@@ -1107,7 +1107,7 @@ impl std::error::Error for SubmitProposalError {}
 ///
 /// `_rules_contract_id` is part of the propose API surface (used by the caller's
 /// subsequent confirm step) but is not needed to create the proposal.
-pub(crate) async fn submit_proposal(
+async fn submit_proposal(
     config: &NodeConfig,
     party_id: &CantonId,
     _rules_contract_id: &str,
@@ -2248,7 +2248,7 @@ pub(crate) fn packages() -> PackageConfig {
 // ============================================================================
 
 /// Execute ConfirmAction choice on VaultGovernanceRules contract with structured action
-pub(crate) async fn execute_confirm_action(
+async fn execute_confirm_action(
     config: &NodeConfig,
     request: &ConfirmActionRequest,
     token: &str,

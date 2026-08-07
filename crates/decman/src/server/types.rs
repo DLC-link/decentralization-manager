@@ -651,6 +651,16 @@ pub enum ProposalType {
         /// stranger minted naming itself `dso`.
         dso: CantonId,
         assigners: Vec<CantonId>,
+        /// The split, baked into the delegation and enforced in DAML. Two
+        /// things surprise proposers, and both reject the vote at execute:
+        ///
+        /// 1. The percentages must sum to **exactly** 1.0, compared as exact
+        ///    Decimal. An even 3-way split is therefore not expressible —
+        ///    `0.3333333333` three times is not 1.0. Balance the last entry by
+        ///    hand (`0.3333333333`, `0.3333333333`, `0.3333333334`).
+        /// 2. Nothing is implicitly left to the decparty. To keep a remainder
+        ///    for itself, the decparty must appear here as its own beneficiary
+        ///    with an explicit percentage.
         new_beneficiaries: Vec<RewardBeneficiary>,
         #[serde(default)]
         prior_delegation: Option<String>,
@@ -871,8 +881,15 @@ fn validate_reward_beneficiaries(beneficiaries: &[RewardBeneficiary]) -> Result<
     }
     let sum: DamlDecimal = beneficiaries.iter().map(|b| b.percentage).sum();
     if sum != one {
+        // Say how to fix it. The comparison is exact Decimal, so an even 3-way
+        // split does not exist and nothing is implicitly left to the decparty —
+        // both are things a proposer discovers at execute otherwise.
         return Err(format!(
-            "reward beneficiary percentages must sum to exactly 1.0, got {sum}"
+            "reward beneficiary percentages must sum to exactly 1.0, got {sum}. \
+             The sum is compared as exact Decimal, so balance the last entry by \
+             hand rather than repeating a rounded share. To leave a remainder to \
+             the decparty, list the decparty itself as a beneficiary — nothing is \
+             implicit"
         ));
     }
     Ok(())

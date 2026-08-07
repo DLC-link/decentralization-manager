@@ -226,6 +226,13 @@ The split is an **L3 artifact that encodes the L1 decision** — this is where f
 
 **Where it lives.** The split is a `[RewardBeneficiary { beneficiary; percentage }]` field on the `CouponReassignmentDelegation`, percentages summing to 1.0, validated once when the delegation is created (Rust `validate()` at the API boundary — §9 — and the DAML choice at execute). There is **no separate mutable split store**: baking the split into the delegation means there is nothing to keep in sync with it and no window in which a live delegation and a separate config disagree.
 
+**Two things that reject an otherwise valid-looking vote**, both worth knowing before proposing one:
+
+- The sum is compared as **exact Decimal**, so an even 3-way split is not expressible: `0.3333333333` three times is not 1.0. Balance the last entry by hand (`0.3333333333`, `0.3333333333`, `0.3333333334`).
+- **Nothing is implicitly left to the decparty.** To keep a remainder for itself, the decparty must appear as its own beneficiary with an explicit percentage.
+
+Both are caught at the API boundary by `validate_reward_beneficiaries`, whose error says how to fix them, and again by `executeImpl` for a direct ledger submit. There is no proposer UI for this action — it is automation-only (`GovernanceSection.tsx` rejects it by design), so the API error and this section are where a proposer finds out.
+
 **The split is whatever governance configures** — there is no weight composition and no operator-cut derivation. If the DSO's (or an operator's) cut is part of the arrangement, it is just another configured `RewardBeneficiary` entry; the automation does not compute it. Percentages are stored directly, so nothing is normalized at read time.
 
 **Changing the split (or the assigner set)** is a new governance vote: `Delegation_Revoke` the old delegation and `SetupCouponReassignmentDelegation` a new one. Where the governance flow lets one action archive-and-create in a single transaction, the swap is atomic (never zero or two active). Otherwise it is two separate votes, and the order determines the transient the automation must tolerate: revoke-then-create leaves a brief **zero**-delegation window (automation no-ops), create-then-revoke a brief **two**-delegation window (automation takes the newest — §11). Either way the automation never assigns to a stale split: the newest is the one the latest vote produced, and an atomic replacement archives the old one outright. Membership changes are handled the same way, since `assigners` is likewise baked in.
