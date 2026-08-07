@@ -196,6 +196,7 @@ pub(crate) async fn active_created_records(
             filters_for_any_party: None,
             verbose: true,
         }),
+        stream_continuation_token: None,
     };
 
     let mut stream = state_client
@@ -617,6 +618,7 @@ pub(crate) async fn submit_delegation_assign(
         synchronizer_id: String::new(),
         package_id_selection_preference: vec![],
         prefetch_contract_keys: vec![],
+        taps_max_passes: None,
     };
     let mut req = tonic::Request::new(SubmitAndWaitRequest {
         commands: Some(commands),
