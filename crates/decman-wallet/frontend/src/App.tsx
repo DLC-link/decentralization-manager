@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import logo from "./assets/bitsafe-logo.svg";
 import * as api from "./api";
-import type { AcsView, ConfigView, HostReport, PartyView, StatusView, TemplateId } from "./types";
+import type { AcsView, ConfigView, HostReport, PartyView, StatusView } from "./types";
 import { Contracts } from "./components/Contracts";
 import { CreateParty } from "./components/CreateParty";
 import { HostList } from "./components/HostList";
@@ -123,19 +123,6 @@ export default function App() {
     }
   };
 
-  const onCreateContract = async (templateId: TemplateId, createArguments: unknown) => {
-    setBusy(true);
-    setError(null);
-    try {
-      await api.createContract(templateId, createArguments);
-      await refreshAcs();
-    } catch (e) {
-      setError(message(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
   if (!config) {
     return (
       <div className="shell">
@@ -207,14 +194,7 @@ export default function App() {
       </Card>
 
       {party ? (
-        <Contracts
-          acs={acs}
-          busy={busy}
-          onRefresh={() => void refreshAcs()}
-          onCreate={(templateId, createArguments) =>
-            void onCreateContract(templateId, createArguments)
-          }
-        />
+        <Contracts acs={acs} busy={busy} onRefresh={() => void refreshAcs()} />
       ) : null}
 
       <footer className="footer">

@@ -13,7 +13,7 @@ export function HostList({
 
   return (
     <div>
-      {hosts.map((host, index) => {
+      {hosts.map((host) => {
         const report = reportFor(host.base_url);
         return (
           <div className="host" key={host.base_url}>
@@ -22,9 +22,7 @@ export function HostList({
               <div className="pid">{host.participant_id}</div>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-              <span className="host-role">
-                {index === 0 ? "prepares topology" : "co-validator"}
-              </span>
+              <span className="host-role">co-validator</span>
               {report ? (
                 <StatusBadge status={report.status} error={report.error} />
               ) : null}

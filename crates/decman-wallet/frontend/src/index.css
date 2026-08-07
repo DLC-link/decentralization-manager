@@ -614,3 +614,14 @@ tr:last-child td {
   gap: 16px;
   flex-wrap: wrap;
 }
+
+/* Secret material: visually distinct from public identifiers, so a revealed key
+   never reads like just another fingerprint. */
+.secret {
+  color: var(--warning);
+}
+
+.secret.masked {
+  color: var(--fg-3);
+  letter-spacing: 0.08em;
+}

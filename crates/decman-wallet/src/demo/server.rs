@@ -25,6 +25,7 @@ pub async fn run(state: DemoState, bind_address: &str) -> std::io::Result<()> {
             .service(api::party_status)
             .service(api::party_acs)
             .service(api::create_party_contract)
+            .service(api::party_secret)
             .service(api::party)
             .service(api::reset)
             // Registered last: it is a catch-all that would otherwise shadow the

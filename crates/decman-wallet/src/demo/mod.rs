@@ -128,6 +128,15 @@ impl DemoState {
         self.confirmation_threshold
     }
 
+    /// The party's private seed, base64-encoded. Only the wallet's own UI sees this,
+    /// over loopback — it is never sent to a DecMan host. Exposed because the whole
+    /// point of the demo is showing that the key is the owner's.
+    fn seed_b64(&self) -> Option<zeroize::Zeroizing<String>> {
+        let guard = self.lock();
+        let state = guard.as_ref()?;
+        Some(ExternalKeyPair::from_seed(*state.seed).seed_b64())
+    }
+
     /// The party's key, hint, and id — rebuilt from the stored seed so callers can
     /// do async work without holding the lock.
     fn current(&self) -> Option<(ExternalKeyPair, String, String)> {

@@ -237,6 +237,22 @@ pub async fn create_party_contract(
     }
 }
 
+/// The party's private key, for the wallet's own UI to display.
+///
+/// This is the actual signing key. It is served only over the loopback address this
+/// process binds, and it is never sent to a DecMan host — the point of showing it is
+/// that the owner holds it and the hosts do not. A real wallet would put this behind
+/// a device unlock; a demo on a throwaway devnet key does not need to pretend.
+#[get("/api/party/secret")]
+pub async fn party_secret(state: web::Data<DemoState>) -> impl Responder {
+    match state.seed_b64() {
+        Some(seed) => HttpResponse::Ok().json(serde_json::json!({
+            "seed": seed.as_str(),
+        })),
+        None => no_party(),
+    }
+}
+
 /// Forget the party and its key, so the demo can be run again from scratch.
 #[delete("/api/party")]
 pub async fn reset(state: web::Data<DemoState>) -> impl Responder {

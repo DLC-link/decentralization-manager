@@ -4,7 +4,6 @@ import type {
   OnboardedParty,
   PartyView,
   StatusView,
-  TemplateId,
 } from "./types";
 
 /** The wallet answers errors as `{ "error": "..." }`; surface that text as-is. */
@@ -53,13 +52,7 @@ export const createParty = (partyHint: string, confirmationThreshold: number | n
     }),
   });
 
-export const createContract = (templateId: TemplateId, createArguments: unknown) =>
-  request<{ served_by: string }>("/api/party/contracts", {
-    method: "POST",
-    body: JSON.stringify({
-      template_id: templateId,
-      create_arguments: createArguments,
-    }),
-  });
+/** The party's own signing key, for display. Loopback only; never sent to a host. */
+export const getSecret = () => request<{ seed: string }>("/api/party/secret");
 
 export const reset = () => request<void>("/api/party", { method: "DELETE" });
