@@ -311,7 +311,7 @@ pub async fn get_chain_audit(
     packages: &PackageConfig,
     limit: usize,
     before_offset: Option<i64>,
-) -> Result<Vec<ChainAuditEntry>> {
+) -> Result<AuditPage> {
     let party_id_str = party_id.to_string();
     let party_id = party_id_str.as_str();
     let mut state_client = utils::create_state_client(config, token.clone()).await?;
@@ -323,7 +323,7 @@ pub async fn get_chain_audit(
         .offset;
 
     if ledger_end == 0 {
-        return Ok(Vec::new());
+        return Ok(AuditPage::default());
     }
 
     let pruned_offset = state_client
@@ -344,7 +344,7 @@ pub async fn get_chain_audit(
         None => ledger_end,
     };
     if end_offset <= begin_offset {
-        return Ok(Vec::new());
+        return Ok(AuditPage::default());
     }
     let range = OffsetRange {
         begin_exclusive: begin_offset,
@@ -354,7 +354,7 @@ pub async fn get_chain_audit(
     let filters = chain_filters(packages);
     if filters.templates.is_empty() && filters.interfaces.is_empty() {
         tracing::warn!("No governance templates configured; returning empty chain audit");
-        return Ok(Vec::new());
+        return Ok(AuditPage::default());
     }
 
     // The (module, entity) → governance_type index used to classify events
@@ -400,8 +400,8 @@ pub async fn get_chain_audit(
     };
 
     // `collect_entries` already keeps governance entries only, sorted newest
-    // first and capped at `limit`.
-    let entries = match canton_filters {
+    // first and trimmed to whole offset groups around `limit`.
+    let page = match canton_filters {
         Some(cumulative) => {
             let filtered = collect_entries(
                 config,
@@ -447,11 +447,12 @@ pub async fn get_chain_audit(
     };
 
     tracing::info!(
-        "Chain audit for {party_id}: {count} entries (ledger_end={ledger_end})",
-        count = entries.len()
+        "Chain audit for {party_id}: {count} entries (ledger_end={ledger_end}, has_more={more})",
+        count = page.entries.len(),
+        more = page.has_more
     );
 
-    Ok(entries)
+    Ok(page)
 }
 
 /// The ledger-offset window a chain-audit read covers.
@@ -461,14 +462,28 @@ struct OffsetRange {
     end_inclusive: i64,
 }
 
-/// Read governance audit entries newest-first until `limit` of them have been
-/// collected.
+/// One page of the audit trail, newest-first.
+#[derive(Default)]
+pub struct AuditPage {
+    pub entries: Vec<ChainAuditEntry>,
+    /// Whether entries older than this page exist. Derived from what the read
+    /// actually saw, not from the row count — a page can hold *more* than
+    /// `limit` rows (see [`trim_to_offset_groups`]), so counting rows would
+    /// hand out a cursor to a page that turns out to be empty.
+    pub has_more: bool,
+}
+
+/// Read governance audit entries newest-first until at least `limit` of them
+/// have been collected.
 ///
 /// Paging descending is what makes the early exit sound: every later page holds
 /// strictly lower offsets, so the first `limit` governance entries seen *are*
 /// the most recent `limit`. The previous implementation drained the whole
 /// retained ledger before sorting and truncating, which grew without bound as
 /// the ledger aged.
+///
+/// The returned page can slightly exceed `limit`: it is extended to the end of
+/// the last offset group rather than cut mid-transaction.
 async fn collect_entries(
     config: &NodeConfig,
     token: Option<String>,
@@ -477,7 +492,7 @@ async fn collect_entries(
     cumulative: Vec<CumulativeFilter>,
     template_index: &HashMap<(String, String), &'static str>,
     limit: usize,
-) -> Result<Vec<ChainAuditEntry>> {
+) -> Result<AuditPage> {
     let mut filters_by_party = HashMap::new();
     filters_by_party.insert(party_id.to_string(), Filters { cumulative });
 
@@ -497,11 +512,15 @@ async fn collect_entries(
     };
 
     if limit == 0 {
-        return Ok(Vec::new());
+        return Ok(AuditPage::default());
     }
 
     let mut entries: Vec<ChainAuditEntry> = Vec::new();
     let mut page_token = None;
+    // Whether Canton still had pages left when we stopped. Distinguishes
+    // "stopped because the page was full" from "stopped because the range ran
+    // out", which is what decides if an older page exists.
+    let mut pages_remain = false;
 
     loop {
         let page = fetch_transactions_page(
@@ -524,6 +543,7 @@ async fn collect_entries(
         }
 
         if entries.len() >= limit {
+            pages_remain = page.next_page_token.is_some();
             break;
         }
 
@@ -534,24 +554,42 @@ async fn collect_entries(
     }
 
     entries.sort_by_key(|e| std::cmp::Reverse(e.offset));
+    let dropped = trim_to_offset_groups(&mut entries, limit);
 
-    // Never end a page part-way through an offset. One transaction can yield
-    // several entries that all share its offset, and the cursor handed to the
-    // client is an offset — so a page cut mid-offset would make the next page
-    // (`offset < cursor`) skip the remainder outright. Overshooting `limit` by
-    // the tail of one transaction is the cheaper trade. Everything for a given
-    // offset is already in hand: `GetUpdatesPage` returns whole transactions,
-    // and the loop above consumes a full page before stopping.
-    if entries.len() > limit {
-        let boundary = entries[limit - 1].offset;
-        let keep = entries
-            .iter()
-            .position(|e| e.offset < boundary)
-            .unwrap_or(entries.len());
-        entries.truncate(keep);
+    Ok(AuditPage {
+        entries,
+        // Anything trimmed is strictly older than what we return, so it is
+        // itself proof that an older page exists.
+        has_more: dropped || pages_remain,
+    })
+}
+
+/// Trim `entries` — sorted newest-first — to roughly `limit`, never ending
+/// part-way through an offset group. Returns whether anything was dropped.
+///
+/// One transaction can yield several entries that all share its offset, and the
+/// cursor handed to the client is an offset — so a page cut mid-offset would
+/// make the next page (`offset < cursor`) skip the remainder outright.
+/// Overshooting `limit` by the tail of one transaction is the cheaper trade.
+/// Every entry for a given offset is in hand by construction: `GetUpdatesPage`
+/// returns whole transactions, and the caller consumes a full page before
+/// stopping.
+fn trim_to_offset_groups(entries: &mut Vec<ChainAuditEntry>, limit: usize) -> bool {
+    if limit == 0 || entries.len() <= limit {
+        return false;
     }
 
-    Ok(entries)
+    let boundary = entries[limit - 1].offset;
+    let keep = entries
+        .iter()
+        .position(|e| e.offset < boundary)
+        .unwrap_or(entries.len());
+
+    if keep >= entries.len() {
+        return false;
+    }
+    entries.truncate(keep);
+    true
 }
 
 /// Convert one transaction's Created/Exercised events into audit entries.
@@ -722,6 +760,72 @@ mod tests {
             update_id: String::new(),
             details: JsonValue::Null,
         }
+    }
+
+    /// Entries at the given offsets, newest-first, as `trim_to_offset_groups`
+    /// expects its input.
+    fn entries_at(offsets: &[i64]) -> Vec<ChainAuditEntry> {
+        offsets
+            .iter()
+            .map(|offset| ChainAuditEntry {
+                offset: *offset,
+                ..entry_with_event_type("propose")
+            })
+            .collect()
+    }
+
+    fn offsets_of(entries: &[ChainAuditEntry]) -> Vec<i64> {
+        entries.iter().map(|e| e.offset).collect()
+    }
+
+    #[test]
+    fn trim_keeps_everything_when_within_limit() {
+        let mut entries = entries_at(&[30, 20, 10]);
+        assert!(!trim_to_offset_groups(&mut entries, 5));
+        assert_eq!(offsets_of(&entries), vec![30, 20, 10]);
+    }
+
+    #[test]
+    fn trim_cuts_cleanly_on_an_offset_boundary() {
+        let mut entries = entries_at(&[30, 20, 10]);
+        assert!(trim_to_offset_groups(&mut entries, 2));
+        assert_eq!(offsets_of(&entries), vec![30, 20]);
+    }
+
+    /// The case the cursor depends on: the limit lands mid-transaction, so the
+    /// page is extended to the end of that offset group. Cutting at exactly
+    /// `limit` would strand offset 20's third entry — the next page asks for
+    /// `offset < 20` and would never return it.
+    #[test]
+    fn trim_never_splits_an_offset_group() {
+        let mut entries = entries_at(&[30, 20, 20, 20, 10]);
+        assert!(trim_to_offset_groups(&mut entries, 2));
+        assert_eq!(offsets_of(&entries), vec![30, 20, 20, 20]);
+    }
+
+    /// A single transaction bigger than the whole page still comes back whole
+    /// rather than being cut into a page the cursor can never revisit.
+    #[test]
+    fn trim_keeps_an_oversized_group_intact() {
+        let mut entries = entries_at(&[20, 20, 20, 20]);
+        assert!(!trim_to_offset_groups(&mut entries, 2));
+        assert_eq!(offsets_of(&entries), vec![20, 20, 20, 20]);
+    }
+
+    /// Nothing was dropped, so the caller must not report `has_more` — the
+    /// trailing group runs to the end of what we read.
+    #[test]
+    fn trim_reports_no_drop_when_the_group_runs_to_the_end() {
+        let mut entries = entries_at(&[30, 20, 20]);
+        assert!(!trim_to_offset_groups(&mut entries, 2));
+        assert_eq!(offsets_of(&entries), vec![30, 20, 20]);
+    }
+
+    #[test]
+    fn trim_is_a_no_op_at_zero_limit() {
+        let mut entries = entries_at(&[30, 20]);
+        assert!(!trim_to_offset_groups(&mut entries, 0));
+        assert_eq!(offsets_of(&entries), vec![30, 20]);
     }
 
     #[test]

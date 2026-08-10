@@ -970,13 +970,12 @@ pub async fn get_governance_audit(
 
 /// Wrap a page of audit entries, deriving the cursor for the next (older) page.
 ///
-/// A short page means the trail is exhausted, so no cursor is handed back and
-/// the UI stops asking.
-fn chain_audit_response(entries: Vec<ChainAuditEntry>, limit: usize) -> ChainAuditResponse {
+/// `has_more` is passed in rather than inferred from the row count: a page can
+/// hold more than `limit` rows (it is extended to the end of an offset group),
+/// so counting rows would hand out a cursor to a page that turns out empty.
+fn chain_audit_response(entries: Vec<ChainAuditEntry>, has_more: bool) -> ChainAuditResponse {
     let total_returned = entries.len();
-    let next_before_offset = (total_returned >= limit && limit > 0)
-        .then(|| entries.last().map(|e| e.offset))
-        .flatten();
+    let next_before_offset = has_more.then(|| entries.last().map(|e| e.offset)).flatten();
 
     ChainAuditResponse {
         entries,
@@ -1013,9 +1012,14 @@ pub async fn get_governance_chain_audit(
             .await
         {
             Ok(rows) if !rows.is_empty() => {
+                // The cache only mirrors the pages fetched so far, so it cannot
+                // prove the trail is exhausted. A full page is reported as
+                // "more" and the next request falls through to Canton — better
+                // a spare empty page than hiding entries that do exist.
+                let has_more = rows.len() >= query.limit;
                 let entries: Vec<ChainAuditEntry> =
                     rows.into_iter().map(chain_audit_entry_from_row).collect();
-                return HttpResponse::Ok().json(chain_audit_response(entries, query.limit));
+                return HttpResponse::Ok().json(chain_audit_response(entries, has_more));
             }
             Ok(_) => {}
             Err(e) => {
@@ -1039,16 +1043,16 @@ pub async fn get_governance_chain_audit(
     )
     .await
     {
-        Ok(entries) => {
+        Ok(page) => {
             // Save to cache in background
             let pool = data.db.clone();
             let pid = party_id.clone();
-            let cached = entries.clone();
+            let cached = page.entries.clone();
             tokio::spawn(async move {
                 chain_audit::save_chain_audit_cache(&pool, &pid, &cached).await;
             });
 
-            HttpResponse::Ok().json(chain_audit_response(entries, query.limit))
+            HttpResponse::Ok().json(chain_audit_response(page.entries, page.has_more))
         }
         Err(e) => {
             tracing::error!("Failed to fetch chain audit for {party_id}: {e:#}");
