@@ -46,7 +46,7 @@ template RegistrarDelegation
 
     -- | Consolidate holdings, one `Holding_Merge` per group. Value cannot move:
     -- `Holding_Merge` pins the owner and preserves the amount.
-    nonconsuming choice RegistrarDelegation_MergeHoldings : [ContractId Holding]
+    nonconsuming choice RegistrarDelegation_MergeHoldings : RegistrarDelegation_MergeHoldings_Result
       with
         operator : Party
           -- ^ The submitting operator. Must be in `operators`.
@@ -60,10 +60,11 @@ template RegistrarDelegation
         -- with an unhelpful "contract inactive" error.
         let allCids = concatMap (\g -> g.targetCid :: g.sourceCids) groups
         require "No holding appears twice" (unique allCids)
-        forA groups $ \g -> do
+        mergedCids <- forA groups $ \g -> do
           result <- exercise g.targetCid Holding_Merge with
             holdingCids = g.sourceCids
           pure result.holdingCid
+        pure RegistrarDelegation_MergeHoldings_Result with mergedCids
 
     -- | Any single operator ends the delegation for everyone.
     choice RegistrarDelegation_Revoke : ()
@@ -74,6 +75,13 @@ template RegistrarDelegation
       do
         require "Operator is authorized" (operator `Set.member` operators)
         pure ()
+
+-- | Result of `RegistrarDelegation_MergeHoldings`.
+data RegistrarDelegation_MergeHoldings_Result = RegistrarDelegation_MergeHoldings_Result
+  with
+    mergedCids : [ContractId Holding]
+      -- ^ The holdings created by the merges, one per group.
+  deriving (Eq, Show)
 
 -- | Governance route that creates a `RegistrarDelegation`. This is the only part
 -- of the delegation that needs a vote.

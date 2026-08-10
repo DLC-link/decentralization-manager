@@ -72,14 +72,14 @@ when_two_groups_merged f = do
   a3 <- createHolding f.parties f.parties.outsider 3.0
   b1 <- createHolding f.parties f.parties.member3 10.0
   b2 <- createHolding f.parties f.parties.member3 20.0
-  _ <- submit (operatorContext f.parties f.parties.member1) $
+  result <- submit (operatorContext f.parties f.parties.member1) $
     exerciseCmd f.delegationCid RegistrarDelegation_MergeHoldings with
       operator = f.parties.member1
       groups =
         [ MergeGroup with targetCid = a1; sourceCids = [a2, a3]
         , MergeGroup with targetCid = b1; sourceCids = [b2]
         ]
-  pure ()
+  assertMsg "one merged holding per group" (length result.mergedCids == 2)
 
 then_one_holding_per_owner : Fixture -> () -> Script Failures
 then_one_holding_per_owner f _ = do
