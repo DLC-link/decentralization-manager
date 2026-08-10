@@ -16,7 +16,7 @@ const DAR_FILES: &[&str] = &[
     "governance-action-v1-0.1.0.dar",
     "governance-core-v1-0.1.0.dar",
     "governance-token-custody-v1-0.1.0.dar",
-    "governance-utility-onboarding-v1-0.1.0.dar",
+    "governance-utility-onboarding-v1-0.2.0.dar",
 ];
 
 /// Map of expected package_id → (module_name, entity_name) of a well-known
