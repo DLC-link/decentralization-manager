@@ -43,6 +43,8 @@ actix-web = { workspace = true }
 aes-gcm = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+aws-config = { workspace = true }
+aws-sdk-kms = { workspace = true }
 base64 = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
@@ -56,6 +58,7 @@ hyper = { workspace = true }
 hyper-noise = { workspace = true }
 jsonwebtoken = { workspace = true }
 mime_guess = { workspace = true }
+p256 = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
 reqwest = { version = "0.13", features = ["form", "json"] }
