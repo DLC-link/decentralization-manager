@@ -9,7 +9,7 @@ module Governance.UtilityOnboarding.OnboardInstrumentIssuers where
 import Utility.Registry.V0.Configuration.Instrument (InstrumentConfiguration)
 
 import Governance.Action
-import Governance.UtilityOnboarding.Utils (mintCredentialsMeetingRequirements)
+import Governance.UtilityOnboarding.Utils (mintCredentialsMeetingRequirements, partyList)
 
 template OnboardInstrumentIssuers
   with
@@ -30,8 +30,8 @@ template OnboardInstrumentIssuers
         governanceParty
         proposer
         actionLabel = "OnboardInstrumentIssuers"
-        description = "Onboard " <> show (length instrumentIssuers)
-          <> " instrument issuer(s)"
+        -- Voters see only this text; name every party gaining minting rights.
+        description = "Onboard instrument issuers " <> partyList instrumentIssuers
 
       executeImpl = do
         instrumentConfiguration <- fetch instrumentConfigurationCid

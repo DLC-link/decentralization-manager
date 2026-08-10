@@ -10,6 +10,7 @@ import Utility.Registry.Holding.V0.Types (InstrumentIdentifier(..))
 import Utility.Registry.V0.Configuration.Instrument (InstrumentConfiguration(..))
 
 import Governance.Action (GovernableAction)
+import Governance.ExecutionResult
 
 import Governance.UtilityOnboarding.DualDecpartyTestUtils
 import Governance.UtilityOnboarding.OnboardInstrumentIssuers
@@ -168,3 +169,30 @@ test_when_outsider_confirms_then_rejected = script do
     given = given_provisioned_instrument
     when = when_outsider_confirms
     then_ = then_nothing
+
+-- * The description names the onboarded issuers. Voters confirm from this
+-- text alone, and execution copies it into the GovernanceExecutionResult.
+
+when_onboard_two_issuers_capturing_description : Fixture -> Script Text
+when_onboard_two_issuers_capturing_description fx = do
+  proposalCid <- onboardIssuersProposal fx [fx.f.parties.issuer1, fx.f.parties.issuer2]
+  result <- confirmAndExecuteAs fx.f.parties fx.f.registrarStack proposalCid
+  Some executionResult <-
+    queryContractId fx.f.parties.registrarGov result.executionResultCid
+  pure executionResult.description
+
+-- The expected text is spelled out with stdlib `show` and a literal ", "
+-- join, so the test fails if the template's wording or join changes.
+then_description_names_both_issuers : Fixture -> Text -> Script Failures
+then_description_names_both_issuers fx description = do
+  let parties = fx.f.parties
+  pure $ shouldBe "executed description"
+    ("Onboard instrument issuers "
+       <> show parties.issuer1 <> ", " <> show parties.issuer2)
+    description
+
+test_when_onboard_then_description_names_issuers = script do
+  run Test with
+    given = given_provisioned_instrument
+    when = when_onboard_two_issuers_capturing_description
+    then_ = then_description_names_both_issuers

@@ -18,6 +18,7 @@ import Utility.Credential.V0.Credential
   (Credential, Credential_Revoke(..), WithIssuerHolder(..))
 
 import Governance.Action
+import Governance.UtilityOnboarding.Utils (partyList)
 
 data InstrumentIssuerOffboardingConfiguration = InstrumentIssuerOffboardingConfiguration
   with
@@ -45,8 +46,9 @@ template OffboardInstrumentIssuers
         governanceParty
         proposer
         actionLabel = "OffboardInstrumentIssuers"
-        description = "Offboard " <> show (length instrumentIssuers)
-          <> " instrument issuer(s)"
+        -- Voters see only this text; name every party losing minting rights.
+        description = "Offboard instrument issuers "
+          <> partyList (map (.instrumentIssuer) instrumentIssuers)
 
       executeImpl = do
         _ <- forA instrumentIssuers $ \offboarding ->
