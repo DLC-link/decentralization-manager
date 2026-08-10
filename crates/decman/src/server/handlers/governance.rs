@@ -1001,6 +1001,11 @@ pub async fn get_governance_chain_audit(
 ) -> impl Responder {
     let party_id = &query.party_id;
 
+    // `limit` is caller-supplied; a zero-row page needs no ledger reads.
+    if query.limit == 0 {
+        return HttpResponse::Ok().json(chain_audit_response(Vec::new(), false));
+    }
+
     if !query.refresh {
         // Return from cache. An empty result is treated as a miss rather than
         // an answer: the cache only holds the pages fetched so far, so paging
