@@ -61,13 +61,19 @@ template ProvisionInstrument
         registrarService <- fetch registrarServiceCid
         assertMsg "ProvisionInstrument: registrar service registrar does not match the governance party"
           (registrarService.registrar == governanceParty)
-        _ <- exercise registrarServiceCid RegistrarService_CreateInstrumentConfiguration with
+        result <- exercise registrarServiceCid RegistrarService_CreateInstrumentConfiguration with
           instrumentId = instrumentIdText
           additionalIdentifiers
           issuerRequirements
           holderRequirements
+        -- Mint from the stored configuration, not the proposal parameter.
+        -- OnboardInstrumentIssuers credentials later issuers from what the
+        -- configuration stores, so if the SDK choice ever rewrites the
+        -- requirements it records, minting from the proposal's copy would
+        -- give initial issuers different credentials than later ones.
+        instrumentConfiguration <- fetch result.instrumentConfigurationCid
         _ <- forA initialInstrumentIssuers $ \instrumentIssuer ->
           mintCredentialsMeetingRequirements
             governanceParty instrumentIssuer "instrument-issuer-credential"
-            issuerRequirements
+            instrumentConfiguration.issuerRequirements
         pure ()
