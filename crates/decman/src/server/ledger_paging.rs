@@ -13,13 +13,13 @@
 //! result set anyway; sizing that at 25 would turn one stream into hundreds of
 //! round trips.
 
+use crate::{config::NodeConfig, error::Result, utils};
 use canton_proto_rs::com::daml::ledger::api::v2::{
     CreatedEvent, EventFormat, GetActiveContractsPageRequest, GetActiveContractsRequest,
     GetLedgerEndRequest, GetUpdatesPageRequest, GetUpdatesRequest, ListVettedPackagesRequest,
     Transaction, UpdateFormat, VettedPackage, get_active_contracts_response::ContractEntry,
     get_update_response, get_updates_response,
 };
-use crate::{config::NodeConfig, error::Result, utils};
 
 /// Rows pulled from Canton per round trip when collecting a full result set.
 const FETCH_CHUNK: i32 = 1000;
@@ -31,13 +31,42 @@ fn is_unimplemented(status: &tonic::Status) -> bool {
 
 /// Every `CreatedEvent` in the party's ACS matching `event_format`, read a page
 /// at a time.
-///
-/// `active_at_offset` is pinned to the ledger end for the whole walk: a page
-/// token is only valid against the offset and event format that produced it.
 pub(crate) async fn fetch_active_contracts(
     config: &NodeConfig,
     token: Option<String>,
     event_format: EventFormat,
+) -> Result<Vec<CreatedEvent>> {
+    collect_active_contracts(config, token, event_format, None).await
+}
+
+/// The first `CreatedEvent` matching `event_format`, or `None`.
+///
+/// For "does this contract exist / read its state" lookups. Stops after one
+/// page instead of walking the whole ACS to then discard all but the first
+/// row.
+pub(crate) async fn fetch_first_active_contract(
+    config: &NodeConfig,
+    token: Option<String>,
+    event_format: EventFormat,
+) -> Result<Option<CreatedEvent>> {
+    Ok(
+        collect_active_contracts(config, token, event_format, Some(1))
+            .await?
+            .into_iter()
+            .next(),
+    )
+}
+
+/// Walk the ACS a page at a time, stopping once `max_events` have been
+/// collected (or at the end of the ACS when it is `None`).
+///
+/// `active_at_offset` is pinned to the ledger end for the whole walk: a page
+/// token is only valid against the offset and event format that produced it.
+async fn collect_active_contracts(
+    config: &NodeConfig,
+    token: Option<String>,
+    event_format: EventFormat,
+    max_events: Option<usize>,
 ) -> Result<Vec<CreatedEvent>> {
     let mut client = utils::create_state_client(config, token.clone()).await?;
 
@@ -47,6 +76,13 @@ pub(crate) async fn fetch_active_contracts(
         .into_inner()
         .offset;
 
+    // Asking for fewer rows than a full chunk when the caller only wants a
+    // handful keeps the "find first" case to a single small round trip.
+    let page_size = match max_events {
+        Some(max) => FETCH_CHUNK.min(max.try_into().unwrap_or(FETCH_CHUNK)),
+        None => FETCH_CHUNK,
+    };
+
     let mut created = Vec::new();
     let mut page_token = None;
 
@@ -54,7 +90,7 @@ pub(crate) async fn fetch_active_contracts(
         let request = GetActiveContractsPageRequest {
             active_at_offset: Some(ledger_end),
             event_format: Some(event_format.clone()),
-            max_page_size: Some(FETCH_CHUNK),
+            max_page_size: Some(page_size),
             page_token,
         };
 
@@ -68,7 +104,14 @@ pub(crate) async fn fetch_active_contracts(
                     "GetActiveContractsPage unavailable (participant older than Canton 3.5.1); \
                      falling back to the streaming ACS read"
                 );
-                return stream_active_contracts(config, token, ledger_end, event_format).await;
+                return stream_active_contracts(
+                    config,
+                    token,
+                    ledger_end,
+                    event_format,
+                    max_events,
+                )
+                .await;
             }
             Err(status) => return Err(status.into()),
         };
@@ -81,6 +124,10 @@ pub(crate) async fn fetch_active_contracts(
             }
         }
 
+        if max_events.is_some_and(|max| created.len() >= max) {
+            break;
+        }
+
         match page.next_page_token {
             Some(next) if !next.is_empty() => page_token = Some(next),
             _ => break,
@@ -90,7 +137,8 @@ pub(crate) async fn fetch_active_contracts(
     Ok(created)
 }
 
-/// Pre-3.5.1 path for [`fetch_active_contracts`]: one unbounded server stream.
+/// Pre-3.5.1 path for [`collect_active_contracts`]: one server stream, stopped
+/// early once `max_events` have arrived.
 ///
 /// Builds its own client because the caller's has already been moved into the
 /// failed paged attempt.
@@ -99,6 +147,7 @@ async fn stream_active_contracts(
     token: Option<String>,
     ledger_end: i64,
     event_format: EventFormat,
+    max_events: Option<usize>,
 ) -> Result<Vec<CreatedEvent>> {
     let mut client = utils::create_state_client(config, token).await?;
 
@@ -119,6 +168,9 @@ async fn stream_active_contracts(
             && let Some(event) = active.created_event
         {
             created.push(event);
+            if max_events.is_some_and(|max| created.len() >= max) {
+                break;
+            }
         }
     }
 

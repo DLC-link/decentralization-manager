@@ -32,7 +32,7 @@ use crate::{
 
 use super::{
     action_serializer,
-    ledger_paging::fetch_active_contracts,
+    ledger_paging::{fetch_active_contracts, fetch_first_active_contract},
     package_inventory::{
         fetch_package_id_to_name, fetch_package_names, newest_matching_names, package_name_prefix,
     },
@@ -1566,9 +1566,9 @@ async fn fetch_governance_state_for_template(
         verbose: true,
     };
 
-    Ok(fetch_active_contracts(config, token, event_format)
+    Ok(fetch_first_active_contract(config, token, event_format)
         .await?
-        .first()
+        .as_ref()
         .and_then(extract_governance_state))
 }
 
