@@ -11,6 +11,7 @@ import Utility.Registry.App.V0.Service.Provider
   (ProviderService, ProviderService_CreateProviderConfiguration(..))
 
 import Governance.Action
+import Governance.UtilityOnboarding.Utils (selfIssuedRequirementsHaveClaims)
 
 template CreateProviderConfiguration
   with
@@ -23,6 +24,12 @@ template CreateProviderConfiguration
   where
     signatory proposer
     observer governanceParty
+    -- A claimless registrar requirement the provider would self-issue can
+    -- never be minted, and no action archives a ProviderConfiguration. Left
+    -- unchecked, such a configuration would pass its own vote and then fail
+    -- every OnboardRegistrar that selects it. Refuse it before any vote.
+    -- Holder requirements are not minted against, so they stay unchecked.
+    ensure selfIssuedRequirementsHaveClaims governanceParty registrarRequirements
 
     interface instance GovernableAction for CreateProviderConfiguration where
       view = GovernableActionView with

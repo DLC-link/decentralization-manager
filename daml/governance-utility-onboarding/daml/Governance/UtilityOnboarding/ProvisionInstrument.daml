@@ -12,7 +12,8 @@ import Utility.Registry.App.V0.Service.Registrar
 import Utility.Registry.Holding.V0.Types (InstrumentIdentifier)
 
 import Governance.Action
-import Governance.UtilityOnboarding.Utils (mintCredentialsMeetingRequirements, partyList)
+import Governance.UtilityOnboarding.Utils
+  (mintCredentialsMeetingRequirements, partyList, selfIssuedRequirementsHaveClaims)
 
 template ProvisionInstrument
   with
@@ -28,6 +29,13 @@ template ProvisionInstrument
   where
     signatory proposer
     observer governanceParty
+    -- A claimless issuer requirement the registrar would self-issue can
+    -- never be minted. With no initial issuers the mint assert never runs,
+    -- so the configuration would be created carrying the bad requirement
+    -- and every later OnboardInstrumentIssuers against it would fail.
+    -- Refuse it before any vote. Holder requirements are not minted
+    -- against, so they stay unchecked.
+    ensure selfIssuedRequirementsHaveClaims governanceParty issuerRequirements
 
     interface instance GovernableAction for ProvisionInstrument where
       view = GovernableActionView with

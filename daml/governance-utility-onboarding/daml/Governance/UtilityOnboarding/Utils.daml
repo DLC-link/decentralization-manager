@@ -19,6 +19,19 @@ import Utility.Credential.V0.Credential
 partyList : [Party] -> Text
 partyList = intercalate ", " . map show
 
+-- | True when every requirement the governance party would self-issue
+-- carries at least one required claim. Proposal templates use this in
+-- their `ensure` clause: a claimless self-issued requirement can never be
+-- minted (the assert in `mintCredentialsMeetingRequirements` refuses it),
+-- so a configuration carrying one would pass its own vote and then fail
+-- every later onboard action that mints against it. Requirements from
+-- other issuers are out of scope — those credentials arrive out of band.
+selfIssuedRequirementsHaveClaims : Party -> [PartyCredentialRequirement] -> Bool
+selfIssuedRequirementsHaveClaims governanceParty =
+  all (\requirement ->
+    requirement.issuer /= governanceParty
+      || not (null requirement.requiredClaims))
+
 -- | Render a governance-minted credential id:
 -- {roleTag}/{subject}/{timestamp}-{index}. The timestamp is the minting
 -- transaction's ledger time in seconds since epoch: onboarding actions are

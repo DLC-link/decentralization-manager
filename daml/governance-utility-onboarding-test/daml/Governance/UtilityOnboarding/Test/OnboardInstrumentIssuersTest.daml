@@ -196,3 +196,40 @@ test_when_onboard_then_description_names_issuers = script do
     given = given_provisioned_instrument
     when = when_onboard_two_issuers_capturing_description
     then_ = then_description_names_both_issuers
+
+-- * Stored configuration carrying a claimless self-issued requirement:
+-- the mint assert refuses it at execution. ProvisionInstrument's ensure
+-- clause makes this unreachable for configurations it creates, so this
+-- covers configurations created outside that path — and keeps the assert
+-- in mintCredentialsMeetingRequirements exercised.
+
+when_onboard_against_claimless_requirement : Fixture -> Script ()
+when_onboard_against_claimless_requirement fx = do
+  let parties = fx.f.parties
+  configurationCid <- submit (actAs parties.registrarGov <> actAs parties.providerGov) $
+    createCmd InstrumentConfiguration with
+      operator = parties.registrarGov
+      provider = parties.providerGov
+      registrar = parties.registrarGov
+      defaultIdentifier = InstrumentIdentifier with
+        source = parties.registrarGov
+        id = "CLAIMLESS-TOKEN"
+        scheme = "RegistrarInternalScheme"
+      additionalIdentifiers = []
+      issuerRequirements = [PartyCredentialRequirement with
+        issuer = parties.registrarGov
+        requiredClaims = []]
+      holderRequirements = []
+      providerAppRewardBeneficiaries = None
+  proposalCid <- submit fx.f.registrarStack.member1 $ createCmd OnboardInstrumentIssuers with
+    governanceParty = parties.registrarGov
+    proposer = fx.f.registrarStack.member1
+    instrumentConfigurationCid = configurationCid
+    instrumentIssuers = [parties.issuer1]
+  confirmThenExecuteMustFail fx.f.parties fx.f.registrarStack (toInterfaceContractId proposalCid)
+
+test_when_claimless_requirement_in_configuration_then_execute_fails = script do
+  run Test with
+    given = given_provisioned_instrument
+    when = when_onboard_against_claimless_requirement
+    then_ = then_no_credentials
