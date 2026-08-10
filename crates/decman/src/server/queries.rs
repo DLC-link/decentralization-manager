@@ -5179,7 +5179,10 @@ mod tests {
             fields: vec![
                 field("issuer", party_value(&format!("issuer::{SR_FP}"))),
                 field("holder", party_value(&format!("holder::{SR_FP}"))),
-                field("id", text_value("instrument-issuer-credential/subject/0-0")),
+                field(
+                    "id",
+                    text_value("LAUNCH-TOKEN-instrument-issuer-credential/subject/0-0"),
+                ),
                 field("description", text_value("Governance-minted credential")),
                 field("validFrom", optional_value(None)),
                 field("validUntil", optional_value(None)),
@@ -5220,7 +5223,7 @@ mod tests {
         assert_eq!(info.holder.to_string(), format!("holder::{SR_FP}"));
         assert_eq!(
             info.credential_id,
-            "instrument-issuer-credential/subject/0-0"
+            "LAUNCH-TOKEN-instrument-issuer-credential/subject/0-0"
         );
         assert_eq!(info.description, "Governance-minted credential");
         assert_eq!(info.claims.len(), 2);

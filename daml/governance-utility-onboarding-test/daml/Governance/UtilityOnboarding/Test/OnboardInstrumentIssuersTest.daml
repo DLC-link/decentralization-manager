@@ -3,6 +3,8 @@
 
 module Governance.UtilityOnboarding.Test.OnboardInstrumentIssuersTest where
 
+import DA.List (head, sort)
+import DA.Text qualified as Text
 import Daml.Script
 
 import Utility.Credential.V0.Credential (Credential(..), PartyCredentialRequirement(..))
@@ -10,10 +12,12 @@ import Utility.Registry.Holding.V0.Types (InstrumentIdentifier(..))
 import Utility.Registry.V0.Configuration.Instrument (InstrumentConfiguration(..))
 
 import Governance.Action (GovernableAction)
-import Governance.ExecutionResult
+-- Instances only: record-dot access to the execution result's fields.
+import Governance.ExecutionResult ()
 
 import Governance.UtilityOnboarding.DualDecpartyTestUtils
 import Governance.UtilityOnboarding.OnboardInstrumentIssuers
+import Governance.UtilityOnboarding.ProvisionInstrument
 import Governance.UtilityOnboarding.Utils (mkCredentialId)
 
 import TestHarness
@@ -59,13 +63,13 @@ then_both_issuers_credentialed fx _ = do
   let checks1 = case credentials1 of
         [(_, credential)] ->
           shouldBe "issuer1 credential.id"
-            (mkCredentialId "instrument-issuer-credential" parties.issuer1 now 0)
+            (mkCredentialId "LAUNCH-TOKEN-instrument-issuer-credential" parties.issuer1 now 0)
             credential.id
         _ -> shouldBe "issuer1 credential count" 1 (length credentials1)
       checks2 = case credentials2 of
         [(_, credential)] ->
           shouldBe "issuer2 credential.id"
-            (mkCredentialId "instrument-issuer-credential" parties.issuer2 now 0)
+            (mkCredentialId "LAUNCH-TOKEN-instrument-issuer-credential" parties.issuer2 now 0)
             credential.id
         _ -> shouldBe "issuer2 credential count" 1 (length credentials2)
   pure $ checks1 <> checks2
@@ -251,3 +255,78 @@ test_when_duplicate_issuers_then_create_fails = script do
     given = given_provisioned_instrument
     when = when_onboard_duplicate_issuers
     then_ = then_no_credentials
+
+-- * Credential ids are instrument-scoped for late-onboarded issuers too:
+-- the first "/" segment is "{symbol}-instrument-issuer-credential", read
+-- off the fetched configuration. Asserted on the raw id text, not via
+-- mkCredentialId, so the format itself is pinned.
+
+then_credential_id_is_instrument_scoped : Fixture -> () -> Script Failures
+then_credential_id_is_instrument_scoped fx _ = do
+  credentials <- query @Credential fx.f.parties.issuer1
+  case credentials of
+    [(_, credential)] -> pure $
+      shouldBe "credential id first segment"
+        ["LAUNCH-TOKEN-instrument-issuer-credential"]
+        (take 1 (Text.splitOn "/" credential.id))
+    _ -> pure $ shouldBe "issuer1 credential count" 1 (length credentials)
+
+test_when_onboard_then_credential_id_is_instrument_scoped = script do
+  run Test with
+    given = given_provisioned_instrument
+    when = when_onboard_one_issuer
+    then_ = then_credential_id_is_instrument_scoped
+
+-- * Two instruments on one registrar: the same issuer's credentials carry
+-- different symbols, proving the tag comes from each fetched configuration
+-- rather than a constant.
+
+when_onboard_issuer_to_two_instruments : Fixture -> Script ()
+when_onboard_issuer_to_two_instruments fx = do
+  let parties = fx.f.parties
+  -- Provision a second instrument on the same registrar service.
+  provisionCid <- submit fx.f.registrarStack.member1 $ createCmd ProvisionInstrument with
+    governanceParty = parties.registrarGov
+    proposer = fx.f.registrarStack.member1
+    registrarServiceCid = fx.artifacts.onboarded.registrarServiceCid
+    instrumentIdText = "SECOND-TOKEN"
+    additionalIdentifiers = []
+    issuerRequirements = [defaultIssuerRequirement parties]
+    holderRequirements = []
+    initialInstrumentIssuers = []
+  let provisionInterfaceCid : ContractId GovernableAction = toInterfaceContractId provisionCid
+  _ <- confirmAndExecuteAs fx.f.parties fx.f.registrarStack provisionInterfaceCid
+  configurations <- query @InstrumentConfiguration parties.registrarGov
+  secondConfigurationCid <- case
+    [ cid
+    | (cid, configuration) <- configurations
+    , configuration.defaultIdentifier.id == "SECOND-TOKEN" ] of
+    [cid] -> pure cid
+    other -> abort ("expected one SECOND-TOKEN configuration, got " <> show (length other))
+  -- Onboard the same issuer to both instruments.
+  firstProposalCid <- onboardIssuersProposal fx [parties.issuer1]
+  _ <- confirmAndExecuteAs fx.f.parties fx.f.registrarStack firstProposalCid
+  secondProposalCid <- submit fx.f.registrarStack.member1 $ createCmd OnboardInstrumentIssuers with
+    governanceParty = parties.registrarGov
+    proposer = fx.f.registrarStack.member1
+    instrumentConfigurationCid = secondConfigurationCid
+    instrumentIssuers = [parties.issuer1]
+  _ <- confirmAndExecuteAs fx.f.parties fx.f.registrarStack
+    (toInterfaceContractId secondProposalCid)
+  pure ()
+
+then_credential_ids_differ_by_symbol : Fixture -> () -> Script Failures
+then_credential_ids_differ_by_symbol fx _ = do
+  credentials <- query @Credential fx.f.parties.issuer1
+  let firstSegments = sort
+        [ head (Text.splitOn "/" credential.id) | (_, credential) <- credentials ]
+  pure $ shouldBe "credential id first segments"
+    [ "LAUNCH-TOKEN-instrument-issuer-credential"
+    , "SECOND-TOKEN-instrument-issuer-credential" ]
+    firstSegments
+
+test_when_two_instruments_then_credential_ids_differ_by_symbol = script do
+  run Test with
+    given = given_provisioned_instrument
+    when = when_onboard_issuer_to_two_instruments
+    then_ = then_credential_ids_differ_by_symbol

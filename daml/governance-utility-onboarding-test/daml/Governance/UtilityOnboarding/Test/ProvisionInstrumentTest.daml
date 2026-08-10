@@ -3,6 +3,7 @@
 
 module Governance.UtilityOnboarding.Test.ProvisionInstrumentTest where
 
+import DA.Text qualified as Text
 import Daml.Script
 
 import Utility.Credential.V0.Credential (Claim(..), Credential(..), PartyCredentialRequirement(..))
@@ -10,7 +11,8 @@ import Utility.Registry.App.V0.Service.Registrar (RegistrarService(..))
 import Utility.Registry.V0.Configuration.Instrument (InstrumentConfiguration(..))
 
 import Governance.Action (GovernableAction)
-import Governance.ExecutionResult
+-- Instances only: record-dot access to the execution result's fields.
+import Governance.ExecutionResult ()
 
 import Governance.UtilityOnboarding.DualDecpartyTestUtils
 import Governance.UtilityOnboarding.ProvisionInstrument
@@ -72,7 +74,7 @@ then_configuration_and_credential_created fx _ = do
           shouldBe "credential.issuer" parties.registrarGov credential.issuer <>
           shouldBe "credential.holder" parties.registrarGov credential.holder <>
           shouldBe "credential.id"
-            (mkCredentialId "instrument-issuer-credential" parties.issuer1 now 0)
+            (mkCredentialId "LAUNCH-TOKEN-instrument-issuer-credential" parties.issuer1 now 0)
             credential.id <>
           shouldBe "credential.claims"
             [Claim with
@@ -329,3 +331,23 @@ test_when_duplicate_initial_issuers_then_create_fails = script do
     given = given_onboarded_registrar
     when = when_provision_duplicate_initial_issuers
     then_ = then_nothing_provisioned
+
+-- * Credential ids are instrument-scoped: the first "/" segment is
+-- "{symbol}-instrument-issuer-credential". Asserted on the raw id text,
+-- not via mkCredentialId, so the format itself is pinned.
+
+then_credential_id_is_instrument_scoped : Fixture -> () -> Script Failures
+then_credential_id_is_instrument_scoped fx _ = do
+  credentials <- query @Credential fx.f.parties.issuer1
+  case credentials of
+    [(_, credential)] -> pure $
+      shouldBe "credential id first segment"
+        ["LAUNCH-TOKEN-instrument-issuer-credential"]
+        (take 1 (Text.splitOn "/" credential.id))
+    _ -> pure $ shouldBe "Credential count for issuer1" 1 (length credentials)
+
+test_when_provision_then_credential_id_is_instrument_scoped = script do
+  run Test with
+    given = given_onboarded_registrar
+    when = when_provision_with_initial_issuer
+    then_ = then_credential_id_is_instrument_scoped

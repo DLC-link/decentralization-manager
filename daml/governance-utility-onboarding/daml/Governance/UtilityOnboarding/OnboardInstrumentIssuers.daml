@@ -43,8 +43,13 @@ template OnboardInstrumentIssuers
         instrumentConfiguration <- fetch instrumentConfigurationCid
         assertMsg "OnboardInstrumentIssuers: instrument configuration registrar does not match the governance party"
           (instrumentConfiguration.registrar == governanceParty)
+        -- The role tag carries the instrument symbol so a credential id
+        -- names the instrument it grants issuing rights for, matching what
+        -- ProvisionInstrument mints for initial issuers.
         _ <- forA instrumentIssuers $ \instrumentIssuer ->
           mintCredentialsMeetingRequirements
-            governanceParty instrumentIssuer "instrument-issuer-credential"
+            governanceParty instrumentIssuer
+            (instrumentConfiguration.defaultIdentifier.id
+               <> "-instrument-issuer-credential")
             instrumentConfiguration.issuerRequirements
         pure ()
