@@ -6,10 +6,18 @@ module Governance.UtilityOnboarding.Utils where
 
 import DA.Date (Month(Jan), date)
 import DA.Set qualified as Set
+import DA.Text (intercalate)
 import DA.Time (convertRelTimeToMicroseconds, subTime, time)
 
 import Utility.Credential.V0.Credential
   (Claim(..), Credential(..), PartyCredentialRequirement(..))
+
+-- | Render a party list for a proposal description: full ids via `show`,
+-- joined by ", ". Voters confirm from the description alone, and the
+-- executed description is copied into the on-chain GovernanceExecutionResult,
+-- so every party an action credentials or revokes must appear in it.
+partyList : [Party] -> Text
+partyList = intercalate ", " . map show
 
 -- | Render a governance-minted credential id:
 -- {roleTag}/{subject}/{timestamp}-{index}. The timestamp is the minting

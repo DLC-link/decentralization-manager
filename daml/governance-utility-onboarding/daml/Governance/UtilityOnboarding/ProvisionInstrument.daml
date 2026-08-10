@@ -12,7 +12,7 @@ import Utility.Registry.App.V0.Service.Registrar
 import Utility.Registry.Holding.V0.Types (InstrumentIdentifier)
 
 import Governance.Action
-import Governance.UtilityOnboarding.Utils (mintCredentialsMeetingRequirements)
+import Governance.UtilityOnboarding.Utils (mintCredentialsMeetingRequirements, partyList)
 
 template ProvisionInstrument
   with
@@ -34,8 +34,11 @@ template ProvisionInstrument
         governanceParty
         proposer
         actionLabel = "ProvisionInstrument"
+        -- Voters see only this text; name every party gaining minting rights.
         description = "Provision instrument " <> instrumentIdText
-          <> " (" <> show (length initialInstrumentIssuers) <> " initial issuers)"
+          <> case initialInstrumentIssuers of
+               [] -> ", no initial issuers"
+               issuers -> ", initial issuers " <> partyList issuers
 
       executeImpl = do
         -- Controller authorization alone is not enough: the proposer's
