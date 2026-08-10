@@ -371,6 +371,11 @@ pub(crate) async fn active_delegation(
 /// Only the configured package: a delegation in a superseded package is not
 /// exerciseable by the actions this build proposes, so offering one would waste
 /// a governance round.
+///
+/// Strict on purpose: one undecodable delegation fails the whole read, where
+/// [`active_delegation`] only ever decodes the newest and so would not notice an
+/// older bad one. A delegation nobody can decode is not something to prefill a
+/// vote from, and the caller reports the parse error rather than an empty list.
 pub(crate) async fn active_delegations(
     config: &NodeConfig,
     packages: &PackageConfig,
@@ -406,9 +411,9 @@ pub(crate) async fn active_delegations(
 ///
 /// A wildcard test-mode read returns every template, and a superseded package
 /// version may still be live, so the `decparty` filter is what makes the result
-/// this decparty's own. `max_by_key` keeps the last maximum, so equal offsets —
-/// impossible for two creates on one participant, but cheap to pin — resolve to
-/// the later entry rather than panicking or picking arbitrarily.
+/// this decparty's own. Equal offsets — impossible for two creates on one
+/// participant, but cheap to pin — resolve to whichever the read returned first,
+/// because [`delegations_newest_first`] sorts stably.
 fn newest_delegation_for(
     records: Vec<(String, i64, Record)>,
     decparty: &CantonId,

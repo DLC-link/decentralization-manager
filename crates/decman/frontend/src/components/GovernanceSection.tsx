@@ -1134,6 +1134,8 @@ export const GovernanceSection = ({
     onChange: (v: string) => void;
     help: string;
     emptyText: string;
+    /// What going ahead on a failed read costs, so the warning names the stake.
+    blindRisk: string;
   }) => {
     const many = activeDelegations.length > 1;
     const one = activeDelegations.length === 1 ? activeDelegations[0] : null;
@@ -1158,13 +1160,16 @@ export const GovernanceSection = ({
           fullWidth
           select={many}
           required={activeDelegations.length > 0}
-          disabled={activeDelegations.length === 0}
+          // Disabled only when the ledger genuinely holds none. After a failed
+          // read we do not know, so leave it typeable — telling someone to fill
+          // a field in by hand while disabling it is worse than either alone.
+          disabled={activeDelegations.length === 0 && !activeDelegationError}
           error={!!activeDelegationError}
           helperText={
             activeDelegationLoading
               ? "Reading this party's current delegations…"
               : activeDelegationError
-                ? `${activeDelegationError} Fill this in by hand, or retry.`
+                ? `${activeDelegationError} Fill it in by hand or retry — ${opts.blindRisk}`
                 : many
                   ? "Pick the delegation this vote acts on."
                   : one
@@ -4738,6 +4743,8 @@ export const GovernanceSection = ({
                   help: "Contract id of the active CouponReassignmentDelegation to archive. It is read from the ledger, not typed. Reassignment stops for this party until a new delegation is voted in.",
                   emptyText:
                     "This party has no active delegation, so there is nothing to revoke.",
+                  blindRisk:
+                    "a wrong contract id fails at execute, after the vote.",
                 })}
 
               {proposalType === "setup_coupon_reassignment_delegation" && (
@@ -4785,6 +4792,8 @@ export const GovernanceSection = ({
                     help: "Contract id of the delegation this one replaces — it is archived in the same transaction. It is read from the ledger, not typed: creating a second delegation stops assignment entirely, so leaving it blank while one is live is rejected with 409.",
                     emptyText:
                       "This party has no active delegation, so there is nothing to replace.",
+                    blindRisk:
+                      "leaving it blank while a delegation is live is rejected with 409.",
                   })}
                   <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
                     <TextHelp text="Member parties allowed to run the reassignment. Any ONE of them suffices (1-of-n), so this is liveness, not a threshold. An assigner's participant must also host this governance party, or it cannot read the coupons.">
