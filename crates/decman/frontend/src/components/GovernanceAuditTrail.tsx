@@ -169,7 +169,7 @@ export const GovernanceAuditTrail = ({
   }, [entries, updateScrollShadows]);
 
   const fetchAudit = useCallback(
-    async (refresh: boolean, before?: number) => {
+    async (refresh: boolean, before?: number): Promise<boolean> => {
       setLoading(true);
       setError(null);
       // A refresh pulls in events newer than anything we've paged past, which
@@ -193,14 +193,16 @@ export const GovernanceAuditTrail = ({
           const response: ChainAuditResponse = await res.json();
           setEntries(response.entries);
           setNextCursor(response.next_before_offset ?? null);
-        } else {
-          const errData = await res.json().catch(() => ({}));
-          setError(errData.error || "Failed to fetch audit trail");
+          return true;
         }
+        const errData = await res.json().catch(() => ({}));
+        setError(errData.error || "Failed to fetch audit trail");
+        return false;
       } catch (e) {
         setError(
           e instanceof Error ? e.message : "Failed to fetch audit trail",
         );
+        return false;
       } finally {
         setLoading(false);
       }
@@ -223,17 +225,23 @@ export const GovernanceAuditTrail = ({
     fetchAudit(true);
   }, [refreshNonce, fetchAudit]);
 
-  const goToNextPage = useCallback(() => {
+  // Both advance the page only once the fetch has landed. Moving first would
+  // leave the indicator and the cursor stack describing a page whose rows
+  // never arrived, and the next Prev would then walk from the wrong cursor.
+  const goToNextPage = useCallback(async () => {
     if (nextCursor === null) return;
-    setCursors((prev) => [...prev.slice(0, page + 1), nextCursor]);
-    setPage(page + 1);
-    fetchAudit(false, nextCursor);
+    const cursor = nextCursor;
+    if (await fetchAudit(false, cursor)) {
+      setCursors((prev) => [...prev.slice(0, page + 1), cursor]);
+      setPage(page + 1);
+    }
   }, [nextCursor, page, fetchAudit]);
 
-  const goToPrevPage = useCallback(() => {
+  const goToPrevPage = useCallback(async () => {
     if (page === 0) return;
-    setPage(page - 1);
-    fetchAudit(false, cursors[page - 1]);
+    if (await fetchAudit(false, cursors[page - 1])) {
+      setPage(page - 1);
+    }
   }, [page, cursors, fetchAudit]);
 
   useEffect(() => {
