@@ -1225,19 +1225,27 @@ pub struct CouponReassignmentDelegationSummary {
     pub beneficiary_count: usize,
 }
 
-/// Whether a decparty has an active `CouponReassignmentDelegation`, and which.
+/// A decparty's active `CouponReassignmentDelegation` contracts, newest first.
 ///
-/// A vote that creates a second delegation stops assignment entirely, so the
-/// propose boundary rejects one with 409. The proposal form reads this to
-/// prefill `prior_delegation`, rather than asking a human to paste a contract id
-/// that a typo would invalidate for the delegation's whole life.
+/// The vote forms read this so a human never pastes a contract id that a typo
+/// would invalidate for the delegation's whole life. Setup prefills
+/// `prior_delegation` from it; revoke prefills the contract to archive.
+///
+/// **Normally this holds zero or one entry.** It can hold more: the template is
+/// keyless, so Canton cannot enforce the per-decparty singleton, and the
+/// propose-time guard is best-effort. Two proposals racing, or a direct ledger
+/// submit, can leave several active. The list reports what is really there, and
+/// the **first entry is the one the automation acts on**.
+///
+/// Contains only the configured package's delegations. One in a superseded
+/// package is not exerciseable by the actions this build proposes.
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ActiveCouponReassignmentDelegation {
-    /// Absent when this decparty has none, in which case there is nothing to
-    /// replace and the first delegation is the one being created.
-    pub delegation: Option<CouponReassignmentDelegationSummary>,
+    /// Newest first. Empty when this decparty has none, in which case there is
+    /// nothing to replace and nothing to revoke.
+    pub delegations: Vec<CouponReassignmentDelegationSummary>,
 }
 
 /// Generic error response

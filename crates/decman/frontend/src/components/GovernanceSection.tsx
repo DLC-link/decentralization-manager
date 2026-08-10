@@ -229,11 +229,13 @@ export const GovernanceSection = ({
     { beneficiary: string; weight: string }[]
   >([]);
   const [proposalPriorDelegation, setProposalPriorDelegation] = useState("");
-  // The delegation this party already has, read from the ledger. It decides
-  // whether "Replaces Delegation" is answerable at all: with one active the
-  // field is mandatory, and with none there is nothing to replace.
-  const [activeDelegation, setActiveDelegation] =
-    useState<CouponReassignmentDelegationSummary | null>(null);
+  // The delegations this party already has, newest first, read from the ledger.
+  // Normally zero or one — the singleton is not ledger-enforced, so several can
+  // appear and both vote forms then offer a choice. Index 0 is the one the
+  // automation acts on.
+  const [activeDelegations, setActiveDelegations] = useState<
+    CouponReassignmentDelegationSummary[]
+  >([]);
   const [activeDelegationLoading, setActiveDelegationLoading] = useState(false);
   const [activeDelegationError, setActiveDelegationError] = useState<string | null>(null);
   const [proposalRevokeDelegationCid, setProposalRevokeDelegationCid] = useState("");
@@ -1082,10 +1084,10 @@ export const GovernanceSection = ({
     }
   }, [proposalType, dsoPartyId, fetchNetworkInfo]);
 
-  // Read the delegation this party already has, so "Replaces Delegation" can be
-  // prefilled instead of pasted. A wrong contract id there is rejected, and a
-  // blank one while a delegation is live is rejected with 409.
-  const fetchActiveDelegation = useCallback(async () => {
+  // Read the delegations this party already has, so neither vote form asks for a
+  // pasted contract id. Setup needs it for "Replaces Delegation" — blank while
+  // one is live is rejected with 409. Revoke needs it to name what to archive.
+  const fetchActiveDelegations = useCallback(async () => {
     setActiveDelegationLoading(true);
     setActiveDelegationError(null);
     try {
@@ -1093,26 +1095,106 @@ export const GovernanceSection = ({
         `${API_BASE}/coupon-reassignment-delegation?party_id=${encodeURIComponent(partyId)}`,
       );
       if (!res.ok) {
-        setActiveDelegationError("Could not read this party's current delegation.");
+        setActiveDelegationError("Could not read this party's current delegations.");
         return;
       }
       const data: ActiveCouponReassignmentDelegation = await res.json();
-      const active = data.delegation ?? null;
-      setActiveDelegation(active);
-      if (active) setProposalPriorDelegation((cur) => cur || active.cid);
+      const active = data.delegations ?? [];
+      setActiveDelegations(active);
+      // Preselect the one the automation acts on. With several active a human
+      // still has to choose, but the automation's pick is the sane default.
+      if (active.length > 0) {
+        setProposalPriorDelegation((cur) => cur || active[0].cid);
+        setProposalRevokeDelegationCid((cur) => cur || active[0].cid);
+      }
     } catch (e) {
-      console.error("Failed to fetch active coupon reassignment delegation:", e);
-      setActiveDelegationError("Could not read this party's current delegation.");
+      console.error("Failed to fetch active coupon reassignment delegations:", e);
+      setActiveDelegationError("Could not read this party's current delegations.");
     } finally {
       setActiveDelegationLoading(false);
     }
   }, [partyId]);
 
   useEffect(() => {
-    if (proposalType === "setup_coupon_reassignment_delegation") {
-      fetchActiveDelegation();
+    if (
+      proposalType === "setup_coupon_reassignment_delegation" ||
+      proposalType === "revoke_coupon_reassignment_delegation"
+    ) {
+      fetchActiveDelegations();
     }
-  }, [proposalType, fetchActiveDelegation]);
+  }, [proposalType, fetchActiveDelegations]);
+
+  // One delegation field, three states: nothing to pick, one prefilled, or a
+  // dropdown when the ledger holds several. Shared by the setup and revoke
+  // forms, which differ only in wording. Several active is an anomaly the
+  // singleton guard cannot prevent, so it is called out rather than hidden.
+  const delegationPicker = (opts: {
+    label: string;
+    value: string;
+    onChange: (v: string) => void;
+    help: string;
+    emptyText: string;
+  }) => {
+    const many = activeDelegations.length > 1;
+    const one = activeDelegations.length === 1 ? activeDelegations[0] : null;
+    const describe = (d: CouponReassignmentDelegationSummary) =>
+      `${d.assigners.length} assigner${d.assigners.length === 1 ? "" : "s"}, ` +
+      `${d.beneficiary_count} beneficiar${d.beneficiary_count === 1 ? "y" : "ies"}`;
+    return (
+      <>
+        {many && (
+          <Alert severity="warning" sx={{ mb: 1 }}>
+            <Typography variant="caption" component="div">
+              This party has <strong>{activeDelegations.length} active delegations</strong>.
+              Only one should exist. The automation uses the newest, marked{" "}
+              <em>in use</em> below; the others are inert but still exerciseable.
+            </Typography>
+          </Alert>
+        )}
+        <TextField
+          label={opts.label}
+          value={opts.value}
+          onChange={(e) => opts.onChange(e.target.value)}
+          fullWidth
+          select={many}
+          required={activeDelegations.length > 0}
+          disabled={activeDelegations.length === 0}
+          error={!!activeDelegationError}
+          helperText={
+            activeDelegationLoading
+              ? "Reading this party's current delegations…"
+              : activeDelegationError
+                ? `${activeDelegationError} Fill this in by hand, or retry.`
+                : many
+                  ? "Pick the delegation this vote acts on."
+                  : one
+                    ? `Prefilled with this party's active delegation (${describe(one)}).`
+                    : opts.emptyText
+          }
+          slotProps={
+            many
+              ? undefined
+              : {
+                  input: {
+                    sx: { fontFamily: "monospace", fontSize: "0.8rem" },
+                    endAdornment: fieldHelpAdornment(opts.help, `Help for ${opts.label}`),
+                  },
+                }
+          }
+        >
+          {many &&
+            activeDelegations.map((d, idx) => (
+              <MenuItem key={d.cid} value={d.cid}>
+                <Typography variant="caption" sx={{ fontFamily: "monospace" }}>
+                  {d.cid.slice(0, 24)}… — {describe(d)}
+                  {idx === 0 ? " — in use" : ""}
+                </Typography>
+              </MenuItem>
+            ))}
+        </TextField>
+      </>
+    );
+  };
 
   // Setup*Preapproval forms warn when one already exists — fetch the counts
   // (cheap, two ACS template-filter queries).
@@ -4648,23 +4730,15 @@ export const GovernanceSection = ({
                 </>
               )}
 
-              {proposalType === "revoke_coupon_reassignment_delegation" && (
-                <TextField
-                  label="Delegation Contract ID"
-                  value={proposalRevokeDelegationCid}
-                  onChange={(e) => setProposalRevokeDelegationCid(e.target.value)}
-                  fullWidth
-                  required
-                  slotProps={{
-                    input: {
-                      endAdornment: fieldHelpAdornment(
-                        "Contract id of the active CouponReassignmentDelegation to archive. Reassignment stops for this party until a new delegation is voted in.",
-                        "Help for Delegation Contract ID",
-                      ),
-                    },
-                  }}
-                />
-              )}
+              {proposalType === "revoke_coupon_reassignment_delegation" &&
+                delegationPicker({
+                  label: "Delegation Contract ID",
+                  value: proposalRevokeDelegationCid,
+                  onChange: setProposalRevokeDelegationCid,
+                  help: "Contract id of the active CouponReassignmentDelegation to archive. It is read from the ledger, not typed. Reassignment stops for this party until a new delegation is voted in.",
+                  emptyText:
+                    "This party has no active delegation, so there is nothing to revoke.",
+                })}
 
               {proposalType === "setup_coupon_reassignment_delegation" && (
                 <>
@@ -4704,39 +4778,24 @@ export const GovernanceSection = ({
                       },
                     }}
                   />
-                  <TextField
-                    label="Replaces Delegation"
-                    value={proposalPriorDelegation}
-                    onChange={(e) => setProposalPriorDelegation(e.target.value)}
-                    fullWidth
-                    required={!!activeDelegation}
-                    disabled={!activeDelegation}
-                    error={!!activeDelegationError}
-                    helperText={
-                      activeDelegationLoading
-                        ? "Reading this party's current delegation…"
-                        : activeDelegationError
-                          ? `${activeDelegationError} Fill this in by hand, or retry — a blank one is rejected if a delegation is live.`
-                          : activeDelegation
-                            ? `Prefilled with this party's active delegation (${activeDelegation.assigners.length} assigner${activeDelegation.assigners.length === 1 ? "" : "s"}, ${activeDelegation.beneficiary_count} beneficiar${activeDelegation.beneficiary_count === 1 ? "y" : "ies"}). It is archived in the same transaction.`
-                            : "This party has no active delegation, so there is nothing to replace."
-                    }
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "Contract id of the delegation this one replaces — it is archived in the same transaction. It is read from the ledger, not typed: creating a second delegation stops assignment entirely, so leaving it blank while one is live is rejected with 409.",
-                          "Help for Replaces Delegation",
-                        ),
-                      },
-                    }}
-                  />
+                  {delegationPicker({
+                    label: "Replaces Delegation",
+                    value: proposalPriorDelegation,
+                    onChange: setProposalPriorDelegation,
+                    help: "Contract id of the delegation this one replaces — it is archived in the same transaction. It is read from the ledger, not typed: creating a second delegation stops assignment entirely, so leaving it blank while one is live is rejected with 409.",
+                    emptyText:
+                      "This party has no active delegation, so there is nothing to replace.",
+                  })}
                   <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
                     <TextHelp text="Member parties allowed to run the reassignment. Any ONE of them suffices (1-of-n), so this is liveness, not a threshold. An assigner's participant must also host this governance party, or it cannot read the coupons.">
                       Assigners (any one may reassign)
                     </TextHelp>
                   </Typography>
+                  {/* Same shape as a beneficiary row, without the weight: the
+                      party id gets the full width, Remove sits beneath it.
+                      Sharing the row truncated the id past its namespace. */}
                   {proposalDelegationAssigners.map((a, idx) => (
-                    <Box key={idx} sx={{ display: "flex", gap: 1, mb: 1 }}>
+                    <Box key={idx} sx={{ mb: 2 }}>
                       <TextField
                         label={`Assigner ${idx + 1}`}
                         value={a}
@@ -4746,19 +4805,24 @@ export const GovernanceSection = ({
                           setProposalDelegationAssigners(updated);
                         }}
                         size="small"
-                        sx={{ flex: 1 }}
+                        fullWidth
+                        slotProps={{
+                          input: { sx: { fontFamily: "monospace", fontSize: "0.8rem" } },
+                        }}
                       />
-                      <Button
-                        size="small"
-                        color="error"
-                        onClick={() =>
-                          setProposalDelegationAssigners(
-                            proposalDelegationAssigners.filter((_, i) => i !== idx),
-                          )
-                        }
-                      >
-                        Remove
-                      </Button>
+                      <Box sx={{ display: "flex", mt: 1 }}>
+                        <Button
+                          size="small"
+                          color="error"
+                          onClick={() =>
+                            setProposalDelegationAssigners(
+                              proposalDelegationAssigners.filter((_, i) => i !== idx),
+                            )
+                          }
+                        >
+                          Remove
+                        </Button>
+                      </Box>
                     </Box>
                   ))}
                   <Box>

@@ -1919,21 +1919,22 @@ pub async fn get_packages() -> impl Responder {
     HttpResponse::Ok().json(packages())
 }
 
-/// Get the decparty's active CouponReassignmentDelegation, if it has one
+/// Get the decparty's active CouponReassignmentDelegation contracts, newest first
 ///
-/// The proposal form prefills `prior_delegation` from this, so a replacement
-/// vote carries the right contract id without a human pasting one.
+/// The vote forms read this so nobody pastes a contract id: setup prefills
+/// `prior_delegation`, revoke prefills the contract to archive. Normally zero or
+/// one, but the singleton is not ledger-enforced, so several can appear.
 #[utoipa::path(
     tag = "Governance",
     params(GovernanceQuery),
     responses(
         (
             status = 200,
-            description = "The active delegation, or absent when there is none",
+            description = "Active delegations, newest first; empty when there are none",
             body = ActiveCouponReassignmentDelegation
         ),
         (status = 401, description = "No credentials for party", body = ErrorResponse),
-        (status = 503, description = "The delegation could not be read", body = ErrorResponse)
+        (status = 503, description = "The delegations could not be read", body = ErrorResponse)
     )
 )]
 #[get("/coupon-reassignment-delegation")]
@@ -1948,7 +1949,7 @@ pub async fn get_coupon_reassignment_delegation(
         });
     };
 
-    match crate::server::reward_automation::active_delegation(
+    match crate::server::reward_automation::active_delegations(
         &data.config,
         &packages(),
         data.test_mode,
@@ -1958,20 +1959,23 @@ pub async fn get_coupon_reassignment_delegation(
     .await
     {
         Ok(active) => HttpResponse::Ok().json(ActiveCouponReassignmentDelegation {
-            delegation: active.map(|d| CouponReassignmentDelegationSummary {
-                cid: d.cid,
-                dso: d.dso,
-                assigners: d.assigners,
-                beneficiary_count: d.beneficiary_count,
-            }),
+            delegations: active
+                .into_iter()
+                .map(|d| CouponReassignmentDelegationSummary {
+                    cid: d.cid,
+                    dso: d.dso,
+                    assigners: d.assigners,
+                    beneficiary_count: d.beneficiary_count,
+                })
+                .collect(),
         }),
-        // Never report a failed read as "there is none". The form would prefill
-        // a blank `prior_delegation`, and the propose boundary then rejects the
-        // vote with 409 after the proposer has filled in the whole split.
+        // Never report a failed read as an empty list. The setup form would
+        // prefill a blank `prior_delegation` and hit the propose-time 409 after
+        // the whole split is filled in, and revoke would look unavailable.
         Err(e) => {
             tracing::warn!(%party_id, error = %e, "active delegation read failed");
             HttpResponse::ServiceUnavailable().json(ErrorResponse {
-                error: format!("cannot read this party's current delegation: {e}"),
+                error: format!("cannot read this party's current delegations: {e}"),
             })
         }
     }

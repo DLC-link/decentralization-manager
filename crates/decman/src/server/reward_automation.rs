@@ -364,6 +364,43 @@ pub(crate) async fn active_delegation(
     Ok(Some(parse_delegation_record(&cid, &rec)?))
 }
 
+/// Every active `CouponReassignmentDelegation` for `decparty` in the configured
+/// package, newest first. The first entry is what [`active_delegation`] returns,
+/// so a caller can name the one the automation acts on.
+///
+/// Only the configured package: a delegation in a superseded package is not
+/// exerciseable by the actions this build proposes, so offering one would waste
+/// a governance round.
+pub(crate) async fn active_delegations(
+    config: &NodeConfig,
+    packages: &PackageConfig,
+    test_mode: bool,
+    decparty: &CantonId,
+    token: &str,
+) -> anyhow::Result<Vec<ActiveDelegation>> {
+    let Some(package_id) = packages.governance_rewards.as_deref() else {
+        return Ok(Vec::new());
+    };
+
+    let records = active_created_records(
+        config,
+        decparty,
+        Some(token.to_string()),
+        test_mode,
+        package_id,
+        "Governance.Rewards.CouponReassignmentDelegation",
+        "CouponReassignmentDelegation",
+        false,
+        None,
+    )
+    .await?;
+
+    delegations_newest_first(records, decparty)
+        .iter()
+        .map(|(cid, rec)| parse_delegation_record(cid, rec))
+        .collect()
+}
+
 /// Pick the delegation a decparty should act on (pure): of those naming
 /// `decparty`, the one created last.
 ///
@@ -376,7 +413,23 @@ fn newest_delegation_for(
     records: Vec<(String, i64, Record)>,
     decparty: &CantonId,
 ) -> Option<(String, Record)> {
-    let mine: Vec<(String, i64, Record)> = records
+    delegations_newest_first(records, decparty)
+        .into_iter()
+        .next()
+}
+
+/// Every active delegation naming `decparty` (pure), newest first.
+///
+/// **The order is a contract**: the first entry is the one the automation acts
+/// on, so the vote forms can name it. Canton cannot enforce the per-decparty
+/// singleton on a keyless template — the propose-time guard is best-effort, and
+/// a racing proposal or a direct ledger submit can leave two active — so the
+/// forms list what is really there rather than assuming one.
+fn delegations_newest_first(
+    records: Vec<(String, i64, Record)>,
+    decparty: &CantonId,
+) -> Vec<(String, Record)> {
+    let mut mine: Vec<(String, i64, Record)> = records
         .into_iter()
         .filter(|(_, _, rec)| field_party_id(rec, "decparty").ok().as_ref() == Some(decparty))
         .collect();
@@ -388,9 +441,10 @@ fn newest_delegation_for(
             "several active CouponReassignmentDelegations; using the newest"
         );
     }
-    mine.into_iter()
-        .max_by_key(|(_, offset, _)| *offset)
-        .map(|(cid, _, rec)| (cid, rec))
+    // Descending offset. `sort_by_key` is stable, so equal offsets — impossible
+    // for two creates on one participant, but cheap to pin — keep read order.
+    mine.sort_by_key(|(_, offset, _)| std::cmp::Reverse(*offset));
+    mine.into_iter().map(|(cid, _, rec)| (cid, rec)).collect()
 }
 
 // ============================================================================
@@ -1109,6 +1163,33 @@ mod tests {
                 }),
             ),
         ])
+    }
+
+    #[test]
+    fn delegations_are_listed_newest_first() {
+        // The revoke form lists every active delegation and must name the one the
+        // automation acts on, so the order is part of the contract: index 0 is
+        // whatever `newest_delegation_for` would pick.
+        let gov = CantonId::parse(GOV).unwrap();
+        let records = vec![
+            ("00old".to_string(), 100, delegation_of(GOV)),
+            ("00new".to_string(), 900, delegation_of(GOV)),
+            ("00theirs".to_string(), 999, delegation_of(BOB)),
+            ("00mid".to_string(), 500, delegation_of(GOV)),
+        ];
+        let cids: Vec<String> = delegations_newest_first(records, &gov)
+            .into_iter()
+            .map(|(cid, _)| cid)
+            .collect();
+        assert_eq!(cids, vec!["00new", "00mid", "00old"]);
+    }
+
+    #[test]
+    fn delegations_newest_first_skips_other_decparties() {
+        let gov = CantonId::parse(GOV).unwrap();
+        let theirs = vec![("00theirs".to_string(), 999, delegation_of(BOB))];
+        assert!(delegations_newest_first(theirs, &gov).is_empty());
+        assert!(delegations_newest_first(vec![], &gov).is_empty());
     }
 
     #[test]

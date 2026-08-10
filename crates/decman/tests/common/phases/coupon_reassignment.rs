@@ -304,9 +304,10 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         )
                         .await
                         .ok()?;
-                    let Some(active) = r.delegation else {
+                    let [active] = r.delegations.as_slice() else {
                         return Some(Err(anyhow::anyhow!(
-                            "endpoint reports no active delegation while the ACS holds {}",
+                            "endpoint reported {} delegations while the ACS holds exactly one ({})",
+                            r.delegations.len(),
                             only.contract_id
                         )));
                     };

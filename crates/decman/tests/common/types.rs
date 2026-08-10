@@ -78,10 +78,10 @@ pub struct ContractsQueryResponse {
 }
 
 /// `GET /coupon-reassignment-delegation` — the decparty's active
-/// `CouponReassignmentDelegation`, absent when it has none.
+/// `CouponReassignmentDelegation` contracts, newest first, empty when it has none.
 #[derive(Debug, Deserialize)]
 pub struct ActiveDelegationResponse {
-    pub delegation: Option<ActiveDelegationSummary>,
+    pub delegations: Vec<ActiveDelegationSummary>,
 }
 
 #[derive(Debug, Deserialize)]
