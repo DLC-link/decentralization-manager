@@ -730,7 +730,7 @@ pub(crate) async fn run_reassign_once(
 /// contention arriving as three different codes: `LOCAL_VERDICT_LOCKED_CONTRACTS`
 /// is `ABORTED`, `LOCAL_VERDICT_INACTIVE_CONTRACTS` is `NOT_FOUND`, and
 /// `UNKNOWN_CONTRACT_SYNCHRONIZERS` is `FAILED_PRECONDITION`. A code-based rule
-/// would read that last one as a bad command and bisect a chunk another node
+/// would read that last one as a bad command and fan out a chunk another node
 /// had just assigned correctly. Canton's own retryability flag is no better: it
 /// marks those categories non-retryable because *resubmitting* cannot work,
 /// while this automation re-reads, which does fix them.
@@ -770,7 +770,7 @@ fn assign_failure_is_transient(e: &anyhow::Error) -> bool {
 
 /// Assign `assignable` in `chunk`-sized batches via `submit`, returning how many
 /// coupons were assigned. The submit step is injected so the chunking, the
-/// failure rule and the bisect are unit-testable without a ledger.
+/// failure rule and the fan-out are unit-testable without a ledger.
 ///
 /// **A transient failure ends the drain; a rejected command does not.**
 ///
@@ -779,11 +779,18 @@ fn assign_failure_is_transient(e: &anyhow::Error) -> bool {
 /// ends and the coupons keep their full TTL. That is [`TRANSIENT_ASSIGN_ERROR_IDS`].
 ///
 /// Any other rejection is attributable to the batch's contents, so the drain
-/// **bisects** to find the one coupon at fault, logs it at ERROR, and carries on
-/// with the rest. Halving is what makes this work where dropping the primary
-/// would not: splice fetches and validates every `additionalCoupon`, so the
-/// culprit can sit anywhere in the chunk. Each half that commits is real
-/// progress, so the bisect assigns as it narrows.
+/// re-submits that chunk's coupons **one at a time**, logs each one the ledger
+/// still refuses at ERROR, and carries on with the next chunk. splice fetches
+/// and validates every `additionalCoupon`, so the culprit can sit anywhere in
+/// the chunk; submitting each coupon alone pays every healthy one without
+/// having to locate it first.
+///
+/// One rejected chunk of `n` costs `1 + n` submissions, and that ceiling holds
+/// however many of its coupons the ledger refuses. It suits the causes a
+/// rejection actually has, because each one is correlated across coupons rather
+/// than isolated to a single coupon: a package skew on `RewardCouponV2`, a split
+/// splice refuses, a choice context a later coupon version requires. Most or all
+/// of a chunk then fails together, so the ERROR lines name every coupon at fault.
 ///
 /// The skip lasts **one tick only** — there is no cross-tick quarantine, so the
 /// drain stays stateless and a misclassified failure costs one tick rather than
@@ -804,51 +811,79 @@ where
     let mut assigned = 0;
     let mut skipped = 0;
 
-    // Half-open ranges still to attempt, most-urgent-first. A rejected range is
-    // replaced by its two halves, so the stack is the bisect.
-    let mut pending: Vec<(usize, usize)> = (0..assignable.len())
-        .step_by(size)
-        .map(|lo| (lo, (lo + size).min(assignable.len())))
-        .rev()
-        .collect();
-
-    while let Some((lo, hi)) = pending.pop() {
+    // Chunks in most-urgent-first order. A rejected chunk is re-submitted one
+    // coupon at a time, so a batch the ledger refuses costs 1+n, not a stall.
+    'chunks: for lo in (0..assignable.len()).step_by(size) {
+        let hi = (lo + size).min(assignable.len());
         let (primary, additional) = assignable[lo..hi]
             .split_first()
             .expect("ranges are built non-empty");
-        let Err(e) = submit(primary, additional).await else {
-            assigned += hi - lo;
-            continue;
-        };
 
-        if assign_failure_is_transient(&e) {
-            let remaining: usize = pending.iter().map(|(l, h)| h - l).sum::<usize>() + (hi - lo);
-            tracing::warn!(
+        match submit(primary, additional).await {
+            Ok(()) => {
+                assigned += hi - lo;
+                continue;
+            }
+            Err(e) if assign_failure_is_transient(&e) => {
+                tracing::warn!(
+                    %decparty,
+                    error = %e,
+                    coupon = %primary,
+                    assigned,
+                    remaining = assignable.len() - lo,
+                    "assign chunk failed; ending tick to re-read the ledger"
+                );
+                break;
+            }
+            // Already a single coupon: there is nothing to fan out to.
+            Err(e) if hi - lo == 1 => {
+                skipped += 1;
+                tracing::error!(
+                    %decparty,
+                    error = %e,
+                    coupon = %primary,
+                    error_id = canton_error_id(&e).unwrap_or_default(),
+                    "coupon rejected on its own; skipping it for this tick"
+                );
+                continue;
+            }
+            Err(e) => tracing::warn!(
                 %decparty,
                 error = %e,
-                coupon = %primary,
-                assigned,
-                remaining,
-                "assign chunk failed; ending tick to re-read the ledger"
-            );
-            break;
-        }
-
-        if hi - lo == 1 {
-            skipped += 1;
-            tracing::error!(
-                %decparty,
-                error = %e,
-                coupon = %primary,
                 error_id = canton_error_id(&e).unwrap_or_default(),
-                "coupon rejected on its own; skipping it for this tick"
-            );
-            continue;
+                coupons = hi - lo,
+                "assign chunk rejected; re-submitting its coupons one at a time"
+            ),
         }
 
-        let mid = lo + (hi - lo) / 2;
-        pending.push((mid, hi));
-        pending.push((lo, mid));
+        for (i, coupon) in assignable[lo..hi].iter().enumerate() {
+            // An empty slice borrowed from `assignable` keeps `submit`'s lifetime.
+            let alone = &assignable[lo + i..lo + i];
+            match submit(coupon, alone).await {
+                Ok(()) => assigned += 1,
+                Err(e) if assign_failure_is_transient(&e) => {
+                    tracing::warn!(
+                        %decparty,
+                        error = %e,
+                        coupon = %coupon,
+                        assigned,
+                        remaining = assignable.len() - (lo + i),
+                        "assign failed mid fan-out; ending tick to re-read the ledger"
+                    );
+                    break 'chunks;
+                }
+                Err(e) => {
+                    skipped += 1;
+                    tracing::error!(
+                        %decparty,
+                        error = %e,
+                        coupon = %coupon,
+                        error_id = canton_error_id(&e).unwrap_or_default(),
+                        "coupon rejected on its own; skipping it for this tick"
+                    );
+                }
+            }
+        }
     }
 
     if skipped > 0 {
@@ -1332,7 +1367,7 @@ mod tests {
         assert_eq!(*seen.borrow(), vec![1]);
     }
 
-    // ---- failure classification + bisect ------------------------------------
+    // ---- failure classification + fan-out -----------------------------------
 
     /// A ledger rejection carrying a real Canton error id, shaped exactly as
     /// the devnet logs show it: `ID(category,hash): message`.
@@ -1361,11 +1396,34 @@ mod tests {
         (seen, f)
     }
 
+    /// Reject every submission with `err_id`, recording each attempted size.
+    fn all_rejected(
+        err_id: &'static str,
+    ) -> (
+        ChunkSizes,
+        impl FnMut(&str, &[String]) -> std::future::Ready<anyhow::Result<()>>,
+    ) {
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let log = seen.clone();
+        let f = move |_p: &str, additional: &[String]| {
+            log.borrow_mut().push(additional.len() + 1);
+            std::future::ready(Err(canton_err(err_id)))
+        };
+        (seen, f)
+    }
+
+    /// Expected attempt sizes for one chunk of `n` that fails and fans out.
+    fn fanned(n: usize) -> Vec<usize> {
+        std::iter::once(n)
+            .chain(std::iter::repeat_n(1, n))
+            .collect()
+    }
+
     #[tokio::test]
-    async fn contention_ends_the_tick_without_bisecting() {
-        // The common case: two of three assigners lose every devnet round.
-        // Halving cannot help a stale view, so this must cost ONE submission —
-        // bisecting here would burn ~log2(n) failing transactions per tick.
+    async fn contention_ends_the_tick_without_fanning_out() {
+        // The common case: two of three assigners lose every devnet round. A
+        // fresh read is the only cure, so this must cost ONE submission —
+        // fanning out here would burn n failing transactions per tick.
         for id in [
             "LOCAL_VERDICT_LOCKED_CONTRACTS",
             "LOCAL_VERDICT_INACTIVE_CONTRACTS",
@@ -1375,7 +1433,7 @@ mod tests {
             let (seen, submit) = poisoned("c0", id);
             let assigned = drain_assignable(&all, 64, &alice(), submit).await;
             assert_eq!(assigned, 0, "{id} must not assign");
-            assert_eq!(*seen.borrow(), vec![64], "{id} must not bisect");
+            assert_eq!(*seen.borrow(), vec![64], "{id} must not fan out");
         }
     }
 
@@ -1387,20 +1445,16 @@ mod tests {
         let (seen, submit) = poisoned("c0", "DAML_INTERPRETATION_ERROR");
         let assigned = drain_assignable(&all, 64, &alice(), submit).await;
         assert_eq!(assigned, 63, "every healthy coupon is assigned");
-        // Halves down to the culprit (the failing left edge), then commits each
-        // sibling on the way back up: 1+2+4+8+16+32 = 63. Two submissions per
-        // level, so 2*log2(n)+1 for a chunk of n.
-        assert_eq!(
-            *seen.borrow(),
-            vec![64, 32, 16, 8, 4, 2, 1, 1, 2, 4, 8, 16, 32]
-        );
+        // One batched attempt, then every coupon in that chunk on its own:
+        // 1+n submissions, of which n-1 commit.
+        assert_eq!(*seen.borrow(), fanned(64));
     }
 
     #[tokio::test]
-    async fn a_rejected_coupon_is_found_mid_chunk() {
+    async fn a_rejected_coupon_is_found_wherever_it_sits() {
         // splice fetches and validates every additionalCoupon, so the culprit
-        // need not be the primary. Dropping the primary and retrying would
-        // advance one coupon per tick; the bisect finds it wherever it sits.
+        // need not be the primary. Dropping only the primary would advance one
+        // coupon per tick; submitting each on its own does not care where it sat.
         let all = cids(16);
         let (_, submit) = poisoned("c11", "DAML_INTERPRETATION_ERROR");
         let assigned = drain_assignable(&all, 16, &alice(), submit).await;
@@ -1409,11 +1463,63 @@ mod tests {
 
     #[tokio::test]
     async fn a_rejected_coupon_does_not_stop_later_chunks() {
-        // The poison sits in chunk 1 of 3. Chunks 2 and 3 must still go.
+        // The poison sits in chunk 1 of 3. Chunks 2 and 3 must still go, and
+        // they must stay batched — only the rejected chunk fans out.
         let all = cids(30);
-        let (_, submit) = poisoned("c3", "DAML_INTERPRETATION_ERROR");
+        let (seen, submit) = poisoned("c3", "DAML_INTERPRETATION_ERROR");
         let assigned = drain_assignable(&all, 10, &alice(), submit).await;
         assert_eq!(assigned, 29);
+        let mut expected = fanned(10);
+        expected.extend([10, 10]);
+        assert_eq!(*seen.borrow(), expected);
+    }
+
+    #[tokio::test]
+    async fn a_rejected_singleton_chunk_is_not_resubmitted() {
+        // A chunk of one has nothing to fan out to. Re-submitting it would
+        // double the cost of the commonest rejection and change nothing.
+        let all = cids(1);
+        let (seen, submit) = poisoned("c0", "DAML_INTERPRETATION_ERROR");
+        let assigned = drain_assignable(&all, 50, &alice(), submit).await;
+        assert_eq!(assigned, 0);
+        assert_eq!(*seen.borrow(), vec![1]);
+    }
+
+    #[tokio::test]
+    async fn a_wholly_bad_batch_costs_one_pass_not_two() {
+        // The realistic shape: the cause is correlated (a package skew, a split
+        // splice refuses), so every coupon fails. The cost stays 1+n, and every
+        // coupon at fault is named.
+        let all = cids(8);
+        let (seen, submit) = all_rejected("DAML_INTERPRETATION_ERROR");
+        let assigned = drain_assignable(&all, 8, &alice(), submit).await;
+        assert_eq!(assigned, 0);
+        assert_eq!(*seen.borrow(), fanned(8));
+    }
+
+    #[tokio::test]
+    async fn contention_during_the_fan_out_ends_the_tick() {
+        // Another assigner took the rest of the chunk while we were fanning out.
+        // A fresh read is the cure, so stop — and keep what already committed.
+        let all = cids(4);
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let log = seen.clone();
+        let submit = move |_p: &str, additional: &[String]| {
+            log.borrow_mut().push(additional.len() + 1);
+            let calls = log.borrow().len();
+            std::future::ready(match calls {
+                1 => Err(canton_err("DAML_INTERPRETATION_ERROR")), // the batch
+                3 => Err(canton_err("LOCAL_VERDICT_LOCKED_CONTRACTS")),
+                _ => Ok(()),
+            })
+        };
+        let assigned = drain_assignable(&all, 4, &alice(), submit).await;
+        assert_eq!(assigned, 1, "the singleton that committed is kept");
+        assert_eq!(
+            *seen.borrow(),
+            vec![4, 1, 1],
+            "stops at the transient error"
+        );
     }
 
     #[tokio::test]
@@ -1435,7 +1541,7 @@ mod tests {
         let (seen, submit) = recorder(vec![false]);
         let assigned = drain_assignable(&all, 8, &alice(), submit).await;
         assert_eq!(assigned, 0);
-        assert_eq!(*seen.borrow(), vec![8], "no bisect on a non-ledger error");
+        assert_eq!(*seen.borrow(), vec![8], "no fan-out on a non-ledger error");
     }
 
     #[test]
