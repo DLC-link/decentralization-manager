@@ -307,3 +307,25 @@ test_when_provision_then_description_names_issuers = script do
     given = given_onboarded_registrar
     when = when_provision_capturing_description
     then_ = then_description_names_instrument_and_issuer
+
+-- * A duplicated initial issuer is refused at creation: two mints for the
+-- same subject in one transaction would share a credential id, leaving
+-- rows the offboard picker cannot tell apart.
+
+when_provision_duplicate_initial_issuers : Fixture -> Script ()
+when_provision_duplicate_initial_issuers fx =
+  submitMustFail fx.f.registrarStack.member1 $ createCmd ProvisionInstrument with
+    governanceParty = fx.f.parties.registrarGov
+    proposer = fx.f.registrarStack.member1
+    registrarServiceCid = fx.onboarded.registrarServiceCid
+    instrumentIdText = "LAUNCH-TOKEN"
+    additionalIdentifiers = []
+    issuerRequirements = [defaultIssuerRequirement fx.f.parties]
+    holderRequirements = []
+    initialInstrumentIssuers = [fx.f.parties.issuer1, fx.f.parties.issuer1]
+
+test_when_duplicate_initial_issuers_then_create_fails = script do
+  run Test with
+    given = given_onboarded_registrar
+    when = when_provision_duplicate_initial_issuers
+    then_ = then_nothing_provisioned

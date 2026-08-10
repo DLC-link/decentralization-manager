@@ -233,3 +233,21 @@ test_when_claimless_requirement_in_configuration_then_execute_fails = script do
     given = given_provisioned_instrument
     when = when_onboard_against_claimless_requirement
     then_ = then_no_credentials
+
+-- * A duplicated issuer is refused at creation: two mints for the same
+-- subject in one transaction would share a credential id, leaving rows
+-- the offboard picker cannot tell apart.
+
+when_onboard_duplicate_issuers : Fixture -> Script ()
+when_onboard_duplicate_issuers fx =
+  submitMustFail fx.f.registrarStack.member1 $ createCmd OnboardInstrumentIssuers with
+    governanceParty = fx.f.parties.registrarGov
+    proposer = fx.f.registrarStack.member1
+    instrumentConfigurationCid = fx.artifacts.instrumentConfigurationCid
+    instrumentIssuers = [fx.f.parties.issuer1, fx.f.parties.issuer1]
+
+test_when_duplicate_issuers_then_create_fails = script do
+  run Test with
+    given = given_provisioned_instrument
+    when = when_onboard_duplicate_issuers
+    then_ = then_no_credentials

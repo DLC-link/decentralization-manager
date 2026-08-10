@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, RwLock as StdRwLock},
 };
 
@@ -518,6 +518,16 @@ fn validate_timeout(microseconds: i64) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_unique_issuers(issuers: &[CantonId], field: &str) -> Result<(), String> {
+    let mut seen = HashSet::new();
+    for issuer in issuers {
+        if !seen.insert(issuer) {
+            return Err(format!("{field} must not list {issuer} more than once"));
+        }
+    }
+    Ok(())
+}
+
 fn validate_positive_amount(amount: &DamlDecimal, field: &str) -> Result<(), String> {
     // `DamlDecimal` itself doesn't implement `PartialOrd`; compare via the
     // inner `rust_decimal::Decimal` returned by `value()` against a parsed
@@ -857,15 +867,21 @@ impl ProposalType {
             } => validate_beneficiary_weights(beneficiaries),
             // Mirrors the templates' `ensure` guards: an on/offboard action
             // for zero issuers (or an offboard entry revoking no credentials)
-            // does no work, so reject it with a 400 before the ledger sees it.
+            // does no work, and a duplicated issuer would mint two
+            // credentials sharing one id. Reject both with a 400 before the
+            // ledger sees the proposal.
             ProposalType::OnboardInstrumentIssuers {
                 instrument_issuers, ..
             } => {
                 if instrument_issuers.is_empty() {
                     return Err("instrument_issuers must not be empty".to_string());
                 }
-                Ok(())
+                validate_unique_issuers(instrument_issuers, "instrument_issuers")
             }
+            ProposalType::ProvisionInstrument {
+                initial_instrument_issuers,
+                ..
+            } => validate_unique_issuers(initial_instrument_issuers, "initial_instrument_issuers"),
             ProposalType::OffboardInstrumentIssuers { instrument_issuers } => {
                 if instrument_issuers.is_empty() {
                     return Err("instrument_issuers must not be empty".to_string());
@@ -1577,5 +1593,49 @@ mod tests {
             .validate()
             .is_ok()
         );
+    }
+
+    #[test]
+    fn proposal_onboard_instrument_issuers_rejects_duplicate_issuers() {
+        // Mirrors the template's `ensure unique instrumentIssuers`: a
+        // duplicated issuer would mint two credentials sharing one id, so
+        // the rejection surfaces as a 400 before the ledger sees it.
+        let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
+        let issuer_a = CantonId::parse(&format!("issuer-a::{ns}")).unwrap();
+        let issuer_b = CantonId::parse(&format!("issuer-b::{ns}")).unwrap();
+        let mk = |issuers: Vec<CantonId>| ProposalType::OnboardInstrumentIssuers {
+            instrument_configuration_cid: "icc".to_string(),
+            instrument_issuers: issuers,
+        };
+        assert!(
+            mk(vec![issuer_a.clone(), issuer_a.clone()])
+                .validate()
+                .is_err()
+        );
+        assert!(mk(vec![issuer_a, issuer_b]).validate().is_ok());
+    }
+
+    #[test]
+    fn proposal_provision_instrument_rejects_duplicate_initial_issuers() {
+        // Mirrors the template's `ensure unique initialInstrumentIssuers`.
+        // An empty list stays legal: issuers can be onboarded later.
+        let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
+        let issuer_a = CantonId::parse(&format!("issuer-a::{ns}")).unwrap();
+        let issuer_b = CantonId::parse(&format!("issuer-b::{ns}")).unwrap();
+        let mk = |issuers: Vec<CantonId>| ProposalType::ProvisionInstrument {
+            registrar_service_cid: "rsc".to_string(),
+            instrument_id_text: "uuid-1".to_string(),
+            additional_identifiers: vec![],
+            issuer_requirements: vec![],
+            holder_requirements: vec![],
+            initial_instrument_issuers: issuers,
+        };
+        assert!(
+            mk(vec![issuer_a.clone(), issuer_a.clone()])
+                .validate()
+                .is_err()
+        );
+        assert!(mk(vec![issuer_a, issuer_b]).validate().is_ok());
+        assert!(mk(Vec::new()).validate().is_ok());
     }
 }

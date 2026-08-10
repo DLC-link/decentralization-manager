@@ -1548,12 +1548,24 @@ export const GovernanceSection = ({
       };
     });
 
-  // Split a one-party-per-line textarea into party ids.
-  const parsePartyLines = (text: string): string[] =>
-    text
+  // Split a one-party-per-line textarea into party ids. A duplicated party
+  // is an error, not silently deduplicated: the templates refuse duplicates
+  // (two mints for one subject would share a credential id), and dropping a
+  // line here would hide what the operator actually typed.
+  const parsePartyLines = (text: string): string[] => {
+    const lines = text
       .split("\n")
       .map((line) => line.trim())
       .filter(Boolean);
+    const seen = new Set<string>();
+    for (const line of lines) {
+      if (seen.has(line)) {
+        throw new Error(`Party id listed more than once: ${line}`);
+      }
+      seen.add(line);
+    }
+    return lines;
+  };
 
   const validateBeneficiaryWeights = (
     beneficiaries: AppRewardBeneficiary[],

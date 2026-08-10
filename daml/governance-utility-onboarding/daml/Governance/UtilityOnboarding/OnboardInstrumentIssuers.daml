@@ -6,6 +6,8 @@
 -- requirements. Executed whenever issuers join after provisioning.
 module Governance.UtilityOnboarding.OnboardInstrumentIssuers where
 
+import DA.List (unique)
+
 import Utility.Registry.V0.Configuration.Instrument (InstrumentConfiguration)
 
 import Governance.Action
@@ -22,8 +24,12 @@ template OnboardInstrumentIssuers
     signatory proposer
     observer governanceParty
     -- An onboard action for zero issuers does no work; reject it at
-    -- creation rather than record a no-op governance result.
+    -- creation rather than record a no-op governance result. A duplicated
+    -- issuer would mint two credentials sharing one id (ids derive from
+    -- subject, mint time and a per-call index), leaving rows the offboard
+    -- picker cannot tell apart — reject duplicates too.
     ensure not (null instrumentIssuers)
+        && unique instrumentIssuers
 
     interface instance GovernableAction for OnboardInstrumentIssuers where
       view = GovernableActionView with
