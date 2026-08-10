@@ -6,6 +6,8 @@
 -- Executed once per instrument.
 module Governance.UtilityOnboarding.ProvisionInstrument where
 
+import DA.List (unique)
+
 import Utility.Credential.V0.Credential (PartyCredentialRequirement)
 import Utility.Registry.App.V0.Service.Registrar
   (RegistrarService, RegistrarService_CreateInstrumentConfiguration(..))
@@ -34,8 +36,12 @@ template ProvisionInstrument
     -- so the configuration would be created carrying the bad requirement
     -- and every later OnboardInstrumentIssuers against it would fail.
     -- Refuse it before any vote. Holder requirements are not minted
-    -- against, so they stay unchecked.
+    -- against, so they stay unchecked. A duplicated initial issuer would
+    -- mint two credentials sharing one id (ids derive from subject, mint
+    -- time and a per-call index), leaving rows the offboard picker cannot
+    -- tell apart — reject duplicates too.
     ensure selfIssuedRequirementsHaveClaims governanceParty issuerRequirements
+        && unique initialInstrumentIssuers
 
     interface instance GovernableAction for ProvisionInstrument where
       view = GovernableActionView with
