@@ -14,13 +14,13 @@ use tokio::sync::RwLock;
 // keep resolving unchanged. `common::api` holds the HTTP request/response DTOs
 // the frontend's TypeScript is generated from (see `decman/build.rs`).
 pub use common::api::{
-    AddPartyInvitePayload, AddPartyRequest, AuditLogResponse, AuthStatus, AuthStatusResponse,
-    AuthTestResponse, AuthTestResult, CancelConfirmationRequest, ChainAuditEntry,
-    ChainAuditResponse, ChangeThresholdInvitePayload, ChangeThresholdRequest, Claim,
-    ContractQueryResponse, ContractWithBlob, ContractsInvitePayload, ContractsRequest,
-    CredentialOfferInfo, CredentialOffersResponse, DarsInvitePayload, DarsRequest,
-    DecentralizedPartiesResponse, DeclineInvitationPayload, DisclosedContractInput,
-    DiscoverMemberPartyRequest, DiscoverMemberPartyResponse, ErrorResponse,
+    ActiveCouponReassignmentDelegation, AddPartyInvitePayload, AddPartyRequest, AuditLogResponse,
+    AuthStatus, AuthStatusResponse, AuthTestResponse, AuthTestResult, CancelConfirmationRequest,
+    ChainAuditEntry, ChainAuditResponse, ChangeThresholdInvitePayload, ChangeThresholdRequest,
+    Claim, ContractQueryResponse, ContractWithBlob, ContractsInvitePayload, ContractsRequest,
+    CouponReassignmentDelegationSummary, CredentialOfferInfo, CredentialOffersResponse,
+    DarsInvitePayload, DarsRequest, DecentralizedPartiesResponse, DeclineInvitationPayload,
+    DisclosedContractInput, DiscoverMemberPartyRequest, DiscoverMemberPartyResponse, ErrorResponse,
     ExpireConfirmationRequest, ExternalPartiesResponse, ExternalPartyInfo, GovernanceState,
     GovernanceStateResponse, GovernanceType, GrantRightsRequest, GrantRightsResponse,
     InstrumentAllowance, InstrumentId, InstrumentIdentifier, InstrumentInfo, InstrumentsResponse,

@@ -83,6 +83,8 @@ import type {
   HoldingsResponse,
   GovernanceState,
   GovernanceStateResponse,
+  ActiveCouponReassignmentDelegation,
+  CouponReassignmentDelegationSummary,
 } from "../types";
 
 type ActionTypeKey = ActionType["type"];
@@ -227,6 +229,13 @@ export const GovernanceSection = ({
     { beneficiary: string; weight: string }[]
   >([]);
   const [proposalPriorDelegation, setProposalPriorDelegation] = useState("");
+  // The delegation this party already has, read from the ledger. It decides
+  // whether "Replaces Delegation" is answerable at all: with one active the
+  // field is mandatory, and with none there is nothing to replace.
+  const [activeDelegation, setActiveDelegation] =
+    useState<CouponReassignmentDelegationSummary | null>(null);
+  const [activeDelegationLoading, setActiveDelegationLoading] = useState(false);
+  const [activeDelegationError, setActiveDelegationError] = useState<string | null>(null);
   const [proposalRevokeDelegationCid, setProposalRevokeDelegationCid] = useState("");
   const [proposalRegistrarServiceCid, setProposalRegistrarServiceCid] = useState("");
   const [proposalEnableResultContracts, setProposalEnableResultContracts] = useState<"true" | "false" | "clear">("true");
@@ -1030,6 +1039,10 @@ export const GovernanceSection = ({
         setAmuletRulesCid(data.amulet_rules_cid);
         setDsoPartyId(data.dso_party_id);
         setProposalExpectedDso(data.dso_party_id);
+        // The coupon-reassignment form keeps its DSO in its own state, so it
+        // needs prefilling here too. A wrong DSO there assigns nothing at all,
+        // silently, which is indistinguishable from having nothing to do.
+        setProposalDelegationDso(data.dso_party_id);
       }
     } catch (e) {
       console.error("Failed to fetch network info:", e);
@@ -1061,12 +1074,45 @@ export const GovernanceSection = ({
   useEffect(() => {
     if (
       (proposalType === "setup_cc_preapproval" ||
-        proposalType === "setup_minting_delegation") &&
+        proposalType === "setup_minting_delegation" ||
+        proposalType === "setup_coupon_reassignment_delegation") &&
       !dsoPartyId
     ) {
       fetchNetworkInfo();
     }
   }, [proposalType, dsoPartyId, fetchNetworkInfo]);
+
+  // Read the delegation this party already has, so "Replaces Delegation" can be
+  // prefilled instead of pasted. A wrong contract id there is rejected, and a
+  // blank one while a delegation is live is rejected with 409.
+  const fetchActiveDelegation = useCallback(async () => {
+    setActiveDelegationLoading(true);
+    setActiveDelegationError(null);
+    try {
+      const res = await authenticatedFetch(
+        `${API_BASE}/coupon-reassignment-delegation?party_id=${encodeURIComponent(partyId)}`,
+      );
+      if (!res.ok) {
+        setActiveDelegationError("Could not read this party's current delegation.");
+        return;
+      }
+      const data: ActiveCouponReassignmentDelegation = await res.json();
+      const active = data.delegation ?? null;
+      setActiveDelegation(active);
+      if (active) setProposalPriorDelegation((cur) => cur || active.cid);
+    } catch (e) {
+      console.error("Failed to fetch active coupon reassignment delegation:", e);
+      setActiveDelegationError("Could not read this party's current delegation.");
+    } finally {
+      setActiveDelegationLoading(false);
+    }
+  }, [partyId]);
+
+  useEffect(() => {
+    if (proposalType === "setup_coupon_reassignment_delegation") {
+      fetchActiveDelegation();
+    }
+  }, [proposalType, fetchActiveDelegation]);
 
   // Setup*Preapproval forms warn when one already exists — fetch the counts
   // (cheap, two ACS template-filter queries).
@@ -4659,14 +4705,26 @@ export const GovernanceSection = ({
                     }}
                   />
                   <TextField
-                    label="Replaces Delegation (optional)"
+                    label="Replaces Delegation"
                     value={proposalPriorDelegation}
                     onChange={(e) => setProposalPriorDelegation(e.target.value)}
                     fullWidth
+                    required={!!activeDelegation}
+                    disabled={!activeDelegation}
+                    error={!!activeDelegationError}
+                    helperText={
+                      activeDelegationLoading
+                        ? "Reading this party's current delegation…"
+                        : activeDelegationError
+                          ? `${activeDelegationError} Fill this in by hand, or retry — a blank one is rejected if a delegation is live.`
+                          : activeDelegation
+                            ? `Prefilled with this party's active delegation (${activeDelegation.assigners.length} assigner${activeDelegation.assigners.length === 1 ? "" : "s"}, ${activeDelegation.beneficiary_count} beneficiar${activeDelegation.beneficiary_count === 1 ? "y" : "ies"}). It is archived in the same transaction.`
+                            : "This party has no active delegation, so there is nothing to replace."
+                    }
                     slotProps={{
                       input: {
                         endAdornment: fieldHelpAdornment(
-                          "Contract id of the delegation this one replaces — it is archived in the same transaction. Leave blank only for the first delegation; leaving it blank while one is live is rejected with 409.",
+                          "Contract id of the delegation this one replaces — it is archived in the same transaction. It is read from the ledger, not typed: creating a second delegation stops assignment entirely, so leaving it blank while one is live is rejected with 409.",
                           "Help for Replaces Delegation",
                         ),
                       },
@@ -4724,13 +4782,15 @@ export const GovernanceSection = ({
                     const remainderRow = weights ? splitRemainderRow(weights) : -1;
                     return (
                       <>
+                        {/* Party id on its own full-width row, weight beneath it.
+                            A party id is ~70 characters and only its prefix
+                            distinguishes two parties in the same namespace, so
+                            sharing the row with the weight hides the part that
+                            matters. */}
                         {proposalDelegationSplit.map((b, idx) => (
-                          <Box
-                            key={idx}
-                            sx={{ display: "flex", gap: 1, mb: 1, alignItems: "center" }}
-                          >
+                          <Box key={idx} sx={{ mb: 2 }}>
                             <TextField
-                              label="Beneficiary Party"
+                              label={`Beneficiary Party ${idx + 1}`}
                               value={b.beneficiary}
                               onChange={(e) => {
                                 const updated = [...proposalDelegationSplit];
@@ -4738,47 +4798,59 @@ export const GovernanceSection = ({
                                 setProposalDelegationSplit(updated);
                               }}
                               size="small"
-                              sx={{ flex: 2 }}
-                            />
-                            <TextField
-                              label="Weight"
-                              value={b.weight}
-                              onChange={(e) => {
-                                const updated = [...proposalDelegationSplit];
-                                updated[idx] = { ...b, weight: e.target.value };
-                                setProposalDelegationSplit(updated);
-                              }}
-                              size="small"
-                              sx={{ width: 110 }}
+                              fullWidth
                               slotProps={{
-                                input: {
-                                  endAdornment: fieldHelpAdornment(
-                                    "A whole number. Only the ratio matters: 1/1/1 is equal thirds, 80/20 is four to one. The exact percentage is derived.",
-                                    "Help for Weight",
-                                  ),
-                                },
+                                input: { sx: { fontFamily: "monospace", fontSize: "0.8rem" } },
                               }}
                             />
-                            <Typography
-                              variant="caption"
-                              sx={{ width: 190, fontFamily: "monospace" }}
-                              color={shares ? "text.primary" : "text.disabled"}
+                            <Box
+                              sx={{
+                                display: "flex",
+                                gap: 1,
+                                mt: 1,
+                                alignItems: "center",
+                              }}
                             >
-                              {shares
-                                ? `${formatSplitShare(shares[idx])}${idx === remainderRow && shares.length > 1 ? " ⟵ +rem" : ""}`
-                                : "—"}
-                            </Typography>
-                            <Button
-                              size="small"
-                              color="error"
-                              onClick={() =>
-                                setProposalDelegationSplit(
-                                  proposalDelegationSplit.filter((_, i) => i !== idx),
-                                )
-                              }
-                            >
-                              Remove
-                            </Button>
+                              <TextField
+                                label="Weight"
+                                value={b.weight}
+                                onChange={(e) => {
+                                  const updated = [...proposalDelegationSplit];
+                                  updated[idx] = { ...b, weight: e.target.value };
+                                  setProposalDelegationSplit(updated);
+                                }}
+                                size="small"
+                                sx={{ width: 110 }}
+                                slotProps={{
+                                  input: {
+                                    endAdornment: fieldHelpAdornment(
+                                      "A whole number. Only the ratio matters: 1/1/1 is equal thirds, 80/20 is four to one. The exact percentage is derived.",
+                                      "Help for Weight",
+                                    ),
+                                  },
+                                }}
+                              />
+                              <Typography
+                                variant="caption"
+                                sx={{ flex: 1, fontFamily: "monospace" }}
+                                color={shares ? "text.primary" : "text.disabled"}
+                              >
+                                {shares
+                                  ? `${formatSplitShare(shares[idx])}${idx === remainderRow && shares.length > 1 ? " ⟵ +rem" : ""}`
+                                  : "—"}
+                              </Typography>
+                              <Button
+                                size="small"
+                                color="error"
+                                onClick={() =>
+                                  setProposalDelegationSplit(
+                                    proposalDelegationSplit.filter((_, i) => i !== idx),
+                                  )
+                                }
+                              >
+                                Remove
+                              </Button>
+                            </Box>
                           </Box>
                         ))}
                         <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>

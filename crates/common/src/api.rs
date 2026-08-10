@@ -1213,6 +1213,33 @@ pub struct PartyConfigResponse {
 // Generic + audit DTOs
 // ============================================================================
 
+/// A decparty's active `CouponReassignmentDelegation`.
+#[derive(Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct CouponReassignmentDelegationSummary {
+    pub cid: String,
+    /// The DSO whose coupons this delegation may assign.
+    pub dso: CantonId,
+    pub assigners: Vec<CantonId>,
+    pub beneficiary_count: usize,
+}
+
+/// Whether a decparty has an active `CouponReassignmentDelegation`, and which.
+///
+/// A vote that creates a second delegation stops assignment entirely, so the
+/// propose boundary rejects one with 409. The proposal form reads this to
+/// prefill `prior_delegation`, rather than asking a human to paste a contract id
+/// that a typo would invalidate for the delegation's whole life.
+#[derive(Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct ActiveCouponReassignmentDelegation {
+    /// Absent when this decparty has none, in which case there is nothing to
+    /// replace and the first delegation is the one being created.
+    pub delegation: Option<CouponReassignmentDelegationSummary>,
+}
+
 /// Generic error response
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

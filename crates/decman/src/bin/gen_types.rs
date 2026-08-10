@@ -47,6 +47,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ($($t:ty),* $(,)?) => { $( <$t as TS>::export_all(&cfg)?; )* };
     }
     export![
+        ActiveCouponReassignmentDelegation,
         AddPartyInvitePayload,
         AddPartyRequest,
         AuditLogEntry,

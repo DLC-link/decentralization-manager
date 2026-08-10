@@ -1196,6 +1196,7 @@ pub async fn start_server(
             .service(handlers::get_governance_audit)
             .service(handlers::get_governance_chain_audit)
             .service(handlers::get_token_standard_contracts)
+            .service(handlers::get_coupon_reassignment_delegation)
             .service(handlers::get_network_info)
             .service(handlers::get_operator_info)
             .service(handlers::get_party_config)

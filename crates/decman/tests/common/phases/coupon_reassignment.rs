@@ -88,7 +88,7 @@ use crate::common::{
     ledger_api::P1_JSON_API,
     phases::seed_reward_coupons::{SEED_AMOUNT, SEED_COUPON_COUNT},
     scenario::Scenario,
-    types::ContractsQueryResponse,
+    types::{ActiveDelegationResponse, ContractsQueryResponse},
 };
 
 /// `#splice-api-reward-assignment-v1`, URL-encoded — the `RewardCoupon`
@@ -271,6 +271,61 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         .await
                         .ok()?;
                     (r.contracts.len() == 1).then_some(Ok(()))
+                })
+            },
+        )
+        .run(f)
+        .await?;
+
+    // The proposal form prefills "Replaces Delegation" from this endpoint. A cid
+    // that disagrees with the ledger would aim the next vote at a contract that
+    // is not the live one, so assert the two agree rather than trusting the read.
+    Scenario::new("active-delegation endpoint agrees with the ledger")
+        .then(
+            "GET /coupon-reassignment-delegation returns the live delegation's cid",
+            Duration::from_secs(60),
+            |f, _| {
+                Box::pin(async move {
+                    let party_id = match f.party_id() {
+                        Ok(p) => p,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    let acs: ContractsQueryResponse = f
+                        .get_json(f.p1.http, &delegation_query_path(party_id))
+                        .await
+                        .ok()?;
+                    let [only] = acs.contracts.as_slice() else {
+                        return None;
+                    };
+                    let r: ActiveDelegationResponse = f
+                        .get_json(
+                            f.p1.http,
+                            &format!("/coupon-reassignment-delegation?party_id={party_id}"),
+                        )
+                        .await
+                        .ok()?;
+                    let Some(active) = r.delegation else {
+                        return Some(Err(anyhow::anyhow!(
+                            "endpoint reports no active delegation while the ACS holds {}",
+                            only.contract_id
+                        )));
+                    };
+                    if active.cid != only.contract_id {
+                        return Some(Err(anyhow::anyhow!(
+                            "endpoint returned {} but the ACS holds {}",
+                            active.cid,
+                            only.contract_id
+                        )));
+                    }
+                    // Decoded fields the cid-only `/contracts/query` cannot show.
+                    if active.assigners.is_empty() || active.beneficiary_count == 0 {
+                        return Some(Err(anyhow::anyhow!(
+                            "delegation decoded as {} assigners / {} beneficiaries",
+                            active.assigners.len(),
+                            active.beneficiary_count
+                        )));
+                    }
+                    Some(Ok(()))
                 })
             },
         )
