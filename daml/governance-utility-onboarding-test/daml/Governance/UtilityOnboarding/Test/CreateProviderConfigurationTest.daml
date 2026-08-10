@@ -5,6 +5,7 @@ module Governance.UtilityOnboarding.Test.CreateProviderConfigurationTest where
 
 import Daml.Script
 
+import Utility.Credential.V0.Credential (PartyCredentialRequirement(..))
 import Utility.Registry.App.V0.Configuration.Provider (ProviderConfiguration(..))
 import Utility.Registry.App.V0.Service.Provider (ProviderService(..))
 
@@ -108,3 +109,78 @@ test_when_outsider_confirms_then_rejected = script do
     given = given_provider_service
     when = when_outsider_confirms
     then_ = then_nothing
+
+-- * A claimless registrar requirement the provider would self-issue is
+-- refused at creation: the ensure clause rejects the proposal before any
+-- vote. No action archives a ProviderConfiguration, so a bad one would
+-- otherwise persist and fail every OnboardRegistrar that selects it.
+
+when_create_claimless_self_requirement : Fixture -> Script ()
+when_create_claimless_self_requirement fx =
+  submitMustFail fx.f.providerStack.member1 $ createCmd CreateProviderConfiguration with
+    governanceParty = fx.f.parties.providerGov
+    proposer = fx.f.providerStack.member1
+    providerServiceCid = fx.providerServiceCid
+    registrarRequirements = [PartyCredentialRequirement with
+      issuer = fx.f.parties.providerGov
+      requiredClaims = []]
+    holderRequirements = []
+
+test_when_claimless_self_requirement_then_create_fails = script do
+  run Test with
+    given = given_provider_service
+    when = when_create_claimless_self_requirement
+    then_ = then_no_configuration
+
+-- * The ensure clause is narrow: a claimless requirement from an external
+-- issuer is legal. Its credentials arrive out of band, so the governance
+-- party never mints against it.
+
+when_create_claimless_external_requirement : Fixture -> Script ()
+when_create_claimless_external_requirement fx = do
+  let externalClaimless = PartyCredentialRequirement with
+        issuer = fx.f.parties.outsider
+        requiredClaims = []
+  proposalCid <- submit fx.f.providerStack.member1 $ createCmd CreateProviderConfiguration with
+    governanceParty = fx.f.parties.providerGov
+    proposer = fx.f.providerStack.member1
+    providerServiceCid = fx.providerServiceCid
+    registrarRequirements = [externalClaimless]
+    holderRequirements = []
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  _ <- confirmAndExecuteAs fx.f.parties fx.f.providerStack proposalInterfaceCid
+  pure ()
+
+then_one_configuration : Fixture -> () -> Script Failures
+then_one_configuration fx _ = do
+  configurations <- query @ProviderConfiguration fx.f.parties.providerGov
+  pure $ shouldBe "ProviderConfiguration count" 1 (length configurations)
+
+test_when_claimless_external_requirement_then_created = script do
+  run Test with
+    given = given_provider_service
+    when = when_create_claimless_external_requirement
+    then_ = then_one_configuration
+
+-- * The ensure clause is narrow: holder requirements are never minted
+-- against, so a claimless self-issued holder requirement is legal.
+
+when_create_claimless_holder_requirement : Fixture -> Script ()
+when_create_claimless_holder_requirement fx = do
+  proposalCid <- submit fx.f.providerStack.member1 $ createCmd CreateProviderConfiguration with
+    governanceParty = fx.f.parties.providerGov
+    proposer = fx.f.providerStack.member1
+    providerServiceCid = fx.providerServiceCid
+    registrarRequirements = [defaultRegistrarRequirement fx.f.parties]
+    holderRequirements = [PartyCredentialRequirement with
+      issuer = fx.f.parties.providerGov
+      requiredClaims = []]
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  _ <- confirmAndExecuteAs fx.f.parties fx.f.providerStack proposalInterfaceCid
+  pure ()
+
+test_when_claimless_self_holder_requirement_then_created = script do
+  run Test with
+    given = given_provider_service
+    when = when_create_claimless_holder_requirement
+    then_ = then_one_configuration

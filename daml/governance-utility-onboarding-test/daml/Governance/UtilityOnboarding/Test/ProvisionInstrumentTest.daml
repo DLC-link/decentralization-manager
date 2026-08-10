@@ -139,26 +139,93 @@ test_when_mixed_requirements_then_only_self_issuable_minted = script do
     when = when_provision_mixed_requirements
     then_ = then_only_self_issuable_minted
 
--- * Minting guard: a self-issuable requirement with no claims is refused.
+-- * A self-issuable requirement with no claims is refused at creation:
+-- the ensure clause rejects the proposal before any vote. This matters
+-- most with no initial issuers — the mint assert would never run, so the
+-- configuration would otherwise persist and fail every later onboard.
 
 when_provision_claimless_requirement : Fixture -> Script ()
-when_provision_claimless_requirement fx = do
-  let claimlessRequirement = PartyCredentialRequirement with
-        issuer = fx.f.parties.registrarGov
-        requiredClaims = []
-  proposalCid <- provisionProposal fx [claimlessRequirement] [fx.f.parties.issuer1]
-  confirmThenExecuteMustFail fx.f.parties fx.f.registrarStack proposalCid
+when_provision_claimless_requirement fx =
+  submitMustFail fx.f.registrarStack.member1 $ createCmd ProvisionInstrument with
+    governanceParty = fx.f.parties.registrarGov
+    proposer = fx.f.registrarStack.member1
+    registrarServiceCid = fx.onboarded.registrarServiceCid
+    instrumentIdText = "LAUNCH-TOKEN"
+    additionalIdentifiers = []
+    issuerRequirements = [PartyCredentialRequirement with
+      issuer = fx.f.parties.registrarGov
+      requiredClaims = []]
+    holderRequirements = []
+    initialInstrumentIssuers = []
 
 then_nothing_provisioned : Fixture -> () -> Script Failures
 then_nothing_provisioned fx _ = do
   configurations <- query @InstrumentConfiguration fx.f.parties.registrarGov
   pure $ shouldBe "InstrumentConfiguration count" 0 (length configurations)
 
-test_when_claimless_self_requirement_then_execute_fails = script do
+test_when_claimless_self_requirement_then_create_fails = script do
   run Test with
     given = given_onboarded_registrar
     when = when_provision_claimless_requirement
     then_ = then_nothing_provisioned
+
+-- * The ensure clause is narrow: a claimless requirement from an external
+-- issuer is legal. The mint helper skips external requirements, so the
+-- provision succeeds and mints nothing for it.
+
+when_provision_claimless_external_requirement : Fixture -> Script ()
+when_provision_claimless_external_requirement fx = do
+  let externalClaimless = PartyCredentialRequirement with
+        issuer = fx.f.parties.outsider
+        requiredClaims = []
+  proposalCid <- provisionProposal fx [externalClaimless] [fx.f.parties.issuer1]
+  _ <- confirmAndExecuteAs fx.f.parties fx.f.registrarStack proposalCid
+  pure ()
+
+then_configuration_created_nothing_minted : Fixture -> () -> Script Failures
+then_configuration_created_nothing_minted fx _ = do
+  configurations <- query @InstrumentConfiguration fx.f.parties.registrarGov
+  credentials <- query @Credential fx.f.parties.issuer1
+  pure $
+    shouldBe "InstrumentConfiguration count" 1 (length configurations) <>
+    shouldBe "issuer1 credentials" 0 (length credentials)
+
+test_when_claimless_external_requirement_then_provisioned = script do
+  run Test with
+    given = given_onboarded_registrar
+    when = when_provision_claimless_external_requirement
+    then_ = then_configuration_created_nothing_minted
+
+-- * The ensure clause is narrow: holder requirements are never minted
+-- against, so a claimless self-issued holder requirement is legal.
+
+when_provision_claimless_holder_requirement : Fixture -> Script ()
+when_provision_claimless_holder_requirement fx = do
+  proposalCid <- submit fx.f.registrarStack.member1 $ createCmd ProvisionInstrument with
+    governanceParty = fx.f.parties.registrarGov
+    proposer = fx.f.registrarStack.member1
+    registrarServiceCid = fx.onboarded.registrarServiceCid
+    instrumentIdText = "LAUNCH-TOKEN"
+    additionalIdentifiers = []
+    issuerRequirements = [defaultIssuerRequirement fx.f.parties]
+    holderRequirements = [PartyCredentialRequirement with
+      issuer = fx.f.parties.registrarGov
+      requiredClaims = []]
+    initialInstrumentIssuers = []
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  _ <- confirmAndExecuteAs fx.f.parties fx.f.registrarStack proposalInterfaceCid
+  pure ()
+
+then_configuration_created : Fixture -> () -> Script Failures
+then_configuration_created fx _ = do
+  configurations <- query @InstrumentConfiguration fx.f.parties.registrarGov
+  pure $ shouldBe "InstrumentConfiguration count" 1 (length configurations)
+
+test_when_claimless_self_holder_requirement_then_provisioned = script do
+  run Test with
+    given = given_onboarded_registrar
+    when = when_provision_claimless_holder_requirement
+    then_ = then_configuration_created
 
 -- * Authorization: a service owned by the proposer, not the governance
 -- party, is refused. Controller authorization alone does not protect this:
