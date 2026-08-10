@@ -41,6 +41,21 @@ pub const SEED_COUPON_COUNT: usize = 60;
 /// fails when the point of the test is what the automation does afterwards.
 const SEED_TX_SIZE: usize = 20;
 
+/// Amount for one coupon the ledger admits but refuses to assign, seeded
+/// alongside the healthy set so the drain's fan-out runs against a real ledger.
+///
+/// `Delegation_Assign` creates one coupon per beneficiary at
+/// `amount * percentage`, and `RewardCouponV2` carries `ensure amount > 0.0`.
+/// Daml `Decimal` holds 10 decimal places, so `1e-10 * 0.2` rounds to `0.0` and
+/// that create fails, taking its whole chunk with it. The reader still admits
+/// the coupon — right `provider`, right `dso`, `beneficiary` null, `amount`
+/// decodes — so it reaches a batch and the fan-out has to isolate it.
+///
+/// **This amount cannot occur in production.** Devnet's smallest real coupon is
+/// 4.31 CC against a threshold near 2.5e-10. The point is to exercise the
+/// mechanism, which unit tests alone cover, not to model a live risk.
+pub const UNASSIGNABLE_AMOUNT: &str = "0.0000000001";
+
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     if f.target != TestTarget::Localnet {
         info!("seed_reward_coupons: skipped (localnet-only)");
@@ -66,7 +81,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     let expires_at = (Utc::now() + chrono::Duration::hours(36))
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string();
-    let seeds: Vec<SeedCoupon> = (0..SEED_COUPON_COUNT)
+    let mut seeds: Vec<SeedCoupon> = (0..SEED_COUPON_COUNT)
         .map(|i| SeedCoupon {
             dso: dso.clone(),
             provider: decparty.clone(),
@@ -75,6 +90,15 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             round: i as i64,
         })
         .collect();
+    // One coupon the ledger will admit and then refuse to assign, so the drain's
+    // fan-out runs for real. See UNASSIGNABLE_AMOUNT.
+    seeds.push(SeedCoupon {
+        dso: dso.clone(),
+        provider: decparty.clone(),
+        amount: UNASSIGNABLE_AMOUNT.to_string(),
+        expires_at: expires_at.clone(),
+        round: SEED_COUPON_COUNT as i64,
+    });
     for (batch, chunk) in seeds.chunks(SEED_TX_SIZE).enumerate() {
         let cmd =
             reward_coupon_create_command(chunk, &format!("seed-coupons-{}-{batch}", f.run_id));
@@ -84,8 +108,9 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     }
 
     info!(
-        "seed_reward_coupons: created {SEED_COUPON_COUNT} unassigned RewardCouponV2 for \
-         {decparty} (beneficiary={beneficiary_party}, operator={operator_party})"
+        "seed_reward_coupons: created {SEED_COUPON_COUNT} unassigned RewardCouponV2 plus one \
+         unassignable at {UNASSIGNABLE_AMOUNT} for {decparty} \
+         (beneficiary={beneficiary_party}, operator={operator_party})"
     );
     f.reward_beneficiary_party = Some(beneficiary_party);
     f.reward_operator_party = Some(operator_party);

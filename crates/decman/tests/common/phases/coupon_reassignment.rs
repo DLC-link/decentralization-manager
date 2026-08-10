@@ -86,7 +86,7 @@ use crate::common::{
     Fixture,
     governance::propose_confirm_execute,
     ledger_api::P1_JSON_API,
-    phases::seed_reward_coupons::{SEED_AMOUNT, SEED_COUPON_COUNT},
+    phases::seed_reward_coupons::{SEED_AMOUNT, SEED_COUPON_COUNT, UNASSIGNABLE_AMOUNT},
     scenario::Scenario,
     types::{ActiveDelegationResponse, ContractsQueryResponse},
 };
@@ -346,9 +346,16 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     // a single-chunk assertion would pass while later chunks were dropped. On
     // devnet the coupon set is whatever the ledger happens to hold and other
     // automation may touch it, so one archived coupon remains the bar there.
+    //
+    // The seed also plants ONE coupon the ledger refuses to assign
+    // (`UNASSIGNABLE_AMOUNT`), so on localnet the bar is every seeded coupon
+    // *except that one*. Requiring all of them would fail by construction, and
+    // requiring merely "one or more" would pass while the fan-out dropped a
+    // whole chunk. Exempting exactly one is what proves a bad coupon costs only
+    // itself.
     let require_all_archived = f.target == crate::common::TestTarget::Localnet;
     let archived_criterion = if require_all_archived {
-        "every seeded coupon archived by Delegation_Assign (spans >1 chunk)"
+        "every seeded coupon but the unassignable one archived (spans >1 chunk)"
     } else {
         "at least one candidate coupon archived by Delegation_Assign"
     };
@@ -374,7 +381,8 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     // PQS `pqs_cbtc` on the real run.
                     let mut gone = initial.iter().filter(|c| !current.contains(*c));
                     if require_all_archived {
-                        gone.count().eq(&initial.len()).then_some(Ok(()))
+                        // Every seeded coupon but the unassignable one.
+                        gone.count().eq(&(initial.len() - 1)).then_some(Ok(()))
                     } else {
                         gone.next().map(|_| Ok(()))
                     }
@@ -449,6 +457,63 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                             Err(anyhow::anyhow!(
                                 "split mismatch: beneficiary={b_total} operator={o_total} \
                                  (expected {expect_benef} / {expect_operator})"
+                            ))
+                        })
+                    })
+                },
+            )
+            .run(f)
+            .await?;
+
+        // The bad coupon costs only itself. The seed planted one coupon the
+        // ledger admits and then refuses to assign, so `Delegation_Assign` failed
+        // for the chunk holding it and the drain re-submitted that chunk one
+        // coupon at a time. What proves the fan-out worked is the pair of facts:
+        // every healthy coupon was paid (asserted above, and by the split totals
+        // which already reconcile to the full seeded amount), and this one is
+        // still sitting there unassigned rather than having wedged the tick.
+        Scenario::new("an unassignable coupon is isolated, not fatal")
+            .then(
+                "exactly one coupon remains, unassigned, at the unassignable amount",
+                Duration::from_secs(120),
+                move |f, _| {
+                    Box::pin(async move {
+                        let party_id = match f.party_id() {
+                            Ok(p) => p,
+                            Err(e) => return Some(Err(e)),
+                        };
+                        let all = match f.active_reward_coupons(P1_JSON_API, party_id).await {
+                            Ok(v) => v,
+                            Err(e) => {
+                                warn!("unassignable assertion: reading coupons failed: {e:#}");
+                                return None;
+                            }
+                        };
+                        let unassigned: Vec<&String> = all
+                            .iter()
+                            .filter(|(bene, _)| bene.is_none())
+                            .map(|(_, amt)| amt)
+                            .collect();
+                        // The drain may still be mid-tick; keep polling until the
+                        // healthy set has drained away.
+                        if unassigned.len() > 1 {
+                            return None;
+                        }
+                        let [amount] = unassigned.as_slice() else {
+                            return Some(Err(anyhow::anyhow!(
+                                "no unassigned coupon left; the unassignable one should survive \
+                                 every tick, since nothing quarantines it"
+                            )));
+                        };
+                        let wanted: f64 = UNASSIGNABLE_AMOUNT.parse().unwrap_or(f64::NAN);
+                        let got: f64 = amount.parse().unwrap_or(f64::NAN);
+                        Some(if (got - wanted).abs() < 1e-12 {
+                            Ok(())
+                        } else {
+                            Err(anyhow::anyhow!(
+                                "the surviving unassigned coupon is {amount}, not the \
+                                 unassignable {UNASSIGNABLE_AMOUNT} — a healthy coupon was \
+                                 skipped instead"
                             ))
                         })
                     })
