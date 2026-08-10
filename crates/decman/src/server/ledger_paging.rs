@@ -29,14 +29,64 @@ fn is_unimplemented(status: &tonic::Status) -> bool {
     status.code() == tonic::Code::Unimplemented
 }
 
-/// Every `CreatedEvent` in the party's ACS matching `event_format`, read a page
-/// at a time.
-pub(crate) async fn fetch_active_contracts(
+/// Like [`fetch_active_contracts`], but applies `extract` to each event as its
+/// page arrives and keeps only what it returns.
+///
+/// For callers that discard most of what they read — a wildcard query narrowed
+/// client-side, or a filter Canton can't express. Collecting every event first
+/// and filtering afterwards would hold the whole matching ACS in memory, which
+/// is worse than the streaming read this replaced.
+pub(crate) async fn fetch_active_contracts_filtered<T, F>(
     config: &NodeConfig,
     token: Option<String>,
     event_format: EventFormat,
-) -> Result<Vec<CreatedEvent>> {
-    collect_active_contracts(config, token, event_format, None).await
+    extract: F,
+) -> Result<Vec<T>>
+where
+    F: FnMut(CreatedEvent) -> Option<T>,
+{
+    collect_active_contracts(config, token, event_format, None, extract).await
+}
+
+/// Run `f` over every matching `CreatedEvent` as its page arrives, keeping
+/// nothing.
+///
+/// For callers that fold results into state they already own (a caller-supplied
+/// accumulator, a map keyed by contract id) rather than building a list.
+pub(crate) async fn for_each_active_contract<F>(
+    config: &NodeConfig,
+    token: Option<String>,
+    event_format: EventFormat,
+    mut f: F,
+) -> Result<()>
+where
+    F: FnMut(CreatedEvent),
+{
+    collect_active_contracts(config, token, event_format, None, |created| {
+        f(created);
+        None::<()>
+    })
+    .await?;
+    Ok(())
+}
+
+/// The first event `extract` accepts, or `None` — stopping at the first match
+/// rather than walking the rest of the ACS.
+pub(crate) async fn fetch_first_matching<T, F>(
+    config: &NodeConfig,
+    token: Option<String>,
+    event_format: EventFormat,
+    extract: F,
+) -> Result<Option<T>>
+where
+    F: FnMut(CreatedEvent) -> Option<T>,
+{
+    Ok(
+        collect_active_contracts(config, token, event_format, Some(1), extract)
+            .await?
+            .into_iter()
+            .next(),
+    )
 }
 
 /// The first `CreatedEvent` matching `event_format`, or `None`.
@@ -50,7 +100,7 @@ pub(crate) async fn fetch_first_active_contract(
     event_format: EventFormat,
 ) -> Result<Option<CreatedEvent>> {
     Ok(
-        collect_active_contracts(config, token, event_format, Some(1))
+        collect_active_contracts(config, token, event_format, Some(1), Some)
             .await?
             .into_iter()
             .next(),
@@ -62,12 +112,16 @@ pub(crate) async fn fetch_first_active_contract(
 ///
 /// `active_at_offset` is pinned to the ledger end for the whole walk: a page
 /// token is only valid against the offset and event format that produced it.
-async fn collect_active_contracts(
+async fn collect_active_contracts<T, F>(
     config: &NodeConfig,
     token: Option<String>,
     event_format: EventFormat,
     max_events: Option<usize>,
-) -> Result<Vec<CreatedEvent>> {
+    mut extract: F,
+) -> Result<Vec<T>>
+where
+    F: FnMut(CreatedEvent) -> Option<T>,
+{
     let mut client = utils::create_state_client(config, token.clone()).await?;
 
     let ledger_end = client
@@ -110,6 +164,7 @@ async fn collect_active_contracts(
                     ledger_end,
                     event_format,
                     max_events,
+                    extract,
                 )
                 .await;
             }
@@ -119,8 +174,9 @@ async fn collect_active_contracts(
         for response in page.active_contracts {
             if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
                 && let Some(event) = active.created_event
+                && let Some(kept) = extract(event)
             {
-                created.push(event);
+                created.push(kept);
             }
         }
 
@@ -142,13 +198,17 @@ async fn collect_active_contracts(
 ///
 /// Builds its own client because the caller's has already been moved into the
 /// failed paged attempt.
-async fn stream_active_contracts(
+async fn stream_active_contracts<T, F>(
     config: &NodeConfig,
     token: Option<String>,
     ledger_end: i64,
     event_format: EventFormat,
     max_events: Option<usize>,
-) -> Result<Vec<CreatedEvent>> {
+    mut extract: F,
+) -> Result<Vec<T>>
+where
+    F: FnMut(CreatedEvent) -> Option<T>,
+{
     let mut client = utils::create_state_client(config, token).await?;
 
     let request = GetActiveContractsRequest {
@@ -166,8 +226,9 @@ async fn stream_active_contracts(
     while let Some(response) = stream.message().await? {
         if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
             && let Some(event) = active.created_event
+            && let Some(kept) = extract(event)
         {
-            created.push(event);
+            created.push(kept);
             if max_events.is_some_and(|max| created.len() >= max) {
                 break;
             }

@@ -32,7 +32,10 @@ use crate::{
 
 use super::{
     action_serializer,
-    ledger_paging::{fetch_active_contracts, fetch_first_active_contract},
+    ledger_paging::{
+        fetch_active_contracts_filtered, fetch_first_active_contract, fetch_first_matching,
+        for_each_active_contract,
+    },
     package_inventory::{
         fetch_package_id_to_name, fetch_package_names, newest_matching_names, package_name_prefix,
     },
@@ -479,20 +482,20 @@ async fn fetch_contracts_with_wildcard(
         verbose: false,
     };
 
-    for created in fetch_active_contracts(config, token, event_format).await? {
-        // Filter in-memory for contract templates
+    for_each_active_contract(config, token, event_format, |created| {
+        // Test mode reads the ACS wildcard, so the template narrowing happens
+        // here rather than Canton-side.
         let is_wanted = created
             .template_id
             .as_ref()
             .map(|t| is_contract_template(&t.module_name, &t.entity_name))
             .unwrap_or(false);
 
-        if !is_wanted {
-            continue;
+        if is_wanted {
+            contracts.push(render_contract_info(&created, package_versions));
         }
-
-        contracts.push(render_contract_info(&created, package_versions));
-    }
+    })
+    .await?;
 
     Ok(())
 }
@@ -531,9 +534,10 @@ async fn fetch_contracts_for_template(
         verbose: false,
     };
 
-    for created in fetch_active_contracts(config, token, event_format).await? {
+    for_each_active_contract(config, token, event_format, |created| {
         contracts.push(render_contract_info(&created, package_versions));
-    }
+    })
+    .await?;
 
     Ok(())
 }
@@ -818,9 +822,9 @@ async fn fetch_governance_with_wildcard(
         verbose: true,
     };
 
-    for created in fetch_active_contracts(config, token, event_format).await? {
+    for_each_active_contract(config, token, event_format, |created| {
         let Some(ref template_id) = created.template_id else {
-            continue;
+            return;
         };
 
         if is_governance_template(&template_id.module_name, &template_id.entity_name) {
@@ -835,7 +839,8 @@ async fn fetch_governance_with_wildcard(
             // Capture proposal info from GovernableAction contracts
             extract_proposal_info(&created, proposal_infos);
         }
-    }
+    })
+    .await?;
 
     Ok(())
 }
@@ -874,7 +879,7 @@ async fn fetch_governance_for_template(
         verbose: true,
     };
 
-    for created in fetch_active_contracts(config, token, event_format).await? {
+    for_each_active_contract(config, token, event_format, |created| {
         if created.template_id.as_ref().is_some_and(|t| {
             t.module_name == "Governance.Confirmation" && t.entity_name == "GovernanceConfirmation"
         }) {
@@ -882,7 +887,8 @@ async fn fetch_governance_for_template(
         } else {
             extract_and_add_confirmation(&created, confirmations_by_hash);
         }
-    }
+    })
+    .await?;
 
     Ok(())
 }
@@ -1364,9 +1370,10 @@ async fn fetch_proposal_infos(
         verbose: true,
     };
 
-    for created in fetch_active_contracts(config, token.clone(), event_format).await? {
+    for_each_active_contract(config, token.clone(), event_format, |created| {
         extract_proposal_info(&created, proposal_infos);
-    }
+    })
+    .await?;
 
     // Resolve the linked `TransferInstruction` for any
     // `AcceptTransferProposal`s we just captured so the notification card has
@@ -1519,19 +1526,19 @@ async fn fetch_governance_state_with_wildcard(
         verbose: true,
     };
 
-    for created in fetch_active_contracts(config, token, event_format).await? {
-        // Check if this is a governance rules template (vault or core)
-        if let Some(ref template_id) = created.template_id
-            && ((template_id.module_name == "BitsafeVault.VaultGovernance"
-                && template_id.entity_name == "VaultGovernanceRules")
-                || (template_id.module_name == "Governance.Rules"
-                    && template_id.entity_name == "GovernanceRules"))
-        {
-            return Ok(extract_governance_state(&created));
-        }
-    }
-
-    Ok(None)
+    // Test mode reads the ACS wildcard, so the governance-rules templates are
+    // matched here; stops at the first one rather than draining the ACS.
+    fetch_first_matching(config, token, event_format, |created| {
+        let template_id = created.template_id.as_ref()?;
+        let is_rules = (template_id.module_name == "BitsafeVault.VaultGovernance"
+            && template_id.entity_name == "VaultGovernanceRules")
+            || (template_id.module_name == "Governance.Rules"
+                && template_id.entity_name == "GovernanceRules");
+        is_rules
+            .then(|| extract_governance_state(&created))
+            .flatten()
+    })
+    .await
 }
 
 /// Fetch governance state for a specific template
@@ -1838,7 +1845,7 @@ async fn fetch_vaults_with_wildcard(
     };
 
     let mut vaults = Vec::new();
-    for created in fetch_active_contracts(config, token, event_format).await? {
+    for_each_active_contract(config, token, event_format, |created| {
         if let Some(template_id) = &created.template_id
             && template_id.module_name == "BitsafeVault.Vault"
             && template_id.entity_name == "Vault"
@@ -1846,7 +1853,8 @@ async fn fetch_vaults_with_wildcard(
         {
             vaults.push(vault_info);
         }
-    }
+    })
+    .await?;
 
     Ok(vaults)
 }
@@ -1883,16 +1891,10 @@ async fn fetch_vaults_for_template(
         verbose: true,
     };
 
-    let active_contracts = fetch_active_contracts(config, token, event_format).await?;
-
-    let mut vaults = Vec::new();
-    for created in active_contracts {
-        if let Some(vault_info) = extract_vault_info(&created) {
-            vaults.push(vault_info);
-        }
-    }
-
-    Ok(vaults)
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        extract_vault_info(&created)
+    })
+    .await
 }
 
 /// Extract VaultInfo from a Vault created event
@@ -2020,20 +2022,16 @@ async fn fetch_provider_services_with_wildcard(
         verbose: true,
     };
 
-    let active_contracts = fetch_active_contracts(config, token, event_format).await?;
-
-    let mut services = Vec::new();
-    for created in active_contracts {
-        if let Some(template_id) = &created.template_id
-            && template_id.module_name == "Utility.Registry.App.V0.Service.Provider"
-            && template_id.entity_name == "ProviderService"
-            && let Some(info) = extract_provider_service_info(&created)
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        let template_id = created.template_id.as_ref()?;
+        if template_id.module_name != "Utility.Registry.App.V0.Service.Provider"
+            || template_id.entity_name != "ProviderService"
         {
-            services.push(info);
+            return None;
         }
-    }
-
-    Ok(services)
+        extract_provider_service_info(&created)
+    })
+    .await
 }
 
 /// Fetch provider services using TemplateFilter
@@ -2068,16 +2066,10 @@ async fn fetch_provider_services_for_template(
         verbose: true,
     };
 
-    let active_contracts = fetch_active_contracts(config, token, event_format).await?;
-
-    let mut services = Vec::new();
-    for created in active_contracts {
-        if let Some(info) = extract_provider_service_info(&created) {
-            services.push(info);
-        }
-    }
-
-    Ok(services)
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        extract_provider_service_info(&created)
+    })
+    .await
 }
 
 /// Extract ProviderServiceInfo from a ProviderService created event
@@ -2157,20 +2149,16 @@ async fn fetch_user_services_with_wildcard(
         verbose: true,
     };
 
-    let active_contracts = fetch_active_contracts(config, token, event_format).await?;
-
-    let mut services = Vec::new();
-    for created in active_contracts {
-        if let Some(template_id) = &created.template_id
-            && template_id.module_name == "Utility.Credential.App.V0.Service.User"
-            && template_id.entity_name == "UserService"
-            && let Some(info) = extract_user_service_info(&created)
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        let template_id = created.template_id.as_ref()?;
+        if template_id.module_name != "Utility.Credential.App.V0.Service.User"
+            || template_id.entity_name != "UserService"
         {
-            services.push(info);
+            return None;
         }
-    }
-
-    Ok(services)
+        extract_user_service_info(&created)
+    })
+    .await
 }
 
 /// Fetch user services using TemplateFilter
@@ -2205,16 +2193,10 @@ async fn fetch_user_services_for_template(
         verbose: true,
     };
 
-    let active_contracts = fetch_active_contracts(config, token, event_format).await?;
-
-    let mut services = Vec::new();
-    for created in active_contracts {
-        if let Some(info) = extract_user_service_info(&created) {
-            services.push(info);
-        }
-    }
-
-    Ok(services)
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        extract_user_service_info(&created)
+    })
+    .await
 }
 
 /// Extract UserServiceInfo from a UserService created event
@@ -2300,20 +2282,16 @@ async fn fetch_credential_offers_with_wildcard(
         verbose: true,
     };
 
-    let active_contracts = fetch_active_contracts(config, token, event_format).await?;
-
-    let mut offers = Vec::new();
-    for created in active_contracts {
-        if let Some(template_id) = &created.template_id
-            && template_id.module_name == "Utility.Credential.App.V0.Model.Offer"
-            && template_id.entity_name == "CredentialOffer"
-            && let Some(info) = extract_credential_offer_info(&created)
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        let template_id = created.template_id.as_ref()?;
+        if template_id.module_name != "Utility.Credential.App.V0.Model.Offer"
+            || template_id.entity_name != "CredentialOffer"
         {
-            offers.push(info);
+            return None;
         }
-    }
-
-    Ok(offers)
+        extract_credential_offer_info(&created)
+    })
+    .await
 }
 
 /// Fetch credential offers using TemplateFilter
@@ -2348,16 +2326,10 @@ async fn fetch_credential_offers_for_template(
         verbose: true,
     };
 
-    let active_contracts = fetch_active_contracts(config, token, event_format).await?;
-
-    let mut offers = Vec::new();
-    for created in active_contracts {
-        if let Some(info) = extract_credential_offer_info(&created) {
-            offers.push(info);
-        }
-    }
-
-    Ok(offers)
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        extract_credential_offer_info(&created)
+    })
+    .await
 }
 
 /// Extract CredentialOfferInfo from a CredentialOffer created event. An offer
@@ -2443,20 +2415,16 @@ async fn fetch_registrar_services_with_wildcard(
         verbose: true,
     };
 
-    let active_contracts = fetch_active_contracts(config, token, event_format).await?;
-
-    let mut services = Vec::new();
-    for created in active_contracts {
-        if let Some(template_id) = &created.template_id
-            && template_id.module_name == "Utility.Registry.App.V0.Service.Registrar"
-            && template_id.entity_name == "RegistrarService"
-            && let Some(info) = extract_registrar_service_info(&created)
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        let template_id = created.template_id.as_ref()?;
+        if template_id.module_name != "Utility.Registry.App.V0.Service.Registrar"
+            || template_id.entity_name != "RegistrarService"
         {
-            services.push(info);
+            return None;
         }
-    }
-
-    Ok(services)
+        extract_registrar_service_info(&created)
+    })
+    .await
 }
 
 /// Fetch registrar services using TemplateFilter
@@ -2491,16 +2459,10 @@ async fn fetch_registrar_services_for_template(
         verbose: true,
     };
 
-    let active_contracts = fetch_active_contracts(config, token, event_format).await?;
-
-    let mut services = Vec::new();
-    for created in active_contracts {
-        if let Some(info) = extract_registrar_service_info(&created) {
-            services.push(info);
-        }
-    }
-
-    Ok(services)
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        extract_registrar_service_info(&created)
+    })
+    .await
 }
 
 /// Extract RegistrarServiceInfo from a RegistrarService created event
@@ -2596,20 +2558,16 @@ async fn fetch_instruments_with_wildcard(
         verbose: true,
     };
 
-    let active_contracts = fetch_active_contracts(config, token, event_format).await?;
-
-    let mut instruments = Vec::new();
-    for created in active_contracts {
-        if let Some(template_id) = &created.template_id
-            && template_id.module_name == "Utility.Registry.V0.Configuration.Instrument"
-            && template_id.entity_name == "InstrumentConfiguration"
-            && let Some(info) = extract_instrument_info(&created)
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        let template_id = created.template_id.as_ref()?;
+        if template_id.module_name != "Utility.Registry.V0.Configuration.Instrument"
+            || template_id.entity_name != "InstrumentConfiguration"
         {
-            instruments.push(info);
+            return None;
         }
-    }
-
-    Ok(instruments)
+        extract_instrument_info(&created)
+    })
+    .await
 }
 
 async fn fetch_instruments_for_template(
@@ -2643,16 +2601,10 @@ async fn fetch_instruments_for_template(
         verbose: true,
     };
 
-    let active_contracts = fetch_active_contracts(config, token, event_format).await?;
-
-    let mut instruments = Vec::new();
-    for created in active_contracts {
-        if let Some(info) = extract_instrument_info(&created) {
-            instruments.push(info);
-        }
-    }
-
-    Ok(instruments)
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        extract_instrument_info(&created)
+    })
+    .await
 }
 
 /// Extract InstrumentInfo from an InstrumentConfiguration created event.
@@ -2766,36 +2718,32 @@ pub async fn query_contracts_by_template(
         verbose: true,
     };
 
-    let active_contracts = fetch_active_contracts(config, token, event_format).await?;
-
-    let mut contracts = Vec::new();
-    for created in active_contracts {
-        let matches = if test_mode {
-            created.template_id.as_ref().is_some_and(|t| {
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        // Test mode reads the ACS wildcard, so the template narrowing Canton
+        // would otherwise have done has to happen here.
+        if test_mode
+            && !created.template_id.as_ref().is_some_and(|t| {
                 t.module_name == params.module_name && t.entity_name == params.entity_name
             })
-        } else {
-            true
-        };
-
-        if matches {
-            // QA flagged the Accept Mint Request dropdown for surfacing
-            // contracts whose `executeBefore` has already passed —
-            // accepting them would fail at interpretation with
-            // deadline-exceeded. Drop them here when the caller opts in.
-            if params.active_only && is_execute_before_expired(&created) {
-                continue;
-            }
-            let blob =
-                base64::engine::general_purpose::STANDARD.encode(&created.created_event_blob);
-            contracts.push(ContractWithBlob {
-                contract_id: created.contract_id,
-                blob,
-            });
+        {
+            return None;
         }
-    }
 
-    Ok(contracts)
+        // QA flagged the Accept Mint Request dropdown for surfacing contracts
+        // whose `executeBefore` has already passed — accepting them would fail
+        // at interpretation with deadline-exceeded. Drop them here when the
+        // caller opts in.
+        if params.active_only && is_execute_before_expired(&created) {
+            return None;
+        }
+
+        let blob = base64::engine::general_purpose::STANDARD.encode(&created.created_event_blob);
+        Some(ContractWithBlob {
+            contract_id: created.contract_id,
+            blob,
+        })
+    })
+    .await
 }
 
 // ============================================================================
@@ -2846,23 +2794,17 @@ pub async fn get_open_transfer_instructions(
         verbose: true,
     };
 
-    let active_contracts = fetch_active_contracts(config, token, event_format).await?;
-
     let receiver_str = party_id.to_string();
-    let mut instructions = Vec::new();
-    for created in active_contracts {
-        // The InterfaceFilter only enforces party visibility — this party can
-        // see the contract as sender, receiver, or an instrument-admin
-        // stakeholder. Keep only the ones where it's the *receiver*, since
-        // those are the only ones it can Accept.
-        if let Some(info) = extract_transfer_instruction_info(&created)
-            && info.receiver.to_string() == receiver_str
-        {
-            instructions.push(info);
-        }
-    }
 
-    Ok(instructions)
+    // The InterfaceFilter only enforces party visibility — this party can see
+    // the contract as sender, receiver, or an instrument-admin stakeholder.
+    // Keep only the ones where it's the *receiver*, since those are the only
+    // ones it can Accept.
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        extract_transfer_instruction_info(&created)
+            .filter(|info| info.receiver.to_string() == receiver_str)
+    })
+    .await
 }
 
 /// Pull sender / receiver / amount / instrument out of a `TransferInstruction`
@@ -3043,18 +2985,13 @@ async fn fetch_token_requests_for_template(
         verbose: true,
     };
 
-    let active_contracts = fetch_active_contracts(config, token, event_format).await?;
-
-    let mut requests = Vec::new();
-    for created in active_contracts {
-        if !is_execute_before_expired_in_payload(&created, payload_field)
-            && let Some(info) = extract_token_request_info(&created, payload_field)
-        {
-            requests.push(info);
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        if is_execute_before_expired_in_payload(&created, payload_field) {
+            return None;
         }
-    }
-
-    Ok(requests)
+        extract_token_request_info(&created, payload_field)
+    })
+    .await
 }
 
 /// Extract `{holder, amount, instrumentId.{admin,id}, executeBefore}` from a
@@ -3272,15 +3209,10 @@ pub async fn get_transfer_factories(
         verbose: true,
     };
 
-    let active_contracts = fetch_active_contracts(config, token, event_format).await?;
-
-    let mut factories = Vec::new();
-    for created in active_contracts {
-        if let Some(info) = extract_transfer_factory_info(&created) {
-            factories.push(info);
-        }
-    }
-    Ok(factories)
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        extract_transfer_factory_info(&created)
+    })
+    .await
 }
 
 /// Pull `admin` (the instrument admin / expected admin) out of the
@@ -3433,18 +3365,12 @@ async fn fetch_holding_views(
         verbose: true,
     };
 
-    let active_contracts = fetch_active_contracts(config, token, event_format).await?;
-
     let owner_str = party_id.to_string();
-    let mut holdings = Vec::new();
-    for created in active_contracts {
-        if let Some(view) = extract_holding_view(&created)
-            && view.owner == owner_str
-        {
-            holdings.push(view);
-        }
-    }
-    Ok(holdings)
+
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        extract_holding_view(&created).filter(|view| view.owner == owner_str)
+    })
+    .await
 }
 
 /// Intermediate parse result. `owner` lets `fetch_holding_views` drop holdings
@@ -3634,17 +3560,15 @@ async fn fetch_utility_preapproval_instruments(
         verbose: true,
     };
 
-    let active_contracts = fetch_active_contracts(config, token, event_format).await?;
+    let entries = fetch_active_contracts_filtered(config, token, event_format, |created| {
+        created
+            .create_arguments
+            .as_ref()
+            .map(extract_preapproval_entries)
+    })
+    .await?;
 
-    let mut set = std::collections::HashSet::new();
-    for created in active_contracts {
-        if let Some(args) = created.create_arguments {
-            for entry in extract_preapproval_entries(&args) {
-                set.insert(entry);
-            }
-        }
-    }
-    Ok(set)
+    Ok(entries.into_iter().flatten().collect())
 }
 
 /// Sentinel `instrument_id` for a preapproval whose `instrumentAllowances` is
