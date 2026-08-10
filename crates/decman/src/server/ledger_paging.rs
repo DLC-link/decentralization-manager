@@ -19,8 +19,6 @@ use canton_proto_rs::com::daml::ledger::api::v2::{
     Transaction, UpdateFormat, VettedPackage, get_active_contracts_response::ContractEntry,
     get_update_response, get_updates_response,
 };
-use common::api::PAGE_SIZE;
-
 use crate::{config::NodeConfig, error::Result, utils};
 
 /// Rows pulled from Canton per round trip when collecting a full result set.
@@ -222,7 +220,7 @@ pub(crate) async fn fetch_vetted_packages(
                 package_metadata_filter: None,
                 topology_state_filter: None,
                 page_token: page_token.clone(),
-                page_size: PAGE_SIZE as u32,
+                page_size: FETCH_CHUNK as u32,
             }))
             .await?
             .into_inner();
