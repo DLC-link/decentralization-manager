@@ -212,6 +212,7 @@ export const HoldingsSection = ({
         pageCount={pageCount}
         total={total}
         onChange={setPage}
+        sx={{ px: 3 }}
       />
     </Box>
   );

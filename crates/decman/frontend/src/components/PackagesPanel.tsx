@@ -105,6 +105,8 @@ export const PackagesPanel = ({
 
   const localPaging = usePagination(filteredSorted);
   const comparisonPaging = usePagination(sortedComparison);
+  // The peer-comparison view swaps in its own table, so it pages its own rows.
+  const paging = comparison ? comparisonPaging : localPaging;
 
   const updateScrollShadows = useCallback(() => {
     const el = scrollRef.current;
@@ -436,21 +438,13 @@ export const PackagesPanel = ({
             }}
           />
         </Box>
-        {comparison ? (
-          <PaginationControls
-            page={comparisonPaging.page}
-            pageCount={comparisonPaging.pageCount}
-            total={comparisonPaging.total}
-            onChange={comparisonPaging.setPage}
-          />
-        ) : (
-          <PaginationControls
-            page={localPaging.page}
-            pageCount={localPaging.pageCount}
-            total={localPaging.total}
-            onChange={localPaging.setPage}
-          />
-        )}
+        <PaginationControls
+          page={paging.page}
+          pageCount={paging.pageCount}
+          total={paging.total}
+          onChange={paging.setPage}
+          sx={{ px: 3 }}
+        />
     </Box>
   );
 };

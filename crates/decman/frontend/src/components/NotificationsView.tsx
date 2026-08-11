@@ -2025,6 +2025,7 @@ export const NotificationsView = ({
         pageCount={pageCount}
         total={total}
         onChange={setPage}
+        sx={{ px: 0 }}
       />
     </Box>
   );
