@@ -40,7 +40,7 @@ use crate::{
     server::{
         AppState,
         health::classify_health_reply,
-        ledger_paging::fetch_vetted_packages,
+        package_inventory::fetch_vetted_packages,
         queries::{get_contracts, get_party_metadata, sort_contracts},
         types::{
             ConnectionStatus, ContractInfo, DecentralizedPartiesResponse, DecentralizedParty,
@@ -866,29 +866,18 @@ pub async fn fetch_decentralized_parties(
 )]
 #[get("/packages/vetted")]
 pub async fn get_vetted_packages(data: web::Data<AppState>) -> impl Responder {
-    // Reads the participant's topology vetting state via the ledger API's
-    // paginated `ListVettedPackages`. The admin `ListPackages` this used to
-    // call lists every *uploaded* DAR, which is a strictly larger set — an
-    // uploaded-but-unvetted package was previously reported as vetted.
-    let vetted = match fetch_vetted_packages(&data.config, None).await {
-        Ok(vetted) => vetted,
+    // Reads topology vetting state. The admin `ListPackages` this used to call
+    // lists every *uploaded* DAR, a strictly larger set — an uploaded-but-
+    // unvetted package was previously reported as vetted.
+    match fetch_vetted_packages(&data.config).await {
+        Ok(packages) => HttpResponse::Ok().json(packages),
         Err(e) => {
-            return HttpResponse::InternalServerError().json(ErrorResponse {
+            tracing::error!("Failed to list vetted packages: {e:#}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
                 error: format!("Failed to list vetted packages: {e}"),
-            });
+            })
         }
-    };
-
-    let packages: Vec<VettedPackageInfo> = vetted
-        .into_iter()
-        .map(|p| VettedPackageInfo {
-            package_id: p.package_id,
-            package_name: p.package_name,
-            package_version: p.package_version,
-        })
-        .collect();
-
-    HttpResponse::Ok().json(packages)
+    }
 }
 
 /// Check connectivity status of all participants

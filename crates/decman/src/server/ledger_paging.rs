@@ -16,9 +16,8 @@
 use crate::{config::NodeConfig, error::Result, utils};
 use canton_proto_rs::com::daml::ledger::api::v2::{
     CreatedEvent, EventFormat, GetActiveContractsPageRequest, GetActiveContractsRequest,
-    GetLedgerEndRequest, GetUpdatesPageRequest, GetUpdatesRequest, ListVettedPackagesRequest,
-    Transaction, UpdateFormat, VettedPackage, get_active_contracts_response::ContractEntry,
-    get_update_response, get_updates_response,
+    GetLedgerEndRequest, GetUpdatesPageRequest, GetUpdatesRequest, Transaction, UpdateFormat,
+    get_active_contracts_response::ContractEntry, get_update_response, get_updates_response,
 };
 
 /// Rows pulled from Canton per round trip when collecting a full result set.
@@ -307,49 +306,6 @@ pub(crate) async fn fetch_transactions_page(
             })
         }
         Err(status) => Err(status.into()),
-    }
-}
-
-/// Every package currently vetted by this participant, deduplicated by package
-/// id.
-///
-/// `ListVettedPackages` landed in Canton 3.4.10 and is paginated from the
-/// outset. It reports the participant's *topology* vetting state, one entry per
-/// (participant, synchronizer) pair, so the same package id can appear more
-/// than once when a participant is connected to several synchronizers.
-pub(crate) async fn fetch_vetted_packages(
-    config: &NodeConfig,
-    token: Option<String>,
-) -> Result<Vec<VettedPackage>> {
-    let mut client = utils::create_package_client(config, token).await?;
-
-    let mut seen = std::collections::HashSet::new();
-    let mut vetted = Vec::new();
-    let mut page_token = String::new();
-
-    loop {
-        let response = client
-            .list_vetted_packages(tonic::Request::new(ListVettedPackagesRequest {
-                package_metadata_filter: None,
-                topology_state_filter: None,
-                page_token: page_token.clone(),
-                page_size: FETCH_CHUNK as u32,
-            }))
-            .await?
-            .into_inner();
-
-        for entry in response.vetted_packages {
-            for package in entry.packages {
-                if seen.insert(package.package_id.clone()) {
-                    vetted.push(package);
-                }
-            }
-        }
-
-        if response.next_page_token.is_empty() {
-            return Ok(vetted);
-        }
-        page_token = response.next_page_token;
     }
 }
 

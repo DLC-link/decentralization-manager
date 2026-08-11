@@ -1,13 +1,17 @@
 use std::collections::{BTreeSet, HashMap};
 
 use anyhow::{Context, Result};
-use canton_proto_rs::com::digitalasset::canton::admin::participant::v30::{
-    ListPackagesRequest, package_service_client::PackageServiceClient,
+use canton_proto_rs::com::digitalasset::canton::{
+    admin::participant::v30::{ListPackagesRequest, package_service_client::PackageServiceClient},
+    topology::admin::v30::{
+        BaseQuery, ListVettedPackagesRequest, StoreId, base_query, store_id,
+        topology_manager_read_service_client::TopologyManagerReadServiceClient,
+    },
 };
 
-use crate::config::NodeConfig;
+use crate::{config::NodeConfig, utils};
 
-use super::queries::compare_versions;
+use super::{queries::compare_versions, types::VettedPackageInfo};
 
 /// Derive the stable package-name prefix from a package reference by
 /// stripping the leading `#` and any trailing version segments, e.g.
@@ -113,6 +117,93 @@ pub(crate) async fn fetch_package_id_to_name(
         .package_descriptions
         .into_iter()
         .map(|p| (p.package_id, p.name))
+        .collect())
+}
+
+/// Packages this participant has actually vetted, with name and version.
+///
+/// Reads topology vetting state — which is a strictly smaller set than the
+/// uploaded DARs `fetch_package_names` reports, since a DAR can be uploaded
+/// without being vetted. The topology entries carry only package ids, so
+/// name/version are joined in from the Admin PackageService.
+///
+/// Deliberately on the admin channel: the Ledger API has a paginated
+/// `ListVettedPackages`, but it needs a bearer token and tokens here are
+/// per-party — a participant-level endpoint has no party to borrow one from.
+pub(crate) async fn fetch_vetted_packages(config: &NodeConfig) -> Result<Vec<VettedPackageInfo>> {
+    let channel = config
+        .admin_channel()
+        .await
+        .context("Failed to connect to participant Admin API")?;
+    let mut client = TopologyManagerReadServiceClient::new(channel)
+        .max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
+
+    let response = client
+        .list_vetted_packages(tonic::Request::new(ListVettedPackagesRequest {
+            base_query: Some(BaseQuery {
+                store: Some(StoreId {
+                    store: Some(store_id::Store::Authorized(store_id::Authorized {})),
+                }),
+                proposals: false,
+                operation: 0,
+                time_query: Some(base_query::TimeQuery::HeadState(())),
+                filter_signed_key: String::new(),
+                protocol_version: None,
+                client_version: None,
+            }),
+            filter_participant: config.participant_id().to_string(),
+        }))
+        .await
+        .context("Failed to list vetted packages")?
+        .into_inner();
+
+    let descriptions = fetch_package_descriptions(config).await?;
+
+    let mut seen = std::collections::HashSet::new();
+    let mut vetted = Vec::new();
+    for result in response.results {
+        let Some(item) = result.item else { continue };
+        for package in item.packages {
+            if !seen.insert(package.package_id.clone()) {
+                continue;
+            }
+            let (name, version) = descriptions
+                .get(&package.package_id)
+                .cloned()
+                .unwrap_or_default();
+            vetted.push(VettedPackageInfo {
+                package_id: package.package_id,
+                package_name: name,
+                package_version: version,
+            });
+        }
+    }
+
+    Ok(vetted)
+}
+
+/// Load `(package_id → (name, version))` from the Admin PackageService.
+async fn fetch_package_descriptions(
+    config: &NodeConfig,
+) -> Result<HashMap<String, (String, String)>> {
+    let mut client = PackageServiceClient::new(
+        config
+            .admin_channel()
+            .await
+            .context("Failed to connect to participant Admin API")?,
+    );
+    let response = client
+        .list_packages(tonic::Request::new(ListPackagesRequest {
+            limit: 0,
+            filter_name: String::new(),
+        }))
+        .await
+        .context("Failed to list participant packages")?
+        .into_inner();
+    Ok(response
+        .package_descriptions
+        .into_iter()
+        .map(|p| (p.package_id, (p.name, p.version)))
         .collect())
 }
 
