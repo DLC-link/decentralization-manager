@@ -1,0 +1,51 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Standing delegation that carries the decparty's authority and the fixed
+-- beneficiary split. Created ONCE via governance (SetupCouponReassignmentDelegation);
+-- thereafter any single listed assigner may reassign a coupon batch to the baked-in
+-- split with a plain Delegation_Assign exercise — no per-round vote.
+module Governance.Rewards.CouponReassignmentDelegation where
+
+import DA.Foldable (forA_)
+
+import Splice.Amulet (RewardCouponV2)
+import Splice.Api.RewardAssignmentV1
+  (RewardCoupon, RewardBeneficiary, RewardCoupon_AssignBeneficiaries(..))
+import Splice.Api.Token.MetadataV1 (ExtraArgs)
+
+template CouponReassignmentDelegation
+  with
+    decparty  : Party                 -- = governanceParty = the coupons' provider
+    dso       : Party                 -- the DSO whose coupons may be assigned
+    assigners : [Party]               -- any one may reassign (1-of-n)
+    split     : [RewardBeneficiary]   -- BAKED IN; validated at create
+  where
+    signatory decparty
+    observer assigners
+
+    nonconsuming choice Delegation_Assign : ()
+      with
+        assigner          : Party
+        primaryCoupon     : ContractId RewardCoupon
+        additionalCoupons : [ContractId RewardCoupon]
+        extraArgs         : ExtraArgs
+          -- ^ passed through to RewardCoupon_AssignBeneficiaries; empty today,
+          -- but a later RewardCoupon version may require a populated context.
+      controller assigner
+      do
+        assertMsg "assigner must be listed on the delegation" (assigner `elem` assigners)
+        -- Both guards are load-bearing; design §7 says why.
+        forA_ (primaryCoupon :: additionalCoupons) $ \cid -> do
+          coupon <- fetch (fromInterfaceContractId @RewardCouponV2 cid)
+          assertMsg "coupon dso must match the delegation's dso" (coupon.dso == dso)
+        _ <- exercise primaryCoupon RewardCoupon_AssignBeneficiaries with
+               additionalCoupons
+               newBeneficiaries = split   -- the contract's split, never a caller argument
+               extraArgs
+        pure ()
+
+    -- Governance-only revoke. Invoked via a GovernableAction.
+    choice Delegation_Revoke : ()
+      controller decparty
+      do pure ()

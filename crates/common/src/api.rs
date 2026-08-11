@@ -1213,6 +1213,41 @@ pub struct PartyConfigResponse {
 // Generic + audit DTOs
 // ============================================================================
 
+/// A decparty's active `CouponReassignmentDelegation`.
+#[derive(Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct CouponReassignmentDelegationSummary {
+    pub cid: String,
+    /// The DSO whose coupons this delegation may assign.
+    pub dso: CantonId,
+    pub assigners: Vec<CantonId>,
+    pub beneficiary_count: usize,
+}
+
+/// A decparty's active `CouponReassignmentDelegation` contracts, newest first.
+///
+/// The vote forms read this so a human never pastes a contract id that a typo
+/// would invalidate for the delegation's whole life. Setup prefills
+/// `prior_delegation` from it; revoke prefills the contract to archive.
+///
+/// **Normally this holds zero or one entry.** It can hold more: the template is
+/// keyless, so Canton cannot enforce the per-decparty singleton, and the
+/// propose-time guard is best-effort. Two proposals racing, or a direct ledger
+/// submit, can leave several active. The list reports what is really there, and
+/// the **first entry is the one the automation acts on**.
+///
+/// Contains only the configured package's delegations. One in a superseded
+/// package is not exerciseable by the actions this build proposes.
+#[derive(Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct ActiveCouponReassignmentDelegation {
+    /// Newest first. Empty when this decparty has none, in which case there is
+    /// nothing to replace and nothing to revoke.
+    pub delegations: Vec<CouponReassignmentDelegationSummary>,
+}
+
 /// Generic error response
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

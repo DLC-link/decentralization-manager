@@ -15,6 +15,7 @@ mod handlers;
 mod middleware;
 mod package_inventory;
 mod queries;
+mod reward_automation;
 mod transfer_context;
 mod types;
 
@@ -1024,6 +1025,14 @@ pub async fn start_server(
         .await;
     });
 
+    // Background task: CIP-104 Mode A reward-assignment automation. Clone the
+    // existing `web::Data<AppState>` (an Arc) so the loop shares the SAME state —
+    // live party credentials, auth, config — never a fresh AppState.
+    let reward_automation_state = app_state.clone();
+    tokio::spawn(async move {
+        reward_automation::run_reward_automation_loop(reward_automation_state).await;
+    });
+
     // Single peer-job listener: drains the queue and spawns one
     // `workflow::start_peer` per accepted / retried / resumed invite, so this
     // node can be a peer in many concurrent workflows at once.
@@ -1187,6 +1196,7 @@ pub async fn start_server(
             .service(handlers::get_governance_audit)
             .service(handlers::get_governance_chain_audit)
             .service(handlers::get_token_standard_contracts)
+            .service(handlers::get_coupon_reassignment_delegation)
             .service(handlers::get_network_info)
             .service(handlers::get_operator_info)
             .service(handlers::get_party_config)
