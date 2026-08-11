@@ -162,11 +162,14 @@ export const PartyList = ({
           })}
         </TableBody>
       </Table>
+      {/* Extra right padding clears the fixed Create-Party FAB (56px wide,
+        * offset 24px), which this view renders over the bottom-right corner. */}
       <PaginationControls
         page={page}
         pageCount={pageCount}
         total={total}
         onChange={setPage}
+        sx={{ pr: 11 }}
       />
     </Box>
   );
