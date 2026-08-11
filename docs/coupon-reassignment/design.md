@@ -86,7 +86,7 @@ The delegation model is the purest expression of this principle: the split is a 
 ## 3. Scope
 
 **In scope**
-- A new DAML template `CouponReassignmentDelegation` (in the `governance-rewards-automation-v1-rc2` package): signed by the decparty, holding the fixed `[RewardBeneficiary]` split, the DSO party whose coupons it may assign, and the assigner list, with a `nonconsuming` `Delegation_Assign` choice that assigns caller-supplied coupons to the baked-in split (§7).
+- A new DAML template `CouponReassignmentDelegation` (in the `governance-rewards-automation-v1` package): signed by the decparty, holding the fixed `[RewardBeneficiary]` split, the DSO party whose coupons it may assign, and the assigner list, with a `nonconsuming` `Delegation_Assign` choice that assigns caller-supplied coupons to the baked-in split (§7).
 - A `GovernableAction` to **create** the delegation through governance — `SetupCouponReassignmentDelegation` — and a governance path to **revoke** it (archive). Creating/replacing the delegation is the *only* action that goes through a threshold vote.
 - A new Rust background module in `crates/decman` — the automation — that, per node, reads the active delegation + the decparty's unassigned coupons, selects a due batch, and exercises `Delegation_Assign` as a plain ledger command. Each member node runs an instance.
 - Batching cadence with a submission-safety expiry margin; duplicate/all-or-nothing handling (§10).
@@ -172,7 +172,7 @@ Two phases on top of existing DecMan machinery (propose/confirm/execute engine, 
 
 ## 7. DAML: `CouponReassignmentDelegation`
 
-New module `Governance/Rewards/CouponReassignmentDelegation.daml` in the `governance-rewards-automation-v1-rc2` package (alongside PR #256's `Governance/Rewards/SetupMintingDelegation.daml`). The delegation carries the decparty's authority and the fixed split; a nonconsuming choice lets any assigner assign coupons to that split.
+New module `Governance/Rewards/CouponReassignmentDelegation.daml` in the `governance-rewards-automation-v1` package (alongside PR #256's `Governance/Rewards/SetupMintingDelegation.daml`). The delegation carries the decparty's authority and the fixed split; a nonconsuming choice lets any assigner assign coupons to that split.
 
 ```haskell
 template CouponReassignmentDelegation
@@ -312,12 +312,12 @@ Stated in the §2 frame — **fairness/correctness live in L3, never in L2 trust
 
 1. **Model:** the **delegation model** — one governance vote creates a `CouponReassignmentDelegation` with the split baked in; per-round assignment is a plain 1-of-n exercise, no per-round vote. The split is enforced in L3 DAML by construction, and the recurring quorum is off the 36h critical path — only the one-time setup needs the governance threshold.
 2. **Config source (§8):** "Option B" — a governance-config artifact — realized as the split **baked into the delegation contract**, not a separate mutable split store. **No `getBeneficiaries` composition and no operator-cut derivation** — "the split is whatever governance configures," so any DA/operator cut is just another configured entry.
-3. **Package placement** of `CouponReassignmentDelegation` (and the `SetupCouponReassignmentDelegation` / revoke actions): the `governance-rewards-automation-v1-rc2` package — renamed from `governance-rewards-v1` after team alignment, since the required `dso` field is not an SCU-compatible upgrade of it.
+3. **Package placement** of `CouponReassignmentDelegation` (and the `SetupCouponReassignmentDelegation` / revoke actions): the `governance-rewards-automation-v1` package — renamed from `governance-rewards-v1` after team alignment, since the required `dso` field is not an SCU-compatible upgrade of it.
 4. **Mode selector:** none. Mode A is built standalone; Mode B is a **one-shot** collection path (PR #256), not a runtime-selectable engine mode. There is no shared mode/config template and no per-decparty mode flag; the two must not run on the same decparty.
 
 ## 15. Milestone breakdown (proposed)
 
-- **M1 — DAML delegation + tests:** `CouponReassignmentDelegation` (template + `Delegation_Assign` + `Delegation_Revoke`) in the `governance-rewards-automation-v1-rc2` package + `daml.yaml` dep on `splice-api-reward-assignment-v1` + the DAML tests in §13. Reviewable in isolation; the `Delegation_Assign` security review lands here.
+- **M1 — DAML delegation + tests:** `CouponReassignmentDelegation` (template + `Delegation_Assign` + `Delegation_Revoke`) in the `governance-rewards-automation-v1` package + `daml.yaml` dep on `splice-api-reward-assignment-v1` + the DAML tests in §13. Reviewable in isolation; the `Delegation_Assign` security review lands here.
 - **M2 — Rust setup plumbing:** `ProposalType::SetupCouponReassignmentDelegation` (+ revoke) variant + `validate()` + `action_serializer` mapping + `ProposalPackage`/handler/`PackageConfig`; serialization + validation unit tests. Mirrors PR #256. Enables creating/replacing the delegation through governance.
 - **M3 — per-round automation:** the background loop — read active delegation, scan unassigned coupons, `select_assignable` (expiry margin), drain the set in creates-sized chunks via `Delegation_Assign` as a plain command; per-tick gating; Rust unit tests.
 - **M4 — devnet integration:** end-to-end — governance creates the delegation, a single member node assigns live `cbtc-network` coupons; IT test (needs Mode-B collection paused on `cbtc-network`).
