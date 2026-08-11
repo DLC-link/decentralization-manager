@@ -88,7 +88,6 @@ async fn main() -> Result {
             .with(
                 tracing_subscriber::fmt::layer()
                     .json()
-                    .flatten_event(true)
                     .with_ansi(false)
                     .with_filter(filter),
             )
