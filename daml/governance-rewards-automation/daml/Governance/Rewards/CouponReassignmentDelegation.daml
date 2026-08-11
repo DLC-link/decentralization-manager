@@ -35,19 +35,7 @@ template CouponReassignmentDelegation
       controller assigner
       do
         assertMsg "assigner must be listed on the delegation" (assigner `elem` assigners)
-        -- Fetch as the concrete RewardCouponV2, then check the dso. Both guards
-        -- are load-bearing: without the typed fetch, a look-alike implementation
-        -- whose view claims `provider = decparty` satisfies
-        -- RewardCoupon_AssignBeneficiaries' `controller (view this).provider`
-        -- and runs its own code with this delegation's authority; without the
-        -- dso check, any party can mint a genuine RewardCouponV2 naming itself
-        -- dso, and as a batch's primary it makes splice reject every real
-        -- coupon alongside it.
-        --
-        -- EVERY coupon is checked, not just the primary. splice is expected to
-        -- fetch the additional ones with the primary's dso, but nothing in this
-        -- choice's contract guarantees that, and leaving the other argument
-        -- position unguarded is the same hole the primary fetch closes.
+        -- Both guards are load-bearing; design §7 says why.
         forA_ (primaryCoupon :: additionalCoupons) $ \cid -> do
           coupon <- fetch (fromInterfaceContractId @RewardCouponV2 cid)
           assertMsg "coupon dso must match the delegation's dso" (coupon.dso == dso)

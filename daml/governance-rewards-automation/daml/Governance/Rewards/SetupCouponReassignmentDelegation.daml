@@ -35,18 +35,14 @@ template SetupCouponReassignmentDelegation
         description = "Create (or replace) the coupon-reassignment delegation."
 
       executeImpl = do
-        -- Execute-time guards: a direct ledger submit bypasses the Rust boundary.
         assertMsg "beneficiaries must not be empty" (not (null beneficiaries))
         assertMsg "at most 20 beneficiaries" (length beneficiaries <= 20)
         assertMsg "each percentage must be in (0,1]"
           (all (\b -> b.percentage > 0.0 && b.percentage <= 1.0) beneficiaries)
-        -- Splice requires unique beneficiaries, so a duplicate baked in here
-        -- would fail every later Delegation_Assign.
         assertMsg "beneficiaries must be unique" (unique (map (.beneficiary) beneficiaries))
         let total = sum (map (.percentage) beneficiaries)
         assertMsg "percentages must sum to 1.0" (total == 1.0)   -- exact Decimal
         assertMsg "assigners must not be empty" (not (null assigners))
-        -- Uniqueness only: on localnet one party legitimately wears several hats.
         assertMsg "assigners must be unique" (unique assigners)
         forA_ priorDelegation (`exercise` Delegation_Revoke)      -- atomic replace when Some
         _ <- create CouponReassignmentDelegation with
