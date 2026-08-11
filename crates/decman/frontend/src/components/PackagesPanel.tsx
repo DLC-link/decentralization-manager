@@ -103,8 +103,10 @@ export const PackagesPanel = ({
     [filteredComparison],
   );
 
-  const localPaging = usePagination(filteredSorted);
-  const comparisonPaging = usePagination(sortedComparison);
+  // This panel scrolls its rows in `scrollRef`, not the window, so paging has to
+  // reset that container rather than the document.
+  const localPaging = usePagination(filteredSorted, scrollRef);
+  const comparisonPaging = usePagination(sortedComparison, scrollRef);
   // The peer-comparison view swaps in its own table, so it pages its own rows.
   const paging = comparison ? comparisonPaging : localPaging;
 
