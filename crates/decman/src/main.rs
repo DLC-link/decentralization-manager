@@ -62,6 +62,13 @@ fn find_dir_arg() -> PathBuf {
     PathBuf::from(".")
 }
 
+/// JSON is the default so each `tracing` field becomes a queryable attribute in
+/// SigNoz. The console format stays available for a developer running the binary
+/// by hand: set `DECPM_LOG_FORMAT=text`.
+fn json_logs_enabled(format: Option<&str>) -> bool {
+    !format.is_some_and(|f| f.trim().eq_ignore_ascii_case("text"))
+}
+
 #[tokio::main]
 async fn main() -> Result {
     // Load .env from the root directory before clap parses,
@@ -76,9 +83,21 @@ async fn main() -> Result {
         EnvFilter::new("dec_party_manager=info,tokio_noise=error,hyper_noise=error")
     });
 
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer().with_filter(filter))
-        .init();
+    if json_logs_enabled(std::env::var("DECPM_LOG_FORMAT").ok().as_deref()) {
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .flatten_event(true)
+                    .with_ansi(false)
+                    .with_filter(filter),
+            )
+            .init();
+    } else {
+        tracing_subscriber::registry()
+            .with(tracing_subscriber::fmt::layer().with_filter(filter))
+            .init();
+    }
 
     let args = Cli::parse();
 
@@ -319,4 +338,31 @@ async fn main() -> Result {
 
     tracing::info!("Command completed successfully");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::json_logs_enabled;
+
+    #[test]
+    fn json_is_the_default_when_the_variable_is_unset() {
+        assert!(json_logs_enabled(None));
+    }
+
+    #[test]
+    fn text_selects_the_console_format() {
+        assert!(!json_logs_enabled(Some("text")));
+    }
+
+    #[test]
+    fn the_text_value_tolerates_case_and_padding() {
+        assert!(!json_logs_enabled(Some(" TEXT ")));
+    }
+
+    #[test]
+    fn any_other_value_stays_on_json() {
+        assert!(json_logs_enabled(Some("json")));
+        assert!(json_logs_enabled(Some("")));
+        assert!(json_logs_enabled(Some("pretty")));
+    }
 }
