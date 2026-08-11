@@ -752,12 +752,48 @@ pub async fn get_governance_confirmations(
         })
         .collect();
 
-    // Build domain actions from domain confirmations. Confirmations whose
-    // proposal isn't in this participant's active set are marked `orphaned`
-    // (rather than dropped) so the UI can offer a dismiss-only card — the
-    // underlying Confirmation contracts are still on-ledger and need to be
-    // expired explicitly to clear them.
-    let domain_actions: Vec<DomainGovernanceAction> = domain_confirmations
+    let domain_actions = build_domain_actions(
+        domain_confirmations,
+        proposal_infos,
+        proposal_infos_complete,
+        threshold,
+        now_seconds,
+    );
+
+    Ok((actions, domain_actions))
+}
+
+/// Label used for a proposal synthesized from a bare `GovernableAction`
+/// (no confirmations, and no `actionLabel` recovered from either the
+/// interface view or create-arguments).
+const FALLBACK_PROPOSAL_LABEL: &str = "Proposal";
+
+/// Merge confirmed domain proposals with the full active-proposal set.
+///
+/// `domain_confirmations` covers only proposals that already have at least
+/// one `GovernanceConfirmation`; `proposal_infos` covers every active
+/// `GovernableAction` visible to the party, confirmed or not. Confirmations
+/// whose proposal isn't in `proposal_infos` are marked `orphaned` (rather
+/// than dropped) so the UI can offer a dismiss-only card — the underlying
+/// Confirmation contracts are still on-ledger and need to be expired
+/// explicitly to clear them.
+///
+/// Whatever remains in `proposal_infos` after the confirmed proposals are
+/// enriched and removed is a proposal nobody has confirmed yet. Those are
+/// synthesized into zero-confirmation cards so a freshly created proposal is
+/// visible and confirmable from the notifications queue, instead of staying
+/// invisible until its first confirmation lands. Synthesis only runs when
+/// `proposal_infos_complete` is true — on a partial fetch we can't tell a
+/// genuinely new proposal from a proposal we simply failed to enrich, and
+/// it's better to miss a card for one refresh than to show a garbage one.
+fn build_domain_actions(
+    domain_confirmations: HashMap<String, (String, Vec<GovernanceConfirmation>)>,
+    mut proposal_infos: HashMap<String, ProposalInfo>,
+    proposal_infos_complete: bool,
+    threshold: usize,
+    now_seconds: i64,
+) -> Vec<DomainGovernanceAction> {
+    let mut domain_actions: Vec<DomainGovernanceAction> = domain_confirmations
         .into_iter()
         .map(|(proposal_cid, (action_label, mut confirmations))| {
             confirmations.sort_by_key(|c| Reverse(c.created_at));
@@ -813,7 +849,31 @@ pub async fn get_governance_confirmations(
         })
         .collect();
 
-    Ok((actions, domain_actions))
+    if proposal_infos_complete {
+        for (proposal_cid, info) in proposal_infos {
+            let action_label = info
+                .action_label
+                .unwrap_or_else(|| FALLBACK_PROPOSAL_LABEL.to_string());
+            let service_request_details = match action_label.as_str() {
+                "CreateUserServiceRequest" | "CreateProviderServiceRequest" => info.service_request,
+                _ => None,
+            };
+            domain_actions.push(DomainGovernanceAction {
+                proposal_cid,
+                action_label,
+                description: info.description,
+                confirmations: Vec::new(),
+                confirmation_count: 0,
+                can_execute: false,
+                orphaned: false,
+                transfer_details: info.transfer,
+                accept_transfer_details: info.accept_transfer,
+                service_request_details,
+            });
+        }
+    }
+
+    domain_actions
 }
 
 /// Fetch governance confirmations using WildcardFilter (for test mode)
@@ -1136,6 +1196,25 @@ pub struct ProposalInfo {
     /// `Create{User,Provider}ServiceRequest` proposals so the notification card
     /// can render the full summary.
     pub service_request: Option<ServiceRequestDetails>,
+    /// `actionLabel` from the `GovernableActionView` interface view, falling
+    /// back to a same-named create-argument field. `None` when neither is
+    /// present (e.g. a wildcard-mode fetch that didn't request the view) —
+    /// callers fall back to a generic label in that case.
+    pub action_label: Option<String>,
+}
+
+/// Pull `actionLabel` out of a `GovernableAction` interface view. Every
+/// proposal template implements the interface with this field, so this is
+/// the authoritative source; `extract_proposal_info` only falls back to
+/// create-arguments when the view wasn't requested (test-mode wildcard fetch).
+fn extract_action_label_from_view(created: &CreatedEvent) -> Option<String> {
+    let view = created.interface_views.iter().find(|v| {
+        v.interface_id.as_ref().is_some_and(|id| {
+            id.module_name == "Governance.Action" && id.entity_name == "GovernableAction"
+        })
+    })?;
+    let view_record = view.view_value.as_ref()?;
+    field_text(view_record, "actionLabel")
 }
 
 /// Extract proposal info from a GovernableAction contract's create_arguments.
@@ -1173,6 +1252,8 @@ fn extract_proposal_info(
 
     let transfer = extract_transfer_proposal_details(record);
     let service_request = extract_service_request_details(record);
+    let action_label =
+        extract_action_label_from_view(created).or_else(|| field_text(record, "actionLabel"));
 
     // `AcceptTransferProposal`s carry `transferInstructionCid` instead of the
     // transfer fields. Capture it here; the post-pass in `fetch_proposal_infos`
@@ -1199,6 +1280,7 @@ fn extract_proposal_info(
             accept_transfer_instruction_cid,
             accept_transfer: None,
             service_request,
+            action_label,
         },
     );
 }
@@ -4617,5 +4699,173 @@ mod tests {
             record.fields.retain(|f| f.label != "holder");
         }
         assert!(extract_credential_offer_info(&event).is_none());
+    }
+
+    // ------------------------------------------------------------------------
+    // extract_action_label_from_view / build_domain_actions
+    //
+    // Covers the pending-approvals fix: every active GovernableAction should
+    // surface, confirmations or not, using only the interface view.
+    // ------------------------------------------------------------------------
+
+    fn governable_action_view_event(action_label: &str) -> CreatedEvent {
+        let view = InterfaceView {
+            interface_id: Some(Identifier {
+                package_id: "#governance-action-v1".to_string(),
+                module_name: "Governance.Action".to_string(),
+                entity_name: "GovernableAction".to_string(),
+            }),
+            view_status: None,
+            view_value: Some(Record {
+                record_id: None,
+                fields: vec![field("actionLabel", text_value(action_label))],
+            }),
+            implementation_package_id: String::new(),
+        };
+        CreatedEvent {
+            offset: 0,
+            node_id: 0,
+            contract_id: "proposal-cid".to_string(),
+            template_id: None,
+            contract_key: None,
+            create_arguments: None,
+            created_event_blob: vec![],
+            interface_views: vec![view],
+            witness_parties: vec![],
+            signatories: vec![],
+            observers: vec![],
+            created_at: None,
+            package_name: String::new(),
+            representative_package_id: String::new(),
+            acs_delta: false,
+            contract_key_hash: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn extract_action_label_from_view_reads_the_governable_action_view() {
+        let event = governable_action_view_event("SetupCcPreapproval");
+        assert_eq!(
+            extract_action_label_from_view(&event),
+            Some("SetupCcPreapproval".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_action_label_from_view_absent_when_no_matching_view() {
+        let mut event = governable_action_view_event("SetupCcPreapproval");
+        event.interface_views.clear();
+        assert_eq!(extract_action_label_from_view(&event), None);
+    }
+
+    fn proposal_info(action_label: Option<&str>) -> ProposalInfo {
+        ProposalInfo {
+            description: Some("a description".to_string()),
+            transfer: None,
+            accept_transfer_instruction_cid: None,
+            accept_transfer: None,
+            service_request: None,
+            action_label: action_label.map(str::to_string),
+        }
+    }
+
+    fn confirmation(confirming_party: &str) -> GovernanceConfirmation {
+        GovernanceConfirmation {
+            contract_id: format!("confirmation-{confirming_party}"),
+            action: ActionType::GovernanceSetThreshold { new_threshold: 0 },
+            confirming_party: CantonId::parse(&format!(
+                "{confirming_party}::1220aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ))
+            .unwrap(),
+            created_at: 0,
+            expires_at: 0,
+        }
+    }
+
+    #[test]
+    fn build_domain_actions_synthesizes_a_card_for_an_unconfirmed_proposal() {
+        let domain_confirmations = HashMap::new();
+        let mut proposal_infos = HashMap::new();
+        proposal_infos.insert(
+            "new-proposal-cid".to_string(),
+            proposal_info(Some("SetupCcPreapproval")),
+        );
+
+        let actions = build_domain_actions(domain_confirmations, proposal_infos, true, 2, 0);
+
+        assert_eq!(actions.len(), 1);
+        let action = &actions[0];
+        assert_eq!(action.proposal_cid, "new-proposal-cid");
+        assert_eq!(action.action_label, "SetupCcPreapproval");
+        assert_eq!(action.confirmation_count, 0);
+        assert!(action.confirmations.is_empty());
+        assert!(!action.can_execute);
+        assert!(!action.orphaned);
+    }
+
+    #[test]
+    fn build_domain_actions_leftover_label_falls_back_when_absent() {
+        let domain_confirmations = HashMap::new();
+        let mut proposal_infos = HashMap::new();
+        proposal_infos.insert("new-proposal-cid".to_string(), proposal_info(None));
+
+        let actions = build_domain_actions(domain_confirmations, proposal_infos, true, 2, 0);
+
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].action_label, FALLBACK_PROPOSAL_LABEL);
+    }
+
+    #[test]
+    fn build_domain_actions_does_not_duplicate_an_enriched_proposal() {
+        let mut domain_confirmations = HashMap::new();
+        domain_confirmations.insert(
+            "confirmed-cid".to_string(),
+            (
+                "SetupCcPreapproval".to_string(),
+                vec![confirmation("alice")],
+            ),
+        );
+        let mut proposal_infos = HashMap::new();
+        proposal_infos.insert(
+            "confirmed-cid".to_string(),
+            proposal_info(Some("SetupCcPreapproval")),
+        );
+
+        let actions = build_domain_actions(domain_confirmations, proposal_infos, true, 2, 0);
+
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].confirmation_count, 1);
+    }
+
+    #[test]
+    fn build_domain_actions_skips_synthesis_on_incomplete_fetch() {
+        let domain_confirmations = HashMap::new();
+        let mut proposal_infos = HashMap::new();
+        proposal_infos.insert(
+            "new-proposal-cid".to_string(),
+            proposal_info(Some("SetupCcPreapproval")),
+        );
+
+        let actions = build_domain_actions(domain_confirmations, proposal_infos, false, 2, 0);
+
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn build_domain_actions_does_not_orphan_confirmations_on_incomplete_fetch() {
+        let mut domain_confirmations = HashMap::new();
+        domain_confirmations.insert(
+            "missing-cid".to_string(),
+            (
+                "SetupCcPreapproval".to_string(),
+                vec![confirmation("alice")],
+            ),
+        );
+        let proposal_infos = HashMap::new();
+
+        let actions = build_domain_actions(domain_confirmations, proposal_infos, false, 2, 0);
+
+        assert_eq!(actions.len(), 1);
+        assert!(!actions[0].orphaned);
     }
 }
