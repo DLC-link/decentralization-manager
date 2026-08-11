@@ -131,82 +131,87 @@ export const HoldingsSection = ({
   }
 
   return (
-    <Box sx={{ overflowX: "auto" }}>
-      <Table size="small">
-        <TableHead>
-          <TableRow>
-            <TableCell sx={{ py: 1 }}>
-              <TextHelp text="The token's id (for Canton Coin this is 'Amulet', displayed as 'CC' here).">
-                Asset
-              </TextHelp>
-            </TableCell>
-            <TableCell sx={{ py: 1 }}>
-              <TextHelp text="The party that issues / administers the token.">
-                Admin
-              </TextHelp>
-            </TableCell>
-            <TableCell sx={{ py: 1 }} align="right">
-              <TextHelp text="Total amount this party holds for the asset, summed across all Holding contracts.">
-                Amount
-              </TextHelp>
-            </TableCell>
-            <TableCell sx={{ py: 1 }}>
-              <TextHelp text="Whether a TransferPreapproval exists for this party on this instrument — needed to receive transfers without manual accept.">
-                Preapproval set up
-              </TextHelp>
-            </TableCell>
-          </TableRow>
-        </TableHead>
-        <TableBody>
-          {pageItems.map((h, idx) => (
-            <TableRow
-              key={`${h.instrument_admin}::${h.instrument_id}`}
-              sx={zebraRow(idx)}
-            >
-              <TableCell
-                sx={{ py: 1, fontFamily: "monospace", fontSize: "0.85rem" }}
-              >
-                {/* Canton Coin's instrument id on the Splice token-standard
-                  * is the literal "Amulet" — display it as "CC" since that's
-                  * what users actually call it everywhere else in the UI. */}
-                {h.instrument_id === "Amulet" ? "CC" : h.instrument_id}
+    // The horizontal scroller wraps the table only: an overflow ancestor would
+    // capture the footer's `position: sticky` and pin it to a box that never
+    // scrolls vertically.
+    <Box>
+      <Box sx={{ overflowX: "auto" }}>
+        <Table size="small">
+          <TableHead>
+            <TableRow>
+              <TableCell sx={{ py: 1 }}>
+                <TextHelp text="The token's id (for Canton Coin this is 'Amulet', displayed as 'CC' here).">
+                  Asset
+                </TextHelp>
               </TableCell>
               <TableCell sx={{ py: 1 }}>
-                <CopyableText
-                  text={h.instrument_admin}
-                  truncate={{ start: 8, end: 8 }}
-                  variant="caption"
-                />
+                <TextHelp text="The party that issues / administers the token.">
+                  Admin
+                </TextHelp>
               </TableCell>
-              <TableCell
-                sx={{
-                  py: 1,
-                  fontFamily: "monospace",
-                  fontSize: "0.85rem",
-                }}
-                align="right"
-              >
-                {h.amount}
-                {Number(h.locked_amount) > 0 && (
-                  <Box
-                    component="span"
-                    sx={{ color: "warning.main", ml: 0.5 }}
-                  >
-                    ({h.locked_amount} locked)
-                  </Box>
-                )}
+              <TableCell sx={{ py: 1 }} align="right">
+                <TextHelp text="Total amount this party holds for the asset, summed across all Holding contracts.">
+                  Amount
+                </TextHelp>
               </TableCell>
               <TableCell sx={{ py: 1 }}>
-                <Chip
-                  label={h.preapproval_set_up ? "Yes" : "No"}
-                  size="small"
-                  color={h.preapproval_set_up ? "success" : "default"}
-                />
+                <TextHelp text="Whether a TransferPreapproval exists for this party on this instrument — needed to receive transfers without manual accept.">
+                  Preapproval set up
+                </TextHelp>
               </TableCell>
             </TableRow>
-          ))}
-        </TableBody>
-      </Table>
+          </TableHead>
+          <TableBody>
+            {pageItems.map((h, idx) => (
+              <TableRow
+                key={`${h.instrument_admin}::${h.instrument_id}`}
+                sx={zebraRow(idx)}
+              >
+                <TableCell
+                  sx={{ py: 1, fontFamily: "monospace", fontSize: "0.85rem" }}
+                >
+                  {/* Canton Coin's instrument id on the Splice token-standard
+                    * is the literal "Amulet" — display it as "CC" since that's
+                    * what users actually call it everywhere else in the UI. */}
+                  {h.instrument_id === "Amulet" ? "CC" : h.instrument_id}
+                </TableCell>
+                <TableCell sx={{ py: 1 }}>
+                  <CopyableText
+                    text={h.instrument_admin}
+                    truncate={{ start: 8, end: 8 }}
+                    variant="caption"
+                  />
+                </TableCell>
+                <TableCell
+                  sx={{
+                    py: 1,
+                    fontFamily: "monospace",
+                    fontSize: "0.85rem",
+                  }}
+                  align="right"
+                >
+                  {h.amount}
+                  {Number(h.locked_amount) > 0 && (
+                    <Box
+                      component="span"
+                      sx={{ color: "warning.main", ml: 0.5 }}
+                    >
+                      ({h.locked_amount} locked)
+                    </Box>
+                  )}
+                </TableCell>
+                <TableCell sx={{ py: 1 }}>
+                  <Chip
+                    label={h.preapproval_set_up ? "Yes" : "No"}
+                    size="small"
+                    color={h.preapproval_set_up ? "success" : "default"}
+                  />
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </Box>
       <PaginationControls
         page={page}
         pageCount={pageCount}

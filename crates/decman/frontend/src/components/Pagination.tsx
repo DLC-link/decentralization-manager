@@ -27,6 +27,15 @@ const footerSx = {
   mt: 0.5,
   borderTop: 1,
   borderColor: "divider",
+  // Pinned to the bottom of whatever scrolls. Pages differ in height — the
+  // last one is usually short — so a static footer jumps out of view the
+  // moment you change page and has to be chased back down. Needs an opaque
+  // fill so rows don't show through it while they scroll past. A no-op in
+  // containers that don't scroll (the Packages panel already pins it).
+  position: "sticky",
+  bottom: 0,
+  zIndex: 2,
+  bgcolor: "background.paper",
 };
 
 const rangeSx = {
