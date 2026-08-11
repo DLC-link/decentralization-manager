@@ -23,7 +23,11 @@ html, body {
   padding: 0;
   width: 100%;
   min-height: 100vh;
-  overflow-x: hidden;
+  /* `clip` rather than `hidden`: both suppress the horizontal scrollbar, but
+     `hidden` makes this a scroll container, and `position: sticky` binds to the
+     nearest scrolling ancestor — which would stop the paginated tables' footers
+     from ever pinning to the viewport. */
+  overflow-x: clip;
 }
 
 @media (prefers-reduced-motion: no-preference) {
