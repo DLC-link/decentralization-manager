@@ -90,7 +90,7 @@ when_accept_mint_request_executed f = do
     proposer = f.parties.member1
     mintRequestCid = f.mintRequestCid
     instrumentConfigurationCid = f.artifacts.instrumentConfigurationCid
-    issuerCredentialCids = []
+    issuerCredentialCids = None
     description = "Accept holder-initiated mint"
     extraArgsMeta = Metadata with values = TextMap.empty
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
@@ -123,7 +123,7 @@ when_outsider_confirms_accept_mint f = do
     proposer = f.parties.member1
     mintRequestCid = f.mintRequestCid
     instrumentConfigurationCid = f.artifacts.instrumentConfigurationCid
-    issuerCredentialCids = []
+    issuerCredentialCids = None
     description = "Accept holder-initiated mint"
     extraArgsMeta = Metadata with values = TextMap.empty
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid

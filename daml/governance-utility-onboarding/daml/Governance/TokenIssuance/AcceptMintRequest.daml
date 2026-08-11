@@ -8,6 +8,7 @@
 -- the original requester.
 module Governance.TokenIssuance.AcceptMintRequest where
 
+import DA.Optional (fromOptional)
 import DA.TextMap qualified as TextMap
 
 import Splice.Api.Token.MetadataV1
@@ -27,11 +28,13 @@ template AcceptMintRequest
     proposer : Party
     mintRequestCid : ContractId MintRequest
     instrumentConfigurationCid : ContractId InstrumentConfiguration
-    issuerCredentialCids : [ContractId Credential]
-      -- ^ Credentials proving the mint holder meets the instrument's
-      -- issuer requirements. Empty for instruments without requirements.
     description : Text
     extraArgsMeta : Metadata
+    issuerCredentialCids : Optional [ContractId Credential]
+      -- ^ Credentials proving the mint holder meets the instrument's
+      -- issuer requirements. None or Some [] both mean no credentials.
+      -- Optional and declared last so 0.2.0 is a valid smart-contract
+      -- upgrade of 0.1.0, which lacked this field.
   where
     signatory proposer
     observer governanceParty
@@ -49,7 +52,8 @@ template AcceptMintRequest
                 [ (instrumentConfigurationContextKey,
                    AV_ContractId $ coerceContractId instrumentConfigurationCid)
                 , (issuerCredentialsContextKey,
-                   AV_List $ map (AV_ContractId . coerceContractId) issuerCredentialCids)
+                   AV_List $ map (AV_ContractId . coerceContractId) $
+                     fromOptional [] issuerCredentialCids)
                 ]
         _ <- exercise mintRequestCid MintRequest_Accept with
           extraArgs = ExtraArgs with

@@ -99,7 +99,7 @@ acceptMintViaGovernance fx mintRequestCid issuer = do
     proposer = fx.f.registrarStack.member1
     mintRequestCid
     instrumentConfigurationCid = fx.artifacts.instrumentConfigurationCid
-    issuerCredentialCids = credentialCids
+    issuerCredentialCids = Some credentialCids
     description = "Accept issuer-initiated mint"
     extraArgsMeta = emptyMeta
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
@@ -136,7 +136,7 @@ acceptBurnViaGovernance fx burnRequestCid issuer = do
     proposer = fx.f.registrarStack.member1
     burnRequestCid
     instrumentConfigurationCid = fx.artifacts.instrumentConfigurationCid
-    issuerCredentialCids = credentialCids
+    issuerCredentialCids = Some credentialCids
     description = "Accept issuer-initiated burn"
     extraArgsMeta = emptyMeta
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid

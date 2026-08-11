@@ -242,6 +242,14 @@ fn serialize_instrument_id(id: &InstrumentId) -> Value {
     ])
 }
 
+fn make_optional_list(values: Vec<Value>) -> Value {
+    Value {
+        sum: Some(value::Sum::Optional(Box::new(Optional {
+            value: Some(Box::new(make_list(values))),
+        }))),
+    }
+}
+
 fn make_optional_numeric(opt: &Option<DamlDecimal>) -> Value {
     Value {
         sum: Some(value::Sum::Optional(Box::new(Optional {
@@ -1453,17 +1461,19 @@ pub fn build_proposal_create_args(
                         "instrumentConfigurationCid",
                         make_contract_id(instrument_configuration_cid),
                     ),
+                    field("description", make_text(description)),
+                    field("extraArgsMeta", make_empty_metadata()),
+                    // Optional and last: the field was appended in package
+                    // version 0.2.0 under Daml smart-contract-upgrade rules.
                     field(
                         "issuerCredentialCids",
-                        make_list(
+                        make_optional_list(
                             issuer_credential_cids
                                 .iter()
                                 .map(|cid| make_contract_id(cid))
                                 .collect(),
                         ),
                     ),
-                    field("description", make_text(description)),
-                    field("extraArgsMeta", make_empty_metadata()),
                 ],
             },
         ),
@@ -1486,17 +1496,19 @@ pub fn build_proposal_create_args(
                         "instrumentConfigurationCid",
                         make_contract_id(instrument_configuration_cid),
                     ),
+                    field("description", make_text(description)),
+                    field("extraArgsMeta", make_empty_metadata()),
+                    // Optional and last: the field was appended in package
+                    // version 0.2.0 under Daml smart-contract-upgrade rules.
                     field(
                         "issuerCredentialCids",
-                        make_list(
+                        make_optional_list(
                             issuer_credential_cids
                                 .iter()
                                 .map(|cid| make_contract_id(cid))
                                 .collect(),
                         ),
                     ),
-                    field("description", make_text(description)),
-                    field("extraArgsMeta", make_empty_metadata()),
                 ],
             },
         ),
@@ -2972,9 +2984,9 @@ mod tests {
                     "proposer",
                     "mintRequestCid",
                     "instrumentConfigurationCid",
-                    "issuerCredentialCids",
                     "description",
                     "extraArgsMeta",
+                    "issuerCredentialCids",
                 ],
             },
             Case {
@@ -2992,9 +3004,9 @@ mod tests {
                     "proposer",
                     "burnRequestCid",
                     "instrumentConfigurationCid",
-                    "issuerCredentialCids",
                     "description",
                     "extraArgsMeta",
+                    "issuerCredentialCids",
                 ],
             },
             Case {
@@ -3120,8 +3132,8 @@ mod tests {
     #[test]
     fn build_proposal_accept_requests_serialize_issuer_credentials() -> Result {
         // The accept arms forward the supplied credential cids into the
-        // `issuerCredentialCids` list as ContractId values. Labels alone
-        // cannot catch a regression to the old hardcoded empty list.
+        // `issuerCredentialCids` field as Some(list of ContractId). Labels
+        // alone cannot catch a regression to the old hardcoded empty list.
         let proposals = [
             ProposalType::AcceptMintRequest {
                 mint_request_cid: "mrc".to_string(),
@@ -3140,10 +3152,18 @@ mod tests {
             let (_, module, _, record) =
                 build_proposal_create_args("gov", "proposer", &proposal, None, None)?;
             let credentials = field_value(&record, "issuerCredentialCids");
-            let elements = match &credentials.sum {
+            let inner = match &credentials.sum {
+                Some(value::Sum::Optional(o)) => o.value.as_deref(),
+                other => {
+                    panic!("expected Optional for issuerCredentialCids in {module}, got {other:?}")
+                }
+            };
+            let inner =
+                inner.unwrap_or_else(|| panic!("expected Some list in {module}, got None"));
+            let elements = match &inner.sum {
                 Some(value::Sum::List(l)) => &l.elements,
                 other => {
-                    panic!("expected List for issuerCredentialCids in {module}, got {other:?}")
+                    panic!("expected List inside Optional in {module}, got {other:?}")
                 }
             };
             let cids: Vec<_> = elements
