@@ -287,10 +287,6 @@ pub struct NodeConfig {
     /// disables the tenant API (except in insecure/test mode). Not serialized.
     #[serde(skip)]
     pub tenant_api_keys: std::collections::HashSet<String>,
-    /// Ledger credentials the tenant API transacts under. Not serialized
-    /// (carries a client secret).
-    #[serde(skip)]
-    pub tenant_ledger: Option<TenantLedgerConfig>,
     /// Root directory containing data/ subdirectory
     #[serde(skip)]
     root_dir: PathBuf,
@@ -311,32 +307,9 @@ impl Default for NodeConfig {
             insecure: false,
             insecure_auth: InsecureAuthConfig::default(),
             tenant_api_keys: std::collections::HashSet::new(),
-            tenant_ledger: None,
             root_dir: PathBuf::new(),
         }
     }
-}
-
-/// The ledger user the tenant API acts under, and the client credentials that
-/// mint its token.
-///
-/// This exists so the broad rights that serving external parties needs live on
-/// their own identity. A wallet-held external party has no ledger user, so this
-/// node reads and relays for it, which takes `CanReadAsAnyParty` and
-/// `CanExecuteAsAnyParty`. Those rights let the holder read every party on the
-/// participant, so they must not sit on a dec party's user: granting rights to
-/// one dec party would otherwise widen what that party's user can see.
-///
-/// Grant this user exactly those two rights, and never `CanActAsAnyParty` — the
-/// node relays a submission the wallet signed and must not be able to originate
-/// one.
-#[derive(Clone, Debug)]
-pub struct TenantLedgerConfig {
-    /// The Canton ledger user id, e.g. `decman-tenant`.
-    pub user_id: String,
-    /// IdP client id whose service account maps to `user_id`.
-    pub client_id: String,
-    pub client_secret: String,
 }
 
 /// Node-specific information

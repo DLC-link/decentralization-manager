@@ -8,12 +8,11 @@
 //! locally, then submits the same signed bundle to `POST /v0/tenant/onboard` on
 //! EACH host itself — DPM never relays between hosts and never sees the private
 //! key. Asserts each host reports the party hosted via
-//! `GET /v0/tenant/{party}/status` and that the ACS is readable via
-//! `GET /v0/tenant/{party}/acs`.
+//! `GET /v0/tenant/{party}/status`.
 //!
-//! (Full transacting — prepare-submission/execute-submission of a real contract
-//! — is exercised against DevNet, since it needs a concrete template; here we
-//! confirm onboarding + the ACS read end-to-end.)
+//! Transacting as the party is not part of the tenant API — a wallet does that
+//! directly against Canton with the key it holds — so this phase covers
+//! onboarding only.
 
 use std::time::Duration;
 
@@ -163,31 +162,6 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             })
         }
     })
-    .then(
-        "party ACS readable via /v0/tenant/{party}/acs",
-        Duration::from_secs(30),
-        {
-            let party_id = party_id.clone();
-            move |f, _| {
-                let party_id = party_id.clone();
-                Box::pin(async move {
-                    let resp: Value = match f
-                        .get_json(f.p1.http, &format!("/v0/tenant/{party_id}/acs"))
-                        .await
-                    {
-                        Ok(r) => r,
-                        // Surface a real HTTP error instead of retrying it away.
-                        Err(e) => return Some(Err(e)),
-                    };
-                    // A freshly onboarded party has no contracts yet; the check is
-                    // that the endpoint answers with a contracts array.
-                    resp.get("contracts")
-                        .and_then(Value::as_array)
-                        .map(|_| Ok(()))
-                })
-            }
-        },
-    )
     .run(f)
     .await
 }

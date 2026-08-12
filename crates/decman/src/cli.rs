@@ -213,22 +213,6 @@ pub enum Commands {
         #[arg(long, env = "DECPM_TENANT_API_KEYS")]
         tenant_api_keys: Option<String>,
 
-        /// Canton ledger user the tenant API transacts under. Give this user
-        /// `CanReadAsAnyParty` + `CanExecuteAsAnyParty` and nothing else: an
-        /// external party has no ledger user of its own, so this node reads and
-        /// relays for it. Keep it separate from any dec party's user, because
-        /// those rights can read every party on the participant.
-        #[arg(long, env = "DECPM_TENANT_LEDGER_USER_ID")]
-        tenant_ledger_user_id: Option<String>,
-
-        /// IdP client id whose service account maps to the tenant ledger user.
-        #[arg(long, env = "DECPM_TENANT_LEDGER_CLIENT_ID")]
-        tenant_ledger_client_id: Option<String>,
-
-        /// Client secret for `--tenant-ledger-client-id`.
-        #[arg(long, env = "DECPM_TENANT_LEDGER_CLIENT_SECRET")]
-        tenant_ledger_client_secret: Option<String>,
-
         // Timeouts
         /// Noise handshake timeout in seconds
         #[arg(long, env = "DECPM_TIMEOUT_HANDSHAKE")]

@@ -29,7 +29,7 @@ pub(crate) fn make_party(p: impl std::fmt::Display) -> Value {
     }
 }
 
-pub(super) fn make_text(t: &str) -> Value {
+fn make_text(t: &str) -> Value {
     Value {
         sum: Some(value::Sum::Text(t.to_string())),
     }
@@ -41,7 +41,7 @@ fn make_int64(n: i64) -> Value {
     }
 }
 
-pub(super) fn make_numeric(d: &str) -> Value {
+fn make_numeric(d: &str) -> Value {
     Value {
         sum: Some(value::Sum::Numeric(d.to_string())),
     }
@@ -59,13 +59,6 @@ pub(crate) fn make_contract_id(c: &str) -> Value {
     }
 }
 
-/// A Daml `Time`, which the Ledger API carries as microseconds since the epoch.
-pub(crate) fn make_timestamp(micros: i64) -> Value {
-    Value {
-        sum: Some(value::Sum::Timestamp(micros)),
-    }
-}
-
 pub(crate) fn field(label: &str, value: Value) -> RecordField {
     RecordField {
         label: label.to_string(),
@@ -73,7 +66,7 @@ pub(crate) fn field(label: &str, value: Value) -> RecordField {
     }
 }
 
-pub(super) fn make_record(fields: Vec<RecordField>) -> Value {
+fn make_record(fields: Vec<RecordField>) -> Value {
     Value {
         sum: Some(value::Sum::Record(Record {
             record_id: None,
@@ -120,7 +113,7 @@ pub(crate) fn make_text_map(entries: Vec<(String, Value)>) -> Value {
 // is typed `TextMap AnyValue` (see `Splice.Api.Token.MetadataV1`). Both must be
 // sent as a `TextMap` value — an empty `GenMap` is rejected by Canton's command
 // preprocessor with `mismatching type: TextMap ... and value: ValueGenMap()`.
-pub(super) fn make_empty_metadata() -> Value {
+fn make_empty_metadata() -> Value {
     make_record(vec![field("values", make_empty_text_map())])
 }
 
@@ -227,7 +220,7 @@ fn make_any_value(v: &ContextValue) -> Result<Value> {
 
 /// Build the `extraArgs` record with the choice-context values populated from
 /// a registry response (e.g. `registry::accept_context::get`).
-pub(super) fn make_extra_args_from_context(ctx: &ChoiceContext) -> Result<Value> {
+fn make_extra_args_from_context(ctx: &ChoiceContext) -> Result<Value> {
     let mut entries: Vec<(String, Value)> = ctx
         .values
         .iter()

@@ -63,19 +63,15 @@ later; a threshold of `N` is rejected.
 
 ## Transacting
 
-Every action prepares on a host, signs the returned transaction hash locally, and
-executes it — only the signature crosses back, so the node cannot originate a
-submission on its own.
+Transacting as the party is **not** part of DecMan's tenant API, and not part of
+this crate's node-facing client. Once a party is onboarded it is an ordinary
+Canton external party: a wallet reads its contracts and signs its submissions
+directly against Canton's Ledger API, authorizing each with the
+[`ExternalKeyPair`] it holds. DecMan's role ends at onboarding — it has no business
+holding a Ledger-API credential on the party's behalf.
 
-- **Token-standard transfers** — [`send_transfer`] and [`accept_transfer`] move
-  assets. Canton Coin and utility instruments like CBTC go through the same calls:
-  the host resolves the instrument's registry, the transfer factory, and the choice
-  context, and the wallet only signs. A transfer to a party without a
-  `TransferPreapproval` — which is every fresh wallet party — escrows the funds and
-  leaves an offer the receiver accepts.
-- **Anything else** — [`create_contract`] and [`exercise_choice`] for a plain
-  create or an arbitrary choice, with disclosed contracts when the choice needs
-  them.
+This crate gives you the two halves a wallet needs for that: [`ExternalKeyPair`]
+for the signing, and the onboarding flow above to bring the party up.
 
 ## Why the key belongs in the embedding process
 

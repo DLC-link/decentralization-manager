@@ -179,9 +179,6 @@ async fn run() -> Result {
             canton_hmac_audience,
             canton_hmac_subject,
             tenant_api_keys,
-            tenant_ledger_user_id,
-            tenant_ledger_client_id,
-            tenant_ledger_client_secret,
             ..
         } => {
             if let Some(key) = db_encryption_key {
@@ -317,31 +314,6 @@ async fn run() -> Result {
                         .collect()
                 })
                 .unwrap_or_default();
-
-            // All three or none. A partial set would otherwise start the node and
-            // fail only when a wallet first tried to transact.
-            config.tenant_ledger = match (
-                tenant_ledger_user_id.as_deref().map(str::trim),
-                tenant_ledger_client_id.as_deref().map(str::trim),
-                tenant_ledger_client_secret.as_deref().map(str::trim),
-            ) {
-                (Some(user_id), Some(client_id), Some(secret))
-                    if !user_id.is_empty() && !client_id.is_empty() && !secret.is_empty() =>
-                {
-                    Some(dec_party_manager::config::TenantLedgerConfig {
-                        user_id: user_id.to_string(),
-                        client_id: client_id.to_string(),
-                        client_secret: secret.to_string(),
-                    })
-                }
-                (None, None, None) => None,
-                _ => {
-                    anyhow::bail!(
-                        "DECPM_TENANT_LEDGER_USER_ID, DECPM_TENANT_LEDGER_CLIENT_ID and \
-                         DECPM_TENANT_LEDGER_CLIENT_SECRET must be set together, or all left unset"
-                    );
-                }
-            };
 
             config.insecure = *insecure;
             // Only ingest the unsafe HMAC settings when insecure mode is on;
