@@ -69,6 +69,21 @@ fn json_logs_enabled(format: Option<&str>) -> bool {
     !format.is_some_and(|f| f.trim().eq_ignore_ascii_case("text"))
 }
 
+/// The layer whose output the SigNoz log pipeline parses. `severity_parser`
+/// reads `level` and `timestamp`, so both stay at the top level, and the event's
+/// own fields nest under `fields`. `with_ansi(false)` drops the colouring, which
+/// the layer applies even when stdout is not a terminal.
+fn json_layer<S, W>(writer: W) -> impl tracing_subscriber::Layer<S>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    W: for<'a> tracing_subscriber::fmt::MakeWriter<'a> + 'static,
+{
+    tracing_subscriber::fmt::layer()
+        .json()
+        .with_ansi(false)
+        .with_writer(writer)
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     match run().await {
@@ -99,12 +114,7 @@ async fn run() -> Result {
 
     if json_logs_enabled(std::env::var("DECPM_LOG_FORMAT").ok().as_deref()) {
         tracing_subscriber::registry()
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .json()
-                    .with_ansi(false)
-                    .with_filter(filter),
-            )
+            .with(json_layer(std::io::stdout).with_filter(filter))
             .init();
     } else {
         tracing_subscriber::registry()
@@ -363,7 +373,85 @@ async fn run() -> Result {
 
 #[cfg(test)]
 mod tests {
-    use super::json_logs_enabled;
+    use std::sync::{Arc, Mutex};
+
+    use anyhow::anyhow;
+    use tracing_subscriber::{fmt::MakeWriter, prelude::*};
+
+    use super::{json_layer, json_logs_enabled};
+
+    /// A writer the test reads back once the layer has written to it.
+    #[derive(Clone, Default)]
+    struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedBuffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let mut written = self
+                .0
+                .lock()
+                .map_err(|_| std::io::Error::other("the buffer lock is poisoned"))?;
+            written.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for SharedBuffer {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// The dlc-infra log pipeline reads this exact shape. `severity_parser`
+    /// takes `level` and `timestamp` from the top level, and `json_parser`
+    /// flattens `fields` to the leaf key, so `count` arrives as a numeric
+    /// attribute. Adding `.flatten_event(true)` breaks both, and the string
+    /// tests below would still pass.
+    #[test]
+    fn the_json_line_carries_the_shape_the_pipeline_parses() -> anyhow::Result<()> {
+        let buffer = SharedBuffer::default();
+        let subscriber = tracing_subscriber::registry().with(json_layer(buffer.clone()));
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(
+                count = 7,
+                decparty = "cbtc-network::1220",
+                "reassigned coupon batch"
+            );
+        });
+
+        let written = buffer
+            .0
+            .lock()
+            .map_err(|_| anyhow!("the buffer lock is poisoned"))?
+            .clone();
+        let line = String::from_utf8(written)?;
+        assert!(
+            !line.contains('\u{1b}'),
+            "an ANSI escape survived into the line: {line}"
+        );
+
+        let event: serde_json::Value = serde_json::from_str(line.trim())?;
+        assert_eq!(event["level"], "INFO");
+        assert!(
+            event["timestamp"].is_string(),
+            "the severity parser needs a top-level timestamp: {event}"
+        );
+        assert_eq!(event["fields"]["message"], "reassigned coupon batch");
+        assert_eq!(event["fields"]["decparty"], "cbtc-network::1220");
+        assert_eq!(event["fields"]["count"], 7);
+        assert!(
+            event["fields"]["count"].is_number(),
+            "count must stay numeric so an alert can compare it: {event}"
+        );
+
+        Ok(())
+    }
 
     #[test]
     fn json_is_the_default_when_the_variable_is_unset() {
