@@ -21,6 +21,12 @@ use crate::{
     },
 };
 
+/// Rows per page for every paginated list, on the wire and in the UI. Drives
+/// the Canton `max_page_size` on ledger-API reads and the frontend's page size
+/// (re-exported into `types.generated.ts` by `gen-types`, so the two cannot
+/// drift). `i32` to match the ledger API's page-size fields.
+pub const PAGE_SIZE: i32 = 25;
+
 // ============================================================================
 // Config DTOs (shared with the server's config layer)
 // ============================================================================
@@ -1330,4 +1336,7 @@ pub struct ChainAuditEntry {
 pub struct ChainAuditResponse {
     pub entries: Vec<ChainAuditEntry>,
     pub total_returned: usize,
+    /// Cursor for the next (older) page: pass back as `before_offset`. `None`
+    /// when the page was short, i.e. there is nothing older left to read.
+    pub next_before_offset: Option<i64>,
 }

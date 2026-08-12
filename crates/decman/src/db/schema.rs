@@ -87,6 +87,7 @@ pub trait SchemaRead {
         &self,
         party_id: &CantonId,
         limit: i64,
+        before_offset: Option<i64>,
     ) -> Result<Vec<ChainAuditCacheRow>>;
 
     /// Get all persisted pending invitations

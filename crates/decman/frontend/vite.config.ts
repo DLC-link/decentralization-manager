@@ -2,7 +2,9 @@ import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { defineConfig, type Plugin } from 'vite'
+// `vitest/config` rather than `vite`: same defineConfig, plus the `test` key.
+import { defineConfig } from 'vitest/config'
+import type { Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 
 const rootDir = dirname(fileURLToPath(import.meta.url))
@@ -71,5 +73,12 @@ export default defineConfig({
   plugins: [react(), ...(process.env.MOCK === 'true' ? [mockApi()] : [])],
   define: {
     __BUILD_DATE__: JSON.stringify(new Date().toISOString()),
+  },
+  // `npm test`. jsdom because the hooks under test render components and touch
+  // the DOM (scroll containers); `include` keeps the runner off node_modules.
+  test: {
+    environment: 'jsdom',
+    include: ['src/**/*.test.{ts,tsx}'],
+    setupFiles: ['src/vitest.setup.ts'],
   },
 })

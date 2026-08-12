@@ -31,15 +31,11 @@
 //! [`chunk_size`]) are unit-tested here; the gRPC reads and command submission
 //! are exercised by the localnet and devnet integration tests.
 
-use std::collections::HashMap;
-
 use anyhow::{Context, anyhow};
 use canton_common::decimal::DamlDecimal;
 use canton_proto_rs::com::daml::ledger::api::v2::{
-    Command, Commands, CumulativeFilter, EventFormat, ExerciseCommand, Filters,
-    GetActiveContractsRequest, GetLedgerEndRequest, Identifier, InterfaceFilter, Record,
-    SubmitAndWaitRequest, TemplateFilter, Value, WildcardFilter, command,
-    command_service_client::CommandServiceClient, cumulative_filter,
+    Command, Commands, ExerciseCommand, GetActiveContractsRequest, GetLedgerEndRequest, Identifier,
+    Record, SubmitAndWaitRequest, Value, command, command_service_client::CommandServiceClient,
     get_active_contracts_response::ContractEntry, value,
 };
 use chrono::{DateTime, Utc};
@@ -55,6 +51,9 @@ use std::time::Duration;
 use super::AppState;
 use super::action_serializer::{
     field, make_contract_id, make_extra_args, make_list, make_party, make_text_map,
+};
+use super::event_filters::{
+    interface_filter, party_event_format, template_filter, wildcard_filter,
 };
 use super::handlers::{get_party_credentials, packages};
 use super::queries::resolve_contract_package_ref;
@@ -160,48 +159,22 @@ pub(crate) async fn active_created_records(
         .into_inner()
         .offset;
 
-    let identifier_filter = if interface_view {
-        cumulative_filter::IdentifierFilter::InterfaceFilter(InterfaceFilter {
-            interface_id: Some(Identifier {
-                package_id: package_id.to_string(),
-                module_name: module.to_string(),
-                entity_name: entity.to_string(),
-            }),
-            include_interface_view: true,
-            include_created_event_blob: false,
-        })
-    } else if test_mode {
-        cumulative_filter::IdentifierFilter::WildcardFilter(WildcardFilter {
-            include_created_event_blob: false,
-        })
-    } else {
-        cumulative_filter::IdentifierFilter::TemplateFilter(TemplateFilter {
-            template_id: Some(Identifier {
-                package_id: package_id.to_string(),
-                module_name: module.to_string(),
-                entity_name: entity.to_string(),
-            }),
-            include_created_event_blob: false,
-        })
+    let identifier = || Identifier {
+        package_id: package_id.to_string(),
+        module_name: module.to_string(),
+        entity_name: entity.to_string(),
     };
-
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(identifier_filter),
-            }],
-        },
-    );
+    let filter = if interface_view {
+        interface_filter(identifier(), false)
+    } else if test_mode {
+        wildcard_filter(false)
+    } else {
+        template_filter(identifier(), false)
+    };
 
     let acs_request = GetActiveContractsRequest {
         active_at_offset: ledger_end,
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            verbose: true,
-        }),
+        event_format: Some(party_event_format(party_id, vec![filter], true)),
         stream_continuation_token: None,
     };
 
