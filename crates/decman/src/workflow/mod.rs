@@ -818,7 +818,18 @@ pub async fn start_peer(
                             items
                         }
                         Err(e) => {
+                            // Undecodable in BOTH formats is a corruption/encoding
+                            // bug, not a legacy coordinator. Count it as a step
+                            // failure so it backs off and eventually aborts instead
+                            // of hot-looping on a payload that can never decode.
                             tracing::error!("Failed to decode ImportAcs payload: {e}");
+                            consecutive_step_failures += 1;
+                            if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                                anyhow::bail!(
+                                    "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
+                                );
+                            }
+                            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                             continue;
                         }
                     },
