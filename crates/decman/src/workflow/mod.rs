@@ -797,12 +797,42 @@ pub async fn start_peer(
             }
             MessageType::ImportAcs => {
                 tracing::info!("Executing: Import party ACS");
-                let items = match utils::decode_length_prefixed(&payload, 2) {
+                // Current coordinators send 3 items [config, snapshot, package_ids].
+                // Stay backward-compatible with an older coordinator that ships the
+                // legacy 2-item payload (config + snapshot, no package-id list):
+                // fall back to 2 items and treat the required-package set as empty
+                // (skips the preflight — the pre-fix behaviour), so a mixed-version
+                // rolling upgrade doesn't wedge the peer.
+                let items = match utils::decode_length_prefixed(&payload, 3) {
                     Ok(items) => items,
-                    Err(e) => {
-                        tracing::error!("Failed to decode ImportAcs payload: {e}");
-                        continue;
-                    }
+                    Err(three_item_err) => match utils::decode_length_prefixed(&payload, 2) {
+                        Ok(mut items) => {
+                            // Log the 3-item decode error so a genuine
+                            // corruption/encoding bug is distinguishable from an
+                            // intentional legacy 2-item payload, without changing behaviour.
+                            tracing::debug!(
+                                "ImportAcs payload not in 3-item format ({three_item_err}); \
+                                 using legacy 2-item payload (package preflight skipped)"
+                            );
+                            items.push(Vec::new());
+                            items
+                        }
+                        Err(e) => {
+                            // Undecodable in BOTH formats is a corruption/encoding
+                            // bug, not a legacy coordinator. Count it as a step
+                            // failure so it backs off and eventually aborts instead
+                            // of hot-looping on a payload that can never decode.
+                            tracing::error!("Failed to decode ImportAcs payload: {e}");
+                            consecutive_step_failures += 1;
+                            if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                                anyhow::bail!(
+                                    "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
+                                );
+                            }
+                            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                            continue;
+                        }
+                    },
                 };
                 let Some(add_party_config) = decode_add_party_config(&items[0]) else {
                     continue;
@@ -811,10 +841,23 @@ pub async fn start_peer(
                     send_skip_status(&client, "ImportAcs").await;
                     continue;
                 }
+                // Newline-joined package ids the party's contracts need; the
+                // import preflight checks this participant has them all.
+                let required_package_ids: Vec<String> = String::from_utf8_lossy(&items[2])
+                    .lines()
+                    .filter(|l| !l.is_empty())
+                    .map(str::to_string)
+                    .collect();
 
-                if let Err(e) =
-                    add_party::import_party_acs(&node_config, &add_party_config, items[1].clone())
-                        .await
+                if let Err(e) = add_party::import_party_acs(
+                    &node_config,
+                    &db,
+                    &instance_name,
+                    &add_party_config,
+                    items[1].clone(),
+                    &required_package_ids,
+                )
+                .await
                 {
                     tracing::error!("Step execution failed: {e}");
                     consecutive_step_failures += 1;

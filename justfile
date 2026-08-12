@@ -13,8 +13,8 @@ gen-types:
     DECMAN_SKIP_FRONTEND=1 cargo run -q -p decman --features typegen --bin gen-types
     echo "Generated crates/decman/frontend/src/types.generated.ts"
 
-# Forward Canton devnet participant 1..3 Ledger/Admin ports. Each node lives in
-# its own namespace (KUBE_NS_PREFIX=canton-node- by default -> canton-node-1..3).
+# Forward Canton devnet participant 1..4 Ledger/Admin ports. Each node lives in
+# its own namespace (KUBE_NS_PREFIX=canton-node- by default -> canton-node-1..4).
 [group('canton')]
 port-forward:
     #!/usr/bin/env bash
@@ -42,10 +42,12 @@ port-forward:
     fwd p1 "${prefix}1" participant 5001:5001 5002:5002
     fwd p2 "${prefix}2" participant 5011:5001 5012:5002
     fwd p3 "${prefix}3" participant 5021:5001 5022:5002
+    fwd p4 "${prefix}4" participant 5031:5001 5032:5002
 
     echo "[port-forward]   participant 1 (${prefix}1)  ->  localhost:5001 / 5002"
     echo "[port-forward]   participant 2 (${prefix}2)  ->  localhost:5011 / 5012"
     echo "[port-forward]   participant 3 (${prefix}3)  ->  localhost:5021 / 5022"
+    echo "[port-forward]   participant 4 (${prefix}4)  ->  localhost:5031 / 5032"
     echo "[port-forward] Ctrl-C to stop all."
 
     wait

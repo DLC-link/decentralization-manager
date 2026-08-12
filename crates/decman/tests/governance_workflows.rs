@@ -206,6 +206,10 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
         }
     }
 
+    // Runs dead last: kicks P3, seeds contracts of a package P3 lacks, and
+    // drives a re-add that the DAR-preflight must reject — leaving P3 out of the
+    // party, so nothing may run after it (the CIP-104 phases above need P3 in).
+    phases::add_party_missing_dar::run(&mut f).await?;
     Ok(())
 }
 
