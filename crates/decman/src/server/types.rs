@@ -784,7 +784,6 @@ pub enum ProposalType {
     /// `ProviderConfiguration`'s registrar requirements, then accept the
     /// request in the same vote.
     OnboardRegistrar {
-        registrar: CantonId,
         provider_service_cid: String,
         registrar_service_request_cid: String,
         provider_configuration_cid: String,

@@ -23,9 +23,6 @@ template OnboardRegistrar
     governanceParty : Party
       -- ^ The provider decparty.
     proposer : Party
-    registrar : Party
-      -- ^ Explicit so voters see whom they onboard; checked against the
-      -- request at execution.
     providerServiceCid : ContractId ProviderService
     registrarServiceRequestCid : ContractId RegistrarServiceRequest
     providerConfigurationCid : ContractId ProviderConfiguration
@@ -41,19 +38,17 @@ template OnboardRegistrar
         governanceParty
         proposer
         actionLabel = "OnboardRegistrar"
-        description = "Onboard registrar " <> show registrar
+        description = "Onboard the registrar named in the service request"
 
       executeImpl = do
         request <- fetch registrarServiceRequestCid
-        assertMsg "OnboardRegistrar: request registrar does not match proposal registrar"
-          (request.registrar == registrar)
         assertMsg "OnboardRegistrar: request provider does not match the governance party"
           (request.provider == governanceParty)
         providerConfiguration <- fetch providerConfigurationCid
         assertMsg "OnboardRegistrar: provider configuration provider does not match the governance party"
           (providerConfiguration.provider == governanceParty)
         mintedCredentialCids <- mintCredentialsMeetingRequirements
-          governanceParty registrar "registrar-credential"
+          governanceParty request.registrar "registrar-credential"
           providerConfiguration.registrarRequirements
         _ <- exercise providerServiceCid ProviderService_AcceptRegistrarServiceRequest with
           cid = registrarServiceRequestCid

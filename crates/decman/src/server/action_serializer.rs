@@ -1562,7 +1562,6 @@ pub fn build_proposal_create_args(
             },
         ),
         ProposalType::OnboardRegistrar {
-            registrar,
             provider_service_cid,
             registrar_service_request_cid,
             provider_configuration_cid,
@@ -1576,7 +1575,6 @@ pub fn build_proposal_create_args(
                 fields: vec![
                     field("governanceParty", make_party(governance_party)),
                     field("proposer", make_party(proposer)),
-                    field("registrar", make_party(registrar)),
                     field("providerServiceCid", make_contract_id(provider_service_cid)),
                     field(
                         "registrarServiceRequestCid",
@@ -3070,7 +3068,6 @@ mod tests {
             },
             Case {
                 proposal: ProposalType::OnboardRegistrar {
-                    registrar: party_id(),
                     provider_service_cid: "psc".to_string(),
                     registrar_service_request_cid: "rsrc".to_string(),
                     provider_configuration_cid: "pcc".to_string(),
@@ -3082,7 +3079,6 @@ mod tests {
                 labels: &[
                     "governanceParty",
                     "proposer",
-                    "registrar",
                     "providerServiceCid",
                     "registrarServiceRequestCid",
                     "providerConfigurationCid",
@@ -3158,8 +3154,7 @@ mod tests {
                     panic!("expected Optional for issuerCredentialCids in {module}, got {other:?}")
                 }
             };
-            let inner =
-                inner.unwrap_or_else(|| panic!("expected Some list in {module}, got None"));
+            let inner = inner.unwrap_or_else(|| panic!("expected Some list in {module}, got None"));
             let elements = match &inner.sum {
                 Some(value::Sum::List(l)) => &l.elements,
                 other => {
@@ -3192,7 +3187,6 @@ mod tests {
         // `extraRegistrarCredentialCids` list as ContractId values. Labels
         // alone cannot catch a regression to a hardcoded empty list.
         let proposal = ProposalType::OnboardRegistrar {
-            registrar: party_id(),
             provider_service_cid: "psc".to_string(),
             registrar_service_request_cid: "rsrc".to_string(),
             provider_configuration_cid: "pcc".to_string(),

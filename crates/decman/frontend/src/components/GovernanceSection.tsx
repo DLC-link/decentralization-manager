@@ -240,7 +240,6 @@ export const GovernanceSection = ({
   // issuer requirements. Passed into the accept's choice context.
   const [proposalIssuerCredentialCids, setProposalIssuerCredentialCids] = useState<string[]>([]);
   // Registrar-onboarding proposal state
-  const [proposalRegistrar, setProposalRegistrar] = useState("");
   const [proposalRegistrarServiceRequestCid, setProposalRegistrarServiceRequestCid] = useState("");
   const [proposalProviderConfigurationCid, setProposalProviderConfigurationCid] = useState("");
   const [proposalExtraRegistrarCredentialCids, setProposalExtraRegistrarCredentialCids] = useState<string[]>([]);
@@ -770,10 +769,12 @@ export const GovernanceSection = ({
 
   // Candidate extra credentials for Onboard Registrar: issued by a party
   // other than this governance party (self-issuable requirements are minted
-  // automatically) and attesting for the registrar entered on the form.
+  // automatically) and attesting for the registrar of the selected request.
   const externalRegistrarCredentials = useMemo(() => {
-    const registrar = proposalRegistrar.trim();
-    if (registrar === "") {
+    const registrar = acceptableRegistrarServiceRequests.find(
+      (r) => r.contract_id === proposalRegistrarServiceRequestCid,
+    )?.registrar;
+    if (!registrar) {
       return [];
     }
     return availableCredentials.filter(
@@ -782,7 +783,12 @@ export const GovernanceSection = ({
         c.claims.length > 0 &&
         c.claims.every((claim) => claim.subject === registrar),
     );
-  }, [availableCredentials, partyId, proposalRegistrar]);
+  }, [
+    availableCredentials,
+    partyId,
+    acceptableRegistrarServiceRequests,
+    proposalRegistrarServiceRequestCid,
+  ]);
 
   // Prefill the credential proposal form's UserService once the list arrives —
   // parties typically have exactly one.
@@ -1745,7 +1751,6 @@ export const GovernanceSection = ({
     setProposalDelegate("");
     setProposalDelegationExpiresAt("");
     setProposalAmuletMergeLimit("10");
-    setProposalRegistrar("");
     setProposalRegistrarServiceRequestCid("");
     setProposalProviderConfigurationCid("");
     setProposalExtraRegistrarCredentialCids([]);
@@ -2011,7 +2016,6 @@ export const GovernanceSection = ({
         case "onboard_registrar":
           proposal = {
             type: "onboard_registrar",
-            registrar: proposalRegistrar,
             provider_service_cid: proposalProviderServiceCid,
             registrar_service_request_cid: proposalRegistrarServiceRequestCid,
             provider_configuration_cid: proposalProviderConfigurationCid,
@@ -5811,22 +5815,6 @@ export const GovernanceSection = ({
 
               {proposalType === "onboard_registrar" && (
                 <>
-                  <TextField
-                    size="small"
-                    label="Registrar Party"
-                    value={proposalRegistrar}
-                    onChange={(e) => setProposalRegistrar(e.target.value)}
-                    fullWidth
-                    required
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "Party id of the registrar decparty to onboard. Checked against the selected request at execution.",
-                          "Help for Registrar Party",
-                        ),
-                      },
-                    }}
-                  />
                   <FormControl size="small" fullWidth required>
                     <InputLabel>
                       <TextHelp text="ProviderService contract of this provider decparty, used to accept the request.">
@@ -5856,7 +5844,7 @@ export const GovernanceSection = ({
                   </FormControl>
                   <FormControl size="small" fullWidth required>
                     <InputLabel>
-                      <TextHelp text="Pending RegistrarServiceRequest to accept. Its provider must be this governance party and its registrar the party above.">
+                      <TextHelp text="Pending RegistrarServiceRequest to accept. The request names the registrar to onboard; its provider must be this governance party.">
                         RegistrarServiceRequest
                       </TextHelp>
                     </InputLabel>
@@ -5963,8 +5951,8 @@ export const GovernanceSection = ({
                         helperText={
                           credentialsLoading
                             ? "Loading credentials…"
-                            : proposalRegistrar.trim() === ""
-                              ? "Enter the registrar party above to see its externally-issued credentials"
+                            : proposalRegistrarServiceRequestCid === ""
+                              ? "Select the RegistrarServiceRequest above to see the registrar's externally-issued credentials"
                               : "Pick the registrar's externally-issued credentials, or paste contract ids. Optional."
                         }
                       />
