@@ -1844,6 +1844,150 @@ mod tests {
     }
 
     // ====================================================================
+    // Chain audit cache
+    // ====================================================================
+
+    /// One cached chain-audit row. `contract_id` is part of the primary key, so
+    /// it is what lets several rows share an offset — the case the paging query
+    /// has to keep together.
+    async fn insert_chain_audit_row(
+        pool: &SqlitePool,
+        party_id: &str,
+        offset: i64,
+        contract_id: &str,
+    ) -> Result {
+        sqlx::query(
+            r"
+            INSERT INTO chain_audit_cache (
+                party_id, offset, timestamp, event_type, contract_id,
+                template_id, package_id, governance_type, action_summary,
+                choice, acting_parties, update_id, details
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ",
+        )
+        .bind(party_id)
+        .bind(offset)
+        .bind(offset)
+        .bind("propose")
+        .bind(contract_id)
+        .bind("Governance:Action")
+        .bind("pkg-1")
+        .bind("core_domain")
+        .bind("propose_add_member")
+        .bind(None::<String>)
+        .bind("[]")
+        .bind(format!("update-{offset}"))
+        .bind("null")
+        .execute(pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Party A holds a trail whose middle offset carries three entries, plus a
+    /// second party's row at an interleaving offset to prove the party filter.
+    async fn seed_chain_audit_trail(pool: &SqlitePool, party_a: &str, party_b: &str) -> Result {
+        for (offset, contract_id) in [
+            (30, "c-30"),
+            (20, "c-20-a"),
+            (20, "c-20-b"),
+            (20, "c-20-c"),
+            (10, "c-10"),
+        ] {
+            insert_chain_audit_row(pool, party_a, offset, contract_id).await?;
+        }
+        insert_chain_audit_row(pool, party_b, 25, "other-25").await?;
+
+        Ok(())
+    }
+
+    fn cached_offsets(rows: &[crate::db::rows::ChainAuditCacheRow]) -> Vec<i64> {
+        rows.iter().map(|r| r.offset).collect()
+    }
+
+    /// The page is cut on whole offsets, not on rows: `limit = 2` reaches
+    /// offset 20 and then keeps all three of its entries. Cutting at two rows
+    /// would strand the rest of offset 20 — the next page asks for
+    /// `offset < 20` and would never return them.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_chain_audit_cache_keeps_offset_groups_whole(pool: SqlitePool) -> Result {
+        let party_a = test_party_id("party-a");
+        let party_b = test_party_id("party-b");
+        seed_chain_audit_trail(&pool, &party_a.to_string(), &party_b.to_string()).await?;
+
+        let rows = pool.get_chain_audit_cache(&party_a, 2, None).await?;
+        assert_eq!(cached_offsets(&rows), vec![30, 20, 20, 20]);
+
+        Ok(())
+    }
+
+    /// The cursor is exclusive, so paging from offset 20 returns what is
+    /// strictly older and never repeats that offset's group.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_chain_audit_cache_pages_before_a_cursor(pool: SqlitePool) -> Result {
+        let party_a = test_party_id("party-a");
+        let party_b = test_party_id("party-b");
+        seed_chain_audit_trail(&pool, &party_a.to_string(), &party_b.to_string()).await?;
+
+        let rows = pool.get_chain_audit_cache(&party_a, 2, Some(20)).await?;
+        assert_eq!(cached_offsets(&rows), vec![10]);
+
+        // Past the oldest cached offset there is nothing left to hand back —
+        // the handler treats this empty result as a miss and reads Canton.
+        let rows = pool.get_chain_audit_cache(&party_a, 2, Some(10)).await?;
+        assert!(rows.is_empty());
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_chain_audit_cache_returns_all_rows_for_an_oversized_limit(
+        pool: SqlitePool,
+    ) -> Result {
+        let party_a = test_party_id("party-a");
+        let party_b = test_party_id("party-b");
+        seed_chain_audit_trail(&pool, &party_a.to_string(), &party_b.to_string()).await?;
+
+        let rows = pool.get_chain_audit_cache(&party_a, 500, None).await?;
+        assert_eq!(cached_offsets(&rows), vec![30, 20, 20, 20, 10]);
+
+        Ok(())
+    }
+
+    /// A single offset bigger than the page still comes back whole, since the
+    /// cursor cannot address part of an offset group.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_chain_audit_cache_keeps_an_oversized_group_intact(pool: SqlitePool) -> Result {
+        let party_a = test_party_id("party-a");
+        let party_a_str = party_a.to_string();
+        for contract_id in ["c-a", "c-b", "c-c"] {
+            insert_chain_audit_row(&pool, &party_a_str, 20, contract_id).await?;
+        }
+
+        let rows = pool.get_chain_audit_cache(&party_a, 1, None).await?;
+        assert_eq!(cached_offsets(&rows), vec![20, 20, 20]);
+
+        Ok(())
+    }
+
+    /// Another party's rows never leak into a page, even at an offset that
+    /// interleaves with the queried party's trail.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_chain_audit_cache_filters_by_party(pool: SqlitePool) -> Result {
+        let party_a = test_party_id("party-a");
+        let party_b = test_party_id("party-b");
+        seed_chain_audit_trail(&pool, &party_a.to_string(), &party_b.to_string()).await?;
+
+        let rows = pool.get_chain_audit_cache(&party_b, 50, None).await?;
+        assert_eq!(cached_offsets(&rows), vec![25]);
+
+        let rows = pool.get_chain_audit_cache(&party_a, 50, None).await?;
+        assert!(rows.iter().all(|r| r.offset != 25));
+
+        Ok(())
+    }
+
+    // ====================================================================
     // Pending invitations
     // ====================================================================
 

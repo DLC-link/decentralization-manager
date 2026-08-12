@@ -75,6 +75,15 @@ jobs:
       # build doesn't itself try to build the frontend.
       - name: Generate frontend TypeScript bindings
         run: DECMAN_SKIP_FRONTEND=1 cargo run -p decman --all-features --bin gen-types
+      # Frontend unit tests (vitest). Runs after the bindings step above, which
+      # writes the gitignored types.generated.ts the tests read PAGE_SIZE from.
+      # Installs only on a cold npm cache, same as build.rs does — `npm ci`
+      # unconditionally would wipe the restored node_modules on every run.
+      - name: Frontend tests
+        working-directory: crates/decman/frontend
+        run: |
+          [ -d node_modules ] || npm ci
+          npm test
       - name: cargo fmt
         run: cargo fmt -- --check
       # Build the test binaries first (rlibs + sidecar rmeta) so both

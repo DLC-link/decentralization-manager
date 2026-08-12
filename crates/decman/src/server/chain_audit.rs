@@ -1,10 +1,9 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, future::Future};
 
 use anyhow::{Context, Result};
 use canton_proto_rs::com::daml::ledger::api::v2::{
-    CumulativeFilter, EventFormat, Filters, GetLatestPrunedOffsetsRequest, GetLedgerEndRequest,
-    Identifier, InterfaceFilter, Record, TemplateFilter, Transaction, TransactionFormat,
-    TransactionShape, UpdateFormat, Value, WildcardFilter, cumulative_filter, event::Event, value,
+    CumulativeFilter, GetLatestPrunedOffsetsRequest, GetLedgerEndRequest, Identifier, Record,
+    Transaction, TransactionFormat, TransactionShape, UpdateFormat, Value, event::Event, value,
 };
 use serde_json::{Value as JsonValue, json};
 use sqlx::SqlitePool;
@@ -16,7 +15,8 @@ use crate::{
 };
 
 use super::{
-    ledger_paging::fetch_transactions_page,
+    event_filters::{interface_filter, party_event_format, template_filter, wildcard_filter},
+    ledger_paging::{TransactionPage, fetch_transactions_page},
     package_inventory::{fetch_package_names, matching_names, package_name_prefix},
     types::ChainAuditEntry,
 };
@@ -135,36 +135,27 @@ fn build_canton_filters(filters: &ChainFilters, package_names: &[String]) -> Vec
 
     for t in &filters.templates {
         for name in matching_names(package_names, &t.package_prefix) {
-            cumulative.push(CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
-                    TemplateFilter {
-                        template_id: Some(Identifier {
-                            package_id: format!("#{name}"),
-                            module_name: t.module_name.to_string(),
-                            entity_name: t.entity_name.to_string(),
-                        }),
-                        include_created_event_blob: false,
-                    },
-                )),
-            });
+            cumulative.push(template_filter(
+                Identifier {
+                    package_id: format!("#{name}"),
+                    module_name: t.module_name.to_string(),
+                    entity_name: t.entity_name.to_string(),
+                },
+                false,
+            ));
         }
     }
 
     for i in &filters.interfaces {
         for name in matching_names(package_names, &i.package_prefix) {
-            cumulative.push(CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::InterfaceFilter(
-                    InterfaceFilter {
-                        interface_id: Some(Identifier {
-                            package_id: format!("#{name}"),
-                            module_name: i.module_name.to_string(),
-                            entity_name: i.entity_name.to_string(),
-                        }),
-                        include_interface_view: true,
-                        include_created_event_blob: false,
-                    },
-                )),
-            });
+            cumulative.push(interface_filter(
+                Identifier {
+                    package_id: format!("#{name}"),
+                    module_name: i.module_name.to_string(),
+                    entity_name: i.entity_name.to_string(),
+                },
+                false,
+            ));
         }
     }
 
@@ -174,13 +165,7 @@ fn build_canton_filters(filters: &ChainFilters, package_names: &[String]) -> Vec
 /// The wildcard fallback filter: every event for the party, classified and
 /// trimmed client-side.
 fn wildcard_filters() -> Vec<CumulativeFilter> {
-    vec![CumulativeFilter {
-        identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
-            WildcardFilter {
-                include_created_event_blob: false,
-            },
-        )),
-    }]
+    vec![wildcard_filter(false)]
 }
 
 /// Whether an entry is a governance action worth showing in the audit trail:
@@ -478,9 +463,7 @@ pub struct AuditPage {
 ///
 /// Paging descending is what makes the early exit sound: every later page holds
 /// strictly lower offsets, so the first `limit` governance entries seen *are*
-/// the most recent `limit`. The previous implementation drained the whole
-/// retained ledger before sorting and truncating, which grew without bound as
-/// the ledger aged.
+/// the most recent `limit`.
 ///
 /// The returned page can slightly exceed `limit`: it is extended to the end of
 /// the last offset group rather than cut mid-transaction.
@@ -493,24 +476,46 @@ async fn collect_entries(
     template_index: &HashMap<(String, String), &'static str>,
     limit: usize,
 ) -> Result<AuditPage> {
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(party_id.to_string(), Filters { cumulative });
-
-    let event_format = EventFormat {
-        filters_by_party,
-        filters_for_any_party: None,
-        verbose: true,
-    };
-
     let update_format = UpdateFormat {
         include_transactions: Some(TransactionFormat {
-            event_format: Some(event_format),
+            event_format: Some(party_event_format(party_id, cumulative, true)),
             transaction_shape: TransactionShape::LedgerEffects as i32,
         }),
         include_reassignments: None,
         include_topology_events: None,
     };
 
+    collect_from_pages(
+        |page_token| {
+            fetch_transactions_page(
+                config,
+                token.clone(),
+                range.begin_exclusive,
+                range.end_inclusive,
+                update_format.clone(),
+                page_token,
+            )
+        },
+        template_index,
+        limit,
+    )
+    .await
+}
+
+/// The page-walk behind [`collect_entries`], over an arbitrary page source.
+///
+/// `fetch_page` takes the token of the page to read and is a parameter so the
+/// walk — and the `has_more` it derives from where it stopped — can be tested
+/// against scripted pages. Production passes [`fetch_transactions_page`].
+async fn collect_from_pages<F, Fut>(
+    mut fetch_page: F,
+    template_index: &HashMap<(String, String), &'static str>,
+    limit: usize,
+) -> Result<AuditPage>
+where
+    F: FnMut(Option<Vec<u8>>) -> Fut,
+    Fut: Future<Output = Result<TransactionPage>>,
+{
     if limit == 0 {
         return Ok(AuditPage::default());
     }
@@ -523,16 +528,9 @@ async fn collect_entries(
     let mut pages_remain = false;
 
     loop {
-        let page = fetch_transactions_page(
-            config,
-            token.clone(),
-            range.begin_exclusive,
-            range.end_inclusive,
-            update_format.clone(),
-            page_token,
-        )
-        .await
-        .context("Failed to read ledger updates")?;
+        let page = fetch_page(page_token)
+            .await
+            .context("Failed to read ledger updates")?;
 
         for tx in page.transactions {
             entries.extend(
@@ -739,8 +737,10 @@ pub async fn save_chain_audit_cache(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+
     use canton_proto_rs::com::daml::ledger::api::v2::{
-        Enum, Optional, RecordField, TextMap, Variant,
+        CreatedEvent, Enum, Event as EventEnvelope, Optional, RecordField, TextMap, Variant,
     };
 
     use super::*;
@@ -1032,5 +1032,155 @@ mod tests {
 
         // One template filter per core package version + one interface filter
         assert_eq!(cumulative.len(), 3);
+    }
+
+    // ====================================================================
+    // Page walk
+    // ====================================================================
+
+    /// One transaction carrying a governable-action Create per offset — each
+    /// classifies as `propose`, so all of them survive the governance filter.
+    fn tx_at(offsets: &[i64]) -> Transaction {
+        Transaction {
+            events: offsets
+                .iter()
+                .map(|offset| EventEnvelope {
+                    event: Some(Event::Created(CreatedEvent {
+                        offset: *offset,
+                        contract_id: format!("c-{offset}"),
+                        template_id: Some(Identifier {
+                            package_id: "#governance-action-v1".to_string(),
+                            module_name: "Governance.Action".to_string(),
+                            entity_name: "GovernableAction".to_string(),
+                        }),
+                        ..Default::default()
+                    })),
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    /// A scripted page holding one transaction, and whether Canton claims more
+    /// pages follow it.
+    fn scripted_page(offsets: &[i64], more: bool) -> TransactionPage {
+        TransactionPage {
+            transactions: vec![tx_at(offsets)],
+            next_page_token: more.then(|| b"next".to_vec()),
+        }
+    }
+
+    /// Run the walk over `pages`. Asking for a page beyond the script is an
+    /// error, so a test that over-reads fails rather than quietly passing.
+    async fn walk(pages: Vec<TransactionPage>, limit: usize) -> AuditPage {
+        let mut remaining = VecDeque::from(pages);
+        let template_index = HashMap::new();
+
+        collect_from_pages(
+            |_page_token| {
+                let page = remaining.pop_front();
+                async move { page.context("asked for a page beyond the script") }
+            },
+            &template_index,
+            limit,
+        )
+        .await
+        .expect("the scripted walk succeeds")
+    }
+
+    /// The edge the cursor contract turns on: the limit is met exactly on
+    /// Canton's last page, so nothing older exists and the endpoint must not
+    /// advertise another page.
+    #[tokio::test]
+    async fn walk_reports_no_more_when_the_limit_lands_on_the_last_page() {
+        let page = walk(vec![scripted_page(&[30, 20], false)], 2).await;
+
+        assert_eq!(offsets_of(&page.entries), vec![30, 20]);
+        assert!(!page.has_more);
+    }
+
+    /// Stopped on a full page with a token still in hand — there is more.
+    #[tokio::test]
+    async fn walk_reports_more_when_pages_remain() {
+        let page = walk(vec![scripted_page(&[30, 20], true)], 2).await;
+
+        assert_eq!(offsets_of(&page.entries), vec![30, 20]);
+        assert!(page.has_more);
+    }
+
+    /// A page short of `limit` is followed, and only as far as needed: a third
+    /// page is never requested.
+    #[tokio::test]
+    async fn walk_follows_pages_until_the_limit_is_met() {
+        let pages = vec![
+            scripted_page(&[30], true),
+            scripted_page(&[20], true),
+            scripted_page(&[10], true),
+        ];
+        let page = walk(pages, 2).await;
+
+        assert_eq!(offsets_of(&page.entries), vec![30, 20]);
+        assert!(page.has_more);
+    }
+
+    /// The range ran out before `limit` was reached, so this is the last page
+    /// however short it is.
+    #[tokio::test]
+    async fn walk_reports_no_more_when_the_range_runs_out() {
+        let page = walk(vec![scripted_page(&[30], false)], 5).await;
+
+        assert_eq!(offsets_of(&page.entries), vec![30]);
+        assert!(!page.has_more);
+    }
+
+    /// Canton had no further pages, but the offset-group trim dropped entries —
+    /// which are strictly older than what is returned, so they are themselves
+    /// proof of an older page.
+    #[tokio::test]
+    async fn walk_reports_more_when_the_trim_drops_entries() {
+        let page = walk(vec![scripted_page(&[30, 20, 20, 10], false)], 2).await;
+
+        assert_eq!(offsets_of(&page.entries), vec![30, 20, 20]);
+        assert!(page.has_more);
+    }
+
+    /// A zero-row page reads nothing at all — the script is empty, so any fetch
+    /// would fail the walk.
+    #[tokio::test]
+    async fn walk_at_zero_limit_reads_no_pages() {
+        let page = walk(Vec::new(), 0).await;
+
+        assert!(page.entries.is_empty());
+        assert!(!page.has_more);
+    }
+
+    /// Events that are not governance actions are dropped without counting
+    /// toward the limit, so the walk keeps reading for the ones that are.
+    #[tokio::test]
+    async fn walk_skips_non_governance_events() {
+        let noise = Transaction {
+            events: vec![EventEnvelope {
+                event: Some(Event::Created(CreatedEvent {
+                    offset: 40,
+                    contract_id: "c-40".to_string(),
+                    // Ends with `Rules`, so it classifies as `create`.
+                    template_id: Some(id("GovernanceRules")),
+                    ..Default::default()
+                })),
+            }],
+            ..Default::default()
+        };
+        let pages = vec![
+            TransactionPage {
+                transactions: vec![noise],
+                next_page_token: Some(b"next".to_vec()),
+            },
+            scripted_page(&[30], false),
+        ];
+
+        let page = walk(pages, 1).await;
+
+        assert_eq!(offsets_of(&page.entries), vec![30]);
+        assert!(!page.has_more);
     }
 }

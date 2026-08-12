@@ -11,6 +11,7 @@ mod action_serializer;
 mod assets;
 mod audit;
 mod chain_audit;
+mod event_filters;
 mod handlers;
 mod ledger_paging;
 mod middleware;

@@ -21,7 +21,7 @@ use crate::{
     auth::WorkflowAuth,
     canton_id::CantonId,
     config::{NetworkConfig, NodeConfig, PackageConfig, default_package_config},
-    db::schema::SchemaRead,
+    db::{rows::ChainAuditCacheRow, schema::SchemaRead},
     error::Result,
     noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
     server::{
@@ -984,6 +984,29 @@ fn chain_audit_response(entries: Vec<ChainAuditEntry>, has_more: bool) -> ChainA
     }
 }
 
+/// The cached answer for a page request, or `None` when the cache cannot answer
+/// it and the read has to reach Canton.
+///
+/// An empty result is a miss rather than an answer: the cache only holds the
+/// pages fetched so far, so paging past its tail (or a cold start) must not be
+/// reported as an exhausted trail.
+fn cached_chain_audit_page(
+    rows: Vec<ChainAuditCacheRow>,
+    limit: usize,
+) -> Option<ChainAuditResponse> {
+    if rows.is_empty() {
+        return None;
+    }
+
+    // The cache cannot prove the trail is exhausted either, so a full page is
+    // reported as "more" and the next request falls through to Canton — better
+    // a spare empty page than hiding entries that do exist.
+    let has_more = rows.len() >= limit;
+    let entries: Vec<ChainAuditEntry> = rows.into_iter().map(chain_audit_entry_from_row).collect();
+
+    Some(chain_audit_response(entries, has_more))
+}
+
 /// Get on-chain governance audit entries.
 /// Returns cached data by default. Pass `refresh=true` to fetch from Canton and update cache.
 #[utoipa::path(
@@ -1000,33 +1023,26 @@ pub async fn get_governance_chain_audit(
     query: web::Query<ChainAuditQuery>,
 ) -> impl Responder {
     let party_id = &query.party_id;
+    // `limit` is caller-supplied, so it is bounded here rather than trusted:
+    // one page must not be able to ask for the whole retained ledger.
+    let limit = query.clamped_limit();
 
-    // `limit` is caller-supplied; a zero-row page needs no ledger reads.
-    if query.limit == 0 {
+    // A zero-row page needs no ledger reads.
+    if limit == 0 {
         return HttpResponse::Ok().json(chain_audit_response(Vec::new(), false));
     }
 
     if !query.refresh {
-        // Return from cache. An empty result is treated as a miss rather than
-        // an answer: the cache only holds the pages fetched so far, so paging
-        // past its tail (or a cold start) has to reach Canton instead of
-        // reporting the trail as exhausted.
         match data
             .db
-            .get_chain_audit_cache(party_id, query.limit as i64, query.before_offset)
+            .get_chain_audit_cache(party_id, limit as i64, query.before_offset)
             .await
         {
-            Ok(rows) if !rows.is_empty() => {
-                // The cache only mirrors the pages fetched so far, so it cannot
-                // prove the trail is exhausted. A full page is reported as
-                // "more" and the next request falls through to Canton — better
-                // a spare empty page than hiding entries that do exist.
-                let has_more = rows.len() >= query.limit;
-                let entries: Vec<ChainAuditEntry> =
-                    rows.into_iter().map(chain_audit_entry_from_row).collect();
-                return HttpResponse::Ok().json(chain_audit_response(entries, has_more));
+            Ok(rows) => {
+                if let Some(response) = cached_chain_audit_page(rows, limit) {
+                    return HttpResponse::Ok().json(response);
+                }
             }
-            Ok(_) => {}
             Err(e) => {
                 tracing::warn!("Failed to read chain audit cache: {e}");
                 // Fall through to live query
@@ -1043,7 +1059,7 @@ pub async fn get_governance_chain_audit(
         party_id,
         token,
         &pkgs,
-        query.limit,
+        limit,
         query.before_offset,
     )
     .await
@@ -2886,5 +2902,104 @@ mod propose_guard_tests {
         assert!(!may_create_second_delegation(&setup_with_prior));
         // unrelated proposals are never blocked, and never pay for the read
         assert!(!may_create_second_delegation(&unrelated));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry_at(offset: i64) -> ChainAuditEntry {
+        ChainAuditEntry {
+            offset,
+            timestamp: 0,
+            event_type: "propose".to_string(),
+            contract_id: String::new(),
+            template_id: String::new(),
+            package_id: String::new(),
+            governance_type: "core_domain".to_string(),
+            action_summary: String::new(),
+            choice: None,
+            acting_parties: Vec::new(),
+            update_id: String::new(),
+            details: serde_json::Value::Null,
+        }
+    }
+
+    fn cache_row_at(offset: i64) -> ChainAuditCacheRow {
+        ChainAuditCacheRow {
+            party_id: "dec::1220ff".to_string(),
+            offset,
+            timestamp: 0,
+            event_type: "propose".to_string(),
+            contract_id: String::new(),
+            template_id: String::new(),
+            package_id: String::new(),
+            governance_type: "core_domain".to_string(),
+            action_summary: String::new(),
+            choice: None,
+            acting_parties: "[]".to_string(),
+            update_id: String::new(),
+            details: "null".to_string(),
+        }
+    }
+
+    /// The cursor is the oldest offset on the page, since the next request asks
+    /// for `offset < cursor`.
+    #[test]
+    fn cursor_is_the_oldest_offset_when_more_exist() {
+        let response = chain_audit_response(vec![entry_at(30), entry_at(20), entry_at(10)], true);
+        assert_eq!(response.next_before_offset, Some(10));
+        assert_eq!(response.total_returned, 3);
+    }
+
+    #[test]
+    fn no_cursor_when_nothing_older_exists() {
+        let response = chain_audit_response(vec![entry_at(30), entry_at(20)], false);
+        assert_eq!(response.next_before_offset, None);
+        assert_eq!(response.total_returned, 2);
+    }
+
+    /// A `has_more` with no rows to derive a cursor from must not hand out one:
+    /// there is no offset to page before, and inventing one would skip entries.
+    #[test]
+    fn no_cursor_from_an_empty_page() {
+        let response = chain_audit_response(Vec::new(), true);
+        assert_eq!(response.next_before_offset, None);
+        assert_eq!(response.total_returned, 0);
+    }
+
+    /// An empty cache read is a miss, not "the trail ends here" — the caller
+    /// has to fall through to Canton.
+    #[test]
+    fn empty_cache_is_a_miss() {
+        assert!(cached_chain_audit_page(Vec::new(), 2).is_none());
+    }
+
+    /// A cache page that fills `limit` is reported as having more, so the next
+    /// request reaches Canton rather than stopping at the cache's tail.
+    #[test]
+    fn full_cache_page_reports_more() {
+        let response = cached_chain_audit_page(vec![cache_row_at(30), cache_row_at(20)], 2)
+            .expect("non-empty rows are a hit");
+        assert_eq!(response.next_before_offset, Some(20));
+    }
+
+    #[test]
+    fn short_cache_page_reports_no_more() {
+        let response =
+            cached_chain_audit_page(vec![cache_row_at(30)], 2).expect("non-empty rows are a hit");
+        assert_eq!(response.next_before_offset, None);
+        assert_eq!(response.total_returned, 1);
+    }
+
+    /// An over-`limit` cache page (a whole offset group kept together) still
+    /// reports more, and its cursor is the oldest offset returned.
+    #[test]
+    fn oversized_cache_page_reports_more() {
+        let rows = vec![cache_row_at(30), cache_row_at(20), cache_row_at(20)];
+        let response = cached_chain_audit_page(rows, 2).expect("non-empty rows are a hit");
+        assert_eq!(response.total_returned, 3);
+        assert_eq!(response.next_before_offset, Some(20));
     }
 }

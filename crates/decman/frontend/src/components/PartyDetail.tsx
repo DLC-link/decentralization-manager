@@ -38,7 +38,7 @@ import { KickDialog } from "./KickDialog";
 import { ContractsDialog } from "./ContractsDialog";
 import { PartyConfigDialog } from "./PartyConfigDialog";
 import { GovernanceActionsDialog } from "./GovernanceActionsDialog";
-import { GovernanceAuditTrail, CHAIN_LIMIT } from "./GovernanceAuditTrail";
+import { GovernanceAuditTrail } from "./GovernanceAuditTrail";
 import { HoldingsSection } from "./HoldingsSection";
 import { AuthSection, getAuthStatusIcon } from "./AuthSection";
 import { zebraRow } from "../styles";
@@ -215,6 +215,10 @@ export const PartyDetail = ({
   );
   const [governanceRefreshNonce, setGovernanceRefreshNonce] = useState(0);
   const [auditTrailCount, setAuditTrailCount] = useState(0);
+  // Whether older audit entries exist beyond the loaded page, straight from the
+  // server's cursor. The page size is not a reliable stand-in: it can overshoot
+  // to keep a transaction whole.
+  const [auditTrailHasMore, setAuditTrailHasMore] = useState(false);
   const [auditTrailLoading, setAuditTrailLoading] = useState(false);
   const [canScrollUp, setCanScrollUp] = useState(false);
   const [canScrollDown, setCanScrollDown] = useState(false);
@@ -243,6 +247,16 @@ export const PartyDetail = ({
       : undefined;
 
   const isOwner = Boolean(party.my_owner_key);
+
+  // Stable identity: the audit trail reports through this from an effect, so a
+  // fresh callback each render would re-run it on every parent render.
+  const onAuditTrailCountChange = useCallback(
+    (count: number, hasMore: boolean) => {
+      setAuditTrailCount(count);
+      setAuditTrailHasMore(hasMore);
+    },
+    [],
+  );
 
   const updateScrollShadows = useCallback(() => {
     const el = contractsScrollRef.current;
@@ -688,7 +702,7 @@ export const PartyDetail = ({
             <>
               {auditTrailCount > 0 && (
                 <Chip
-                  label={`${auditTrailCount}${auditTrailCount === CHAIN_LIMIT ? "+" : ""}`}
+                  label={`${auditTrailCount}${auditTrailHasMore ? "+" : ""}`}
                   size="small"
                   sx={{ ml: 1 }}
                 />
@@ -715,7 +729,7 @@ export const PartyDetail = ({
           <GovernanceAuditTrail
             partyId={party.party_id}
             refreshNonce={governanceRefreshNonce}
-            onCountChange={setAuditTrailCount}
+            onCountChange={onAuditTrailCountChange}
             onLoadingChange={setAuditTrailLoading}
           />
         </CollapsibleSection>

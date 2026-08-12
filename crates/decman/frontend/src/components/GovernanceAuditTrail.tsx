@@ -34,8 +34,10 @@ interface GovernanceAuditTrailProps {
   /// trigger a fresh fetch.
   refreshNonce?: number;
   /// Reports the loaded entry count to the parent so it can render a badge in
-  /// the section header (matches the Contracts pattern).
-  onCountChange?: (count: number) => void;
+  /// the section header (matches the Contracts pattern). `hasMore` says whether
+  /// older entries exist beyond this page — a page can legally hold more than
+  /// `CHAIN_LIMIT` rows, so the count alone can't tell the parent that.
+  onCountChange?: (count: number, hasMore: boolean) => void;
   /// Reports fetch in-flight state up so the parent can disable its Refresh
   /// icon while a request is pending.
   onLoadingChange?: (loading: boolean) => void;
@@ -225,6 +227,12 @@ export const GovernanceAuditTrail = ({
     fetchAudit(true);
   }, [refreshNonce, fetchAudit]);
 
+  // A new page is read from its top, same as the client-paged views — see
+  // `usePagination`, which scrolls for the same reason.
+  const scrollToFirstRow = useCallback(() => {
+    scrollRef.current?.scrollTo({ top: 0 });
+  }, []);
+
   // Both advance the page only once the fetch has landed. Moving first would
   // leave the indicator and the cursor stack describing a page whose rows
   // never arrived, and the next Prev would then walk from the wrong cursor.
@@ -234,19 +242,21 @@ export const GovernanceAuditTrail = ({
     if (await fetchAudit(false, cursor)) {
       setCursors((prev) => [...prev.slice(0, page + 1), cursor]);
       setPage(page + 1);
+      scrollToFirstRow();
     }
-  }, [nextCursor, page, fetchAudit]);
+  }, [nextCursor, page, fetchAudit, scrollToFirstRow]);
 
   const goToPrevPage = useCallback(async () => {
     if (page === 0) return;
     if (await fetchAudit(false, cursors[page - 1])) {
       setPage(page - 1);
+      scrollToFirstRow();
     }
-  }, [page, cursors, fetchAudit]);
+  }, [page, cursors, fetchAudit, scrollToFirstRow]);
 
   useEffect(() => {
-    onCountChange?.(entries.length);
-  }, [entries.length, onCountChange]);
+    onCountChange?.(entries.length, nextCursor !== null);
+  }, [entries.length, nextCursor, onCountChange]);
 
   useEffect(() => {
     onLoadingChange?.(loading);

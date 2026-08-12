@@ -1248,7 +1248,8 @@ fn default_audit_limit() -> i64 {
 pub struct ChainAuditQuery {
     /// Decentralized party ID to query chain events for
     pub party_id: CantonId,
-    /// Maximum number of entries to return (default [`PAGE_SIZE`])
+    /// Maximum number of entries to return (default [`PAGE_SIZE`], capped at
+    /// [`MAX_CHAIN_AUDIT_LIMIT`])
     #[serde(default = "default_chain_audit_limit")]
     pub limit: usize,
     /// Cursor: return only entries strictly older than this ledger offset.
@@ -1262,6 +1263,21 @@ pub struct ChainAuditQuery {
 
 fn default_chain_audit_limit() -> usize {
     PAGE_SIZE as usize
+}
+
+/// Ceiling on a chain-audit page size.
+///
+/// `limit` arrives on the query string, so it is untrusted: left unbounded it
+/// would drain the whole retained ledger into one response, and a value above
+/// `i64::MAX` wraps negative when cast for SQLite — which reads a negative
+/// `LIMIT` as no limit at all.
+pub const MAX_CHAIN_AUDIT_LIMIT: usize = 1_000;
+
+impl ChainAuditQuery {
+    /// The requested page size, bounded by [`MAX_CHAIN_AUDIT_LIMIT`].
+    pub fn clamped_limit(&self) -> usize {
+        self.limit.min(MAX_CHAIN_AUDIT_LIMIT)
+    }
 }
 
 /// Build a [`ChainAuditEntry`] wire DTO from a cached DB row.

@@ -25,6 +25,14 @@ export function usePagination<T>(
   // intermediate render showing an empty one.
   const page = Math.min(requestedPage, pageCount - 1);
 
+  // The clamp above only hides an out-of-range request; it has to be forgotten
+  // too, or a list that shrinks and later grows back jumps to the stale page the
+  // user never asked for again. Adjusted while rendering rather than in an
+  // effect, which is what keeps the empty page from ever being shown.
+  if (requestedPage > page) {
+    setRequestedPage(page);
+  }
+
   const setPage = useCallback(
     (next: number) => {
       setRequestedPage(next);

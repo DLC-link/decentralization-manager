@@ -21,7 +21,7 @@ use canton_proto_rs::com::daml::ledger::api::v2::{
 };
 
 /// Rows pulled from Canton per round trip when collecting a full result set.
-const FETCH_CHUNK: i32 = 1000;
+pub(crate) const FETCH_CHUNK: i32 = 1000;
 
 /// Did the participant reject this RPC because it predates Canton 3.5.1?
 fn is_unimplemented(status: &tonic::Status) -> bool {
@@ -296,16 +296,27 @@ pub(crate) async fn fetch_transactions_page(
                 "GetUpdatesPage unavailable (participant older than Canton 3.5.1); falling back \
                  to the streaming update read"
             );
-            let mut transactions =
+            let transactions =
                 stream_transactions(config, token, begin_exclusive, end_inclusive, update_format)
                     .await?;
-            transactions.reverse();
-            Ok(TransactionPage {
-                transactions,
-                next_page_token: None,
-            })
+            Ok(descending_page(transactions))
         }
         Err(status) => Err(status.into()),
+    }
+}
+
+/// Present an ascending stream of transactions as one descending page.
+///
+/// The pre-3.5.1 `GetUpdates` has no "newest first" option, so the reversal
+/// here is what makes the fallback meet the same contract as the paged RPC.
+/// There is no continuation token to hand back: the stream drained the whole
+/// range in one go.
+fn descending_page(mut transactions: Vec<Transaction>) -> TransactionPage {
+    transactions.reverse();
+
+    TransactionPage {
+        transactions,
+        next_page_token: None,
     }
 }
 
@@ -340,4 +351,65 @@ async fn stream_transactions(
     }
 
     Ok(transactions)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tx_at(offset: i64) -> Transaction {
+        Transaction {
+            offset,
+            update_id: format!("update-{offset}"),
+            ..Default::default()
+        }
+    }
+
+    fn offsets_of(page: &TransactionPage) -> Vec<i64> {
+        page.transactions.iter().map(|tx| tx.offset).collect()
+    }
+
+    /// The pre-3.5.1 stream arrives oldest-first; callers page newest-first, so
+    /// the fallback has to hand back the reverse of what it read.
+    #[test]
+    fn fallback_page_is_newest_first() {
+        let page = descending_page(vec![tx_at(10), tx_at(20), tx_at(30)]);
+
+        assert_eq!(offsets_of(&page), vec![30, 20, 10]);
+    }
+
+    /// The stream drained the whole range, so there is nothing to continue
+    /// from — a token here would send the caller round the same range again.
+    #[test]
+    fn fallback_page_has_no_continuation() {
+        let page = descending_page(vec![tx_at(10)]);
+        assert!(page.next_page_token.is_none());
+
+        let empty = descending_page(Vec::new());
+        assert!(empty.transactions.is_empty());
+        assert!(empty.next_page_token.is_none());
+    }
+
+    /// Only `Unimplemented` means "this participant predates the paged RPCs".
+    /// Any other status is a real error and must not be answered with a full
+    /// unpaged read.
+    #[test]
+    fn only_unimplemented_selects_the_fallback() {
+        assert!(is_unimplemented(&tonic::Status::unimplemented(
+            "GetUpdatesPage"
+        )));
+
+        for status in [
+            tonic::Status::unavailable("participant restarting"),
+            tonic::Status::permission_denied("bad token"),
+            tonic::Status::invalid_argument("bad page token"),
+            tonic::Status::deadline_exceeded("too slow"),
+        ] {
+            assert!(
+                !is_unimplemented(&status),
+                "{code:?} must not fall back",
+                code = status.code()
+            );
+        }
+    }
 }

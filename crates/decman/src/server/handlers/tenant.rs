@@ -20,9 +20,9 @@
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use canton_proto_rs::com::daml::ledger::api::v2::{
-    Command, CreateCommand, CumulativeFilter, EventFormat, Filters, GetActiveContractsRequest,
-    GetLedgerEndRequest, Identifier, List, Optional, Record, RecordField, Signature,
-    SignatureFormat, SigningAlgorithmSpec, Value, WildcardFilter, command, cumulative_filter,
+    Command, CreateCommand, GetActiveContractsRequest, GetLedgerEndRequest, Identifier, List,
+    Optional, Record, RecordField, Signature, SignatureFormat, SigningAlgorithmSpec, Value,
+    command,
     get_active_contracts_response::ContractEntry,
     interactive::{
         ExecuteSubmissionRequest, PartySignatures, PrepareSubmissionRequest, PreparedTransaction,
@@ -39,6 +39,7 @@ use crate::{
     error::Result,
     server::{
         AppState,
+        event_filters::{party_event_format, wildcard_filter},
         middleware::require_tenant_api_key,
         types::{
             ErrorResponse, TenantAcsResponse, TenantContract, TenantExecuteSubmissionRequest,
@@ -538,29 +539,15 @@ async fn fetch_party_acs(
         .into_inner()
         .offset;
 
-    let mut filters_by_party = std::collections::HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
-                    WildcardFilter {
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
-    );
-
     let request = GetActiveContractsRequest {
         active_at_offset: ledger_end,
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            // Verbose so created events carry record field labels, which makes
-            // `create_arguments` render as a labelled JSON object.
-            verbose: true,
-        }),
+        // Verbose so created events carry record field labels, which makes
+        // `create_arguments` render as a labelled JSON object.
+        event_format: Some(party_event_format(
+            party_id,
+            vec![wildcard_filter(false)],
+            true,
+        )),
         stream_continuation_token: None,
     };
 

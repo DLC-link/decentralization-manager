@@ -7,21 +7,21 @@
 use std::{
     cmp::Reverse,
     collections::HashMap,
+    future::Future,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use canton_common::decimal::DamlDecimal;
 use canton_proto_rs::com::{
     daml::ledger::api::v2::{
-        CreatedEvent, CumulativeFilter, EventFormat, Filters, GetEventsByContractIdRequest,
-        Identifier, InterfaceFilter, Record, TemplateFilter, Value, WildcardFilter,
-        admin::ListKnownPartiesRequest, cumulative_filter, value,
+        CreatedEvent, GetEventsByContractIdRequest, Identifier, Record, Value,
+        admin::{ListKnownPartiesRequest, ListKnownPartiesResponse},
+        value,
     },
     digitalasset::canton::admin::participant::v30::{
         ListPackagesRequest, package_service_client::PackageServiceClient,
     },
 };
-use common::api::PAGE_SIZE;
 
 use crate::{
     canton_id::CantonId,
@@ -32,9 +32,10 @@ use crate::{
 
 use super::{
     action_serializer,
+    event_filters::{interface_filter, party_event_format, template_filter, wildcard_filter},
     ledger_paging::{
-        fetch_active_contracts_filtered, fetch_first_active_contract, fetch_first_matching,
-        for_each_active_contract,
+        FETCH_CHUNK, fetch_active_contracts_filtered, fetch_first_active_contract,
+        fetch_first_matching, for_each_active_contract,
     },
     package_inventory::{
         fetch_package_id_to_name, fetch_package_names, newest_matching_names, package_name_prefix,
@@ -462,25 +463,7 @@ async fn fetch_contracts_with_wildcard(
     package_versions: &HashMap<String, String>,
     contracts: &mut Vec<ContractInfo>,
 ) -> Result {
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
-                    WildcardFilter {
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
-    );
-
-    let event_format = EventFormat {
-        filters_by_party,
-        filters_for_any_party: None,
-        verbose: false,
-    };
+    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], false);
 
     for_each_active_contract(config, token, event_format, |created| {
         // Test mode reads the ACS wildcard, so the template narrowing happens
@@ -509,30 +492,18 @@ async fn fetch_contracts_for_template(
     package_versions: &HashMap<String, String>,
     contracts: &mut Vec<ContractInfo>,
 ) -> Result {
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
-                    TemplateFilter {
-                        template_id: Some(Identifier {
-                            package_id: template.package_id.to_string(),
-                            module_name: template.module_name.to_string(),
-                            entity_name: template.entity_name.to_string(),
-                        }),
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
+    let event_format = party_event_format(
+        party_id,
+        vec![template_filter(
+            Identifier {
+                package_id: template.package_id.to_string(),
+                module_name: template.module_name.to_string(),
+                entity_name: template.entity_name.to_string(),
+            },
+            false,
+        )],
+        false,
     );
-
-    let event_format = EventFormat {
-        filters_by_party,
-        filters_for_any_party: None,
-        verbose: false,
-    };
 
     for_each_active_contract(config, token, event_format, |created| {
         contracts.push(render_contract_info(&created, package_versions));
@@ -548,30 +519,54 @@ pub async fn get_party_metadata(
     party_id: &CantonId,
     token: Option<String>,
 ) -> Result<Option<PartyMetadata>> {
-    let mut client = utils::create_party_client(config, token).await?;
+    let client = utils::create_party_client(config, token).await?;
     let party_id_str = party_id.to_string();
 
     // `filter_party` is a server-side prefix match, so a full party id narrows
     // this to the one party we want. Paging is still walked because the prefix
     // can in principle match more than one id, and a participant hosting more
     // parties than one page holds would otherwise silently report no metadata.
-    let mut page_token = String::new();
-    loop {
-        let response = client
-            .list_known_parties(tonic::Request::new(ListKnownPartiesRequest {
-                identity_provider_id: String::new(),
-                page_token: page_token.clone(),
-                page_size: PAGE_SIZE,
-                filter_party: party_id_str.clone(),
-            }))
-            .await?
-            .into_inner();
+    //
+    // `FETCH_CHUNK` rather than the wire `PAGE_SIZE`: this is an internal
+    // full-collection read, and on a participant that ignores `filter_party`
+    // the wire size would turn the walk into a round trip per 25 parties.
+    find_party_annotations(&party_id_str, |page_token| {
+        let request = ListKnownPartiesRequest {
+            identity_provider_id: String::new(),
+            page_token,
+            page_size: FETCH_CHUNK,
+            filter_party: party_id_str.clone(),
+        };
+        let mut client = client.clone();
 
-        if let Some(details) = response
-            .party_details
-            .iter()
-            .find(|p| p.party == party_id_str)
-        {
+        async move {
+            Ok(client
+                .list_known_parties(tonic::Request::new(request))
+                .await?
+                .into_inner())
+        }
+    })
+    .await
+}
+
+/// Walk `ListKnownParties` pages for `party_id`, returning its annotations.
+///
+/// `fetch_page` takes the token of the page to read and is a parameter so the
+/// walk can be tested; production passes the Ledger API call.
+async fn find_party_annotations<F, Fut>(
+    party_id: &str,
+    mut fetch_page: F,
+) -> Result<Option<PartyMetadata>>
+where
+    F: FnMut(String) -> Fut,
+    Fut: Future<Output = Result<ListKnownPartiesResponse>>,
+{
+    let mut page_token = String::new();
+
+    loop {
+        let response = fetch_page(page_token.clone()).await?;
+
+        if let Some(details) = response.party_details.iter().find(|p| p.party == party_id) {
             let annotations = details
                 .local_metadata
                 .as_ref()
@@ -585,7 +580,9 @@ pub async fn get_party_metadata(
             };
         }
 
-        if response.next_page_token.is_empty() {
+        // A repeated token means the server is not advancing; treating it as the
+        // end keeps a misbehaving participant from walking forever.
+        if response.next_page_token.is_empty() || response.next_page_token == page_token {
             return Ok(None);
         }
         page_token = response.next_page_token;
@@ -802,25 +799,7 @@ async fn fetch_governance_with_wildcard(
     domain_confirmations: &mut HashMap<String, (String, Vec<GovernanceConfirmation>)>,
     proposal_infos: &mut HashMap<String, ProposalInfo>,
 ) -> Result {
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
-                    WildcardFilter {
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
-    );
-
-    let event_format = EventFormat {
-        filters_by_party,
-        filters_for_any_party: None,
-        verbose: true,
-    };
+    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], true);
 
     for_each_active_contract(config, token, event_format, |created| {
         let Some(ref template_id) = created.template_id else {
@@ -854,30 +833,18 @@ async fn fetch_governance_for_template(
     confirmations_by_hash: &mut HashMap<String, (ActionType, Vec<GovernanceConfirmation>)>,
     domain_confirmations: &mut HashMap<String, (String, Vec<GovernanceConfirmation>)>,
 ) -> Result {
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
-                    TemplateFilter {
-                        template_id: Some(Identifier {
-                            package_id: template.package_id.to_string(),
-                            module_name: template.module_name.to_string(),
-                            entity_name: template.entity_name.to_string(),
-                        }),
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
+    let event_format = party_event_format(
+        party_id,
+        vec![template_filter(
+            Identifier {
+                package_id: template.package_id.to_string(),
+                module_name: template.module_name.to_string(),
+                entity_name: template.entity_name.to_string(),
+            },
+            false,
+        )],
+        true,
     );
-
-    let event_format = EventFormat {
-        filters_by_party,
-        filters_for_any_party: None,
-        verbose: true,
-    };
 
     for_each_active_contract(config, token, event_format, |created| {
         if created.template_id.as_ref().is_some_and(|t| {
@@ -1221,32 +1188,20 @@ async fn resolve_accept_transfer_details(
     let mut client = utils::create_event_query_client(config, token).await?;
 
     for (proposal_cid, instruction_cid) in pending {
-        let mut filters_by_party = HashMap::new();
-        filters_by_party.insert(
-            party_id.to_string(),
-            Filters {
-                cumulative: vec![CumulativeFilter {
-                    identifier_filter: Some(cumulative_filter::IdentifierFilter::InterfaceFilter(
-                        InterfaceFilter {
-                            interface_id: Some(Identifier {
-                                package_id: "#splice-api-token-transfer-instruction-v1".to_string(),
-                                module_name: "Splice.Api.Token.TransferInstructionV1".to_string(),
-                                entity_name: "TransferInstruction".to_string(),
-                            }),
-                            include_interface_view: true,
-                            include_created_event_blob: false,
-                        },
-                    )),
-                }],
-            },
-        );
         let request = GetEventsByContractIdRequest {
             contract_id: instruction_cid.clone(),
-            event_format: Some(EventFormat {
-                filters_by_party,
-                filters_for_any_party: None,
-                verbose: true,
-            }),
+            event_format: Some(party_event_format(
+                party_id,
+                vec![interface_filter(
+                    Identifier {
+                        package_id: "#splice-api-token-transfer-instruction-v1".to_string(),
+                        module_name: "Splice.Api.Token.TransferInstructionV1".to_string(),
+                        entity_name: "TransferInstruction".to_string(),
+                    },
+                    false,
+                )],
+                true,
+            )),
         };
         let created_event = match client
             .get_events_by_contract_id(tonic::Request::new(request))
@@ -1344,31 +1299,18 @@ async fn fetch_proposal_infos(
         return Ok(());
     };
 
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::InterfaceFilter(
-                    InterfaceFilter {
-                        interface_id: Some(Identifier {
-                            package_id: pkg.clone(),
-                            module_name: "Governance.Action".to_string(),
-                            entity_name: "GovernableAction".to_string(),
-                        }),
-                        include_created_event_blob: false,
-                        include_interface_view: true,
-                    },
-                )),
-            }],
-        },
+    let event_format = party_event_format(
+        party_id,
+        vec![interface_filter(
+            Identifier {
+                package_id: pkg.clone(),
+                module_name: "Governance.Action".to_string(),
+                entity_name: "GovernableAction".to_string(),
+            },
+            false,
+        )],
+        true,
     );
-
-    let event_format = EventFormat {
-        filters_by_party,
-        filters_for_any_party: None,
-        verbose: true,
-    };
 
     for_each_active_contract(config, token.clone(), event_format, |created| {
         extract_proposal_info(&created, proposal_infos);
@@ -1506,25 +1448,7 @@ async fn fetch_governance_state_with_wildcard(
     party_id: &CantonId,
     token: Option<String>,
 ) -> Result<Option<GovernanceState>> {
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
-                    WildcardFilter {
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
-    );
-
-    let event_format = EventFormat {
-        filters_by_party,
-        filters_for_any_party: None,
-        verbose: true,
-    };
+    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], true);
 
     // Test mode reads the ACS wildcard, so the governance-rules templates are
     // matched here; stops at the first one rather than draining the ACS.
@@ -1548,30 +1472,18 @@ async fn fetch_governance_state_for_template(
     token: Option<String>,
     template: &TemplateId,
 ) -> Result<Option<GovernanceState>> {
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
-                    TemplateFilter {
-                        template_id: Some(Identifier {
-                            package_id: template.package_id.clone(),
-                            module_name: template.module_name.to_string(),
-                            entity_name: template.entity_name.to_string(),
-                        }),
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
+    let event_format = party_event_format(
+        party_id,
+        vec![template_filter(
+            Identifier {
+                package_id: template.package_id.clone(),
+                module_name: template.module_name.to_string(),
+                entity_name: template.entity_name.to_string(),
+            },
+            false,
+        )],
+        true,
     );
-
-    let event_format = EventFormat {
-        filters_by_party,
-        filters_for_any_party: None,
-        verbose: true,
-    };
 
     Ok(fetch_first_active_contract(config, token, event_format)
         .await?
@@ -1678,26 +1590,13 @@ async fn fetch_contract_package_ref(
 ) -> Result<Option<String>> {
     let mut client = utils::create_event_query_client(config, token).await?;
 
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
-                    WildcardFilter {
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
-    );
     let request = GetEventsByContractIdRequest {
         contract_id: contract_id.to_string(),
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            verbose: false,
-        }),
+        event_format: Some(party_event_format(
+            party_id,
+            vec![wildcard_filter(false)],
+            false,
+        )),
     };
 
     let package_id = client
@@ -1824,25 +1723,7 @@ async fn fetch_vaults_with_wildcard(
     party_id: &CantonId,
     token: Option<String>,
 ) -> Result<Vec<VaultInfo>> {
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
-                    WildcardFilter {
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
-    );
-
-    let event_format = EventFormat {
-        filters_by_party,
-        filters_for_any_party: None,
-        verbose: true,
-    };
+    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], true);
 
     let mut vaults = Vec::new();
     for_each_active_contract(config, token, event_format, |created| {
@@ -1866,30 +1747,18 @@ async fn fetch_vaults_for_template(
     token: Option<String>,
     template: &TemplateId,
 ) -> Result<Vec<VaultInfo>> {
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
-                    TemplateFilter {
-                        template_id: Some(Identifier {
-                            package_id: template.package_id.clone(),
-                            module_name: template.module_name.to_string(),
-                            entity_name: template.entity_name.to_string(),
-                        }),
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
+    let event_format = party_event_format(
+        party_id,
+        vec![template_filter(
+            Identifier {
+                package_id: template.package_id.clone(),
+                module_name: template.module_name.to_string(),
+                entity_name: template.entity_name.to_string(),
+            },
+            false,
+        )],
+        true,
     );
-
-    let event_format = EventFormat {
-        filters_by_party,
-        filters_for_any_party: None,
-        verbose: true,
-    };
 
     fetch_active_contracts_filtered(config, token, event_format, |created| {
         extract_vault_info(&created)
@@ -2002,25 +1871,7 @@ async fn fetch_provider_services_with_wildcard(
     party_id: &CantonId,
     token: Option<String>,
 ) -> Result<Vec<ProviderServiceInfo>> {
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
-                    WildcardFilter {
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
-    );
-
-    let event_format = EventFormat {
-        filters_by_party,
-        filters_for_any_party: None,
-        verbose: true,
-    };
+    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], true);
 
     fetch_active_contracts_filtered(config, token, event_format, |created| {
         let template_id = created.template_id.as_ref()?;
@@ -2041,30 +1892,18 @@ async fn fetch_provider_services_for_template(
     token: Option<String>,
     template: &TemplateId,
 ) -> Result<Vec<ProviderServiceInfo>> {
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
-                    TemplateFilter {
-                        template_id: Some(Identifier {
-                            package_id: template.package_id.clone(),
-                            module_name: template.module_name.to_string(),
-                            entity_name: template.entity_name.to_string(),
-                        }),
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
+    let event_format = party_event_format(
+        party_id,
+        vec![template_filter(
+            Identifier {
+                package_id: template.package_id.clone(),
+                module_name: template.module_name.to_string(),
+                entity_name: template.entity_name.to_string(),
+            },
+            false,
+        )],
+        true,
     );
-
-    let event_format = EventFormat {
-        filters_by_party,
-        filters_for_any_party: None,
-        verbose: true,
-    };
 
     fetch_active_contracts_filtered(config, token, event_format, |created| {
         extract_provider_service_info(&created)
@@ -2129,25 +1968,7 @@ async fn fetch_user_services_with_wildcard(
     party_id: &CantonId,
     token: Option<String>,
 ) -> Result<Vec<UserServiceInfo>> {
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
-                    WildcardFilter {
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
-    );
-
-    let event_format = EventFormat {
-        filters_by_party,
-        filters_for_any_party: None,
-        verbose: true,
-    };
+    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], true);
 
     fetch_active_contracts_filtered(config, token, event_format, |created| {
         let template_id = created.template_id.as_ref()?;
@@ -2168,30 +1989,18 @@ async fn fetch_user_services_for_template(
     token: Option<String>,
     template: &TemplateId,
 ) -> Result<Vec<UserServiceInfo>> {
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
-                    TemplateFilter {
-                        template_id: Some(Identifier {
-                            package_id: template.package_id.clone(),
-                            module_name: template.module_name.to_string(),
-                            entity_name: template.entity_name.to_string(),
-                        }),
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
+    let event_format = party_event_format(
+        party_id,
+        vec![template_filter(
+            Identifier {
+                package_id: template.package_id.clone(),
+                module_name: template.module_name.to_string(),
+                entity_name: template.entity_name.to_string(),
+            },
+            false,
+        )],
+        true,
     );
-
-    let event_format = EventFormat {
-        filters_by_party,
-        filters_for_any_party: None,
-        verbose: true,
-    };
 
     fetch_active_contracts_filtered(config, token, event_format, |created| {
         extract_user_service_info(&created)
@@ -2262,25 +2071,7 @@ async fn fetch_credential_offers_with_wildcard(
     party_id: &CantonId,
     token: Option<String>,
 ) -> Result<Vec<CredentialOfferInfo>> {
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
-                    WildcardFilter {
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
-    );
-
-    let event_format = EventFormat {
-        filters_by_party,
-        filters_for_any_party: None,
-        verbose: true,
-    };
+    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], true);
 
     fetch_active_contracts_filtered(config, token, event_format, |created| {
         let template_id = created.template_id.as_ref()?;
@@ -2301,30 +2092,18 @@ async fn fetch_credential_offers_for_template(
     token: Option<String>,
     template: &TemplateId,
 ) -> Result<Vec<CredentialOfferInfo>> {
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
-                    TemplateFilter {
-                        template_id: Some(Identifier {
-                            package_id: template.package_id.clone(),
-                            module_name: template.module_name.to_string(),
-                            entity_name: template.entity_name.to_string(),
-                        }),
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
+    let event_format = party_event_format(
+        party_id,
+        vec![template_filter(
+            Identifier {
+                package_id: template.package_id.clone(),
+                module_name: template.module_name.to_string(),
+                entity_name: template.entity_name.to_string(),
+            },
+            false,
+        )],
+        true,
     );
-
-    let event_format = EventFormat {
-        filters_by_party,
-        filters_for_any_party: None,
-        verbose: true,
-    };
 
     fetch_active_contracts_filtered(config, token, event_format, |created| {
         extract_credential_offer_info(&created)
@@ -2395,25 +2174,7 @@ async fn fetch_registrar_services_with_wildcard(
     party_id: &CantonId,
     token: Option<String>,
 ) -> Result<Vec<RegistrarServiceInfo>> {
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
-                    WildcardFilter {
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
-    );
-
-    let event_format = EventFormat {
-        filters_by_party,
-        filters_for_any_party: None,
-        verbose: true,
-    };
+    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], true);
 
     fetch_active_contracts_filtered(config, token, event_format, |created| {
         let template_id = created.template_id.as_ref()?;
@@ -2434,30 +2195,18 @@ async fn fetch_registrar_services_for_template(
     token: Option<String>,
     template: &TemplateId,
 ) -> Result<Vec<RegistrarServiceInfo>> {
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
-                    TemplateFilter {
-                        template_id: Some(Identifier {
-                            package_id: template.package_id.clone(),
-                            module_name: template.module_name.to_string(),
-                            entity_name: template.entity_name.to_string(),
-                        }),
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
+    let event_format = party_event_format(
+        party_id,
+        vec![template_filter(
+            Identifier {
+                package_id: template.package_id.clone(),
+                module_name: template.module_name.to_string(),
+                entity_name: template.entity_name.to_string(),
+            },
+            false,
+        )],
+        true,
     );
-
-    let event_format = EventFormat {
-        filters_by_party,
-        filters_for_any_party: None,
-        verbose: true,
-    };
 
     fetch_active_contracts_filtered(config, token, event_format, |created| {
         extract_registrar_service_info(&created)
@@ -2538,25 +2287,7 @@ async fn fetch_instruments_with_wildcard(
     party_id: &CantonId,
     token: Option<String>,
 ) -> Result<Vec<InstrumentInfo>> {
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
-                    WildcardFilter {
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
-    );
-
-    let event_format = EventFormat {
-        filters_by_party,
-        filters_for_any_party: None,
-        verbose: true,
-    };
+    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], true);
 
     fetch_active_contracts_filtered(config, token, event_format, |created| {
         let template_id = created.template_id.as_ref()?;
@@ -2576,30 +2307,18 @@ async fn fetch_instruments_for_template(
     token: Option<String>,
     template: &TemplateId,
 ) -> Result<Vec<InstrumentInfo>> {
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
-                    TemplateFilter {
-                        template_id: Some(Identifier {
-                            package_id: template.package_id.clone(),
-                            module_name: template.module_name.to_string(),
-                            entity_name: template.entity_name.to_string(),
-                        }),
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
+    let event_format = party_event_format(
+        party_id,
+        vec![template_filter(
+            Identifier {
+                package_id: template.package_id.clone(),
+                module_name: template.module_name.to_string(),
+                entity_name: template.entity_name.to_string(),
+            },
+            false,
+        )],
+        true,
     );
-
-    let event_format = EventFormat {
-        filters_by_party,
-        filters_for_any_party: None,
-        verbose: true,
-    };
 
     fetch_active_contracts_filtered(config, token, event_format, |created| {
         extract_instrument_info(&created)
@@ -2685,38 +2404,15 @@ pub async fn query_contracts_by_template(
         entity_name: params.entity_name.clone(),
     };
 
-    let identifier_filter = if test_mode {
-        cumulative_filter::IdentifierFilter::WildcardFilter(WildcardFilter {
-            include_created_event_blob: true,
-        })
+    let filter = if test_mode {
+        wildcard_filter(true)
     } else if params.use_interface_filter {
-        cumulative_filter::IdentifierFilter::InterfaceFilter(InterfaceFilter {
-            interface_id: Some(identifier),
-            include_interface_view: true,
-            include_created_event_blob: true,
-        })
+        interface_filter(identifier, true)
     } else {
-        cumulative_filter::IdentifierFilter::TemplateFilter(TemplateFilter {
-            template_id: Some(identifier),
-            include_created_event_blob: true,
-        })
+        template_filter(identifier, true)
     };
 
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(identifier_filter),
-            }],
-        },
-    );
-
-    let event_format = EventFormat {
-        filters_by_party,
-        filters_for_any_party: None,
-        verbose: true,
-    };
+    let event_format = party_event_format(party_id, vec![filter], true);
 
     fetch_active_contracts_filtered(config, token, event_format, |created| {
         // Test mode reads the ACS wildcard, so the template narrowing Canton
@@ -2768,31 +2464,18 @@ pub async fn get_open_transfer_instructions(
     party_id: &CantonId,
     token: Option<String>,
 ) -> Result<Vec<TransferInstructionInfo>> {
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::InterfaceFilter(
-                    InterfaceFilter {
-                        interface_id: Some(Identifier {
-                            package_id: "#splice-api-token-transfer-instruction-v1".to_string(),
-                            module_name: "Splice.Api.Token.TransferInstructionV1".to_string(),
-                            entity_name: "TransferInstruction".to_string(),
-                        }),
-                        include_interface_view: true,
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
+    let event_format = party_event_format(
+        party_id,
+        vec![interface_filter(
+            Identifier {
+                package_id: "#splice-api-token-transfer-instruction-v1".to_string(),
+                module_name: "Splice.Api.Token.TransferInstructionV1".to_string(),
+                entity_name: "TransferInstruction".to_string(),
+            },
+            false,
+        )],
+        true,
     );
-
-    let event_format = EventFormat {
-        filters_by_party,
-        filters_for_any_party: None,
-        verbose: true,
-    };
 
     let receiver_str = party_id.to_string();
 
@@ -2960,30 +2643,18 @@ async fn fetch_token_requests_for_template(
     template: &TemplateId,
     payload_field: &str,
 ) -> Result<Vec<TokenRequestInfo>> {
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
-                    TemplateFilter {
-                        template_id: Some(Identifier {
-                            package_id: template.package_id.clone(),
-                            module_name: template.module_name.to_string(),
-                            entity_name: template.entity_name.to_string(),
-                        }),
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
+    let event_format = party_event_format(
+        party_id,
+        vec![template_filter(
+            Identifier {
+                package_id: template.package_id.clone(),
+                module_name: template.module_name.to_string(),
+                entity_name: template.entity_name.to_string(),
+            },
+            false,
+        )],
+        true,
     );
-
-    let event_format = EventFormat {
-        filters_by_party,
-        filters_for_any_party: None,
-        verbose: true,
-    };
 
     fetch_active_contracts_filtered(config, token, event_format, |created| {
         if is_execute_before_expired_in_payload(&created, payload_field) {
@@ -3183,31 +2854,18 @@ pub async fn get_transfer_factories(
     party_id: &CantonId,
     token: Option<String>,
 ) -> Result<Vec<TransferFactoryInfo>> {
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::InterfaceFilter(
-                    InterfaceFilter {
-                        interface_id: Some(Identifier {
-                            package_id: "#splice-api-token-transfer-instruction-v1".to_string(),
-                            module_name: "Splice.Api.Token.TransferInstructionV1".to_string(),
-                            entity_name: "TransferFactory".to_string(),
-                        }),
-                        include_interface_view: true,
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
+    let event_format = party_event_format(
+        party_id,
+        vec![interface_filter(
+            Identifier {
+                package_id: "#splice-api-token-transfer-instruction-v1".to_string(),
+                module_name: "Splice.Api.Token.TransferInstructionV1".to_string(),
+                entity_name: "TransferFactory".to_string(),
+            },
+            false,
+        )],
+        true,
     );
-
-    let event_format = EventFormat {
-        filters_by_party,
-        filters_for_any_party: None,
-        verbose: true,
-    };
 
     fetch_active_contracts_filtered(config, token, event_format, |created| {
         extract_transfer_factory_info(&created)
@@ -3339,31 +2997,18 @@ async fn fetch_holding_views(
     party_id: &CantonId,
     token: Option<String>,
 ) -> Result<Vec<HoldingView>> {
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::InterfaceFilter(
-                    InterfaceFilter {
-                        interface_id: Some(Identifier {
-                            package_id: "#splice-api-token-holding-v1".to_string(),
-                            module_name: "Splice.Api.Token.HoldingV1".to_string(),
-                            entity_name: "Holding".to_string(),
-                        }),
-                        include_interface_view: true,
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
+    let event_format = party_event_format(
+        party_id,
+        vec![interface_filter(
+            Identifier {
+                package_id: "#splice-api-token-holding-v1".to_string(),
+                module_name: "Splice.Api.Token.HoldingV1".to_string(),
+                entity_name: "Holding".to_string(),
+            },
+            false,
+        )],
+        true,
     );
-
-    let event_format = EventFormat {
-        filters_by_party,
-        filters_for_any_party: None,
-        verbose: true,
-    };
 
     let owner_str = party_id.to_string();
 
@@ -3534,31 +3179,18 @@ async fn fetch_utility_preapproval_instruments(
     party_id: &CantonId,
     token: Option<String>,
 ) -> Result<std::collections::HashSet<(String, String)>> {
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
-                    TemplateFilter {
-                        template_id: Some(Identifier {
-                            package_id: "#utility-registry-app-v0".to_string(),
-                            module_name: "Utility.Registry.App.V0.Model.TransferPreapproval"
-                                .to_string(),
-                            entity_name: "TransferPreapproval".to_string(),
-                        }),
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
+    let event_format = party_event_format(
+        party_id,
+        vec![template_filter(
+            Identifier {
+                package_id: "#utility-registry-app-v0".to_string(),
+                module_name: "Utility.Registry.App.V0.Model.TransferPreapproval".to_string(),
+                entity_name: "TransferPreapproval".to_string(),
+            },
+            false,
+        )],
+        true,
     );
-
-    let event_format = EventFormat {
-        filters_by_party,
-        filters_for_any_party: None,
-        verbose: true,
-    };
 
     let entries = fetch_active_contracts_filtered(config, token, event_format, |created| {
         created
@@ -3614,6 +3246,8 @@ fn extract_preapproval_entries(args: &Record) -> Vec<(String, String)> {
 
 #[cfg(test)]
 mod tests {
+    use canton_proto_rs::com::daml::ledger::api::v2::admin::{ObjectMeta, PartyDetails};
+
     use super::*;
 
     fn ci(name: &str, version: &str, created_at: &str, contract_id: &str) -> ContractInfo {
@@ -4093,5 +3727,106 @@ mod tests {
             record.fields.retain(|f| f.label != "holder");
         }
         assert!(extract_credential_offer_info(&event).is_none());
+    }
+
+    // ====================================================================
+    // Party metadata page walk
+    // ====================================================================
+
+    fn party_page(parties: &[(&str, &[(&str, &str)])], next: &str) -> ListKnownPartiesResponse {
+        ListKnownPartiesResponse {
+            party_details: parties
+                .iter()
+                .map(|(party, annotations)| PartyDetails {
+                    party: (*party).to_string(),
+                    is_local: true,
+                    local_metadata: Some(ObjectMeta {
+                        resource_version: String::new(),
+                        annotations: annotations
+                            .iter()
+                            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                            .collect(),
+                    }),
+                    identity_provider_id: String::new(),
+                })
+                .collect(),
+            next_page_token: next.to_string(),
+        }
+    }
+
+    /// Walk `pages` in order. Asking past the script is an error, so a test that
+    /// over-reads fails instead of quietly passing.
+    async fn walk_parties(
+        party_id: &str,
+        pages: Vec<ListKnownPartiesResponse>,
+    ) -> Result<Option<PartyMetadata>> {
+        let mut remaining = std::collections::VecDeque::from(pages);
+
+        find_party_annotations(party_id, |_page_token| {
+            let page = remaining.pop_front();
+            async move { page.ok_or_else(|| anyhow::anyhow!("asked for a page beyond the script")) }
+        })
+        .await
+    }
+
+    /// `filter_party` is only a prefix match, so the wanted party can sit behind
+    /// a page of others — the walk has to follow the token to find it.
+    #[tokio::test]
+    async fn party_walk_finds_the_party_on_a_later_page() -> Result {
+        let pages = vec![
+            party_page(&[("other::1220aa", &[("k", "v")])], "page-2"),
+            party_page(&[("wanted::1220bb", &[("owner", "alice")])], ""),
+        ];
+
+        let metadata = walk_parties("wanted::1220bb", pages).await?;
+
+        assert_eq!(
+            metadata.map(|m| m.annotations),
+            Some([("owner".to_string(), "alice".to_string())].into())
+        );
+
+        Ok(())
+    }
+
+    /// An exhausted token list means the party is not hosted here.
+    #[tokio::test]
+    async fn party_walk_reports_nothing_when_the_tokens_run_out() -> Result {
+        let pages = vec![
+            party_page(&[("other::1220aa", &[])], "page-2"),
+            party_page(&[("another::1220cc", &[])], ""),
+        ];
+
+        assert!(walk_parties("wanted::1220bb", pages).await?.is_none());
+
+        Ok(())
+    }
+
+    /// A participant that keeps handing back the same token would otherwise walk
+    /// forever; the walk treats a repeat as the end. The script holds two pages,
+    /// so a third read would error rather than return `None`.
+    #[tokio::test]
+    async fn party_walk_stops_on_a_repeated_page_token() -> Result {
+        let pages = vec![
+            party_page(&[("other::1220aa", &[])], "stuck"),
+            party_page(&[("other::1220aa", &[])], "stuck"),
+        ];
+
+        assert!(walk_parties("wanted::1220bb", pages).await?.is_none());
+
+        Ok(())
+    }
+
+    /// Found, but carrying no annotations — there is no metadata to report, and
+    /// the walk must not keep looking for a better match.
+    #[tokio::test]
+    async fn party_walk_reports_nothing_for_a_party_without_annotations() -> Result {
+        let pages = vec![
+            party_page(&[("wanted::1220bb", &[])], "page-2"),
+            party_page(&[("wanted::1220bb", &[("owner", "alice")])], ""),
+        ];
+
+        assert!(walk_parties("wanted::1220bb", pages).await?.is_none());
+
+        Ok(())
     }
 }
