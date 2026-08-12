@@ -919,6 +919,12 @@ impl ProposalType {
                 if instrument_issuer_cids.is_empty() {
                     return Err("instrument_issuer_cids must not be empty".to_string());
                 }
+                let mut seen = std::collections::HashSet::new();
+                for cid in instrument_issuer_cids {
+                    if !seen.insert(cid) {
+                        return Err(format!("duplicate credential cid not allowed: {cid}"));
+                    }
+                }
                 Ok(())
             }
             ProposalType::SetupCouponReassignmentDelegation {
@@ -1673,6 +1679,26 @@ mod tests {
         };
         assert!(mk(Vec::new()).validate().is_err());
         assert!(mk(vec!["cred-1".to_string()]).validate().is_ok());
+    }
+
+    #[test]
+    fn proposal_offboard_instrument_issuers_rejects_duplicate_cids() {
+        // Mirrors the template's `ensure unique instrumentIssuerCids`: a
+        // duplicated cid would revoke the same credential twice and fail
+        // the whole action at execution.
+        let mk = |cids: Vec<String>| ProposalType::OffboardInstrumentIssuers {
+            instrument_issuer_cids: cids,
+        };
+        assert!(
+            mk(vec!["cred-1".to_string(), "cred-1".to_string()])
+                .validate()
+                .is_err()
+        );
+        assert!(
+            mk(vec!["cred-1".to_string(), "cred-2".to_string()])
+                .validate()
+                .is_ok()
+        );
     }
 
     #[test]
