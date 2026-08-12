@@ -4199,7 +4199,7 @@ export const GovernanceSection = ({
                   <Divider />
                   <ListSubheader sx={{ color: "primary.main", fontWeight: 600 }}>Dual Governance Utility Onboarding</ListSubheader>
                   <ListSubheader sx={{ fontStyle: "italic", lineHeight: 1.5, pl: 4 }}>Onboarding (in order)</ListSubheader>
-                  <MenuItem value="create_user_service_request">1. Create User Service Request (as Provider/Registrar)</MenuItem>
+                  <MenuItem value="create_user_service_request">1. Create User Service Request (as Provider)</MenuItem>
                   <MenuItem value="create_provider_service_request">2. Create Provider Service Request (as Provider)</MenuItem>
                   <MenuItem value="create_provider_configuration">3. Create Provider Configuration (as Provider)</MenuItem>
                   <MenuItem value="create_registrar_service_request">4. Create Registrar Service Request (as Registrar)</MenuItem>
