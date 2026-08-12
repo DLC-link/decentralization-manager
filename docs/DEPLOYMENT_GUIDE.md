@@ -257,6 +257,10 @@ spec:
           env:
             - name: RUST_LOG
               value: dec_party_manager=info,tokio_noise=error,hyper_noise=error
+            # Logs are JSON on stdout by default. The collector indexes the
+            # fields as attributes only where a log pipeline parses the line,
+            # so this environment needs its own decman pipeline in dlc-infra.
+            # Set DECPM_LOG_FORMAT=text for the console format instead.
           envFrom:
             - secretRef:
                 name: dec-party-manager-secrets
@@ -399,6 +403,7 @@ Most variables have a default that's only useful for local development (loopback
 | `DECPM_TIMEOUT_MESSAGE` | `120` | optional | Noise message timeout (seconds) |
 | `DECPM_TIMEOUT_RETRY_ATTEMPTS` | `3` | optional | Connection retry attempts |
 | `DECPM_TIMEOUT_RETRY_DELAY` | `5` | optional | Connection retry delay (seconds) |
+| `DECPM_LOG_FORMAT` | `json` | optional | Leave it unset in a cluster, because the log pipeline parses JSON only. `text` gives the console format for local work |
 
 ¹ Required only for the chosen provider. Set the `DECPM_KEYCLOAK_*` trio **or** the `DECPM_AUTH0_*` trio, not both.
 

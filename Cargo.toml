@@ -83,7 +83,7 @@ tonic = { version = "0.14.2", features = [
 ] }
 tonic-prost = { version = "0.14.2" }
 tracing = { version = "0.1" }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 ts-rs = { version = "12", features = ["no-serde-warnings"] }
 utoipa = { version = "5" }
 utoipa-actix-web = { version = "0.1" }
