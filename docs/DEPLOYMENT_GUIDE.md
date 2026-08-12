@@ -403,6 +403,7 @@ Most variables have a default that's only useful for local development (loopback
 | `DECPM_TIMEOUT_MESSAGE` | `120` | optional | Noise message timeout (seconds) |
 | `DECPM_TIMEOUT_RETRY_ATTEMPTS` | `3` | optional | Connection retry attempts |
 | `DECPM_TIMEOUT_RETRY_DELAY` | `5` | optional | Connection retry delay (seconds) |
+| `DECPM_LOG_FORMAT` | `json` | optional | Leave it unset in a cluster, because the log pipeline parses JSON only. `text` gives the console format for local work |
 
 ¹ Required only for the chosen provider. Set the `DECPM_KEYCLOAK_*` trio **or** the `DECPM_AUTH0_*` trio, not both.
 
