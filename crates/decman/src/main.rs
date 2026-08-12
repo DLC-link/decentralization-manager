@@ -1,6 +1,6 @@
 mod cli;
 
-use std::path::PathBuf;
+use std::{path::PathBuf, process::ExitCode};
 
 use dec_party_manager::{
     config::{Auth0Config, CantonTlsConfig, KeycloakConfig, NodeConfig},
@@ -70,7 +70,21 @@ fn json_logs_enabled(format: Option<&str>) -> bool {
 }
 
 #[tokio::main]
-async fn main() -> Result {
+async fn main() -> ExitCode {
+    match run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            // Returning the error from `main` prints it through `Termination`,
+            // as plain text no pipeline parses. The error-rate alert counts
+            // parsed `level` values, so the fatal has to leave through
+            // `tracing` to be counted at all.
+            tracing::error!(%error, "dec-party-manager exited with an error");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run() -> Result {
     // Load .env from the root directory before clap parses,
     // so DECPM_* env vars are available for clap's env feature
     let dir = find_dir_arg();
@@ -97,6 +111,14 @@ async fn main() -> Result {
             .with(tracing_subscriber::fmt::layer().with_filter(filter))
             .init();
     }
+
+    // A panic prints to stderr as plain text, which the pipeline leaves
+    // unparsed, so log it before the default hook prints the backtrace.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        tracing::error!(panic = %info, "dec-party-manager panicked");
+        default_hook(info);
+    }));
 
     let args = Cli::parse();
 
