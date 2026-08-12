@@ -222,7 +222,6 @@ setupOnboardedRegistrar f registrarRequirements = do
   proposalCid <- submit f.providerStack.member1 $ createCmd OnboardRegistrar with
     governanceParty = f.parties.providerGov
     proposer = f.providerStack.member1
-    registrar = f.parties.registrarGov
     providerServiceCid
     registrarServiceRequestCid = requestCid
     providerConfigurationCid

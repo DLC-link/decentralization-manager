@@ -29,12 +29,11 @@ data Fixture = Fixture
     requestCid : ContractId RegistrarServiceRequest
   deriving (Eq, Show)
 
-onboardProposal : Fixture -> Party -> Script (ContractId GovernableAction)
-onboardProposal fx registrar = do
+onboardProposal : Fixture -> Script (ContractId GovernableAction)
+onboardProposal fx = do
   proposalCid <- submit fx.f.providerStack.member1 $ createCmd OnboardRegistrar with
     governanceParty = fx.f.parties.providerGov
     proposer = fx.f.providerStack.member1
-    registrar
     providerServiceCid = fx.providerServiceCid
     registrarServiceRequestCid = fx.requestCid
     providerConfigurationCid = fx.providerConfigurationCid
@@ -54,7 +53,7 @@ given_with_default_requirement = do
 
 when_onboard_registrar : Fixture -> Script ()
 when_onboard_registrar fx = do
-  proposalCid <- onboardProposal fx fx.f.parties.registrarGov
+  proposalCid <- onboardProposal fx
   _ <- confirmAndExecuteAs fx.f.parties fx.f.providerStack proposalCid
   pure ()
 
@@ -146,7 +145,6 @@ when_onboard_with_extra_credential fx = do
   proposalCid <- submit fx.f.providerStack.member1 $ createCmd OnboardRegistrar with
     governanceParty = fx.f.parties.providerGov
     proposer = fx.f.providerStack.member1
-    registrar = fx.f.parties.registrarGov
     providerServiceCid = fx.providerServiceCid
     registrarServiceRequestCid = fx.requestCid
     providerConfigurationCid = fx.providerConfigurationCid
@@ -171,7 +169,7 @@ test_when_external_requirement_covered_then_accepted = script do
 
 when_onboard_missing_external_credential : Fixture -> Script ()
 when_onboard_missing_external_credential fx = do
-  proposalCid <- onboardProposal fx fx.f.parties.registrarGov
+  proposalCid <- onboardProposal fx
   confirmThenExecuteMustFail fx.f.parties fx.f.providerStack proposalCid
 
 then_no_service : Fixture -> () -> Script Failures
@@ -183,19 +181,6 @@ test_when_external_requirement_uncovered_then_execute_fails = script do
   run Test with
     given = given_external_requirement
     when = when_onboard_missing_external_credential
-    then_ = then_no_service
-
--- * Proposal registrar does not match the request: assert fails.
-
-when_onboard_wrong_registrar : Fixture -> Script ()
-when_onboard_wrong_registrar fx = do
-  proposalCid <- onboardProposal fx fx.f.parties.issuer1
-  confirmThenExecuteMustFail fx.f.parties fx.f.providerStack proposalCid
-
-test_when_registrar_mismatch_then_execute_fails = script do
-  run Test with
-    given = given_with_default_requirement
-    when = when_onboard_wrong_registrar
     then_ = then_no_service
 
 -- * Request aimed at a different provider: assert fails. The request's
@@ -214,7 +199,6 @@ when_onboard_foreign_provider_request fx = do
   proposalCid <- submit fx.f.providerStack.member1 $ createCmd OnboardRegistrar with
     governanceParty = parties.providerGov
     proposer = fx.f.providerStack.member1
-    registrar = parties.registrarGov
     providerServiceCid = fx.providerServiceCid
     registrarServiceRequestCid = foreignRequestCid
     providerConfigurationCid = fx.providerConfigurationCid
@@ -242,7 +226,6 @@ when_onboard_foreign_configuration fx = do
   proposalCid <- submit fx.f.providerStack.member1 $ createCmd OnboardRegistrar with
     governanceParty = parties.providerGov
     proposer = fx.f.providerStack.member1
-    registrar = parties.registrarGov
     providerServiceCid = fx.providerServiceCid
     registrarServiceRequestCid = fx.requestCid
     providerConfigurationCid = foreignConfigurationCid
@@ -259,7 +242,7 @@ test_when_configuration_provider_mismatch_then_execute_fails = script do
 
 when_outsider_confirms : Fixture -> Script ()
 when_outsider_confirms fx = do
-  proposalCid <- onboardProposal fx fx.f.parties.registrarGov
+  proposalCid <- onboardProposal fx
   outsiderCannotConfirm fx.f.parties fx.f.providerStack proposalCid
 
 then_nothing : Fixture -> () -> Script Failures
