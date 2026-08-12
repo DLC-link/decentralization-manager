@@ -45,21 +45,29 @@ pub fn propose_confirm_execute(label: &str, proposal: Value) -> Scenario<Proposa
         .then(
             "proposal visible in confirmations on P1",
             Duration::from_secs(60),
-            |f, ctx| {
-                Box::pin(async move {
-                    let party_id = match f.party_id() {
-                        Ok(p) => p,
-                        Err(e) => return Some(Err(e)),
-                    };
-                    let path = format!("/governance/confirmations?party_id={party_id}");
-                    let s: GovernanceState = f.get_json(f.p1.http, &path).await.ok()?;
-                    if s.domain_actions.len() != 1 {
-                        return None;
-                    }
-                    let action = s.domain_actions.into_iter().next()?;
-                    ctx.proposal_cid = Some(action.proposal_cid);
-                    Some(Ok(()))
-                })
+            {
+                let label_p1 = label.clone();
+                move |f, ctx| {
+                    let label_p1 = label_p1.clone();
+                    Box::pin(async move {
+                        let party_id = match f.party_id() {
+                            Ok(p) => p,
+                            Err(e) => return Some(Err(e)),
+                        };
+                        let path = format!("/governance/confirmations?party_id={party_id}");
+                        let s: GovernanceState = f.get_json(f.p1.http, &path).await.ok()?;
+                        // Match THIS cycle's proposal by action label rather than
+                        // assuming it is the only pending domain action. A prior
+                        // phase (e.g. notification_feed) can leave an unrelated
+                        // proposal pending, so `len() == 1` is not a safe gate.
+                        let action = s
+                            .domain_actions
+                            .into_iter()
+                            .find(|a| a.action_label == label_p1)?;
+                        ctx.proposal_cid = Some(action.proposal_cid);
+                        Some(Ok(()))
+                    })
+                }
             },
         )
         .then(
@@ -115,7 +123,11 @@ pub fn propose_confirm_execute(label: &str, proposal: Value) -> Scenario<Proposa
                     };
                     let path = format!("/governance/confirmations?party_id={party_id}");
                     let s: GovernanceState = f.get_json(f.p1.http, &path).await.ok()?;
-                    let action = s.domain_actions.into_iter().find(|a| a.can_execute)?;
+                    let our_cid = ctx.proposal_cid.clone();
+                    let action = s
+                        .domain_actions
+                        .into_iter()
+                        .find(|a| Some(&a.proposal_cid) == our_cid.as_ref() && a.can_execute)?;
                     ctx.confirmation_cids = action
                         .confirmations
                         .iter()
@@ -176,9 +188,9 @@ pub fn propose_confirm_execute(label: &str, proposal: Value) -> Scenario<Proposa
             })
         })
         .then(
-            "no pending domain actions",
+            "this proposal no longer pending",
             Duration::from_secs(60),
-            |f, _| {
+            |f, ctx| {
                 Box::pin(async move {
                     let party_id = match f.party_id() {
                         Ok(p) => p,
@@ -186,7 +198,14 @@ pub fn propose_confirm_execute(label: &str, proposal: Value) -> Scenario<Proposa
                     };
                     let path = format!("/governance/confirmations?party_id={party_id}");
                     let s: GovernanceState = f.get_json(f.p1.http, &path).await.ok()?;
-                    s.domain_actions.is_empty().then_some(Ok(()))
+                    // This cycle is done when ITS proposal is gone (executed).
+                    // Don't assert a globally empty slate — an unrelated prior
+                    // proposal may still be pending (see the P1 visibility note).
+                    let our_cid = ctx.proposal_cid.clone();
+                    (!s.domain_actions
+                        .iter()
+                        .any(|a| Some(&a.proposal_cid) == our_cid.as_ref()))
+                    .then_some(Ok(()))
                 })
             },
         )

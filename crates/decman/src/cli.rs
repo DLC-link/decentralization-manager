@@ -243,5 +243,22 @@ pub enum Commands {
         /// Backoff between attempts of the bounded peer-Noise retry wrapper, in milliseconds
         #[arg(long, env = "DECPM_NOISE_RETRY_BACKOFF_MS")]
         noise_retry_backoff_ms: Option<u64>,
+
+        /// CIP-104 Mode A reward-automation loop tick interval, in seconds.
+        /// Enablement is on-ledger (presence of a CouponReassignmentDelegation);
+        /// this only controls cadence. Defaults to 300.
+        #[arg(long, env = "DECPM_REWARD_AUTOMATION_INTERVAL_SECS")]
+        reward_automation_interval_secs: Option<u64>,
+        /// Output contracts one Delegation_Assign may create, bounding the
+        /// coupons per transaction. Raise stepwise to find the ledger's real
+        /// ceiling; set too high, assigns fail and nothing is assigned.
+        /// Defaults to 100.
+        #[arg(long, env = "DECPM_REWARD_MAX_CREATES")]
+        reward_max_creates: Option<usize>,
+        /// Seconds a coupon must have left before expiry to be assigned. Guards
+        /// against a coupon vanishing mid-submission, not a minting reserve for
+        /// the beneficiary. Defaults to 120.
+        #[arg(long, env = "DECPM_REWARD_MIN_EXPIRY_MARGIN_SECS")]
+        reward_min_expiry_margin_secs: Option<u64>,
     },
 }

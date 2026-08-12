@@ -1,0 +1,122 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Standing delegation of registrar authority to a named set of operators.
+--
+-- The registrar dec party signs this contract, so a choice body runs with the
+-- registrar's authority while an operator submits the command.
+--
+-- Governance creates the contract once, through `RegistrarDelegationProposal`.
+-- Any operator ends it with `RegistrarDelegation_Revoke`. Granting the power
+-- takes a vote; withdrawing it does not.
+module Governance.TokenIssuance.RegistrarDelegation where
+
+import DA.List (unique)
+import DA.Set as Set hiding (filter)
+import Splice.Util (require)
+
+import Governance.Action
+
+import Utility.Registry.Holding.V0.Holding (Holding, Holding_Merge(..))
+
+-- | One consolidation: the target holding and the source holdings folded
+-- into it. `Holding_Merge` archives every holding, including the target,
+-- then creates one holding with the aggregate amount. It requires every
+-- holding to share operator, provider, registrar, owner, instrument, and
+-- label. It rejects locked holdings.
+data MergeGroup = MergeGroup
+  with
+    targetCid : ContractId Holding
+      -- ^ The holding whose `Holding_Merge` choice runs. The new holding
+      -- inherits its field values, then gets the aggregate amount.
+    sourceCids : [ContractId Holding]
+      -- ^ The holdings archived into the target.
+  deriving (Eq, Show)
+
+template RegistrarDelegation
+  with
+    registrar : Party
+      -- ^ The dec party whose authority this contract delegates.
+    operators : Set Party
+      -- ^ Parties that may exercise the delegated choices, and may revoke.
+  where
+    signatory registrar
+
+    ensure not (Set.null operators)
+
+    -- | Consolidate holdings, one `Holding_Merge` per group. Value cannot move:
+    -- `Holding_Merge` pins the owner and preserves the amount.
+    nonconsuming choice RegistrarDelegation_MergeHoldings : RegistrarDelegation_MergeHoldings_Result
+      with
+        operator : Party
+          -- ^ The submitting operator. Must be in `operators`.
+        groups : [MergeGroup]
+          -- ^ Consolidations to apply.
+      controller operator
+      do
+        require "Operator is authorized" (operator `Set.member` operators)
+        require "Groups must be non-empty" (not (Prelude.null groups))
+        -- A repeated contract id would otherwise fail on the second archive
+        -- with an unhelpful "contract inactive" error.
+        let allCids = concatMap (\g -> g.targetCid :: g.sourceCids) groups
+        require "No holding appears twice" (unique allCids)
+        mergedCids <- forA groups $ \g -> do
+          result <- exercise g.targetCid Holding_Merge with
+            holdingCids = g.sourceCids
+          pure result.holdingCid
+        pure RegistrarDelegation_MergeHoldings_Result with mergedCids
+
+    -- | Any single operator ends the delegation for everyone.
+    choice RegistrarDelegation_Revoke : ()
+      with
+        operator : Party
+          -- ^ The submitting operator. Must be in `operators`.
+      controller operator
+      do
+        require "Operator is authorized" (operator `Set.member` operators)
+        pure ()
+
+-- | Result of `RegistrarDelegation_MergeHoldings`.
+data RegistrarDelegation_MergeHoldings_Result = RegistrarDelegation_MergeHoldings_Result
+  with
+    mergedCids : [ContractId Holding]
+      -- ^ The holdings created by the merges, one per group.
+  deriving (Eq, Show)
+
+-- | Governance route that creates a `RegistrarDelegation`. This is the only part
+-- of the delegation that needs a vote.
+--
+-- `registrar` must equal `governanceParty`: `executeImpl` holds the governance
+-- party's authority and the proposer's, and nothing else, so it cannot create a
+-- contract signed by a third party. The `ensure` clause fails at proposal
+-- creation, before any member votes.
+template RegistrarDelegationProposal
+  with
+    governanceParty : Party
+      -- ^ The governance party whose authority executes this action.
+    proposer : Party
+      -- ^ Sole signatory; a committee member or an additional proposer.
+    description : Text
+      -- ^ Human-readable reason recorded in GovernanceExecutionResult.
+    registrar : Party
+      -- ^ The dec party whose authority the delegation grants.
+    operators : Set Party
+      -- ^ Parties the delegation authorizes.
+  where
+    signatory proposer
+    observer governanceParty
+
+    ensure registrar == governanceParty && not (Set.null operators)
+
+    interface instance GovernableAction for RegistrarDelegationProposal where
+      view = GovernableActionView with
+        governanceParty
+        proposer
+        actionLabel = "RegistrarDelegation"
+        description
+
+      executeImpl = do
+        _ <- create RegistrarDelegation with
+          registrar
+          operators
+        pure ()

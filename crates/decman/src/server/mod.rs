@@ -15,6 +15,7 @@ mod handlers;
 mod middleware;
 mod package_inventory;
 mod queries;
+mod reward_automation;
 mod transfer_context;
 mod types;
 
@@ -32,7 +33,9 @@ use actix_web::{App, HttpServer, web};
 use canton_proto_rs::com::digitalasset::canton::{
     admin::participant::v30::{ListPackagesRequest, package_service_client::PackageServiceClient},
     crypto::{
-        admin::v30::{ListMyKeysRequest, vault_service_client::VaultServiceClient},
+        admin::v30::{
+            ListMyKeysRequest, private_key_metadata, vault_service_client::VaultServiceClient,
+        },
         v30::public_key,
     },
     topology::admin::v30::{
@@ -1022,6 +1025,14 @@ pub async fn start_server(
         .await;
     });
 
+    // Background task: CIP-104 Mode A reward-assignment automation. Clone the
+    // existing `web::Data<AppState>` (an Arc) so the loop shares the SAME state —
+    // live party credentials, auth, config — never a fresh AppState.
+    let reward_automation_state = app_state.clone();
+    tokio::spawn(async move {
+        reward_automation::run_reward_automation_loop(reward_automation_state).await;
+    });
+
     // Single peer-job listener: drains the queue and spawns one
     // `workflow::start_peer` per accepted / retried / resumed invite, so this
     // node can be a peer in many concurrent workflows at once.
@@ -1188,6 +1199,7 @@ pub async fn start_server(
             .service(handlers::get_governance_audit)
             .service(handlers::get_governance_chain_audit)
             .service(handlers::get_token_standard_contracts)
+            .service(handlers::get_coupon_reassignment_delegation)
             .service(handlers::get_network_info)
             .service(handlers::get_operator_info)
             .service(handlers::get_party_config)
@@ -2240,13 +2252,17 @@ async fn list_my_owner_keys(
 
     // Get this node's namespace key fingerprints
     let keys_response = vault_client
-        .list_my_keys(tonic::Request::new(ListMyKeysRequest { filters: None }))
+        .list_my_keys(tonic::Request::new(ListMyKeysRequest {
+            filters: None,
+            base_request: None,
+        }))
         .await?
         .into_inner();
 
     let mut my_fingerprints = Vec::new();
     for key_meta in keys_response.private_keys_metadata {
-        if let Some(pub_key_with_name) = &key_meta.public_key_with_name
+        if let Some(private_key_metadata::PublicKeyWithName::V30(pub_key_with_name)) =
+            &key_meta.public_key_with_name
             && let Some(pub_key) = &pub_key_with_name.public_key
             && let Some(public_key::Key::SigningPublicKey(signing_key)) = &pub_key.key
             && signing_key.usage.contains(&1)
@@ -2269,6 +2285,7 @@ async fn list_my_owner_keys(
         time_query: Some(base_query::TimeQuery::HeadState(())),
         filter_signed_key: String::new(),
         protocol_version: None,
+        client_version: None,
     };
 
     // Get all decentralized namespace definitions. The response is bounded by

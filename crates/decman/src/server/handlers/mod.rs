@@ -14,15 +14,20 @@ pub use config::{
 };
 pub use governance::{
     cancel_confirmation, confirm_action, execute_action, expire_confirmation,
-    get_burn_requests_handler, get_credential_offers_handler, get_credentials_handler,
-    get_governance, get_governance_audit, get_governance_chain_audit, get_governance_state,
-    get_holdings_handler, get_instruments_handler, get_known_members, get_mint_requests_handler,
-    get_network_info, get_operator_info, get_packages, get_provider_configurations_handler,
-    get_provider_services_handler, get_registrar_service_requests_handler,
-    get_registrar_services_handler, get_token_standard_contracts, get_transfer_factories_handler,
+    get_burn_requests_handler, get_coupon_reassignment_delegation, get_credential_offers_handler,
+    get_credentials_handler, get_governance, get_governance_audit, get_governance_chain_audit,
+    get_governance_state, get_holdings_handler, get_instruments_handler, get_known_members,
+    get_mint_requests_handler, get_network_info, get_operator_info, get_packages,
+    get_provider_configurations_handler, get_provider_services_handler,
+    get_registrar_service_requests_handler, get_registrar_services_handler,
+    get_token_standard_contracts, get_transfer_factories_handler,
     get_transfer_instructions_handler, get_transfer_preapprovals_handler,
     get_user_services_handler, get_vaults_handler, propose_action, query_contracts_handler,
 };
+// Crate-internal governance helpers reused by the reward-automation module,
+// re-exported here so they are reachable through the private `governance`
+// submodule.
+pub(crate) use governance::{get_party_credentials, packages};
 pub use invitations::{accept_invitation, decline_invitation, get_invitations};
 pub use keys::get_key_status;
 pub use parties::{

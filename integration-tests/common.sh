@@ -187,6 +187,7 @@ start_nodes() {
         DECPM_CANTON_NETWORK=devnet \
         DECPM_NOISE_PORT="${noise_ports[$idx]}" \
         DECPM_PORT="${http_ports[$idx]}" \
+        DECPM_REWARD_AUTOMATION_INTERVAL_SECS=15 \
         "$BINARY" -d "$DEV_DIR/participant-$i" serve \
             >> "$log_file" 2>&1 &
         PIDS+=($!)

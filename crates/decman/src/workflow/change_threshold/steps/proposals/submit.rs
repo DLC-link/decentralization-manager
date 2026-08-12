@@ -2,6 +2,7 @@ use canton_proto_rs::com::digitalasset::canton::{
     protocol::v30::DecentralizedNamespaceDefinition,
     topology::admin::v30::{
         ListDecentralizedNamespaceDefinitionRequest, ListPartyToParticipantRequest,
+        list_party_to_participant_response::result::Item as P2pItem,
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
     },
 };
@@ -184,11 +185,11 @@ async fn wait_for_p2p_in_topology(
             .await?
             .into_inner();
 
-        if response.results.iter().any(|r| {
-            r.item
-                .as_ref()
-                .is_some_and(|p| p.threshold == expected_threshold)
-        }) {
+        if response
+            .results
+            .iter()
+            .any(|r| matches!(&r.item, Some(P2pItem::V30(p)) if p.threshold == expected_threshold))
+        {
             tracing::info!(
                 "P2P threshold {expected_threshold} confirmed in topology after {attempt} attempt(s)"
             );

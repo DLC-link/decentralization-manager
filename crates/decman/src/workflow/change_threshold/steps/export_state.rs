@@ -50,6 +50,7 @@ pub async fn export_state(
             time_query: Some(base_query::TimeQuery::HeadState(())),
             filter_signed_key: String::new(),
             protocol_version: None,
+            client_version: None,
         }),
         filter_namespace: namespace_hex.clone(),
     });

@@ -1,0 +1,334 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+module Governance.Rewards.TestCouponReassignmentDelegation where
+
+import Daml.Script
+import Splice.Amulet (RewardCouponV2(..))
+import Splice.Api.RewardAssignmentV1 (RewardBeneficiary(..))
+import Governance.Rewards.CouponReassignmentDelegation
+import Governance.Rewards.SetupCouponReassignmentDelegation
+import Governance.Rewards.RevokeCouponReassignmentDelegation
+import Governance.Rewards.AssignTestUtils   -- allocateRewardsTestParties, TestParties (has .dso)
+import Governance.TestUtils (submitConfirmations)
+                                             -- also: createTestGovernance, confirmAndExecute,
+                                             -- submitConfirmations, memberContext
+import Governance.Action (GovernableAction)
+import Governance.Rules (GovernanceRules, GovernanceRules_ExecuteConfirmedAction(..))
+import TestHarness                            -- Test{given,when,then_}, run, Failures, shouldBe
+
+-- mkUnassignedCoupon lives in AssignTestUtils (shared with the other reward tests).
+
+-- GWT fixture: parties + a delegation created DIRECTLY (in production it is created by
+-- the SetupCouponReassignmentDelegation governance action). decparty is the
+-- coupons' provider; assigners are the member parties (1-of-n).
+data Fixture = Fixture with
+    parties : TestParties
+    split   : [RewardBeneficiary]
+    delId   : ContractId CouponReassignmentDelegation
+
+given_delegation : Script Fixture
+given_delegation = do
+  parties <- allocateRewardsTestParties
+  let gp = parties.governanceParty
+  let split = [ RewardBeneficiary with beneficiary = parties.member2; percentage = 0.8
+              , RewardBeneficiary with beneficiary = parties.member3; percentage = 0.2 ]
+  delId <- submit gp $ createCmd CouponReassignmentDelegation with
+    decparty = gp; dso = parties.dso; assigners = [parties.member1, parties.member2]; split
+  pure Fixture with ..
+
+-- shared no-assertion then_ for negative cases (when : Fixture -> Script ())
+then_nothing : Fixture -> a -> Script Failures
+then_nothing _ _ = pure []
+
+-- happy path: a SINGLE assigner (member1), acting alone, reassigns one coupon to the
+-- baked-in split -> one RewardCouponV2 per beneficiary (original archived).
+when_assigner_reassigns : Fixture -> Script Int
+when_assigner_reassigns f = do
+  let gp = f.parties.governanceParty
+  c1 <- mkUnassignedCoupon f.parties.dso gp 100.0
+  submit (memberContext f.parties.member1 gp) $ exerciseCmd f.delId Delegation_Assign with
+    assigner = f.parties.member1; primaryCoupon = c1; additionalCoupons = []; extraArgs = emptyExtraArgs
+  coupons <- query @RewardCouponV2 gp
+  pure (length coupons)
+
+then_two_beneficiary_coupons : Fixture -> Int -> Script Failures
+then_two_beneficiary_coupons _ n = pure $ shouldBe "one coupon per beneficiary" 2 n
+
+test_assigner_reassigns_to_baked_split = script do
+  run Test with
+    given = given_delegation
+    when = when_assigner_reassigns
+    then_ = then_two_beneficiary_coupons
+
+-- security: a non-assigner (member3, not in `assigners`) is rejected by the elem gate.
+when_non_assigner_rejected : Fixture -> Script ()
+when_non_assigner_rejected f = do
+  let gp = f.parties.governanceParty
+  c1 <- mkUnassignedCoupon f.parties.dso gp 100.0
+  -- member3 has the same readAs visibility a real member would; the rejection
+  -- must come from the `elem` gate, not from incidental lack of visibility.
+  submitMustFail (memberContext f.parties.member3 gp) $ exerciseCmd f.delId Delegation_Assign with
+    assigner = f.parties.member3; primaryCoupon = c1; additionalCoupons = []; extraArgs = emptyExtraArgs
+
+test_non_assigner_cannot_reassign = script do
+  run Test with
+    given = given_delegation
+    when = when_non_assigner_rejected
+    then_ = then_nothing
+
+-- nonconsuming: the same delegation serves two rounds (2 coupons x 2 beneficiaries = 4).
+when_two_rounds : Fixture -> Script Int
+when_two_rounds f = do
+  let gp = f.parties.governanceParty
+  c1 <- mkUnassignedCoupon f.parties.dso gp 100.0
+  c2 <- mkUnassignedCoupon f.parties.dso gp 50.0
+  submit (memberContext f.parties.member1 gp) $ exerciseCmd f.delId Delegation_Assign with
+    assigner = f.parties.member1; primaryCoupon = c1; additionalCoupons = []; extraArgs = emptyExtraArgs
+  submit (memberContext f.parties.member1 gp) $ exerciseCmd f.delId Delegation_Assign with
+    assigner = f.parties.member1; primaryCoupon = c2; additionalCoupons = []; extraArgs = emptyExtraArgs
+  coupons <- query @RewardCouponV2 gp
+  pure (length coupons)
+
+then_four_beneficiary_coupons : Fixture -> Int -> Script Failures
+then_four_beneficiary_coupons _ n = pure $ shouldBe "two rounds x two beneficiaries" 4 n
+
+test_delegation_is_nonconsuming = script do
+  run Test with
+    given = given_delegation
+    when = when_two_rounds
+    then_ = then_four_beneficiary_coupons
+
+-- revoke: the decparty archives the delegation.
+when_revoke : Fixture -> Script Int
+when_revoke f = do
+  submit f.parties.governanceParty $ exerciseCmd f.delId Delegation_Revoke
+  dels <- query @CouponReassignmentDelegation f.parties.governanceParty
+  pure (length dels)
+
+then_no_delegation : Fixture -> Int -> Script Failures
+then_no_delegation _ n = pure $ shouldBe "delegation archived" 0 n
+
+test_revoke_archives = script do
+  run Test with
+    given = given_delegation
+    when = when_revoke
+    then_ = then_no_delegation
+
+-- already-assigned coupon rejected (all-or-nothing): re-assigning a consumed coupon
+-- fails the whole tx.
+when_reassign_same_coupon_fails : Fixture -> Script ()
+when_reassign_same_coupon_fails f = do
+  let gp = f.parties.governanceParty
+  c1 <- mkUnassignedCoupon f.parties.dso gp 100.0
+  submit (memberContext f.parties.member1 gp) $ exerciseCmd f.delId Delegation_Assign with
+    assigner = f.parties.member1; primaryCoupon = c1; additionalCoupons = []; extraArgs = emptyExtraArgs
+  -- c1 is now consumed/assigned; re-assigning the same cid fails the whole tx (all-or-nothing)
+  submitMustFail (memberContext f.parties.member1 gp) $ exerciseCmd f.delId Delegation_Assign with
+    assigner = f.parties.member1; primaryCoupon = c1; additionalCoupons = []; extraArgs = emptyExtraArgs
+
+-- security: a coupon minted by a DIFFERENT dso is rejected. Any party can create
+-- a RewardCouponV2 naming itself dso and this decparty as provider (dso is the
+-- only signatory), so without this guard a stranger's coupon would be assignable
+-- and, as a batch's primary, would make splice reject every genuine coupon
+-- alongside it -- stopping the reward engine for the cost of one contract.
+when_foreign_dso_coupon_rejected : Fixture -> Script ()
+when_foreign_dso_coupon_rejected f = do
+  let gp = f.parties.governanceParty
+  -- member3 mints it as its own dso, naming gp as provider.
+  bad <- mkUnassignedCoupon f.parties.member3 gp 100.0
+  submitMustFail (memberContext f.parties.member1 gp) $ exerciseCmd f.delId Delegation_Assign with
+    assigner = f.parties.member1; primaryCoupon = bad; additionalCoupons = []; extraArgs = emptyExtraArgs
+
+test_foreign_dso_coupon_rejected = script do
+  run Test with
+    given = given_delegation
+    when = when_foreign_dso_coupon_rejected
+    then_ = then_nothing
+
+-- security: a stranger's coupon in additionalCoupons fails the whole exercise.
+--
+-- This pins the OUTCOME, not our guard. Verified 2026-08-07: the test still
+-- passes with Delegation_Assign's check narrowed to the primary, because splice
+-- fetches the additional coupons with the primary's dso and rejects them
+-- itself. So today two layers enforce this and no test can separate them.
+-- Its job is the upstream change: if splice ever stops enforcing it, this test
+-- is what keeps the property, and Delegation_Assign's per-coupon check is what
+-- makes it ours rather than borrowed.
+when_foreign_dso_in_additional_rejected : Fixture -> Script ()
+when_foreign_dso_in_additional_rejected f = do
+  let gp = f.parties.governanceParty
+  good <- mkUnassignedCoupon f.parties.dso gp 100.0
+  bad <- mkUnassignedCoupon f.parties.member3 gp 100.0
+  submitMustFail (memberContext f.parties.member1 gp) $ exerciseCmd f.delId Delegation_Assign with
+    assigner = f.parties.member1; primaryCoupon = good; additionalCoupons = [bad]
+    extraArgs = emptyExtraArgs
+
+test_foreign_dso_in_additional_rejected = script do
+  run Test with
+    given = given_delegation
+    when = when_foreign_dso_in_additional_rejected
+    then_ = then_nothing
+
+test_already_assigned_coupon_rejected = script do
+  run Test with
+    given = given_delegation
+    when = when_reassign_same_coupon_fails
+    then_ = then_nothing
+
+-- ============================================================================
+-- Governance-path tests: the delegation is created/replaced/revoked via the
+-- SetupCouponReassignmentDelegation / RevokeCouponReassignmentDelegation
+-- GovernableActions, through a real propose -> confirm -> execute vote
+-- via the governance action, rather than the direct-create fixture above.
+-- ============================================================================
+
+-- GWT fixture for the governance-created path: parties + a GovernanceRules + the split.
+data GovFixture = GovFixture with
+    parties  : TestParties
+    rulesCid : ContractId GovernanceRules
+    split    : [RewardBeneficiary]
+
+given_governance : Script GovFixture
+given_governance = do
+  parties <- allocateRewardsTestParties
+  rulesCid <- createTestGovernance parties
+  let split = [ RewardBeneficiary with beneficiary = parties.member2; percentage = 0.8
+              , RewardBeneficiary with beneficiary = parties.member3; percentage = 0.2 ]
+  pure GovFixture with ..
+
+then_singleton : GovFixture -> Int -> Script Failures
+then_singleton _ n = pure $ shouldBe "exactly one delegation" 1 n
+
+then_zero : GovFixture -> Int -> Script Failures
+then_zero _ n = pure $ shouldBe "no delegation" 0 n
+
+then_gov_nothing : GovFixture -> () -> Script Failures
+then_gov_nothing _ _ = pure []
+
+-- one governance vote (propose -> confirm -> execute) creates the delegation
+when_setup_executed : GovFixture -> Script [(ContractId CouponReassignmentDelegation, CouponReassignmentDelegation)]
+when_setup_executed f = do
+  let gp = f.parties.governanceParty
+  actionCid <- submit f.parties.member1 $ createCmd SetupCouponReassignmentDelegation with
+    governanceParty = gp; proposer = f.parties.member1; priorDelegation = None
+    dso = f.parties.dso
+    assigners = [f.parties.member1, f.parties.member2]; beneficiaries = f.split
+  let iface : ContractId GovernableAction = toInterfaceContractId actionCid
+  _ <- confirmAndExecute f.parties f.rulesCid iface [f.parties.member1, f.parties.member2] f.parties.member1
+  query @CouponReassignmentDelegation gp
+
+then_one_delegation_with_split : GovFixture -> [(ContractId CouponReassignmentDelegation, CouponReassignmentDelegation)] -> Script Failures
+then_one_delegation_with_split f dels =
+  pure $ shouldBe "one delegation exists" 1 (length dels)
+      <> shouldBe "split baked in" [f.split] (map (\(_, d) -> d.split) dels)
+
+test_setup_creates_delegation = script do
+  run Test with
+    given = given_governance; when = when_setup_executed; then_ = then_one_delegation_with_split
+
+-- replace: a second Setup carrying priorDelegation archives the first (still singleton)
+when_setup_replaces : GovFixture -> Script Int
+when_setup_replaces f = do
+  let gp = f.parties.governanceParty
+      mk prior bene = do
+        a <- submit f.parties.member1 $ createCmd SetupCouponReassignmentDelegation with
+          governanceParty = gp; proposer = f.parties.member1; priorDelegation = prior
+          dso = f.parties.dso
+          assigners = [f.parties.member1, f.parties.member2]
+          beneficiaries = [RewardBeneficiary with beneficiary = bene; percentage = 1.0]
+        let iface : ContractId GovernableAction = toInterfaceContractId a
+        confirmAndExecute f.parties f.rulesCid iface [f.parties.member1, f.parties.member2] f.parties.member1
+  _ <- mk None f.parties.member2
+  [(oldCid, _)] <- query @CouponReassignmentDelegation gp
+  _ <- mk (Some oldCid) f.parties.member3
+  dels <- query @CouponReassignmentDelegation gp
+  pure (length dels)
+
+test_setup_replaces_prior = script do
+  run Test with
+    given = given_governance; when = when_setup_replaces; then_ = then_singleton
+
+-- revoke via governance: the RevokeCouponReassignmentDelegation action archives it
+when_revoke_via_governance : GovFixture -> Script Int
+when_revoke_via_governance f = do
+  let gp = f.parties.governanceParty
+  s <- submit f.parties.member1 $ createCmd SetupCouponReassignmentDelegation with
+    governanceParty = gp; proposer = f.parties.member1; priorDelegation = None
+    dso = f.parties.dso
+    assigners = [f.parties.member1, f.parties.member2]; beneficiaries = f.split
+  _ <- confirmAndExecute f.parties f.rulesCid (toInterfaceContractId s : ContractId GovernableAction)
+         [f.parties.member1, f.parties.member2] f.parties.member1
+  [(delCid, _)] <- query @CouponReassignmentDelegation gp
+  r <- submit f.parties.member1 $ createCmd RevokeCouponReassignmentDelegation with
+    governanceParty = gp; proposer = f.parties.member1; delegation = delCid
+  _ <- confirmAndExecute f.parties f.rulesCid (toInterfaceContractId r : ContractId GovernableAction)
+         [f.parties.member1, f.parties.member2] f.parties.member1
+  dels <- query @CouponReassignmentDelegation gp
+  pure (length dels)
+
+test_revoke_via_governance = script do
+  run Test with
+    given = given_governance; when = when_revoke_via_governance; then_ = then_zero
+
+-- Reusable negative driver: propose a Setup carrying the given (bad) assigners /
+-- beneficiaries, gather confirmations, and assert the governed execute fails an
+-- executeImpl guard. The executor is a governance executor, NOT the delegation
+-- assigner. Each `test_setup_*_rejected` below isolates one executeImpl guard.
+setupExecuteMustFail : GovFixture -> [Party] -> [RewardBeneficiary] -> Script ()
+setupExecuteMustFail f assigners beneficiaries = do
+  let gp = f.parties.governanceParty
+  actionCid <- submit f.parties.member1 $ createCmd SetupCouponReassignmentDelegation with
+    governanceParty = gp; proposer = f.parties.member1; priorDelegation = None
+    dso = f.parties.dso
+    assigners; beneficiaries
+  let iface : ContractId GovernableAction = toInterfaceContractId actionCid
+  confs <- submitConfirmations gp f.rulesCid iface [f.parties.member1, f.parties.member2]
+  submitMustFail (actAs f.parties.member1 <> readAs gp) $
+    exerciseCmd f.rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor = f.parties.member1
+      actionProposalCid = iface
+      confirmations = confs
+
+rb : Party -> Decimal -> RewardBeneficiary
+rb p pct = RewardBeneficiary with beneficiary = p; percentage = pct
+
+-- empty split rejected at execute (executeImpl asserts non-empty beneficiaries)
+test_setup_empty_split_rejected = script do
+  run Test with
+    given = given_governance
+    when = \f -> setupExecuteMustFail f [f.parties.member1] []
+    then_ = then_gov_nothing
+
+-- percentages not summing to 1.0 rejected at execute
+test_setup_bad_sum_rejected = script do
+  run Test with
+    given = given_governance
+    when = \f -> setupExecuteMustFail f [f.parties.member1] [rb f.parties.member2 0.5]
+    then_ = then_gov_nothing
+
+-- a percentage outside (0,1] rejected at execute
+test_setup_percentage_out_of_range_rejected = script do
+  run Test with
+    given = given_governance
+    when = \f -> setupExecuteMustFail f [f.parties.member1] [rb f.parties.member2 1.5]
+    then_ = then_gov_nothing
+
+-- a duplicated beneficiary rejected at execute. Percentages sum to 1.0 and are
+-- each in range, so only the uniqueness guard can reject this. Without it the
+-- delegation would be created, and every later Delegation_Assign would fail
+-- splice's "Beneficaries are unique" requirement — stalling assignment behind a
+-- coupon that can never be exercised.
+test_setup_duplicate_beneficiary_rejected = script do
+  run Test with
+    given = given_governance
+    when = \f -> setupExecuteMustFail f [f.parties.member1]
+                   [rb f.parties.member2 0.5, rb f.parties.member2 0.5]
+    then_ = then_gov_nothing
+
+-- more than 20 beneficiaries rejected at execute
+test_setup_too_many_beneficiaries_rejected = script do
+  run Test with
+    given = given_governance
+    when = \f -> setupExecuteMustFail f [f.parties.member1] (replicate 21 (rb f.parties.member2 0.05))
+    then_ = then_gov_nothing

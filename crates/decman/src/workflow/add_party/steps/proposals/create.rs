@@ -212,9 +212,9 @@ pub(crate) fn proposal_request(
             authorize_request::Proposal {
                 change: enums::TopologyChangeOp::AddReplace as i32,
                 serial: 0,
-                mapping: Some(TopologyMapping {
+                mapping: Some(authorize_request::proposal::Mapping::V30(TopologyMapping {
                     mapping: Some(mapping),
-                }),
+                })),
             },
         )),
         must_fully_authorize: false,

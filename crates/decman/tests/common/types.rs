@@ -77,6 +77,21 @@ pub struct ContractsQueryResponse {
     pub contracts: Vec<ContractsQueryItem>,
 }
 
+/// `GET /coupon-reassignment-delegation` — the decparty's active
+/// `CouponReassignmentDelegation` contracts, newest first, empty when it has none.
+#[derive(Debug, Deserialize)]
+pub struct ActiveDelegationResponse {
+    pub delegations: Vec<ActiveDelegationSummary>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ActiveDelegationSummary {
+    pub cid: String,
+    pub dso: String,
+    pub assigners: Vec<String>,
+    pub beneficiary_count: usize,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct PendingInvitation {
     pub id: String,

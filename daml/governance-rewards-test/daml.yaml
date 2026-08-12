@@ -10,9 +10,9 @@ data-dependencies:
   - ../governance-action-v1/.daml/dist/governance-action-v1-0.1.0.dar
   - ../governance-core/.daml/dist/governance-core-v1-0.1.0.dar
   - ../governance-core-test/.daml/dist/governance-core-test-0.1.0.dar
-  - ../governance-rewards/.daml/dist/governance-rewards-v1-0.1.1.dar
+  - ../governance-rewards-automation/.daml/dist/governance-rewards-automation-v1-0.1.0.dar
   - ../dars/splice-wallet-0.1.18.dar
-  - ../dars/splice-amulet-0.1.17.dar
+  - ../dars/splice-amulet-0.1.19.dar
   - ../dars/testlib-0.1.0.dar
 build-options:
   - --target=2.2

@@ -1,0 +1,242 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+module Governance.UtilityOnboarding.Test.RegistrarDelegationTest where
+
+import DA.Set qualified as Set
+import Daml.Script
+
+import Splice.Api.Token.HoldingV1 (InstrumentId(..))
+import Utility.Registry.Holding.V0.Holding (Holding(..))
+import Utility.Registry.Holding.V0.TokenApiUtils (toInstrumentIdentifier)
+import Utility.Registry.Holding.V0.Types (InstrumentIdentifier)
+
+import Governance.Action (GovernableAction)
+import Governance.Rules (GovernanceRules)
+
+import Governance.TokenIssuance.RegistrarDelegation
+import Governance.UtilityOnboarding.TestUtils
+
+import TestHarness
+
+data Fixture = Fixture
+  with
+    parties : OnboardingTestParties
+    delegationCid : ContractId RegistrarDelegation
+  deriving (Eq, Show)
+
+-- The `Holding` template's `ensure` clause requires the instrument to equal
+-- `toInstrumentIdentifier registrar instrumentId`, so build it that way rather
+-- than hand-rolling the record.
+mkInstrument : Party -> InstrumentIdentifier
+mkInstrument registrar =
+  toInstrumentIdentifier registrar InstrumentId with
+    admin = registrar
+    id = "TEST-TOKEN"
+
+-- `Holding` has `signatory registrar, owner`, so creating one in a test needs
+-- both parties' authority. `operator` and `provider` are observers only.
+createHolding : OnboardingTestParties -> Party -> Decimal -> Script (ContractId Holding)
+createHolding parties owner amount =
+  submit (actAs parties.governanceParty <> actAs owner) $
+    createCmd Holding with
+      operator = parties.operator
+      provider = parties.governanceParty
+      registrar = parties.governanceParty
+      owner
+      instrument = mkInstrument parties.governanceParty
+      label = ""
+      amount
+      lock = None
+
+-- Create the delegation directly. Task 2 covers the governance-vote route that
+-- creates it in production.
+given_delegation : Script Fixture
+given_delegation = do
+  parties <- allocateOnboardingTestParties
+  delegationCid <- submit parties.governanceParty $
+    createCmd RegistrarDelegation with
+      registrar = parties.governanceParty
+      operators = Set.fromList [parties.member1, parties.member2]
+  pure Fixture with ..
+
+-- member1 is not a stakeholder of the holdings, so it must read as the
+-- registrar to resolve them at submission.
+operatorContext : OnboardingTestParties -> Party -> SubmitOptions
+operatorContext parties operator = actAs operator <> readAs parties.governanceParty
+
+when_two_groups_merged : Fixture -> Script ()
+when_two_groups_merged f = do
+  a1 <- createHolding f.parties f.parties.outsider 1.0
+  a2 <- createHolding f.parties f.parties.outsider 2.0
+  a3 <- createHolding f.parties f.parties.outsider 3.0
+  b1 <- createHolding f.parties f.parties.member3 10.0
+  b2 <- createHolding f.parties f.parties.member3 20.0
+  result <- submit (operatorContext f.parties f.parties.member1) $
+    exerciseCmd f.delegationCid RegistrarDelegation_MergeHoldings with
+      operator = f.parties.member1
+      groups =
+        [ MergeGroup with targetCid = a1; sourceCids = [a2, a3]
+        , MergeGroup with targetCid = b1; sourceCids = [b2]
+        ]
+  assertMsg "one merged holding per group" (length result.mergedCids == 2)
+
+then_one_holding_per_owner : Fixture -> () -> Script Failures
+then_one_holding_per_owner f _ = do
+  holdings <- query @Holding f.parties.governanceParty
+  let amountsFor owner = [h.amount | (_, h) <- holdings, h.owner == owner]
+  pure $
+    shouldBe "outsider holdings" [6.0] (amountsFor f.parties.outsider) <>
+    shouldBe "member3 holdings" [30.0] (amountsFor f.parties.member3) <>
+    shouldBe "total holding count" 2 (length holdings)
+
+test_when_two_groups_merged_then_one_holding_each = script do
+  run Test with
+    given = given_delegation
+    when = when_two_groups_merged
+    then_ = then_one_holding_per_owner
+
+when_outsider_merges : Fixture -> Script ()
+when_outsider_merges f = do
+  a1 <- createHolding f.parties f.parties.outsider 1.0
+  a2 <- createHolding f.parties f.parties.outsider 2.0
+  submitMustFail (operatorContext f.parties f.parties.outsider) $
+    exerciseCmd f.delegationCid RegistrarDelegation_MergeHoldings with
+      operator = f.parties.outsider
+      groups = [MergeGroup with targetCid = a1; sourceCids = [a2]]
+
+then_no_change : Fixture -> () -> Script Failures
+then_no_change f _ = do
+  holdings <- query @Holding f.parties.governanceParty
+  pure $ shouldBe "holdings untouched" 2 (length holdings)
+
+test_when_outsider_merges_then_rejected = script do
+  run Test with
+    given = given_delegation
+    when = when_outsider_merges
+    then_ = then_no_change
+
+when_duplicate_cid : Fixture -> Script ()
+when_duplicate_cid f = do
+  a1 <- createHolding f.parties f.parties.outsider 1.0
+  a2 <- createHolding f.parties f.parties.outsider 2.0
+  submitMustFail (operatorContext f.parties f.parties.member1) $
+    exerciseCmd f.delegationCid RegistrarDelegation_MergeHoldings with
+      operator = f.parties.member1
+      groups =
+        [ MergeGroup with targetCid = a1; sourceCids = [a2]
+        , MergeGroup with targetCid = a2; sourceCids = [a1]
+        ]
+
+test_when_duplicate_cid_then_rejected = script do
+  run Test with
+    given = given_delegation
+    when = when_duplicate_cid
+    then_ = then_no_change
+
+when_operator_revokes : Fixture -> Script ()
+when_operator_revokes f =
+  submit (operatorContext f.parties f.parties.member1) $
+    exerciseCmd f.delegationCid RegistrarDelegation_Revoke with
+      operator = f.parties.member1
+
+then_delegation_gone : Fixture -> () -> Script Failures
+then_delegation_gone f _ = do
+  delegations <- query @RegistrarDelegation f.parties.governanceParty
+  pure $ shouldBe "delegation count" 0 (length delegations)
+
+test_when_operator_revokes_then_delegation_archived = script do
+  run Test with
+    given = given_delegation
+    when = when_operator_revokes
+    then_ = then_delegation_gone
+
+when_outsider_revokes : Fixture -> Script ()
+when_outsider_revokes f =
+  submitMustFail (operatorContext f.parties f.parties.outsider) $
+    exerciseCmd f.delegationCid RegistrarDelegation_Revoke with
+      operator = f.parties.outsider
+
+then_delegation_present : Fixture -> () -> Script Failures
+then_delegation_present f _ = do
+  delegations <- query @RegistrarDelegation f.parties.governanceParty
+  pure $ shouldBe "delegation count" 1 (length delegations)
+
+test_when_outsider_revokes_then_rejected = script do
+  run Test with
+    given = given_delegation
+    when = when_outsider_revokes
+    then_ = then_delegation_present
+
+when_empty_operators : Fixture -> Script ()
+when_empty_operators f =
+  submitMustFail f.parties.governanceParty $
+    createCmd RegistrarDelegation with
+      registrar = f.parties.governanceParty
+      operators = Set.empty
+
+test_when_empty_operators_then_create_rejected = script do
+  run Test with
+    given = given_delegation
+    when = when_empty_operators
+    then_ = then_delegation_present
+
+data ProposalFixture = ProposalFixture
+  with
+    parties : OnboardingTestParties
+    rulesCid : ContractId GovernanceRules
+  deriving (Eq, Show)
+
+given_governance : Script ProposalFixture
+given_governance = do
+  parties <- allocateOnboardingTestParties
+  rulesCid <- createTestGovernance parties
+  pure ProposalFixture with ..
+
+when_proposal_executed : ProposalFixture -> Script ()
+when_proposal_executed f = do
+  proposalCid <- submit f.parties.member1 $ createCmd RegistrarDelegationProposal with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    description = "Grant holding-merge rights to member1 and member2"
+    registrar = f.parties.governanceParty
+    operators = Set.fromList [f.parties.member1, f.parties.member2]
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  _ <- confirmAndExecute f.parties f.rulesCid proposalInterfaceCid
+    [f.parties.member1, f.parties.member2] f.parties.member1
+  pure ()
+
+then_delegation_created : ProposalFixture -> () -> Script Failures
+then_delegation_created f _ = do
+  delegations <- query @RegistrarDelegation f.parties.governanceParty
+  case delegations of
+    [(_, d)] -> pure $
+      shouldBe "registrar" f.parties.governanceParty d.registrar <>
+      shouldBe "operators" (Set.fromList [f.parties.member1, f.parties.member2]) d.operators
+    _ -> pure $ shouldBe "delegation count" 1 (length delegations)
+
+test_when_proposal_executed_then_delegation_created = script do
+  run Test with
+    given = given_governance
+    when = when_proposal_executed
+    then_ = then_delegation_created
+
+when_registrar_mismatch : ProposalFixture -> Script ()
+when_registrar_mismatch f =
+  submitMustFail f.parties.member1 $ createCmd RegistrarDelegationProposal with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    description = "registrar is not the governance party"
+    registrar = f.parties.outsider
+    operators = Set.fromList [f.parties.member1]
+
+then_no_delegation : ProposalFixture -> () -> Script Failures
+then_no_delegation f _ = do
+  delegations <- query @RegistrarDelegation f.parties.governanceParty
+  pure $ shouldBe "delegation count" 0 (length delegations)
+
+test_when_registrar_mismatch_then_create_rejected = script do
+  run Test with
+    given = given_governance
+    when = when_registrar_mismatch
+    then_ = then_no_delegation
