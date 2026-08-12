@@ -1,11 +1,21 @@
-use std::time::Duration;
+use std::{
+    collections::{BTreeSet, HashMap, HashSet},
+    time::Duration,
+};
 
-use canton_proto_rs::com::digitalasset::canton::admin::participant::v30::{
-    ContractImportMode, DisconnectSynchronizerRequest, ExportPartyAcsRequest,
-    ImportPartyAcsRequest, ListConnectedSynchronizersRequest, ReconnectSynchronizersRequest,
-    list_connected_synchronizers_response,
-    party_management_service_client::PartyManagementServiceClient,
-    synchronizer_connectivity_service_client::SynchronizerConnectivityServiceClient,
+use canton_proto_rs::com::{
+    daml::ledger::api::v2::{
+        CumulativeFilter, EventFormat, Filters, GetActiveContractsRequest, GetLedgerEndRequest,
+        WildcardFilter, cumulative_filter, get_active_contracts_response::ContractEntry,
+    },
+    digitalasset::canton::admin::participant::v30::{
+        ContractImportMode, DisconnectSynchronizerRequest, ExportPartyAcsRequest,
+        ImportPartyAcsRequest, ListConnectedSynchronizersRequest, ListPackagesRequest,
+        ReconnectSynchronizersRequest, list_connected_synchronizers_response,
+        package_service_client::PackageServiceClient,
+        party_management_service_client::PartyManagementServiceClient,
+        synchronizer_connectivity_service_client::SynchronizerConnectivityServiceClient,
+    },
 };
 use sqlx::SqlitePool;
 
@@ -422,13 +432,6 @@ pub async fn collect_party_package_ids(
     party_id: &str,
     ledger_token: Option<&str>,
 ) -> Result<Vec<String>> {
-    use std::collections::BTreeSet;
-
-    use canton_proto_rs::com::daml::ledger::api::v2::{
-        CumulativeFilter, EventFormat, Filters, GetActiveContractsRequest, GetLedgerEndRequest,
-        WildcardFilter, cumulative_filter, get_active_contracts_response::ContractEntry,
-    };
-
     let mut state = utils::create_state_client(config, ledger_token.map(str::to_string)).await?;
     let ledger_end = state
         .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
@@ -436,7 +439,7 @@ pub async fn collect_party_package_ids(
         .into_inner()
         .offset;
 
-    let mut filters_by_party = std::collections::HashMap::new();
+    let mut filters_by_party = HashMap::new();
     filters_by_party.insert(
         party_id.to_string(),
         Filters {
@@ -479,11 +482,7 @@ pub async fn collect_party_package_ids(
 
 /// New-member side: package ids currently known to this participant, via the
 /// admin `PackageService.ListPackages`. Backs the ACS-import package preflight.
-async fn local_package_ids(config: &NodeConfig) -> Result<std::collections::HashSet<String>> {
-    use canton_proto_rs::com::digitalasset::canton::admin::participant::v30::{
-        ListPackagesRequest, package_service_client::PackageServiceClient,
-    };
-
+async fn local_package_ids(config: &NodeConfig) -> Result<HashSet<String>> {
     let mut client = PackageServiceClient::new(config.admin_channel().await?);
     let descriptions = client
         .list_packages(tonic::Request::new(ListPackagesRequest {
