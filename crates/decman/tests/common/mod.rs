@@ -13,7 +13,6 @@ pub mod processes;
 pub mod scenario;
 pub mod tls_proxy;
 pub mod types;
-pub mod wallet;
 
 use std::{
     path::PathBuf,

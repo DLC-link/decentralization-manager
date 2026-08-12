@@ -1,0 +1,27 @@
+[package]
+name = "decman-wallet"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Wallet-side client for DecMan's tenant API: run a co-validated Canton party from a key you hold yourself"
+
+[lib]
+name = "decman_wallet"
+path = "src/lib.rs"
+
+[dependencies]
+base64 = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+reqwest = { version = "0.13", features = ["json"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+zeroize = { workspace = true }
+
+common = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+wiremock = { workspace = true }

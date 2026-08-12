@@ -1,17 +1,18 @@
 //! Wallet-driven external-party onboarding via the tenant API (`/v0/tenant/*`).
 //!
-//! Stands in for a wallet: generates an Ed25519 key locally (see
-//! [`crate::common::wallet`]), calls `POST /v0/tenant/prepare` on one host to get
-//! the multi-host onboarding topology + the multi-hash, signs the multi-hash
+//! Stands in for a wallet: generates an Ed25519 key locally with the shipped
+//! wallet library ([`decman_wallet::ExternalKeyPair`] — the same type a wallet
+//! provider uses, so there is one implementation of the key handling and the
+//! fingerprint derivation), calls `POST /v0/tenant/prepare` on one host to get
+//! the multi-host onboarding topology + one hash per transaction, signs each hash
 //! locally, then submits the same signed bundle to `POST /v0/tenant/onboard` on
 //! EACH host itself — DPM never relays between hosts and never sees the private
 //! key. Asserts each host reports the party hosted via
-//! `GET /v0/tenant/{party}/status` and that the ACS is readable via
-//! `GET /v0/tenant/{party}/acs`.
+//! `GET /v0/tenant/{party}/status`.
 //!
-//! (Full transacting — prepare-submission/execute-submission of a real contract
-//! — is exercised against DevNet, since it needs a concrete template; here we
-//! confirm onboarding + the ACS read end-to-end.)
+//! Transacting as the party is not part of the tenant API — a wallet does that
+//! directly against Canton with the key it holds — so this phase covers
+//! onboarding only.
 
 use std::time::Duration;
 
@@ -20,9 +21,10 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use tracing::info;
 
+use decman_wallet::ExternalKeyPair;
+
 use crate::common::{
     Fixture, chaos::fresh_prefix, http::probe_workflow_status, scenario::Scenario,
-    wallet::ExternalKeyPair,
 };
 
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
@@ -31,10 +33,12 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     // The "wallet": key generated + held client-side; DPM only ever sees the
     // public key and the signature.
     let wallet = ExternalKeyPair::generate();
-    let seed = wallet.seed();
+    // Copied out of its `Zeroizing` wrapper so the closure below can rebuild the
+    // key; the wrapper itself is not `Copy`.
+    let seed = *wallet.seed();
     let hint = fresh_prefix("tenant-ext");
     let party_id = wallet.party_id(&hint);
-    let public_key = STANDARD.encode(wallet.public_key_bytes());
+    let public_key = wallet.public_key_b64();
     info!("Wallet-driven external party: {party_id}");
 
     Scenario::with_ctx(
@@ -61,21 +65,33 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     let prep: Value = f
                         .post_json(f.p1.http, "/v0/tenant/prepare", &prepare_req)
                         .await?;
-                    let multi_hash_b64 = prep
-                        .get("multi_hash")
-                        .and_then(Value::as_str)
-                        .context("prepare response missing multi_hash")?;
-                    let multi_hash = STANDARD
-                        .decode(multi_hash_b64)
-                        .context("multi_hash is not valid base64")?;
+                    let hashes = prep
+                        .get("transaction_hashes")
+                        .and_then(Value::as_array)
+                        .context("prepare response missing transaction_hashes")?
+                        .iter()
+                        .map(|h| {
+                            let encoded = h
+                                .as_str()
+                                .context("transaction_hashes entry is not a string")?;
+                            STANDARD
+                                .decode(encoded)
+                                .context("transaction hash is not valid base64")
+                        })
+                        .collect::<anyhow::Result<Vec<_>>>()?;
                     let topology_transactions = prep
                         .get("topology_transactions")
                         .cloned()
                         .context("prepare response missing topology_transactions")?;
 
-                    // 2) The wallet signs the multi-hash locally with its own key.
+                    // 2) The wallet signs each transaction hash locally with its own key.
                     let wallet = ExternalKeyPair::from_seed(seed);
-                    let signature = STANDARD.encode(wallet.sign(&multi_hash));
+                    // One signature per transaction, over the hash Canton returned
+                    // for it.
+                    let signatures: Vec<String> = hashes
+                        .iter()
+                        .map(|h| STANDARD.encode(wallet.sign(h)))
+                        .collect();
 
                     // 3) The wallet submits the SAME signed bundle to every host
                     // itself — no host relays to another. `onboard` carries no host
@@ -84,7 +100,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         "party_hint": hint,
                         "public_key": public_key,
                         "topology_transactions": topology_transactions,
-                        "multi_hash_signature": signature,
+                        "signatures": signatures,
                         "signed_by": wallet.fingerprint(),
                     });
                     for host in [f.p1.http, f.p2.http, f.p3.http] {
@@ -146,31 +162,6 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             })
         }
     })
-    .then(
-        "party ACS readable via /v0/tenant/{party}/acs",
-        Duration::from_secs(30),
-        {
-            let party_id = party_id.clone();
-            move |f, _| {
-                let party_id = party_id.clone();
-                Box::pin(async move {
-                    let resp: Value = match f
-                        .get_json(f.p1.http, &format!("/v0/tenant/{party_id}/acs"))
-                        .await
-                    {
-                        Ok(r) => r,
-                        // Surface a real HTTP error instead of retrying it away.
-                        Err(e) => return Some(Err(e)),
-                    };
-                    // A freshly onboarded party has no contracts yet; the check is
-                    // that the endpoint answers with a contracts array.
-                    resp.get("contracts")
-                        .and_then(Value::as_array)
-                        .map(|_| Ok(()))
-                })
-            }
-        },
-    )
     .run(f)
     .await
 }
