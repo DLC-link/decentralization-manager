@@ -1342,6 +1342,7 @@ export const ContractsDialog = ({
     if (packages.vault) ids.add(packages.vault);
     if (packages.utility_registry) ids.add(packages.utility_registry);
     if (packages.utility_credential) ids.add(packages.utility_credential);
+    if (packages.utility_credential_app) ids.add(packages.utility_credential_app);
     return [...ids].sort();
   }, [knownPackageIds, packages]);
 
