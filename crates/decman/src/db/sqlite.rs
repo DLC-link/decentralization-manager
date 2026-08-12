@@ -1173,6 +1173,7 @@ mod tests {
                 governance_utility_credential: None,
                 governance_utility_onboarding: None,
                 utility_credential: None,
+                utility_credential_app: None,
                 utility_registry: None,
                 vault: None,
                 vault_governance: None,

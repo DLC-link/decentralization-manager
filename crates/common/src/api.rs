@@ -36,7 +36,11 @@ pub struct PackageConfig {
     pub governance_token_custody: Option<String>,
     pub governance_utility_credential: Option<String>,
     pub governance_utility_onboarding: Option<String>,
+    /// Base credential package; defines the `Credential` template.
     pub utility_credential: Option<String>,
+    /// Credential app package (services, offers). Bundles the base package
+    /// as a dependency but does not define its templates.
+    pub utility_credential_app: Option<String>,
     pub utility_registry: Option<String>,
     pub vault: Option<String>,
     pub vault_governance: Option<String>,

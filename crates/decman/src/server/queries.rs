@@ -188,23 +188,31 @@ fn provider_service_template(packages: &PackageConfig) -> Option<TemplateId> {
 
 /// UserService template identifier
 fn user_service_template(packages: &PackageConfig) -> Option<TemplateId> {
-    packages.utility_credential.as_ref().map(|pkg| TemplateId {
-        package_id: pkg.clone(),
-        module_name: "Utility.Credential.App.V0.Service.User",
-        entity_name: "UserService",
-    })
+    packages
+        .utility_credential_app
+        .as_ref()
+        .map(|pkg| TemplateId {
+            package_id: pkg.clone(),
+            module_name: "Utility.Credential.App.V0.Service.User",
+            entity_name: "UserService",
+        })
 }
 
 /// CredentialOffer template identifier
 fn credential_offer_template(packages: &PackageConfig) -> Option<TemplateId> {
-    packages.utility_credential.as_ref().map(|pkg| TemplateId {
-        package_id: pkg.clone(),
-        module_name: "Utility.Credential.App.V0.Model.Offer",
-        entity_name: "CredentialOffer",
-    })
+    packages
+        .utility_credential_app
+        .as_ref()
+        .map(|pkg| TemplateId {
+            package_id: pkg.clone(),
+            module_name: "Utility.Credential.App.V0.Model.Offer",
+            entity_name: "CredentialOffer",
+        })
 }
 
-/// Credential template identifier
+/// Credential template identifier. Uses the base `utility_credential`
+/// package, which defines the `Credential` template; the app package
+/// (`utility_credential_app`) only bundles it as a dependency.
 fn credential_template(packages: &PackageConfig) -> Option<TemplateId> {
     packages.utility_credential.as_ref().map(|pkg| TemplateId {
         package_id: pkg.clone(),
@@ -4673,6 +4681,19 @@ fn extract_preapproval_entries(args: &Record) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credential_template_names_the_defining_package() {
+        // The `Credential` template is defined in `utility-credential-v0`;
+        // `utility-credential-app-v0` only bundles that dalf as a dependency.
+        // Canton resolves a `#name` filter against the defining package's
+        // name, so naming the app package matches no contracts.
+        let template = credential_template(&crate::config::default_package_config())
+            .expect("default package config sets utility_credential");
+        assert_eq!(template.package_id, "#utility-credential-v0");
+        assert_eq!(template.module_name, "Utility.Credential.V0.Credential");
+        assert_eq!(template.entity_name, "Credential");
+    }
 
     fn ci(name: &str, version: &str, created_at: &str, contract_id: &str) -> ContractInfo {
         ContractInfo {
