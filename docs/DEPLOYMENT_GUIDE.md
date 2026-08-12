@@ -257,9 +257,10 @@ spec:
           env:
             - name: RUST_LOG
               value: dec_party_manager=info,tokio_noise=error,hyper_noise=error
-            # Logs are JSON on stdout by default, which is what a log collector
-            # indexes as attributes. Set DECPM_LOG_FORMAT=text for the console
-            # format instead.
+            # Logs are JSON on stdout by default. The collector indexes the
+            # fields as attributes only where a log pipeline parses the line,
+            # so this environment needs its own decman pipeline in dlc-infra.
+            # Set DECPM_LOG_FORMAT=text for the console format instead.
           envFrom:
             - secretRef:
                 name: dec-party-manager-secrets

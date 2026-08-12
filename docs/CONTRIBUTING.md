@@ -105,9 +105,9 @@ Key conventions:
   including in tests; return `Result` and use `?`.
 - **Logging:** use `tracing` (`info!`/`warn!`/`error!`), never `println!`/`eprintln!`.
   Record each value as a field — `info!(count, "assigned")`, not `info!("assigned {count}")`.
-  The binary writes one JSON object per line, so a field becomes a queryable attribute in
-  SigNoz while text inside the message does not. Set `DECPM_LOG_FORMAT=text` for the readable
-  console format while you work.
+  The binary writes one JSON object per line, and a SigNoz log pipeline parses that line.
+  A field then becomes a queryable attribute. Text inside the message never does.
+  Set `DECPM_LOG_FORMAT=text` for the readable console format while you work.
 - **Cargo.toml:** dependencies and their features are kept in strict
   alphabetical order.
 - **Comments:** only where the logic isn't self-evident; remove dead code rather
