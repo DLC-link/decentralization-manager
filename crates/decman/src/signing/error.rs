@@ -10,6 +10,11 @@ pub enum SigningError {
     /// A Canton admin-API RPC failed (for example `ExportKeyPair`).
     #[error("vault RPC failed: {0}")]
     VaultRpc(#[from] tonic::Status),
+    /// The external KMS rejected or failed a signing call. Common causes:
+    /// missing `kms:Sign` permission for decman's role on the party key, or
+    /// unreachable KMS endpoint.
+    #[error("KMS signing failed: {0}")]
+    Kms(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// Any other signing failure.
     #[error(transparent)]
     Other(#[from] anyhow::Error),

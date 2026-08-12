@@ -6,6 +6,7 @@ pub mod db;
 pub mod governance;
 pub mod http;
 pub mod invitations;
+pub mod ledger_api;
 pub mod operator;
 pub mod phases;
 pub mod processes;
@@ -95,6 +96,8 @@ pub struct Fixture {
     pub p1_member_party: Option<String>,
     pub p2_member_party: Option<String>,
     pub p3_member_party: Option<String>,
+    pub reward_beneficiary_party: Option<String>,
+    pub reward_operator_party: Option<String>,
     pub provider_service_cid: Option<String>,
     pub allocation_factory_cid: Option<String>,
     pub instrument_configuration_cid: Option<String>,
@@ -238,6 +241,8 @@ impl Fixture {
             p1_member_party: None,
             p2_member_party: None,
             p3_member_party: None,
+            reward_beneficiary_party: None,
+            reward_operator_party: None,
             provider_service_cid: None,
             allocation_factory_cid: None,
             instrument_configuration_cid: None,
@@ -302,6 +307,16 @@ impl Fixture {
             .as_deref()
             .context("p3_member_party not set")
     }
+    pub fn reward_beneficiary_party(&self) -> anyhow::Result<&str> {
+        self.reward_beneficiary_party
+            .as_deref()
+            .context("reward_beneficiary_party not set — seed_reward_coupons must run first")
+    }
+    pub fn reward_operator_party(&self) -> anyhow::Result<&str> {
+        self.reward_operator_party
+            .as_deref()
+            .context("reward_operator_party not set — seed_reward_coupons must run first")
+    }
 
     /// Build a `Fixture` with hardcoded test values, bypassing env vars entirely.
     /// Used by unit tests for the Scenario DSL — those tests don't make HTTP calls,
@@ -350,6 +365,8 @@ impl Fixture {
             p1_member_party: None,
             p2_member_party: None,
             p3_member_party: None,
+            reward_beneficiary_party: None,
+            reward_operator_party: None,
             provider_service_cid: None,
             allocation_factory_cid: None,
             instrument_configuration_cid: None,

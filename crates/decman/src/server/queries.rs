@@ -523,6 +523,7 @@ async fn fetch_contracts_with_wildcard(
             filters_for_any_party: None,
             verbose: false,
         }),
+        stream_continuation_token: None,
     };
 
     let mut stream = state_client
@@ -595,6 +596,7 @@ async fn fetch_contracts_for_template(
             filters_for_any_party: None,
             verbose: false,
         }),
+        stream_continuation_token: None,
     };
 
     let mut stream = state_client
@@ -626,6 +628,7 @@ pub async fn get_party_metadata(
             identity_provider_id: String::new(),
             page_token: String::new(),
             page_size: 1000,
+            filter_party: String::new(),
         }))
         .await?
         .into_inner();
@@ -887,6 +890,7 @@ async fn fetch_governance_with_wildcard(
             filters_for_any_party: None,
             verbose: true,
         }),
+        stream_continuation_token: None,
     };
 
     let mut stream = state_client
@@ -960,6 +964,7 @@ async fn fetch_governance_for_template(
             filters_for_any_party: None,
             verbose: true,
         }),
+        stream_continuation_token: None,
     };
 
     let mut stream = state_client
@@ -1471,6 +1476,7 @@ async fn fetch_proposal_infos(
             filters_for_any_party: None,
             verbose: true,
         }),
+        stream_continuation_token: None,
     };
 
     let mut stream = state_client
@@ -1646,6 +1652,7 @@ async fn fetch_governance_state_with_wildcard(
             filters_for_any_party: None,
             verbose: true,
         }),
+        stream_continuation_token: None,
     };
 
     let mut stream = state_client
@@ -1713,6 +1720,7 @@ async fn fetch_governance_state_for_template(
             filters_for_any_party: None,
             verbose: true,
         }),
+        stream_continuation_token: None,
     };
 
     let mut stream = state_client
@@ -2005,6 +2013,7 @@ async fn fetch_vaults_with_wildcard(
             filters_for_any_party: None,
             verbose: true,
         }),
+        stream_continuation_token: None,
     };
 
     let mut stream = state_client
@@ -2069,6 +2078,7 @@ async fn fetch_vaults_for_template(
             filters_for_any_party: None,
             verbose: true,
         }),
+        stream_continuation_token: None,
     };
 
     let mut stream = state_client
@@ -2223,6 +2233,7 @@ async fn fetch_provider_services_with_wildcard(
             filters_for_any_party: None,
             verbose: true,
         }),
+        stream_continuation_token: None,
     };
 
     let mut stream = state_client
@@ -2287,6 +2298,7 @@ async fn fetch_provider_services_for_template(
             filters_for_any_party: None,
             verbose: true,
         }),
+        stream_continuation_token: None,
     };
 
     let mut stream = state_client
@@ -2393,6 +2405,7 @@ async fn fetch_user_services_with_wildcard(
             filters_for_any_party: None,
             verbose: true,
         }),
+        stream_continuation_token: None,
     };
 
     let mut stream = state_client
@@ -2457,6 +2470,7 @@ async fn fetch_user_services_for_template(
             filters_for_any_party: None,
             verbose: true,
         }),
+        stream_continuation_token: None,
     };
 
     let mut stream = state_client
@@ -2569,6 +2583,7 @@ async fn fetch_credential_offers_with_wildcard(
             filters_for_any_party: None,
             verbose: true,
         }),
+        stream_continuation_token: None,
     };
 
     let mut stream = state_client
@@ -2633,6 +2648,7 @@ async fn fetch_credential_offers_for_template(
             filters_for_any_party: None,
             verbose: true,
         }),
+        stream_continuation_token: None,
     };
 
     let mut stream = state_client
@@ -2741,6 +2757,7 @@ async fn fetch_credentials_with_wildcard(
             filters_for_any_party: None,
             verbose: true,
         }),
+        stream_continuation_token: None,
     };
 
     let mut stream = state_client
@@ -2805,6 +2822,7 @@ async fn fetch_credentials_for_template(
             filters_for_any_party: None,
             verbose: true,
         }),
+        stream_continuation_token: None,
     };
 
     let mut stream = state_client
@@ -2927,6 +2945,7 @@ async fn fetch_registrar_services_with_wildcard(
             filters_for_any_party: None,
             verbose: true,
         }),
+        stream_continuation_token: None,
     };
 
     let mut stream = state_client
@@ -2991,6 +3010,7 @@ async fn fetch_registrar_services_for_template(
             filters_for_any_party: None,
             verbose: true,
         }),
+        stream_continuation_token: None,
     };
 
     let mut stream = state_client
@@ -3104,6 +3124,7 @@ async fn fetch_registrar_service_requests_with_wildcard(
             filters_for_any_party: None,
             verbose: true,
         }),
+        stream_continuation_token: None,
     };
 
     let mut stream = state_client
@@ -3168,6 +3189,7 @@ async fn fetch_registrar_service_requests_for_template(
             filters_for_any_party: None,
             verbose: true,
         }),
+        stream_continuation_token: None,
     };
 
     let mut stream = state_client
@@ -3290,6 +3312,7 @@ async fn fetch_provider_configurations_with_wildcard(
             filters_for_any_party: None,
             verbose: true,
         }),
+        stream_continuation_token: None,
     };
 
     let mut stream = state_client
@@ -3354,6 +3377,7 @@ async fn fetch_provider_configurations_for_template(
             filters_for_any_party: None,
             verbose: true,
         }),
+        stream_continuation_token: None,
     };
 
     let mut stream = state_client
@@ -3463,6 +3487,7 @@ async fn fetch_instruments_with_wildcard(
             filters_for_any_party: None,
             verbose: true,
         }),
+        stream_continuation_token: None,
     };
 
     let mut stream = state_client
@@ -3526,6 +3551,7 @@ async fn fetch_instruments_for_template(
             filters_for_any_party: None,
             verbose: true,
         }),
+        stream_continuation_token: None,
     };
 
     let mut stream = state_client
@@ -3666,6 +3692,7 @@ pub async fn query_contracts_by_template(
             filters_for_any_party: None,
             verbose: true,
         }),
+        stream_continuation_token: None,
     };
 
     let mut stream = state_client
@@ -3764,6 +3791,7 @@ pub async fn get_open_transfer_instructions(
             filters_for_any_party: None,
             verbose: true,
         }),
+        stream_continuation_token: None,
     };
 
     let mut stream = state_client
@@ -3977,6 +4005,7 @@ async fn fetch_token_requests_for_template(
             filters_for_any_party: None,
             verbose: true,
         }),
+        stream_continuation_token: None,
     };
 
     let mut stream = state_client
@@ -4222,6 +4251,7 @@ pub async fn get_transfer_factories(
             filters_for_any_party: None,
             verbose: true,
         }),
+        stream_continuation_token: None,
     };
 
     let mut stream = state_client
@@ -4400,6 +4430,7 @@ async fn fetch_holding_views(
             filters_for_any_party: None,
             verbose: true,
         }),
+        stream_continuation_token: None,
     };
 
     let mut stream = state_client
@@ -4616,6 +4647,7 @@ async fn fetch_utility_preapproval_instruments(
             filters_for_any_party: None,
             verbose: true,
         }),
+        stream_continuation_token: None,
     };
 
     let mut stream = state_client
@@ -4862,6 +4894,7 @@ mod tests {
                     field("transfer", transfer),
                 ],
             }),
+            implementation_package_id: String::new(),
         };
         CreatedEvent {
             offset: 0,
@@ -4879,6 +4912,7 @@ mod tests {
             package_name: String::new(),
             representative_package_id: String::new(),
             acs_delta: false,
+            contract_key_hash: Vec::new(),
         }
     }
 
@@ -4952,6 +4986,7 @@ mod tests {
                     field("lock", optional_value(lock)),
                 ],
             }),
+            implementation_package_id: String::new(),
         };
         CreatedEvent {
             offset: 0,
@@ -4969,6 +5004,7 @@ mod tests {
             package_name: String::new(),
             representative_package_id: String::new(),
             acs_delta: false,
+            contract_key_hash: Vec::new(),
         }
     }
 
@@ -5130,6 +5166,7 @@ mod tests {
             package_name: String::new(),
             representative_package_id: String::new(),
             acs_delta: false,
+            contract_key_hash: Vec::new(),
         }
     }
 
@@ -5227,6 +5264,7 @@ mod tests {
             package_name: String::new(),
             representative_package_id: String::new(),
             acs_delta: false,
+            contract_key_hash: Vec::new(),
         }
     }
 
@@ -5322,6 +5360,7 @@ mod tests {
             package_name: String::new(),
             representative_package_id: String::new(),
             acs_delta: false,
+            contract_key_hash: Vec::new(),
         }
     }
 
@@ -5406,6 +5445,7 @@ mod tests {
             package_name: String::new(),
             representative_package_id: String::new(),
             acs_delta: false,
+            contract_key_hash: Vec::new(),
         }
     }
 

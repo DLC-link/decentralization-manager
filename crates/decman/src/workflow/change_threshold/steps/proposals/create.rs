@@ -112,11 +112,11 @@ pub async fn create_proposals(
             authorize_request::Proposal {
                 change: enums::TopologyChangeOp::AddReplace as i32,
                 serial: 0,
-                mapping: Some(TopologyMapping {
+                mapping: Some(authorize_request::proposal::Mapping::V30(TopologyMapping {
                     mapping: Some(topology_mapping::Mapping::DecentralizedNamespaceDefinition(
                         new_namespace_def.clone(),
                     )),
-                }),
+                })),
             },
         )),
         must_fully_authorize: false,
@@ -138,9 +138,9 @@ pub async fn create_proposals(
             authorize_request::Proposal {
                 change: enums::TopologyChangeOp::AddReplace as i32,
                 serial: 0,
-                mapping: Some(TopologyMapping {
+                mapping: Some(authorize_request::proposal::Mapping::V30(TopologyMapping {
                     mapping: Some(topology_mapping::Mapping::PartyToParticipant(new_p2p)),
-                }),
+                })),
             },
         )),
         must_fully_authorize: false,

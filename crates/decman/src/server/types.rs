@@ -14,13 +14,14 @@ use tokio::sync::RwLock;
 // keep resolving unchanged. `common::api` holds the HTTP request/response DTOs
 // the frontend's TypeScript is generated from (see `decman/build.rs`).
 pub use common::api::{
-    AddPartyInvitePayload, AddPartyRequest, AuditLogResponse, AuthStatus, AuthStatusResponse,
-    AuthTestResponse, AuthTestResult, CancelConfirmationRequest, ChainAuditEntry,
-    ChainAuditResponse, ChangeThresholdInvitePayload, ChangeThresholdRequest, Claim,
-    ContractQueryResponse, ContractWithBlob, ContractsInvitePayload, ContractsRequest,
-    CredentialInfo, CredentialOfferInfo, CredentialOffersResponse, CredentialsResponse,
-    DarsInvitePayload, DarsRequest, DecentralizedPartiesResponse, DeclineInvitationPayload,
-    DisclosedContractInput, DiscoverMemberPartyRequest, DiscoverMemberPartyResponse, ErrorResponse,
+    ActiveCouponReassignmentDelegation, AddPartyInvitePayload, AddPartyRequest, AuditLogResponse,
+    AuthStatus, AuthStatusResponse, AuthTestResponse, AuthTestResult, CancelConfirmationRequest,
+    ChainAuditEntry, ChainAuditResponse, ChangeThresholdInvitePayload, ChangeThresholdRequest,
+    Claim, ContractQueryResponse, ContractWithBlob, ContractsInvitePayload, ContractsRequest,
+    CouponReassignmentDelegationSummary, CredentialInfo, CredentialOfferInfo,
+    CredentialOffersResponse, CredentialsResponse, DarsInvitePayload, DarsRequest,
+    DecentralizedPartiesResponse, DeclineInvitationPayload, DisclosedContractInput,
+    DiscoverMemberPartyRequest, DiscoverMemberPartyResponse, ErrorResponse,
     ExpireConfirmationRequest, ExternalPartiesResponse, ExternalPartyInfo, GovernanceState,
     GovernanceStateResponse, GovernanceType, GrantRightsRequest, GrantRightsResponse,
     InstrumentAllowance, InstrumentId, InstrumentIdentifier, InstrumentInfo, InstrumentsResponse,
@@ -342,6 +343,16 @@ pub struct AppRewardBeneficiary {
     pub weight: DamlDecimal,
 }
 
+/// A CIP-104 reward-coupon beneficiary assignment.
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct RewardBeneficiary {
+    pub beneficiary: CantonId,
+    #[schema(value_type = String)]
+    #[cfg_attr(feature = "typegen", ts(type = "string"))]
+    pub percentage: DamlDecimal,
+}
+
 /// Featured App Right configuration
 #[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
@@ -645,6 +656,30 @@ pub enum ProposalType {
         #[serde(default)]
         provider_app_reward_beneficiaries: Option<Vec<AppRewardBeneficiary>>,
     },
+    /// Create (or replace) the decparty's on-ledger CouponReassignmentDelegation.
+    /// `prior_delegation` is the cid of the delegation being replaced (None for the first).
+    SetupCouponReassignmentDelegation {
+        /// The DSO whose coupons the delegation may assign. Fixed by this vote
+        /// so the automation can tell the decparty's real coupons from ones a
+        /// stranger minted naming itself `dso`.
+        dso: CantonId,
+        assigners: Vec<CantonId>,
+        /// The split, baked into the delegation and enforced in DAML. Two
+        /// things surprise proposers, and both reject the vote at execute:
+        ///
+        /// 1. The percentages must sum to **exactly** 1.0, compared as exact
+        ///    Decimal. An even 3-way split is therefore not expressible —
+        ///    `0.3333333333` three times is not 1.0. Balance the last entry by
+        ///    hand (`0.3333333333`, `0.3333333333`, `0.3333333334`).
+        /// 2. Nothing is implicitly left to the decparty. To keep a remainder
+        ///    for itself, the decparty must appear here as its own beneficiary
+        ///    with an explicit percentage.
+        new_beneficiaries: Vec<RewardBeneficiary>,
+        #[serde(default)]
+        prior_delegation: Option<String>,
+    },
+    /// Revoke (archive) the decparty's CouponReassignmentDelegation.
+    RevokeCouponReassignmentDelegation { delegation: String },
     /// Toggle result-contract emission on a `RegistrarService`.
     SetEnableResultContracts {
         registrar_service_cid: String,
@@ -886,9 +921,83 @@ impl ProposalType {
                 }
                 Ok(())
             }
+            ProposalType::SetupCouponReassignmentDelegation {
+                assigners,
+                new_beneficiaries,
+                ..
+            } => {
+                if assigners.is_empty() {
+                    return Err("assigners must not be empty".to_string());
+                }
+                let mut seen = std::collections::HashSet::new();
+                for a in assigners {
+                    if !seen.insert(a) {
+                        return Err(format!("duplicate assigner not allowed: {a}"));
+                    }
+                }
+                validate_reward_beneficiaries(new_beneficiaries)
+            }
+            ProposalType::RevokeCouponReassignmentDelegation { delegation } => {
+                if delegation.trim().is_empty() {
+                    return Err("delegation must not be empty".to_string());
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
+}
+
+/// Validates a `new_beneficiaries` list (e.g.
+/// `SetupCouponReassignmentDelegation::new_beneficiaries`): non-empty,
+/// <= 20 entries, no duplicate beneficiary, each percentage in (0.0, 1.0],
+/// summing to exactly 1.0.
+///
+/// The uniqueness rule mirrors the on-ledger `RewardCoupon_AssignBeneficiaries`
+/// impl (`require "Beneficaries are unique"`); catching it here means a
+/// duplicated split is rejected at propose time rather than passing the vote
+/// and then failing every `Delegation_Assign`, which would leave a permanently
+/// unusable delegation.
+///
+/// `DamlDecimal` addition is exact (no float rounding), so an exact `==`
+/// against `1.0` is sufficient here — no epsilon tolerance is needed.
+fn validate_reward_beneficiaries(beneficiaries: &[RewardBeneficiary]) -> Result<(), String> {
+    if beneficiaries.is_empty() {
+        return Err("new_beneficiaries must not be empty".to_string());
+    }
+    if beneficiaries.len() > 20 {
+        return Err("at most 20 beneficiaries per coupon".to_string());
+    }
+    let one = DamlDecimal::parse("1").map_err(|e| e.to_string())?;
+    let mut seen = std::collections::HashSet::new();
+    for b in beneficiaries {
+        if b.percentage.value() <= DamlDecimal::ZERO.value() || b.percentage.value() > one.value() {
+            return Err(format!(
+                "each percentage must be in (0.0, 1.0], got {}",
+                b.percentage
+            ));
+        }
+        if !seen.insert(&b.beneficiary) {
+            return Err(format!(
+                "duplicate beneficiary not allowed: {}",
+                b.beneficiary
+            ));
+        }
+    }
+    let sum: DamlDecimal = beneficiaries.iter().map(|b| b.percentage).sum();
+    if sum != one {
+        // Say how to fix it. The comparison is exact Decimal, so an even 3-way
+        // split does not exist and nothing is implicitly left to the decparty —
+        // both are things a proposer discovers at execute otherwise.
+        return Err(format!(
+            "reward beneficiary percentages must sum to exactly 1.0, got {sum}. \
+             The sum is compared as exact Decimal, so balance the last entry by \
+             hand rather than repeating a rounded share. To leave a remainder to \
+             the decparty, list the decparty itself as a beneficiary — nothing is \
+             implicit"
+        ));
+    }
+    Ok(())
 }
 
 /// Request to propose a governance domain action (creates proposal contract)
@@ -1608,5 +1717,90 @@ mod tests {
         );
         assert!(mk(vec![issuer_a, issuer_b]).validate().is_ok());
         assert!(mk(Vec::new()).validate().is_ok());
+    }
+
+    /// Test-only helper: builds a `CantonId` with a fixed valid namespace so
+    /// tests can vary just the prefix.
+    fn cid(prefix: &str) -> CantonId {
+        let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
+        CantonId::parse(&format!("{prefix}::{ns}")).unwrap()
+    }
+
+    /// Test-only helper: builds a `RewardBeneficiary` from a Canton-ID prefix
+    /// and a decimal percentage string.
+    fn rb(prefix: &str, pct: &str) -> RewardBeneficiary {
+        RewardBeneficiary {
+            beneficiary: cid(prefix),
+            percentage: pct.parse().expect("valid decimal"),
+        }
+    }
+
+    #[test]
+    fn setup_delegation_validate() {
+        // Reuse the `rb` helper from the neighboring set_reward_split_validate
+        // test; `rb(..).beneficiary` yields a CantonId (there is no dedicated
+        // party-id helper). Note: `rb`'s prefix is combined with a fixed
+        // namespace via `cid()`, so the prefix must be a plain string (no
+        // embedded "::") -- unlike the brief's example.
+        let execs = vec![rb("m1", "1.0").beneficiary, rb("m2", "1.0").beneficiary];
+        let ok = ProposalType::SetupCouponReassignmentDelegation {
+            dso: rb("dso", "1.0").beneficiary,
+            assigners: execs.clone(),
+            new_beneficiaries: vec![rb("a", "0.8"), rb("b", "0.2")],
+            prior_delegation: None,
+        };
+        assert!(ok.validate().is_ok());
+        let no_exec = ProposalType::SetupCouponReassignmentDelegation {
+            dso: rb("dso", "1.0").beneficiary,
+            assigners: vec![],
+            new_beneficiaries: vec![rb("a", "1.0")],
+            prior_delegation: None,
+        };
+        assert!(no_exec.validate().is_err());
+        let bad_sum = ProposalType::SetupCouponReassignmentDelegation {
+            dso: rb("dso", "1.0").beneficiary,
+            assigners: execs,
+            new_beneficiaries: vec![rb("a", "0.5")],
+            prior_delegation: None,
+        };
+        assert!(bad_sum.validate().is_err());
+        let revoke = ProposalType::RevokeCouponReassignmentDelegation {
+            delegation: "00abc".into(),
+        };
+        assert!(revoke.validate().is_ok());
+        // An empty delegation cid is rejected at the boundary (not left to fail
+        // only at ledger submission).
+        let revoke_empty = ProposalType::RevokeCouponReassignmentDelegation {
+            delegation: "  ".into(),
+        };
+        assert!(revoke_empty.validate().is_err());
+    }
+
+    #[test]
+    fn validate_reward_beneficiaries_edge_cases() {
+        // Empty is rejected.
+        assert!(validate_reward_beneficiaries(&[]).is_err());
+
+        // Per-percentage bound is (0.0, 1.0]: 0.0, negative, and > 1.0 all reject.
+        assert!(validate_reward_beneficiaries(&[rb("a", "0.0"), rb("b", "1.0")]).is_err());
+        assert!(validate_reward_beneficiaries(&[rb("a", "-0.5"), rb("b", "1.5")]).is_err());
+        assert!(validate_reward_beneficiaries(&[rb("a", "1.5")]).is_err());
+
+        // A single 1.0 (upper bound inclusive) is accepted.
+        assert!(validate_reward_beneficiaries(&[rb("a", "1.0")]).is_ok());
+
+        // Duplicate beneficiary is rejected even when percentages are otherwise valid.
+        assert!(validate_reward_beneficiaries(&[rb("dup", "0.5"), rb("dup", "0.5")]).is_err());
+
+        // Count boundary: exactly 20 (each 0.05, summing to 1.0) is accepted; 21 rejects.
+        let twenty: Vec<RewardBeneficiary> =
+            (0..20).map(|i| rb(&format!("b{i}"), "0.05")).collect();
+        assert!(validate_reward_beneficiaries(&twenty).is_ok());
+        let twenty_one: Vec<RewardBeneficiary> =
+            (0..21).map(|i| rb(&format!("b{i}"), "0.05")).collect();
+        assert!(validate_reward_beneficiaries(&twenty_one).is_err());
+
+        // Valid two-way split.
+        assert!(validate_reward_beneficiaries(&[rb("a", "0.8"), rb("b", "0.2")]).is_ok());
     }
 }

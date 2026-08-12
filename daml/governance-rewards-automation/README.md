@@ -1,4 +1,4 @@
-# governance-rewards
+# governance-rewards-automation-v1
 
 A decman governance plugin (`GovernableAction` implementations) that lets a
 decentralized party manage collection of its CIP-104 rewards. Each action is
@@ -16,18 +16,26 @@ on-ledger actions the decparty needs to stand that up:
 |---|---|
 | `SetupMintingDelegation` | Create a `MintingDelegationProposal` naming a validator as the delegate that mints the decparty's coupons. |
 | `AcceptExternalPartySetup` | Accept a validator-created `ExternalPartySetupProposal`, creating the decparty's `ValidatorRight` + `TransferPreapproval` on that validator — the prerequisite that makes the validator actually run reward collection for the party. |
+| `SetupCouponReassignmentDelegation` | Create (or atomically replace) a `CouponReassignmentDelegation` that carries the decparty's authority and a fixed beneficiary split; enables per-round, vote-free coupon reassignment. |
+| `RevokeCouponReassignmentDelegation` | Archive the decparty's `CouponReassignmentDelegation`, disabling reassignment. |
 
-Both are required to close the loop: `SetupMintingDelegation` establishes *who*
-mints, `AcceptExternalPartySetup` gives the validator the standing to run its
-collection automation for the party.
+`SetupMintingDelegation` + `AcceptExternalPartySetup` close the *minting-delegation*
+loop (Mode B): a validator mints the decparty's coupons. `SetupCouponReassignmentDelegation`
+/ `RevokeCouponReassignmentDelegation` enable the *coupon-reassignment* loop (Mode A),
+documented below.
 
 ## Prerequisites
 
 - A `GovernanceRules` contract deployed (from `#governance-core-<version>`).
-- This `governance-rewards` DAR uploaded and vetted on all participants (from
-  `#governance-rewards-<version>`). decman resolves the package by name, so
-  Canton package-preference selects the highest vetted version; the package is
-  upgrade-compatible (SCU) across additive version bumps.
+- This `governance-rewards-automation-v1` DAR uploaded and vetted on all participants. decman resolves the
+  package by name (`#governance-rewards-automation-v1`), so Canton package-preference selects the highest
+  vetted version.
+
+  **Not upgrade-compatible with `governance-rewards-v1`.** This is a new package
+  lineage, not a version bump of it: `CouponReassignmentDelegation` gained a
+  required `dso` field, which SCU does not permit as an in-place upgrade. The
+  rename avoids the clash. `governance-rewards-v1` had reached devnet only, never
+  production, so no upgrade path was owed.
 - The `splice-wallet` DAR (containing `Splice.Wallet.MintingDelegation`) and
   `splice-amulet` DAR (containing `Splice.AmuletRules:ExternalPartySetupProposal`,
   `Splice.Amulet:ValidatorRight`) uploaded on all participants.
@@ -103,7 +111,7 @@ Establishing those is a two-step onboarding.
 
    This creates an on-ledger `Splice.AmuletRules:ExternalPartySetupProposal`
    (signed by the validator + DSO, observed by the decparty) and returns its
-   contract id. Manual operator action — not part of `governance-rewards`.
+   contract id. Manual operator action — not part of `governance-rewards-automation-v1`.
 
 2. **Governance votes `AcceptExternalPartySetup`.** A member proposes the action
    with the proposal's contract id; after threshold confirmations, execution
@@ -143,3 +151,84 @@ Establishing those is a two-step onboarding.
   0.1.17-typed exercise run on the newer on-ledger contract; this was verified on
   devnet (the accept executed and minting followed). Re-confirm when the
   on-ledger splice-amulet version moves substantially ahead.
+
+## Coupon reassignment (Mode A)
+
+An alternative to minting delegation. Instead of a validator minting the
+decparty's coupons, the decparty reassigns each coupon's `beneficiary` to a
+governance-approved split; the beneficiaries then self-mint. This suits a
+decparty that wants rewards routed to specific parties by a fixed split, without
+a per-round governance vote.
+
+### Templates
+
+| Template | Role |
+|---|---|
+| `CouponReassignmentDelegation` | Standing delegation: `signatory decparty`, `observer assigners`, with the beneficiary `split` baked in. Created once by governance. |
+| `SetupCouponReassignmentDelegation` | `GovernableAction` that creates or atomically replaces the delegation (the only reassignment step that takes a vote). |
+| `RevokeCouponReassignmentDelegation` | `GovernableAction` that archives the delegation. |
+
+### How it works
+
+1. **Governance votes `SetupCouponReassignmentDelegation` once.** After threshold
+   confirmations, execution creates a `CouponReassignmentDelegation` naming the
+   member parties as `assigners` and carrying the fixed `split`
+   (`[{beneficiary, percentage}]`, percentages in (0,1], summing to 1.0, ≤ 20,
+   no duplicates). `executeImpl` re-validates the split, so a direct ledger
+   submit that bypasses the decman API cannot bake in a malformed split.
+2. **Any single assigner reassigns each round — no vote.** The delegation's
+   `nonconsuming` `Delegation_Assign` choice is `controller assigner` gated by
+   `assert (assigner elem assigners)` (a genuine 1-of-n, not escalatable). It
+   reassigns caller-supplied coupons to the contract's `split` —
+   `newBeneficiaries = split`, **never** a caller argument (the security
+   boundary). The per-node `reward_automation` loop drives this on a timer.
+3. **Beneficiaries self-mint** the resulting coupons before expiry (out of scope
+   for this plugin).
+
+### Trust model
+
+A single assigner (even the least-trusted member) can unilaterally reassign all
+the decparty's unassigned coupons at any time — but only ever to the
+governance-approved split. The blast radius is timing, not destination.
+`Delegation_Revoke`/replace is `controller decparty`, i.e. governance-only.
+
+### Proposing / revoking
+
+```bash
+# create or replace the delegation
+curl -X POST http://<decman-node>:8080/governance/propose -H "Content-Type: application/json" -d '{
+  "party_id": "<decparty>::1220...",
+  "rules_contract_id": "<governance-rules-cid>",
+  "proposal": {
+    "type": "setup_coupon_reassignment_delegation",
+    "assigners": ["<member1>::1220...", "<member2>::1220..."],
+    "new_beneficiaries": [
+      {"beneficiary": "<benef>::1220...", "percentage": "0.8"},
+      {"beneficiary": "<operator>::1220...", "percentage": "0.2"}
+    ],
+    "prior_delegation": null
+  }
+}'
+
+# revoke it
+curl -X POST http://<decman-node>:8080/governance/propose -H "Content-Type: application/json" -d '{
+  "party_id": "<decparty>::1220...",
+  "rules_contract_id": "<governance-rules-cid>",
+  "proposal": { "type": "revoke_coupon_reassignment_delegation", "delegation": "<delegation-cid>" }
+}'
+```
+
+- `assigners`: member parties allowed to run per-round reassignment (1-of-n).
+- `new_beneficiaries`: the fixed split; validated at propose (decman) and at execute (DAML).
+- `prior_delegation`: cid of the delegation to replace (`null` for the first create).
+
+### Caveats
+
+- **Mutually exclusive with Mode B.** Do not run coupon reassignment and
+  minting-delegation collection on the same decparty — they compete for the same
+  coupons.
+- **Reassignment cadence.** The `reward_automation` loop assigns every
+  assignable coupon each tick, in chunks sized by output creates
+  (`reward_max_creates / beneficiary_count`). Throughput does not depend on the tick
+  interval, so the interval only trades assignment latency against transaction
+  cost.

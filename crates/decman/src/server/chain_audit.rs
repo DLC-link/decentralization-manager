@@ -476,6 +476,7 @@ async fn stream_entries(
         begin_exclusive,
         end_inclusive: Some(end_inclusive),
         update_format: Some(update_format),
+        descending_order: false,
     };
 
     let mut stream = update_client

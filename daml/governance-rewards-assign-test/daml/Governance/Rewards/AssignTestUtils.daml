@@ -1,0 +1,102 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Test utilities for the coupon-reassignment-delegation tests.
+--
+-- `TestParties` and the helpers typed on it are local because these tests need
+-- an extra `dso` party that `Governance.TestUtils` does not carry. Anything not
+-- typed on that record is imported from there rather than copied.
+--
+-- In real Canton, members have readAs rights on the governance party via
+-- participant topology. In Daml Script, we simulate this with actAs/readAs.
+module Governance.Rewards.AssignTestUtils where
+
+import DA.Set as Set hiding (filter)
+import DA.Time (addRelTime, hours, minutes)
+import Daml.Script
+
+import Splice.Amulet (RewardCouponV2(..))
+import Splice.Types (Round(..))
+import Splice.Api.RewardAssignmentV1 (RewardCoupon)
+import Splice.Api.Token.MetadataV1
+  (ExtraArgs(..), emptyChoiceContext, emptyMetadata)
+
+import Governance.Action (GovernableAction)
+import Governance.ExecutionResult
+import Governance.Rules
+import Governance.TestUtils (submitConfirmations)
+
+-- | `Splice.Api.Token.MetadataV1` exports no ready-made empty `ExtraArgs`.
+-- Delegation_Assign takes it as a choice argument; every current caller passes
+-- this, and splice ignores it for RewardCouponV2.
+emptyExtraArgs : ExtraArgs
+emptyExtraArgs = ExtraArgs with
+  context = emptyChoiceContext
+  meta = emptyMetadata
+
+-- | Standard test party allocation, plus the DSO party used to create
+-- RewardCouponV2 coupons for the assign tests.
+data TestParties = TestParties
+  with
+    governanceParty : Party
+    member1 : Party
+    member2 : Party
+    member3 : Party
+    outsider : Party
+    dso : Party
+  deriving (Show, Eq)
+
+-- | Allocate standard test parties.
+allocateRewardsTestParties : Script TestParties
+allocateRewardsTestParties = do
+  governanceParty <- allocateParty "GovernanceParty"
+  member1 <- allocateParty "Member1"
+  member2 <- allocateParty "Member2"
+  member3 <- allocateParty "Member3"
+  outsider <- allocateParty "Outsider"
+  dso <- allocateParty "DSO"
+  pure TestParties with ..
+
+-- | Get the standard member list (3 members).
+getMembers : TestParties -> Set Party
+getMembers parties = Set.fromList [parties.member1, parties.member2, parties.member3]
+
+-- | Create a RewardCouponV2 owned (provider) by `provider`, unassigned, as an
+-- interface CID. Used by the coupon-reassignment-delegation tests.
+mkUnassignedCoupon : Party -> Party -> Decimal -> Script (ContractId RewardCoupon)
+mkUnassignedCoupon dso provider amount = do
+  now <- getTime
+  cid <- submit dso $ createCmd RewardCouponV2 with
+    dso
+    provider
+    round = Round 1
+    amount
+    expiresAt = now `addRelTime` hours 36
+    providerIsObserver = True
+    beneficiary = None
+  pure (toInterfaceContractId @RewardCoupon cid)
+
+-- | Build the submission context for a member acting with readAs on governance party.
+-- Simulates the Canton topology where members host the governance party.
+memberContext member gp = actAs member <> readAs gp
+
+-- | Create governance rules with standard test configuration.
+-- 3 members, threshold of 2, 30 minute timeout.
+createTestGovernance : TestParties -> Script (ContractId GovernanceRules)
+createTestGovernance parties =
+  submit parties.governanceParty $ createCmd GovernanceRules with
+    governanceParty = parties.governanceParty
+    members = getMembers parties
+    threshold = 2
+    actionConfirmationTimeout = minutes 30
+    additionalProposers = None
+
+-- | Confirm and execute an interface action in one go.
+confirmAndExecute : TestParties -> ContractId GovernanceRules -> ContractId GovernableAction -> [Party] -> Party -> Script ExecuteConfirmedActionResult
+confirmAndExecute parties rulesCid proposalCid confirmers executor = do
+  confirmationCids <- submitConfirmations parties.governanceParty rulesCid proposalCid confirmers
+  submit (memberContext executor parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor
+      actionProposalCid = proposalCid
+      confirmations = confirmationCids

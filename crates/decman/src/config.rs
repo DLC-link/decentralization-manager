@@ -250,6 +250,25 @@ pub struct NodeConfig {
     pub canton: CantonConfig,
     pub timeouts: Timeouts,
     pub noise_retry: NoiseRetryConfig,
+    /// Tick interval (seconds) for the CIP-104 Mode A reward-assignment
+    /// automation loop. Enablement is on-ledger (presence of a
+    /// `CouponReassignmentDelegation`), so this only controls cadence. Default 300s.
+    pub reward_automation_interval_secs: u64,
+    /// Output contracts one `Delegation_Assign` may create, which bounds the
+    /// coupons per transaction (`/ beneficiary_count`). The ledger's real
+    /// ceiling for this transaction shape is unmeasured — configurable so it can
+    /// be raised stepwise against a live ledger without a rebuild. Set too high,
+    /// the ledger rejects each chunk and the tick ends having assigned nothing,
+    /// so lower it if assigns start failing. Default 100.
+    pub reward_max_creates: usize,
+    /// How much time (seconds) a coupon must have left before expiry to be
+    /// assigned. This guards against a coupon vanishing between the ACS read
+    /// and the commit, which would fail its whole chunk — it is NOT a reserve
+    /// of minting time for the beneficiary. Withholding a coupon guarantees it
+    /// is never minted, whereas assigning it late still lets the beneficiary
+    /// try, so this should be a small submission-latency allowance rather than
+    /// a generous window. Default 120s.
+    pub reward_min_expiry_margin_secs: u64,
     /// Top-level Keycloak config for frontend website gating
     pub keycloak: Option<KeycloakConfig>,
     /// Top-level Auth0 config for frontend website gating (mutually exclusive
@@ -280,6 +299,9 @@ impl Default for NodeConfig {
             canton: CantonConfig::default(),
             timeouts: Timeouts::default(),
             noise_retry: NoiseRetryConfig::default(),
+            reward_automation_interval_secs: 300,
+            reward_max_creates: 100,
+            reward_min_expiry_margin_secs: 120,
             keycloak: None,
             auth0: None,
             insecure: false,
@@ -407,7 +429,7 @@ pub fn default_package_config() -> PackageConfig {
     PackageConfig {
         governance_action: Some("#governance-action-v1".to_string()),
         governance_core: Some("#governance-core-v1".to_string()),
-        governance_rewards: Some("#governance-rewards-v1".to_string()),
+        governance_rewards: Some("#governance-rewards-automation-v1".to_string()),
         governance_token_custody: Some("#governance-token-custody-v1".to_string()),
         governance_utility_credential: Some("#governance-utility-credential-v1".to_string()),
         governance_utility_onboarding: Some("#governance-utility-onboarding-v1".to_string()),
@@ -873,7 +895,7 @@ mod tests {
         );
         assert_eq!(
             packages.governance_rewards.as_deref(),
-            Some("#governance-rewards-v1"),
+            Some("#governance-rewards-automation-v1"),
         );
         assert_eq!(
             packages.governance_token_custody.as_deref(),

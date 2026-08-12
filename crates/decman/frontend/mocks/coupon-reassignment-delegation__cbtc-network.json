@@ -1,0 +1,14 @@
+{
+  "delegations": [
+    {
+      "cid": "00f05a9f0e05b64b6a71cfaee7fee2b0000c0b0de7be8064510a4dd29c889d95eb",
+      "dso": "DSO::1220aa11bb22cc33dd44ee55ff66007788990011223344556677889900aabbccdd",
+      "assigners": [
+        "cbtc-attestor-pool::122070884b3eb2e563698a1e51f29ea9cec1d6b9d25272be0efd76cc715b769a",
+        "attestor-pool-eu::122091e27cd7ca81e72e5dd8bb97e026ff5151c1020c024ead4881ecdc7d98e9",
+        "attestor-pool-us::12200756bbbb488bef27fa4c54b1042637f13d1e582644cf1d1b048308418608"
+      ],
+      "beneficiary_count": 3
+    }
+  ]
+}

@@ -44,17 +44,18 @@ use crate::{
             to_proto_disclosed_contracts,
         },
         types::{
-            AuditLogEntry, AuditLogQuery, AuditLogResponse, BurnRequestsResponse,
-            CancelConfirmationRequest, ChainAuditEntry, ChainAuditQuery, ChainAuditResponse,
-            ConfirmActionRequest, ContractQueryResponse, CredentialOffersResponse,
-            CredentialsResponse, ErrorResponse, ExecuteActionRequest, ExpireConfirmationRequest,
-            GovernanceResponse, GovernanceStateResponse, GovernanceType, HoldingsResponse,
-            InstrumentsResponse, KnownMember, KnownMembersResponse, MessageResponse,
-            MintRequestsResponse, NetworkInfo, OperatorInfo, ProposalType, ProposeActionRequest,
-            ProviderConfigurationsResponse, ProviderServicesResponse,
-            RegistrarServiceRequestsResponse, RegistrarServicesResponse, TransferFactoriesResponse,
-            TransferFactoryInfo, TransferInstructionsResponse, TransferPreapprovalsResponse,
-            UserServicesResponse, VaultsResponse, chain_audit_entry_from_row,
+            ActiveCouponReassignmentDelegation, AuditLogEntry, AuditLogQuery, AuditLogResponse,
+            BurnRequestsResponse, CancelConfirmationRequest, ChainAuditEntry, ChainAuditQuery,
+            ChainAuditResponse, ConfirmActionRequest, ContractQueryResponse,
+            CouponReassignmentDelegationSummary, CredentialOffersResponse, CredentialsResponse,
+            ErrorResponse, ExecuteActionRequest, ExpireConfirmationRequest, GovernanceResponse,
+            GovernanceStateResponse, GovernanceType, HoldingsResponse, InstrumentsResponse,
+            KnownMember, KnownMembersResponse, MessageResponse, MintRequestsResponse, NetworkInfo,
+            OperatorInfo, ProposalType, ProposeActionRequest, ProviderConfigurationsResponse,
+            ProviderServicesResponse, RegistrarServiceRequestsResponse, RegistrarServicesResponse,
+            TransferFactoriesResponse, TransferFactoryInfo, TransferInstructionsResponse,
+            TransferPreapprovalsResponse, UserServicesResponse, VaultsResponse,
+            chain_audit_entry_from_row,
         },
     },
     utils,
@@ -1156,6 +1157,29 @@ pub async fn get_governance_chain_audit(
 // Action Endpoints
 // ============================================================================
 
+/// True when this proposal, on a decparty that already has a live
+/// `CouponReassignmentDelegation`, would create a SECOND one.
+///
+/// Canton cannot enforce the per-decparty singleton — contract keys do not give
+/// cross-participant uniqueness — and `executeImpl` cannot query the ACS, so the
+/// propose boundary is the only place the accident is catchable. Replacing an
+/// existing delegation is fine; leaving `prior_delegation` empty while one is
+/// live is not, because an assigner can still pay the superseded split.
+///
+/// This is the proposal shape alone — the handler pairs it with the ACS read.
+/// Keeping the shape test separate is what lets `propose_action` skip that read
+/// entirely for every other proposal type, which would otherwise pay a
+/// `GetLedgerEnd` plus a `GetActiveContracts` for an answer that cannot change.
+fn may_create_second_delegation(proposal: &ProposalType) -> bool {
+    matches!(
+        proposal,
+        ProposalType::SetupCouponReassignmentDelegation {
+            prior_delegation: None,
+            ..
+        }
+    )
+}
+
 /// Propose a domain governance action (creates a GovernableAction proposal contract)
 #[utoipa::path(
     tag = "Governance",
@@ -1165,7 +1189,9 @@ pub async fn get_governance_chain_audit(
         (status = 400, description = "Bad request", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
+        (status = 409, description = "A CouponReassignmentDelegation is already active; set prior_delegation to replace it", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+        (status = 503, description = "Cannot confirm whether a CouponReassignmentDelegation is already active", body = ErrorResponse)
     )
 )]
 #[post("/governance/propose")]
@@ -1191,6 +1217,49 @@ pub async fn propose_action(
             });
         }
     };
+
+    // Canton cannot enforce the per-decparty singleton, so the propose boundary
+    // is the only place a second CouponReassignmentDelegation is catchable.
+    //
+    // Match on the proposal type BEFORE reading the ledger: only one variant can
+    // trip this guard, and the read is a GetLedgerEnd plus a GetActiveContracts
+    // that every other propose would otherwise pay for nothing.
+    if may_create_second_delegation(&body.proposal) {
+        match crate::server::reward_automation::active_delegation(
+            &data.config,
+            &packages(),
+            data.test_mode,
+            party_id,
+            &token,
+        )
+        .await
+        {
+            Ok(Some(active)) => {
+                return HttpResponse::Conflict().json(ErrorResponse {
+                    error: format!(
+                        "a CouponReassignmentDelegation is already active ({}); set \
+                         prior_delegation to replace it — creating a second one stops \
+                         assignment entirely",
+                        active.cid
+                    ),
+                });
+            }
+            Ok(None) => {}
+            // Do not swallow this. The guard exists for exactly the state a
+            // failed read leaves us blind to, so let the proposer see it rather
+            // than admitting a second delegation on a transport blip.
+            Err(e) => {
+                tracing::warn!(%party_id, error = %e, "delegation singleton check failed");
+                return HttpResponse::ServiceUnavailable().json(ErrorResponse {
+                    error: format!(
+                        "cannot confirm whether a CouponReassignmentDelegation is already \
+                         active, so this proposal is refused rather than risk a second \
+                         one: {e}"
+                    ),
+                });
+            }
+        }
+    }
 
     let audit_pool = data.db.clone();
     let audit_summary = crate::server::audit::proposal_summary(&body.proposal);
@@ -1442,6 +1511,7 @@ pub async fn propose_action(
         synchronizer_id: String::new(),
         package_id_selection_preference: vec![],
         prefetch_contract_keys: vec![],
+        taps_max_passes: None,
     };
 
     let channel = match data.config.ledger_channel().await {
@@ -1565,6 +1635,7 @@ pub async fn propose_action(
         synchronizer_id: String::new(),
         package_id_selection_preference: vec![],
         prefetch_contract_keys: vec![],
+        taps_max_passes: None,
     };
 
     let mut confirm_req = tonic::Request::new(SubmitAndWaitRequest {
@@ -1964,6 +2035,68 @@ pub async fn get_packages() -> impl Responder {
     HttpResponse::Ok().json(packages())
 }
 
+/// Get the decparty's active CouponReassignmentDelegation contracts, newest first
+///
+/// The vote forms read this so nobody pastes a contract id: setup prefills
+/// `prior_delegation`, revoke prefills the contract to archive. Normally zero or
+/// one, but the singleton is not ledger-enforced, so several can appear.
+#[utoipa::path(
+    tag = "Governance",
+    params(GovernanceQuery),
+    responses(
+        (
+            status = 200,
+            description = "Active delegations, newest first; empty when there are none",
+            body = ActiveCouponReassignmentDelegation
+        ),
+        (status = 401, description = "No credentials for party", body = ErrorResponse),
+        (status = 503, description = "The delegations could not be read", body = ErrorResponse)
+    )
+)]
+#[get("/coupon-reassignment-delegation")]
+pub async fn get_coupon_reassignment_delegation(
+    data: web::Data<AppState>,
+    query: web::Query<GovernanceQuery>,
+) -> impl Responder {
+    let party_id = &query.party_id;
+    let Some((token, _member)) = get_party_credentials(&data, party_id).await else {
+        return HttpResponse::Unauthorized().json(ErrorResponse {
+            error: "No credentials configured for party".to_string(),
+        });
+    };
+
+    match crate::server::reward_automation::active_delegations(
+        &data.config,
+        &packages(),
+        data.test_mode,
+        party_id,
+        &token,
+    )
+    .await
+    {
+        Ok(active) => HttpResponse::Ok().json(ActiveCouponReassignmentDelegation {
+            delegations: active
+                .into_iter()
+                .map(|d| CouponReassignmentDelegationSummary {
+                    cid: d.cid,
+                    dso: d.dso,
+                    assigners: d.assigners,
+                    beneficiary_count: d.beneficiary_count,
+                })
+                .collect(),
+        }),
+        // Never report a failed read as an empty list. The setup form would
+        // prefill a blank `prior_delegation` and hit the propose-time 409 after
+        // the whole split is filled in, and revoke would look unavailable.
+        Err(e) => {
+            tracing::warn!(%party_id, error = %e, "active delegation read failed");
+            HttpResponse::ServiceUnavailable().json(ErrorResponse {
+                error: format!("cannot read this party's current delegations: {e}"),
+            })
+        }
+    }
+}
+
 /// Get DSO network info (DSO party ID + amulet rules contract)
 #[utoipa::path(
     tag = "Proxy",
@@ -2155,6 +2288,7 @@ async fn get_party_threshold(data: &web::Data<AppState>, party_id: &CantonId) ->
                     time_query: Some(base_query::TimeQuery::HeadState(())),
                     filter_signed_key: String::new(),
                     protocol_version: None,
+                    client_version: None,
                 }),
                 filter_namespace: namespace,
             },
@@ -2180,7 +2314,7 @@ async fn get_member_party_id(data: &web::Data<AppState>, party_id: &CantonId) ->
 }
 
 /// Get token and member_party_id for a party
-async fn get_party_credentials(
+pub(crate) async fn get_party_credentials(
     data: &web::Data<AppState>,
     party_id: &CantonId,
 ) -> Option<(String, CantonId)> {
@@ -2200,7 +2334,7 @@ async fn get_party_credentials(
 }
 
 /// Get the hardcoded default package config (package IDs are constants, not per-party)
-fn packages() -> PackageConfig {
+pub(crate) fn packages() -> PackageConfig {
     default_package_config()
 }
 
@@ -2318,6 +2452,7 @@ async fn execute_confirm_action(
         synchronizer_id: String::new(),
         package_id_selection_preference: vec![],
         prefetch_contract_keys: vec![],
+        taps_max_passes: None,
     };
 
     let mut req = tonic::Request::new(SubmitAndWaitRequest {
@@ -2515,6 +2650,7 @@ async fn execute_confirmed_action(
         synchronizer_id: String::new(),
         package_id_selection_preference: vec![],
         prefetch_contract_keys: vec![],
+        taps_max_passes: None,
     };
 
     let mut req = tonic::Request::new(SubmitAndWaitRequest {
@@ -2655,6 +2791,7 @@ async fn execute_expire_confirmation(
         synchronizer_id: String::new(),
         package_id_selection_preference: vec![],
         prefetch_contract_keys: vec![],
+        taps_max_passes: None,
     };
 
     let mut req = tonic::Request::new(SubmitAndWaitRequest {
@@ -2780,6 +2917,7 @@ async fn execute_cancel_confirmation(
         synchronizer_id: String::new(),
         package_id_selection_preference: vec![],
         prefetch_contract_keys: vec![],
+        taps_max_passes: None,
     };
 
     let mut req = tonic::Request::new(SubmitAndWaitRequest {
@@ -2791,4 +2929,47 @@ async fn execute_cancel_confirmation(
     client.submit_and_wait(req).await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod propose_guard_tests {
+    use super::*;
+
+    fn party() -> CantonId {
+        // `prefix::<68 hex chars>` = a 34-byte all-zero namespace: a well-formed id.
+        CantonId::parse(&format!("p::{}", "0".repeat(68))).expect("valid canton id")
+    }
+
+    /// Only a Setup that omits `prior_delegation` can conflict with an active
+    /// delegation. Replacing one is the normal path and must stay allowed, and no
+    /// other proposal type is affected — a rule broad enough to block either would
+    /// make the reward action unusable.
+    ///
+    /// This also gates the ACS read: a shape that returns false here never
+    /// touches the ledger, so a false positive would tax every propose.
+    #[test]
+    fn only_an_unnamed_replacement_can_create_a_second_delegation() {
+        let setup_without_prior = ProposalType::SetupCouponReassignmentDelegation {
+            dso: party(),
+            assigners: vec![party()],
+            new_beneficiaries: vec![],
+            prior_delegation: None,
+        };
+        let setup_with_prior = ProposalType::SetupCouponReassignmentDelegation {
+            dso: party(),
+            assigners: vec![party()],
+            new_beneficiaries: vec![],
+            prior_delegation: Some("00abc".to_string()),
+        };
+        let unrelated = ProposalType::GenericVote {
+            description: "unrelated".to_string(),
+        };
+
+        // the accident: creating one without naming what it replaces
+        assert!(may_create_second_delegation(&setup_without_prior));
+        // replacement names what it replaces -> always allowed, no read needed
+        assert!(!may_create_second_delegation(&setup_with_prior));
+        // unrelated proposals are never blocked, and never pay for the read
+        assert!(!may_create_second_delegation(&unrelated));
+    }
 }
