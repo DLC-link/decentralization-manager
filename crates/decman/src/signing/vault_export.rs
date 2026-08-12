@@ -11,7 +11,7 @@ use canton_proto_rs::com::digitalasset::canton::crypto::{
     admin::v30::{ExportKeyPairRequest, vault_service_client::VaultServiceClient},
     v30::{Signature, SignatureFormat, SigningAlgorithmSpec},
 };
-use ed25519_dalek::{Signature as DalekSignature, Signer, SigningKey, Verifier};
+use ed25519_dalek::{Signature as DalekSignature, Signer, SigningKey, Verifier, VerifyingKey};
 use tonic::transport::Channel;
 use zeroize::Zeroizing;
 
@@ -207,16 +207,17 @@ impl TransactionSigner for VaultExportSigner {
         for (idx, hash) in hashes.iter().enumerate() {
             let signature_bytes = signing_key.sign(hash.as_bytes()).to_bytes();
 
-            // Verify locally
-            let sig = DalekSignature::from_bytes(&signature_bytes);
-            if verifying_key.verify(hash.as_bytes(), &sig).is_ok() {
-                tracing::info!("Signature {index} verified locally", index = idx + 1);
-            } else {
-                tracing::error!(
-                    "Signature {index} failed local verification!",
-                    index = idx + 1
-                );
-            }
+            // Verify locally before submission. A signature that fails here is
+            // guaranteed to be rejected at ExecuteSubmission, so fail loudly with
+            // context instead of submitting it and getting an opaque ledger error.
+            verify_local_signature(
+                &verifying_key,
+                hash.as_bytes(),
+                &signature_bytes,
+                idx,
+                key_fingerprint,
+            )?;
+            tracing::info!("Signature {index} verified locally", index = idx + 1);
 
             // Create Signature protobuf message
             // Ed25519 signatures use CONCAT format (r || s in little-endian)
@@ -231,5 +232,73 @@ impl TransactionSigner for VaultExportSigner {
 
         tracing::debug!("Generated {count} signatures", count = signatures.len());
         Ok(signatures)
+    }
+}
+
+/// Verify one produced Ed25519 signature against the party's public key before
+/// submission. A signature that fails here is guaranteed to be rejected at
+/// `ExecuteSubmission`, so this returns an error with context instead of letting
+/// the caller submit it and get an opaque ledger error. This mirrors the KMS
+/// backend, which also hard-fails on a failed local verification.
+fn verify_local_signature(
+    verifying_key: &VerifyingKey,
+    message: &[u8],
+    signature_bytes: &[u8; 64],
+    index: usize,
+    fingerprint: &str,
+) -> Result<(), SigningError> {
+    let sig = DalekSignature::from_bytes(signature_bytes);
+    verifying_key.verify(message, &sig).map_err(|e| {
+        anyhow::anyhow!(
+            "Signature {index} failed local verification against the registered \
+             public key {fingerprint}: {e}",
+            index = index + 1
+        )
+        .into()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key_from_seed(seed: u8) -> SigningKey {
+        SigningKey::from_bytes(&[seed; 32])
+    }
+
+    #[test]
+    fn accepts_a_correct_signature() -> Result<(), SigningError> {
+        let signing_key = key_from_seed(1);
+        let verifying_key = signing_key.verifying_key();
+        let message = b"prepared-transaction-hash";
+        let signature = signing_key.sign(message).to_bytes();
+
+        verify_local_signature(&verifying_key, message, &signature, 0, "fingerprint")
+    }
+
+    #[test]
+    fn rejects_a_tampered_signature() {
+        let signing_key = key_from_seed(1);
+        let verifying_key = signing_key.verifying_key();
+        let message = b"prepared-transaction-hash";
+        let mut signature = signing_key.sign(message).to_bytes();
+        signature[0] ^= 0xff;
+
+        assert!(
+            verify_local_signature(&verifying_key, message, &signature, 0, "fingerprint").is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_a_signature_from_a_different_key() {
+        let signer = key_from_seed(1);
+        let other_key = key_from_seed(2);
+        let verifying_key = other_key.verifying_key();
+        let message = b"prepared-transaction-hash";
+        let signature = signer.sign(message).to_bytes();
+
+        assert!(
+            verify_local_signature(&verifying_key, message, &signature, 0, "fingerprint").is_err()
+        );
     }
 }
