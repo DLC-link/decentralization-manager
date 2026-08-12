@@ -424,6 +424,231 @@ pub struct TenantOnboardResponse {
     pub party_id: String,
 }
 
+/// A Daml template *or interface* identifier for a tenant command.
+///
+/// `package_id` may be a package-name reference (`#splice-api-token-transfer-instruction-v1`)
+/// rather than a hash, which is how a caller names a token-standard interface
+/// without pinning the exact package version the participant has vetted.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantTemplateId {
+    pub package_id: String,
+    pub module_name: String,
+    pub entity_name: String,
+}
+
+/// Create a new contract. `create_arguments` is JSON that maps to the template's
+/// Daml record.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantCreateCommand {
+    pub template_id: TenantTemplateId,
+    #[cfg_attr(feature = "typegen", ts(type = "any"))]
+    pub create_arguments: serde_json::Value,
+}
+
+/// Exercise a choice on an existing contract. `template_id` is the template or
+/// interface the choice is defined on, and `choice_argument` is JSON that maps to
+/// the choice's Daml record.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantExerciseCommand {
+    pub template_id: TenantTemplateId,
+    pub contract_id: String,
+    pub choice: String,
+    #[cfg_attr(feature = "typegen", ts(type = "any"))]
+    pub choice_argument: serde_json::Value,
+}
+
+/// The single command a tenant submission carries. Externally tagged, so the
+/// wire form is `{"create": {…}}` or `{"exercise": {…}}`.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub enum TenantCommand {
+    Create(TenantCreateCommand),
+    Exercise(TenantExerciseCommand),
+}
+
+/// A contract the submission must carry on the wire because the acting party
+/// can't read it from its own ACS. Token-standard choice contexts are served
+/// this way: the registry hands back the contracts its choice will look up, and
+/// they have to ride along or interpretation fails.
+///
+/// These attach at *prepare* time, not execute time — `ExecuteSubmissionRequest`
+/// has no field for them, because the prepared transaction Canton hands back
+/// already embeds what it needs.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantDisclosedContract {
+    pub contract_id: String,
+    /// The contract's created-event blob, base64-encoded.
+    pub created_event_blob: String,
+    pub synchronizer_id: String,
+}
+
+/// Request to prepare an interactive submission for a wallet-held party.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantPrepareSubmissionRequest {
+    pub command: TenantCommand,
+    #[serde(default)]
+    pub disclosed_contracts: Vec<TenantDisclosedContract>,
+}
+
+/// The prepared transaction for the wallet to sign. `prepared_transaction` and
+/// `prepared_transaction_hash` are base64-encoded.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantPrepareSubmissionResponse {
+    pub prepared_transaction: String,
+    pub prepared_transaction_hash: String,
+    pub hashing_scheme_version: i32,
+}
+
+/// Request to execute a wallet-signed interactive submission.
+/// `prepared_transaction` and `signature` are base64-encoded.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantExecuteSubmissionRequest {
+    pub prepared_transaction: String,
+    pub signature: String,
+    pub signed_by: String,
+    pub hashing_scheme_version: i32,
+}
+
+/// One active contract owned by a tenant party.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantContract {
+    pub contract_id: String,
+    /// `package_id:module_name:entity_name`.
+    pub template_id: String,
+    /// The contract's payload rendered as JSON.
+    #[cfg_attr(feature = "typegen", ts(type = "any"))]
+    pub create_arguments: serde_json::Value,
+}
+
+/// Response wrapper for `GET /v0/tenant/{party}/acs`.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantAcsResponse {
+    pub contracts: Vec<TenantContract>,
+}
+
+// ----------------------------------------------------------------------------
+// Token-standard transfers
+//
+// Amounts are decimal strings end to end. Daml `Decimal` is a fixed-point type
+// with 10 fractional digits and JSON numbers are IEEE-754 doubles, so parsing an
+// amount as a number would silently round it.
+// ----------------------------------------------------------------------------
+
+/// A party's balance in one instrument, summed over every `Holding` it owns.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantHolding {
+    /// The instrument's registrar party — `(instrument_admin, instrument_id)`
+    /// identifies an instrument, and the pair is what a transfer must name.
+    pub instrument_admin: String,
+    /// e.g. `Amulet` (Canton Coin) or `CBTC`.
+    pub instrument_id: String,
+    /// Everything held, including the locked portion.
+    pub total: String,
+    /// Escrowed against an in-flight transfer, so not spendable right now.
+    pub locked: String,
+    /// `total - locked` — what a new transfer can actually draw on.
+    pub available: String,
+}
+
+/// Response wrapper for `GET /v0/tenant/{party}/holdings`.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantHoldingsResponse {
+    pub holdings: Vec<TenantHolding>,
+}
+
+/// An inbound transfer awaiting this party's acceptance.
+///
+/// A transfer to a party with no `TransferPreapproval` — which is every freshly
+/// onboarded wallet party — completes in two steps: the sender creates a
+/// `TransferInstruction` that escrows the funds, and the receiver accepts it.
+/// This is one such instruction.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantTransferOffer {
+    /// The `TransferInstruction` contract id, to pass back to `prepare-accept`.
+    pub contract_id: String,
+    pub sender: String,
+    pub instrument_admin: String,
+    pub instrument_id: String,
+    pub amount: String,
+    /// Whether accepting it right now would succeed: the instruction is waiting
+    /// on this party (not on a registrar's internal workflow) and hasn't expired.
+    /// Offers that fail this are still listed — a silently missing offer reads as
+    /// "the transfer never arrived", which is worse than a disabled row.
+    pub acceptable: bool,
+    /// Unix seconds after which Daml refuses the accept and the sender can
+    /// reclaim the escrow.
+    pub expires_at: i64,
+}
+
+/// Response wrapper for `GET /v0/tenant/{party}/transfer-offers`.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantTransferOffersResponse {
+    pub offers: Vec<TenantTransferOffer>,
+}
+
+/// Request to prepare an outgoing transfer for a wallet-held party.
+///
+/// DPM resolves the instrument's token-standard registry, fetches the transfer
+/// factory and its choice context, picks the input holdings, and returns a
+/// prepared transaction — the wallet only signs. The response is the same
+/// [`TenantPrepareSubmissionResponse`] as any other submission, so it executes
+/// through the same `execute-submission` call.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantTransferRequest {
+    pub receiver: String,
+    pub instrument_admin: String,
+    pub instrument_id: String,
+    /// Decimal string, e.g. `"1.25"`.
+    pub amount: String,
+    /// Specific `Holding` contracts to fund the transfer from. Empty (the usual
+    /// case) means DPM funds it from every unlocked holding the party owns for
+    /// this instrument and lets the choice return change.
+    #[serde(default)]
+    pub input_holding_cids: Vec<String>,
+    /// How long the receiver has to accept before the escrow can be reclaimed.
+    /// `None` uses DPM's default window.
+    #[serde(default)]
+    pub validity_window_hours: Option<u32>,
+}
+
+/// Request to prepare acceptance of an inbound transfer.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantAcceptTransferRequest {
+    pub transfer_instruction_cid: String,
+}
+
 /// Response for key status check
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

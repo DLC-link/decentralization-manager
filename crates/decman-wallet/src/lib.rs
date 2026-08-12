@@ -40,17 +40,26 @@
 //! ```
 //!
 //! Onboarding is asynchronous on the Canton side: poll [`statuses`] until every
-//! host reports the party hosted. Transacting as the party — reading its
-//! contracts and signing submissions — is done directly against Canton by the
-//! wallet, using the [`ExternalKeyPair`] this crate holds; it is not part of
-//! DecMan's tenant API.
+//! host reports the party hosted, then transact as it.
+//!
+//! Transacting comes in two shapes. Assets move through the token standard:
+//! [`send_transfer`] and [`accept_transfer`] handle Canton Coin and utility
+//! instruments like CBTC identically, because the host resolves the instrument's
+//! registry and the wallet only signs. Anything else is a plain
+//! [`create_contract`] or [`exercise_choice`].
 
 pub mod client;
 pub mod error;
 pub mod flow;
 pub mod key;
 
+#[cfg(feature = "demo")]
+pub mod demo;
+
 pub use client::{HostStatus, TenantClient};
 pub use error::{Error, Result};
-pub use flow::{HostReport, OnboardedParty, WalletHost, onboard_co_validated, statuses};
+pub use flow::{
+    HostReport, OnboardedParty, WalletHost, accept_transfer, create_contract, exercise_choice,
+    onboard_co_validated, send_transfer, statuses,
+};
 pub use key::ExternalKeyPair;

@@ -7,7 +7,12 @@
 //! last host has signed, so a party is only live once every host reports it.
 
 use common::{
-    api::{TenantOnboardRequest, TenantPrepareRequest},
+    api::{
+        TenantAcceptTransferRequest, TenantCommand, TenantCreateCommand, TenantDisclosedContract,
+        TenantExecuteSubmissionRequest, TenantExerciseCommand, TenantOnboardRequest,
+        TenantPrepareRequest, TenantPrepareSubmissionRequest, TenantPrepareSubmissionResponse,
+        TenantTemplateId, TenantTransferRequest,
+    },
     canton_id::CantonId,
     types::WorkflowProgress,
 };
@@ -279,4 +284,125 @@ pub async fn statuses(hosts: &[WalletHost], party_id: &str) -> Vec<HostReport> {
         reports.push(report);
     }
     reports
+}
+
+/// Sign a prepared submission locally and execute it on the same host.
+///
+/// Only the signature crosses back — the node holds no key material and cannot
+/// produce the submission on its own. Every way the party acts on the ledger
+/// funnels through here, so there is exactly one place where the key is used to
+/// authorize a transaction.
+async fn sign_and_execute(
+    host: &TenantClient,
+    key: &ExternalKeyPair,
+    party_id: &str,
+    prepared: TenantPrepareSubmissionResponse,
+) -> Result<()> {
+    let hash = host.decode_b64(
+        "prepared_transaction_hash",
+        &prepared.prepared_transaction_hash,
+    )?;
+
+    host.execute_submission(
+        party_id,
+        &TenantExecuteSubmissionRequest {
+            prepared_transaction: prepared.prepared_transaction,
+            signature: key.sign_b64(&hash),
+            signed_by: key.fingerprint(),
+            hashing_scheme_version: prepared.hashing_scheme_version,
+        },
+    )
+    .await
+}
+
+/// Create a contract as the party: prepare the CREATE on `host`, sign the
+/// prepared transaction's hash locally, and execute it.
+pub async fn create_contract(
+    host: &TenantClient,
+    key: &ExternalKeyPair,
+    party_id: &str,
+    template_id: TenantTemplateId,
+    create_arguments: serde_json::Value,
+) -> Result<()> {
+    let prepared = host
+        .prepare_submission(
+            party_id,
+            &TenantPrepareSubmissionRequest {
+                command: TenantCommand::Create(TenantCreateCommand {
+                    template_id,
+                    create_arguments,
+                }),
+                disclosed_contracts: Vec::new(),
+            },
+        )
+        .await?;
+
+    sign_and_execute(host, key, party_id, prepared).await
+}
+
+/// Exercise a choice as the party.
+///
+/// `disclosed_contracts` covers contracts the choice's interpretation reads but
+/// the party cannot see in its own ACS. For token-standard transfers prefer
+/// [`send_transfer`] / [`accept_transfer`], which get those from the instrument's
+/// registry instead of asking the caller to supply them.
+pub async fn exercise_choice(
+    host: &TenantClient,
+    key: &ExternalKeyPair,
+    party_id: &str,
+    command: TenantExerciseCommand,
+    disclosed_contracts: Vec<TenantDisclosedContract>,
+) -> Result<()> {
+    let prepared = host
+        .prepare_submission(
+            party_id,
+            &TenantPrepareSubmissionRequest {
+                command: TenantCommand::Exercise(command),
+                disclosed_contracts,
+            },
+        )
+        .await?;
+
+    sign_and_execute(host, key, party_id, prepared).await
+}
+
+/// Send an asset as the party.
+///
+/// The host resolves the instrument's token-standard registry, the transfer
+/// factory, and the choice context; the wallet signs the result. Works the same
+/// for Canton Coin and for utility instruments like CBTC — the difference is a
+/// registry lookup on the host's side, not a different flow here.
+///
+/// Whether the funds land immediately or wait for the receiver is the
+/// instrument's rule, not this call's: a receiver with a `TransferPreapproval`
+/// gets them at once, and a receiver without one — every freshly onboarded wallet
+/// party — gets a `TransferInstruction` to [`accept_transfer`].
+pub async fn send_transfer(
+    host: &TenantClient,
+    key: &ExternalKeyPair,
+    party_id: &str,
+    request: &TenantTransferRequest,
+) -> Result<()> {
+    let prepared = host.prepare_transfer(party_id, request).await?;
+    sign_and_execute(host, key, party_id, prepared).await
+}
+
+/// Accept an inbound transfer as the party, taking the escrowed funds into its
+/// own holdings. `transfer_instruction_cid` comes from
+/// [`TenantClient::transfer_offers`].
+pub async fn accept_transfer(
+    host: &TenantClient,
+    key: &ExternalKeyPair,
+    party_id: &str,
+    transfer_instruction_cid: &str,
+) -> Result<()> {
+    let prepared = host
+        .prepare_accept(
+            party_id,
+            &TenantAcceptTransferRequest {
+                transfer_instruction_cid: transfer_instruction_cid.to_string(),
+            },
+        )
+        .await?;
+    sign_and_execute(host, key, party_id, prepared).await
 }

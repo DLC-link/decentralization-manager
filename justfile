@@ -13,6 +13,29 @@ gen-types:
     DECMAN_SKIP_FRONTEND=1 cargo run -q -p decman --features typegen --bin gen-types
     echo "Generated crates/decman/frontend/src/types.generated.ts"
 
+# Run the demo wallet against a hosting set, e.g.
+#   just demo-wallet "http://localhost:8080=participant::1220aa… http://localhost:8081=participant::1220bb…"
+# Each entry is <decman-base-url>=<participant-id>; co-validation needs at least
+# two. DECMAN_TENANT_API_KEY is picked up from the environment (nodes running
+# --insecure accept any value). Serves the UI on http://127.0.0.1:7878.
+#
+# Anything after the host list is passed straight to the binary, so a restart can
+# keep the same party:
+#   just demo-wallet "<hosts…>" --state-file ~/.decman-demo-wallet.json
+[group('demo-wallet')]
+demo-wallet hosts *extra:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    args=()
+    for host in {{ hosts }}; do args+=(--host "$host"); done
+    cargo run -p decman-wallet --features demo --bin decman-wallet-demo -- "${args[@]}" {{ extra }}
+
+# Iterate on the demo wallet's UI with hot reload. Expects `just demo-wallet …`
+# to be running in another shell; Vite proxies /api to it.
+[group('demo-wallet')]
+demo-wallet-ui:
+    cd crates/decman-wallet/frontend && npm install && npm run dev
+
 # Forward Canton devnet participant 1..4 Ledger/Admin ports. Each node lives in
 # its own namespace (KUBE_NS_PREFIX=canton-node- by default -> canton-node-1..4).
 [group('canton')]

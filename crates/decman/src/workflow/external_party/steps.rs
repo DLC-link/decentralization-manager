@@ -477,6 +477,7 @@ pub struct ExternalPartyAllocatePayload {
 pub async fn allocate_party(
     config: &NodeConfig,
     bundle: &ExternalPartyAllocatePayload,
+    ledger_token: Option<String>,
 ) -> Result<()> {
     if bundle.signatures.len() != bundle.topology_transactions.len() {
         return Err(anyhow::anyhow!(
@@ -548,7 +549,96 @@ pub async fn allocate_party(
         "external-party: onboarding topology submitted on this host"
     );
 
+    // Convenience only: let this host read the party's contracts. Onboarding has
+    // already succeeded at this point, so a failure here is logged, not propagated.
+    grant_read_as_hosted_party(config, ledger_token, &bundle.party_id).await;
     Ok(())
+}
+
+/// The ledger user a token authenticates as — its `sub` claim. Canton resolves a
+/// user token's rights by `sub`, so that is the user a grant must name.
+fn ledger_user_from_token(token: &str) -> Option<String> {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+
+    let payload = token.split('.').nth(1)?;
+    let decoded = URL_SAFE_NO_PAD.decode(payload).ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+    claims
+        .get("sub")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
+/// Grant this node's ledger user `CanReadAs` the freshly hosted external party, so
+/// the tenant ACS and prepare-submission endpoints can read its contracts through
+/// that user's token.
+///
+/// Read-only on purpose: never `CanActAs`, which would let a host act as the
+/// sovereign party without its signature.
+///
+/// Best-effort. Unlike onboarding — which writes topology over the admin API and
+/// needs no ledger credential at all — `GrantUserRights` requires
+/// `ParticipantAdmin OR IdentityProviderAdmin`, so an ordinary per-party credential
+/// cannot perform it. Where it can't, this logs and moves on: the party is hosted
+/// either way, and an operator can grant `CanReadAsAnyParty` once per node via
+/// `POST /auth/grant-rights` instead, which covers every external party without a
+/// per-party grant.
+async fn grant_read_as_hosted_party(config: &NodeConfig, token: Option<String>, party_id: &str) {
+    use canton_proto_rs::com::daml::ledger::api::v2::admin::{
+        GrantUserRightsRequest, Right,
+        right::{CanReadAs, Kind},
+    };
+
+    let Some(token) = token else {
+        tracing::debug!(
+            "external-party: no ledger credential on this node, skipping the CanReadAs grant for \
+             {party_id}"
+        );
+        return;
+    };
+
+    let Some(user_id) = ledger_user_from_token(&token) else {
+        tracing::warn!("external-party: could not read the ledger user from its own token");
+        return;
+    };
+
+    let mut client = match utils::create_user_client(config, Some(token)).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("external-party: user client for read-as grant failed: {e}");
+            return;
+        }
+    };
+    let request = GrantUserRightsRequest {
+        user_id,
+        rights: vec![Right {
+            kind: Some(Kind::CanReadAs(CanReadAs {
+                party: party_id.to_string(),
+            })),
+        }],
+        identity_provider_id: String::new(),
+    };
+    if let Err(e) = client.grant_user_rights(tonic::Request::new(request)).await {
+        // Expected in the supported configuration, so this is not a warning.
+        //
+        // Granting a per-party right needs ParticipantAdmin, which the tenant API
+        // deliberately does not hold. The path that actually makes reading and
+        // relaying work is `CanReadAsAnyParty` + `CanExecuteAsAnyParty` on the
+        // node's own ledger user, granted once per node via `POST
+        // /auth/grant-rights` — see `node_ledger_token`. Where those are in place
+        // this grant is redundant, and where they are not, a per-party `CanReadAs`
+        // would not be enough anyway: `ExecuteSubmission` needs `executeAs` too.
+        //
+        // The previous message claimed the host could not read the party's
+        // contracts until this succeeded, which is false under the any-party
+        // grant — it sent operators after a right they do not need. A real
+        // permission problem surfaces on the ACS read itself, which says so
+        // precisely.
+        tracing::debug!(
+            "external-party: per-party CanReadAs grant for {party_id} was refused, which is \
+             normal without ParticipantAdmin; reads rely on CanReadAsAnyParty instead: {e}"
+        );
+    }
 }
 
 /// A head-state (or proposal) topology query against the synchronizer store.

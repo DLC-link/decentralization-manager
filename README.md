@@ -457,7 +457,8 @@ This repository is a Cargo workspace with four crates under `crates/`:
 - **`decman-cli`** — a terminal UI client for the server.
 - **`decman-wallet`** — the client side of the tenant API (`/v0/tenant/*`): the
   library a wallet provider embeds to run a co-validated party from a key it holds
-  itself, and to transact as it. See
+  itself and to transact as it, plus a demo wallet (its own UI, behind the `demo`
+  feature) that drives the whole flow. See
   [crates/decman-wallet/README.md](crates/decman-wallet/README.md).
 
 Workspace-wide `cargo` commands build all four; pass `-p decman` to act on

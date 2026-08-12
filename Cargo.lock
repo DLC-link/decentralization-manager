@@ -1825,16 +1825,21 @@ dependencies = [
 name = "decman-wallet"
 version = "0.1.0"
 dependencies = [
+ "actix-web",
  "base64 0.23.0",
+ "clap",
  "common 0.1.0",
  "ed25519-dalek",
+ "mime_guess",
  "rand 0.10.2",
  "reqwest 0.13.3",
+ "rust-embed",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "wiremock",
  "zeroize",
 ]

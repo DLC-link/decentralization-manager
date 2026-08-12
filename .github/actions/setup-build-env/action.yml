@@ -68,8 +68,13 @@ runs:
     # the calling workflow. Don't double-cache CARGO_HOME here — the two
     # actions would race on save and the manual key would lose to
     # rust-cache's smarter trimming.
+    # Both frontends: the server UI (built by decman's build.rs) and the demo
+    # wallet's UI (built by decman-wallet's build.rs whenever the `demo` feature is
+    # on, which `--all-features` turns on).
     - name: Cache npm
       uses: actions/cache@v5
       with:
-        path: crates/decman/frontend/node_modules
-        key: npm-${{ hashFiles('crates/decman/frontend/package-lock.json') }}
+        path: |
+          crates/decman/frontend/node_modules
+          crates/decman-wallet/frontend/node_modules
+        key: npm-${{ hashFiles('crates/decman/frontend/package-lock.json', 'crates/decman-wallet/frontend/package-lock.json') }}

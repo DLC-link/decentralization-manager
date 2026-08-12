@@ -8,7 +8,11 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
 use common::{
     api::{
+        TenantAcceptTransferRequest, TenantAcsResponse, TenantContract,
+        TenantExecuteSubmissionRequest, TenantHolding, TenantHoldingsResponse,
         TenantOnboardRequest, TenantOnboardResponse, TenantPrepareRequest, TenantPrepareResponse,
+        TenantPrepareSubmissionRequest, TenantPrepareSubmissionResponse, TenantTransferOffer,
+        TenantTransferOffersResponse, TenantTransferRequest,
     },
     types::WorkflowProgress,
 };
@@ -103,6 +107,73 @@ impl TenantClient {
         }
     }
 
+    /// `POST /v0/tenant/{party}/prepare-submission` — build a create or exercise
+    /// command for the party and get back the prepared transaction plus the hash
+    /// to sign.
+    pub async fn prepare_submission(
+        &self,
+        party_id: &str,
+        req: &TenantPrepareSubmissionRequest,
+    ) -> Result<TenantPrepareSubmissionResponse> {
+        self.post(&format!("/v0/tenant/{party_id}/prepare-submission"), req)
+            .await
+    }
+
+    /// `GET /v0/tenant/{party}/holdings` — the party's balance per instrument.
+    pub async fn holdings(&self, party_id: &str) -> Result<Vec<TenantHolding>> {
+        let resp: TenantHoldingsResponse =
+            self.get(&format!("/v0/tenant/{party_id}/holdings")).await?;
+        Ok(resp.holdings)
+    }
+
+    /// `GET /v0/tenant/{party}/transfer-offers` — inbound transfers awaiting
+    /// acceptance.
+    pub async fn transfer_offers(&self, party_id: &str) -> Result<Vec<TenantTransferOffer>> {
+        let resp: TenantTransferOffersResponse = self
+            .get(&format!("/v0/tenant/{party_id}/transfer-offers"))
+            .await?;
+        Ok(resp.offers)
+    }
+
+    /// `POST /v0/tenant/{party}/prepare-transfer` — resolve the instrument's
+    /// registry and build the send, returning the prepared transaction to sign.
+    pub async fn prepare_transfer(
+        &self,
+        party_id: &str,
+        req: &TenantTransferRequest,
+    ) -> Result<TenantPrepareSubmissionResponse> {
+        self.post(&format!("/v0/tenant/{party_id}/prepare-transfer"), req)
+            .await
+    }
+
+    /// `POST /v0/tenant/{party}/prepare-accept` — resolve the accept context for
+    /// an inbound transfer, returning the prepared transaction to sign.
+    pub async fn prepare_accept(
+        &self,
+        party_id: &str,
+        req: &TenantAcceptTransferRequest,
+    ) -> Result<TenantPrepareSubmissionResponse> {
+        self.post(&format!("/v0/tenant/{party_id}/prepare-accept"), req)
+            .await
+    }
+
+    /// `POST /v0/tenant/{party}/execute-submission` — submit the wallet's
+    /// signature over the prepared transaction. Returns an empty 200 on success.
+    pub async fn execute_submission(
+        &self,
+        party_id: &str,
+        req: &TenantExecuteSubmissionRequest,
+    ) -> Result<()> {
+        self.post_discarding_body(&format!("/v0/tenant/{party_id}/execute-submission"), req)
+            .await
+    }
+
+    /// `GET /v0/tenant/{party}/acs` — the party's active contracts.
+    pub async fn acs(&self, party_id: &str) -> Result<Vec<TenantContract>> {
+        let resp: TenantAcsResponse = self.get(&format!("/v0/tenant/{party_id}/acs")).await?;
+        Ok(resp.contracts)
+    }
+
     /// Base64-decode a field the host sent us, tagging which field it was.
     pub(crate) fn decode_b64(&self, field: &'static str, value: &str) -> Result<Vec<u8>> {
         STANDARD.decode(value).map_err(|source| Error::Base64 {
@@ -130,6 +201,11 @@ impl TenantClient {
 
     /// For endpoints that answer with an empty 200 (`execute-submission`), where
     /// parsing a body would fail on success.
+    async fn post_discarding_body<B: Serialize>(&self, path: &str, body: &B) -> Result<()> {
+        let response = self.send_post(path, body).await?;
+        self.check_status("POST", path, response).await.map(|_| ())
+    }
+
     async fn send_post<B: Serialize>(&self, path: &str, body: &B) -> Result<reqwest::Response> {
         self.http
             .post(format!("{base}{path}", base = self.base_url))

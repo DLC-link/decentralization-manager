@@ -1,7 +1,8 @@
 # decman-wallet
 
 The wallet side of DecMan's tenant API (`/v0/tenant/*`) — the library a wallet
-provider embeds to run a **co-validated** Canton party.
+provider embeds to run a **co-validated** Canton party, plus a demo wallet that
+drives it end to end.
 
 A co-validated party is hosted on several participants at once but controlled by a
 single key its owner holds. One key, one signature, N hosts: the owner keeps sole
@@ -13,7 +14,7 @@ process using it.** DecMan only ever receives a public key and signatures over
 hashes it computed itself. Nothing here transmits key material, and the node-side
 code cannot generate a party key at all.
 
-## Onboarding
+## The library
 
 ```rust
 use common::canton_id::CantonId;
@@ -29,25 +30,22 @@ let hosts = vec![
 // Generated here, held here, never transmitted.
 let key = ExternalKeyPair::generate();
 
-// Every host prepares, the wallet signs locally, and onboards on every host.
+// Prepare on the first host, sign locally, onboard on every host.
 let party = onboard_co_validated(&hosts, &key, "alice", Some(2)).await?;
 
 // Authorization is not instant — poll until every host reports the party hosted.
 let reports = statuses(&hosts, &party.party_id).await;
 ```
 
-The onboarding shape is load-bearing: **every** host builds the topology, the
-wallet requires their output to be byte-identical, signs it **locally**, and
-submits that same signed bundle to **every** host itself. No host relays to
-another. The wallet signs a hash it cannot itself recompute, so agreement between
-hosts is what stands between it and a host that returns the hash of a mapping it
-never showed — one honest host defeats a lying one. Canton keeps the topology a
-proposal until the last host signs, so the party is only live once all of them
-report it. `onboard_co_validated` records a failed host in its report rather than
-aborting, and onboarding is idempotent, so stragglers can simply be retried.
+The onboarding shape is load-bearing: **one** host builds the topology, the wallet
+signs it **locally**, and the wallet submits that same signed bundle to **every**
+host itself. No host relays to another. Canton keeps the topology a proposal until
+the last host signs, so the party is only live once all of them report it —
+`onboard_co_validated` records a failed host in its report rather than aborting,
+and onboarding is idempotent, so stragglers can simply be retried.
 
-The wallet signs one hash per topology transaction, each hash computed by Canton
-and returned by the prepare step. Nothing on either side re-derives a Canton hash.
+The wallet signs one hash per topology transaction, each hash computed by Canton and
+returned by the prepare step. Nothing on either side re-derives a Canton hash.
 
 Onboarding rides Canton's **admin** API rather than the Ledger API's
 `AllocateExternalParty`. That RPC is a convenience wrapper around the same topology
@@ -61,22 +59,53 @@ users happen to be provisioned.
 `None` lets DecMan default it to `N-1`, which is what keeps a host able to exit
 later; a threshold of `N` is rejected.
 
-## Transacting
+Transacting goes through `create_contract`, which prepares a CREATE on a host,
+signs the returned transaction hash locally, and executes it. The API supports
+CREATE only today — no Exercise, no Archive.
 
-Transacting as the party is **not** part of DecMan's tenant API, and not part of
-this crate's node-facing client. Once a party is onboarded it is an ordinary
-Canton external party: a wallet reads its contracts and signs its submissions
-directly against Canton's Ledger API, authorizing each with the
-[`ExternalKeyPair`] it holds. DecMan's role ends at onboarding — it has no business
-holding a Ledger-API credential on the party's behalf.
+## The demo wallet
 
-This crate gives you the two halves a wallet needs for that: [`ExternalKeyPair`]
-for the signing, and the onboarding flow above to bring the party up.
+Behind the `demo` feature, so depending on this crate for the client does not drag
+in an HTTP server and a UI bundle.
 
-## Why the key belongs in the embedding process
+```sh
+just demo-wallet "http://localhost:8080=participant::1220aa… http://localhost:8081=participant::1220bb…"
+```
 
-A wallet holds two secrets: the party's signing key and the provider's tenant API
-key. Neither belongs in a browser page. Keeping them in the process that embeds
-this library also keeps one implementation of the crypto — signing in the browser
-would mean a second copy of the fingerprint derivation and signature encoding, free
-to drift from the one the node validates against.
+or directly:
+
+```sh
+cargo run -p decman-wallet --features demo --bin decman-wallet-demo -- \
+  --host http://localhost:8080=participant::1220aa… \
+  --host http://localhost:8081=participant::1220bb… \
+  --host http://localhost:8082=participant::1220cc… \
+  --api-key "$DECMAN_TENANT_API_KEY"
+```
+
+Then open <http://127.0.0.1:7878>: name a party, watch it come up on every host,
+and transact as it.
+
+Hosts and the API key are process configuration, not UI state — this process holds
+the party's private key and the provider's API key, which is why it binds to
+loopback and why the browser never receives either. `--state-file` persists the
+party's key (mode 0600) so a restart keeps the same party; without it each run is
+a fresh demo.
+
+The UI is its own Vite app under `frontend/`, separate from the DecMan server's UI,
+and is embedded into the binary by `build.rs`. `DECMAN_SKIP_FRONTEND=1` skips that
+npm build while iterating on the Rust side; `just demo-wallet-ui` runs the UI with
+hot reload against a demo wallet already running on :7878.
+
+## Why the key is in this process and not the browser
+
+Three reasons, in order of weight:
+
+1. A wallet holds two secrets — the party's signing key and the provider's tenant
+   API key. Neither belongs in a page.
+2. One implementation of the crypto. Signing in TypeScript would mean a second
+   copy of the fingerprint derivation and signature encoding, free to drift from
+   the one the node validates against.
+3. CORS. DecMan is same-origin-only unless an operator sets `--allowed-origin`, and
+   it accepts a single origin — so a page cannot call three hosts directly anyway.
+
+A real wallet app is a local process holding a key, which is exactly what this is.
