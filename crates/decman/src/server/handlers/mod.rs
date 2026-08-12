@@ -35,8 +35,9 @@ pub use parties::{
 };
 pub use party_config::{discover_member_party, get_party_config, save_party_config};
 pub use tenant::{
-    tenant_acs, tenant_execute_submission, tenant_onboard, tenant_prepare,
-    tenant_prepare_submission, tenant_status,
+    tenant_acs, tenant_execute_submission, tenant_holdings, tenant_onboard, tenant_prepare,
+    tenant_prepare_accept, tenant_prepare_submission, tenant_prepare_transfer, tenant_status,
+    tenant_transfer_offers,
 };
 pub use workflows::{
     cancel_add_party, cancel_change_threshold, cancel_contracts, cancel_dars, cancel_kick,

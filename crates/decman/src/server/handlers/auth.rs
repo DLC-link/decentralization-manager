@@ -1,3 +1,8 @@
+use std::{
+    sync::OnceLock,
+    time::{Duration, Instant},
+};
+
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 use base64::Engine;
 use canton_proto_rs::com::daml::ledger::api::v2::admin::{
@@ -424,6 +429,57 @@ impl AdminTokenSource {
     }
 
     /// The absolute `client_credentials` token endpoint for this source.
+    /// Derive the IdP from the node's own top-level config, for credentials that
+    /// belong to the node rather than to a party — the tenant ledger user.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message naming what is missing when the node has neither a
+    /// Keycloak realm nor an Auth0 tenant with an audience. Auth0 needs the
+    /// audience because Canton validates `aud` on the token it receives.
+    fn from_node(config: &NodeConfig) -> std::result::Result<Self, String> {
+        if let Some(auth0) = &config.auth0 {
+            let domain = auth0.domain.trim();
+            let audience = auth0.audience.as_deref().unwrap_or("").trim();
+            if domain.is_empty() || audience.is_empty() {
+                return Err(
+                    "This node's Auth0 configuration has no domain or no audience, so it cannot \
+                     mint a tenant ledger token"
+                        .to_string(),
+                );
+            }
+            return Ok(Self::Auth0 {
+                domain: domain.to_string(),
+                audience: audience.to_string(),
+            });
+        }
+        if let Some(keycloak) = &config.keycloak {
+            // Backchannel URL when the node cannot reach the browser-facing one.
+            let url = keycloak
+                .internal_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|u| !u.is_empty())
+                .unwrap_or(keycloak.url.trim());
+            if url.is_empty() || keycloak.realm.trim().is_empty() {
+                return Err(
+                    "This node's Keycloak configuration has no URL or no realm, so it cannot mint \
+                     a tenant ledger token"
+                        .to_string(),
+                );
+            }
+            return Ok(Self::Keycloak {
+                url: url.to_string(),
+                realm: keycloak.realm.trim().to_string(),
+            });
+        }
+        Err(
+            "This node has no Keycloak or Auth0 configuration, so it cannot mint a tenant ledger \
+             token"
+                .to_string(),
+        )
+    }
+
     fn token_endpoint(&self) -> String {
         match self {
             Self::Auth0 { domain, .. } => {
@@ -644,6 +700,14 @@ async fn grant_user_rights(
 
     let member_party_id_str = member_party_id.to_string();
     let dec_party_id_str = dec_party_id.to_string();
+    // Exactly the rights this dec party needs, and nothing wider.
+    //
+    // Serving wallet-held external parties needs `CanReadAsAnyParty` and
+    // `CanExecuteAsAnyParty`, which can read every party on the participant.
+    // Those belong to the separately configured tenant ledger user, not here —
+    // see `tenant_ledger_token`. Granting them here would widen a dec party's
+    // user as a side effect of giving that party its own rights, and an operator
+    // clicking "Grant Rights" per party would widen every one of them.
     let rights = vec![
         right_act_as(&member_party_id_str),
         right_read_as(&member_party_id_str),
@@ -682,6 +746,95 @@ fn right_read_as(party: &str) -> Right {
             party: party.to_string(),
         })),
     }
+}
+
+/// Read any party's contracts — needed for the tenant API's ACS read and
+/// prepare-submission on wallet-held external parties, which have no credential of
+/// their own.
+/// How long before a token's own expiry this node mints a new one.
+const TENANT_TOKEN_SKEW: Duration = Duration::from_secs(60);
+
+/// The tenant ledger token and the moment it stops being usable.
+fn tenant_token_cache() -> &'static tokio::sync::RwLock<Option<(Instant, String)>> {
+    static CACHE: OnceLock<tokio::sync::RwLock<Option<(Instant, String)>>> = OnceLock::new();
+    CACHE.get_or_init(|| tokio::sync::RwLock::new(None))
+}
+
+/// Mint (or reuse) the token for the ledger user the tenant API transacts under.
+///
+/// This user is configured separately from every dec party on purpose. Serving a
+/// wallet-held external party needs `CanReadAsAnyParty` and
+/// `CanExecuteAsAnyParty`, because the party has no ledger user of its own and
+/// this node reads and relays for it. Those rights can read every party on the
+/// participant, so they belong on their own identity. Putting them on a dec
+/// party's user would widen that user's reach as a side effect of granting the
+/// party its own rights.
+///
+/// # Errors
+///
+/// Returns an error when the node configures no tenant ledger user, when it has
+/// no IdP to mint against, or when the IdP rejects the credentials.
+pub(crate) async fn tenant_ledger_token(
+    config: &NodeConfig,
+    http: &reqwest::Client,
+) -> Result<String> {
+    if let Some((expires_at, token)) = tenant_token_cache().read().await.clone()
+        && Instant::now() < expires_at
+    {
+        return Ok(token);
+    }
+
+    let Some(tenant) = &config.tenant_ledger else {
+        anyhow::bail!(
+            "no tenant ledger user is configured; set DECPM_TENANT_LEDGER_USER_ID, \
+             DECPM_TENANT_LEDGER_CLIENT_ID and DECPM_TENANT_LEDGER_CLIENT_SECRET, and grant that \
+             user CanReadAsAnyParty + CanExecuteAsAnyParty"
+        );
+    };
+
+    let source = AdminTokenSource::from_node(config).map_err(|e| anyhow::anyhow!(e))?;
+    let token = mint_admin_token(
+        http,
+        &source,
+        tenant.client_id.clone(),
+        tenant.client_secret.clone(),
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "{idp} rejected the tenant ledger credentials for user {user}: {e}",
+            idp = source.idp(),
+            user = tenant.user_id
+        )
+    })?;
+
+    // Trust the token's own expiry; fall back to a short life when it cannot be
+    // read, so a malformed token cannot pin a stale credential in the cache.
+    let lifetime = jwt_seconds_until_expiry(&token)
+        .map(|secs| Duration::from_secs(secs).saturating_sub(TENANT_TOKEN_SKEW))
+        .unwrap_or(TENANT_TOKEN_SKEW);
+    *tenant_token_cache().write().await = Some((Instant::now() + lifetime, token.clone()));
+
+    Ok(token)
+}
+
+/// Seconds from now until a JWT's `exp`, or `None` when the claim is unreadable
+/// or already past.
+fn jwt_seconds_until_expiry(token: &str) -> Option<u64> {
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let payload = parts[1];
+    let padding_needed = (4 - (payload.len() % 4)) % 4;
+    let padded = format!("{payload}{}", "=".repeat(padding_needed));
+    let decoded = base64::engine::general_purpose::URL_SAFE
+        .decode(padded)
+        .ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+    let exp = claims.get("exp")?.as_i64()?;
+    let now = chrono::Utc::now().timestamp();
+    u64::try_from(exp - now).ok().filter(|secs| *secs > 0)
 }
 
 async fn test_keycloak_auth(

@@ -2550,6 +2550,20 @@ fn extract_transfer_instruction_info(created: &CreatedEvent) -> Option<TransferI
             _ => None,
         })?;
 
+    transfer_instruction_from_transfer(created, transfer_record, status, pending_actions)
+}
+
+/// Read the token-standard `Transfer` record shared by every transfer instruction.
+///
+/// The utility registry supplies it inside the `TransferInstruction` interface view;
+/// Canton Coin supplies the same shape in the template's own create arguments. One
+/// parser reads both, so the two paths cannot drift.
+fn transfer_instruction_from_transfer(
+    created: &CreatedEvent,
+    transfer_record: &Record,
+    status: TransferInstructionStatus,
+    pending_actions: Vec<PendingAction>,
+) -> Option<TransferInstructionInfo> {
     // Surface the deadline so the UI can disable past-deadline rows; do *not*
     // hide them. Accepting an expired offer would fail at interpretation with
     // `deadline-exceeded`, but staying silent left users wondering where their

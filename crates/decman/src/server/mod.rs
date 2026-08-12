@@ -18,6 +18,7 @@ mod middleware;
 mod package_inventory;
 mod queries;
 mod reward_automation;
+mod token_standard;
 mod transfer_context;
 mod types;
 
@@ -1151,6 +1152,10 @@ pub async fn start_server(
             .service(handlers::tenant_prepare_submission)
             .service(handlers::tenant_execute_submission)
             .service(handlers::tenant_acs)
+            .service(handlers::tenant_holdings)
+            .service(handlers::tenant_transfer_offers)
+            .service(handlers::tenant_prepare_transfer)
+            .service(handlers::tenant_prepare_accept)
             .service(handlers::start_onboarding)
             .service(handlers::get_onboarding_status)
             .service(handlers::cancel_onboarding)
