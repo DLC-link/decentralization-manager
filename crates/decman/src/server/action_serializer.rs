@@ -1526,8 +1526,6 @@ pub fn build_proposal_create_args(
                     ),
                     field("description", make_text(description)),
                     field("extraArgsMeta", make_empty_metadata()),
-                    // Optional and last: the field was appended in package
-                    // version 0.2.0 under Daml smart-contract-upgrade rules.
                     field(
                         "issuerCredentialCids",
                         make_optional_list(
@@ -1561,8 +1559,6 @@ pub fn build_proposal_create_args(
                     ),
                     field("description", make_text(description)),
                     field("extraArgsMeta", make_empty_metadata()),
-                    // Optional and last: the field was appended in package
-                    // version 0.2.0 under Daml smart-contract-upgrade rules.
                     field(
                         "issuerCredentialCids",
                         make_optional_list(

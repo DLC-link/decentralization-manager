@@ -57,8 +57,7 @@ mkCredentialId roleTag subject now index =
 -- exercises `Credential_Get` and references the cids in mint/burn requests.
 --
 -- A self-issuable requirement with no required claims is refused: the
--- resulting claimless credential would attest for nobody and could never be
--- offboarded by `OffboardInstrumentIssuers`.
+-- resulting claimless credential would attest for nobody.
 mintCredentialsMeetingRequirements
   : Party
     -- ^ Governance party. Issuer and holder of every minted credential.

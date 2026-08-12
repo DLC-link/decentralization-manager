@@ -31,15 +31,8 @@ template ProvisionInstrument
   where
     signatory proposer
     observer governanceParty
-    -- A claimless issuer requirement the registrar would self-issue can
-    -- never be minted. With no initial issuers the mint assert never runs,
-    -- so the configuration would be created carrying the bad requirement
-    -- and every later OnboardInstrumentIssuers against it would fail.
-    -- Refuse it before any vote. Holder requirements are not minted
-    -- against, so they stay unchecked. A duplicated initial issuer would
-    -- mint two credentials sharing one id (ids derive from subject, mint
-    -- time and a per-call index), leaving rows the offboard picker cannot
-    -- tell apart — reject duplicates too.
+    -- We don't allow any claimless self-issued (issuer=holder) requirements, as they will later translate
+    -- into credentials that have no subject (as subject is marked on only the claims in this case).
     ensure selfIssuedRequirementsHaveClaims governanceParty issuerRequirements
         && unique initialInstrumentIssuers
 

@@ -24,11 +24,8 @@ template CreateProviderConfiguration
   where
     signatory proposer
     observer governanceParty
-    -- A claimless registrar requirement the provider would self-issue can
-    -- never be minted, and no action archives a ProviderConfiguration. Left
-    -- unchecked, such a configuration would pass its own vote and then fail
-    -- every OnboardRegistrar that selects it. Refuse it before any vote.
-    -- Holder requirements are not minted against, so they stay unchecked.
+    -- We don't allow any claimless self-issued (issuer=holder) requirements, as they will later translate
+    -- into credentials that have no subject (as subject is marked on only the claims in this case).
     ensure selfIssuedRequirementsHaveClaims governanceParty registrarRequirements
 
     interface instance GovernableAction for CreateProviderConfiguration where
@@ -41,8 +38,6 @@ template CreateProviderConfiguration
           <> show (length holderRequirements) <> " holder requirements)"
 
       executeImpl = do
-        -- The choice controller is the provider, so a ProviderService whose
-        -- provider is not the governance party fails on authorization.
         _ <- exercise providerServiceCid ProviderService_CreateProviderConfiguration with
           registrarRequirements
           holderRequirements
