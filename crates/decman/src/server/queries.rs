@@ -804,7 +804,7 @@ fn build_domain_actions(
                 description,
                 transfer_details,
                 accept_transfer_details,
-                service_request_info,
+                service_request_details,
                 orphaned,
             ) = match proposal_infos.remove(&proposal_cid) {
                 Some(info) => (
@@ -815,14 +815,6 @@ fn build_domain_actions(
                     false,
                 ),
                 None => (None, None, None, None, proposal_infos_complete),
-            };
-            // Service-request parties are only meaningful on the two
-            // service-request proposal kinds; clear them otherwise so an
-            // unrelated proposal that happens to carry operator/provider
-            // parties doesn't render a misleading summary.
-            let service_request_details = match action_label.as_str() {
-                "CreateUserServiceRequest" | "CreateProviderServiceRequest" => service_request_info,
-                _ => None,
             };
             let mut seen_parties = std::collections::HashSet::new();
             let unique_confirmations: Vec<GovernanceConfirmation> = confirmations
@@ -854,10 +846,6 @@ fn build_domain_actions(
             let action_label = info
                 .action_label
                 .unwrap_or_else(|| FALLBACK_PROPOSAL_LABEL.to_string());
-            let service_request_details = match action_label.as_str() {
-                "CreateUserServiceRequest" | "CreateProviderServiceRequest" => info.service_request,
-                _ => None,
-            };
             domain_actions.push(DomainGovernanceAction {
                 proposal_cid,
                 action_label,
@@ -868,7 +856,7 @@ fn build_domain_actions(
                 orphaned: false,
                 transfer_details: info.transfer,
                 accept_transfer_details: info.accept_transfer,
-                service_request_details,
+                service_request_details: info.service_request,
             });
         }
     }
@@ -1194,7 +1182,8 @@ pub struct ProposalInfo {
     pub accept_transfer: Option<AcceptTransferDetails>,
     /// Operator + user/provider parties, populated only for
     /// `Create{User,Provider}ServiceRequest` proposals so the notification card
-    /// can render the full summary.
+    /// can render the full summary. `extract_proposal_info` enforces that, so a
+    /// consumer renders this field without re-checking the label.
     pub service_request: Option<ServiceRequestDetails>,
     /// `actionLabel` from the `GovernableActionView` interface view, falling
     /// back to a same-named create-argument field and then to the template's
@@ -1254,13 +1243,24 @@ fn extract_proposal_info(
         .or_else(|| record.and_then(|r| field_text(r, "description")));
 
     let transfer = record.and_then(extract_transfer_proposal_details);
-    let service_request = record.and_then(extract_service_request_details);
     // The template name is a poor label next to the view's `actionLabel`, but
     // it beats a generic placeholder and it needs no per-package knowledge.
     let action_label = view
         .and_then(|v| field_text(v, "actionLabel"))
         .or_else(|| record.and_then(|r| field_text(r, "actionLabel")))
         .or_else(|| created.template_id.as_ref().map(|t| t.entity_name.clone()));
+
+    // `extract_service_request_details` matches on field shape — an `operator`
+    // plus a `user` or a `provider` — so an unrelated proposal carrying those
+    // names would yield a misleading party summary. Onboarding is only what
+    // these two actions do, so gate on the label here and let every consumer
+    // trust the field.
+    let service_request = match action_label.as_deref() {
+        Some("CreateUserServiceRequest") | Some("CreateProviderServiceRequest") => {
+            record.and_then(extract_service_request_details)
+        }
+        _ => None,
+    };
 
     // `AcceptTransferProposal`s carry `transferInstructionCid` instead of the
     // transfer fields. Capture it here; the post-pass in `fetch_proposal_infos`
@@ -4873,6 +4873,56 @@ mod tests {
                 .and_then(|i| i.action_label.clone()),
             Some("RegistrarDelegationProposal".to_string())
         );
+    }
+
+    #[test]
+    fn extract_proposal_info_gates_service_request_details_on_the_label() {
+        // The party fields alone must not produce a service-request summary.
+        // Onboarding is only what the two Create*ServiceRequest actions do.
+        let mut event = governable_action_view_event("MintProposal", "mint some tokens");
+        event.create_arguments = Some(Record {
+            record_id: None,
+            fields: vec![
+                field("governanceParty", party_value(&format!("gov::{SR_FP}"))),
+                field("proposer", party_value(&format!("proposer::{SR_FP}"))),
+                field("operator", party_value(&format!("operator::{SR_FP}"))),
+                field("user", party_value(&format!("user::{SR_FP}"))),
+            ],
+        });
+        let mut infos = HashMap::new();
+
+        extract_proposal_info(&event, &mut infos);
+
+        let Some(info) = infos.get("proposal-cid") else {
+            panic!("the proposal should still be captured");
+        };
+        assert!(info.service_request.is_none());
+    }
+
+    #[test]
+    fn extract_proposal_info_keeps_service_request_details_on_a_matching_label() {
+        let mut event =
+            governable_action_view_event("CreateUserServiceRequest", "onboard the user");
+        event.create_arguments = Some(Record {
+            record_id: None,
+            fields: vec![
+                field("governanceParty", party_value(&format!("gov::{SR_FP}"))),
+                field("proposer", party_value(&format!("proposer::{SR_FP}"))),
+                field("operator", party_value(&format!("operator::{SR_FP}"))),
+                field("user", party_value(&format!("user::{SR_FP}"))),
+            ],
+        });
+        let mut infos = HashMap::new();
+
+        extract_proposal_info(&event, &mut infos);
+
+        let Some(details) = infos
+            .get("proposal-cid")
+            .and_then(|i| i.service_request.as_ref())
+        else {
+            panic!("a user service request should carry its parties");
+        };
+        assert_eq!(details.operator.to_string(), format!("operator::{SR_FP}"));
     }
 
     #[test]
