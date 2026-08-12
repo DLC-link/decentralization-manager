@@ -23,12 +23,11 @@ pub use common::api::{
     DisclosedContractInput, DiscoverMemberPartyRequest, DiscoverMemberPartyResponse, ErrorResponse,
     ExpireConfirmationRequest, ExternalPartiesResponse, ExternalPartyInfo, GovernanceState,
     GovernanceStateResponse, GovernanceType, GrantRightsRequest, GrantRightsResponse,
-    InstrumentAllowance, InstrumentId, InstrumentIdentifier, InstrumentInfo,
-    InstrumentIssuerOffboardingConfiguration, InstrumentsResponse, InvitationActionRequest,
-    KeyStatusResponse, KickInvitePayload, KickRequest, KnownMember, KnownMembersResponse,
-    MessageResponse, MissingEdgeKind, MissingPeerEdge, NetworkInfo, OnboardingInvitePayload,
-    OnboardingMeshErrorResponse, OnboardingRequest, OperatorInfo, PartyAuthStatus,
-    PartyConfigRequest, PartyConfigResponse, PartyCredentialRequirement,
+    InstrumentAllowance, InstrumentId, InstrumentIdentifier, InstrumentInfo, InstrumentsResponse,
+    InvitationActionRequest, KeyStatusResponse, KickInvitePayload, KickRequest, KnownMember,
+    KnownMembersResponse, MessageResponse, MissingEdgeKind, MissingPeerEdge, NetworkInfo,
+    OnboardingInvitePayload, OnboardingMeshErrorResponse, OnboardingRequest, OperatorInfo,
+    PartyAuthStatus, PartyConfigRequest, PartyConfigResponse, PartyCredentialRequirement,
     PendingInvitationsResponse, ProviderConfigurationInfo, ProviderConfigurationsResponse,
     ProviderServiceInfo, ProviderServicesResponse, RegistrarServiceInfo,
     RegistrarServiceRequestInfo, RegistrarServiceRequestsResponse, RegistrarServicesResponse,
@@ -815,10 +814,9 @@ pub enum ProposalType {
         instrument_issuers: Vec<CantonId>,
     },
     /// Revoke the credentials the governance party self-issued for
-    /// instrument issuers, removing their issuing privileges.
-    OffboardInstrumentIssuers {
-        instrument_issuers: Vec<InstrumentIssuerOffboardingConfiguration>,
-    },
+    /// instrument issuers, removing their issuing privileges. Each
+    /// credential's claims name the issuer it attests for.
+    OffboardInstrumentIssuers { instrument_issuer_cids: Vec<String> },
 }
 
 impl ProposalType {
@@ -865,10 +863,9 @@ impl ProposalType {
                 ..
             } => validate_beneficiary_weights(beneficiaries),
             // Mirrors the templates' `ensure` guards: an on/offboard action
-            // for zero issuers (or an offboard entry revoking no credentials)
-            // does no work, and a duplicated issuer would mint two
-            // credentials sharing one id. Reject both with a 400 before the
-            // ledger sees the proposal.
+            // for zero issuers (or revoking zero credentials) does no work,
+            // and a duplicated issuer would mint two credentials sharing one
+            // id. Reject both with a 400 before the ledger sees the proposal.
             ProposalType::OnboardInstrumentIssuers {
                 instrument_issuers, ..
             } => {
@@ -881,17 +878,11 @@ impl ProposalType {
                 initial_instrument_issuers,
                 ..
             } => validate_unique_issuers(initial_instrument_issuers, "initial_instrument_issuers"),
-            ProposalType::OffboardInstrumentIssuers { instrument_issuers } => {
-                if instrument_issuers.is_empty() {
-                    return Err("instrument_issuers must not be empty".to_string());
-                }
-                if instrument_issuers
-                    .iter()
-                    .any(|entry| entry.credential_cids.is_empty())
-                {
-                    return Err(
-                        "every offboard entry must list at least one credential_cid".to_string()
-                    );
+            ProposalType::OffboardInstrumentIssuers {
+                instrument_issuer_cids,
+            } => {
+                if instrument_issuer_cids.is_empty() {
+                    return Err("instrument_issuer_cids must not be empty".to_string());
                 }
                 Ok(())
             }
@@ -1565,33 +1556,14 @@ mod tests {
     }
 
     #[test]
-    fn proposal_offboard_instrument_issuers_rejects_empty_lists() {
-        // Mirrors the template's `ensure`: the issuer list must be non-empty
-        // and every entry must revoke at least one credential.
-        let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
-        let issuer = CantonId::parse(&format!("issuer::{ns}")).unwrap();
-        let mk = |entries: Vec<InstrumentIssuerOffboardingConfiguration>| {
-            ProposalType::OffboardInstrumentIssuers {
-                instrument_issuers: entries,
-            }
+    fn proposal_offboard_instrument_issuers_rejects_empty_list() {
+        // Mirrors the template's `ensure`: the credential list must be
+        // non-empty.
+        let mk = |cids: Vec<String>| ProposalType::OffboardInstrumentIssuers {
+            instrument_issuer_cids: cids,
         };
         assert!(mk(Vec::new()).validate().is_err());
-        assert!(
-            mk(vec![InstrumentIssuerOffboardingConfiguration {
-                instrument_issuer: issuer.clone(),
-                credential_cids: Vec::new(),
-            }])
-            .validate()
-            .is_err()
-        );
-        assert!(
-            mk(vec![InstrumentIssuerOffboardingConfiguration {
-                instrument_issuer: issuer,
-                credential_cids: vec!["cred-1".to_string()],
-            }])
-            .validate()
-            .is_ok()
-        );
+        assert!(mk(vec!["cred-1".to_string()]).validate().is_ok());
     }
 
     #[test]

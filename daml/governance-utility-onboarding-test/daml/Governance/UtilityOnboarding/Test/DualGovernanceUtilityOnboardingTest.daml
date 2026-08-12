@@ -231,10 +231,7 @@ when_issuer1_offboarded_then_mint_fails fx = do
   proposalCid <- submit fx.f.registrarStack.member1 $ createCmd OffboardInstrumentIssuers with
     governanceParty = parties.registrarGov
     proposer = fx.f.registrarStack.member1
-    instrumentIssuers =
-      [InstrumentIssuerOffboardingConfiguration with
-         instrumentIssuer = parties.issuer1
-         credentialCids = staleCredentialCids]
+    instrumentIssuerCids = staleCredentialCids
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
   _ <- confirmAndExecuteAs fx.f.parties fx.f.registrarStack proposalInterfaceCid
   now <- getTime

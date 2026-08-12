@@ -16,8 +16,7 @@ use crate::{canton_id::CantonId, error::Result};
 
 use super::types::{
     ActionType, AppRewardBeneficiary, BillingParams, Claim, FarConfig, InstrumentAllowance,
-    InstrumentId, InstrumentIdentifier, InstrumentIssuerOffboardingConfiguration,
-    PartyCredentialRequirement, ProposalType, VaultLimits,
+    InstrumentId, InstrumentIdentifier, PartyCredentialRequirement, ProposalType, VaultLimits,
 };
 
 // ============================================================================
@@ -1664,7 +1663,9 @@ pub fn build_proposal_create_args(
                 ],
             },
         ),
-        ProposalType::OffboardInstrumentIssuers { instrument_issuers } => (
+        ProposalType::OffboardInstrumentIssuers {
+            instrument_issuer_cids,
+        } => (
             ProposalPackage::GovernanceUtilityOnboarding,
             "Governance.UtilityOnboarding.OffboardInstrumentIssuers",
             "OffboardInstrumentIssuers",
@@ -1674,11 +1675,11 @@ pub fn build_proposal_create_args(
                     field("governanceParty", make_party(governance_party)),
                     field("proposer", make_party(proposer)),
                     field(
-                        "instrumentIssuers",
+                        "instrumentIssuerCids",
                         make_list(
-                            instrument_issuers
+                            instrument_issuer_cids
                                 .iter()
-                                .map(serialize_issuer_offboarding_configuration)
+                                .map(|cid| make_contract_id(cid))
                                 .collect(),
                         ),
                     ),
@@ -1718,27 +1719,6 @@ fn serialize_party_credential_requirements(requirements: &[PartyCredentialRequir
             })
             .collect(),
     )
-}
-
-/// Serialize one `InstrumentIssuerOffboardingConfiguration` entry of an
-/// `OffboardInstrumentIssuers` proposal. Field order matches the Daml data
-/// definition: `instrumentIssuer`, then `credentialCids`.
-fn serialize_issuer_offboarding_configuration(
-    entry: &InstrumentIssuerOffboardingConfiguration,
-) -> Value {
-    make_record(vec![
-        field("instrumentIssuer", make_party(&entry.instrument_issuer)),
-        field(
-            "credentialCids",
-            make_list(
-                entry
-                    .credential_cids
-                    .iter()
-                    .map(|cid| make_contract_id(cid))
-                    .collect(),
-            ),
-        ),
-    ])
 }
 
 /// Build the GovernanceRules_ConfirmAction choice argument for domain actions
@@ -3102,15 +3082,12 @@ mod tests {
             },
             Case {
                 proposal: ProposalType::OffboardInstrumentIssuers {
-                    instrument_issuers: vec![InstrumentIssuerOffboardingConfiguration {
-                        instrument_issuer: party_id(),
-                        credential_cids: vec!["cred-1".to_string()],
-                    }],
+                    instrument_issuer_cids: vec!["cred-1".to_string()],
                 },
                 package: ProposalPackage::GovernanceUtilityOnboarding,
                 module: "Governance.UtilityOnboarding.OffboardInstrumentIssuers",
                 entity: "OffboardInstrumentIssuers",
-                labels: &["governanceParty", "proposer", "instrumentIssuers"],
+                labels: &["governanceParty", "proposer", "instrumentIssuerCids"],
             },
         ];
 
@@ -3230,40 +3207,25 @@ mod tests {
     }
 
     #[test]
-    fn build_proposal_offboard_instrument_issuers_nested_shape_and_values() -> Result {
-        // Each `instrumentIssuers` element is a nested
-        // `InstrumentIssuerOffboardingConfiguration` record; descend into it
-        // and assert the issuer party and credential cid values.
-        let issuer = party_id();
+    fn build_proposal_offboard_instrument_issuers_serializes_credential_cids() -> Result {
+        // The arm forwards the supplied credential cids into the
+        // `instrumentIssuerCids` list as ContractId values. Labels alone
+        // cannot catch a regression to a hardcoded empty list.
         let proposal = ProposalType::OffboardInstrumentIssuers {
-            instrument_issuers: vec![InstrumentIssuerOffboardingConfiguration {
-                instrument_issuer: issuer.clone(),
-                credential_cids: vec!["cred-1".to_string(), "cred-2".to_string()],
-            }],
+            instrument_issuer_cids: vec!["cred-1".to_string(), "cred-2".to_string()],
         };
         let (_, _, _, record) =
             build_proposal_create_args("gov", "proposer", &proposal, None, None)?;
-        let entries = as_list_elements(
-            field_value(&record, "instrumentIssuers"),
-            "instrumentIssuers",
-        );
-        let entry = as_record(
-            entries
-                .first()
-                .unwrap_or_else(|| panic!("instrumentIssuers list is empty")),
-        );
-        assert_eq!(owned_labels(entry), ["instrumentIssuer", "credentialCids"]);
-        match &field_value(entry, "instrumentIssuer").sum {
-            Some(value::Sum::Party(p)) => assert_eq!(p, &issuer.to_string()),
-            other => panic!("expected Party for instrumentIssuer, got {other:?}"),
-        }
-        let cids: Vec<_> = as_list_elements(field_value(entry, "credentialCids"), "credentialCids")
-            .iter()
-            .map(|v| match &v.sum {
-                Some(value::Sum::ContractId(cid)) => cid.as_str(),
-                other => panic!("expected ContractId element, got {other:?}"),
-            })
-            .collect();
+        let cids: Vec<_> = as_list_elements(
+            field_value(&record, "instrumentIssuerCids"),
+            "instrumentIssuerCids",
+        )
+        .iter()
+        .map(|v| match &v.sum {
+            Some(value::Sum::ContractId(cid)) => cid.as_str(),
+            other => panic!("expected ContractId element, got {other:?}"),
+        })
+        .collect();
         assert_eq!(cids, ["cred-1", "cred-2"]);
         Ok(())
     }
