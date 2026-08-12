@@ -763,9 +763,9 @@ pub async fn get_governance_confirmations(
     Ok((actions, domain_actions))
 }
 
-/// Label used for a proposal synthesized from a bare `GovernableAction`
-/// (no confirmations, and no `actionLabel` recovered from either the
-/// interface view or create-arguments).
+/// Label used for a proposal synthesized from a bare `GovernableAction` when
+/// nothing names it — no `actionLabel` in the interface view or the
+/// create-arguments, and no template id on the event either.
 const FALLBACK_PROPOSAL_LABEL: &str = "Proposal";
 
 /// Merge confirmed domain proposals with the full active-proposal set.
@@ -1175,11 +1175,11 @@ fn extract_and_add_domain_confirmation(
         .push(confirmation);
 }
 
-/// Per-proposal info pulled out of a `GovernableAction` contract's
-/// `create_arguments`. `description` mirrors the `description` field on
-/// every proposal; `transfer` is populated only for `TransferProposal`
-/// templates so the notifications queue can render recipient/amount/
-/// instrument on the card without a follow-up fetch.
+/// Per-proposal info pulled out of a `GovernableAction` contract. `description`
+/// and `action_label` come from the interface view, which every proposal
+/// implements; `transfer` is populated only for `TransferProposal` templates so
+/// the notifications queue can render recipient/amount/instrument on the card
+/// without a follow-up fetch.
 ///
 /// `accept_transfer_instruction_cid` is captured for `AcceptTransferProposal`
 /// templates (they only carry the linked `TransferInstruction` cid, not the
@@ -1197,72 +1197,81 @@ pub struct ProposalInfo {
     /// can render the full summary.
     pub service_request: Option<ServiceRequestDetails>,
     /// `actionLabel` from the `GovernableActionView` interface view, falling
-    /// back to a same-named create-argument field. `None` when neither is
-    /// present (e.g. a wildcard-mode fetch that didn't request the view) —
-    /// callers fall back to a generic label in that case.
+    /// back to a same-named create-argument field and then to the template's
+    /// own name. `None` only when the event carries no template id either.
     pub action_label: Option<String>,
 }
 
-/// Pull `actionLabel` out of a `GovernableAction` interface view. Every
-/// proposal template implements the interface with this field, so this is
-/// the authoritative source; `extract_proposal_info` only falls back to
-/// create-arguments when the view wasn't requested (test-mode wildcard fetch).
-fn extract_action_label_from_view(created: &CreatedEvent) -> Option<String> {
-    let view = created.interface_views.iter().find(|v| {
-        v.interface_id.as_ref().is_some_and(|id| {
-            id.module_name == "Governance.Action" && id.entity_name == "GovernableAction"
-        })
-    })?;
-    let view_record = view.view_value.as_ref()?;
-    field_text(view_record, "actionLabel")
+/// Pull the `GovernableAction` interface view off a created event. Canton
+/// only fills this in when the query asked for it with an `InterfaceFilter`,
+/// so a wildcard fetch (test mode) always gets `None`.
+fn governable_action_view(created: &CreatedEvent) -> Option<&Record> {
+    created
+        .interface_views
+        .iter()
+        .find(|v| {
+            v.interface_id.as_ref().is_some_and(|id| {
+                id.module_name == "Governance.Action" && id.entity_name == "GovernableAction"
+            })
+        })?
+        .view_value
+        .as_ref()
 }
 
-/// Extract proposal info from a GovernableAction contract's create_arguments.
+/// Whether a contract's create-arguments carry the two fields every
+/// in-repo proposal template declares. Used only when no interface view is
+/// available: a wildcard fetch returns every contract the party can see, so
+/// something has to keep unrelated templates out of the proposal map.
+fn looks_like_governable_action(record: &Record) -> bool {
+    let has = |label: &str| record.fields.iter().any(|f| f.label == label);
+    has("governanceParty") && has("proposer")
+}
+
+/// Extract proposal info from a `GovernableAction` contract.
 ///
-/// Looks for a `description` field (Text) and, for `TransferProposal`
-/// contracts, the nested `transfer` record. Only captures it if the
-/// contract has the `governanceParty` + `proposer` fields shared by every
-/// governable action (avoids matching unrelated contracts in wildcard
-/// mode).
+/// The interface view is the authoritative source: Canton only attaches one
+/// to a contract that really implements `GovernableAction`, and the view
+/// carries `actionLabel` and `description` even for templates that compute
+/// them rather than store them. Its presence is therefore enough to capture
+/// the contract, whatever package declared the template and however that
+/// template names its own fields.
+///
+/// A wildcard fetch (test mode) carries no view, so it falls back to the
+/// field-shape heuristic and to create-arguments for the same values.
 fn extract_proposal_info(
     created: &CreatedEvent,
     proposal_infos: &mut HashMap<String, ProposalInfo>,
 ) {
-    let Some(record) = &created.create_arguments else {
-        return;
-    };
+    let view = governable_action_view(created);
+    let record = created.create_arguments.as_ref();
 
-    // Only capture contracts that look like GovernableAction proposals
-    let has_governance_party = record.fields.iter().any(|f| f.label == "governanceParty");
-    let has_proposer = record.fields.iter().any(|f| f.label == "proposer");
-
-    if !has_governance_party || !has_proposer {
+    if view.is_none() && !record.is_some_and(looks_like_governable_action) {
         return;
     }
 
-    let description = record
-        .fields
-        .iter()
-        .find(|f| f.label == "description")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Text(t)) => Some(t.clone()),
-            _ => None,
-        });
+    let description = view
+        .and_then(|v| field_text(v, "description"))
+        .or_else(|| record.and_then(|r| field_text(r, "description")));
 
-    let transfer = extract_transfer_proposal_details(record);
-    let service_request = extract_service_request_details(record);
-    let action_label =
-        extract_action_label_from_view(created).or_else(|| field_text(record, "actionLabel"));
+    let transfer = record.and_then(extract_transfer_proposal_details);
+    let service_request = record.and_then(extract_service_request_details);
+    // The template name is a poor label next to the view's `actionLabel`, but
+    // it beats a generic placeholder and it needs no per-package knowledge.
+    let action_label = view
+        .and_then(|v| field_text(v, "actionLabel"))
+        .or_else(|| record.and_then(|r| field_text(r, "actionLabel")))
+        .or_else(|| created.template_id.as_ref().map(|t| t.entity_name.clone()));
 
     // `AcceptTransferProposal`s carry `transferInstructionCid` instead of the
     // transfer fields. Capture it here; the post-pass in `fetch_proposal_infos`
     // resolves each cid to an `AcceptTransferDetails` via a per-cid event
     // query so the card can render sender/amount/instrument.
     let accept_transfer_instruction_cid = record
-        .fields
-        .iter()
-        .find(|f| f.label == "transferInstructionCid")
+        .and_then(|r| {
+            r.fields
+                .iter()
+                .find(|f| f.label == "transferInstructionCid")
+        })
         .and_then(|f| f.value.as_ref())
         .and_then(|v| match &v.sum {
             Some(value::Sum::ContractId(cid)) => Some(cid.clone()),
@@ -1483,8 +1492,11 @@ async fn fetch_proposal_infos(
     packages: &PackageConfig,
     proposal_infos: &mut HashMap<String, ProposalInfo>,
 ) -> Result {
+    // Report this as a failure, not as an empty active-proposal set. The
+    // caller reads an empty set as "every confirmed proposal is archived" and
+    // marks the lot orphaned, which is a lie when we never ran the query.
     let Some(ref pkg) = packages.governance_action else {
-        return Ok(());
+        anyhow::bail!("governance_action package not configured");
     };
 
     let mut state_client = utils::create_state_client(config, token.clone()).await?;
@@ -4702,35 +4714,22 @@ mod tests {
     }
 
     // ------------------------------------------------------------------------
-    // extract_action_label_from_view / build_domain_actions
+    // extract_proposal_info / build_domain_actions
     //
     // Covers the pending-approvals fix: every active GovernableAction should
     // surface, confirmations or not, using only the interface view.
     // ------------------------------------------------------------------------
 
-    fn governable_action_view_event(action_label: &str) -> CreatedEvent {
-        let view = InterfaceView {
-            interface_id: Some(Identifier {
-                package_id: "#governance-action-v1".to_string(),
-                module_name: "Governance.Action".to_string(),
-                entity_name: "GovernableAction".to_string(),
-            }),
-            view_status: None,
-            view_value: Some(Record {
-                record_id: None,
-                fields: vec![field("actionLabel", text_value(action_label))],
-            }),
-            implementation_package_id: String::new(),
-        };
+    fn bare_created_event(contract_id: &str) -> CreatedEvent {
         CreatedEvent {
             offset: 0,
             node_id: 0,
-            contract_id: "proposal-cid".to_string(),
+            contract_id: contract_id.to_string(),
             template_id: None,
             contract_key: None,
             create_arguments: None,
             created_event_blob: vec![],
-            interface_views: vec![view],
+            interface_views: vec![],
             witness_parties: vec![],
             signatories: vec![],
             observers: vec![],
@@ -4742,20 +4741,152 @@ mod tests {
         }
     }
 
+    /// A created event as the production `InterfaceFilter` query returns it:
+    /// the `GovernableAction` view is present and nothing else is.
+    fn governable_action_view_event(action_label: &str, description: &str) -> CreatedEvent {
+        let view = InterfaceView {
+            interface_id: Some(Identifier {
+                package_id: "#governance-action-v1".to_string(),
+                module_name: "Governance.Action".to_string(),
+                entity_name: "GovernableAction".to_string(),
+            }),
+            view_status: None,
+            view_value: Some(Record {
+                record_id: None,
+                fields: vec![
+                    field("actionLabel", text_value(action_label)),
+                    field("description", text_value(description)),
+                ],
+            }),
+            implementation_package_id: String::new(),
+        };
+        CreatedEvent {
+            interface_views: vec![view],
+            ..bare_created_event("proposal-cid")
+        }
+    }
+
     #[test]
-    fn extract_action_label_from_view_reads_the_governable_action_view() {
-        let event = governable_action_view_event("SetupCcPreapproval");
+    fn governable_action_view_reads_the_view_record() {
+        let event = governable_action_view_event("SetupCcPreapproval", "set up the preapproval");
+        let Some(view) = governable_action_view(&event) else {
+            panic!("the GovernableAction view should be found");
+        };
         assert_eq!(
-            extract_action_label_from_view(&event),
+            field_text(view, "actionLabel"),
             Some("SetupCcPreapproval".to_string())
         );
     }
 
     #[test]
-    fn extract_action_label_from_view_absent_when_no_matching_view() {
-        let mut event = governable_action_view_event("SetupCcPreapproval");
+    fn governable_action_view_absent_when_no_matching_view() {
+        let mut event = governable_action_view_event("SetupCcPreapproval", "");
         event.interface_views.clear();
-        assert_eq!(extract_action_label_from_view(&event), None);
+        assert!(governable_action_view(&event).is_none());
+    }
+
+    #[test]
+    fn extract_proposal_info_captures_a_proposal_from_its_view_alone() {
+        // An `InterfaceFilter` query populates `interface_views` and leaves
+        // `create_arguments` to the template filter, which this query has none
+        // of. The view alone must be enough.
+        let event = governable_action_view_event("CreateUserServiceRequest", "onboard the user");
+        let mut infos = HashMap::new();
+
+        extract_proposal_info(&event, &mut infos);
+
+        let Some(info) = infos.get("proposal-cid") else {
+            panic!("a view-only proposal should be captured");
+        };
+        assert_eq!(
+            info.action_label,
+            Some("CreateUserServiceRequest".to_string())
+        );
+        assert_eq!(info.description, Some("onboard the user".to_string()));
+    }
+
+    #[test]
+    fn extract_proposal_info_prefers_the_view_description() {
+        // Templates such as CreateUserServiceRequest compute `description` in
+        // the view and hold no field of that name, so the view must win.
+        let mut event = governable_action_view_event("MintProposal", "computed in the view");
+        event.create_arguments = Some(Record {
+            record_id: None,
+            fields: vec![
+                field("governanceParty", party_value(&format!("gov::{SR_FP}"))),
+                field("proposer", party_value(&format!("proposer::{SR_FP}"))),
+                field("description", text_value("stored on the template")),
+            ],
+        });
+        let mut infos = HashMap::new();
+
+        extract_proposal_info(&event, &mut infos);
+
+        assert_eq!(
+            infos
+                .get("proposal-cid")
+                .and_then(|i| i.description.clone()),
+            Some("computed in the view".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_proposal_info_captures_a_proposal_from_an_unknown_package() {
+        // The visibility rule: a package decman has never heard of, whose
+        // template names its own fields differently, still gets a card. No
+        // allowlist of labels or templates may gate the pending path.
+        let event = governable_action_view_event("VaultPause", "pause the vault");
+        let mut infos = HashMap::new();
+        extract_proposal_info(&event, &mut infos);
+
+        let actions = build_domain_actions(HashMap::new(), infos, true, 2, 0);
+
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].action_label, "VaultPause");
+        assert_eq!(actions[0].confirmation_count, 0);
+    }
+
+    #[test]
+    fn extract_proposal_info_labels_a_wildcard_proposal_with_its_template_name() {
+        // Test mode fetches with a wildcard filter, so no view arrives and the
+        // template name is the only name available.
+        let mut event = bare_created_event("proposal-cid");
+        event.template_id = Some(Identifier {
+            package_id: "#governance-utility-onboarding".to_string(),
+            module_name: "Governance.TokenIssuance.RegistrarDelegation".to_string(),
+            entity_name: "RegistrarDelegationProposal".to_string(),
+        });
+        event.create_arguments = Some(Record {
+            record_id: None,
+            fields: vec![
+                field("governanceParty", party_value(&format!("gov::{SR_FP}"))),
+                field("proposer", party_value(&format!("proposer::{SR_FP}"))),
+            ],
+        });
+        let mut infos = HashMap::new();
+
+        extract_proposal_info(&event, &mut infos);
+
+        assert_eq!(
+            infos
+                .get("proposal-cid")
+                .and_then(|i| i.action_label.clone()),
+            Some("RegistrarDelegationProposal".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_proposal_info_skips_an_unrelated_wildcard_contract() {
+        let mut event = bare_created_event("other-cid");
+        event.create_arguments = Some(Record {
+            record_id: None,
+            fields: vec![field("owner", party_value(&format!("owner::{SR_FP}")))],
+        });
+        let mut infos = HashMap::new();
+
+        extract_proposal_info(&event, &mut infos);
+
+        assert!(infos.is_empty());
     }
 
     fn proposal_info(action_label: Option<&str>) -> ProposalInfo {
