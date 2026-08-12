@@ -94,7 +94,11 @@ jobs:
         run: cargo clippy --all-targets --all-features --no-deps -- -D warnings
       - name: Install coverage tooling
         if: steps.cache-grcov.outputs.cache-hit != 'true'
-        run: cargo install grcov --version 0.10.7
+        # --force because rust-cache runs with cache-bin: true and its restore
+        # paths include $CARGO_HOME/bin — so it can supply grcov while the
+        # dedicated cache entry above misses, and a plain install then aborts
+        # with "binary `grcov` already exists in destination".
+        run: cargo install grcov --version 0.10.7 --force
       - name: Run tests with coverage
         run: ./code-coverage.sh
 
