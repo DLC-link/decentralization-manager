@@ -107,6 +107,17 @@ const formatRelativeTime = (epochSeconds: number): string => {
   return `${days}d ago`;
 };
 
+const formatTimeUntil = (epochSeconds: number): string => {
+  const seconds = Math.max(0, epochSeconds - Math.floor(Date.now() / 1000));
+  if (seconds < 60) return "in under a minute";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `in ${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `in ${hours}h`;
+  const days = Math.floor(hours / 24);
+  return `in ${days}d`;
+};
+
 const truncatePartyId = (id: string): string => {
   const parts = id.split("::");
   if (parts.length !== 2) return id;
@@ -868,9 +879,20 @@ const DomainActionCard = ({
   const otherConfirmations = domainAction.confirmations.filter(
     (c) => c.confirming_party !== party.memberPartyId,
   );
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  // GovernanceConfirmation_Expire refuses to run before a confirmation's
+  // expiry time, and only its own confirmer can archive it any earlier. So
+  // another member's live confirmation is nobody else's to clear yet.
+  const expiredOthers = otherConfirmations.filter(
+    (c) => (c.expires_at ?? 0) > 0 && (c.expires_at ?? 0) <= nowSeconds,
+  );
+  const nextOtherExpiry = otherConfirmations
+    .map((c) => c.expires_at ?? 0)
+    .filter((t) => t > nowSeconds)
+    .sort((a, b) => a - b)[0];
   // Only the proposer controls GovernableAction_ProposerCancel, so anyone else
   // pressing the button would just collect a ledger rejection.
-  const isProposer =
+  const canCancelProposal =
     !!domainAction.proposer && domainAction.proposer === party.memberPartyId;
 
   // The on-chain proposal already encodes the action — server only needs the
@@ -972,12 +994,11 @@ const DomainActionCard = ({
 
   // For orphaned actions (underlying proposal is gone) the only valid
   // operation is to clear the stranded Confirmation contracts off the ledger.
-  // Our own goes through Revoke instead: GovernanceConfirmation_Expire refuses
-  // to run before the confirmation's expiry time, and only the confirmer can
-  // archive it any earlier. Loop sequentially so the `busy` lock on each
-  // /governance/expire call serializes correctly.
+  // Our own goes through Revoke instead, and another member's live one is not
+  // ours to clear, so this covers the expired remainder. Loop sequentially so
+  // the `busy` lock on each /governance/expire call serializes correctly.
   const handleDismissOrphan = async () => {
-    for (const c of otherConfirmations) {
+    for (const c of expiredOthers) {
       await handleExpire(c.contract_id);
     }
   };
@@ -1045,8 +1066,9 @@ const DomainActionCard = ({
 
       {domainAction.orphaned && (
         <Alert severity="warning" sx={{ py: 0.5 }}>
-          The underlying proposal has been archived. These confirmation
-          contracts are stranded on the ledger — dismiss to clear them.
+          The underlying proposal has been archived, so these confirmation
+          contracts are stranded on the ledger. Each member revokes their own.
+          Anyone can dismiss the rest once they expire.
         </Alert>
       )}
 
@@ -1293,7 +1315,6 @@ const DomainActionCard = ({
           (a, b) => (a.created_at ?? 0) - (b.created_at ?? 0),
         );
         const proposerCid = sorted[0]?.contract_id;
-        const nowSeconds = Math.floor(Date.now() / 1000);
         return (
           <Box
             sx={{
@@ -1420,15 +1441,31 @@ const DomainActionCard = ({
               </Button>
             )}
             {otherConfirmations.length > 0 && (
-              <Button
-                size="small"
-                variant="outlined"
-                color="warning"
-                onClick={handleDismissOrphan}
-                disabled={busy || !party.rulesContractId}
+              <Tooltip
+                title={
+                  expiredOthers.length > 0
+                    ? "Clear the other members' expired confirmations"
+                    : `Only each member clears their own confirmation until it expires${
+                        nextOtherExpiry
+                          ? `, and the next one expires ${formatTimeUntil(nextOtherExpiry)}`
+                          : ""
+                      }`
+                }
               >
-                Dismiss
-              </Button>
+                <span>
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    color="warning"
+                    onClick={handleDismissOrphan}
+                    disabled={
+                      busy || !party.rulesContractId || expiredOthers.length === 0
+                    }
+                  >
+                    Dismiss
+                  </Button>
+                </span>
+              </Tooltip>
             )}
           </>
         ) : (
@@ -1453,7 +1490,7 @@ const DomainActionCard = ({
                 Confirm
               </Button>
             )}
-            {isProposer && (
+            {canCancelProposal && (
               <Button
                 size="small"
                 variant="outlined"
