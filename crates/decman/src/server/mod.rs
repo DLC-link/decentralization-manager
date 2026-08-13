@@ -1095,6 +1095,8 @@ pub async fn start_server(
         }
     });
 
+    reward_automation::register_metrics();
+
     tracing::info!("Starting HTTP server on {host}:{port}");
     tracing::info!("Frontend available at http://{host}:{port}/");
 

@@ -39,6 +39,7 @@ use canton_proto_rs::com::daml::ledger::api::v2::{
     get_active_contracts_response::ContractEntry, value,
 };
 use chrono::{DateTime, Utc};
+use prometheus::{GaugeVec, IntCounter, IntCounterVec};
 
 use crate::{
     canton_id::CantonId,
@@ -46,6 +47,7 @@ use crate::{
     utils,
 };
 
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use super::AppState;
@@ -510,6 +512,87 @@ fn parse_unassigned_coupon(
         cid: cid.to_string(),
         expires_at: field_time(rec, "expiresAt")?,
     }))
+}
+
+// ============================================================================
+// Metrics
+// ============================================================================
+
+// The reward automation's health signal. Design §5 defines each instrument and
+// the alert that reads it.
+
+static HEARTBEAT: LazyLock<IntCounter> = LazyLock::new(|| {
+    prometheus::register_int_counter!(
+        "decman_reward_heartbeat_total",
+        "Heartbeats of the reward automation loop, one per minute while it lives."
+    )
+    .expect("metric name is a unique literal")
+});
+
+static SWEEPS: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    prometheus::register_int_counter_vec!(
+        "decman_reward_sweep_total",
+        "Reward sweeps started for a decparty.",
+        &["decparty"]
+    )
+    .expect("metric name is a unique literal")
+});
+
+static ASSIGNED: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    prometheus::register_int_counter_vec!(
+        "decman_reward_coupons_assigned_total",
+        "Coupons successfully reassigned by this node.",
+        &["decparty"]
+    )
+    .expect("metric name is a unique literal")
+});
+
+static SKIPPED: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    prometheus::register_int_counter_vec!(
+        "decman_reward_coupons_skipped_total",
+        "Coupons the ledger rejected individually, to be retried next sweep.",
+        &["decparty"]
+    )
+    .expect("metric name is a unique literal")
+});
+
+static ZERO_ASSIGNED: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    prometheus::register_int_counter_vec!(
+        "decman_reward_sweep_zero_assigned_total",
+        "Reward sweeps that assigned nothing while every attempted coupon was refused.",
+        &["decparty"]
+    )
+    .expect("metric name is a unique literal")
+});
+
+static SWEEP_FAILED: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    prometheus::register_int_counter_vec!(
+        "decman_reward_sweep_failed_total",
+        "Reward sweeps that ended in an error.",
+        &["decparty"]
+    )
+    .expect("metric name is a unique literal")
+});
+
+static OLDEST_EXPIRES_IN: LazyLock<GaugeVec> = LazyLock::new(|| {
+    prometheus::register_gauge_vec!(
+        "decman_reward_oldest_unassigned_expires_in_seconds",
+        "Seconds until the expiry of the oldest coupon this node saw unassigned at its last read.",
+        &["decparty"]
+    )
+    .expect("metric name is a unique literal")
+});
+
+/// Registers every family at startup. Design §6, change 1, covers what this can and
+/// cannot expose.
+pub(crate) fn register_metrics() {
+    LazyLock::force(&HEARTBEAT);
+    LazyLock::force(&SWEEPS);
+    LazyLock::force(&ASSIGNED);
+    LazyLock::force(&SKIPPED);
+    LazyLock::force(&ZERO_ASSIGNED);
+    LazyLock::force(&SWEEP_FAILED);
+    LazyLock::force(&OLDEST_EXPIRES_IN);
 }
 
 // ============================================================================
@@ -1676,5 +1759,36 @@ mod tests {
             "Governance.Rewards.CouponReassignmentDelegation"
         );
         assert_eq!(id.entity_name, "CouponReassignmentDelegation");
+    }
+
+    fn gathered_family_names() -> Vec<String> {
+        prometheus::gather()
+            .into_iter()
+            .map(|f| f.get_name().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn the_heartbeat_is_exposed_before_any_sweep_runs() {
+        // The stall alert watches this family, so it must exist from boot.
+        register_metrics();
+        assert!(
+            gathered_family_names()
+                .iter()
+                .any(|n| n == "decman_reward_heartbeat_total")
+        );
+    }
+
+    #[test]
+    fn a_labelled_family_appears_once_a_decparty_is_known() {
+        // `gather()` omits a labelled family with no series, so these appear only
+        // once a decparty is known. Design §6, change 1.
+        register_metrics();
+        SWEEPS.with_label_values(&["cbtc-network::1220test"]).inc(); // any string is a valid label
+        assert!(
+            gathered_family_names()
+                .iter()
+                .any(|n| n == "decman_reward_sweep_total")
+        );
     }
 }
