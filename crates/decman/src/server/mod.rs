@@ -28,7 +28,7 @@ use std::{
 };
 
 use actix_cors::Cors;
-use actix_web::{App, HttpServer, web};
+use actix_web::{App, HttpServer, middleware::Compress, web};
 use canton_proto_rs::com::digitalasset::canton::{
     admin::participant::v30::{ListPackagesRequest, package_service_client::PackageServiceClient},
     crypto::{
@@ -1187,7 +1187,13 @@ pub async fn start_server(
             .service(handlers::discover_member_party)
             .split_for_parts();
 
-        let mut app = app.wrap(AuthMiddleware).wrap(cors);
+        // Compress static bundles and API responses according to the client's
+        // Accept-Encoding header. This is especially important for the embedded
+        // frontend, whose JavaScript bundle is otherwise served verbatim.
+        let mut app = app
+            .wrap(AuthMiddleware)
+            .wrap(cors)
+            .wrap(Compress::default());
         if insecure {
             app = app
                 .service(SwaggerUi::new("/swagger-ui/{_:.*}").url("/api-docs/openapi.json", api));
