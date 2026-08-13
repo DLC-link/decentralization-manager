@@ -1097,6 +1097,29 @@ pub async fn start_server(
 
     reward_automation::register_metrics();
 
+    // Separate from the API server; design §6, change 7. 0 disables it.
+    let metrics_port = config.metrics_port;
+    if metrics_port == 0 {
+        tracing::info!("Metrics endpoint disabled (metrics_port = 0)");
+    } else {
+        let metrics_host = host.to_string();
+        match HttpServer::new(|| App::new().route("/metrics", web::get().to(handlers::metrics)))
+            // One worker: the default is one per logical CPU.
+            .workers(1)
+            .bind((metrics_host.clone(), metrics_port))
+        {
+            Ok(server) => {
+                tracing::info!("Serving metrics on {metrics_host}:{metrics_port}/metrics");
+                tokio::spawn(server.run());
+            }
+            Err(e) => tracing::error!(
+                error = %e,
+                port = metrics_port,
+                "binding the metrics port failed; this node reports no metrics"
+            ),
+        }
+    }
+
     tracing::info!("Starting HTTP server on {host}:{port}");
     tracing::info!("Frontend available at http://{host}:{port}/");
 

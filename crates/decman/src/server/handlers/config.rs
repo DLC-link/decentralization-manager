@@ -3,6 +3,7 @@ use actix_web::{
     http::header::{CacheControl, CacheDirective},
     post, web,
 };
+use prometheus::{Encoder, TextEncoder};
 use serde::Serialize;
 
 use sqlx::SqlitePool;
@@ -139,6 +140,22 @@ pub async fn healthz() -> impl Responder {
         })
 }
 
+/// Prometheus exposition for the collector to scrape, served on
+/// `NodeConfig::metrics_port` rather than the API port. Design §6, change 7, covers
+/// the port choice and why `/healthz` ignores these numbers.
+pub async fn metrics() -> impl Responder {
+    let mut buffer = Vec::new();
+    match TextEncoder::new().encode(&prometheus::gather(), &mut buffer) {
+        Ok(()) => HttpResponse::Ok()
+            .content_type("text/plain; version=0.0.4; charset=utf-8")
+            .body(buffer),
+        Err(e) => {
+            tracing::warn!(error = %e, "encoding metrics failed");
+            HttpResponse::InternalServerError().finish()
+        }
+    }
+}
+
 async fn save_peers_to_db(db: &SqlitePool, peers: &[Peer]) -> Result {
     let mut tx = db.begin_transaction().await?;
     tx.delete_all_peers().await?;
@@ -151,6 +168,7 @@ async fn save_peers_to_db(db: &SqlitePool, peers: &[Peer]) -> Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use actix_web::{App, http::StatusCode};
     use utoipa::PartialSchema;
 
     // The `/node-config` OpenAPI response is documented as `NodeConfigResponse`,
@@ -167,5 +185,38 @@ mod tests {
                 "OpenAPI schema missing `{field}`: {json}"
             );
         }
+    }
+
+    // The collector scrapes this endpoint, so it must answer 200 with the
+    // Prometheus text format and carry the reward automation's families. A handler
+    // that compiles but serves an empty or JSON body would leave every alert
+    // evaluating nothing.
+    #[actix_web::test]
+    async fn metrics_endpoint_serves_the_prometheus_text_format() {
+        use actix_web::test;
+
+        crate::server::reward_automation::register_metrics();
+        let app = test::init_service(App::new().route("/metrics", web::get().to(metrics))).await;
+
+        let response =
+            test::call_service(&app, test::TestRequest::get().uri("/metrics").to_request()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            content_type.starts_with("text/plain"),
+            "content type was {content_type}"
+        );
+
+        let body = String::from_utf8(test::read_body(response).await.to_vec())
+            .unwrap_or_else(|e| panic!("body is not UTF-8: {e}"));
+        assert!(
+            body.contains("decman_reward_heartbeat_total"),
+            "body did not describe the heartbeat: {body}"
+        );
     }
 }

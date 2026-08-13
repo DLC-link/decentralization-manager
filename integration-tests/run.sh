@@ -184,6 +184,7 @@ log_phase "Running e2e: ${DECPM_E2E_TEST:-governance_workflows_e2e} (Rust)"
 
 export P1_HTTP P2_HTTP P3_HTTP
 export P1_NOISE P2_NOISE P3_NOISE
+export P1_METRICS P2_METRICS P3_METRICS
 export P1_PARTICIPANT_ID P2_PARTICIPANT_ID P3_PARTICIPANT_ID
 export DEV_DIR
 
