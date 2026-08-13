@@ -25,10 +25,22 @@ The longest step is usually the cross-team coordination needed to exchange Noise
 The Dec Party Manager is published as a public container image:
 
 ```
-public.ecr.aws/dlc-link/canton-decparty-manager:<tag>
+public.ecr.aws/dlc-link/decentralization-manager:<tag>
 ```
 
-Use the latest tagged release (for example `0.1.7`). Pin the version explicitly — do not use `latest`. If your cluster cannot pull from Public ECR directly, mirror the image into your own registry first.
+Use the latest tagged release (for example `v1.6.2`). Pin the version explicitly — do not use `latest`. If your cluster cannot pull from Public ECR directly, mirror the image into your own registry first.
+
+> [!NOTE]
+> Releases before v1.6.0 were published under the old repository name,
+> `public.ecr.aws/dlc-link/canton-decparty-manager`. That repository stays up for
+> existing pins, but new releases only go to `decentralization-manager` — update
+> your manifests when you upgrade.
+
+The image is distroless: it contains the `dec-party-manager` binary (entrypoint
+`dec-party-manager serve`, binary on `PATH`) and no shell or coreutils. Run
+anything that needs `sh` — init containers, `kubectl exec` debugging, exec
+probes — on a utility image such as `busybox`, not on this image. The
+Deployment example below shows the pattern.
 
 To check the version of a running pod:
 
@@ -232,7 +244,7 @@ spec:
               mountPath: /app
       containers:
         - name: dec-party-manager
-          image: public.ecr.aws/dlc-link/canton-decparty-manager:<tag>
+          image: public.ecr.aws/dlc-link/decentralization-manager:<tag>
           imagePullPolicy: Always
           command:
             - dec-party-manager
