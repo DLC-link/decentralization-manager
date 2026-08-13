@@ -207,6 +207,10 @@ const InvitationCard = ({
   return (
     <ApprovalCard
       accent
+      dataAttrs={{
+        "data-testid": "invitation-card",
+        "data-kind": invitation.invitation_type,
+      }}
       pill={<Pill label="Respond" tone="accent" />}
       time={formatRelativeTime(invitation.received_at)}
       title={inviteTitle}
@@ -373,7 +377,7 @@ const InvitationCard = ({
               </Typography>
               <Typography
                 variant="body2"
-                sx={{ fontWeight: 600, fontFamily: "monospace" }}
+                sx={{ fontWeight: 600, fontFamily: "var(--font-mono)" }}
               >
                 {truncatePartyId(invitation.new_participant)}
               </Typography>
@@ -1546,6 +1550,10 @@ const WorkflowRunCard = ({
   if (compact) {
     return (
       <Box
+        data-testid="workflow-run-card"
+        data-kind={run.kind}
+        data-prefix={run.prefix ?? ""}
+        data-status={run.status}
         sx={{
           display: "flex",
           alignItems: "center",
@@ -1676,6 +1684,12 @@ const WorkflowRunCard = ({
 
   return (
     <ApprovalCard
+      dataAttrs={{
+        "data-testid": "workflow-run-card",
+        "data-kind": run.kind,
+        "data-prefix": run.prefix ?? "",
+        "data-status": run.status,
+      }}
       pill={<StatusPill status={run.status} />}
       time={formatRelativeTime(run.updated_at)}
       title={run.prefix ? `${run.kind} · ${run.prefix}` : run.kind}
@@ -1824,7 +1838,7 @@ const WorkflowRunCard = ({
               </Typography>
               <Typography
                 variant="body2"
-                sx={{ fontWeight: 600, fontFamily: "monospace" }}
+                sx={{ fontWeight: 600, fontFamily: "var(--font-mono)" }}
               >
                 {truncatePartyId(run.added_participant)}
               </Typography>
@@ -1975,16 +1989,8 @@ export const NotificationsView = ({
   );
   const [doneCollapsed, setDoneCollapsed] = useState(true);
 
-  if (loading) {
-    return (
-      <Box sx={{ display: "flex", flexDirection: "column", gap: 1, p: 3 }}>
-        <NotificationSkeleton />
-        <NotificationSkeleton />
-        <NotificationSkeleton />
-      </Box>
-    );
-  }
-
+  // Built above the loading / empty early-returns so the pagination hook below
+  // runs on every render, loading or not.
   // ── Categorize every feed item by what it needs from the operator ──
   type Group = "you" | "prog" | "done";
   type Kind = "gov" | "wf" | "inv";
@@ -2092,16 +2098,6 @@ export const NotificationsView = ({
 
   entries.sort((a, b) => b.ts - a.ts);
 
-  if (entries.length === 0) {
-    return (
-      <Box sx={{ p: 4, textAlign: "center" }}>
-        <Typography variant="body2" color="text.secondary">
-          No pending notifications.
-        </Typography>
-      </Box>
-    );
-  }
-
   // Each chip's count reflects the *other* active filter dimension.
   const byKind = entries.filter(
     (e) => typeFilter === "all" || e.kind === typeFilter,
@@ -2121,6 +2117,36 @@ export const NotificationsView = ({
   }
   const anyVisible =
     grouped.you.length + grouped.prog.length + grouped.done.length > 0;
+
+  // "Needs your action" and "In progress" are bounded by how much work is live;
+  // only "Completed" grows without limit, so that's the section that pages.
+  const {
+    page: donePage,
+    setPage: setDonePage,
+    pageCount: donePageCount,
+    pageItems: donePageItems,
+    total: doneTotal,
+  } = usePagination(grouped.done);
+
+  if (loading) {
+    return (
+      <Box sx={{ display: "flex", flexDirection: "column", gap: 1, p: 3 }}>
+        <NotificationSkeleton />
+        <NotificationSkeleton />
+        <NotificationSkeleton />
+      </Box>
+    );
+  }
+
+  if (entries.length === 0) {
+    return (
+      <Box sx={{ p: 4, textAlign: "center" }}>
+        <Typography variant="body2" color="text.secondary">
+          No pending notifications.
+        </Typography>
+      </Box>
+    );
+  }
 
   const statusChips: { key: "all" | Group; label: string }[] = [
     { key: "all", label: "All" },
@@ -2319,21 +2345,23 @@ export const NotificationsView = ({
             </Box>
             {!collapsed && (
               <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
-                {grouped[group].map((e) => (
+                {(group === "done" ? donePageItems : grouped[group]).map((e) => (
                   <Fragment key={e.key}>{e.node}</Fragment>
                 ))}
               </Box>
             )}
+            {!collapsed && group === "done" && donePageCount > 1 && (
+              <PaginationControls
+                page={donePage}
+                pageCount={donePageCount}
+                total={doneTotal}
+                onChange={setDonePage}
+                sx={{ px: 0 }}
+              />
+            )}
           </Box>
         );
       })}
-      <PaginationControls
-        page={page}
-        pageCount={pageCount}
-        total={total}
-        onChange={setPage}
-        sx={{ px: 0 }}
-      />
     </Box>
   );
 };

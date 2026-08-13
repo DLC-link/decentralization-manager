@@ -257,6 +257,7 @@ export const ApprovalCard = ({
   footerLeft,
   actions,
   detail,
+  dataAttrs,
 }: {
   accent?: boolean;
   pill?: ReactNode;
@@ -266,10 +267,13 @@ export const ApprovalCard = ({
   footerLeft?: ReactNode;
   actions?: ReactNode;
   detail?: ReactNode;
+  /** `data-*` hooks set on the card root, for the e2e suite to select by. */
+  dataAttrs?: Record<string, string>;
 }) => {
   const [open, setOpen] = useState(false);
   return (
     <Box
+      {...dataAttrs}
       sx={{
         position: "relative",
         p: "14px 20px",
