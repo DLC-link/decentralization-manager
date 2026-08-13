@@ -60,20 +60,26 @@ const navItems = [
   { label: "Approvals", icon: <NotificationsIcon />, index: 3 },
 ];
 
-// Compile-time build metadata (injected via vite `define`). Shown at the
-// bottom of the expanded sidebar — see vite.config.ts / build.rs.
-const BUILD_INFO = (() => {
-  const version = __APP_VERSION__ === "dev" ? "dev build" : `v${__APP_VERSION__}`;
-  let when = __BUILD_DATE__;
+// Build stamp shown at the bottom of the expanded sidebar. Prefers the identity
+// the backend reports for the image actually running (CI image tag / short SHA,
+// and the time CI stamped it); falls back to the values vite injected at compile
+// time, which is all that exists before login, under `npm run dev` and in mock
+// mode. See vite.config.ts / build.rs.
+const buildStamp = (info?: BuildInfo) => {
+  const version =
+    info?.buildVersion ??
+    (__APP_VERSION__ === "dev" ? "dev build" : `v${__APP_VERSION__}`);
+  const iso = info?.buildTime ?? __BUILD_DATE__;
+  let when = iso;
   try {
-    const d = new Date(__BUILD_DATE__);
+    const d = new Date(iso);
     const p = (n: number) => String(n).padStart(2, "0");
     when = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
   } catch {
     /* fall back to the raw ISO string */
   }
   return `${version} · ${when}`;
-})();
+};
 
 export const Sidebar = ({
   activeTab,
@@ -277,7 +283,7 @@ export const Sidebar = ({
             color="text.secondary"
             sx={{ fontFamily: "var(--font-mono)", fontSize: "0.66rem", letterSpacing: "0.02em" }}
           >
-            {BUILD_INFO}
+            {buildStamp(buildInfo)}
           </Typography>
         </Box>
       )}
