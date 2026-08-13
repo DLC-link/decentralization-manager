@@ -222,6 +222,12 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: dec-party-manager
+        # A Prometheus-style collector reads `app` as the service name.
+        app: dec-party-manager
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "9464"
     spec:
       initContainers:
         - name: init-data
@@ -248,6 +254,9 @@ spec:
               containerPort: 8080
             - name: noise
               containerPort: 9000
+            - name: metrics
+              containerPort: 9464
+              protocol: TCP
           volumeMounts:
             - name: data
               mountPath: /app
@@ -261,6 +270,10 @@ spec:
             # fields as attributes only where a log pipeline parses the line,
             # so this environment needs its own decman pipeline in dlc-infra.
             # Set DECPM_LOG_FORMAT=text for the console format instead.
+            # Prometheus metrics are served on this port, separate from the API
+            # port so the Ingress never exposes them. Set 0 to disable.
+            - name: DECPM_METRICS_PORT
+              value: "9464"
           envFrom:
             - secretRef:
                 name: dec-party-manager-secrets
@@ -373,6 +386,7 @@ Most variables have a default that's only useful for local development (loopback
 |---|---|---|---|
 | `DECPM_LISTEN_ADDRESS` | `0.0.0.0` | optional | Noise transport bind address |
 | `DECPM_NOISE_PORT` | `9000` | optional | Noise transport port |
+| `DECPM_METRICS_PORT` | `9464` | optional | Prometheus metrics port, separate from the API port. `0` serves no metrics |
 | `DECPM_PUBLIC_ADDRESS` | falls back to `DECPM_LISTEN_ADDRESS` | **yes** | Hostname peers use to reach this node from the public internet |
 | `DECPM_CANTON_ADMIN_HOST` | `127.0.0.1` | **yes** | Canton Admin API host |
 | `DECPM_CANTON_ADMIN_PORT` | `5002` | optional | Canton Admin API port |
