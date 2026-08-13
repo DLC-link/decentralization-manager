@@ -320,13 +320,20 @@ pub struct AuthRegistry {
 }
 
 impl AuthRegistry {
-    /// Create a new AuthRegistry and initialize TokenManagers for all configured parties
+    /// Create a new AuthRegistry and initialize TokenManagers for all configured parties.
+    ///
+    /// A party whose credentials fail is skipped, so one broken party cannot
+    /// stop the others. That is a per-party fault, so it logs at `warn`. The
+    /// node as a whole is only broken when every configured party fails, and
+    /// that case logs at `error`.
     ///
     /// # Errors
     ///
-    /// Returns an error if authentication fails for any party
+    /// Never returns an error today. The signature stays fallible so a future
+    /// failure that does stop startup can be reported without changing callers.
     pub async fn new(parties: &[PartyCredentials]) -> Result<Self> {
         let mut managers = HashMap::new();
+        let mut failed = Vec::new();
 
         for party in parties {
             let dec_party_id = party.dec_party_id.to_string();
@@ -356,12 +363,22 @@ impl AuthRegistry {
                     managers.insert(dec_party_id, Arc::new(manager));
                 }
                 Err(e) => {
-                    tracing::error!(
+                    tracing::warn!(
                         "Failed to initialize auth for dec_party={dec_party_id}: {e}. \
                          Skipping — workflows for this party will fail until credentials are fixed."
                     );
+                    failed.push(dec_party_id);
                 }
             }
+        }
+
+        if managers.is_empty() && !failed.is_empty() {
+            tracing::error!(
+                "Authentication failed for all {} configured parties: {}. \
+                 This node can run no workflow until the credentials are fixed.",
+                failed.len(),
+                failed.join(", ")
+            );
         }
 
         Ok(Self { managers })
@@ -434,5 +451,162 @@ impl WorkflowAuth {
                 })
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use anyhow::anyhow;
+    use common::canton_id::{NAMESPACE_LENGTH, Namespace};
+    use tracing_subscriber::fmt::MakeWriter;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path_regex},
+    };
+
+    use super::{AuthRegistry, CantonId, KeycloakConfig, PartyCredentials};
+
+    /// A writer the test reads back once the subscriber has written to it.
+    #[derive(Clone, Default)]
+    struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedBuffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let mut written = self
+                .0
+                .lock()
+                .map_err(|_| std::io::Error::other("the buffer lock is poisoned"))?;
+            written.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for SharedBuffer {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// A Keycloak stand-in that answers every token request with `status`.
+    async fn keycloak_returning(status: u16, body: serde_json::Value) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r".*/token$"))
+            .respond_with(ResponseTemplate::new(status).set_body_json(body))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    fn party(name: u8, keycloak_url: &str) -> PartyCredentials {
+        let mut namespace = [0u8; NAMESPACE_LENGTH];
+        namespace[0] = name;
+        PartyCredentials {
+            dec_party_id: CantonId::new(format!("party{name}"), Namespace::new(namespace)),
+            member_party_id: CantonId::new(format!("member{name}"), Namespace::new(namespace)),
+            user_id: format!("user{name}"),
+            keycloak: KeycloakConfig {
+                url: keycloak_url.to_string(),
+                realm: "test-realm".to_string(),
+                client_id: "decman".to_string(),
+                client_secret: Some("secret".to_string()),
+                ..KeycloakConfig::default()
+            },
+            auth0: None,
+            packages: common::api::PackageConfig::default(),
+        }
+    }
+
+    fn captured(buffer: &SharedBuffer) -> anyhow::Result<String> {
+        let written = buffer
+            .0
+            .lock()
+            .map_err(|_| anyhow!("the buffer lock is poisoned"))?
+            .clone();
+        Ok(String::from_utf8(written)?)
+    }
+
+    /// One party with dead credentials is a per-party fault. The node still
+    /// serves every other party, so the general error-rate alert must not fire.
+    #[tokio::test]
+    async fn one_failing_party_logs_a_warning_and_no_error() -> anyhow::Result<()> {
+        let working = keycloak_returning(200, serde_json::json!({"access_token": "t"})).await;
+        let broken = keycloak_returning(500, serde_json::json!({"error": "nope"})).await;
+        let parties = [party(1, &working.uri()), party(2, &broken.uri())];
+
+        let buffer = SharedBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buffer.clone())
+            .with_ansi(false)
+            .finish();
+        let registry = {
+            let _guard = tracing::subscriber::set_default(subscriber);
+            AuthRegistry::new(&parties).await?
+        };
+
+        assert_eq!(registry.party_ids().len(), 1);
+        let logs = captured(&buffer)?;
+        assert!(logs.contains("WARN"), "no warning was logged: {logs}");
+        assert!(
+            !logs.contains("ERROR"),
+            "a single broken party logged an error: {logs}"
+        );
+        Ok(())
+    }
+
+    /// No party initialized, so the node can serve nobody. That is the one
+    /// startup outcome an operator must be paged about.
+    #[tokio::test]
+    async fn every_party_failing_logs_an_error() -> anyhow::Result<()> {
+        let broken = keycloak_returning(500, serde_json::json!({"error": "nope"})).await;
+        let parties = [party(1, &broken.uri()), party(2, &broken.uri())];
+
+        let buffer = SharedBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buffer.clone())
+            .with_ansi(false)
+            .finish();
+        let registry = {
+            let _guard = tracing::subscriber::set_default(subscriber);
+            AuthRegistry::new(&parties).await?
+        };
+
+        assert!(registry.party_ids().is_empty());
+        let logs = captured(&buffer)?;
+        assert!(
+            logs.contains("ERROR") && logs.contains("all 2 configured parties"),
+            "the all-parties-failed error is missing: {logs}"
+        );
+        Ok(())
+    }
+
+    /// A node with no configured party is idle, not broken.
+    #[tokio::test]
+    async fn no_configured_party_logs_no_error() -> anyhow::Result<()> {
+        let buffer = SharedBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buffer.clone())
+            .with_ansi(false)
+            .finish();
+        let registry = {
+            let _guard = tracing::subscriber::set_default(subscriber);
+            AuthRegistry::new(&[]).await?
+        };
+
+        assert!(registry.party_ids().is_empty());
+        let logs = captured(&buffer)?;
+        assert!(
+            !logs.contains("ERROR"),
+            "an empty party list logged an error: {logs}"
+        );
+        Ok(())
     }
 }
