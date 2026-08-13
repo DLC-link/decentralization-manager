@@ -17,20 +17,21 @@ pub use common::api::PAGE_SIZE;
 pub use common::api::{
     ActiveCouponReassignmentDelegation, AddPartyInvitePayload, AddPartyRequest, AuditLogResponse,
     AuthStatus, AuthStatusResponse, AuthTestResponse, AuthTestResult, CancelConfirmationRequest,
-    ChainAuditEntry, ChainAuditResponse, ChangeThresholdInvitePayload, ChangeThresholdRequest,
-    Claim, ContractQueryResponse, ContractWithBlob, ContractsInvitePayload, ContractsRequest,
-    CouponReassignmentDelegationSummary, CredentialOfferInfo, CredentialOffersResponse,
-    DarsInvitePayload, DarsRequest, DecentralizedPartiesResponse, DeclineInvitationPayload,
-    DisclosedContractInput, DiscoverMemberPartyRequest, DiscoverMemberPartyResponse, ErrorResponse,
-    ExpireConfirmationRequest, ExternalPartiesResponse, ExternalPartyInfo, GovernanceState,
-    GovernanceStateResponse, GovernanceType, GrantRightsRequest, GrantRightsResponse,
-    InstrumentAllowance, InstrumentId, InstrumentIdentifier, InstrumentInfo, InstrumentsResponse,
-    InvitationActionRequest, KeyStatusResponse, KickInvitePayload, KickRequest, KnownMember,
-    KnownMembersResponse, MessageResponse, MissingEdgeKind, MissingPeerEdge, NetworkInfo,
-    OnboardingInvitePayload, OnboardingMeshErrorResponse, OnboardingRequest, OperatorInfo,
-    PartyAuthStatus, PartyConfigRequest, PartyConfigResponse, PendingInvitationsResponse,
-    ProviderServiceInfo, ProviderServicesResponse, RegistrarServiceInfo, RegistrarServicesResponse,
-    ResponseSource, RightsStatus, SuccessResponse, TenantOnboardRequest, TenantOnboardResponse,
+    CancelProposalRequest, ChainAuditEntry, ChainAuditResponse, ChangeThresholdInvitePayload,
+    ChangeThresholdRequest, Claim, ContractQueryResponse, ContractWithBlob, ContractsInvitePayload,
+    ContractsRequest, CouponReassignmentDelegationSummary, CredentialOfferInfo,
+    CredentialOffersResponse, DarsInvitePayload, DarsRequest, DecentralizedPartiesResponse,
+    DeclineInvitationPayload, DisclosedContractInput, DiscoverMemberPartyRequest,
+    DiscoverMemberPartyResponse, ErrorResponse, ExpireConfirmationRequest, ExternalPartiesResponse,
+    ExternalPartyInfo, GovernanceState, GovernanceStateResponse, GovernanceType,
+    GrantRightsRequest, GrantRightsResponse, InstrumentAllowance, InstrumentId,
+    InstrumentIdentifier, InstrumentInfo, InstrumentsResponse, InvitationActionRequest,
+    KeyStatusResponse, KickInvitePayload, KickRequest, KnownMember, KnownMembersResponse,
+    MessageResponse, MissingEdgeKind, MissingPeerEdge, NetworkInfo, OnboardingInvitePayload,
+    OnboardingMeshErrorResponse, OnboardingRequest, OperatorInfo, PartyAuthStatus,
+    PartyConfigRequest, PartyConfigResponse, PendingInvitationsResponse, ProviderServiceInfo,
+    ProviderServicesResponse, RegistrarServiceInfo, RegistrarServicesResponse, ResponseSource,
+    RightsStatus, SuccessResponse, TenantOnboardRequest, TenantOnboardResponse,
     TenantPrepareRequest, TenantPrepareResponse, TransferFactoriesResponse, TransferFactoryInfo,
     TransferPreapprovalsResponse, UserServiceInfo, UserServicesResponse, VaultInfo, VaultsResponse,
     WorkflowResponse, WorkflowRunsResponse, WorkflowStatusResponse,
@@ -952,6 +953,13 @@ pub struct DomainGovernanceAction {
     /// proposal kinds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_request_details: Option<ServiceRequestDetails>,
+    /// The member who created the proposal, read from the proposal contract.
+    /// Only that member can retract it with `GovernableAction_ProposerCancel`,
+    /// so the card shows the retract button when this equals the node's own
+    /// member party. Absent on an orphaned card, where the proposal contract
+    /// is no longer readable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposer: Option<CantonId>,
 }
 
 /// Operator + counterparty parties extracted from a service-request proposal

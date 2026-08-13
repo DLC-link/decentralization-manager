@@ -845,6 +845,23 @@ pub struct CancelConfirmationRequest {
     pub governance_type: GovernanceType,
 }
 
+/// Request to retract a proposal the caller proposed.
+///
+/// `confirmation_cid` carries the caller's own confirmation on that proposal,
+/// which `/governance/propose` always creates. The server archives it in the
+/// same transaction, because a confirmation that outlives its proposal can
+/// only be cleared by its own confirmer, and only `GovernanceConfirmation_Cancel`
+/// clears it without waiting for the expiry time.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct CancelProposalRequest {
+    pub party_id: CantonId,
+    pub proposal_cid: String,
+    #[serde(default)]
+    pub confirmation_cid: Option<String>,
+}
+
 /// State of a VaultGovernanceRules contract
 #[derive(Clone, Debug, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
