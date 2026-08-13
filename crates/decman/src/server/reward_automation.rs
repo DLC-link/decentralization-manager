@@ -1009,13 +1009,23 @@ where
         }
     }
 
+    let label = decparty.to_string();
+    if assigned > 0 {
+        ASSIGNED
+            .with_label_values(&[&label])
+            .inc_by(assigned as u64);
+    }
     if skipped > 0 {
+        SKIPPED.with_label_values(&[&label]).inc_by(skipped as u64);
         tracing::error!(
             %decparty,
             skipped,
             assigned,
-            "some coupons could not be assigned; they will be retried next tick"
+            "some coupons could not be assigned; they will be retried next sweep"
         );
+    }
+    if all_coupons_refused(assigned, skipped) {
+        ZERO_ASSIGNED.with_label_values(&[&label]).inc();
     }
     assigned
 }
@@ -1090,6 +1100,11 @@ pub(crate) async fn run_reward_automation_loop(data: actix_web::web::Data<AppSta
 /// its backlog rather than waiting out an interval.
 fn sweep_is_due(since_last_sweep: Option<Duration>, interval: Duration) -> bool {
     since_last_sweep.is_none_or(|elapsed| elapsed >= interval)
+}
+
+/// A sweep whose every attempted coupon was refused (pure). Design §2, condition 3.
+fn all_coupons_refused(assigned: usize, skipped: usize) -> bool {
+    assigned == 0 && skipped > 0
 }
 
 /// Seconds from `now` until `expires_at` (pure). Negative once the moment has
@@ -2004,5 +2019,20 @@ mod tests {
     fn oldest_expiry_is_none_for_an_empty_backlog() {
         // The loop reads this as "drop the series", so it must not be a zero.
         assert_eq!(oldest_expiry(&[]), None);
+    }
+
+    #[test]
+    fn a_sweep_that_paid_nothing_while_every_coupon_was_refused_counts() {
+        assert!(all_coupons_refused(0, 3));
+    }
+
+    #[test]
+    fn a_sweep_that_paid_something_does_not_count() {
+        assert!(!all_coupons_refused(7, 3));
+    }
+
+    #[test]
+    fn a_sweep_with_nothing_to_do_does_not_count() {
+        assert!(!all_coupons_refused(0, 0));
     }
 }
