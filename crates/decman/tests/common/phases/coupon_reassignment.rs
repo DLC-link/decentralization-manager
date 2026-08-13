@@ -584,14 +584,22 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                                 return None;
                             }
                         };
-                        Some(if skipped >= 1.0 {
-                            Ok(())
+                        if skipped >= 1.0 {
+                            Some(Ok(()))
                         } else {
-                            Err(anyhow::anyhow!(
-                                "assigned reached {assigned} but skipped is {skipped}; the \
-                                 unassignable coupon should have been counted"
-                            ))
-                        })
+                            // Reachable, not just theoretical: the drain's fan-out can
+                            // `break 'chunks` on a transient error, and if that lands on
+                            // the unassignable coupon's isolated submission after the
+                            // healthy coupons already committed, the sweep ends with
+                            // `assigned` complete and `skipped` still 0. Nothing
+                            // quarantines that coupon, so retry within the deadline
+                            // instead of failing the run — the next sweep re-finds it.
+                            warn!(
+                                "counter assertion: assigned reached {assigned} but skipped \
+                                 is still {skipped}; retrying"
+                            );
+                            None
+                        }
                     })
                 },
             )
