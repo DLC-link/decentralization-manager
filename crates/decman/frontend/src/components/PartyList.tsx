@@ -23,6 +23,13 @@ interface PartyListProps {
 // keep the two aligned.
 const AUTH_SLOT = 56;
 const VISIBILITY_SLOT = 84;
+// Trailing dead space inside the row, standing in for the spacer cell the table
+// used to carry: it holds the visibility toggle out from under the fixed
+// Create-Party FAB (56px, offset 24px) that this view renders over the
+// bottom-right corner. Padding the container instead would make its horizontal
+// inset lopsided, which shows as an off-centre list once `--content-pad`
+// bottoms out on a small screen.
+const FAB_GUTTER = 40;
 
 const legendSx = {
   fontFamily: "var(--font-mono)",
@@ -77,16 +84,7 @@ export const PartyList = ({
   }
 
   return (
-    // The Create-Party FAB (56px, offset 24px) is fixed over this view's
-    // bottom-right corner, so the cards stop short of it — otherwise it covers
-    // the visibility toggle on whichever row it happens to sit over.
-    <Box
-      sx={{
-        pl: "var(--content-pad)",
-        pr: "calc(var(--content-pad) + 40px)",
-        pt: 1,
-      }}
-    >
+    <Box sx={{ px: "var(--content-pad)", pt: 1 }}>
       {/* Legend — padded to line up with the cards' own 16px inset. */}
       <Box
         sx={{
@@ -117,6 +115,7 @@ export const PartyList = ({
         >
           Visibility
         </Typography>
+        <Box sx={{ width: FAB_GUTTER, flexShrink: 0 }} aria-hidden />
       </Box>
 
       <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
@@ -170,6 +169,7 @@ export const PartyList = ({
                   </IconButton>
                 </Tooltip>
               </Box>
+              <Box sx={{ width: FAB_GUTTER, flexShrink: 0 }} aria-hidden />
             </RowCard>
           );
         })}
