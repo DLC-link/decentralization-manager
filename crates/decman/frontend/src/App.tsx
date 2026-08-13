@@ -972,7 +972,7 @@ const App = () => {
               <Tabs
                 value={partiesView}
                 onChange={(_e, v) => setPartiesView(v)}
-                sx={{ px: 2, mb: 1 }}
+                sx={{ px: "var(--content-pad)", mb: 1 }}
               >
                 <Tab value="decentralized" label="Decentralized Parties" />
                 <Tab value="external" label="External Parties" />
