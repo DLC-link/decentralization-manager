@@ -47,6 +47,7 @@ use crate::{
     utils,
 };
 
+use std::collections::HashMap;
 use std::sync::LazyLock;
 use std::time::Duration;
 
@@ -774,6 +775,12 @@ pub(crate) async fn submit_delegation_assign(
     Ok(())
 }
 
+/// The earliest expiry in an unassigned pile (pure). Every coupon counts, not
+/// only the assignable ones — design §6, change 4.
+fn oldest_expiry(coupons: &[CouponInfo]) -> Option<DateTime<Utc>> {
+    coupons.iter().map(|c| c.expires_at).min()
+}
+
 /// One reassign tick for a decparty under the delegation model: read the
 /// unassigned coupons and assign **all** the assignable ones, in successive
 /// chunked `Delegation_Assign` transactions. Nothing assignable is a no-op.
@@ -796,7 +803,7 @@ pub(crate) async fn run_reassign_once(
     delegation: &ActiveDelegation,
     test_mode: bool,
     packages: &PackageConfig,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<DateTime<Utc>>> {
     let expiry_margin =
         chrono::Duration::seconds(config.reward_min_expiry_margin_secs.min(i64::MAX as u64) as i64);
 
@@ -809,9 +816,10 @@ pub(crate) async fn run_reassign_once(
         packages,
     )
     .await?;
+    let oldest = oldest_expiry(&coupons);
     let assignable = select_assignable(&coupons, Utc::now(), expiry_margin);
     if assignable.is_empty() {
-        return Ok(()); // nothing assignable -> no-op
+        return Ok(oldest);
     }
 
     let assigned = drain_assignable(
@@ -835,7 +843,7 @@ pub(crate) async fn run_reassign_once(
     if assigned > 0 {
         tracing::info!(%decparty, %assigner, count = assigned, "reassigned coupon batch");
     }
-    Ok(())
+    Ok(oldest)
 }
 
 /// Canton error ids that mean this node's view is stale, or the network
@@ -1016,22 +1024,41 @@ where
 // Background loop + registration
 // ============================================================================
 
-/// Per-node background loop: every `reward_automation_interval_secs`, read the
-/// active `CouponReassignmentDelegation` for each decparty this node holds
-/// credentials for, and — if this node's member party is a listed assigner —
-/// reassign its due coupons via [`run_reassign_once`]. Enablement is
-/// on-ledger — a decparty with no active delegation is skipped.
+/// The loop's wake interval, independent of the reward cadence. Design §5, "Three
+/// clocks".
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Per-node background loop. It records a heartbeat every [`HEARTBEAT_INTERVAL`] and
+/// sweeps each decparty it holds credentials for every
+/// `reward_automation_interval_secs`. Enablement is on-ledger: a decparty with no
+/// active delegation is skipped.
+///
+/// The heartbeat shares this task with the sweep deliberately; design §6, the
+/// supervisor section, says why.
 pub(crate) async fn run_reward_automation_loop(data: actix_web::web::Data<AppState>) {
-    // `tokio::time::interval` panics on a zero period, which would silently kill
-    // this background task; clamp a misconfigured 0 to 1s and warn.
     let interval_secs = data.config.reward_automation_interval_secs;
     if interval_secs == 0 {
         tracing::warn!("reward_automation_interval_secs is 0; using 1s instead");
     }
-    let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs.max(1)));
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let sweep_interval = Duration::from_secs(interval_secs.max(1));
+
+    let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut last_sweep: Option<tokio::time::Instant> = None;
+    // Recomputed into the gauge on every heartbeat (design §5).
+    let mut oldest_expiry: HashMap<CantonId, DateTime<Utc>> = HashMap::new();
+
     loop {
-        ticker.tick().await;
+        heartbeat.tick().await;
+        HEARTBEAT.inc();
+        report_oldest_expiry(&oldest_expiry, Utc::now());
+
+        let now = tokio::time::Instant::now();
+        if !sweep_is_due(last_sweep.map(|t| now.duration_since(t)), sweep_interval) {
+            continue;
+        }
+        last_sweep = Some(now);
+
         let parties: Vec<CantonId> = data
             .party_credentials
             .read()
@@ -1039,12 +1066,86 @@ pub(crate) async fn run_reward_automation_loop(data: actix_web::web::Data<AppSta
             .iter()
             .map(|p| p.dec_party_id.clone())
             .collect();
+
+        prune_unserved(&mut oldest_expiry, &parties);
+
         for decparty in parties {
-            if let Err(e) = run_once_for_party(&data, &decparty).await {
-                tracing::warn!(%decparty, error = %e, "reward automation tick failed");
-            }
+            let label = decparty.to_string();
+            SWEEPS.with_label_values(&[&label]).inc();
+            let outcome = match run_once_for_party(&data, &decparty).await {
+                Ok(Some(expires_at)) => SweepOutcome::Backlog(expires_at),
+                Ok(None) => SweepOutcome::Empty,
+                Err(e) => {
+                    SWEEP_FAILED.with_label_values(&[&label]).inc();
+                    tracing::warn!(%decparty, error = %e, "reward automation sweep failed");
+                    SweepOutcome::Failed
+                }
+            };
+            apply_sweep_outcome(&mut oldest_expiry, &decparty, outcome);
         }
     }
+}
+
+/// Whether a reward sweep is due (pure). `None` is always due: a fresh pod drains
+/// its backlog rather than waiting out an interval.
+fn sweep_is_due(since_last_sweep: Option<Duration>, interval: Duration) -> bool {
+    since_last_sweep.is_none_or(|elapsed| elapsed >= interval)
+}
+
+/// Seconds from `now` until `expires_at` (pure). Negative once the moment has
+/// passed, and sub-second precise; design §5 and §9 rely on both.
+fn seconds_until(expires_at: DateTime<Utc>, now: DateTime<Utc>) -> f64 {
+    (expires_at - now).num_milliseconds() as f64 / 1000.0
+}
+
+/// Publishes the expiry countdown for every remembered decparty.
+fn report_oldest_expiry(oldest: &HashMap<CantonId, DateTime<Utc>>, now: DateTime<Utc>) {
+    for (decparty, expires_at) in oldest {
+        OLDEST_EXPIRES_IN
+            .with_label_values(&[&decparty.to_string()])
+            .set(seconds_until(*expires_at, now));
+    }
+}
+
+/// What one sweep learned about a decparty's unassigned backlog.
+enum SweepOutcome {
+    /// The oldest unassigned coupon expires at this instant.
+    Backlog(DateTime<Utc>),
+    /// Nothing unassigned, or the automation is switched off for this decparty.
+    Empty,
+    /// The sweep errored before it could tell.
+    Failed,
+}
+
+/// Applies one sweep's outcome to the remembered timestamps. The three arms are
+/// asymmetrical on purpose — design §6, change 4.
+fn apply_sweep_outcome(
+    oldest: &mut HashMap<CantonId, DateTime<Utc>>,
+    decparty: &CantonId,
+    outcome: SweepOutcome,
+) {
+    match outcome {
+        SweepOutcome::Backlog(expires_at) => {
+            oldest.insert(decparty.clone(), expires_at);
+        }
+        SweepOutcome::Empty => {
+            oldest.remove(decparty);
+            let _ = OLDEST_EXPIRES_IN.remove_label_values(&[&decparty.to_string()]);
+        }
+        SweepOutcome::Failed => {}
+    }
+}
+
+/// Forgets every decparty this node no longer holds credentials for, dropping its
+/// gauge series with it. Design §5 says why the series must go too.
+fn prune_unserved(oldest: &mut HashMap<CantonId, DateTime<Utc>>, served: &[CantonId]) {
+    oldest.retain(|decparty, _| {
+        let still_served = served.contains(decparty);
+        if !still_served {
+            let _ = OLDEST_EXPIRES_IN.remove_label_values(&[&decparty.to_string()]);
+        }
+        still_served
+    });
 }
 
 /// One reassign pass for a single decparty under the delegation model. No-op
@@ -1053,21 +1154,21 @@ pub(crate) async fn run_reward_automation_loop(data: actix_web::web::Data<AppSta
 async fn run_once_for_party(
     data: &actix_web::web::Data<AppState>,
     decparty: &CantonId,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<DateTime<Utc>>> {
     let pkgs = packages();
     let Some((token, member)) = get_party_credentials(data, decparty).await else {
-        return Ok(());
+        return Ok(None);
     };
     // Enablement: an active delegation. None => off (no-op).
     let Some(delegation) =
         active_delegation(&data.config, &pkgs, data.test_mode, decparty, &token).await?
     else {
-        return Ok(());
+        return Ok(None);
     };
     // This node must be a listed assigner, else it cannot reassign.
     if !delegation.assigners.contains(&member) {
         tracing::debug!(%decparty, %member, "node not an assigner on the delegation — skipping");
-        return Ok(());
+        return Ok(None);
     }
     run_reassign_once(
         &data.config,
@@ -1790,5 +1891,118 @@ mod tests {
                 .iter()
                 .any(|n| n == "decman_reward_sweep_total")
         );
+    }
+
+    #[test]
+    fn the_expiry_countdown_falls_with_real_time_not_with_the_sweep() {
+        // Falls with real time, not with the sweep cadence (design §5).
+        let decparty = CantonId::parse(GOV).expect("GOV is a valid canton id");
+        let expires_at = dt("2026-07-20T18:00:00Z");
+        let mut oldest = HashMap::new();
+        oldest.insert(decparty.clone(), expires_at);
+
+        report_oldest_expiry(&oldest, dt("2026-07-20T12:00:00Z"));
+        let six_hours = OLDEST_EXPIRES_IN
+            .get_metric_with_label_values(&[&decparty.to_string()])
+            .expect("label values are valid")
+            .get();
+        assert_eq!(six_hours, 6.0 * 3600.0);
+
+        // Twenty minutes later, with no sweep in between.
+        report_oldest_expiry(&oldest, dt("2026-07-20T12:20:00Z"));
+        let after = OLDEST_EXPIRES_IN
+            .get_metric_with_label_values(&[&decparty.to_string()])
+            .expect("label values are valid")
+            .get();
+        assert_eq!(after, 6.0 * 3600.0 - 1200.0);
+    }
+
+    #[test]
+    fn a_failed_sweep_keeps_the_countdown_running() {
+        // A failure must leave the timestamp alone (design §6, change 4).
+        let decparty = CantonId::parse(ALICE).expect("ALICE is a valid canton id");
+        let expires_at = dt("2026-07-20T18:00:00Z");
+        let mut oldest = HashMap::new();
+
+        apply_sweep_outcome(&mut oldest, &decparty, SweepOutcome::Backlog(expires_at));
+        assert_eq!(oldest.get(&decparty), Some(&expires_at), "a backlog writes");
+
+        apply_sweep_outcome(&mut oldest, &decparty, SweepOutcome::Failed);
+        assert_eq!(
+            oldest.get(&decparty),
+            Some(&expires_at),
+            "a failure must leave the timestamp in place"
+        );
+
+        apply_sweep_outcome(&mut oldest, &decparty, SweepOutcome::Empty);
+        assert!(oldest.is_empty(), "an empty backlog removes");
+    }
+
+    #[test]
+    fn a_decparty_this_node_stopped_serving_is_forgotten() {
+        // Otherwise the countdown outlives the credentials (design §5).
+        let decparty = CantonId::parse(BOB).expect("BOB is a valid canton id");
+        let mut oldest = HashMap::new();
+        oldest.insert(decparty.clone(), dt("2026-07-20T18:00:00Z"));
+
+        prune_unserved(&mut oldest, std::slice::from_ref(&decparty));
+        assert!(
+            oldest.contains_key(&decparty),
+            "still served, so still tracked"
+        );
+
+        prune_unserved(&mut oldest, &[]);
+        assert!(oldest.is_empty(), "no longer served, so forgotten");
+    }
+
+    #[test]
+    fn the_first_sweep_of_a_process_is_always_due() {
+        // A fresh pod drains its backlog instead of waiting out an interval.
+        assert!(sweep_is_due(None, Duration::from_secs(21_600)));
+    }
+
+    #[test]
+    fn a_sweep_is_due_once_the_interval_has_elapsed() {
+        let interval = Duration::from_secs(600);
+        assert!(!sweep_is_due(Some(Duration::from_secs(599)), interval));
+        assert!(sweep_is_due(Some(Duration::from_secs(600)), interval));
+        assert!(sweep_is_due(Some(Duration::from_secs(601)), interval));
+    }
+
+    #[test]
+    fn seconds_until_counts_down_to_the_expiry() {
+        let now = dt("2026-07-20T12:00:00Z");
+        assert_eq!(seconds_until(dt("2026-07-20T18:00:00Z"), now), 6.0 * 3600.0);
+    }
+
+    #[test]
+    fn seconds_until_is_negative_for_an_expired_coupon() {
+        // Negative rather than clamped: the value is lost, and by how long matters.
+        let now = dt("2026-07-20T12:00:00Z");
+        assert_eq!(seconds_until(dt("2026-07-20T11:00:00Z"), now), -3600.0);
+    }
+
+    #[test]
+    fn seconds_until_keeps_sub_second_precision() {
+        // §9 compares two samples 20 minutes apart.
+        let now = dt("2026-07-20T12:00:00Z");
+        assert_eq!(seconds_until(dt("2026-07-20T12:00:00.500Z"), now), 0.5);
+    }
+
+    #[test]
+    fn oldest_expiry_takes_the_earliest_of_the_pile() {
+        // Not the first read, and not the most urgent assignable one.
+        let coupons = vec![
+            coupon("a", "2026-07-20T18:00:00Z"),
+            coupon("b", "2026-07-20T12:00:00Z"),
+            coupon("c", "2026-07-20T15:00:00Z"),
+        ];
+        assert_eq!(oldest_expiry(&coupons), Some(dt("2026-07-20T12:00:00Z")));
+    }
+
+    #[test]
+    fn oldest_expiry_is_none_for_an_empty_backlog() {
+        // The loop reads this as "drop the series", so it must not be a zero.
+        assert_eq!(oldest_expiry(&[]), None);
     }
 }
