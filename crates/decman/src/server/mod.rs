@@ -1117,6 +1117,18 @@ pub async fn start_server(
     if metrics_port == 0 {
         tracing::info!("Metrics endpoint disabled (metrics_port = 0)");
     } else {
+        if metrics_port == port || metrics_port == config.node.port {
+            // The metrics listener binds first (below), so on a collision it
+            // wins and the API or noise server dies instead, reporting the
+            // wrong listener as the cause.
+            tracing::warn!(
+                metrics_port,
+                api_port = port,
+                noise_port = config.node.port,
+                "metrics_port collides with another listener; whichever binds first wins and \
+                 the other will fail to start"
+            );
+        }
         let metrics_host = host.to_string();
         match HttpServer::new(|| App::new().route("/metrics", web::get().to(handlers::metrics)))
             // One worker: the default is one per logical CPU.
