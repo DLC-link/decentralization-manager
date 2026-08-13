@@ -86,7 +86,12 @@ export const PartyList = ({
             >
               Auth
             </TableCell>
-            <TableCell sx={{ py: 1, width: 56 }} align="center" />
+            <TableCell
+              sx={{ py: 1, width: "1%", whiteSpace: "nowrap" }}
+              align="center"
+            >
+              Visibility
+            </TableCell>
             <TableCell sx={{ py: 1 }} aria-hidden />
           </TableRow>
         </TableHead>
@@ -137,7 +142,10 @@ export const PartyList = ({
                     <AuthStatusIcon status={auth} />
                   </Box>
                 </TableCell>
-                <TableCell sx={{ py: 1, width: 56 }} align="center">
+                <TableCell
+                  sx={{ py: 1, width: "1%", whiteSpace: "nowrap" }}
+                  align="center"
+                >
                   <Tooltip title={hidden ? "Unhide party" : "Hide party"}>
                     <IconButton
                       size="small"
