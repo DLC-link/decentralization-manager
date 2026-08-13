@@ -775,10 +775,18 @@ pub(crate) async fn submit_delegation_assign(
     Ok(())
 }
 
-/// The earliest expiry in an unassigned pile (pure). Every coupon counts, not
-/// only the assignable ones — design §6, change 4.
-fn oldest_expiry(coupons: &[CouponInfo]) -> Option<DateTime<Utc>> {
-    coupons.iter().map(|c| c.expires_at).min()
+/// The earliest expiry among unassigned coupons still worth saving (pure): every
+/// coupon that has not yet expired counts, including ones inside the
+/// assignability margin — design §6, change 4. An already-expired coupon is
+/// excluded; the DSO's reaper does not archive it promptly (it can sit active
+/// for weeks), so including it would pin the gauge to a corpse instead of the
+/// backlog a responder can still act on.
+fn oldest_expiry(coupons: &[CouponInfo], now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    coupons
+        .iter()
+        .map(|c| c.expires_at)
+        .filter(|&expires_at| expires_at > now)
+        .min()
 }
 
 /// One reassign sweep for a decparty under the delegation model: read the
@@ -816,8 +824,9 @@ pub(crate) async fn run_reassign_once(
         packages,
     )
     .await?;
-    let oldest = oldest_expiry(&coupons);
-    let assignable = select_assignable(&coupons, Utc::now(), expiry_margin);
+    let now = Utc::now();
+    let oldest = oldest_expiry(&coupons, now);
+    let assignable = select_assignable(&coupons, now, expiry_margin);
     if assignable.is_empty() {
         return Ok(oldest);
     }
@@ -2059,18 +2068,48 @@ mod tests {
     #[test]
     fn oldest_expiry_takes_the_earliest_of_the_pile() {
         // Not the first read, and not the most urgent assignable one.
+        let now = dt("2026-07-20T00:00:00Z");
         let coupons = vec![
             coupon("a", "2026-07-20T18:00:00Z"),
             coupon("b", "2026-07-20T12:00:00Z"),
             coupon("c", "2026-07-20T15:00:00Z"),
         ];
-        assert_eq!(oldest_expiry(&coupons), Some(dt("2026-07-20T12:00:00Z")));
+        assert_eq!(
+            oldest_expiry(&coupons, now),
+            Some(dt("2026-07-20T12:00:00Z"))
+        );
     }
 
     #[test]
     fn oldest_expiry_is_none_for_an_empty_backlog() {
         // The loop reads this as "drop the series", so it must not be a zero.
-        assert_eq!(oldest_expiry(&[]), None);
+        let now = dt("2026-07-20T00:00:00Z");
+        assert_eq!(oldest_expiry(&[], now), None);
+    }
+
+    #[test]
+    fn oldest_expiry_ignores_an_expired_coupon_in_favour_of_a_later_live_one() {
+        // The expired coupon has the numerically smallest `expires_at` in the
+        // pile — without the expiry filter it would win the minimum.
+        let now = dt("2026-07-20T12:00:00Z");
+        let coupons = vec![
+            coupon("dead", "2026-07-19T00:00:00Z"),
+            coupon("live", "2026-07-20T18:00:00Z"),
+        ];
+        assert_eq!(
+            oldest_expiry(&coupons, now),
+            Some(dt("2026-07-20T18:00:00Z"))
+        );
+    }
+
+    #[test]
+    fn oldest_expiry_is_none_when_every_coupon_has_expired() {
+        let now = dt("2026-07-20T12:00:00Z");
+        let coupons = vec![
+            coupon("dead-1", "2026-07-19T00:00:00Z"),
+            coupon("dead-2", "2026-07-18T00:00:00Z"),
+        ];
+        assert_eq!(oldest_expiry(&coupons, now), None);
     }
 
     #[test]
