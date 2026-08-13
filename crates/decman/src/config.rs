@@ -269,6 +269,9 @@ pub struct NodeConfig {
     /// try, so this should be a small submission-latency allowance rather than
     /// a generous window. Default 120s.
     pub reward_min_expiry_margin_secs: u64,
+    /// Port serving Prometheus metrics at `/metrics`, on its own listener rather
+    /// than the API port. 0 serves no metrics. Default 9464.
+    pub metrics_port: u16,
     /// Top-level Keycloak config for frontend website gating
     pub keycloak: Option<KeycloakConfig>,
     /// Top-level Auth0 config for frontend website gating (mutually exclusive
@@ -302,6 +305,7 @@ impl Default for NodeConfig {
             reward_automation_interval_secs: 300,
             reward_max_creates: 100,
             reward_min_expiry_margin_secs: 120,
+            metrics_port: 9464,
             keycloak: None,
             auth0: None,
             insecure: false,

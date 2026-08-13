@@ -173,6 +173,7 @@ async fn run() -> Result {
             reward_automation_interval_secs,
             reward_max_creates,
             reward_min_expiry_margin_secs,
+            metrics_port,
             db_encryption_key,
             insecure,
             canton_hmac_secret,
@@ -302,6 +303,9 @@ async fn run() -> Result {
             }
             if let Some(v) = reward_min_expiry_margin_secs {
                 config.reward_min_expiry_margin_secs = *v;
+            }
+            if let Some(v) = metrics_port {
+                config.metrics_port = *v;
             }
 
             config.tenant_api_keys = tenant_api_keys

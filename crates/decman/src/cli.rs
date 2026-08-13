@@ -260,5 +260,9 @@ pub enum Commands {
         /// the beneficiary. Defaults to 120.
         #[arg(long, env = "DECPM_REWARD_MIN_EXPIRY_MARGIN_SECS")]
         reward_min_expiry_margin_secs: Option<u64>,
+        /// Port serving Prometheus metrics at /metrics, on its own listener.
+        /// 0 disables the endpoint. Defaults to 9464.
+        #[arg(long, env = "DECPM_METRICS_PORT")]
+        metrics_port: Option<u16>,
     },
 }
