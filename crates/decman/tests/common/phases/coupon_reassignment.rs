@@ -49,7 +49,7 @@
 //! So this phase observes, at the HTTP layer: delegation **presence** (the
 //! keyless-singleton invariant: exactly one `CouponReassignmentDelegation`) and
 //! coupon **archival** (an originally-visible unassigned coupon cid is gone
-//! after a tick). It **cannot** assert, at the HTTP layer, that each resulting
+//! after a sweep). It **cannot** assert, at the HTTP layer, that each resulting
 //! coupon carries a specific `beneficiary` or the 0.8 / 0.2 `amount` shares.
 //!
 //! On **localnet**, the split IS asserted by value: each beneficiary party is
@@ -490,7 +490,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         // coupon at a time. What proves the fan-out worked is the pair of facts:
         // every healthy coupon was paid (asserted above, and by the split totals
         // which already reconcile to the full seeded amount), and this one is
-        // still sitting there unassigned rather than having wedged the tick.
+        // still sitting there unassigned rather than having wedged the sweep.
         Scenario::new("an unassignable coupon is isolated, not fatal")
             .then(
                 "exactly one coupon remains, unassigned, at the unassignable amount",
@@ -513,7 +513,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                             .filter(|(bene, _)| bene.is_none())
                             .map(|(_, amt)| amt)
                             .collect();
-                        // The drain may still be mid-tick; keep polling until the
+                        // The drain may still be mid-sweep; keep polling until the
                         // healthy set has drained away.
                         if unassigned.len() > 1 {
                             return None;
@@ -521,7 +521,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         let [amount] = unassigned.as_slice() else {
                             return Some(Err(anyhow::anyhow!(
                                 "no unassigned coupon left; the unassignable one should survive \
-                                 every tick, since nothing quarantines it"
+                                 every sweep, since nothing quarantines it"
                             )));
                         };
                         let wanted: f64 = UNASSIGNABLE_AMOUNT.parse().unwrap_or(f64::NAN);

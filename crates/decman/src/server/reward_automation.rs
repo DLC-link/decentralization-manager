@@ -24,7 +24,7 @@
 //!   are not read here — `Delegation_Assign` enforces them in DAML.
 //! * [`unassigned_coupons`] — reads the decparty's unassigned `RewardCoupon`
 //!   interface views.
-//! * [`run_reassign_once`] — one reassign tick: assigns every assignable
+//! * [`run_reassign_once`] — one reassign sweep: assigns every assignable
 //!   unassigned coupon via successive chunked `Delegation_Assign` transactions.
 //!
 //! The pure record decoders, selection and chunk sizing ([`select_assignable`],
@@ -452,7 +452,7 @@ pub(crate) struct CouponInfo {
 /// That restriction is load-bearing, not tidiness. `Delegation_Assign` fetches
 /// the primary as the concrete `RewardCouponV2`, so any other implementation of
 /// the interface would pass this reader and fail the exercise. Sorted
-/// most-urgent-first it would head the batch on every tick and stall the drain
+/// most-urgent-first it would head the batch on every sweep and stall the drain
 /// (see [`drain_assignable`]). The reader admitting exactly what the DAML
 /// accepts is what keeps the two in step; a second implementation shipping, or
 /// a package skew, must not wedge the engine.
@@ -619,9 +619,9 @@ fn is_assignable(c: &CouponInfo, now: DateTime<Utc>, expiry_margin: chrono::Dura
 /// Every assignable coupon (pure), ordered most-urgent-first (ascending
 /// `expiresAt`) so that under any partial failure the coupons closest to expiry
 /// are assigned first. The whole set is returned — it is *not* truncated to a
-/// batch size, because a tick assigns all of it in successive chunked
+/// batch size, because a sweep assigns all of it in successive chunked
 /// transactions (see [`chunk_size`] and [`run_reassign_once`]); the chunk size
-/// bounds one transaction, not a tick's work.
+/// bounds one transaction, not a sweep's work.
 pub(crate) fn select_assignable(
     coupons: &[CouponInfo],
     now: DateTime<Utc>,
@@ -641,7 +641,7 @@ pub(crate) fn select_assignable(
 /// `coupons × beneficiaries` contracts — so the cap is expressed in *output
 /// creates* and the coupon count is derived from the delegation's beneficiary
 /// count. A fixed coupon count would be `beneficiary_count`-times looser for a
-/// wide split than a narrow one. Never returns 0, so a tick always makes
+/// wide split than a narrow one. Never returns 0, so a sweep always makes
 /// progress even with an implausibly wide split.
 pub(crate) fn chunk_size(max_creates: usize, beneficiary_count: usize) -> usize {
     (max_creates / beneficiary_count.max(1)).max(1)
@@ -781,16 +781,16 @@ fn oldest_expiry(coupons: &[CouponInfo]) -> Option<DateTime<Utc>> {
     coupons.iter().map(|c| c.expires_at).min()
 }
 
-/// One reassign tick for a decparty under the delegation model: read the
+/// One reassign sweep for a decparty under the delegation model: read the
 /// unassigned coupons and assign **all** the assignable ones, in successive
 /// chunked `Delegation_Assign` transactions. Nothing assignable is a no-op.
 ///
-/// A tick drains the whole set rather than assigning one chunk and waiting for
-/// the next tick, so throughput does not depend on the tick interval: the
+/// A sweep drains the whole set rather than assigning one chunk and waiting for
+/// the next sweep, so throughput does not depend on the sweep interval: the
 /// interval is a latency/cost knob, not a safety-critical one. The chunk bounds
 /// one *transaction* (design §9/§11; see [`chunk_size`]).
 ///
-/// A transient failure ends the tick; a rejected command is isolated to the one
+/// A transient failure ends the sweep; a rejected command is isolated to the one
 /// coupon at fault and the drain continues (see [`drain_assignable`]).
 ///
 /// The create budget and the expiry margin come from [`NodeConfig`] so they can
@@ -859,7 +859,7 @@ pub(crate) async fn run_reassign_once(
 /// while this automation re-reads, which does fix them.
 ///
 /// The timeouts come from the 2026-07-29 devnet outage, where five consecutive
-/// ticks each hit a different one and recovered unattended.
+/// sweeps each hit a different one and recovered unattended.
 const TRANSIENT_ASSIGN_ERROR_IDS: &[&str] = &[
     "LOCAL_VERDICT_LOCKED_CONTRACTS",
     "LOCAL_VERDICT_INACTIVE_CONTRACTS",
@@ -880,7 +880,7 @@ fn canton_error_id(e: &anyhow::Error) -> Option<String> {
         .then(|| id.to_string())
 }
 
-/// Whether a fresh read on the next tick is the cure.
+/// Whether a fresh read on the next sweep is the cure.
 ///
 /// A non-ledger failure (config, transport, auth) is transient here too: it is
 /// not attributable to any one coupon, so isolating one would be meaningless.
@@ -898,7 +898,7 @@ fn assign_failure_is_transient(e: &anyhow::Error) -> bool {
 /// **A transient failure ends the drain; a rejected command does not.**
 ///
 /// Contention is the overwhelmingly common failure — on a 3-assigner devnet two
-/// nodes lose every round — and there a fresh read is the only cure, so the tick
+/// nodes lose every round — and there a fresh read is the only cure, so the sweep
 /// ends and the coupons keep their full TTL. That is [`TRANSIENT_ASSIGN_ERROR_IDS`].
 ///
 /// Any other rejection is attributable to the batch's contents, so the drain
@@ -915,10 +915,10 @@ fn assign_failure_is_transient(e: &anyhow::Error) -> bool {
 /// splice refuses, a choice context a later coupon version requires. Most or all
 /// of a chunk then fails together, so the ERROR lines name every coupon at fault.
 ///
-/// The skip lasts **one tick only** — there is no cross-tick quarantine, so the
-/// drain stays stateless and a misclassified failure costs one tick rather than
+/// The skip lasts **one sweep only** — there is no cross-sweep quarantine, so the
+/// drain stays stateless and a misclassified failure costs one sweep rather than
 /// stranding a healthy coupon until restart. A genuinely un-exerciseable coupon
-/// is therefore re-found every tick, which is the point: it keeps producing an
+/// is therefore re-found every sweep, which is the point: it keeps producing an
 /// ERROR for alerting while every healthy coupon still gets paid.
 async fn drain_assignable<'a, F, Fut>(
     assignable: &'a [String],
@@ -954,7 +954,7 @@ where
                     coupon = %primary,
                     assigned,
                     remaining = assignable.len() - lo,
-                    "assign chunk failed; ending tick to re-read the ledger"
+                    "assign chunk failed; ending the sweep to re-read the ledger"
                 );
                 break;
             }
@@ -966,7 +966,7 @@ where
                     error = %e,
                     coupon = %primary,
                     error_id = canton_error_id(&e).unwrap_or_default(),
-                    "coupon rejected on its own; skipping it for this tick"
+                    "coupon rejected on its own; skipping it for this sweep"
                 );
                 continue;
             }
@@ -991,7 +991,7 @@ where
                         coupon = %coupon,
                         assigned,
                         remaining = assignable.len() - (lo + i),
-                        "assign failed mid fan-out; ending tick to re-read the ledger"
+                        "assign failed mid fan-out; ending the sweep to re-read the ledger"
                     );
                     break 'chunks;
                 }
@@ -1002,7 +1002,7 @@ where
                         error = %e,
                         coupon = %coupon,
                         error_id = canton_error_id(&e).unwrap_or_default(),
-                        "coupon rejected on its own; skipping it for this tick"
+                        "coupon rejected on its own; skipping it for this sweep"
                     );
                 }
             }
@@ -1454,7 +1454,7 @@ mod tests {
         // naming itself dso and this decparty as provider. Letting it into a
         // batch is a denial of service: sorted most-urgent-first it becomes the
         // primary, splice fetches the genuine coupons with the primary's dso,
-        // the chunk is rejected, and the tick ends having assigned nothing.
+        // the chunk is rejected, and the sweep ends having assigned nothing.
         let alice = CantonId::parse(ALICE).unwrap();
         let real_dso = CantonId::parse(GOV).unwrap();
 
@@ -1519,7 +1519,7 @@ mod tests {
 
     #[test]
     fn select_assignable_does_not_truncate() {
-        // A tick drains the whole set in chunks, so selection returns all of it;
+        // A sweep drains the whole set in chunks, so selection returns all of it;
         // bounding a transaction is chunk_size's job, not selection's.
         let now = dt("2026-07-20T12:00:00Z");
         let coupons: Vec<CouponInfo> = (0..500)
@@ -1581,7 +1581,7 @@ mod tests {
     #[tokio::test]
     async fn drain_assigns_the_whole_set_in_one_pass() {
         // The point of draining: 120 coupons at a chunk of 50 is three
-        // transactions in ONE tick, not one transaction and a wait.
+        // transactions in ONE sweep, not one transaction and a wait.
         let all = cids(120);
         let (seen, submit) = recorder(vec![]);
         let assigned = drain_assignable(&all, 50, &alice(), submit).await;
@@ -1590,7 +1590,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drain_ends_the_tick_on_a_failed_chunk() {
+    async fn drain_ends_the_sweep_on_a_failed_chunk() {
         // A failure means the view is stale, and only a fresh read fixes that.
         // Exactly one attempt: no retry at a smaller size (a smaller chunk is
         // not a newer view) and no skip-and-continue (an assigner that took the
@@ -1599,13 +1599,13 @@ mod tests {
         let (seen, submit) = recorder(vec![false]);
         let assigned = drain_assignable(&all, 50, &alice(), submit).await;
         assert_eq!(assigned, 0);
-        assert_eq!(*seen.borrow(), vec![50], "one attempt, then end the tick");
+        assert_eq!(*seen.borrow(), vec![50], "one attempt, then end the sweep");
     }
 
     #[tokio::test]
     async fn drain_keeps_the_chunks_it_already_committed() {
-        // Ending the tick must not discard earlier successes: the first chunk is
-        // assigned, the second fails, and the remainder waits for the next tick
+        // Ending the sweep must not discard earlier successes: the first chunk is
+        // assigned, the second fails, and the remainder waits for the next sweep
         // with its full TTL intact.
         let all = cids(120);
         let (seen, submit) = recorder(vec![true, false]);
@@ -1678,10 +1678,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn contention_ends_the_tick_without_fanning_out() {
+    async fn contention_ends_the_sweep_without_fanning_out() {
         // The common case: two of three assigners lose every devnet round. A
         // fresh read is the only cure, so this must cost ONE submission —
-        // fanning out here would burn n failing transactions per tick.
+        // fanning out here would burn n failing transactions per sweep.
         for id in [
             "LOCAL_VERDICT_LOCKED_CONTRACTS",
             "LOCAL_VERDICT_INACTIVE_CONTRACTS",
@@ -1712,7 +1712,7 @@ mod tests {
     async fn a_rejected_coupon_is_found_wherever_it_sits() {
         // splice fetches and validates every additionalCoupon, so the culprit
         // need not be the primary. Dropping only the primary would advance one
-        // coupon per tick; submitting each on its own does not care where it sat.
+        // coupon per sweep; submitting each on its own does not care where it sat.
         let all = cids(16);
         let (_, submit) = poisoned("c11", "DAML_INTERPRETATION_ERROR");
         let assigned = drain_assignable(&all, 16, &alice(), submit).await;
@@ -1756,7 +1756,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn contention_during_the_fan_out_ends_the_tick() {
+    async fn contention_during_the_fan_out_ends_the_sweep() {
         // Another assigner took the rest of the chunk while we were fanning out.
         // A fresh read is the cure, so stop — and keep what already committed.
         let all = cids(4);
@@ -1784,7 +1784,7 @@ mod tests {
     async fn an_unrecognized_ledger_rejection_is_isolated_not_swallowed() {
         // An id we have never seen is treated as a bad command, so a coupon
         // that can never be exercised is still contained. The cost of being
-        // wrong is one tick: nothing is quarantined across ticks.
+        // wrong is one sweep: nothing is quarantined across sweeps.
         let all = cids(8);
         let (_, submit) = poisoned("c0", "SOME_FUTURE_CANTON_ERROR");
         let assigned = drain_assignable(&all, 8, &alice(), submit).await;
@@ -1792,7 +1792,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_non_ledger_failure_ends_the_tick() {
+    async fn a_non_ledger_failure_ends_the_sweep() {
         // A transport or config failure is not attributable to any one coupon,
         // so isolating one would be meaningless.
         let all = cids(8);
@@ -1836,7 +1836,7 @@ mod tests {
     }
 
     #[test]
-    fn chunk_size_never_stalls_a_tick() {
+    fn chunk_size_never_stalls_a_sweep() {
         // A split wider than the create budget still yields a 1-coupon chunk
         // rather than 0, which would loop forever making no progress.
         assert_eq!(chunk_size(100, 500), 1);
