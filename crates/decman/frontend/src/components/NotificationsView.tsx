@@ -865,6 +865,13 @@ const DomainActionCard = ({
   const ownConfirmation = domainAction.confirmations.find(
     (c) => c.confirming_party === party.memberPartyId,
   );
+  const otherConfirmations = domainAction.confirmations.filter(
+    (c) => c.confirming_party !== party.memberPartyId,
+  );
+  // Only the proposer controls GovernableAction_ProposerCancel, so anyone else
+  // pressing the button would just collect a ledger rejection.
+  const isProposer =
+    !!domainAction.proposer && domainAction.proposer === party.memberPartyId;
 
   // The on-chain proposal already encodes the action — server only needs the
   // proposal_cid and governance_type to confirm/execute. action is a
@@ -879,7 +886,12 @@ const DomainActionCard = ({
     body: T,
     successMsg: string,
   ): Promise<void> => {
-    if (!party.rulesContractId) {
+    // Only the endpoints that exercise a choice on the rules contract need it.
+    // Cancelling a confirmation or a proposal goes straight to the contract
+    // being archived, so it stays available when the rules cid is unknown.
+    const needsRulesContract =
+      typeof body === "object" && body !== null && "rules_contract_id" in body;
+    if (needsRulesContract && !party.rulesContractId) {
       showSnackbar("Governance rules contract is not set", "error");
       return;
     }
@@ -944,12 +956,28 @@ const DomainActionCard = ({
       "Confirmation expired",
     );
 
+  // Retract the proposal, and archive our own confirmation with it. The server
+  // sends both as one transaction, because nobody else can clear that
+  // confirmation once the proposal it points at is gone.
+  const handleCancelProposal = () =>
+    post(
+      "cancel-proposal",
+      {
+        party_id: party.partyId,
+        proposal_cid: domainAction.proposal_cid,
+        confirmation_cid: ownConfirmation?.contract_id,
+      },
+      "Proposal cancelled",
+    );
+
   // For orphaned actions (underlying proposal is gone) the only valid
   // operation is to clear the stranded Confirmation contracts off the ledger.
-  // Loop sequentially so the `busy` lock on each /governance/expire call
-  // serializes correctly.
+  // Our own goes through Revoke instead: GovernanceConfirmation_Expire refuses
+  // to run before the confirmation's expiry time, and only the confirmer can
+  // archive it any earlier. Loop sequentially so the `busy` lock on each
+  // /governance/expire call serializes correctly.
   const handleDismissOrphan = async () => {
-    for (const c of domainAction.confirmations) {
+    for (const c of otherConfirmations) {
       await handleExpire(c.contract_id);
     }
   };
@@ -1379,15 +1407,30 @@ const DomainActionCard = ({
           variant={domainAction.can_execute ? "filled" : "outlined"}
         />
         {domainAction.orphaned ? (
-          <Button
-            size="small"
-            variant="outlined"
-            color="warning"
-            onClick={handleDismissOrphan}
-            disabled={busy || !party.rulesContractId}
-          >
-            Dismiss
-          </Button>
+          <>
+            {ownConfirmation && (
+              <Button
+                size="small"
+                variant="outlined"
+                color="warning"
+                onClick={handleRevoke}
+                disabled={busy}
+              >
+                Revoke
+              </Button>
+            )}
+            {otherConfirmations.length > 0 && (
+              <Button
+                size="small"
+                variant="outlined"
+                color="warning"
+                onClick={handleDismissOrphan}
+                disabled={busy || !party.rulesContractId}
+              >
+                Dismiss
+              </Button>
+            )}
+          </>
         ) : (
           <>
             {ownConfirmation ? (
@@ -1408,6 +1451,17 @@ const DomainActionCard = ({
                 disabled={busy || !party.rulesContractId}
               >
                 Confirm
+              </Button>
+            )}
+            {isProposer && (
+              <Button
+                size="small"
+                variant="outlined"
+                color="error"
+                onClick={handleCancelProposal}
+                disabled={busy}
+              >
+                Cancel proposal
               </Button>
             )}
             {domainAction.can_execute && (
