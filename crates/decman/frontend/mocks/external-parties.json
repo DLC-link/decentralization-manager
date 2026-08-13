@@ -1,0 +1,32 @@
+{
+  "parties": [
+    {
+      "party_id": "alice-wallet::1220f3a9c41d7e2b58cd06ba4e7719fd3c85a2e0b6417d9fc38e5a1b7c04d29e6f31",
+      "fingerprint": "1220f3a9c41d7e2b58cd06ba4e7719fd3c85a2e0b6417d9fc38e5a1b7c04d29e6f31",
+      "host_count": 4,
+      "threshold": 3,
+      "created_at": "2026-07-14T09:12:00Z"
+    },
+    {
+      "party_id": "bob-treasury::1220a7d1e4835b09fc26e7a4d05138bb6c94f2e70d8a15c3fb9e46072d18a5c3e90b",
+      "fingerprint": "1220a7d1e4835b09fc26e7a4d05138bb6c94f2e70d8a15c3fb9e46072d18a5c3e90b",
+      "host_count": 4,
+      "threshold": 3,
+      "created_at": "2026-07-22T16:45:00Z"
+    },
+    {
+      "party_id": "carol-desk::12205c8b03fa1d47e69208d5b7c4130ae6f9d21847b0e3c5fa927d61840bce35a712",
+      "fingerprint": "12205c8b03fa1d47e69208d5b7c4130ae6f9d21847b0e3c5fa927d61840bce35a712",
+      "host_count": 2,
+      "threshold": 2,
+      "created_at": "2026-08-03T11:30:00Z"
+    },
+    {
+      "party_id": "dave-custody::12208e14b7d0c9a35f62e4180da7b539c6207fe4a1b83d95c0e7f2648a1db07c4e59",
+      "fingerprint": "12208e14b7d0c9a35f62e4180da7b539c6207fe4a1b83d95c0e7f2648a1db07c4e59",
+      "host_count": 1,
+      "threshold": 1,
+      "created_at": "2026-08-11T08:05:00Z"
+    }
+  ]
+}
