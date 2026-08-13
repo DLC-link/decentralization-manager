@@ -1030,9 +1030,24 @@ pub async fn start_server(
     // Background task: CIP-104 Mode A reward-assignment automation. Clone the
     // existing `web::Data<AppState>` (an Arc) so the loop shares the SAME state —
     // live party credentials, auth, config — never a fresh AppState.
+    //
+    // The outer task reports the inner one's death and nothing more; it does not
+    // respawn. Design §6, change 6, covers what this catches that the panic hook
+    // in `main` does not.
     let reward_automation_state = app_state.clone();
     tokio::spawn(async move {
-        reward_automation::run_reward_automation_loop(reward_automation_state).await;
+        let automation = tokio::spawn(async move {
+            reward_automation::run_reward_automation_loop(reward_automation_state).await;
+        });
+        match automation.await {
+            Ok(()) => tracing::error!(
+                "reward automation loop returned; coupons will expire unassigned until this node restarts"
+            ),
+            Err(e) => tracing::error!(
+                error = %e,
+                "reward automation task died; coupons will expire unassigned until this node restarts"
+            ),
+        }
     });
 
     // Single peer-job listener: drains the queue and spawns one
