@@ -17,6 +17,7 @@ import { copyToClipboard } from "../clipboard";
 import { useSnackbar } from "../contexts";
 import { formatActionDetails, formatActionType } from "../governanceFormat";
 import { ExecuteDialog } from "./ExecuteDialog";
+import { RowCard } from "./RowCard";
 import { PaginationControls } from "./Pagination";
 import { usePagination } from "../usePagination";
 import {
@@ -1549,20 +1550,12 @@ const WorkflowRunCard = ({
   // Terminal runs collapse to a single dense row in the Completed section.
   if (compact) {
     return (
-      <Box
-        data-testid="workflow-run-card"
-        data-kind={run.kind}
-        data-prefix={run.prefix ?? ""}
-        data-status={run.status}
-        sx={{
-          display: "flex",
-          alignItems: "center",
-          gap: 2,
-          p: "9px 16px",
-          border: "1px solid",
-          borderColor: "divider",
-          borderRadius: "8px",
-          bgcolor: "background.paper",
+      <RowCard
+        dataAttrs={{
+          "data-testid": "workflow-run-card",
+          "data-kind": run.kind,
+          "data-prefix": run.prefix ?? "",
+          "data-status": run.status,
         }}
       >
         <Typography
@@ -1678,7 +1671,7 @@ const WorkflowRunCard = ({
             Dismiss
           </Button>
         </Box>
-      </Box>
+      </RowCard>
     );
   }
 
