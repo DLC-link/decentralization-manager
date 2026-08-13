@@ -525,7 +525,7 @@ fn parse_unassigned_coupon(
 static HEARTBEAT: LazyLock<IntCounter> = LazyLock::new(|| {
     prometheus::register_int_counter!(
         "decman_reward_heartbeat_total",
-        "Heartbeats of the reward automation loop, one per minute while it lives."
+        "Heartbeats of the reward automation loop, one per wake while it lives — every 60s, or every sweep interval when that is shorter."
     )
     .expect("metric name is a unique literal")
 });
