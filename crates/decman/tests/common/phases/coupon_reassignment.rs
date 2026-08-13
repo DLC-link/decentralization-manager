@@ -146,6 +146,25 @@ async fn query_reward_coupons(f: &Fixture, party_id: &str) -> anyhow::Result<Has
     Ok(r.contracts.into_iter().map(|c| c.contract_id).collect())
 }
 
+/// Sums one metric family across the e2e nodes. A node serving no such line has
+/// never moved that counter, which sums as zero.
+async fn counter_total(f: &Fixture, ports: &[u16], name: &str) -> anyhow::Result<f64> {
+    let mut total = 0.0;
+    for port in ports {
+        let body = f.get_text(*port, "/metrics").await?;
+        for line in body.lines() {
+            if line.starts_with(name) {
+                total += line
+                    .split_whitespace()
+                    .last()
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .unwrap_or_default();
+            }
+        }
+    }
+    Ok(total)
+}
+
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: coupon_reassignment (CIP-104 Mode A delegation model)");
 
@@ -514,6 +533,60 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                                 "the surviving unassigned coupon is {amount}, not the \
                                  unassignable {UNASSIGNABLE_AMOUNT} — a healthy coupon was \
                                  skipped instead"
+                            ))
+                        })
+                    })
+                },
+            )
+            .run(f)
+            .await?;
+
+        // The instruments the alerts read, proven end to end: a real sweep
+        // assigned real coupons and the counters moved. Design §5.
+        let assigner_metrics = [f.p1.metrics, f.p2.metrics];
+        Scenario::new("the reward counters move")
+            .then(
+                "assigned counts every healthy coupon, and the refused one is counted skipped",
+                Duration::from_secs(120),
+                move |f, _| {
+                    Box::pin(async move {
+                        let assigned = match counter_total(
+                            f,
+                            &assigner_metrics,
+                            "decman_reward_coupons_assigned_total",
+                        )
+                        .await
+                        {
+                            Ok(v) => v,
+                            Err(e) => {
+                                warn!("counter assertion: reading /metrics failed: {e:#}");
+                                return None;
+                            }
+                        };
+                        // The tail of `drain_assignable` runs just after the
+                        // commit the split assertion already saw, so keep polling.
+                        if assigned < SEED_COUPON_COUNT as f64 {
+                            return None;
+                        }
+                        let skipped = match counter_total(
+                            f,
+                            &assigner_metrics,
+                            "decman_reward_coupons_skipped_total",
+                        )
+                        .await
+                        {
+                            Ok(v) => v,
+                            Err(e) => {
+                                warn!("counter assertion: reading /metrics failed: {e:#}");
+                                return None;
+                            }
+                        };
+                        Some(if skipped >= 1.0 {
+                            Ok(())
+                        } else {
+                            Err(anyhow::anyhow!(
+                                "assigned reached {assigned} but skipped is {skipped}; the \
+                                 unassignable coupon should have been counted"
                             ))
                         })
                     })
