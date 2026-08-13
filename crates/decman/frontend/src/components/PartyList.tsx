@@ -175,14 +175,13 @@ export const PartyList = ({
         })}
       </Box>
 
-      {/* Tops up the container's FAB clearance for the right-aligned controls,
-        * which sit closer to the edge than the cards do. */}
+      {/* No FAB clearance needed: the controls sit centered, well clear of the
+        * bottom-right corner, and padding one side would pull them off-center. */}
       <PaginationControls
         page={page}
         pageCount={pageCount}
         total={total}
         onChange={setPage}
-        sx={{ pr: 5 }}
       />
     </Box>
   );

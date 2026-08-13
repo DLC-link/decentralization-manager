@@ -11,7 +11,11 @@ import { PAGE_SIZE } from "../constants";
 const MONO = "var(--font-mono)";
 
 /**
- * Footer bar the table sits on: top rule, range on the left, controls right.
+ * Footer bar the table sits on: top rule spanning the container, with the range
+ * and the page controls centered on it as a single group.
+ *
+ * The bar fills the width so its rule closes off the rows above, but its
+ * contents travel together rather than being pushed into opposite corners.
  *
  * Horizontal padding is overridable because the containers this drops into pad
  * their content differently — the bar has to line up with the rows above it.
@@ -19,9 +23,9 @@ const MONO = "var(--font-mono)";
 const footerSx = {
   display: "flex",
   alignItems: "center",
-  justifyContent: "space-between",
+  justifyContent: "center",
   flexWrap: "wrap",
-  gap: 1.5,
+  gap: 2,
   px: 2,
   py: 1.25,
   mt: 0.5,
@@ -44,6 +48,7 @@ const rangeSx = {
   letterSpacing: "0.02em",
   color: "text.secondary",
   fontVariantNumeric: "tabular-nums",
+  whiteSpace: "nowrap" as const,
 };
 
 /**
