@@ -36,7 +36,8 @@
 //!   - The test nodes must run with a **short reward-automation interval** so
 //!     the loop reassigns within the poll deadline. The default is 300s; set
 //!     `DECPM_REWARD_AUTOMATION_INTERVAL_SECS` (or `--reward-automation-interval-secs`,
-//!     e.g. 15-30s) on the test nodes.
+//!     e.g. 15-30s) on the test nodes — the loop's own heartbeat timer scales
+//!     down to match, so a sub-60s interval genuinely beats at that rate.
 //!   - At least one of the delegation's `assigners` must be a member party this
 //!     node holds credentials for (else the loop skips the decparty). Here the
 //!     assigners are `[p1_member, p2_member]`; on the live `cbtc-network` run
@@ -100,8 +101,10 @@ const GOVERNANCE_REWARDS_PKG: &str = "%23governance-rewards-automation-v1";
 
 /// Generous ceiling for the reassignment step. Under a short
 /// `DECPM_REWARD_AUTOMATION_INTERVAL_SECS` (see the module doc) the loop
-/// reassigns within seconds; this only bites when the nodes are misconfigured
-/// (still on the 300s default) or paused Mode-B collection was not arranged.
+/// reassigns within seconds — the loop's heartbeat timer scales down to match
+/// rather than flooring at its own 60s cadence; this only bites when the
+/// nodes are misconfigured (still on the 300s default) or paused Mode-B
+/// collection was not arranged.
 const REASSIGN_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Devnet query: the `RewardCoupon` *interface* (matches any implementer; on

@@ -1036,6 +1036,10 @@ where
 
 /// The loop's wake interval, independent of the reward cadence. Design §5, "Three
 /// clocks".
+///
+/// The heartbeat and the sweep share this one task, so a sweep that blocks for N
+/// minutes costs N heartbeats, and one blocking past the stall rule's 10-minute
+/// window pages `decman-reward-automation-stalled` even though nothing crashed.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Per-node background loop. It records a heartbeat every [`HEARTBEAT_INTERVAL`] and
@@ -1052,16 +1056,22 @@ pub(crate) async fn run_reward_automation_loop(data: actix_web::web::Data<AppSta
     }
     let sweep_interval = Duration::from_secs(interval_secs.max(1));
 
-    let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
+    // The shorter of the two: a configured interval below HEARTBEAT_INTERVAL must
+    // still beat at its own rate, or sweep_is_due only ever sees HEARTBEAT_INTERVAL-
+    // sized steps and a short interval is silently floored to it. Beating faster is
+    // safe for the stall alert, whose `increase < 1 over 10m` is a lower bound.
+    let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL.min(sweep_interval));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Records the wake time, not the tick's own deadline, so scheduling jitter can
+    // stretch an interval by up to one heartbeat — benign against a 36h coupon TTL.
     let mut last_sweep: Option<tokio::time::Instant> = None;
     // Recomputed into the gauge on every heartbeat (design §5).
-    let mut oldest_expiry: HashMap<CantonId, DateTime<Utc>> = HashMap::new();
+    let mut oldest: HashMap<CantonId, DateTime<Utc>> = HashMap::new();
 
     loop {
         heartbeat.tick().await;
         HEARTBEAT.inc();
-        report_oldest_expiry(&oldest_expiry, Utc::now());
+        report_oldest_expiry(&oldest, Utc::now());
 
         let now = tokio::time::Instant::now();
         if !sweep_is_due(last_sweep.map(|t| now.duration_since(t)), sweep_interval) {
@@ -1077,21 +1087,20 @@ pub(crate) async fn run_reward_automation_loop(data: actix_web::web::Data<AppSta
             .map(|p| p.dec_party_id.clone())
             .collect();
 
-        prune_unserved(&mut oldest_expiry, &parties);
+        prune_unserved(&mut oldest, &parties);
 
         for decparty in parties {
             let label = decparty.to_string();
             SWEEPS.with_label_values(&[&label]).inc();
             let outcome = match run_once_for_party(&data, &decparty).await {
-                Ok(Some(expires_at)) => SweepOutcome::Backlog(expires_at),
-                Ok(None) => SweepOutcome::Empty,
+                Ok(outcome) => outcome,
                 Err(e) => {
                     SWEEP_FAILED.with_label_values(&[&label]).inc();
                     tracing::warn!(%decparty, error = %e, "reward automation sweep failed");
                     SweepOutcome::Failed
                 }
             };
-            apply_sweep_outcome(&mut oldest_expiry, &decparty, outcome);
+            apply_sweep_outcome(&mut oldest, &decparty, outcome);
         }
     }
 }
@@ -1130,10 +1139,16 @@ enum SweepOutcome {
     Empty,
     /// The sweep errored before it could tell.
     Failed,
+    /// Party credentials were not available this sweep — e.g. a Keycloak token
+    /// acquisition failure. Distinct from `Empty`: this decparty is still meant
+    /// to be served (it holds a row in `party_credentials`), so this is an
+    /// error condition rather than the automation being off for it.
+    CredentialsUnavailable,
 }
 
-/// Applies one sweep's outcome to the remembered timestamps. The three arms are
-/// asymmetrical on purpose — design §6, change 4.
+/// Applies one sweep's outcome to the remembered timestamps. The four arms are
+/// asymmetrical on purpose — design §6, change 4. `CredentialsUnavailable` is
+/// treated like `Failed`: a token failure must not read as "safely off".
 fn apply_sweep_outcome(
     oldest: &mut HashMap<CantonId, DateTime<Utc>>,
     decparty: &CantonId,
@@ -1147,7 +1162,7 @@ fn apply_sweep_outcome(
             oldest.remove(decparty);
             let _ = OLDEST_EXPIRES_IN.remove_label_values(&[&decparty.to_string()]);
         }
-        SweepOutcome::Failed => {}
+        SweepOutcome::Failed | SweepOutcome::CredentialsUnavailable => {}
     }
 }
 
@@ -1163,29 +1178,37 @@ fn prune_unserved(oldest: &mut HashMap<CantonId, DateTime<Utc>>, served: &[Canto
     });
 }
 
-/// One reassign pass for a single decparty under the delegation model. No-op
-/// unless the decparty has an active `CouponReassignmentDelegation` (the
-/// enablement signal) naming this node's member party as an assigner.
+/// One reassign pass for a single decparty under the delegation model. A no-op
+/// outcome (`SweepOutcome::Empty`) unless the decparty has an active
+/// `CouponReassignmentDelegation` (the enablement signal) naming this node's
+/// member party as an assigner. Credentials being unavailable is a distinct
+/// outcome (`SweepOutcome::CredentialsUnavailable`): unlike the two enablement
+/// no-ops, it is not this decparty's automation being switched off.
 async fn run_once_for_party(
     data: &actix_web::web::Data<AppState>,
     decparty: &CantonId,
-) -> anyhow::Result<Option<DateTime<Utc>>> {
+) -> anyhow::Result<SweepOutcome> {
     let pkgs = packages();
     let Some((token, member)) = get_party_credentials(data, decparty).await else {
-        return Ok(None);
+        // `get_party_credentials` returns `None` both when this decparty holds no
+        // token manager and when a live one failed to acquire a token (its `?` on
+        // `get_token()`). Either way this decparty is still meant to be served, so
+        // the countdown must keep falling rather than clear as if switched off.
+        tracing::warn!(%decparty, "party credentials unavailable for reward sweep");
+        return Ok(SweepOutcome::CredentialsUnavailable);
     };
     // Enablement: an active delegation. None => off (no-op).
     let Some(delegation) =
         active_delegation(&data.config, &pkgs, data.test_mode, decparty, &token).await?
     else {
-        return Ok(None);
+        return Ok(SweepOutcome::Empty);
     };
     // This node must be a listed assigner, else it cannot reassign.
     if !delegation.assigners.contains(&member) {
         tracing::debug!(%decparty, %member, "node not an assigner on the delegation — skipping");
-        return Ok(None);
+        return Ok(SweepOutcome::Empty);
     }
-    run_reassign_once(
+    let expires_at = run_reassign_once(
         &data.config,
         decparty,
         &member,
@@ -1194,7 +1217,11 @@ async fn run_once_for_party(
         data.test_mode,
         &pkgs,
     )
-    .await
+    .await?;
+    Ok(match expires_at {
+        Some(t) => SweepOutcome::Backlog(t),
+        None => SweepOutcome::Empty,
+    })
 }
 
 #[cfg(test)]
@@ -1268,6 +1295,8 @@ mod tests {
     const ALICE: &str =
         "alice::1220aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const BOB: &str = "bob::1220bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const CAROL: &str =
+        "carol::1220cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 
     #[test]
     fn parse_delegation_record_reads_assigners_and_split() {
@@ -1954,6 +1983,30 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_credentials_keep_the_countdown_running() {
+        // A Keycloak token failure must not read as "safely off" (design §6,
+        // change 4): the timestamp must survive exactly as it does on `Failed`.
+        // Its own decparty fixture, since these tests share a process-wide
+        // metrics registry and run in parallel.
+        let decparty = CantonId::parse(CAROL).expect("CAROL is a valid canton id");
+        let expires_at = dt("2026-07-20T18:00:00Z");
+        let mut oldest = HashMap::new();
+
+        apply_sweep_outcome(&mut oldest, &decparty, SweepOutcome::Backlog(expires_at));
+        assert_eq!(oldest.get(&decparty), Some(&expires_at), "a backlog writes");
+
+        apply_sweep_outcome(&mut oldest, &decparty, SweepOutcome::CredentialsUnavailable);
+        assert_eq!(
+            oldest.get(&decparty),
+            Some(&expires_at),
+            "unavailable credentials must leave the timestamp in place"
+        );
+
+        apply_sweep_outcome(&mut oldest, &decparty, SweepOutcome::Empty);
+        assert!(oldest.is_empty(), "an empty backlog removes");
+    }
+
+    #[test]
     fn a_decparty_this_node_stopped_serving_is_forgotten() {
         // Otherwise the countdown outlives the credentials (design §5).
         let decparty = CantonId::parse(BOB).expect("BOB is a valid canton id");
@@ -1972,7 +2025,6 @@ mod tests {
 
     #[test]
     fn the_first_sweep_of_a_process_is_always_due() {
-        // A fresh pod drains its backlog instead of waiting out an interval.
         assert!(sweep_is_due(None, Duration::from_secs(21_600)));
     }
 
