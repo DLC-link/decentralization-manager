@@ -1181,7 +1181,7 @@ export const GovernanceSection = ({
               ? undefined
               : {
                   input: {
-                    sx: { fontFamily: "monospace", fontSize: "0.8rem" },
+                    sx: { fontFamily: "var(--font-mono)", fontSize: "0.8rem" },
                     endAdornment: fieldHelpAdornment(opts.help, `Help for ${opts.label}`),
                   },
                 }
@@ -1190,7 +1190,7 @@ export const GovernanceSection = ({
           {many &&
             activeDelegations.map((d, idx) => (
               <MenuItem key={d.cid} value={d.cid}>
-                <Typography variant="caption" sx={{ fontFamily: "monospace" }}>
+                <Typography variant="caption" sx={{ fontFamily: "var(--font-mono)" }}>
                   {d.cid.slice(0, 24)}… — {describe(d)}
                   {idx === 0 ? " — in use" : ""}
                 </Typography>
@@ -4816,7 +4816,7 @@ export const GovernanceSection = ({
                         size="small"
                         fullWidth
                         slotProps={{
-                          input: { sx: { fontFamily: "monospace", fontSize: "0.8rem" } },
+                          input: { sx: { fontFamily: "var(--font-mono)", fontSize: "0.8rem" } },
                         }}
                       />
                       <Box sx={{ display: "flex", mt: 1 }}>
@@ -4873,7 +4873,7 @@ export const GovernanceSection = ({
                               size="small"
                               fullWidth
                               slotProps={{
-                                input: { sx: { fontFamily: "monospace", fontSize: "0.8rem" } },
+                                input: { sx: { fontFamily: "var(--font-mono)", fontSize: "0.8rem" } },
                               }}
                             />
                             <Box
@@ -4905,7 +4905,7 @@ export const GovernanceSection = ({
                               />
                               <Typography
                                 variant="caption"
-                                sx={{ flex: 1, fontFamily: "monospace" }}
+                                sx={{ flex: 1, fontFamily: "var(--font-mono)" }}
                                 color={shares ? "text.primary" : "text.disabled"}
                               >
                                 {shares

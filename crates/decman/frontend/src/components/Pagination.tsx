@@ -6,9 +6,9 @@ import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 import { PAGE_SIZE } from "../constants";
 
 // Numerics are monospaced so page numbers and ranges don't reflow as digits
-// change width. Matches the `monospace` stack used for ids and amounts
-// elsewhere in the app.
-const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
+// change width. Uses the design system's mono token (Roboto Mono) so page
+// numbers match the ids and amounts in the rows above.
+const MONO = "var(--font-mono)";
 
 /**
  * Footer bar the table sits on: top rule, range on the left, controls right.

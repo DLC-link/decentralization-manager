@@ -68,30 +68,38 @@ export const ExternalPartyList = ({ parties }: ExternalPartyListProps) => {
         <TableBody>
           {pageItems.map((party, idx) => (
             <TableRow key={party.party_id} sx={{ ...zebraRow(idx) }}>
-              <TableCell sx={{ py: 1.5 }}>
+              <TableCell sx={{ py: 1 }}>
                 <CopyableText
                   text={party.party_id}
                   truncate={{ start: party.party_id.indexOf("::") + 10, end: 12 }}
                   variant="body2"
                 />
               </TableCell>
-              <TableCell sx={{ py: 1.5 }}>
+              <TableCell sx={{ py: 1 }}>
                 <CopyableText
                   text={party.fingerprint}
                   truncate={{ start: 10, end: 8 }}
                   variant="body2"
                 />
               </TableCell>
-              <TableCell sx={{ py: 1.5 }} align="right">
-                <Typography variant="body2">{party.host_count}</Typography>
+              <TableCell
+                sx={{ py: 1, fontFamily: "var(--font-mono)", fontSize: "0.85rem" }}
+                align="right"
+              >
+                {party.host_count}
               </TableCell>
-              <TableCell sx={{ py: 1.5 }} align="right">
-                <Typography variant="body2">
-                  {party.threshold} of {party.host_count}
-                </Typography>
+              <TableCell
+                sx={{ py: 1, fontFamily: "var(--font-mono)", fontSize: "0.85rem" }}
+                align="right"
+              >
+                {party.threshold} of {party.host_count}
               </TableCell>
-              <TableCell sx={{ py: 1.5 }} align="right">
-                <Typography variant="caption" color="text.secondary">
+              <TableCell sx={{ py: 1 }} align="right">
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ fontFamily: "var(--font-mono)" }}
+                >
                   {formatCreated(party.created_at)}
                 </Typography>
               </TableCell>
