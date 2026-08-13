@@ -88,12 +88,16 @@ export const GrantRightsDialog = ({
       <DialogContent>
         <Box sx={{ display: "flex", flexDirection: "column", gap: 2, mt: 1 }}>
           <Typography variant="body2" color="text.secondary">
-            Used once to grant <code>actAs</code> + <code>readAs</code> on the
-            member and dec parties. Credentials are not stored — paste the
-            client credentials whose identity has <code>ParticipantAdmin</code>{" "}
-            on this participant, from whichever provider this party is
-            configured with (a Keycloak client's service account, or an Auth0
-            machine-to-machine application).
+            Run this once. It grants four Ledger API rights to this party&apos;s
+            ledger user: <code>actAs</code> and <code>readAs</code> on the member
+            party, and the same two on the dec party. It grants nothing wider, so
+            it does not affect any other party.
+          </Typography>
+          <Typography variant="body2" color="text.secondary">
+            Credentials are not stored. Paste the client credentials whose
+            identity holds <code>ParticipantAdmin</code> on this participant, from
+            the provider this party uses: a Keycloak client&apos;s service
+            account, or an Auth0 machine-to-machine application.
           </Typography>
 
           <TextField

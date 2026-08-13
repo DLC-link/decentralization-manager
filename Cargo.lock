@@ -1377,6 +1377,7 @@ dependencies = [
  "serde",
  "serde-big-array",
  "serde_json",
+ "sha2 0.11.0",
  "ts-rs",
  "utoipa",
 ]
@@ -1742,7 +1743,7 @@ checksum = "092966b41edc516079bdf31ec78a2e0588d1d0c08f78b91d8307215928642b2b"
 
 [[package]]
 name = "decman"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "actix-cors",
  "actix-web",
@@ -1758,6 +1759,7 @@ dependencies = [
  "clap",
  "common 0.1.0",
  "common 0.6.1",
+ "decman-wallet",
  "dotenvy",
  "ed25519-dalek",
  "futures",
@@ -1771,7 +1773,6 @@ dependencies = [
  "p256",
  "prost",
  "prost-types",
- "rand 0.10.2",
  "rcgen",
  "registry",
  "reqwest 0.13.3",
@@ -1818,6 +1819,24 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "decman-wallet"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.0",
+ "common 0.1.0",
+ "ed25519-dalek",
+ "rand 0.10.2",
+ "reqwest 0.13.3",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+ "wiremock",
+ "zeroize",
 ]
 
 [[package]]

@@ -17,6 +17,8 @@ import VisibilityIcon from "@mui/icons-material/Visibility";
 import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 import { CopyableText } from "./CopyableText";
 import { zebraRow } from "../styles";
+import { PaginationControls } from "./Pagination";
+import { usePagination } from "../usePagination";
 import type { DecentralizedParty, PartyAuthStatus } from "../types";
 
 interface PartyListProps {
@@ -60,6 +62,8 @@ export const PartyList = ({
   isHidden,
   onToggleHidden,
 }: PartyListProps) => {
+  const { page, setPage, pageCount, pageItems, total } = usePagination(parties);
+
   if (parties.length === 0) {
     return (
       <Typography variant="body2" color="text.secondary" sx={{ textAlign: "center", py: 6 }}>
@@ -83,7 +87,7 @@ export const PartyList = ({
           </TableRow>
         </TableHead>
         <TableBody>
-          {parties.map((party, idx) => {
+          {pageItems.map((party, idx) => {
             const auth = authStatuses.find(
               (a) => a.dec_party_id === party.party_id,
             );
@@ -158,6 +162,15 @@ export const PartyList = ({
           })}
         </TableBody>
       </Table>
+      {/* Extra right padding clears the fixed Create-Party FAB (56px wide,
+        * offset 24px), which this view renders over the bottom-right corner. */}
+      <PaginationControls
+        page={page}
+        pageCount={pageCount}
+        total={total}
+        onChange={setPage}
+        sx={{ pr: 11 }}
+      />
     </Box>
   );
 };

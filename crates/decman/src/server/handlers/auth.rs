@@ -644,6 +644,8 @@ async fn grant_user_rights(
 
     let member_party_id_str = member_party_id.to_string();
     let dec_party_id_str = dec_party_id.to_string();
+    // Exactly the rights this dec party needs, and nothing wider: actAs + readAs
+    // on the member party and on the dec party.
     let rights = vec![
         right_act_as(&member_party_id_str),
         right_read_as(&member_party_id_str),

@@ -21,6 +21,8 @@ import SignalWifiOffIcon from "@mui/icons-material/SignalWifiOff";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import ErrorIcon from "@mui/icons-material/Error";
 import { CopyableText } from "./CopyableText";
+import { PaginationControls } from "./Pagination";
+import { usePagination } from "../usePagination";
 import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
 import { zebraRow } from "../styles";
@@ -95,6 +97,18 @@ export const PackagesPanel = ({
       (p.name || "").toLowerCase().includes(q),
     );
   }, [comparison, search]);
+
+  const sortedComparison = useMemo(
+    () => [...(filteredComparison ?? [])].sort((a, b) => a.name.localeCompare(b.name)),
+    [filteredComparison],
+  );
+
+  // This panel scrolls its rows in `scrollRef`, not the window, so paging has to
+  // reset that container rather than the document.
+  const localPaging = usePagination(filteredSorted, scrollRef);
+  const comparisonPaging = usePagination(sortedComparison, scrollRef);
+  // The peer-comparison view swaps in its own table, so it pages its own rows.
+  const paging = comparison ? comparisonPaging : localPaging;
 
   const updateScrollShadows = useCallback(() => {
     const el = scrollRef.current;
@@ -321,9 +335,7 @@ export const PackagesPanel = ({
                   </TableRow>
                 </TableHead>
                 <TableBody>
-                  {(filteredComparison ?? [])
-                    .slice()
-                    .sort((a, b) => a.name.localeCompare(b.name))
+                  {comparisonPaging.pageItems
                     .map((pkg, idx) => (
                       <TableRow key={pkg.package_id} sx={zebraRow(idx)}>
                         <TableCell sx={{ py: 0.75 }}>
@@ -391,7 +403,7 @@ export const PackagesPanel = ({
                   </TableRow>
                 </TableHead>
                 <TableBody>
-                  {filteredSorted.map((p, idx) => (
+                  {localPaging.pageItems.map((p, idx) => (
                     <TableRow key={p.package_id} sx={zebraRow(idx)}>
                       <TableCell sx={{ py: 1 }}>
                         {p.package_name || "-"}
@@ -428,6 +440,13 @@ export const PackagesPanel = ({
             }}
           />
         </Box>
+        <PaginationControls
+          page={paging.page}
+          pageCount={paging.pageCount}
+          total={paging.total}
+          onChange={paging.setPage}
+          sx={{ px: 3 }}
+        />
     </Box>
   );
 };
