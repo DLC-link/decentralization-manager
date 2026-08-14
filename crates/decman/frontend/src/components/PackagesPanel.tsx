@@ -40,6 +40,15 @@ interface PackagesPanelProps {
   refreshNonce?: number;
 }
 
+// Comparison-table columns. Every one is stated, because a fixed-layout table
+// hands an unstated column a share of the space rather than the remainder, which
+// had left the package name in ~110px. Peers share one width so they read as a
+// grid however long their names are, and adding peers pushes the table wider —
+// into the scroller — instead of squeezing the name that identifies the row.
+const PEER_COL_WIDTH = 150;
+const VERSION_COL_WIDTH = 110;
+const PACKAGE_MIN_WIDTH = 260;
+
 export const PackagesPanel = ({
   onUploadDars,
   onDistributeDars,
@@ -294,13 +303,33 @@ export const PackagesPanel = ({
               </Table>
             ) : comparison ? (
               /* Comparison table */
-              <Table size="small" sx={{ minWidth: 650 }}>
+              <Table
+                size="small"
+                sx={{
+                  // Fixed rather than auto: auto treats a column width as a
+                  // suggestion and takes the shortfall out of whichever column
+                  // it likes, which left the last peer squeezed against its
+                  // neighbours. Fixed honours them, so every peer is one width.
+                  tableLayout: "fixed",
+                  // Grows with the peer count, so the columns keep their width
+                  // and the table overflows into the scroller instead of every
+                  // column shrinking as peers are added.
+                  minWidth:
+                    PACKAGE_MIN_WIDTH +
+                    VERSION_COL_WIDTH +
+                    peerLookups.length * PEER_COL_WIDTH,
+                }}
+              >
                 <TableHead>
                   <TableRow>
-                    <TableCell sx={{ py: 1, fontWeight: "bold" }}>
+                    <TableCell
+                      sx={{ py: 1, fontWeight: "bold", width: PACKAGE_MIN_WIDTH }}
+                    >
                       Package
                     </TableCell>
-                    <TableCell sx={{ py: 1, fontWeight: "bold" }}>
+                    <TableCell
+                      sx={{ py: 1, fontWeight: "bold", width: VERSION_COL_WIDTH }}
+                    >
                       Version
                     </TableCell>
                     {peerLookups.map(({ peer }) => (
@@ -311,6 +340,11 @@ export const PackagesPanel = ({
                           fontWeight: "bold",
                           textAlign: "center",
                           opacity: peer.reachable ? 1 : 0.5,
+                          // Pinned, so every peer reads as the same column
+                          // whatever its name is as long as it is.
+                          width: PEER_COL_WIDTH,
+                          minWidth: PEER_COL_WIDTH,
+                          maxWidth: PEER_COL_WIDTH,
                         }}
                       >
                         <Box
@@ -321,11 +355,27 @@ export const PackagesPanel = ({
                             gap: 0.5,
                           }}
                         >
-                          {peer.name || peer.participant_id}
+                          <Tooltip title={peer.participant_id} arrow>
+                            <Box
+                              component="span"
+                              sx={{
+                                minWidth: 0,
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                              }}
+                            >
+                              {peer.name || peer.participant_id}
+                            </Box>
+                          </Tooltip>
                           {!peer.reachable && (
                             <Tooltip title="Unreachable" arrow>
                               <SignalWifiOffIcon
-                                sx={{ fontSize: 14, color: "text.disabled" }}
+                                sx={{
+                                  fontSize: 14,
+                                  color: "text.disabled",
+                                  flexShrink: 0,
+                                }}
                               />
                             </Tooltip>
                           )}
@@ -338,10 +388,17 @@ export const PackagesPanel = ({
                   {comparisonPaging.pageItems
                     .map((pkg, idx) => (
                       <TableRow key={pkg.package_id} sx={zebraRow(idx)}>
-                        <TableCell sx={{ py: 1 }}>
+                        <TableCell
+                          sx={{
+                            py: 1,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
                           {pkg.name || "-"}
                         </TableCell>
-                        <TableCell sx={{ py: 1 }}>
+                        <TableCell sx={{ py: 1, width: VERSION_COL_WIDTH }}>
                           {pkg.version || "-"}
                         </TableCell>
                         {peerLookups.map(({ peer, lookup }) => {
