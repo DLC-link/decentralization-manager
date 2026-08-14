@@ -1,6 +1,11 @@
 import { Box, Skeleton } from "@mui/material";
-import { columnSx, legendSx } from "../styles";
-import { AUTH_SLOT, FAB_GUTTER, VISIBILITY_SLOT } from "./PartyList";
+import {
+  AUTH_SLOT,
+  VISIBILITY_SLOT,
+  columnSx,
+  fabGutterSx,
+  legendSx,
+} from "../styles";
 import { RowCard } from "./RowCard";
 
 /**
@@ -18,7 +23,7 @@ export const LoadingSkeleton = () => (
       </Box>
       <Box
         component="span"
-        sx={{ ...legendSx, width: AUTH_SLOT, textAlign: "center", flexShrink: 0 }}
+        sx={{ ...legendSx, width: AUTH_SLOT, textAlign: "right", flexShrink: 0 }}
       >
         Auth
       </Box>
@@ -27,13 +32,13 @@ export const LoadingSkeleton = () => (
         sx={{
           ...legendSx,
           width: VISIBILITY_SLOT,
-          textAlign: "center",
+          textAlign: "right",
           flexShrink: 0,
         }}
       >
         Visibility
       </Box>
-      <Box sx={{ width: FAB_GUTTER, flexShrink: 0 }} aria-hidden />
+      <Box sx={fabGutterSx} aria-hidden />
     </Box>
 
     <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
@@ -50,7 +55,7 @@ export const LoadingSkeleton = () => (
               width: AUTH_SLOT,
               flexShrink: 0,
               display: "flex",
-              justifyContent: "center",
+              justifyContent: "flex-end",
               minHeight: 30,
               alignItems: "center",
             }}
@@ -62,12 +67,12 @@ export const LoadingSkeleton = () => (
               width: VISIBILITY_SLOT,
               flexShrink: 0,
               display: "flex",
-              justifyContent: "center",
+              justifyContent: "flex-end",
             }}
           >
             <Skeleton variant="circular" width={18} height={18} />
           </Box>
-          <Box sx={{ width: FAB_GUTTER, flexShrink: 0 }} aria-hidden />
+          <Box sx={fabGutterSx} aria-hidden />
         </RowCard>
       ))}
     </Box>
