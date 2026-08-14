@@ -743,6 +743,7 @@ pub async fn get_governance_confirmations(
                 transfer_details,
                 accept_transfer_details,
                 service_request_info,
+                proposer,
                 orphaned,
             ) = match proposal_infos.remove(&proposal_cid) {
                 Some(info) => (
@@ -750,9 +751,10 @@ pub async fn get_governance_confirmations(
                     info.transfer,
                     info.accept_transfer,
                     info.service_request,
+                    info.proposer,
                     false,
                 ),
-                None => (None, None, None, None, proposal_infos_complete),
+                None => (None, None, None, None, None, proposal_infos_complete),
             };
             // Service-request parties are only meaningful on the two
             // service-request proposal kinds; clear them otherwise so an
@@ -783,6 +785,7 @@ pub async fn get_governance_confirmations(
                 transfer_details,
                 accept_transfer_details,
                 service_request_details,
+                proposer,
             }
         })
         .collect();
@@ -1042,6 +1045,10 @@ pub struct ProposalInfo {
     /// `Create{User,Provider}ServiceRequest` proposals so the notification card
     /// can render the full summary.
     pub service_request: Option<ServiceRequestDetails>,
+    /// The member who created the proposal. Only that member controls
+    /// `GovernableAction_ProposerCancel`, so the card offers the retract
+    /// button on this field alone. `None` when the party id fails to parse.
+    pub proposer: Option<CantonId>,
 }
 
 /// Extract proposal info from a GovernableAction contract's create_arguments.
@@ -1077,6 +1084,17 @@ fn extract_proposal_info(
             _ => None,
         });
 
+    let proposer = field_party(record, "proposer").and_then(|p| match CantonId::parse(&p) {
+        Ok(id) => Some(id),
+        Err(e) => {
+            tracing::warn!(
+                "Proposal {cid} carries an unparseable proposer '{p}': {e}",
+                cid = created.contract_id
+            );
+            None
+        }
+    });
+
     let transfer = extract_transfer_proposal_details(record);
     let service_request = extract_service_request_details(record);
 
@@ -1105,6 +1123,7 @@ fn extract_proposal_info(
             accept_transfer_instruction_cid,
             accept_transfer: None,
             service_request,
+            proposer,
         },
     );
 }

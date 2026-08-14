@@ -58,6 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         AuthTestResponse,
         AuthTestResult,
         CancelConfirmationRequest,
+        CancelProposalRequest,
         ChainAuditEntry,
         ChainAuditResponse,
         ChangeThresholdInvitePayload,

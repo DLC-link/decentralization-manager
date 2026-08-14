@@ -61,6 +61,7 @@ const eventTypeColor = (
     case "expire":
       return "warning";
     case "cancel":
+    case "cancel_proposal":
       return "error";
     default:
       return "default";

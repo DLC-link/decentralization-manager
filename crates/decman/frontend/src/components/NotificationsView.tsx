@@ -107,6 +107,17 @@ const formatRelativeTime = (epochSeconds: number): string => {
   return `${days}d ago`;
 };
 
+const formatTimeUntil = (epochSeconds: number): string => {
+  const seconds = Math.max(0, epochSeconds - Math.floor(Date.now() / 1000));
+  if (seconds < 60) return "in under a minute";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `in ${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `in ${hours}h`;
+  const days = Math.floor(hours / 24);
+  return `in ${days}d`;
+};
+
 const truncatePartyId = (id: string): string => {
   const parts = id.split("::");
   if (parts.length !== 2) return id;
@@ -865,6 +876,24 @@ const DomainActionCard = ({
   const ownConfirmation = domainAction.confirmations.find(
     (c) => c.confirming_party === party.memberPartyId,
   );
+  const otherConfirmations = domainAction.confirmations.filter(
+    (c) => c.confirming_party !== party.memberPartyId,
+  );
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  // GovernanceConfirmation_Expire refuses to run before a confirmation's
+  // expiry time, and only its own confirmer can archive it any earlier. So
+  // another member's live confirmation is nobody else's to clear yet.
+  const expiredOthers = otherConfirmations.filter(
+    (c) => (c.expires_at ?? 0) > 0 && (c.expires_at ?? 0) <= nowSeconds,
+  );
+  const nextOtherExpiry = otherConfirmations
+    .map((c) => c.expires_at ?? 0)
+    .filter((t) => t > nowSeconds)
+    .sort((a, b) => a - b)[0];
+  // Only the proposer controls GovernableAction_ProposerCancel, so anyone else
+  // pressing the button would just collect a ledger rejection.
+  const canCancelProposal =
+    !!domainAction.proposer && domainAction.proposer === party.memberPartyId;
 
   // The on-chain proposal already encodes the action — server only needs the
   // proposal_cid and governance_type to confirm/execute. action is a
@@ -879,7 +908,12 @@ const DomainActionCard = ({
     body: T,
     successMsg: string,
   ): Promise<void> => {
-    if (!party.rulesContractId) {
+    // Only the endpoints that exercise a choice on the rules contract need it.
+    // Cancelling a confirmation or a proposal goes straight to the contract
+    // being archived, so it stays available when the rules cid is unknown.
+    const needsRulesContract =
+      typeof body === "object" && body !== null && "rules_contract_id" in body;
+    if (needsRulesContract && !party.rulesContractId) {
       showSnackbar("Governance rules contract is not set", "error");
       return;
     }
@@ -944,12 +978,27 @@ const DomainActionCard = ({
       "Confirmation expired",
     );
 
+  // Retract the proposal, and archive our own confirmation with it. The server
+  // sends both as one transaction, because nobody else can clear that
+  // confirmation once the proposal it points at is gone.
+  const handleCancelProposal = () =>
+    post(
+      "cancel-proposal",
+      {
+        party_id: party.partyId,
+        proposal_cid: domainAction.proposal_cid,
+        confirmation_cid: ownConfirmation?.contract_id,
+      },
+      "Proposal cancelled",
+    );
+
   // For orphaned actions (underlying proposal is gone) the only valid
   // operation is to clear the stranded Confirmation contracts off the ledger.
-  // Loop sequentially so the `busy` lock on each /governance/expire call
-  // serializes correctly.
+  // Our own goes through Revoke instead, and another member's live one is not
+  // ours to clear, so this covers the expired remainder. Loop sequentially so
+  // the `busy` lock on each /governance/expire call serializes correctly.
   const handleDismissOrphan = async () => {
-    for (const c of domainAction.confirmations) {
+    for (const c of expiredOthers) {
       await handleExpire(c.contract_id);
     }
   };
@@ -1017,8 +1066,9 @@ const DomainActionCard = ({
 
       {domainAction.orphaned && (
         <Alert severity="warning" sx={{ py: 0.5 }}>
-          The underlying proposal has been archived. These confirmation
-          contracts are stranded on the ledger — dismiss to clear them.
+          The underlying proposal has been archived, so these confirmation
+          contracts are stranded on the ledger. Each member revokes their own.
+          Anyone can dismiss the rest once they expire.
         </Alert>
       )}
 
@@ -1265,7 +1315,6 @@ const DomainActionCard = ({
           (a, b) => (a.created_at ?? 0) - (b.created_at ?? 0),
         );
         const proposerCid = sorted[0]?.contract_id;
-        const nowSeconds = Math.floor(Date.now() / 1000);
         return (
           <Box
             sx={{
@@ -1379,15 +1428,46 @@ const DomainActionCard = ({
           variant={domainAction.can_execute ? "filled" : "outlined"}
         />
         {domainAction.orphaned ? (
-          <Button
-            size="small"
-            variant="outlined"
-            color="warning"
-            onClick={handleDismissOrphan}
-            disabled={busy || !party.rulesContractId}
-          >
-            Dismiss
-          </Button>
+          <>
+            {ownConfirmation && (
+              <Button
+                size="small"
+                variant="outlined"
+                color="warning"
+                onClick={handleRevoke}
+                disabled={busy}
+              >
+                Revoke
+              </Button>
+            )}
+            {otherConfirmations.length > 0 && (
+              <Tooltip
+                title={
+                  expiredOthers.length > 0
+                    ? "Clear the other members' expired confirmations"
+                    : `Only each member clears their own confirmation until it expires${
+                        nextOtherExpiry
+                          ? `, and the next one expires ${formatTimeUntil(nextOtherExpiry)}`
+                          : ""
+                      }`
+                }
+              >
+                <span>
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    color="warning"
+                    onClick={handleDismissOrphan}
+                    disabled={
+                      busy || !party.rulesContractId || expiredOthers.length === 0
+                    }
+                  >
+                    Dismiss
+                  </Button>
+                </span>
+              </Tooltip>
+            )}
+          </>
         ) : (
           <>
             {ownConfirmation ? (
@@ -1408,6 +1488,17 @@ const DomainActionCard = ({
                 disabled={busy || !party.rulesContractId}
               >
                 Confirm
+              </Button>
+            )}
+            {canCancelProposal && (
+              <Button
+                size="small"
+                variant="outlined"
+                color="error"
+                onClick={handleCancelProposal}
+                disabled={busy}
+              >
+                Cancel proposal
               </Button>
             )}
             {domainAction.can_execute && (
