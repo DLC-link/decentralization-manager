@@ -311,6 +311,15 @@ export const PackagesPanel = ({
                   // it likes, which left the last peer squeezed against its
                   // neighbours. Fixed honours them, so every peer is one width.
                   tableLayout: "fixed",
+                  // The theme pads a table's trailing cell out to
+                  // `--content-pad`, so a full-bleed table's last column lines
+                  // its content up with the rest of the UI. This table isn't
+                  // full-bleed — it's a fixed grid inside a scroller — and that
+                  // padding ate the last peer column, leaving its tick sitting
+                  // against the column's left edge while the column itself
+                  // painted full width. The leading inset stays: it lines the
+                  // package name up with the panel's header above it.
+                  "& .MuiTableCell-root:last-of-type": { pr: 2 },
                   // Grows with the peer count, so the columns keep their width
                   // and the table overflows into the scroller instead of every
                   // column shrinking as peers are added.
@@ -320,16 +329,24 @@ export const PackagesPanel = ({
                     peerLookups.length * PEER_COL_WIDTH,
                 }}
               >
+                {/* Columns are declared here rather than inferred from the
+                  * header cells: sizing a fixed-layout table off its cells left
+                  * the last peer's column painting one width while laying its
+                  * content out at another. The package column is left open so it
+                  * takes whatever the stated columns leave. */}
+                <colgroup>
+                  <col />
+                  <col style={{ width: VERSION_COL_WIDTH }} />
+                  {peerLookups.map(({ peer }) => (
+                    <col key={peer.participant_id} style={{ width: PEER_COL_WIDTH }} />
+                  ))}
+                </colgroup>
                 <TableHead>
                   <TableRow>
-                    <TableCell
-                      sx={{ py: 1, fontWeight: "bold", width: PACKAGE_MIN_WIDTH }}
-                    >
+                    <TableCell sx={{ py: 1, fontWeight: "bold" }}>
                       Package
                     </TableCell>
-                    <TableCell
-                      sx={{ py: 1, fontWeight: "bold", width: VERSION_COL_WIDTH }}
-                    >
+                    <TableCell sx={{ py: 1, fontWeight: "bold" }}>
                       Version
                     </TableCell>
                     {peerLookups.map(({ peer }) => (
@@ -340,11 +357,7 @@ export const PackagesPanel = ({
                           fontWeight: "bold",
                           textAlign: "center",
                           opacity: peer.reachable ? 1 : 0.5,
-                          // Pinned, so every peer reads as the same column
-                          // whatever its name is as long as it is.
-                          width: PEER_COL_WIDTH,
-                          minWidth: PEER_COL_WIDTH,
-                          maxWidth: PEER_COL_WIDTH,
+                          whiteSpace: "nowrap",
                         }}
                       >
                         <Box
@@ -398,7 +411,7 @@ export const PackagesPanel = ({
                         >
                           {pkg.name || "-"}
                         </TableCell>
-                        <TableCell sx={{ py: 1, width: VERSION_COL_WIDTH }}>
+                        <TableCell sx={{ py: 1 }}>
                           {pkg.version || "-"}
                         </TableCell>
                         {peerLookups.map(({ peer, lookup }) => {
