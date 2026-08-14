@@ -157,11 +157,17 @@ export const OnboardingDialog = ({
 
   const toggleAllVisible = () => {
     setSelectedPeerIds((prev) => {
+      // Decided from `prev`, not the render's `allVisibleSelected`: fired twice
+      // before a re-render — key repeat on the button — both calls would read
+      // the same stale flag and the second would repeat the first instead of
+      // toggling back.
+      const allSelected =
+        visiblePeers.length > 0 &&
+        visiblePeers.every((p) => prev.has(p.participant_id));
       const next = new Set(prev);
-      if (allVisibleSelected) {
-        visiblePeers.forEach((p) => next.delete(p.participant_id));
-      } else {
-        visiblePeers.forEach((p) => next.add(p.participant_id));
+      for (const p of visiblePeers) {
+        if (allSelected) next.delete(p.participant_id);
+        else next.add(p.participant_id);
       }
       return next;
     });
