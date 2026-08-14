@@ -349,6 +349,7 @@ async fn run() -> Result {
     let pool = db::connect(&db_path).await?;
 
     tracing::info!("Running database migrations");
+    db::repair_migration_checksums(&pool).await?;
     db::MIGRATOR.run(&pool).await?;
 
     match args.command {

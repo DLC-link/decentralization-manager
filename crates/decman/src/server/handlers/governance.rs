@@ -44,10 +44,10 @@ use crate::{
         },
         types::{
             ActiveCouponReassignmentDelegation, AuditLogEntry, AuditLogQuery, AuditLogResponse,
-            BurnRequestsResponse, CancelConfirmationRequest, ChainAuditEntry, ChainAuditQuery,
-            ChainAuditResponse, ConfirmActionRequest, ContractQueryResponse,
-            CouponReassignmentDelegationSummary, CredentialOffersResponse, ErrorResponse,
-            ExecuteActionRequest, ExpireConfirmationRequest, GovernanceResponse,
+            BurnRequestsResponse, CancelConfirmationRequest, CancelProposalRequest,
+            ChainAuditEntry, ChainAuditQuery, ChainAuditResponse, ConfirmActionRequest,
+            ContractQueryResponse, CouponReassignmentDelegationSummary, CredentialOffersResponse,
+            ErrorResponse, ExecuteActionRequest, ExpireConfirmationRequest, GovernanceResponse,
             GovernanceStateResponse, GovernanceType, HoldingsResponse, InstrumentsResponse,
             KnownMember, KnownMembersResponse, MessageResponse, MintRequestsResponse, NetworkInfo,
             OperatorInfo, ProposalType, ProposeActionRequest, ProviderServicesResponse,
@@ -1953,6 +1953,85 @@ pub async fn cancel_confirmation(
     }
 }
 
+/// Retract a proposal the caller proposed
+#[utoipa::path(
+    tag = "Governance",
+    request_body = CancelProposalRequest,
+    responses(
+        (status = 200, description = "Proposal cancelled", body = MessageResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[post("/governance/cancel-proposal")]
+pub async fn cancel_proposal(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    body: web::Json<CancelProposalRequest>,
+) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
+    let party_id = &body.party_id;
+
+    let (token, member_party_id) = match get_party_credentials(&data, party_id).await {
+        Some(creds) => creds,
+        None => {
+            return HttpResponse::Unauthorized().json(ErrorResponse {
+                error: "No credentials configured for party".to_string(),
+            });
+        }
+    };
+
+    let audit_pool = data.db.clone();
+    let audit_details = serde_json::to_string(&*body).unwrap_or_default();
+    let audit_party_id = party_id.clone();
+    let audit_member = member_party_id.clone();
+
+    let packages = packages();
+
+    match execute_cancel_proposal(&data.config, &body, &token, &member_party_id, &packages).await {
+        Ok(()) => {
+            spawn_audit_log(
+                audit_pool,
+                AuditParams {
+                    event_type: AuditEvent::CancelProposal,
+                    party_id: audit_party_id,
+                    member_party_id: audit_member,
+                    governance_type: GovernanceType::CoreDomain,
+                    action_summary: "cancel_proposal".to_string(),
+                    details: audit_details,
+                    status: "success",
+                    error_message: None,
+                },
+            );
+            HttpResponse::Ok().json(MessageResponse {
+                message: "Proposal cancelled successfully".to_string(),
+            })
+        }
+        Err(e) => {
+            tracing::error!("Failed to cancel proposal: {e}");
+            spawn_audit_log(
+                audit_pool,
+                AuditParams {
+                    event_type: AuditEvent::CancelProposal,
+                    party_id: audit_party_id,
+                    member_party_id: audit_member,
+                    governance_type: GovernanceType::CoreDomain,
+                    action_summary: "cancel_proposal".to_string(),
+                    details: audit_details,
+                    status: "failed",
+                    error_message: Some(format!("{e}")),
+                },
+            );
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to cancel proposal: {e}"),
+            })
+        }
+    }
+}
+
 /// Get package configuration for a party
 #[utoipa::path(
     tag = "Configuration",
@@ -2860,6 +2939,220 @@ async fn execute_cancel_confirmation(
     client.submit_and_wait(req).await?;
 
     Ok(())
+}
+
+/// Build the exercise commands that retract a proposal.
+///
+/// The first command archives the proposal itself. `GovernableAction_ProposerCancel`
+/// is declared on the interface rather than on any one template, so the
+/// exercise carries the `GovernableAction` interface id and never the id of
+/// the template that actually created the contract. That also rules out
+/// [`resolve_contract_package_ref`]: it reports the package of the contract,
+/// which here is the proposal's own package, not the interface's.
+///
+/// The second command archives the caller's confirmation on that proposal,
+/// which `/governance/propose` creates for every proposal. Both choices take
+/// no arguments, and the caller controls both — `proposer` on one, `confirmer`
+/// on the other — so one submission covers them.
+fn build_cancel_proposal_commands(
+    proposal_cid: &str,
+    action_package_ref: &str,
+    confirmation: Option<(&str, &str)>,
+) -> Vec<Command> {
+    let no_arguments = || {
+        Some(Value {
+            sum: Some(value::Sum::Record(Record {
+                record_id: None,
+                fields: vec![],
+            })),
+        })
+    };
+
+    let mut commands = vec![Command {
+        command: Some(command::Command::Exercise(ExerciseCommand {
+            template_id: Some(Identifier {
+                package_id: action_package_ref.to_string(),
+                module_name: "Governance.Action".to_string(),
+                entity_name: "GovernableAction".to_string(),
+            }),
+            contract_id: proposal_cid.to_string(),
+            choice: "GovernableAction_ProposerCancel".to_string(),
+            choice_argument: no_arguments(),
+        })),
+    }];
+
+    if let Some((confirmation_cid, confirmation_package_ref)) = confirmation {
+        commands.push(Command {
+            command: Some(command::Command::Exercise(ExerciseCommand {
+                template_id: Some(Identifier {
+                    package_id: confirmation_package_ref.to_string(),
+                    module_name: "Governance.Confirmation".to_string(),
+                    entity_name: "GovernanceConfirmation".to_string(),
+                }),
+                contract_id: confirmation_cid.to_string(),
+                choice: "GovernanceConfirmation_Cancel".to_string(),
+                choice_argument: no_arguments(),
+            })),
+        });
+    }
+
+    commands
+}
+
+/// Exercise `GovernableAction_ProposerCancel` on a proposal, and archive the
+/// caller's own confirmation alongside it.
+///
+/// The two commands share one submission so they succeed or fail together. A
+/// confirmation that outlives its proposal is only clearable by its own
+/// confirmer: `GovernanceConfirmation_Expire` refuses to run before the
+/// confirmation's expiry time.
+async fn execute_cancel_proposal(
+    config: &NodeConfig,
+    request: &CancelProposalRequest,
+    token: &str,
+    member_party_id: &CantonId,
+    packages: &PackageConfig,
+) -> Result {
+    let action_package_ref = packages
+        .governance_action
+        .as_deref()
+        .context("governance_action package not configured")?;
+
+    let confirmation_package_ref = match request.confirmation_cid.as_deref() {
+        Some(cid) => {
+            let core = packages
+                .governance_core
+                .as_deref()
+                .context("governance_core package not configured")?;
+            // The confirmation is created by the rules contract's choice, so it
+            // shares that contract's possibly out-of-date package.
+            Some(
+                resolve_contract_package_ref(
+                    config,
+                    &request.party_id,
+                    Some(token.to_string()),
+                    cid,
+                    core,
+                )
+                .await,
+            )
+        }
+        None => None,
+    };
+
+    let commands = build_cancel_proposal_commands(
+        &request.proposal_cid,
+        action_package_ref,
+        request
+            .confirmation_cid
+            .as_deref()
+            .zip(confirmation_package_ref.as_deref()),
+    );
+
+    let channel = config.ledger_channel().await?;
+
+    let mut client =
+        CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
+
+    let commands = Commands {
+        workflow_id: String::new(),
+        user_id: String::new(),
+        command_id: uuid::Uuid::new_v4().to_string(),
+        commands,
+        deduplication_period: None,
+        min_ledger_time_abs: None,
+        min_ledger_time_rel: None,
+        act_as: vec![member_party_id.to_string()],
+        read_as: vec![request.party_id.to_string()],
+        submission_id: String::new(),
+        disclosed_contracts: vec![],
+        synchronizer_id: String::new(),
+        package_id_selection_preference: vec![],
+        prefetch_contract_keys: vec![],
+        taps_max_passes: None,
+    };
+
+    let mut req = tonic::Request::new(SubmitAndWaitRequest {
+        commands: Some(commands),
+    });
+    req.metadata_mut()
+        .insert("authorization", format!("Bearer {token}").parse().unwrap());
+
+    client.submit_and_wait(req).await?;
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod cancel_proposal_tests {
+    use super::*;
+
+    fn exercise(command: &Command) -> &ExerciseCommand {
+        match command.command.as_ref() {
+            Some(command::Command::Exercise(e)) => e,
+            _ => panic!("the builder only emits exercise commands"),
+        }
+    }
+
+    #[test]
+    fn cancels_the_proposal_through_the_interface() {
+        let commands = build_cancel_proposal_commands("proposal-1", "action-pkg", None);
+
+        assert_eq!(commands.len(), 1);
+        let exercised = exercise(&commands[0]);
+        assert_eq!(exercised.contract_id, "proposal-1");
+        assert_eq!(exercised.choice, "GovernableAction_ProposerCancel");
+
+        let template_id = exercised
+            .template_id
+            .as_ref()
+            .expect("exercise carries a template id");
+        assert_eq!(template_id.package_id, "action-pkg");
+        assert_eq!(template_id.module_name, "Governance.Action");
+        assert_eq!(template_id.entity_name, "GovernableAction");
+    }
+
+    #[test]
+    fn archives_the_own_confirmation_in_the_same_batch() {
+        let commands = build_cancel_proposal_commands(
+            "proposal-1",
+            "action-pkg",
+            Some(("confirmation-1", "core-pkg")),
+        );
+
+        assert_eq!(commands.len(), 2);
+        let exercised = exercise(&commands[1]);
+        assert_eq!(exercised.contract_id, "confirmation-1");
+        assert_eq!(exercised.choice, "GovernanceConfirmation_Cancel");
+
+        let template_id = exercised
+            .template_id
+            .as_ref()
+            .expect("exercise carries a template id");
+        assert_eq!(template_id.package_id, "core-pkg");
+        assert_eq!(template_id.module_name, "Governance.Confirmation");
+        assert_eq!(template_id.entity_name, "GovernanceConfirmation");
+    }
+
+    #[test]
+    fn neither_choice_takes_arguments() {
+        let commands = build_cancel_proposal_commands(
+            "proposal-1",
+            "action-pkg",
+            Some(("confirmation-1", "core-pkg")),
+        );
+
+        for command in &commands {
+            let argument = exercise(command)
+                .choice_argument
+                .as_ref()
+                .and_then(|v| v.sum.as_ref());
+            match argument {
+                Some(value::Sum::Record(record)) => assert!(record.fields.is_empty()),
+                _ => panic!("choice argument is an empty record"),
+            }
+        }
+    }
 }
 
 #[cfg(test)]

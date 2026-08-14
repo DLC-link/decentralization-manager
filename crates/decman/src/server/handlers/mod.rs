@@ -13,7 +13,7 @@ pub use config::{
     NodeConfigResponse, get_network_config, get_node_config, healthz, metrics, save_network_config,
 };
 pub use governance::{
-    cancel_confirmation, confirm_action, execute_action, expire_confirmation,
+    cancel_confirmation, cancel_proposal, confirm_action, execute_action, expire_confirmation,
     get_burn_requests_handler, get_coupon_reassignment_delegation, get_credential_offers_handler,
     get_governance, get_governance_audit, get_governance_chain_audit, get_governance_state,
     get_holdings_handler, get_instruments_handler, get_known_members, get_mint_requests_handler,

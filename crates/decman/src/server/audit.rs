@@ -14,6 +14,7 @@ pub enum AuditEvent {
     Execute,
     Expire,
     Cancel,
+    CancelProposal,
 }
 
 impl AuditEvent {
@@ -24,6 +25,7 @@ impl AuditEvent {
             AuditEvent::Execute => "execute",
             AuditEvent::Expire => "expire",
             AuditEvent::Cancel => "cancel",
+            AuditEvent::CancelProposal => "cancel_proposal",
         }
     }
 }

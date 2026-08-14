@@ -1244,6 +1244,7 @@ pub async fn start_server(
             .service(handlers::execute_action)
             .service(handlers::expire_confirmation)
             .service(handlers::cancel_confirmation)
+            .service(handlers::cancel_proposal)
             .service(handlers::get_governance_audit)
             .service(handlers::get_governance_chain_audit)
             .service(handlers::get_token_standard_contracts)
