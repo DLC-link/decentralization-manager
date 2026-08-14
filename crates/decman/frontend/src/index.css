@@ -1,10 +1,13 @@
 :root {
-  font-family: "Space Grotesk", system-ui, -apple-system, "Segoe UI", sans-serif;
+  /* Space Grotesk carries the UI text; Roboto Mono every number, address and
+     machine-readable string. Declared as tokens so the theme and the components
+     that reach for a family by name share one definition. */
+  --font-sans: "Space Grotesk", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  font-family: var(--font-sans);
   line-height: 1.5;
   font-weight: 400;
-
-  /* Roboto Mono carries every number, address and machine-readable string. */
-  --font-mono: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 
   /* BitSafe action accent — see the bitsafe-design skill. */
   --accent: #d63a0f;
