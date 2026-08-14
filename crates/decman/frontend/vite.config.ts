@@ -82,22 +82,31 @@ function mockApi(): Plugin {
 }
 
 // https://vite.dev/config/
-export default defineConfig({
-  plugins: [react(), ...(process.env.MOCK === 'true' ? [mockApi()] : [])],
-  define: {
-    __BUILD_DATE__: JSON.stringify(new Date().toISOString()),
-    // Build version: APP_VERSION from build.rs (production) → Cargo.toml
-    // version (dev / mock) → "dev" only if Cargo.toml can't be read.
-    __APP_VERSION__: JSON.stringify(process.env.APP_VERSION ?? cargoVersion ?? 'dev'),
-    // True only under `MOCK=true` dev — lets the app stand up a fake login
-    // session so the full authed UI (logout, etc.) is previewable offline.
-    __MOCK__: process.env.MOCK === 'true',
-  },
-  // `npm test`. jsdom because the hooks under test render components and touch
-  // the DOM (scroll containers); `include` keeps the runner off node_modules.
-  test: {
-    environment: 'jsdom',
-    include: ['src/**/*.test.{ts,tsx}'],
-    setupFiles: ['src/vitest.setup.ts'],
-  },
+export default defineConfig(({ command }) => {
+  // Mock mode is dev-only, and `serve` is what makes it so. The env var alone
+  // isn't enough: `__MOCK__` switches the app onto a fake login session, so a
+  // build carrying `MOCK=true` in its environment — `build.rs` shells out to
+  // `npm run build` — would ship a bundle that skips real authentication.
+  // Gating the flag here covers the plugin and the define from one place.
+  const mock = command === 'serve' && process.env.MOCK === 'true'
+
+  return {
+    plugins: [react(), ...(mock ? [mockApi()] : [])],
+    define: {
+      __BUILD_DATE__: JSON.stringify(new Date().toISOString()),
+      // Build version: APP_VERSION from build.rs (production) → Cargo.toml
+      // version (dev / mock) → "dev" only if Cargo.toml can't be read.
+      __APP_VERSION__: JSON.stringify(process.env.APP_VERSION ?? cargoVersion ?? 'dev'),
+      // True only under `MOCK=true` dev — lets the app stand up a fake login
+      // session so the full authed UI (logout, etc.) is previewable offline.
+      __MOCK__: mock,
+    },
+    // `npm test`. jsdom because the hooks under test render components and touch
+    // the DOM (scroll containers); `include` keeps the runner off node_modules.
+    test: {
+      environment: 'jsdom',
+      include: ['src/**/*.test.{ts,tsx}'],
+      setupFiles: ['src/vitest.setup.ts'],
+    },
+  }
 })
