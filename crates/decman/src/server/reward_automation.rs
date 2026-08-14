@@ -958,7 +958,7 @@ pub(crate) async fn run_reward_automation_loop(data: actix_web::web::Data<AppSta
             .collect();
         for decparty in parties {
             if let Err(e) = run_once_for_party(&data, &decparty).await {
-                tracing::warn!(%decparty, error = %e, "reward automation tick failed");
+                tracing::trace!(%decparty, error = %e, "reward automation tick failed");
             }
         }
     }
