@@ -8,6 +8,7 @@ import { PartyIdText } from "./PartyIdText";
 import { RowCard } from "./RowCard";
 import { PaginationControls } from "./Pagination";
 import { usePagination } from "../usePagination";
+import { LIST_BLEED, LIST_INSET, legendSx } from "../styles";
 import type { DecentralizedParty, PartyAuthStatus } from "../types";
 
 interface PartyListProps {
@@ -19,26 +20,17 @@ interface PartyListProps {
 }
 
 // Card lists have no header row, so the two icon columns are labelled by a
-// legend above them. These widths are shared by the legend and the cards to
-// keep the two aligned.
-const AUTH_SLOT = 56;
-const VISIBILITY_SLOT = 84;
+// legend above them. These widths are shared by the legend, the cards and the
+// loading skeleton to keep all three aligned.
+export const AUTH_SLOT = 56;
+export const VISIBILITY_SLOT = 84;
 // Trailing dead space inside the row, standing in for the spacer cell the table
 // used to carry: it holds the visibility toggle out from under the fixed
 // Create-Party FAB (56px, offset 24px) that this view renders over the
 // bottom-right corner. Padding the container instead would make its horizontal
-// inset lopsided, which shows as an off-centre list once `--content-pad`
-// bottoms out on a small screen.
-const FAB_GUTTER = 40;
-
-const legendSx = {
-  fontFamily: "var(--font-mono)",
-  fontSize: "0.7rem",
-  fontWeight: 500,
-  letterSpacing: "0.12em",
-  textTransform: "uppercase" as const,
-  color: "text.secondary",
-};
+// inset lopsided, which shows as an off-centre list once the gutter bottoms out
+// on a small screen.
+export const FAB_GUTTER = 40;
 
 const AuthStatusIcon = ({ status }: { status?: PartyAuthStatus }) => {
   if (!status) return null;
@@ -84,7 +76,7 @@ export const PartyList = ({
   }
 
   return (
-    <Box sx={{ px: "var(--content-pad)", pt: 1 }}>
+    <Box sx={{ px: LIST_INSET, pt: 1 }}>
       {/* Legend — padded to line up with the cards' own 16px inset. */}
       <Box
         sx={{
@@ -175,13 +167,14 @@ export const PartyList = ({
         })}
       </Box>
 
-      {/* No FAB clearance needed: the controls sit centered, well clear of the
-        * bottom-right corner, and padding one side would pull them off-center. */}
+      {/* Runs the full width of the view, under rows that stop at the inset.
+        * Its contents are centered, so nothing lands under the FAB. */}
       <PaginationControls
         page={page}
         pageCount={pageCount}
         total={total}
         onChange={setPage}
+        sx={{ mx: LIST_BLEED }}
       />
     </Box>
   );
