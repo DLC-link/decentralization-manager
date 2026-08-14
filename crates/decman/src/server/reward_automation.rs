@@ -596,6 +596,15 @@ pub(crate) fn register_metrics() {
     LazyLock::force(&OLDEST_EXPIRES_IN);
 }
 
+/// Exports the outcome counters at zero for a decparty this node sweeps. A counter
+/// that only appears on its first event leaves a dashboard unable to tell a node
+/// that never failed from an instrument that is missing.
+fn ensure_outcome_series(label: &str) {
+    for counter in [&*ASSIGNED, &*SKIPPED, &*ZERO_ASSIGNED, &*SWEEP_FAILED] {
+        counter.with_label_values(&[label]).inc_by(0);
+    }
+}
+
 // ============================================================================
 // Coupon batch selection
 // ============================================================================
@@ -1101,6 +1110,7 @@ pub(crate) async fn run_reward_automation_loop(data: actix_web::web::Data<AppSta
         for decparty in parties {
             let label = decparty.to_string();
             SWEEPS.with_label_values(&[&label]).inc();
+            ensure_outcome_series(&label);
             let outcome = match run_once_for_party(&data, &decparty).await {
                 Ok(outcome) => outcome,
                 Err(e) => {
@@ -1944,6 +1954,38 @@ mod tests {
                 .iter()
                 .any(|n| n == "decman_reward_sweep_total")
         );
+    }
+
+    #[test]
+    fn the_outcome_counters_read_zero_before_their_first_event() {
+        // A dashboard cannot tell a missing family from a node that never failed,
+        // so a served decparty exports all four at zero from its first sweep.
+        register_metrics();
+        let label = "cbtc-network::1220outcomezero";
+        ensure_outcome_series(label);
+
+        let families = prometheus::gather();
+        for name in [
+            "decman_reward_coupons_assigned_total",
+            "decman_reward_coupons_skipped_total",
+            "decman_reward_sweep_zero_assigned_total",
+            "decman_reward_sweep_failed_total",
+        ] {
+            let family = families
+                .iter()
+                .find(|f| f.get_name() == name)
+                .unwrap_or_else(|| panic!("{name} is missing from the registry"));
+            let metric = family
+                .get_metric()
+                .iter()
+                .find(|m| m.get_label().iter().any(|l| l.get_value() == label))
+                .unwrap_or_else(|| panic!("{name} has no series for the decparty"));
+            assert_eq!(
+                metric.get_counter().get_value(),
+                0.0,
+                "{name} should read zero"
+            );
+        }
     }
 
     #[test]
