@@ -997,6 +997,638 @@
       "local_metadata": {
         "annotations": {}
       }
+    },
+    {
+      "party_id": "cbtc-custody-eu::122042d0d7c4e92600533f99099660ac33fdd59965381605673796341b2a4701",
+      "threshold": 1,
+      "owners": [
+        "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
+        "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead"
+      ],
+      "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
+      "participants": [
+        {
+          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d",
+          "permission": "Submission",
+          "owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2"
+        },
+        {
+          "participant_uid": "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+          "permission": "Submission",
+          "owner_key": "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead"
+        }
+      ],
+      "contracts": [
+        {
+          "contract_id": "00dd997b7ec53feda70dc6ed6a8b79432994028a587754824cef602facc55f9c4ddd09f2",
+          "template_id": "Governance.Rules:GovernanceRules",
+          "package_id": "0a63501e8111e31956c0864953a3c6c1c3498444196cc9bf4967fd4f8fc59adf",
+          "package_name": "governance-core",
+          "package_version": "0.2.0",
+          "created_at": "2026-05-01T10:00:00Z"
+        }
+      ],
+      "local_metadata": {
+        "annotations": {}
+      }
+    },
+    {
+      "party_id": "cbtc-custody-us::1220e0a92fecbc2a6a5b13d99bfe2e71134587976be0fcfaadbfee0ae0128a05",
+      "threshold": 2,
+      "owners": [
+        "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
+        "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead",
+        "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e"
+      ],
+      "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
+      "participants": [
+        {
+          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d",
+          "permission": "Submission",
+          "owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2"
+        },
+        {
+          "participant_uid": "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+          "permission": "Submission",
+          "owner_key": "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead"
+        },
+        {
+          "participant_uid": "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343",
+          "permission": "Submission",
+          "owner_key": "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e"
+        }
+      ],
+      "contracts": [
+        {
+          "contract_id": "00dd997b7ec53feda70dc6ed6a8b79432994028a587754824cef602facc55f9c4ddd09f2",
+          "template_id": "Governance.Rules:GovernanceRules",
+          "package_id": "0a63501e8111e31956c0864953a3c6c1c3498444196cc9bf4967fd4f8fc59adf",
+          "package_name": "governance-core",
+          "package_version": "0.2.0",
+          "created_at": "2026-05-01T10:00:00Z"
+        }
+      ],
+      "local_metadata": {
+        "annotations": {}
+      }
+    },
+    {
+      "party_id": "vault-basis-btc::1220f6f48d14fe041563d9d47b660259db8d993e4788d160c547b0e241facf9f",
+      "threshold": 3,
+      "owners": [
+        "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
+        "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead",
+        "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e",
+        "0261982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae7629"
+      ],
+      "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
+      "participants": [
+        {
+          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d",
+          "permission": "Submission",
+          "owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2"
+        },
+        {
+          "participant_uid": "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+          "permission": "Submission",
+          "owner_key": "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead"
+        },
+        {
+          "participant_uid": "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343",
+          "permission": "Submission",
+          "owner_key": "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e"
+        },
+        {
+          "participant_uid": "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+          "permission": "Submission",
+          "owner_key": "0261982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae7629"
+        }
+      ],
+      "contracts": [
+        {
+          "contract_id": "00dd997b7ec53feda70dc6ed6a8b79432994028a587754824cef602facc55f9c4ddd09f2",
+          "template_id": "Governance.Rules:GovernanceRules",
+          "package_id": "0a63501e8111e31956c0864953a3c6c1c3498444196cc9bf4967fd4f8fc59adf",
+          "package_name": "governance-core",
+          "package_version": "0.2.0",
+          "created_at": "2026-05-01T10:00:00Z"
+        }
+      ],
+      "local_metadata": {
+        "annotations": {}
+      }
+    },
+    {
+      "party_id": "vault-carry-eth::122041138f3c525b216bfdd347ce51e3acd5fca898301a51cdcf43cde0e2ab8f",
+      "threshold": 1,
+      "owners": [
+        "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
+        "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead",
+        "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e",
+        "0261982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae7629",
+        "02d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44eef8"
+      ],
+      "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
+      "participants": [
+        {
+          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d",
+          "permission": "Submission",
+          "owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2"
+        },
+        {
+          "participant_uid": "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+          "permission": "Submission",
+          "owner_key": "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead"
+        },
+        {
+          "participant_uid": "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343",
+          "permission": "Submission",
+          "owner_key": "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e"
+        },
+        {
+          "participant_uid": "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+          "permission": "Submission",
+          "owner_key": "0261982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae7629"
+        },
+        {
+          "participant_uid": "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+          "permission": "Submission",
+          "owner_key": "02d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44eef8"
+        }
+      ],
+      "contracts": [
+        {
+          "contract_id": "00dd997b7ec53feda70dc6ed6a8b79432994028a587754824cef602facc55f9c4ddd09f2",
+          "template_id": "Governance.Rules:GovernanceRules",
+          "package_id": "0a63501e8111e31956c0864953a3c6c1c3498444196cc9bf4967fd4f8fc59adf",
+          "package_name": "governance-core",
+          "package_version": "0.2.0",
+          "created_at": "2026-05-01T10:00:00Z"
+        }
+      ],
+      "local_metadata": {
+        "annotations": {}
+      }
+    },
+    {
+      "party_id": "attestor-pool-apac::1220867ad664f1dbae731553a136622fa71d8744fdd8622be7574e555cca4977",
+      "threshold": 2,
+      "owners": [
+        "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
+        "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead",
+        "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e",
+        "0261982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae7629",
+        "02d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44eef8",
+        "0210f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e916ed"
+      ],
+      "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
+      "participants": [
+        {
+          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d",
+          "permission": "Submission",
+          "owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2"
+        },
+        {
+          "participant_uid": "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+          "permission": "Submission",
+          "owner_key": "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead"
+        },
+        {
+          "participant_uid": "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343",
+          "permission": "Submission",
+          "owner_key": "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e"
+        },
+        {
+          "participant_uid": "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+          "permission": "Submission",
+          "owner_key": "0261982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae7629"
+        },
+        {
+          "participant_uid": "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+          "permission": "Submission",
+          "owner_key": "02d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44eef8"
+        },
+        {
+          "participant_uid": "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9",
+          "permission": "Submission",
+          "owner_key": "0210f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e916ed"
+        }
+      ],
+      "contracts": [
+        {
+          "contract_id": "00dd997b7ec53feda70dc6ed6a8b79432994028a587754824cef602facc55f9c4ddd09f2",
+          "template_id": "Governance.Rules:GovernanceRules",
+          "package_id": "0a63501e8111e31956c0864953a3c6c1c3498444196cc9bf4967fd4f8fc59adf",
+          "package_name": "governance-core",
+          "package_version": "0.2.0",
+          "created_at": "2026-05-01T10:00:00Z"
+        }
+      ],
+      "local_metadata": {
+        "annotations": {}
+      }
+    },
+    {
+      "party_id": "relay-fra1::12201d33028c4ab5dc7b0587279e3c82ea655c5618809f1131df08f455b2695e",
+      "threshold": 3,
+      "owners": [
+        "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
+        "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead"
+      ],
+      "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
+      "participants": [
+        {
+          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d",
+          "permission": "Submission",
+          "owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2"
+        },
+        {
+          "participant_uid": "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+          "permission": "Submission",
+          "owner_key": "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead"
+        }
+      ],
+      "contracts": [
+        {
+          "contract_id": "00dd997b7ec53feda70dc6ed6a8b79432994028a587754824cef602facc55f9c4ddd09f2",
+          "template_id": "Governance.Rules:GovernanceRules",
+          "package_id": "0a63501e8111e31956c0864953a3c6c1c3498444196cc9bf4967fd4f8fc59adf",
+          "package_name": "governance-core",
+          "package_version": "0.2.0",
+          "created_at": "2026-05-01T10:00:00Z"
+        }
+      ],
+      "local_metadata": {
+        "annotations": {}
+      }
+    },
+    {
+      "party_id": "relay-sgp1::1220bc58b3b4b11dcb83f9d37b0632c696ada7728828ab67cd675b9a6b9aec2f",
+      "threshold": 1,
+      "owners": [
+        "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
+        "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead",
+        "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e"
+      ],
+      "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
+      "participants": [
+        {
+          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d",
+          "permission": "Submission",
+          "owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2"
+        },
+        {
+          "participant_uid": "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+          "permission": "Submission",
+          "owner_key": "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead"
+        },
+        {
+          "participant_uid": "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343",
+          "permission": "Submission",
+          "owner_key": "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e"
+        }
+      ],
+      "contracts": [
+        {
+          "contract_id": "00dd997b7ec53feda70dc6ed6a8b79432994028a587754824cef602facc55f9c4ddd09f2",
+          "template_id": "Governance.Rules:GovernanceRules",
+          "package_id": "0a63501e8111e31956c0864953a3c6c1c3498444196cc9bf4967fd4f8fc59adf",
+          "package_name": "governance-core",
+          "package_version": "0.2.0",
+          "created_at": "2026-05-01T10:00:00Z"
+        }
+      ],
+      "local_metadata": {
+        "annotations": {}
+      }
+    },
+    {
+      "party_id": "dec-treasury-ops::12209e9c89dc1fcb9b8b2a523b6ef407cbf5a704ecd0ce59d9efcc2b3e82f03a",
+      "threshold": 2,
+      "owners": [
+        "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
+        "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead",
+        "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e",
+        "0261982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae7629"
+      ],
+      "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
+      "participants": [
+        {
+          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d",
+          "permission": "Submission",
+          "owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2"
+        },
+        {
+          "participant_uid": "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+          "permission": "Submission",
+          "owner_key": "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead"
+        },
+        {
+          "participant_uid": "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343",
+          "permission": "Submission",
+          "owner_key": "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e"
+        },
+        {
+          "participant_uid": "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+          "permission": "Submission",
+          "owner_key": "0261982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae7629"
+        }
+      ],
+      "contracts": [
+        {
+          "contract_id": "00dd997b7ec53feda70dc6ed6a8b79432994028a587754824cef602facc55f9c4ddd09f2",
+          "template_id": "Governance.Rules:GovernanceRules",
+          "package_id": "0a63501e8111e31956c0864953a3c6c1c3498444196cc9bf4967fd4f8fc59adf",
+          "package_name": "governance-core",
+          "package_version": "0.2.0",
+          "created_at": "2026-05-01T10:00:00Z"
+        }
+      ],
+      "local_metadata": {
+        "annotations": {}
+      }
+    },
+    {
+      "party_id": "ibtc-settlement::1220f4c32504087b6c93725108d630f7aa3d06cbe678545577773cfe6e6a7db2",
+      "threshold": 3,
+      "owners": [
+        "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
+        "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead",
+        "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e",
+        "0261982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae7629",
+        "02d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44eef8"
+      ],
+      "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
+      "participants": [
+        {
+          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d",
+          "permission": "Submission",
+          "owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2"
+        },
+        {
+          "participant_uid": "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+          "permission": "Submission",
+          "owner_key": "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead"
+        },
+        {
+          "participant_uid": "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343",
+          "permission": "Submission",
+          "owner_key": "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e"
+        },
+        {
+          "participant_uid": "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+          "permission": "Submission",
+          "owner_key": "0261982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae7629"
+        },
+        {
+          "participant_uid": "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+          "permission": "Submission",
+          "owner_key": "02d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44eef8"
+        }
+      ],
+      "contracts": [
+        {
+          "contract_id": "00dd997b7ec53feda70dc6ed6a8b79432994028a587754824cef602facc55f9c4ddd09f2",
+          "template_id": "Governance.Rules:GovernanceRules",
+          "package_id": "0a63501e8111e31956c0864953a3c6c1c3498444196cc9bf4967fd4f8fc59adf",
+          "package_name": "governance-core",
+          "package_version": "0.2.0",
+          "created_at": "2026-05-01T10:00:00Z"
+        }
+      ],
+      "local_metadata": {
+        "annotations": {}
+      }
+    },
+    {
+      "party_id": "token-registry::1220a825252c346d5e9bb6d1833ed06b51858a5a1520378cc5ff7b5f9b52c32e",
+      "threshold": 1,
+      "owners": [
+        "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
+        "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead",
+        "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e",
+        "0261982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae7629",
+        "02d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44eef8",
+        "0210f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e916ed"
+      ],
+      "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
+      "participants": [
+        {
+          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d",
+          "permission": "Submission",
+          "owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2"
+        },
+        {
+          "participant_uid": "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+          "permission": "Submission",
+          "owner_key": "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead"
+        },
+        {
+          "participant_uid": "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343",
+          "permission": "Submission",
+          "owner_key": "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e"
+        },
+        {
+          "participant_uid": "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+          "permission": "Submission",
+          "owner_key": "0261982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae7629"
+        },
+        {
+          "participant_uid": "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+          "permission": "Submission",
+          "owner_key": "02d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44eef8"
+        },
+        {
+          "participant_uid": "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9",
+          "permission": "Submission",
+          "owner_key": "0210f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e916ed"
+        }
+      ],
+      "contracts": [
+        {
+          "contract_id": "00dd997b7ec53feda70dc6ed6a8b79432994028a587754824cef602facc55f9c4ddd09f2",
+          "template_id": "Governance.Rules:GovernanceRules",
+          "package_id": "0a63501e8111e31956c0864953a3c6c1c3498444196cc9bf4967fd4f8fc59adf",
+          "package_name": "governance-core",
+          "package_version": "0.2.0",
+          "created_at": "2026-05-01T10:00:00Z"
+        }
+      ],
+      "local_metadata": {
+        "annotations": {}
+      }
+    },
+    {
+      "party_id": "governance-rewards::12206d2f2a54b4e591a31d094aa6b3dbe1cd079618c8d875e5879e0e653ae229",
+      "threshold": 2,
+      "owners": [
+        "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
+        "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead"
+      ],
+      "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
+      "participants": [
+        {
+          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d",
+          "permission": "Submission",
+          "owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2"
+        },
+        {
+          "participant_uid": "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+          "permission": "Submission",
+          "owner_key": "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead"
+        }
+      ],
+      "contracts": [
+        {
+          "contract_id": "00dd997b7ec53feda70dc6ed6a8b79432994028a587754824cef602facc55f9c4ddd09f2",
+          "template_id": "Governance.Rules:GovernanceRules",
+          "package_id": "0a63501e8111e31956c0864953a3c6c1c3498444196cc9bf4967fd4f8fc59adf",
+          "package_name": "governance-core",
+          "package_version": "0.2.0",
+          "created_at": "2026-05-01T10:00:00Z"
+        }
+      ],
+      "local_metadata": {
+        "annotations": {}
+      }
+    },
+    {
+      "party_id": "utility-onboarding::122025e1d47ce3ac25ab10e1ff0e0be67b15b13a9170c64af60f33be6c224b81",
+      "threshold": 3,
+      "owners": [
+        "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
+        "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead",
+        "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e"
+      ],
+      "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
+      "participants": [
+        {
+          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d",
+          "permission": "Submission",
+          "owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2"
+        },
+        {
+          "participant_uid": "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+          "permission": "Submission",
+          "owner_key": "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead"
+        },
+        {
+          "participant_uid": "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343",
+          "permission": "Submission",
+          "owner_key": "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e"
+        }
+      ],
+      "contracts": [
+        {
+          "contract_id": "00dd997b7ec53feda70dc6ed6a8b79432994028a587754824cef602facc55f9c4ddd09f2",
+          "template_id": "Governance.Rules:GovernanceRules",
+          "package_id": "0a63501e8111e31956c0864953a3c6c1c3498444196cc9bf4967fd4f8fc59adf",
+          "package_name": "governance-core",
+          "package_version": "0.2.0",
+          "created_at": "2026-05-01T10:00:00Z"
+        }
+      ],
+      "local_metadata": {
+        "annotations": {}
+      }
+    },
+    {
+      "party_id": "mint-authority-2::12209451c3a4738d3ab31b7940763ccc3d5db1561f18978a17974197500aabfb",
+      "threshold": 1,
+      "owners": [
+        "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
+        "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead",
+        "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e",
+        "0261982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae7629"
+      ],
+      "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
+      "participants": [
+        {
+          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d",
+          "permission": "Submission",
+          "owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2"
+        },
+        {
+          "participant_uid": "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+          "permission": "Submission",
+          "owner_key": "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead"
+        },
+        {
+          "participant_uid": "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343",
+          "permission": "Submission",
+          "owner_key": "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e"
+        },
+        {
+          "participant_uid": "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+          "permission": "Submission",
+          "owner_key": "0261982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae7629"
+        }
+      ],
+      "contracts": [
+        {
+          "contract_id": "00dd997b7ec53feda70dc6ed6a8b79432994028a587754824cef602facc55f9c4ddd09f2",
+          "template_id": "Governance.Rules:GovernanceRules",
+          "package_id": "0a63501e8111e31956c0864953a3c6c1c3498444196cc9bf4967fd4f8fc59adf",
+          "package_name": "governance-core",
+          "package_version": "0.2.0",
+          "created_at": "2026-05-01T10:00:00Z"
+        }
+      ],
+      "local_metadata": {
+        "annotations": {}
+      }
+    },
+    {
+      "party_id": "burn-authority::12205d2797cc90d8f0bb89a0aede52f248a513cb61c0d2756a1f11b4b0f268be",
+      "threshold": 2,
+      "owners": [
+        "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
+        "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead",
+        "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e",
+        "0261982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae7629",
+        "02d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44eef8"
+      ],
+      "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
+      "participants": [
+        {
+          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d",
+          "permission": "Submission",
+          "owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2"
+        },
+        {
+          "participant_uid": "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+          "permission": "Submission",
+          "owner_key": "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead"
+        },
+        {
+          "participant_uid": "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343",
+          "permission": "Submission",
+          "owner_key": "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e"
+        },
+        {
+          "participant_uid": "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+          "permission": "Submission",
+          "owner_key": "0261982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae7629"
+        },
+        {
+          "participant_uid": "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+          "permission": "Submission",
+          "owner_key": "02d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44eef8"
+        }
+      ],
+      "contracts": [
+        {
+          "contract_id": "00dd997b7ec53feda70dc6ed6a8b79432994028a587754824cef602facc55f9c4ddd09f2",
+          "template_id": "Governance.Rules:GovernanceRules",
+          "package_id": "0a63501e8111e31956c0864953a3c6c1c3498444196cc9bf4967fd4f8fc59adf",
+          "package_name": "governance-core",
+          "package_version": "0.2.0",
+          "created_at": "2026-05-01T10:00:00Z"
+        }
+      ],
+      "local_metadata": {
+        "annotations": {}
+      }
     }
   ],
   "source": "live",
