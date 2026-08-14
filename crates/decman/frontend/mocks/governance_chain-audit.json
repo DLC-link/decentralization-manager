@@ -8,7 +8,7 @@
       "template_id": "Governance.Rules:GovernanceRules",
       "package_id": "1c8f8f2792779b51f80291e17eadc0132cc4f1cdf665ec829d1521f701a396c4",
       "governance_type": "core_self",
-      "action_summary": "Set governance threshold 3 \u2192 4",
+      "action_summary": "Set governance threshold 3 → 4",
       "choice": "SetThreshold",
       "acting_parties": [
         "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
@@ -122,7 +122,7 @@
       "template_id": "Governance.Rules:GovernanceRules",
       "package_id": "1c8f8f2792779b51f80291e17eadc0132cc4f1cdf665ec829d1521f701a396c4",
       "governance_type": "core_self",
-      "action_summary": "Rotate action confirmation timeout \u2192 48h",
+      "action_summary": "Rotate action confirmation timeout → 48h",
       "choice": "SetTimeout",
       "acting_parties": [
         "governance-core::1220b49bc40b5fc97a403d844155fd5074d3fb20e98a733ef85473b89831cce5"
@@ -256,7 +256,217 @@
       ],
       "update_id": "00125a532ec861ace7ace196d1b6114c15880e4b050b5bbad8f81d0983d1eea001",
       "details": {}
+    },
+    {
+      "offset": 101504,
+      "timestamp": 1782068523,
+      "event_type": "ExercisedEvent",
+      "contract_id": "114ecf10bc7fd72fc2409ac2f4521b3904040b4426c49dd3f4e8091602fc2d7d",
+      "template_id": "Governance.Rules:GovernanceRules",
+      "package_id": "1c8f8f2792779b51f80291e17eadc0132cc4f1cdf665ec829d1521f701a396c4",
+      "governance_type": "core_self",
+      "action_summary": "Confirmed pending action",
+      "choice": "Confirm",
+      "acting_parties": [
+        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
+      ],
+      "update_id": "4e9210b80e7b1cb7d3ff52aacdefe20157c2d36cf71cb7db2e888b7ea0403cc5e7",
+      "details": {
+        "old": 3,
+        "new": 4
+      }
+    },
+    {
+      "offset": 101440,
+      "timestamp": 1782067623,
+      "event_type": "CreatedEvent",
+      "contract_id": "25a7133f98bd07920c4e81c9d0c2a09410c012e375e15ae6e38e350da20fd308",
+      "template_id": "Governance.Rules:GovernanceRules",
+      "package_id": "1c8f8f2792779b51f80291e17eadc0132cc4f1cdf665ec829d1521f701a396c4",
+      "governance_type": "core_self",
+      "action_summary": "Set governance threshold 3 → 4",
+      "choice": "SetThreshold",
+      "acting_parties": [
+        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
+      ],
+      "update_id": "6119dac7d559597a68891a91c42412bc6616ceebb6fc174e3f233655c72b93b022",
+      "details": {
+        "old": 3,
+        "new": 4
+      }
+    },
+    {
+      "offset": 101376,
+      "timestamp": 1782066723,
+      "event_type": "ExercisedEvent",
+      "contract_id": "8aa7e862df1ecc59cb1bc9e4568d0bf3ff1660b68ce0609d39a7695827805cd7",
+      "template_id": "Governance.Rules:GovernanceRules",
+      "package_id": "1c8f8f2792779b51f80291e17eadc0132cc4f1cdf665ec829d1521f701a396c4",
+      "governance_type": "core_self",
+      "action_summary": "Added member to governance",
+      "choice": "AddMember",
+      "acting_parties": [
+        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
+      ],
+      "update_id": "73f0544a1c72b7214572660c4f12e9fba321d71e02cad3e5e285f400f074575f55",
+      "details": {
+        "old": 3,
+        "new": 4
+      }
+    },
+    {
+      "offset": 101312,
+      "timestamp": 1782065823,
+      "event_type": "ExercisedEvent",
+      "contract_id": "794bfae92c0487347a9c890336441a86b78bb02d6b1dd3a83aafa2e71ad1431a",
+      "template_id": "Governance.Rules:GovernanceRules",
+      "package_id": "1c8f8f2792779b51f80291e17eadc0132cc4f1cdf665ec829d1521f701a396c4",
+      "governance_type": "core_self",
+      "action_summary": "Removed member from governance",
+      "choice": "RemoveMember",
+      "acting_parties": [
+        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
+      ],
+      "update_id": "8755b7b13342cd5c82a2090b5056caeeb6f015754799a850881c5f6fc5bd06022d",
+      "details": {
+        "old": 3,
+        "new": 4
+      }
+    },
+    {
+      "offset": 101248,
+      "timestamp": 1782064923,
+      "event_type": "ExercisedEvent",
+      "contract_id": "3db1d8845f9f8a1324678856a66923bd117811f8b7e8acf72c4925ea551b1c41",
+      "template_id": "Governance.Rules:GovernanceRules",
+      "package_id": "1c8f8f2792779b51f80291e17eadc0132cc4f1cdf665ec829d1521f701a396c4",
+      "governance_type": "core_self",
+      "action_summary": "Executed governance action",
+      "choice": "Execute",
+      "acting_parties": [
+        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
+      ],
+      "update_id": "1e6a48ac39952c1be737f2bef98bfb05320bb0a0af06ab7f878142d225210409ab",
+      "details": {
+        "old": 3,
+        "new": 4
+      }
+    },
+    {
+      "offset": 101184,
+      "timestamp": 1782064023,
+      "event_type": "ExercisedEvent",
+      "contract_id": "58870f2305bdaa26b691bb4ddcfb244810ac7b07d1e4fcbacfebe4d120fdd7fc",
+      "template_id": "Governance.Rules:GovernanceRules",
+      "package_id": "1c8f8f2792779b51f80291e17eadc0132cc4f1cdf665ec829d1521f701a396c4",
+      "governance_type": "core_self",
+      "action_summary": "Confirmed pending action",
+      "choice": "Confirm",
+      "acting_parties": [
+        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
+      ],
+      "update_id": "24fd532b2ba24e8ecad784955ac10cf006d43b8ff5e7f3a2ef1ade99d26e372438",
+      "details": {
+        "old": 3,
+        "new": 4
+      }
+    },
+    {
+      "offset": 101120,
+      "timestamp": 1782063123,
+      "event_type": "CreatedEvent",
+      "contract_id": "19c37ff6ef5e76dda32c0a981abc0d17cc71c78a703111612e527b4c7e2b7e3b",
+      "template_id": "Governance.Rules:GovernanceRules",
+      "package_id": "1c8f8f2792779b51f80291e17eadc0132cc4f1cdf665ec829d1521f701a396c4",
+      "governance_type": "core_self",
+      "action_summary": "Set governance threshold 3 → 4",
+      "choice": "SetThreshold",
+      "acting_parties": [
+        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
+      ],
+      "update_id": "4cb2de5e1d4bb22547debd401d660f9feb5e187211159d29102744746307a54373",
+      "details": {
+        "old": 3,
+        "new": 4
+      }
+    },
+    {
+      "offset": 101056,
+      "timestamp": 1782062223,
+      "event_type": "ExercisedEvent",
+      "contract_id": "9268566daecfc4e82018632743fc865a6c93a1f162fd329c16b0ad4bb4c6a22e",
+      "template_id": "Governance.Rules:GovernanceRules",
+      "package_id": "1c8f8f2792779b51f80291e17eadc0132cc4f1cdf665ec829d1521f701a396c4",
+      "governance_type": "core_self",
+      "action_summary": "Added member to governance",
+      "choice": "AddMember",
+      "acting_parties": [
+        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
+      ],
+      "update_id": "65a183b59cc9c1907cdd27af9190b14296da3fb913f8e5c4dbc2b653c8124796ab",
+      "details": {
+        "old": 3,
+        "new": 4
+      }
+    },
+    {
+      "offset": 100992,
+      "timestamp": 1782061323,
+      "event_type": "ExercisedEvent",
+      "contract_id": "0feb5338ef027d3797d2392a49fc968154d2fdec685de05bd97a99fe2ad1f945",
+      "template_id": "Governance.Rules:GovernanceRules",
+      "package_id": "1c8f8f2792779b51f80291e17eadc0132cc4f1cdf665ec829d1521f701a396c4",
+      "governance_type": "core_self",
+      "action_summary": "Removed member from governance",
+      "choice": "RemoveMember",
+      "acting_parties": [
+        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
+      ],
+      "update_id": "6a2719e0bb9a83bf316cbe12a271c6492e581b1456a64b6341953966a0d7818deb",
+      "details": {
+        "old": 3,
+        "new": 4
+      }
+    },
+    {
+      "offset": 100928,
+      "timestamp": 1782060423,
+      "event_type": "ExercisedEvent",
+      "contract_id": "e9fb5b472e7fdffa6b94ef1162e8dd3ca544176b0babc5ce961612d57ddbc630",
+      "template_id": "Governance.Rules:GovernanceRules",
+      "package_id": "1c8f8f2792779b51f80291e17eadc0132cc4f1cdf665ec829d1521f701a396c4",
+      "governance_type": "core_self",
+      "action_summary": "Executed governance action",
+      "choice": "Execute",
+      "acting_parties": [
+        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
+      ],
+      "update_id": "8c3f23cf031f3ee2fc2530d9a0f9e46447e364734c3bdf36c2aecd1dccddebd817",
+      "details": {
+        "old": 3,
+        "new": 4
+      }
+    },
+    {
+      "offset": 100864,
+      "timestamp": 1782059523,
+      "event_type": "ExercisedEvent",
+      "contract_id": "45d27acaa2c5aba10593d08cc7b4527b4777259e02e6d065b30cc680cdac07df",
+      "template_id": "Governance.Rules:GovernanceRules",
+      "package_id": "1c8f8f2792779b51f80291e17eadc0132cc4f1cdf665ec829d1521f701a396c4",
+      "governance_type": "core_self",
+      "action_summary": "Confirmed pending action",
+      "choice": "Confirm",
+      "acting_parties": [
+        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
+      ],
+      "update_id": "fe1533b2a27d7f69eed341b4f3eb018367c33906dba73cadf2fef628335d6367c2",
+      "details": {
+        "old": 3,
+        "new": 4
+      }
     }
   ],
-  "total_returned": 14
+  "total_returned": 25,
+  "next_before_offset": 100618
 }

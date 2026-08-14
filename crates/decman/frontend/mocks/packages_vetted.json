@@ -88,5 +88,85 @@
     "package_id": "578597487eae5e67d7f4c6e98892188e0f6339c0cdc17e91cdbc1c251759a12a",
     "package_name": "canton-network-token",
     "package_version": "0.4.0"
+  },
+  {
+    "package_id": "5417ea10e478362f06b76dc2616cd23912495644cf2b6cd3af9a8c16693ed47d",
+    "package_name": "bitsafe-vault-3",
+    "package_version": "0.3.4"
+  },
+  {
+    "package_id": "5d7e8bb80c7f5bb7925085aacd61790151b17e6c735d66db5a8b6e7e2dd7c3c5",
+    "package_name": "governance-core-3",
+    "package_version": "0.4.5"
+  },
+  {
+    "package_id": "a6a162609b33323f6c349a92c8f2f8c98b86ab94bc16a1e39d409de663169c0d",
+    "package_name": "governance-action-3",
+    "package_version": "0.1.6"
+  },
+  {
+    "package_id": "84070e081f29d9c7c2c34c7a68bc7191ba697dbc033f3deba543ba4eceb87d55",
+    "package_name": "governance-rewards-3",
+    "package_version": "0.2.0"
+  },
+  {
+    "package_id": "7b0a2eb019bd724f30503b6274bd0359cd0e94e4ffc35af3f15263b60e1e879d",
+    "package_name": "governance-token-custody-3",
+    "package_version": "0.3.1"
+  },
+  {
+    "package_id": "5c596458578c1bd739a3074ad4d7ce2128be910c661318fb77de3a1e8acddae5",
+    "package_name": "utility-onboarding-3",
+    "package_version": "0.4.2"
+  },
+  {
+    "package_id": "ae774f0058f7f65f9c7750328d53f1e97bd6123498a298039d8cdd86feef972d",
+    "package_name": "utility-credential-3",
+    "package_version": "0.1.3"
+  },
+  {
+    "package_id": "683a8ea8caa721e76dfcb61a4b5c8eb1e045b85c6869f80bfbb7edee89d0dc75",
+    "package_name": "orphan-marker-3",
+    "package_version": "0.2.4"
+  },
+  {
+    "package_id": "fb4dc3500e03be6f0956d9028180c4794e122384e5655913f6ed0b565462cabd",
+    "package_name": "cbtc-bridge-3",
+    "package_version": "0.3.5"
+  },
+  {
+    "package_id": "aeaf8cf8d1bbebf7ce1d58ea1433b3415dd3f3ac3f14db1b256dd5bec5ba8205",
+    "package_name": "ibtc-registry-3",
+    "package_version": "0.4.6"
+  },
+  {
+    "package_id": "49328ba0ba41ca7faedbd5d2964c7b095b37c8d4b4fc9e2385afed264791224d",
+    "package_name": "token-standard-3",
+    "package_version": "0.1.0"
+  },
+  {
+    "package_id": "0bfd5f481a4b7a078f91efba15863bd1a77e42fc9724c22b84dcf18e9ac3cb95",
+    "package_name": "splice-amulet-3",
+    "package_version": "0.2.1"
+  },
+  {
+    "package_id": "fd0aa7f0bb531a8f743346a2770015996bfc022456996733d55282f6bbd39ddd",
+    "package_name": "dec-namespace-3",
+    "package_version": "0.3.2"
+  },
+  {
+    "package_id": "81a90598b616cc177f277a8a63bd28619c99a64ca5eaad3b1522415e5765b925",
+    "package_name": "attestor-kit-3",
+    "package_version": "0.4.3"
+  },
+  {
+    "package_id": "48fb18405b18ae9fbfca2b72c52494294a53cf74a9acb4434491ccc6cec33d6d",
+    "package_name": "relay-core-3",
+    "package_version": "0.1.4"
+  },
+  {
+    "package_id": "86777fe82b1ee227d0eaf95ad18178f145bb1d9c38f79c4b0c9ac52ecc594ab5",
+    "package_name": "settlement-rails-3",
+    "package_version": "0.2.5"
   }
 ]
