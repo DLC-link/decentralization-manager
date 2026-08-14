@@ -3,6 +3,7 @@ import { PartyIdText } from "./PartyIdText";
 import { RowCard } from "./RowCard";
 import { PaginationControls } from "./Pagination";
 import { usePagination } from "../usePagination";
+import { LIST_BLEED, LIST_INSET, legendSx } from "../styles";
 import type { ExternalPartyInfo } from "../types";
 
 interface ExternalPartyListProps {
@@ -14,15 +15,6 @@ const HOSTS_SLOT = 72;
 const CONFIRMATIONS_SLOT = 108;
 // Wide enough for "YYYY-MM-DD HH:MM UTC" on one line at the mono fact size.
 const CREATED_SLOT = 160;
-
-const legendSx = {
-  fontFamily: "var(--font-mono)",
-  fontSize: "0.7rem",
-  fontWeight: 500,
-  letterSpacing: "0.12em",
-  textTransform: "uppercase" as const,
-  color: "text.secondary",
-};
 
 const factSx = {
   fontFamily: "var(--font-mono)",
@@ -57,7 +49,7 @@ export const ExternalPartyList = ({ parties }: ExternalPartyListProps) => {
   }
 
   return (
-    <Box sx={{ px: "var(--content-pad)", pt: 1 }}>
+    <Box sx={{ px: LIST_INSET, pt: 1 }}>
       {/* Legend — padded to line up with the cards' own 16px inset. */}
       <Box
         sx={{ display: "flex", alignItems: "center", gap: 2, px: "16px", pb: 1 }}
@@ -152,6 +144,7 @@ export const ExternalPartyList = ({ parties }: ExternalPartyListProps) => {
         pageCount={pageCount}
         total={total}
         onChange={setPage}
+        sx={{ mx: LIST_BLEED }}
       />
     </Box>
   );
