@@ -6,9 +6,9 @@ import { ThemeContext, type ThemeMode } from "./ThemeContextValue";
 // BitSafe Design System — faithful implementation of the `bitsafe-design`
 // skill tokens (Figma /01-Foundations). Dark is the default: a warm-neutral
 // near-black substrate with the #D63A0F action accent. Space Grotesk for text,
-// Roboto Mono for every number / address / machine string.
-const FONT_SANS =
-  '"Space Grotesk", system-ui, -apple-system, "Segoe UI", sans-serif';
+// Roboto Mono for every number / address / machine string. Both read the token
+// from index.css, so the stacks live in one place.
+const FONT_SANS = "var(--font-sans)";
 const FONT_MONO = "var(--font-mono)";
 
 // Brand action accent (orange-700 ramp). #FF6633 is decorative-only and never
