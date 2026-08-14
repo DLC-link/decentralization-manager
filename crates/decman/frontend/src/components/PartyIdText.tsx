@@ -39,6 +39,10 @@ export const PartyIdText = ({
           sx={{
             display: "flex",
             alignItems: "baseline",
+            // Takes the whole id column rather than sizing to the text, so the
+            // copy buttons line up down the list instead of following each id
+            // to wherever it happens to end.
+            flex: 1,
             minWidth: 0,
             fontFamily: "var(--font-mono)",
             fontSize: 14,
