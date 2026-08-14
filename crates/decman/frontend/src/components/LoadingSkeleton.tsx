@@ -1,5 +1,5 @@
 import { Box, Skeleton } from "@mui/material";
-import { LIST_INSET, legendSx } from "../styles";
+import { columnSx, legendSx } from "../styles";
 import { AUTH_SLOT, FAB_GUTTER, VISIBILITY_SLOT } from "./PartyList";
 import { RowCard } from "./RowCard";
 
@@ -9,7 +9,7 @@ import { RowCard } from "./RowCard";
  * the data lands.
  */
 export const LoadingSkeleton = () => (
-  <Box sx={{ px: LIST_INSET, pt: 1 }}>
+  <Box sx={{ pt: 1, ...columnSx }}>
     <Box
       sx={{ display: "flex", alignItems: "center", gap: 2, px: "16px", pb: 1 }}
     >

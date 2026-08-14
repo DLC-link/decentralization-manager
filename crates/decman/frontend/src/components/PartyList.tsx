@@ -8,7 +8,7 @@ import { PartyIdText } from "./PartyIdText";
 import { RowCard } from "./RowCard";
 import { PaginationControls } from "./Pagination";
 import { usePagination } from "../usePagination";
-import { LIST_BLEED, LIST_INSET, legendSx } from "../styles";
+import { columnSx, legendSx } from "../styles";
 import type { DecentralizedParty, PartyAuthStatus } from "../types";
 
 interface PartyListProps {
@@ -69,112 +69,124 @@ export const PartyList = ({
 
   if (parties.length === 0) {
     return (
-      <Typography variant="body2" color="text.secondary" sx={{ textAlign: "center", py: 6 }}>
+      <Typography
+        variant="body2"
+        color="text.secondary"
+        sx={{ textAlign: "center", py: 6 }}
+      >
         No parties found
       </Typography>
     );
   }
 
   return (
-    <Box sx={{ px: LIST_INSET, pt: 1 }}>
-      {/* Legend — padded to line up with the cards' own 16px inset. */}
-      <Box
-        sx={{
-          display: "flex",
-          alignItems: "center",
-          gap: 2,
-          px: "16px",
-          pb: 1,
-        }}
-      >
-        <Typography component="span" sx={{ ...legendSx, flex: 1, minWidth: 0 }}>
-          Party ID
-        </Typography>
-        <Typography
-          component="span"
-          sx={{ ...legendSx, width: AUTH_SLOT, textAlign: "center", flexShrink: 0 }}
-        >
-          Auth
-        </Typography>
-        <Typography
-          component="span"
+    <Box sx={{ pt: 1 }}>
+      <Box sx={columnSx}>
+        {/* Legend — padded to line up with the cards' own 16px inset. */}
+        <Box
           sx={{
-            ...legendSx,
-            width: VISIBILITY_SLOT,
-            textAlign: "center",
-            flexShrink: 0,
+            display: "flex",
+            alignItems: "center",
+            gap: 2,
+            px: "16px",
+            pb: 1,
           }}
         >
-          Visibility
-        </Typography>
-        <Box sx={{ width: FAB_GUTTER, flexShrink: 0 }} aria-hidden />
+          <Typography
+            component="span"
+            sx={{ ...legendSx, flex: 1, minWidth: 0 }}
+          >
+            Party ID
+          </Typography>
+          <Typography
+            component="span"
+            sx={{
+              ...legendSx,
+              width: AUTH_SLOT,
+              textAlign: "center",
+              flexShrink: 0,
+            }}
+          >
+            Auth
+          </Typography>
+          <Typography
+            component="span"
+            sx={{
+              ...legendSx,
+              width: VISIBILITY_SLOT,
+              textAlign: "center",
+              flexShrink: 0,
+            }}
+          >
+            Visibility
+          </Typography>
+          <Box sx={{ width: FAB_GUTTER, flexShrink: 0 }} aria-hidden />
+        </Box>
+
+        <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+          {pageItems.map((party) => {
+            const auth = authStatuses.find(
+              (a) => a.dec_party_id === party.party_id,
+            );
+            const hidden = isHidden(party.party_id);
+            return (
+              <RowCard
+                key={party.party_id}
+                onActivate={() => onSelectParty(party.party_id)}
+                dimmed={hidden}
+                ariaLabel={`Open party ${party.party_id}`}
+              >
+                <PartyIdText partyId={party.party_id} />
+                <Box
+                  sx={{
+                    width: AUTH_SLOT,
+                    flexShrink: 0,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                  }}
+                >
+                  <AuthStatusIcon status={auth} />
+                </Box>
+                <Box
+                  sx={{
+                    width: VISIBILITY_SLOT,
+                    flexShrink: 0,
+                    display: "flex",
+                    justifyContent: "center",
+                  }}
+                >
+                  <Tooltip title={hidden ? "Unhide party" : "Hide party"}>
+                    <IconButton
+                      size="small"
+                      aria-label={hidden ? "Unhide party" : "Hide party"}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onToggleHidden(party.party_id);
+                      }}
+                    >
+                      {hidden ? (
+                        <VisibilityOffIcon sx={{ fontSize: 18 }} />
+                      ) : (
+                        <VisibilityIcon sx={{ fontSize: 18 }} />
+                      )}
+                    </IconButton>
+                  </Tooltip>
+                </Box>
+                <Box sx={{ width: FAB_GUTTER, flexShrink: 0 }} aria-hidden />
+              </RowCard>
+            );
+          })}
+        </Box>
       </Box>
 
-      <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
-        {pageItems.map((party) => {
-          const auth = authStatuses.find(
-            (a) => a.dec_party_id === party.party_id,
-          );
-          const hidden = isHidden(party.party_id);
-          return (
-            <RowCard
-              key={party.party_id}
-              onActivate={() => onSelectParty(party.party_id)}
-              dimmed={hidden}
-              ariaLabel={`Open party ${party.party_id}`}
-            >
-              <PartyIdText partyId={party.party_id} />
-              <Box
-                sx={{
-                  width: AUTH_SLOT,
-                  flexShrink: 0,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  minHeight: 30,
-                }}
-              >
-                <AuthStatusIcon status={auth} />
-              </Box>
-              <Box
-                sx={{
-                  width: VISIBILITY_SLOT,
-                  flexShrink: 0,
-                  display: "flex",
-                  justifyContent: "center",
-                }}
-              >
-                <Tooltip title={hidden ? "Unhide party" : "Hide party"}>
-                  <IconButton
-                    size="small"
-                    aria-label={hidden ? "Unhide party" : "Hide party"}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onToggleHidden(party.party_id);
-                    }}
-                  >
-                    {hidden ? (
-                      <VisibilityOffIcon sx={{ fontSize: 18 }} />
-                    ) : (
-                      <VisibilityIcon sx={{ fontSize: 18 }} />
-                    )}
-                  </IconButton>
-                </Tooltip>
-              </Box>
-              <Box sx={{ width: FAB_GUTTER, flexShrink: 0 }} aria-hidden />
-            </RowCard>
-          );
-        })}
-      </Box>
-
-      {/* Runs the full width of the view, under rows that stop at the inset.
-        * Its contents are centered, so nothing lands under the FAB. */}
+      {/* Outside the column: the rule runs the full width of the view, and the
+       * contents are centered, so nothing lands under the FAB. */}
       <PaginationControls
         page={page}
         pageCount={pageCount}
         total={total}
         onChange={setPage}
-        sx={{ mx: LIST_BLEED }}
       />
     </Box>
   );

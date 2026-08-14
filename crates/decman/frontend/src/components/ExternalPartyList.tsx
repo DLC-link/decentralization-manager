@@ -3,7 +3,7 @@ import { PartyIdText } from "./PartyIdText";
 import { RowCard } from "./RowCard";
 import { PaginationControls } from "./Pagination";
 import { usePagination } from "../usePagination";
-import { LIST_BLEED, LIST_INSET, legendSx } from "../styles";
+import { columnSx, legendSx } from "../styles";
 import type { ExternalPartyInfo } from "../types";
 
 interface ExternalPartyListProps {
@@ -49,102 +49,118 @@ export const ExternalPartyList = ({ parties }: ExternalPartyListProps) => {
   }
 
   return (
-    <Box sx={{ px: LIST_INSET, pt: 1 }}>
-      {/* Legend — padded to line up with the cards' own 16px inset. */}
-      <Box
-        sx={{ display: "flex", alignItems: "center", gap: 2, px: "16px", pb: 1 }}
-      >
-        <Typography component="span" sx={{ ...legendSx, flex: 1, minWidth: 0 }}>
-          Party ID
-        </Typography>
-        <Tooltip title="How many participants host this party. Any one of them being down does not take the party down.">
+    <Box sx={{ pt: 1 }}>
+      <Box sx={columnSx}>
+        {/* Legend — padded to line up with the cards' own 16px inset. */}
+        <Box
+          sx={{
+            display: "flex",
+            alignItems: "center",
+            gap: 2,
+            px: "16px",
+            pb: 1,
+          }}
+        >
           <Typography
             component="span"
-            sx={{
-              ...legendSx,
-              width: HOSTS_SLOT,
-              textAlign: "right",
-              flexShrink: 0,
-              cursor: "help",
-            }}
+            sx={{ ...legendSx, flex: 1, minWidth: 0 }}
           >
-            Hosts
+            Party ID
           </Typography>
-        </Tooltip>
-        <Tooltip title="How many of the hosting participants must confirm a transaction involving this party. Separate from the party's signing threshold — one wallet-held key authorizes, this many hosts confirm.">
-          <Typography
-            component="span"
-            sx={{
-              ...legendSx,
-              width: CONFIRMATIONS_SLOT,
-              textAlign: "right",
-              flexShrink: 0,
-              cursor: "help",
-            }}
-          >
-            Confirmations
-          </Typography>
-        </Tooltip>
-        <Tooltip title="When the hosting mapping became effective in the synchronizer's topology.">
-          <Typography
-            component="span"
-            sx={{
-              ...legendSx,
-              width: CREATED_SLOT,
-              textAlign: "right",
-              flexShrink: 0,
-              cursor: "help",
-            }}
-          >
-            Created
-          </Typography>
-        </Tooltip>
-      </Box>
-
-      <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
-        {pageItems.map((party) => (
-          <RowCard key={party.party_id}>
-            <PartyIdText partyId={party.party_id} />
-            <Typography
-              component="span"
-              sx={{ ...factSx, width: HOSTS_SLOT, textAlign: "right", flexShrink: 0 }}
-            >
-              {party.host_count}
-            </Typography>
+          <Tooltip title="How many participants host this party. Any one of them being down does not take the party down.">
             <Typography
               component="span"
               sx={{
-                ...factSx,
+                ...legendSx,
+                width: HOSTS_SLOT,
+                textAlign: "right",
+                flexShrink: 0,
+                cursor: "help",
+              }}
+            >
+              Hosts
+            </Typography>
+          </Tooltip>
+          <Tooltip title="How many of the hosting participants must confirm a transaction involving this party. Separate from the party's signing threshold — one wallet-held key authorizes, this many hosts confirm.">
+            <Typography
+              component="span"
+              sx={{
+                ...legendSx,
                 width: CONFIRMATIONS_SLOT,
                 textAlign: "right",
                 flexShrink: 0,
+                cursor: "help",
               }}
             >
-              {party.threshold} of {party.host_count}
+              Confirmations
             </Typography>
+          </Tooltip>
+          <Tooltip title="When the hosting mapping became effective in the synchronizer's topology.">
             <Typography
               component="span"
               sx={{
-                ...factSx,
-                fontSize: 12,
-                color: "text.disabled",
+                ...legendSx,
                 width: CREATED_SLOT,
                 textAlign: "right",
                 flexShrink: 0,
+                cursor: "help",
               }}
             >
-              {formatCreated(party.created_at)}
+              Created
             </Typography>
-          </RowCard>
-        ))}
+          </Tooltip>
+        </Box>
+
+        <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+          {pageItems.map((party) => (
+            <RowCard key={party.party_id}>
+              <PartyIdText partyId={party.party_id} />
+              <Typography
+                component="span"
+                sx={{
+                  ...factSx,
+                  width: HOSTS_SLOT,
+                  textAlign: "right",
+                  flexShrink: 0,
+                }}
+              >
+                {party.host_count}
+              </Typography>
+              <Typography
+                component="span"
+                sx={{
+                  ...factSx,
+                  width: CONFIRMATIONS_SLOT,
+                  textAlign: "right",
+                  flexShrink: 0,
+                }}
+              >
+                {party.threshold} of {party.host_count}
+              </Typography>
+              <Typography
+                component="span"
+                sx={{
+                  ...factSx,
+                  fontSize: 12,
+                  color: "text.disabled",
+                  width: CREATED_SLOT,
+                  textAlign: "right",
+                  flexShrink: 0,
+                }}
+              >
+                {formatCreated(party.created_at)}
+              </Typography>
+            </RowCard>
+          ))}
+        </Box>
       </Box>
 
+      {/* Outside the column, so its rule runs the full width of the view. */}
       <PaginationControls
         page={page}
         pageCount={pageCount}
         total={total}
         onChange={setPage}
-        sx={{ mx: LIST_BLEED }}
       />
     </Box>
   );

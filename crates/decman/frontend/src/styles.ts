@@ -1,15 +1,21 @@
 import type { Theme } from "@mui/material/styles";
 
-/** Horizontal inset for list content — the column the rest of the UI aligns to. */
-export const LIST_INSET = "var(--content-pad)";
-
 /**
- * Cancels {@link LIST_INSET}, for the footer bar that runs the full width of
- * the view while the rows above it stay in the column. The tables these lists
- * replaced did the same thing: the footer rule ran edge to edge under content
- * that stopped short of it.
+ * The card column: a capped, centered reading width, matching the one the
+ * approvals feed already uses so the two views read at the same measure.
+ *
+ * Rows live in here; a list's footer bar is a sibling *outside* it, so the
+ * footer rule runs the full width of the view under content that stops short of
+ * it — the way the tables these lists replaced behaved.
  */
-export const LIST_BLEED = "calc(-1 * var(--content-pad))";
+export const COLUMN_MAX_WIDTH = 1040;
+
+export const columnSx = {
+  maxWidth: COLUMN_MAX_WIDTH,
+  mx: "auto",
+  // Keeps rows off the edges once the viewport is narrower than the cap.
+  px: 3,
+};
 
 /** Column label above a card list, in the same treatment as a table head. */
 export const legendSx = {
