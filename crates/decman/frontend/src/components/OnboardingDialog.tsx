@@ -34,7 +34,7 @@ const partyPrefixError = (prefix: string): string | null => {
     return `Must be at most ${MAX_PARTY_ID_PREFIX_LEN} characters`;
   if (!/^[A-Za-z]/.test(prefix)) return "Must start with a letter (a–z, A–Z)";
   if (!/^[A-Za-z0-9_-]+$/.test(prefix))
-    return "Only letters, digits, “-” and “_” are allowed";
+    return "Only letters, digits, '-' and '_' are allowed";
   return null;
 };
 
@@ -406,7 +406,7 @@ export const OnboardingDialog = ({
             error={!!partyPrefixError(partyIdPrefix.trim())}
             helperText={
               partyPrefixError(partyIdPrefix.trim()) ??
-              "Letters, digits, “-” and “_”. Must start with a letter."
+              "Letters, digits, '-' and '_'. Must start with a letter."
             }
             sx={{ "& input": { fontFamily: "var(--font-mono)" } }}
             slotProps={{
