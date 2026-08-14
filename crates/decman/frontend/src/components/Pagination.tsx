@@ -28,7 +28,9 @@ const footerSx = {
   gap: 2,
   px: 2,
   py: 1.25,
-  mt: 0.5,
+  // Flush against the rows: its top rule is what closes the list off, and any
+  // margin leaves the bar looking detached from the table it belongs to.
+  mt: 0,
   borderTop: 1,
   borderColor: "divider",
   // Pinned to the bottom of whatever scrolls. Pages differ in height — the
