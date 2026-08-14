@@ -18,6 +18,7 @@ import { useSnackbar } from "../contexts";
 import { formatActionDetails, formatActionType } from "../governanceFormat";
 import { ExecuteDialog } from "./ExecuteDialog";
 import { RowCard } from "./RowCard";
+import { columnSx } from "../styles";
 import { PaginationControls } from "./Pagination";
 import { usePagination } from "../usePagination";
 import {
@@ -2155,7 +2156,7 @@ export const NotificationsView = ({
   ];
 
   return (
-    <Box sx={{ py: 3, px: 3, maxWidth: 1040, mx: "auto" }}>
+    <Box sx={{ py: 3, ...columnSx }}>
       <Box
         sx={{
           position: "sticky",

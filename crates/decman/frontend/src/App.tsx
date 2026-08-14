@@ -38,7 +38,7 @@ import { useSnackbar } from "./contexts";
 import { API_BASE, ADMIN_ACCESS } from "./constants";
 import { authenticatedFetch, pingLatency } from "./api";
 import { useHiddenParties } from "./useHiddenParties";
-import { LIST_INSET } from "./styles";
+import { columnSx } from "./styles";
 import type {
   DecentralizedParty,
   DecentralizedPartiesResponse,
@@ -978,7 +978,7 @@ const App = () => {
               <Tabs
                 value={partiesView}
                 onChange={(_e, v) => setPartiesView(v)}
-                sx={{ px: LIST_INSET, mb: 1 }}
+                sx={{ ...columnSx, mb: 1 }}
               >
                 <Tab value="decentralized" label="Decentralized Parties" />
                 <Tab value="external" label="External Parties" />
