@@ -757,6 +757,14 @@ const App = () => {
             display: "flex",
             flexDirection: "column",
           }),
+          // The parties list ends in a footer bar that should sit at the bottom
+          // of the view even when a short page doesn't fill it — so the region
+          // is at least a screen tall and the list flexes into the leftover.
+          ...(activeTab === 0 && {
+            minHeight: "100vh",
+            display: "flex",
+            flexDirection: "column",
+          }),
         }}
       >
       {loading && (
@@ -881,7 +889,16 @@ const App = () => {
 
       {/* Tab 0: Parties — edge-to-edge */}
       {activeTab === 0 && !loading && !error && (
-        <Box sx={{ pt: isLargeScreen ? 4 : 0 }}>
+        // Passes the region's leftover height down to the list, so its footer
+        // bar can sit at the bottom of the view on a short page.
+        <Box
+          sx={{
+            pt: isLargeScreen ? 4 : 0,
+            flex: 1,
+            display: "flex",
+            flexDirection: "column",
+          }}
+        >
           {selectedPartyId && parties.find((p) => p.party_id === selectedPartyId) ? (
             <PartyDetail
               party={parties.find((p) => p.party_id === selectedPartyId)!}
