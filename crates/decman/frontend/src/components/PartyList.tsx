@@ -8,7 +8,13 @@ import { PartyIdText } from "./PartyIdText";
 import { RowCard } from "./RowCard";
 import { PaginationControls } from "./Pagination";
 import { usePagination } from "../usePagination";
-import { columnSx, legendSx } from "../styles";
+import {
+  AUTH_SLOT,
+  VISIBILITY_SLOT,
+  columnSx,
+  fabGutterSx,
+  legendSx,
+} from "../styles";
 import type { DecentralizedParty, PartyAuthStatus } from "../types";
 
 interface PartyListProps {
@@ -18,19 +24,6 @@ interface PartyListProps {
   isHidden: (partyId: string) => boolean;
   onToggleHidden: (partyId: string) => void;
 }
-
-// Card lists have no header row, so the two icon columns are labelled by a
-// legend above them. These widths are shared by the legend, the cards and the
-// loading skeleton to keep all three aligned.
-export const AUTH_SLOT = 56;
-export const VISIBILITY_SLOT = 84;
-// Trailing dead space inside the row, standing in for the spacer cell the table
-// used to carry: it holds the visibility toggle out from under the fixed
-// Create-Party FAB (56px, offset 24px) that this view renders over the
-// bottom-right corner. Padding the container instead would make its horizontal
-// inset lopsided, which shows as an off-centre list once the gutter bottoms out
-// on a small screen.
-export const FAB_GUTTER = 40;
 
 const AuthStatusIcon = ({ status }: { status?: PartyAuthStatus }) => {
   if (!status) return null;
@@ -103,7 +96,7 @@ export const PartyList = ({
             sx={{
               ...legendSx,
               width: AUTH_SLOT,
-              textAlign: "center",
+              textAlign: "right",
               flexShrink: 0,
             }}
           >
@@ -114,13 +107,13 @@ export const PartyList = ({
             sx={{
               ...legendSx,
               width: VISIBILITY_SLOT,
-              textAlign: "center",
+              textAlign: "right",
               flexShrink: 0,
             }}
           >
             Visibility
           </Typography>
-          <Box sx={{ width: FAB_GUTTER, flexShrink: 0 }} aria-hidden />
+          <Box sx={fabGutterSx} aria-hidden />
         </Box>
 
         <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
@@ -143,7 +136,7 @@ export const PartyList = ({
                     flexShrink: 0,
                     display: "flex",
                     alignItems: "center",
-                    justifyContent: "center",
+                    justifyContent: "flex-end",
                   }}
                 >
                   <AuthStatusIcon status={auth} />
@@ -153,7 +146,7 @@ export const PartyList = ({
                     width: VISIBILITY_SLOT,
                     flexShrink: 0,
                     display: "flex",
-                    justifyContent: "center",
+                    justifyContent: "flex-end",
                   }}
                 >
                   <Tooltip title={hidden ? "Unhide party" : "Hide party"}>
@@ -173,7 +166,7 @@ export const PartyList = ({
                     </IconButton>
                   </Tooltip>
                 </Box>
-                <Box sx={{ width: FAB_GUTTER, flexShrink: 0 }} aria-hidden />
+                <Box sx={fabGutterSx} aria-hidden />
               </RowCard>
             );
           })}
