@@ -70,14 +70,14 @@ const buildStamp = (info?: BuildInfo) => {
     info?.buildVersion ??
     (__APP_VERSION__ === "dev" ? "dev build" : `v${__APP_VERSION__}`);
   const iso = info?.buildTime ?? __BUILD_DATE__;
-  let when = iso;
-  try {
-    const d = new Date(iso);
-    const p = (n: number) => String(n).padStart(2, "0");
-    when = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
-  } catch {
-    /* fall back to the raw ISO string */
-  }
+  const d = new Date(iso);
+  // A bad stamp has to be tested for rather than caught: `new Date` yields an
+  // Invalid Date instead of throwing, and every getter on one returns NaN — so
+  // the guard that looks like it handles this would have formatted a malformed
+  // `buildTime`, which arrives from the backend, as `NaN-NaN-NaN NaN:NaN`.
+  if (Number.isNaN(d.getTime())) return `${version} · ${iso}`;
+  const p = (n: number) => String(n).padStart(2, "0");
+  const when = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
   return `${version} · ${when}`;
 };
 
