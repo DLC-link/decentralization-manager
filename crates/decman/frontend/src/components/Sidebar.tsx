@@ -136,12 +136,20 @@ export const Sidebar = ({
         }}
       >
         {collapsed ? (
-          <img
-            src={BitSafeLogoB}
-            alt="BitSafe"
+          // A button rather than a click-handling <img>: it reloads the app, so
+          // it has to be reachable by keyboard and announce itself as a control.
+          <IconButton
+            aria-label="Reload"
             onClick={() => window.location.reload()}
-            style={{ height: 28, cursor: "pointer" }}
-          />
+            sx={{ p: 0.5 }}
+          >
+            <Box
+              component="img"
+              src={BitSafeLogoB}
+              alt=""
+              sx={{ height: 28, display: "block" }}
+            />
+          </IconButton>
         ) : (
           <Logo buildInfo={buildInfo} />
         )}
