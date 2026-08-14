@@ -49,8 +49,8 @@ export const ExternalPartyList = ({ parties }: ExternalPartyListProps) => {
   }
 
   return (
-    <Box sx={{ pt: 1 }}>
-      <Box sx={columnSx}>
+    <Box sx={{ pt: 1, flex: 1, display: "flex", flexDirection: "column" }}>
+      <Box sx={{ ...columnSx, flex: 1 }}>
         {/* Legend — padded to line up with the cards' own 16px inset. */}
         <Box
           sx={{

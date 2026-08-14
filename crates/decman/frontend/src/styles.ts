@@ -11,6 +11,10 @@ import type { Theme } from "@mui/material/styles";
 export const COLUMN_MAX_WIDTH = 1040;
 
 export const columnSx = {
+  // Explicit, because these boxes also sit inside flex columns: there the `auto`
+  // side margins suppress stretching, and without a width the box would shrink
+  // to its content instead of holding the column.
+  width: "100%",
   maxWidth: COLUMN_MAX_WIDTH,
   mx: "auto",
   // Keeps rows off the edges once the viewport is narrower than the cap.
