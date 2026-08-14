@@ -43,6 +43,10 @@ export const RowCard = ({
       alignItems: "center",
       gap: 2,
       p: "9px 16px",
+      // One height for every card list, whatever a row happens to carry: the
+      // parties rows hold 30px icon buttons while the external-parties rows are
+      // text only, and left alone the two lists would sit at different heights.
+      minHeight: 48,
       border: "1px solid",
       borderColor: "divider",
       borderRadius: "8px",
