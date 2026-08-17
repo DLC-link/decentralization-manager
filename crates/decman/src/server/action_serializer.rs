@@ -1628,7 +1628,6 @@ pub fn build_proposal_create_args(
             provider_service_cid,
             registrar_service_request_cid,
             provider_configuration_cid,
-            extra_registrar_credential_cids,
         } => (
             ProposalPackage::GovernanceUtilityOnboarding,
             "Governance.UtilityOnboarding.OnboardRegistrar",
@@ -1646,15 +1645,6 @@ pub fn build_proposal_create_args(
                     field(
                         "providerConfigurationCid",
                         make_contract_id(provider_configuration_cid),
-                    ),
-                    field(
-                        "extraRegistrarCredentialCids",
-                        make_list(
-                            extra_registrar_credential_cids
-                                .iter()
-                                .map(|cid| make_contract_id(cid))
-                                .collect(),
-                        ),
                     ),
                 ],
             },
@@ -3252,7 +3242,6 @@ mod tests {
                     provider_service_cid: "psc".to_string(),
                     registrar_service_request_cid: "rsrc".to_string(),
                     provider_configuration_cid: "pcc".to_string(),
-                    extra_registrar_credential_cids: vec!["cred-1".to_string()],
                 },
                 package: ProposalPackage::GovernanceUtilityOnboarding,
                 module: "Governance.UtilityOnboarding.OnboardRegistrar",
@@ -3263,7 +3252,6 @@ mod tests {
                     "providerServiceCid",
                     "registrarServiceRequestCid",
                     "providerConfigurationCid",
-                    "extraRegistrarCredentialCids",
                 ],
             },
             Case {
@@ -3360,31 +3348,6 @@ mod tests {
             Some(value::Sum::List(l)) => &l.elements,
             other => panic!("expected List for {label}, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn build_proposal_onboard_registrar_serializes_extra_credentials() -> Result {
-        // The arm forwards the supplied credential cids into the
-        // `extraRegistrarCredentialCids` list as ContractId values. Labels
-        // alone cannot catch a regression to a hardcoded empty list.
-        let proposal = ProposalType::OnboardRegistrar {
-            provider_service_cid: "psc".to_string(),
-            registrar_service_request_cid: "rsrc".to_string(),
-            provider_configuration_cid: "pcc".to_string(),
-            extra_registrar_credential_cids: vec!["cred-1".to_string(), "cred-2".to_string()],
-        };
-        let (_, _, _, record) =
-            build_proposal_create_args("gov", "proposer", &proposal, None, None)?;
-        let credentials = field_value(&record, "extraRegistrarCredentialCids");
-        let cids: Vec<_> = as_list_elements(credentials, "extraRegistrarCredentialCids")
-            .iter()
-            .map(|v| match &v.sum {
-                Some(value::Sum::ContractId(cid)) => cid.as_str(),
-                other => panic!("expected ContractId element, got {other:?}"),
-            })
-            .collect();
-        assert_eq!(cids, ["cred-1", "cred-2"]);
-        Ok(())
     }
 
     #[test]

@@ -842,11 +842,6 @@ pub enum ProposalType {
         provider_service_cid: String,
         registrar_service_request_cid: String,
         provider_configuration_cid: String,
-        /// Credential contract ids from issuers other than the governance
-        /// party, covering externally-issued registrar requirements. Empty
-        /// when every requirement is self-issuable.
-        #[serde(default)]
-        extra_registrar_credential_cids: Vec<String>,
     },
     /// Create an `InstrumentConfiguration` on the registrar decparty and
     /// credential the initial instrument issuers against its issuer
