@@ -779,6 +779,7 @@ fn build_domain_actions(
                 transfer_details,
                 accept_transfer_details,
                 service_request_details,
+                proposer,
                 orphaned,
             ) = match proposal_infos.remove(&proposal_cid) {
                 Some(info) => (
@@ -786,9 +787,10 @@ fn build_domain_actions(
                     info.transfer,
                     info.accept_transfer,
                     info.service_request,
+                    info.proposer,
                     false,
                 ),
-                None => (None, None, None, None, proposal_infos_complete),
+                None => (None, None, None, None, None, proposal_infos_complete),
             };
             let mut seen_parties = std::collections::HashSet::new();
             let unique_confirmations: Vec<GovernanceConfirmation> = confirmations
@@ -811,6 +813,7 @@ fn build_domain_actions(
                 transfer_details,
                 accept_transfer_details,
                 service_request_details,
+                proposer,
             }
         })
         .collect();
@@ -831,6 +834,9 @@ fn build_domain_actions(
                 transfer_details: info.transfer,
                 accept_transfer_details: info.accept_transfer,
                 service_request_details: info.service_request,
+                // A proposal nobody has confirmed is the likeliest one to
+                // retract, so the card needs its proposer as much as any other.
+                proposer: info.proposer,
             });
         }
     }
@@ -1095,6 +1101,10 @@ pub struct ProposalInfo {
     /// back to a same-named create-argument field and then to the template's
     /// own name. `None` only when the event carries no template id either.
     pub action_label: Option<String>,
+    /// The member who created the proposal. Only that member controls
+    /// `GovernableAction_ProposerCancel`, so the card offers the retract
+    /// button on this field alone. `None` when the party id fails to parse.
+    pub proposer: Option<CantonId>,
 }
 
 /// Pull the `GovernableAction` interface view off a created event. Canton
@@ -1148,6 +1158,23 @@ fn extract_proposal_info(
         .and_then(|v| field_text(v, "description"))
         .or_else(|| record.and_then(|r| field_text(r, "description")));
 
+    // Read from the view first for the same reason the label and description
+    // do: the interface declares `proposer`, so the view always carries it,
+    // while a template may compute it instead of storing a field.
+    let proposer = view
+        .and_then(|v| field_party(v, "proposer"))
+        .or_else(|| record.and_then(|r| field_party(r, "proposer")))
+        .and_then(|p| match CantonId::parse(&p) {
+            Ok(id) => Some(id),
+            Err(e) => {
+                tracing::warn!(
+                    "Proposal {cid} carries an unparseable proposer '{p}': {e}",
+                    cid = created.contract_id
+                );
+                None
+            }
+        });
+
     let transfer = record.and_then(extract_transfer_proposal_details);
     // The template name is a poor label next to the view's `actionLabel`, but
     // it beats a generic placeholder and it needs no per-package knowledge.
@@ -1196,6 +1223,7 @@ fn extract_proposal_info(
             accept_transfer: None,
             service_request,
             action_label,
+            proposer,
         },
     );
 }
@@ -4000,6 +4028,59 @@ mod tests {
     }
 
     #[test]
+    fn extract_proposal_info_prefers_the_view_proposer() {
+        // The retract button keys on this field, and the interface declares
+        // `proposer`, so the view is the authoritative source.
+        let mut event = governable_action_view_event("MintProposal", "mint some tokens");
+        if let Some(view) = event
+            .interface_views
+            .first_mut()
+            .and_then(|v| v.view_value.as_mut())
+        {
+            view.fields.push(field(
+                "proposer",
+                party_value(&format!("from-view::{SR_FP}")),
+            ));
+        }
+        event.create_arguments = Some(Record {
+            record_id: None,
+            fields: vec![
+                field("governanceParty", party_value(&format!("gov::{SR_FP}"))),
+                field("proposer", party_value(&format!("from-args::{SR_FP}"))),
+            ],
+        });
+        let mut infos = HashMap::new();
+
+        extract_proposal_info(&event, &mut infos);
+
+        let Some(proposer) = infos.get("proposal-cid").and_then(|i| i.proposer.as_ref()) else {
+            panic!("the proposer should be captured");
+        };
+        assert_eq!(proposer.to_string(), format!("from-view::{SR_FP}"));
+    }
+
+    #[test]
+    fn extract_proposal_info_falls_back_to_the_create_argument_proposer() {
+        // A wildcard fetch carries no view, so the raw field is all there is.
+        let mut event = bare_created_event("proposal-cid");
+        event.create_arguments = Some(Record {
+            record_id: None,
+            fields: vec![
+                field("governanceParty", party_value(&format!("gov::{SR_FP}"))),
+                field("proposer", party_value(&format!("from-args::{SR_FP}"))),
+            ],
+        });
+        let mut infos = HashMap::new();
+
+        extract_proposal_info(&event, &mut infos);
+
+        let Some(proposer) = infos.get("proposal-cid").and_then(|i| i.proposer.as_ref()) else {
+            panic!("the proposer should come from the create arguments");
+        };
+        assert_eq!(proposer.to_string(), format!("from-args::{SR_FP}"));
+    }
+
+    #[test]
     fn extract_proposal_info_gates_service_request_details_on_the_label() {
         // The party fields alone must not produce a service-request summary.
         // Onboarding is only what the two Create*ServiceRequest actions do.
@@ -4071,6 +4152,7 @@ mod tests {
             accept_transfer: None,
             service_request: None,
             action_label: action_label.map(str::to_string),
+            proposer: None,
         }
     }
 

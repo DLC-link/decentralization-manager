@@ -735,21 +735,18 @@ TypeScript imports won't resolve.
 
 ## Docker Image
 
-Build and push to ECR:
+Release images are built and published by CI: pushing a `v<version>` tag (which
+must match the crate version in `crates/decman/Cargo.toml`) runs the release
+workflow, which builds the binary and pushes
+`public.ecr.aws/dlc-link/decentralization-manager:v<version>`. The root
+`Dockerfile` is that workflow's runtime wrapper — it copies in the CI-built
+binary and does no compilation, so it is not useful for a local build.
+
+To build an image from source locally, use the full-source build instead:
 
 ```bash
-# Build (forward an SSH key to fetch the canton-lib dependency — see
-# "Running with Docker" above)
-docker build --ssh default=$HOME/.ssh/id_ed25519 -t dec-party-manager .
-
-# Tag for ECR
-docker tag dec-party-manager:latest public.ecr.aws/dlc-link/canton-decparty-manager:<version>
-
-# Push
-docker push public.ecr.aws/dlc-link/canton-decparty-manager:<version>
+docker build --ssh default=$HOME/.ssh/id_ed25519 -f development/Dockerfile -t dec-party-manager .
 ```
-
-Replace the registry/org (`public.ecr.aws/dlc-link`) and `<version>` with your own.
 
 ## Deployment
 

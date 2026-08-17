@@ -28,6 +28,63 @@ use crate::{
 
 pub static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
+/// Checksum rewrites for migration files that were edited in place after
+/// operators had already applied them: (version, checksum recorded by the old
+/// file, checksum of the current file). Every entry must be a semantically
+/// neutral edit (comments, whitespace) — an edit that changes what the
+/// migration does needs a new migration, never an entry here.
+///
+/// Version 4: #239 changed "DAML" to "Daml" in a comment of
+/// `000004_workflow_runs.up.sql` after the migration had shipped, so databases
+/// initialized before that commit fail sqlx's checksum validation with
+/// "migration 4 was previously applied but has been modified".
+const MIGRATION_CHECKSUM_REPAIRS: &[(i64, &str, &str)] = &[(
+    4,
+    "137f46dbb8207525f71a15371f122ac9a22bddf6dfed826ff1d8dc1dd46e5b80965e1b8e46a0b7943b4a67ca9ddc5b33",
+    "eda7576bac7480932ea8b0a8e3d6ddddb65d045a3cec2ccff85a425ee8b89baf64dc5ca8e5482f5670198aafe350eb9e",
+)];
+
+/// Rewrite the recorded checksums of known post-ship-edited migrations to
+/// match the files this binary embeds. Run this before `MIGRATOR.run`, which
+/// otherwise refuses to start on a database that applied the pre-edit file.
+///
+/// # Errors
+///
+/// Returns an error if the `_sqlx_migrations` table cannot be read or updated.
+pub async fn repair_migration_checksums(pool: &SqlitePool) -> Result<()> {
+    // A fresh database has no `_sqlx_migrations` table yet — nothing to repair.
+    let table_exists = sqlx::query(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_optional(pool)
+    .await?
+    .is_some();
+    if !table_exists {
+        return Ok(());
+    }
+
+    for (version, old_checksum, new_checksum) in MIGRATION_CHECKSUM_REPAIRS {
+        // The checksums are compile-time hex constants, so inlining the blob
+        // literal is safe; version and the old checksum are bound.
+        let result = sqlx::query(&format!(
+            "UPDATE _sqlx_migrations SET checksum = X'{new_checksum}' \
+             WHERE version = ? AND lower(hex(checksum)) = ?"
+        ))
+        .bind(version)
+        .bind(old_checksum)
+        .execute(pool)
+        .await?;
+        if result.rows_affected() > 0 {
+            tracing::info!(
+                "Repaired the recorded checksum of migration {version} \
+                 (applied by an older build from a since-edited file)"
+            );
+        }
+    }
+
+    Ok(())
+}
+
 /// Create a new SQLite connection pool
 ///
 /// # Errors
@@ -1150,7 +1207,7 @@ mod tests {
         },
     };
 
-    use super::MIGRATOR;
+    use super::{MIGRATION_CHECKSUM_REPAIRS, MIGRATOR, repair_migration_checksums};
 
     const TEST_NS: &str = "1220aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -2728,6 +2785,62 @@ mod tests {
         assert_eq!(remaining[0].id, dars.id);
         assert_eq!(remaining[0].invitation_type, InvitationType::Dars);
 
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn repair_migration_checksums_unblocks_pre_edit_database(pool: SqlitePool) -> Result {
+        let (version, old_checksum, _) = MIGRATION_CHECKSUM_REPAIRS[0];
+
+        // Simulate a database whose migration was applied from the pre-edit
+        // file: record the old checksum, as operator databases have it.
+        sqlx::query(&format!(
+            "UPDATE _sqlx_migrations SET checksum = X'{old_checksum}' WHERE version = ?"
+        ))
+        .bind(version)
+        .execute(&pool)
+        .await?;
+
+        // Without the repair, the migrator refuses to start — this is the
+        // operator-reported crash.
+        let err = MIGRATOR
+            .run(&pool)
+            .await
+            .expect_err("checksum must mismatch");
+        assert!(
+            err.to_string()
+                .contains("previously applied but has been modified"),
+            "unexpected error: {err}"
+        );
+
+        repair_migration_checksums(&pool).await?;
+        MIGRATOR.run(&pool).await?;
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn repair_migration_checksums_is_a_noop_on_current_database(pool: SqlitePool) -> Result {
+        let (version, _, new_checksum) = MIGRATION_CHECKSUM_REPAIRS[0];
+
+        repair_migration_checksums(&pool).await?;
+
+        let recorded: (String,) =
+            sqlx::query_as("SELECT lower(hex(checksum)) FROM _sqlx_migrations WHERE version = ?")
+                .bind(version)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(recorded.0, new_checksum);
+        MIGRATOR.run(&pool).await?;
+
+        Ok(())
+    }
+
+    #[sqlx::test]
+    async fn repair_migration_checksums_tolerates_missing_table(pool: SqlitePool) -> Result {
+        // A database that has never run migrations has no `_sqlx_migrations`
+        // table; the repair must not fail on it.
+        repair_migration_checksums(&pool).await?;
         Ok(())
     }
 }

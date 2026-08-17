@@ -14,12 +14,10 @@ use std::{path::Path, time::Duration};
 
 use anyhow::Context;
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
+use common::{api::PendingInvitationsResponse, types::InvitationType};
 use serde_json::json;
 
-use crate::common::{
-    Fixture, chaos, db, invitations::post_accept_invitation, processes,
-    types::PendingInvitationsResponse,
-};
+use crate::common::{Fixture, chaos, db, invitations::post_accept_invitation, processes};
 
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     chaos::ensure_nodes_healthy(f).await?;
@@ -123,12 +121,24 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     processes::restart_node(f, 1).await?;
 
     // Accept all four pending invitations.
-    let p2_onb =
-        chaos::wait_for_invite(f, f.p2.http, "Onboarding", Duration::from_secs(60)).await?;
-    let p3_onb =
-        chaos::wait_for_invite(f, f.p3.http, "Onboarding", Duration::from_secs(60)).await?;
-    let p2_dars = chaos::wait_for_invite(f, f.p2.http, "Dars", Duration::from_secs(60)).await?;
-    let p3_dars = chaos::wait_for_invite(f, f.p3.http, "Dars", Duration::from_secs(60)).await?;
+    let p2_onb = chaos::wait_for_invite(
+        f,
+        f.p2.http,
+        InvitationType::Onboarding,
+        Duration::from_secs(60),
+    )
+    .await?;
+    let p3_onb = chaos::wait_for_invite(
+        f,
+        f.p3.http,
+        InvitationType::Onboarding,
+        Duration::from_secs(60),
+    )
+    .await?;
+    let p2_dars =
+        chaos::wait_for_invite(f, f.p2.http, InvitationType::Dars, Duration::from_secs(60)).await?;
+    let p3_dars =
+        chaos::wait_for_invite(f, f.p3.http, InvitationType::Dars, Duration::from_secs(60)).await?;
     post_accept_invitation(f, f.p2.http, &p2_onb).await?;
     post_accept_invitation(f, f.p3.http, &p3_onb).await?;
     post_accept_invitation(f, f.p2.http, &p2_dars).await?;

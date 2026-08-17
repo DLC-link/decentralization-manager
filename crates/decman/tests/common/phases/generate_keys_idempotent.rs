@@ -7,10 +7,9 @@
 
 use std::time::Duration;
 
-use crate::common::{
-    Fixture, chaos, db, invitations::post_accept_invitation, processes,
-    types::DecentralizedPartiesResponse,
-};
+use common::{api::DecentralizedPartiesResponse, types::InvitationType};
+
+use crate::common::{Fixture, chaos, db, invitations::post_accept_invitation, processes};
 
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     chaos::ensure_nodes_healthy(f).await?;
@@ -19,10 +18,20 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     chaos::say("G7", &format!("starting onboarding with prefix {prefix}"));
     chaos::post_onboarding(f, &prefix).await?;
 
-    let p2_inv =
-        chaos::wait_for_invite(f, f.p2.http, "Onboarding", Duration::from_secs(60)).await?;
-    let p3_inv =
-        chaos::wait_for_invite(f, f.p3.http, "Onboarding", Duration::from_secs(60)).await?;
+    let p2_inv = chaos::wait_for_invite(
+        f,
+        f.p2.http,
+        InvitationType::Onboarding,
+        Duration::from_secs(60),
+    )
+    .await?;
+    let p3_inv = chaos::wait_for_invite(
+        f,
+        f.p3.http,
+        InvitationType::Onboarding,
+        Duration::from_secs(60),
+    )
+    .await?;
     post_accept_invitation(f, f.p2.http, &p2_inv).await?;
     post_accept_invitation(f, f.p3.http, &p3_inv).await?;
 
@@ -65,8 +74,8 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     let dec_party_id = r
         .parties
         .into_iter()
-        .find(|p| p.party_id.starts_with(&prefix))
-        .map(|p| p.party_id)
+        .find(|p| p.party_id.prefix == prefix)
+        .map(|p| p.party_id.to_string())
         .ok_or_else(|| anyhow::anyhow!("dec_party_id not resolved for prefix {prefix}"))?;
 
     // dec_party_identity must have rows for this party (keys persist
