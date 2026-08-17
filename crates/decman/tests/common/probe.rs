@@ -8,6 +8,20 @@
 //! [`ProbeDiag`] is the side channel that closes the gap: probes record what
 //! went wrong, the runner reads it back to annotate the timeout and to end the
 //! step early when the request itself is the problem.
+//!
+//! # Requirement on probe response types
+//!
+//! [`Failure::Deserialize`] is classified [`Class::Fatal`] with no
+//! discriminator, so **a type used by a polled probe must tolerate every
+//! transitional shape the endpoint can emit while the SUT settles.** The
+//! shared DTOs satisfy this today by making optional fields `Option` with
+//! `#[serde(default)]`, so a partially-populated body still deserializes.
+//!
+//! A probe type that instead requires a field the endpoint fills in only once
+//! some background work completes would be failed here at roughly
+//! `FATAL_STREAK × POLL_INTERVAL` — about six seconds — where before this
+//! module it would have polled and eventually passed. Nothing enforces the
+//! requirement; it is on whoever adds the next probe type.
 
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -54,6 +68,13 @@ impl Failure<'_> {
                 // that way while onboarding is still in flight. An unrouted
                 // path falls through to the frontend catch-all instead, whose
                 // body is not JSON: that one is a typo and never resolves.
+                //
+                // This split therefore depends on the frontend catch-all
+                // serving a NON-JSON body (`server::assets`). If it ever
+                // answers 404 with JSON, every unrouted path reads as
+                // transient again and a probe-path typo goes back to costing
+                // a full silent timeout. Degrades gracefully, but check here
+                // when changing what the catch-all returns.
                 404 => {
                     if serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(body)
                         .is_ok()
