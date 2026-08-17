@@ -789,6 +789,20 @@ fn canton_error_id(e: &anyhow::Error) -> Option<String> {
         .then(|| id.to_string())
 }
 
+/// Whether the tick failed only because a package it reads by name is absent
+/// from this participant.
+///
+/// Both reads name their package by alias, so the ledger rejects the request
+/// before it reads a contract. A node in that state fails identically on every
+/// tick and no operator can act on the line, so the loop logs it at `trace`.
+///
+/// One id covers both reads, because the delegation read runs first: a missing
+/// `governance-rewards-automation-v1` fails there, and a missing
+/// `splice-api-reward-assignment-v1` fails the same way on the coupon read.
+fn package_absent(e: &anyhow::Error) -> bool {
+    canton_error_id(e).as_deref() == Some("PACKAGE_NAMES_NOT_FOUND")
+}
+
 /// Whether a fresh read on the next tick is the cure.
 ///
 /// A non-ledger failure (config, transport, auth) is transient here too: it is
@@ -958,7 +972,15 @@ pub(crate) async fn run_reward_automation_loop(data: actix_web::web::Data<AppSta
             .collect();
         for decparty in parties {
             if let Err(e) = run_once_for_party(&data, &decparty).await {
-                tracing::warn!(%decparty, error = %e, "reward automation tick failed");
+                if package_absent(&e) {
+                    tracing::trace!(
+                        %decparty,
+                        error = %e,
+                        "reward automation tick failed: this participant does not hold the DAR"
+                    );
+                } else {
+                    tracing::warn!(%decparty, error = %e, "reward automation tick failed");
+                }
             }
         }
     }
@@ -1634,6 +1656,28 @@ mod tests {
             Some("LOCAL_VERDICT_LOCKED_CONTRACTS")
         );
         assert!(assign_failure_is_transient(&e));
+    }
+
+    #[test]
+    fn only_an_absent_package_is_quiet() {
+        // The devnet message, verbatim. The gRPC code here is deliberately not
+        // the one Canton sends: the error id is what classifies.
+        let absent = anyhow::Error::new(tonic::Status::internal(
+            "PACKAGE_NAMES_NOT_FOUND(11,21a20a9f): The following package names do not match \
+             upgradable packages uploaded on this participant: [governance-rewards-automation-v1].",
+        ));
+        assert!(package_absent(&absent));
+        // A context added on the way up must not send the line back to warn.
+        assert!(package_absent(
+            &Err::<(), _>(absent)
+                .context("reading the delegation")
+                .unwrap_err()
+        ));
+
+        // Another ledger rejection, then a failure carrying no ledger status at
+        // all, such as auth or transport.
+        assert!(!package_absent(&canton_err("DAML_INTERPRETATION_ERROR")));
+        assert!(!package_absent(&anyhow::anyhow!("connection refused")));
     }
 
     #[test]
