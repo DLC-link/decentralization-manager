@@ -38,14 +38,26 @@ use serde_json::{Value, json};
 use tracing::info;
 
 use crate::common::{
-    Fixture,
+    Fixture, TestTarget,
     chaos::fresh_prefix,
+    governance::{CycleParty, propose_confirm_execute_on},
     http::probe_workflow_status,
     invitations::{post_accept_invitation, probe_pending_invitation},
     phases::deploy_gov_core::{configure_party_on_nodes, post_governance_rules},
     scenario::Scenario,
-    types::{DecentralizedPartiesResponse, GovernanceStateLookup},
+    types::{
+        CredentialsResponse, DecentralizedPartiesResponse, GovernanceStateLookup,
+        ProviderConfigurationsResponse, RegistrarServiceRequestsResponse,
+        RegistrarServicesResponse,
+    },
 };
+
+/// The claim the provider decparty demands of a registrar. The provider issues
+/// this credential itself during OnboardRegistrar.
+const REGISTRAR_CLAIM: (&str, &str) = ("role", "registrar");
+
+/// The claim the registrar decparty demands of an instrument issuer.
+const ISSUER_CLAIM: (&str, &str) = ("role", "instrument-issuer");
 
 /// Creates the registrar decparty and makes it able to vote. The function
 /// leaves `f.registrar_party_id` and `f.registrar_rules_contract_id` set.
@@ -264,6 +276,247 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         .clone()
         .context("registrar_rules_contract_id not set")?;
     info!("Registrar decparty ready: {registrar_party_id} rules={registrar_rules_contract_id}");
+
+    let provider_party = f.party_id()?.to_string();
+    let provider_service_cid = f
+        .provider_service_cid
+        .clone()
+        .context("provider_service_cid not set")?;
+
+    // SetupUtility already created a provider configuration with no
+    // requirements, on this same ProviderService. The endpoint reports no
+    // requirement data. The two rows therefore look identical. Record the
+    // existing ids, then take the one that appears.
+    let configurations_before: Vec<String> = {
+        let path = format!("/provider-configurations?party_id={provider_party}");
+        let r: ProviderConfigurationsResponse = f.get_json(f.p1.http, &path).await?;
+        r.provider_configurations
+            .into_iter()
+            .map(|c| c.contract_id)
+            .collect()
+    };
+
+    propose_confirm_execute_on(
+        CycleParty::Primary,
+        "CreateProviderConfiguration",
+        json!({
+            "type": "create_provider_configuration",
+            "provider_service_cid": &provider_service_cid,
+            "registrar_requirements": [{
+                "issuer": &provider_party,
+                "required_claims": [
+                    {"property": REGISTRAR_CLAIM.0, "value": REGISTRAR_CLAIM.1},
+                ],
+            }],
+            "holder_requirements": [],
+        }),
+    )
+    .run(f)
+    .await?;
+
+    Scenario::new("provider configuration created")
+        .then(
+            "exactly one new provider configuration",
+            Duration::from_secs(30),
+            {
+                let before = configurations_before.clone();
+                let provider_party = provider_party.clone();
+                move |f, _| {
+                    let before = before.clone();
+                    let provider_party = provider_party.clone();
+                    Box::pin(async move {
+                        let path = format!("/provider-configurations?party_id={provider_party}");
+                        let r: ProviderConfigurationsResponse =
+                            f.get_json(f.p1.http, &path).await.ok()?;
+                        let fresh: Vec<String> = r
+                            .provider_configurations
+                            .into_iter()
+                            .map(|c| c.contract_id)
+                            .filter(|cid| !before.contains(cid))
+                            .collect();
+                        match fresh.len() {
+                            0 => None,
+                            1 => {
+                                f.provider_configuration_cid = Some(fresh[0].clone());
+                                Some(Ok(()))
+                            }
+                            n => Some(Err(anyhow::anyhow!(
+                                "expected 1 new provider configuration, got {n}"
+                            ))),
+                        }
+                    })
+                }
+            },
+        )
+        .run(f)
+        .await?;
+
+    let provider_configuration_cid = f
+        .provider_configuration_cid
+        .clone()
+        .context("provider_configuration_cid not set")?;
+
+    // The same operator selection deploy_gov_core and utility_onboarding make.
+    // Localnet has nothing that separates the operator from a member party.
+    // Devnet has a real operator identity.
+    let operator = match f.target {
+        TestTarget::Localnet => f.p1_member_party()?.to_string(),
+        TestTarget::Devnet => f
+            .operator_party
+            .clone()
+            .context("operator_party not set on devnet")?,
+    };
+
+    propose_confirm_execute_on(
+        CycleParty::Named {
+            party_id: registrar_party_id.clone(),
+            rules_contract_id: registrar_rules_contract_id.clone(),
+        },
+        "CreateRegistrarServiceRequest",
+        json!({
+            "type": "create_registrar_service_request",
+            "operator": &operator,
+            "provider": &provider_party,
+            "create_transfer_rule": true,
+            "create_allocation_factory": true,
+        }),
+    )
+    .run(f)
+    .await?;
+
+    Scenario::new("registrar service request visible to the provider")
+        .then(
+            "request listed with the right parties and flags",
+            Duration::from_secs(30),
+            {
+                let provider_party = provider_party.clone();
+                let registrar_party = registrar_party_id.clone();
+                let operator = operator.clone();
+                move |f, _| {
+                    let provider_party = provider_party.clone();
+                    let registrar_party = registrar_party.clone();
+                    let operator = operator.clone();
+                    Box::pin(async move {
+                        let path = format!(
+                            "/registrar-service-requests?party_id={provider_party}"
+                        );
+                        let r: RegistrarServiceRequestsResponse =
+                            f.get_json(f.p1.http, &path).await.ok()?;
+                        let row = r
+                            .registrar_service_requests
+                            .into_iter()
+                            .find(|q| q.registrar == registrar_party)?;
+                        if row.provider != provider_party {
+                            return Some(Err(anyhow::anyhow!(
+                                "request provider is {got}, expected {provider_party}",
+                                got = row.provider
+                            )));
+                        }
+                        if row.operator != operator {
+                            return Some(Err(anyhow::anyhow!(
+                                "request operator is {got}, expected {operator}",
+                                got = row.operator
+                            )));
+                        }
+                        // The template maps each Bool to an Optional Bool.
+                        // The endpoint reads an absent flag as false. Assert
+                        // both. A dropped flag then fails here.
+                        if !row.create_transfer_rule || !row.create_allocation_factory {
+                            return Some(Err(anyhow::anyhow!(
+                                "flags are transfer_rule={t} allocation_factory={a}, expected both true",
+                                t = row.create_transfer_rule,
+                                a = row.create_allocation_factory
+                            )));
+                        }
+                        f.registrar_service_request_cid = Some(row.contract_id);
+                        Some(Ok(()))
+                    })
+                }
+            },
+        )
+        .run(f)
+        .await?;
+
+    let registrar_service_request_cid = f
+        .registrar_service_request_cid
+        .clone()
+        .context("registrar_service_request_cid not set")?;
+
+    propose_confirm_execute_on(
+        CycleParty::Primary,
+        "OnboardRegistrar",
+        json!({
+            "type": "onboard_registrar",
+            "provider_service_cid": &provider_service_cid,
+            "registrar_service_request_cid": &registrar_service_request_cid,
+            "provider_configuration_cid": &provider_configuration_cid,
+        }),
+    )
+    .run(f)
+    .await?;
+
+    Scenario::new("registrar onboarded")
+        .then(
+            "RegistrarService exists for the new registrar",
+            Duration::from_secs(30),
+            {
+                let provider_party = provider_party.clone();
+                let registrar_party = registrar_party_id.clone();
+                move |f, _| {
+                    let provider_party = provider_party.clone();
+                    let registrar_party = registrar_party.clone();
+                    Box::pin(async move {
+                        let path = format!("/services/registrar?party_id={provider_party}");
+                        let r: RegistrarServicesResponse =
+                            f.get_json(f.p1.http, &path).await.ok()?;
+                        let row = r
+                            .services
+                            .into_iter()
+                            .find(|s| s.registrar == registrar_party)?;
+                        f.registrar_service_cid = Some(row.contract_id);
+                        Some(Ok(()))
+                    })
+                }
+            },
+        )
+        .then(
+            "provider minted the registrar credential",
+            Duration::from_secs(30),
+            {
+                let provider_party = provider_party.clone();
+                let registrar_party = registrar_party_id.clone();
+                move |f, _| {
+                    let provider_party = provider_party.clone();
+                    let registrar_party = registrar_party.clone();
+                    Box::pin(async move {
+                        let path = format!("/credentials?party_id={provider_party}");
+                        let r: CredentialsResponse = f.get_json(f.p1.http, &path).await.ok()?;
+                        r.credentials
+                            .iter()
+                            .find(|c| {
+                                c.credential_id.starts_with("registrar-credential/")
+                                    && c.claims.iter().any(|claim| {
+                                        claim.subject == registrar_party
+                                            && claim.property == REGISTRAR_CLAIM.0
+                                            && claim.value == REGISTRAR_CLAIM.1
+                                    })
+                            })
+                            .map(|_| Ok(()))
+                    })
+                }
+            },
+        )
+        .run(f)
+        .await?;
+
+    let registrar_service_cid = f
+        .registrar_service_cid
+        .clone()
+        .context("registrar_service_cid not set")?;
+    info!(
+        "Registrar onboarded: configuration={provider_configuration_cid} \
+         request={registrar_service_request_cid} service={registrar_service_cid}"
+    );
 
     Ok(())
 }
