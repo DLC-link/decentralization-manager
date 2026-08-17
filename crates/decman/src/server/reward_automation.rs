@@ -116,6 +116,62 @@ fn field_optional_is_none(rec: &Record, label: &str) -> bool {
 // Shared decoded ACS read
 // ============================================================================
 
+/// A Daml module path, e.g. `Splice.Amulet`.
+pub(crate) struct Module<'a>(pub &'a str);
+
+/// A Daml template or interface name, e.g. `RewardCouponV2`.
+pub(crate) struct Entity<'a>(pub &'a str);
+
+/// What an [`active_created_records`] read selects.
+///
+/// One value rather than four positional arguments, and the two same-typed
+/// halves are wrapped: `package_id`, module and entity were all `&str`, so a
+/// transposition compiled, passed clippy, and yielded a filter matching
+/// nothing — `Ok(vec![])`, which a caller reads as "the party holds no such
+/// contracts". [`Module`] and [`Entity`] make each of those swaps a type
+/// error instead, so the hazard is closed rather than narrowed.
+pub(crate) struct ContractFilter<'a> {
+    pub package_id: &'a str,
+    pub module: &'a str,
+    pub entity: &'a str,
+    /// Read the interface view instead of the concrete template's arguments.
+    pub interface_view: bool,
+    /// Interface reads only: keep a contract only if this concrete template
+    /// created it.
+    pub implementer: Option<(&'a str, &'a str)>,
+}
+
+impl<'a> ContractFilter<'a> {
+    /// A concrete-template read.
+    pub fn template(package_id: &'a str, module: Module<'a>, entity: Entity<'a>) -> Self {
+        Self {
+            package_id,
+            module: module.0,
+            entity: entity.0,
+            interface_view: false,
+            implementer: None,
+        }
+    }
+
+    /// An interface read, admitting every implementation until narrowed by
+    /// [`Self::implemented_by`].
+    pub fn interface(package_id: &'a str, module: Module<'a>, entity: Entity<'a>) -> Self {
+        Self {
+            package_id,
+            module: module.0,
+            entity: entity.0,
+            interface_view: true,
+            implementer: None,
+        }
+    }
+
+    /// Keep only contracts created by this concrete template.
+    pub fn implemented_by(mut self, module: Module<'a>, entity: Entity<'a>) -> Self {
+        self.implementer = Some((module.0, entity.0));
+        self
+    }
+}
+
 /// A single decoded `GetActiveContracts` read.
 ///
 /// For `interface_view = false` this uses a `TemplateFilter` (or, under
@@ -136,21 +192,20 @@ fn field_optional_is_none(rec: &Record, label: &str) -> bool {
 /// consumer needs a specific one — see [`unassigned_coupons`].
 ///
 /// Modeled on `queries::fetch_proposal_infos`.
-// The full filter descriptor (package/module/entity + template-vs-interface) is
-// intentionally passed positionally so this stays the single shared read for
-// every reward-automation query.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn active_created_records(
     config: &NodeConfig,
     party_id: &CantonId,
     token: Option<String>,
     test_mode: bool,
-    package_id: &str,
-    module: &str,
-    entity: &str,
-    interface_view: bool,
-    implementer: Option<(&str, &str)>,
+    filter: ContractFilter<'_>,
 ) -> anyhow::Result<Vec<(String, i64, Record)>> {
+    let ContractFilter {
+        package_id,
+        module,
+        entity,
+        interface_view,
+        implementer,
+    } = filter;
     let mut state_client = utils::create_state_client(config, token).await?;
 
     let ledger_end = state_client
@@ -323,11 +378,11 @@ pub(crate) async fn active_delegation(
         decparty,
         Some(token.to_string()),
         test_mode,
-        package_id,
-        "Governance.Rewards.CouponReassignmentDelegation",
-        "CouponReassignmentDelegation",
-        false,
-        None, // template read: the template *is* the filter
+        ContractFilter::template(
+            package_id,
+            Module("Governance.Rewards.CouponReassignmentDelegation"),
+            Entity("CouponReassignmentDelegation"),
+        ),
     )
     .await?;
 
@@ -365,11 +420,11 @@ pub(crate) async fn active_delegations(
         decparty,
         Some(token.to_string()),
         test_mode,
-        package_id,
-        "Governance.Rewards.CouponReassignmentDelegation",
-        "CouponReassignmentDelegation",
-        false,
-        None,
+        ContractFilter::template(
+            package_id,
+            Module("Governance.Rewards.CouponReassignmentDelegation"),
+            Entity("CouponReassignmentDelegation"),
+        ),
     )
     .await?;
 
@@ -467,11 +522,12 @@ pub(crate) async fn unassigned_coupons(
         decparty,
         token,
         test_mode,
-        "#splice-api-reward-assignment-v1",
-        "Splice.Api.RewardAssignmentV1",
-        "RewardCoupon",
-        true,
-        Some(("Splice.Amulet", "RewardCouponV2")),
+        ContractFilter::interface(
+            "#splice-api-reward-assignment-v1",
+            Module("Splice.Api.RewardAssignmentV1"),
+            Entity("RewardCoupon"),
+        )
+        .implemented_by(Module("Splice.Amulet"), Entity("RewardCouponV2")),
     )
     .await?;
 
@@ -728,7 +784,19 @@ pub(crate) async fn run_reassign_once(
     .await?;
     let assignable = select_assignable(&coupons, Utc::now(), expiry_margin);
     if assignable.is_empty() {
-        return Ok(()); // nothing assignable -> no-op
+        // `visible` is what the ACS read returned, so it separates "coupons
+        // present but none assignable yet" from "nothing visible at all".
+        //
+        // It does NOT separate a decparty that earned nothing from one whose
+        // coupons carry providerIsObserver = false (design §4): such a coupon
+        // is absent from the ACS entirely, so both report 0. Telling those
+        // apart needs a signal this node does not hold.
+        tracing::debug!(
+            %decparty,
+            visible = coupons.len(),
+            "no assignable coupons this tick"
+        );
+        return Ok(());
     }
 
     let assigned = drain_assignable(
