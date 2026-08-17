@@ -267,7 +267,6 @@ export const GovernanceSection = ({
   // Registrar-onboarding proposal state
   const [proposalRegistrarServiceRequestCid, setProposalRegistrarServiceRequestCid] = useState("");
   const [proposalProviderConfigurationCid, setProposalProviderConfigurationCid] = useState("");
-  const [proposalExtraRegistrarCredentialCids, setProposalExtraRegistrarCredentialCids] = useState<string[]>([]);
   // Requirement-editor rows: an issuer party id plus its required claims as
   // "property,value" lines. Parsed into PartyCredentialRequirement on submit.
   const [proposalRegistrarRequirements, setProposalRegistrarRequirements] = useState<
@@ -282,10 +281,11 @@ export const GovernanceSection = ({
   // Party-list textareas, one party id per line.
   const [proposalInitialInstrumentIssuersText, setProposalInitialInstrumentIssuersText] = useState("");
   const [proposalInstrumentIssuersText, setProposalInstrumentIssuersText] = useState("");
-  // Offboard: the credential cids to revoke. Each credential's claims name
-  // the instrument issuer being offboarded.
-  const [proposalOffboardCredentialCids, setProposalOffboardCredentialCids] =
-    useState<string[]>([]);
+  // Offboard: one row per offboarded issuer. Each row's credential picker is
+  // filtered to credentials whose claims all name that row's party.
+  const [proposalOffboardRows, setProposalOffboardRows] = useState<
+    { party: string; cids: string[] }[]
+  >([]);
   // Accept External Party Setup: contract id of the validator-created
   // ExternalPartySetupProposal to accept.
   const [
@@ -792,46 +792,20 @@ export const GovernanceSection = ({
     [availableInstruments, partyId],
   );
 
-  // Candidate extra credentials for Onboard Registrar: issued by a party
-  // other than this governance party (self-issuable requirements are minted
-  // automatically) and attesting for the registrar of the selected request.
-  const externalRegistrarCredentials = useMemo(() => {
-    const registrar = acceptableRegistrarServiceRequests.find(
-      (r) => r.contract_id === proposalRegistrarServiceRequestCid,
-    )?.registrar;
-    if (!registrar) {
-      return [];
-    }
-    return availableCredentials.filter(
-      (c) =>
-        c.issuer !== partyId &&
-        c.claims.length > 0 &&
-        c.claims.every((claim) => claim.subject === registrar),
-    );
-  }, [
-    availableCredentials,
-    partyId,
-    acceptableRegistrarServiceRequests,
-    proposalRegistrarServiceRequestCid,
-  ]);
-
-  // Candidate credentials for Offboard Instrument Issuers: self-issued by
-  // this governance party with claims, restricted to instrument-issuer role
-  // tags so a dual-role decparty's registrar credentials stay out. Sorted by
-  // subject so the picker's per-issuer groups stay contiguous.
-  const offboardableCredentials = useMemo(
-    () =>
-      availableCredentials
-        .filter(
-          (c) =>
-            c.issuer === partyId &&
-            c.holder === partyId &&
-            c.claims.length > 0 &&
-            c.credential_id.split("/")[0].endsWith("-instrument-issuer-credential"),
-        )
-        .sort((a, b) =>
-          (a.claims[0]?.subject ?? "").localeCompare(b.claims[0]?.subject ?? ""),
-        ),
+  // Candidate credentials for one offboard row: self-issued by this governance
+  // party, carrying claims that all name the row's party, and tagged as an
+  // instrument-issuer credential so a dual-role decparty's registrar
+  // credentials stay out.
+  const offboardableCredentialsFor = useCallback(
+    (party: string) =>
+      availableCredentials.filter(
+        (c) =>
+          c.issuer === partyId &&
+          c.holder === partyId &&
+          c.claims.length > 0 &&
+          c.claims.every((cl) => cl.subject === party) &&
+          c.credential_id.split("/")[0].endsWith("-instrument-issuer-credential"),
+      ),
     [availableCredentials, partyId],
   );
 
@@ -1253,12 +1227,11 @@ export const GovernanceSection = ({
       fetchOpenBurnRequests();
     }
     // The accept forms need the party's credentials for the issuer
-    // credential picker; the Onboard Registrar form for its extra-credentials
-    // picker; the Offboard form for its per-issuer credential pickers.
+    // credential picker; the Offboard form for its per-issuer credential
+    // pickers.
     if (
       proposalType === "accept_mint_request" ||
       proposalType === "accept_burn_request" ||
-      proposalType === "onboard_registrar" ||
       proposalType === "offboard_instrument_issuers"
     ) {
       fetchCredentials();
@@ -2015,13 +1988,12 @@ export const GovernanceSection = ({
     setProposalAmuletMergeLimit("10");
     setProposalRegistrarServiceRequestCid("");
     setProposalProviderConfigurationCid("");
-    setProposalExtraRegistrarCredentialCids([]);
     setProposalRegistrarRequirements([]);
     setProposalHolderRequirements([]);
     setProposalIssuerRequirements([]);
     setProposalInitialInstrumentIssuersText("");
     setProposalInstrumentIssuersText("");
-    setProposalOffboardCredentialCids([]);
+    setProposalOffboardRows([]);
   };
 
   const handleSubmitProposal = async () => {
@@ -2318,7 +2290,6 @@ export const GovernanceSection = ({
             provider_service_cid: proposalProviderServiceCid,
             registrar_service_request_cid: proposalRegistrarServiceRequestCid,
             provider_configuration_cid: proposalProviderConfigurationCid,
-            extra_registrar_credential_cids: proposalExtraRegistrarCredentialCids,
           };
           break;
         case "provision_instrument":
@@ -2352,7 +2323,10 @@ export const GovernanceSection = ({
         case "offboard_instrument_issuers":
           proposal = {
             type: "offboard_instrument_issuers",
-            instrument_issuer_cids: proposalOffboardCredentialCids,
+            instrument_issuers: proposalOffboardRows.map((row) => ({
+              instrument_issuer: row.party,
+              credential_cids: row.cids,
+            })),
           };
           break;
       }
@@ -6413,68 +6387,6 @@ export const GovernanceSection = ({
                       )}
                     </Select>
                   </FormControl>
-                  <Autocomplete
-                    size="small"
-                    multiple
-                    freeSolo
-                    options={externalRegistrarCredentials}
-                    value={proposalExtraRegistrarCredentialCids}
-                    loading={credentialsLoading}
-                    onChange={(_event, values) => {
-                      setProposalExtraRegistrarCredentialCids(
-                        values.map((value) =>
-                          typeof value === "string" ? value : value.contract_id,
-                        ),
-                      );
-                    }}
-                    getOptionLabel={(option) => {
-                      const cid = typeof option === "string" ? option : option.contract_id;
-                      const known =
-                        typeof option === "string"
-                          ? availableCredentials.find((c) => c.contract_id === option)
-                          : option;
-                      const cidTail = cid.slice(-8);
-                      return known ? `${known.credential_id} (…${cidTail})` : cid;
-                    }}
-                    isOptionEqualToValue={(option, value) =>
-                      typeof value === "string"
-                        ? option.contract_id === value
-                        : option.contract_id === value.contract_id
-                    }
-                    renderOption={(props, option) => {
-                      const cidTail = option.contract_id.slice(-8);
-                      const issuerName = option.issuer.split("::")[0];
-                      return (
-                        <li {...props} key={option.contract_id}>
-                          <Box sx={{ display: "flex", flexDirection: "column", gap: 0.25 }}>
-                            <Typography variant="body2">
-                              {option.credential_id} (…{cidTail})
-                            </Typography>
-                            <Typography variant="caption" color="text.secondary">
-                              issued by {issuerName}
-                            </Typography>
-                          </Box>
-                        </li>
-                      );
-                    }}
-                    renderInput={(params) => (
-                      <TextField
-                        {...params}
-                        label={
-                          <TextHelp text="Credentials from issuers other than this governance party, covering externally-issued registrar requirements. Leave empty when every requirement is self-issuable.">
-                            Extra Registrar Credentials
-                          </TextHelp>
-                        }
-                        helperText={
-                          credentialsLoading
-                            ? "Loading credentials…"
-                            : proposalRegistrarServiceRequestCid === ""
-                              ? "Select the RegistrarServiceRequest above to see the registrar's externally-issued credentials"
-                              : "Pick the registrar's externally-issued credentials, or paste contract ids. Optional."
-                        }
-                      />
-                    )}
-                  />
                 </>
               )}
 
@@ -6608,56 +6520,107 @@ export const GovernanceSection = ({
               )}
 
               {proposalType === "offboard_instrument_issuers" && (
-                <Autocomplete
-                  size="small"
-                  multiple
-                  freeSolo
-                  options={offboardableCredentials}
-                  value={proposalOffboardCredentialCids}
-                  loading={credentialsLoading}
-                  onChange={(_event, values) =>
-                    setProposalOffboardCredentialCids(
-                      values.map((value) =>
-                        typeof value === "string" ? value : value.contract_id,
-                      ),
-                    )
-                  }
-                  groupBy={(option) =>
-                    option.claims[0]?.subject.split("::")[0] ?? "unknown issuer"
-                  }
-                  getOptionLabel={(option) => {
-                    const cid = typeof option === "string" ? option : option.contract_id;
-                    const known =
-                      typeof option === "string"
-                        ? availableCredentials.find((c) => c.contract_id === option)
-                        : option;
-                    if (!known) {
-                      return cid;
-                    }
-                    const issuerHint = known.claims[0]?.subject.split("::")[0] ?? "?";
-                    return `${issuerHint} — ${known.credential_id.split("/")[0]} (…${cid.slice(-8)})`;
-                  }}
-                  isOptionEqualToValue={(option, value) =>
-                    typeof value === "string"
-                      ? option.contract_id === value
-                      : option.contract_id === value.contract_id
-                  }
-                  renderInput={(params) => (
-                    <TextField
-                      {...params}
-                      label={
-                        <TextHelp text="Credentials this governance party self-issued for instrument issuers, grouped by issuer. Each credential's claims name the issuer it attests for.">
-                          Issuer Credentials to Revoke
-                        </TextHelp>
+                <>
+                  <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+                    <TextHelp text="One row per offboarded issuer. Each row lists the credentials this governance party issued for that issuer. An issuer keeps minting rights through any credential left out.">
+                      Instrument Issuers to Offboard (add issuer + credentials)
+                    </TextHelp>
+                  </Typography>
+                  {proposalOffboardRows.map((row, idx) => (
+                    <Box key={idx} sx={{ display: "flex", gap: 1, mb: 1, alignItems: "flex-start" }}>
+                      <TextField
+                        label="Instrument Issuer Party"
+                        value={row.party}
+                        onChange={(e) => {
+                          const updated = [...proposalOffboardRows];
+                          updated[idx] = { ...row, party: e.target.value };
+                          setProposalOffboardRows(updated);
+                        }}
+                        size="small"
+                        sx={{ flex: 2 }}
+                        slotProps={{
+                          input: {
+                            endAdornment: fieldHelpAdornment(
+                              "Party id of the issuer being offboarded. The credential list below filters to credentials whose claims all name this party.",
+                              "Help for Instrument Issuer Party",
+                            ),
+                          },
+                        }}
+                      />
+                      <Autocomplete
+                        size="small"
+                        multiple
+                        freeSolo
+                        sx={{ flex: 3 }}
+                        options={offboardableCredentialsFor(row.party)}
+                        value={row.cids}
+                        loading={credentialsLoading}
+                        onChange={(_event, values) => {
+                          const updated = [...proposalOffboardRows];
+                          updated[idx] = {
+                            ...row,
+                            cids: values.map((value) =>
+                              typeof value === "string" ? value : value.contract_id,
+                            ),
+                          };
+                          setProposalOffboardRows(updated);
+                        }}
+                        getOptionLabel={(option) => {
+                          const cid =
+                            typeof option === "string" ? option : option.contract_id;
+                          const known =
+                            typeof option === "string"
+                              ? availableCredentials.find((c) => c.contract_id === option)
+                              : option;
+                          if (!known) {
+                            return cid;
+                          }
+                          return `${known.credential_id.split("/")[0]} (…${cid.slice(-8)})`;
+                        }}
+                        isOptionEqualToValue={(option, value) =>
+                          typeof value === "string"
+                            ? option.contract_id === value
+                            : option.contract_id === value.contract_id
+                        }
+                        renderInput={(params) => (
+                          <TextField
+                            {...params}
+                            label="Credentials to Revoke"
+                            helperText={
+                              credentialsLoading
+                                ? "Loading credentials…"
+                                : "Pick every credential of this issuer, or paste contract ids."
+                            }
+                          />
+                        )}
+                      />
+                      <Button
+                        size="small"
+                        color="error"
+                        onClick={() =>
+                          setProposalOffboardRows(
+                            proposalOffboardRows.filter((_, i) => i !== idx),
+                          )
+                        }
+                      >
+                        Remove
+                      </Button>
+                    </Box>
+                  ))}
+                  <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
+                    <Button
+                      size="small"
+                      onClick={() =>
+                        setProposalOffboardRows([
+                          ...proposalOffboardRows,
+                          { party: "", cids: [] },
+                        ])
                       }
-                      helperText={
-                        credentialsLoading
-                          ? "Loading credentials…"
-                          : "Pick every credential of each issuer being offboarded, or paste contract ids. An issuer keeps minting rights through any credential left out."
-                      }
-                    />
-                  )}
-                />
+                    >
+                      Add Issuer
+                    </Button>
+                  </Box>
+                </>
               )}
 
               {proposalType === "offer_paid_credential" && (
