@@ -594,13 +594,12 @@ Mint the self-issuable registrar credentials and accept the request in one vote:
     "type": "onboard_registrar",
     "provider_service_cid": "<provider-service-cid>",
     "registrar_service_request_cid": "<registrar-service-request-cid>",
-    "provider_configuration_cid": "<provider-configuration-cid>",
-    "extra_registrar_credential_cids": []
+    "provider_configuration_cid": "<provider-configuration-cid>"
   }
 }
 ```
 
-`extra_registrar_credential_cids` supplies credentials for requirements issued by parties other than the provider decparty. The accept validates every registrar requirement, so a missing credential rolls back the whole action. Execution creates the `RegistrarService`, plus the `TransferRule` and `AllocationFactory` the request asked for.
+The accept validates every registrar requirement. The provider decparty mints only the credentials it can issue itself, so a requirement issued by another party rolls the whole action back. Execution creates the `RegistrarService`, plus the `TransferRule` and `AllocationFactory` the request asked for.
 
 **5. Provision an instrument (registrar decparty):**
 
@@ -647,12 +646,17 @@ Revoke the credentials the registrar decparty self-issued for the offboarded iss
 {
   "proposal": {
     "type": "offboard_instrument_issuers",
-    "instrument_issuer_cids": ["<credential-cid-1>", "<credential-cid-2>"]
+    "instrument_issuers": [
+      {
+        "instrument_issuer": "<issuer-party-id>",
+        "credential_cids": ["<credential-cid-1>", "<credential-cid-2>"]
+      }
+    ]
   }
 }
 ```
 
-The action revokes only the listed credentials. An issuer keeps minting rights through any live credential the proposal omits, so list every credential the registrar decparty issued for that issuer.
+Each row names one issuer and lists that issuer's credentials. The action checks that every claim on a credential names the declared issuer, so a mistyped row fails instead of revoking the wrong credential. The action revokes only the listed credentials. An issuer keeps minting rights through any live credential the proposal omits, so list every credential the registrar decparty issued for that issuer.
 
 Credentialed issuers request mints and burns through the `AllocationFactory`. The registrar decparty approves each request with the `accept_mint_request` and `accept_burn_request` proposals.
 
