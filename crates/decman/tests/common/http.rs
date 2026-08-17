@@ -1,8 +1,12 @@
 use anyhow::Context;
+use common::{
+    api::WorkflowRunsResponse,
+    types::{WorkflowKind, WorkflowProgress, WorkflowRole},
+};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use super::{Fixture, types::WorkflowRunsResponse};
+use super::Fixture;
 
 impl Fixture {
     pub async fn post_json<B, R>(&self, port: u16, path: &str, body: &B) -> anyhow::Result<R>
@@ -158,14 +162,13 @@ pub async fn probe_workflow_status(
 
 /// Probe `GET /workflows` on `port` until a run matching `kind` + `role` +
 /// `status` is visible. Used to assert the unified notification feed surfaces
-/// completed/cancelled/failed runs from each side. Status values match the
-/// JSON enum form returned by the handler (`completed`, `failed`, etc.).
+/// completed/cancelled/failed runs from each side.
 pub async fn probe_workflow_run_visible(
     f: &Fixture,
     port: u16,
-    kind: &str,
-    role: &str,
-    status: &str,
+    kind: WorkflowKind,
+    role: WorkflowRole,
+    status: WorkflowProgress,
 ) -> Option<anyhow::Result<()>> {
     let r: WorkflowRunsResponse = f.get_json(port, "/workflows").await.ok()?;
     r.runs

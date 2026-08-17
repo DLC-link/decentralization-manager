@@ -7,6 +7,8 @@
 
 use std::time::Duration;
 
+use common::types::InvitationType;
+
 use crate::common::{Fixture, chaos, db, invitations::post_accept_invitation, processes};
 
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
@@ -17,10 +19,20 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     chaos::post_onboarding(f, &prefix).await?;
 
     // Both peers accept up front (so P2 is mid-flight when we kill it).
-    let p2_inv =
-        chaos::wait_for_invite(f, f.p2.http, "Onboarding", Duration::from_secs(60)).await?;
-    let p3_inv =
-        chaos::wait_for_invite(f, f.p3.http, "Onboarding", Duration::from_secs(60)).await?;
+    let p2_inv = chaos::wait_for_invite(
+        f,
+        f.p2.http,
+        InvitationType::Onboarding,
+        Duration::from_secs(60),
+    )
+    .await?;
+    let p3_inv = chaos::wait_for_invite(
+        f,
+        f.p3.http,
+        InvitationType::Onboarding,
+        Duration::from_secs(60),
+    )
+    .await?;
     post_accept_invitation(f, f.p2.http, &p2_inv).await?;
     post_accept_invitation(f, f.p3.http, &p3_inv).await?;
 

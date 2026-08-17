@@ -9,6 +9,7 @@
 
 use std::time::Duration;
 
+use common::types::InvitationType;
 use serde_json::json;
 
 use crate::common::{Fixture, chaos, db, invitations::post_accept_invitation, processes};
@@ -20,10 +21,20 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     chaos::say("G3", &format!("starting onboarding with prefix {prefix}"));
     chaos::post_onboarding(f, &prefix).await?;
 
-    let p2_inv =
-        chaos::wait_for_invite(f, f.p2.http, "Onboarding", Duration::from_secs(60)).await?;
-    let p3_inv =
-        chaos::wait_for_invite(f, f.p3.http, "Onboarding", Duration::from_secs(60)).await?;
+    let p2_inv = chaos::wait_for_invite(
+        f,
+        f.p2.http,
+        InvitationType::Onboarding,
+        Duration::from_secs(60),
+    )
+    .await?;
+    let p3_inv = chaos::wait_for_invite(
+        f,
+        f.p3.http,
+        InvitationType::Onboarding,
+        Duration::from_secs(60),
+    )
+    .await?;
     post_accept_invitation(f, f.p2.http, &p2_inv).await?;
     post_accept_invitation(f, f.p3.http, &p3_inv).await?;
 
