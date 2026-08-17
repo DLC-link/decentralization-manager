@@ -789,6 +789,18 @@ fn canton_error_id(e: &anyhow::Error) -> Option<String> {
         .then(|| id.to_string())
 }
 
+/// Whether the tick failed only because this participant does not carry
+/// `governance-rewards-automation-v1`.
+///
+/// The delegation query names the package by alias, so a participant that has
+/// never had the DAR uploaded rejects the read with `PACKAGE_NAMES_NOT_FOUND`
+/// before any contract is looked at. Every tick fails the same way, and an
+/// operator cannot act on the line, so the loop logs it at `trace`. Issue #334
+/// carries the fix — not running the loop on such a node at all.
+fn package_absent(e: &anyhow::Error) -> bool {
+    canton_error_id(e).as_deref() == Some("PACKAGE_NAMES_NOT_FOUND")
+}
+
 /// Whether a fresh read on the next tick is the cure.
 ///
 /// A non-ledger failure (config, transport, auth) is transient here too: it is
@@ -958,7 +970,15 @@ pub(crate) async fn run_reward_automation_loop(data: actix_web::web::Data<AppSta
             .collect();
         for decparty in parties {
             if let Err(e) = run_once_for_party(&data, &decparty).await {
-                tracing::trace!(%decparty, error = %e, "reward automation tick failed");
+                if package_absent(&e) {
+                    tracing::trace!(
+                        %decparty,
+                        error = %e,
+                        "reward automation tick failed: this participant does not carry the DAR"
+                    );
+                } else {
+                    tracing::warn!(%decparty, error = %e, "reward automation tick failed");
+                }
             }
         }
     }
@@ -1634,6 +1654,29 @@ mod tests {
             Some("LOCAL_VERDICT_LOCKED_CONTRACTS")
         );
         assert!(assign_failure_is_transient(&e));
+    }
+
+    #[test]
+    fn only_the_missing_dar_error_is_quiet() {
+        // The devnet message, verbatim. The gRPC code here is deliberately not
+        // the one Canton sends: the error id is what classifies.
+        let absent = anyhow::Error::new(tonic::Status::internal(
+            "PACKAGE_NAMES_NOT_FOUND(11,21a20a9f): The following package names do not match \
+             upgradable packages uploaded on this participant: [governance-rewards-automation-v1].",
+        ));
+        assert!(package_absent(&absent));
+        // A context added on the way up must not lose the id and send the line
+        // back to warn.
+        assert!(package_absent(
+            &Err::<(), _>(absent)
+                .context("reading the delegation")
+                .unwrap_err()
+        ));
+
+        // Every other failure stays at warn: another ledger rejection, and one
+        // that carries no ledger status at all, such as auth or transport.
+        assert!(!package_absent(&canton_err("DAML_INTERPRETATION_ERROR")));
+        assert!(!package_absent(&anyhow::anyhow!("connection refused")));
     }
 
     #[test]
