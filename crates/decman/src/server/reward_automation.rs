@@ -790,23 +790,14 @@ fn canton_error_id(e: &anyhow::Error) -> Option<String> {
 }
 
 /// Canton error ids that mean a package this automation reads is missing from
-/// the participant, or is present but unusable.
+/// the participant, or present and unusable.
 ///
-/// Every error the loop catches comes from a read: the delegation query, or the
-/// coupon interface query. [`drain_assignable`] absorbs every submission error,
-/// so the submission-side vetting ids cannot arrive here.
-///
-/// The ids split by what the read cannot resolve. The package name itself is
-/// unknown (`PACKAGE_NAMES_NOT_FOUND`), or a configured package id is
-/// (`PACKAGE_NOT_FOUND`). The name resolves but carries neither the template nor
-/// the interface asked for, which is what a partial or superseded upload looks
-/// like (`NO_TEMPLATES_…`, `NO_INTERFACE_…`). Or the participant holds the
-/// implementation and has not vetted it, so the interface view cannot be
-/// rendered (`NO_VETTED_INTERFACE_IMPLEMENTATION_PACKAGE`).
-///
-/// A node in any of these states fails identically on every tick, and no
+/// A node in one of these states fails identically on every tick and no
 /// operator can act on the line, so the loop logs it at `trace`. Issue #334
-/// carries the fix — not running the loop on such a node at all.
+/// stops running the loop there at all.
+///
+/// Read-path ids only: [`drain_assignable`] absorbs every submission error, so
+/// the submission-side vetting ids cannot reach the loop.
 const UNUSABLE_PACKAGE_ERROR_IDS: &[&str] = &[
     "PACKAGE_NAMES_NOT_FOUND",
     "PACKAGE_NOT_FOUND",
@@ -815,8 +806,7 @@ const UNUSABLE_PACKAGE_ERROR_IDS: &[&str] = &[
     "NO_VETTED_INTERFACE_IMPLEMENTATION_PACKAGE",
 ];
 
-/// Whether the tick failed only because a package it reads is missing or
-/// unusable on this participant. See [`UNUSABLE_PACKAGE_ERROR_IDS`].
+/// Whether the tick failed only for a reason in [`UNUSABLE_PACKAGE_ERROR_IDS`].
 fn package_unusable(e: &anyhow::Error) -> bool {
     canton_error_id(e).is_some_and(|id| UNUSABLE_PACKAGE_ERROR_IDS.contains(&id.as_str()))
 }
@@ -1685,8 +1675,7 @@ mod tests {
              upgradable packages uploaded on this participant: [governance-rewards-automation-v1].",
         ));
         assert!(package_unusable(&absent));
-        // A context added on the way up must not lose the id and send the line
-        // back to warn.
+        // A context added on the way up must not send the line back to warn.
         assert!(package_unusable(
             &Err::<(), _>(absent)
                 .context("reading the delegation")
@@ -1697,8 +1686,8 @@ mod tests {
             "NO_VETTED_INTERFACE_IMPLEMENTATION_PACKAGE"
         )));
 
-        // Every other failure stays at warn: another ledger rejection, and one
-        // that carries no ledger status at all, such as auth or transport.
+        // Another ledger rejection, then a failure carrying no ledger status at
+        // all, such as auth or transport.
         assert!(!package_unusable(&canton_err("DAML_INTERPRETATION_ERROR")));
         assert!(!package_unusable(&anyhow::anyhow!("connection refused")));
     }
