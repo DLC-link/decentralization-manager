@@ -46,7 +46,7 @@
 //! ## Field-level split assertions need PQS, not this harness
 //!
 //! The DecMan `/contracts/query` HTTP endpoint returns only `{contract_id}` per
-//! contract (`ContractsQueryResponse`) — it does **not** expose decoded fields.
+//! contract (`ContractQueryResponse`) — it does **not** expose decoded fields.
 //! So this phase observes, at the HTTP layer: delegation **presence** (the
 //! keyless-singleton invariant: exactly one `CouponReassignmentDelegation`) and
 //! coupon **archival** (an originally-visible unassigned coupon cid is gone
@@ -80,6 +80,7 @@
 
 use std::{collections::HashSet, time::Duration};
 
+use common::api::{ActiveCouponReassignmentDelegation, ContractQueryResponse};
 use serde_json::json;
 use tracing::{info, warn};
 
@@ -89,7 +90,6 @@ use crate::common::{
     ledger_api::P1_JSON_API,
     phases::seed_reward_coupons::{SEED_AMOUNT, SEED_COUPON_COUNT, UNASSIGNABLE_AMOUNT},
     scenario::Scenario,
-    types::{ActiveDelegationResponse, ContractsQueryResponse},
 };
 
 /// `#splice-api-reward-assignment-v1`, URL-encoded — the `RewardCoupon`
@@ -145,7 +145,7 @@ async fn query_reward_coupons(f: &Fixture, party_id: &str) -> anyhow::Result<Has
         crate::common::TestTarget::Localnet => reward_coupon_v2_query_path(party_id),
         crate::common::TestTarget::Devnet => reward_coupon_query_path(party_id),
     };
-    let r: ContractsQueryResponse = f.get_json(f.p1.http, &path).await?;
+    let r: ContractQueryResponse = f.get_json(f.p1.http, &path).await?;
     Ok(r.contracts.into_iter().map(|c| c.contract_id).collect())
 }
 
@@ -288,7 +288,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         Ok(p) => p,
                         Err(e) => return Some(Err(e)),
                     };
-                    let r: ContractsQueryResponse = f
+                    let r: ContractQueryResponse = f
                         .get_json(f.p1.http, &delegation_query_path(party_id))
                         .await
                         .ok()?;
@@ -312,14 +312,14 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         Ok(p) => p,
                         Err(e) => return Some(Err(e)),
                     };
-                    let acs: ContractsQueryResponse = f
+                    let acs: ContractQueryResponse = f
                         .get_json(f.p1.http, &delegation_query_path(party_id))
                         .await
                         .ok()?;
                     let [only] = acs.contracts.as_slice() else {
                         return None;
                     };
-                    let r: ActiveDelegationResponse = f
+                    let r: ActiveCouponReassignmentDelegation = f
                         .get_json(
                             f.p1.http,
                             &format!("/coupon-reassignment-delegation?party_id={party_id}"),

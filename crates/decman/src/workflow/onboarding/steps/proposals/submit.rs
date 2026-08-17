@@ -169,8 +169,8 @@ async fn wait_for_dns_in_topology(
 
 /// Aggregate and submit P2P proposals
 ///
-/// **Canton 3.4+**: Submits P2P proposals with embedded signing keys
-/// (replaces the separate PartyToKeyMapping transactions from Canton 3.3).
+/// **Canton 3.4+**: Submits P2P proposals with embedded signing keys, replacing the
+/// separate PartyToKeyMapping transactions of Canton 3.3 (deprecated in Canton 3.5).
 ///
 /// This step must be run once by the coordinator after all peers have signed the P2P proposals.
 /// It aggregates all signatures and submits the fully-signed proposal to Canton.
