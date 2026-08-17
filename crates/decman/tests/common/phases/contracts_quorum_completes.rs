@@ -20,6 +20,7 @@
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
+use common::{api::DecentralizedPartiesResponse, types::InvitationType};
 use serde_json::{Value, json};
 use tokio::time::sleep;
 use tracing::info;
@@ -28,7 +29,6 @@ use crate::common::{
     Fixture, TestTarget, chaos,
     http::probe_workflow_status,
     invitations::{post_accept_invitation, probe_pending_invitation},
-    types::DecentralizedPartiesResponse,
 };
 
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
@@ -55,12 +55,12 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     let party = parties
         .parties
         .into_iter()
-        .find(|p| p.party_id == party_id)
+        .find(|p| p.party_id.to_string() == party_id)
         .with_context(|| format!("party {party_id} not found"))?;
     let uids: Vec<String> = party
         .participants
         .iter()
-        .map(|p| p.participant_uid.clone())
+        .map(|p| p.participant_uid.to_string())
         .collect();
     anyhow::ensure!(
         uids.len() == 3,
@@ -104,7 +104,13 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         .context("POST /contracts")?;
 
     // Only P2 accepts. P3 stays up but never accepts — the absent owner.
-    let p2_inv = chaos::wait_for_invite(f, f.p2.http, "Contracts", Duration::from_secs(60)).await?;
+    let p2_inv = chaos::wait_for_invite(
+        f,
+        f.p2.http,
+        InvitationType::Contracts,
+        Duration::from_secs(60),
+    )
+    .await?;
     post_accept_invitation(f, f.p2.http, &p2_inv)
         .await
         .context("accept Contracts on P2")?;
@@ -131,7 +137,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("contracts workflow completed at quorum with P3 absent");
 
     // Best-effort: clear P3's stale, never-accepted invite so it doesn't linger.
-    if let Some(id) = probe_pending_invitation(f, f.p3.http, "Contracts").await {
+    if let Some(id) = probe_pending_invitation(f, f.p3.http, InvitationType::Contracts).await {
         let _ = f
             .post_expect_status(f.p3.http, "/invitations/decline", &json!({ "id": id }))
             .await;

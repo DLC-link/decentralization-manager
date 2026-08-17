@@ -15,12 +15,11 @@
 use std::time::Duration;
 
 use anyhow::Context;
+use common::api::PendingInvitationsResponse;
 use serde_json::json;
 use tracing::info;
 
-use crate::common::{
-    Fixture, chaos, db, invitations::post_accept_invitation, types::PendingInvitationsResponse,
-};
+use crate::common::{Fixture, chaos, db, invitations::post_accept_invitation};
 
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: add_party_edge_cases");

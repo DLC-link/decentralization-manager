@@ -10,6 +10,7 @@
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Context;
+use common::{api::PendingInvitationsResponse, types::InvitationType};
 use serde_json::{Value, json};
 use tokio::time::sleep;
 use tracing::info;
@@ -121,8 +122,7 @@ pub async fn wait_for_invite_for_instance(
 ) -> anyhow::Result<String> {
     let start = std::time::Instant::now();
     loop {
-        let r: crate::common::types::PendingInvitationsResponse =
-            f.get_json(port, "/invitations").await?;
+        let r: PendingInvitationsResponse = f.get_json(port, "/invitations").await?;
         if let Some(inv) = r
             .invitations
             .into_iter()
@@ -190,7 +190,7 @@ pub async fn ensure_nodes_healthy(f: &mut Fixture) -> anyhow::Result<()> {
 pub async fn wait_for_invite(
     f: &Fixture,
     port: u16,
-    invitation_type: &str,
+    invitation_type: InvitationType,
     deadline: Duration,
 ) -> anyhow::Result<String> {
     let start = Instant::now();

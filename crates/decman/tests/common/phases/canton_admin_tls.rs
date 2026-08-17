@@ -22,6 +22,7 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use common::api::DecentralizedPartiesResponse;
 use serde::Deserialize;
 use tracing::info;
 
@@ -29,7 +30,6 @@ use crate::common::{
     Fixture,
     processes::{self, NodeSpawn},
     tls_proxy::TlsProxy,
-    types::DecentralizedPartiesResponse,
 };
 
 #[derive(Debug, Deserialize)]

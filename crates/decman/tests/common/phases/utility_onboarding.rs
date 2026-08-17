@@ -1,6 +1,10 @@
 use std::time::Duration;
 
 use anyhow::Context;
+use common::{
+    api::{ContractQueryResponse, ProviderServicesResponse},
+    canton_id::CantonId,
+};
 use serde_json::json;
 use tracing::info;
 
@@ -9,7 +13,6 @@ use crate::common::{
     governance::propose_confirm_execute,
     operator::{await_operator_response, operator_response_timeout_devnet},
     scenario::Scenario,
-    types::{ContractsQueryResponse, ProviderServicesResponse},
 };
 
 const UTILITY_APP_PKG: &str = "%23utility-registry-app-v0";
@@ -69,8 +72,13 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 info!("Awaiting operator-driven ProviderService for {governance_party}");
                 let port = f.p1.http;
                 let path = format!("/services/provider?party_id={governance_party}");
-                let operator_for_match = operator.clone();
-                let governance_for_match = governance_party.clone();
+                let operator_for_match: CantonId = operator
+                    .parse()
+                    .with_context(|| format!("operator_party is not a Canton id: {operator}"))?;
+                let governance_for_match: CantonId =
+                    governance_party.parse().with_context(|| {
+                        format!("dec party id is not a Canton id: {governance_party}")
+                    })?;
                 let cid = await_operator_response::<ProviderServicesResponse, _>(
                     f,
                     port,
@@ -82,8 +90,8 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         r.services
                             .into_iter()
                             .find(|s| {
-                                s.operator.as_deref() == Some(operator_for_match.as_str())
-                                    && s.provider.as_deref() == Some(governance_for_match.as_str())
+                                s.operator == operator_for_match
+                                    && s.provider == governance_for_match
                             })
                             .map(|s| s.contract_id)
                     },
@@ -141,7 +149,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                          &module_name=Utility.Registry.App.V0.Service.AllocationFactory\
                          &entity_name=AllocationFactory"
                     );
-                    let r: ContractsQueryResponse = f.get_json(f.p1.http, &path).await.ok()?;
+                    let r: ContractQueryResponse = f.get_json(f.p1.http, &path).await.ok()?;
                     let cid = r.contracts.into_iter().next()?.contract_id;
                     f.allocation_factory_cid = Some(cid);
                     Some(Ok(()))
@@ -162,7 +170,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                          &module_name=Utility.Registry.V0.Configuration.Instrument\
                          &entity_name=InstrumentConfiguration"
                     );
-                    let r: ContractsQueryResponse = f.get_json(f.p1.http, &path).await.ok()?;
+                    let r: ContractQueryResponse = f.get_json(f.p1.http, &path).await.ok()?;
                     let cid = r.contracts.into_iter().next()?.contract_id;
                     f.instrument_configuration_cid = Some(cid);
                     Some(Ok(()))
@@ -208,7 +216,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                      &module_name=Utility.Registry.App.V0.Model.Mint\
                      &entity_name=MintOffer"
                 );
-                let r: ContractsQueryResponse = f.get_json(f.p1.http, &path).await.ok()?;
+                let r: ContractQueryResponse = f.get_json(f.p1.http, &path).await.ok()?;
                 (!r.contracts.is_empty()).then_some(Ok(()))
             })
         })
@@ -242,7 +250,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                      &module_name=Utility.Registry.App.V0.Model.Burn\
                      &entity_name=BurnOffer"
                 );
-                let r: ContractsQueryResponse = f.get_json(f.p1.http, &path).await.ok()?;
+                let r: ContractQueryResponse = f.get_json(f.p1.http, &path).await.ok()?;
                 (!r.contracts.is_empty()).then_some(Ok(()))
             })
         })

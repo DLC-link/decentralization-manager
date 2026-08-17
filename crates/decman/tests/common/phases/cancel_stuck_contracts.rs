@@ -13,11 +13,12 @@
 use std::time::Duration;
 
 use anyhow::Context;
+use common::{api::WorkflowRunsResponse, types::WorkflowProgress};
 use serde_json::json;
 use tokio::time::sleep;
 use tracing::info;
 
-use crate::common::{Fixture, chaos, db, types::WorkflowRunsResponse};
+use crate::common::{Fixture, chaos, db};
 
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: cancel_stuck_contracts");
@@ -38,7 +39,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     anyhow::ensure!(
         runs.runs
             .iter()
-            .any(|w| w.instance_name == instance && w.status == "inprogress"),
+            .any(|w| w.instance_name == instance && w.status == WorkflowProgress::InProgress),
         "injected run not visible as inprogress in /workflows"
     );
 
