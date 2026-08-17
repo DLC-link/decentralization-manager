@@ -560,7 +560,7 @@ static SKIPPED: LazyLock<IntCounterVec> = LazyLock::new(|| {
 static ZERO_ASSIGNED: LazyLock<IntCounterVec> = LazyLock::new(|| {
     prometheus::register_int_counter_vec!(
         "decman_reward_sweep_zero_assigned_total",
-        "Reward sweeps that assigned nothing while every attempted coupon was refused.",
+        "Reward sweeps that found unassigned coupons and assigned none of them.",
         &["decparty"]
     )
     .expect("metric name is a unique literal")
@@ -1042,7 +1042,7 @@ where
             "some coupons could not be assigned; they will be retried next sweep"
         );
     }
-    if all_coupons_refused(assigned, skipped) {
+    if sweep_assigned_nothing(assignable.len(), assigned) {
         ZERO_ASSIGNED.with_label_values(&[&label]).inc();
     }
     assigned
@@ -1130,9 +1130,14 @@ fn sweep_is_due(since_last_sweep: Option<Duration>, interval: Duration) -> bool 
     since_last_sweep.is_none_or(|elapsed| elapsed >= interval)
 }
 
-/// A sweep whose every attempted coupon was refused (pure). Design §2, condition 3.
-fn all_coupons_refused(assigned: usize, skipped: usize) -> bool {
-    assigned == 0 && skipped > 0
+/// A sweep that found coupons to assign and assigned none of them (pure). Design
+/// §2, condition 3.
+///
+/// Keying on the backlog rather than on the refusal tally is what makes the
+/// contention `break` count: that path ends the sweep leaving both tallies at
+/// zero, so a refusal-only test reads it as a sweep with nothing to do.
+fn sweep_assigned_nothing(assignable: usize, assigned: usize) -> bool {
+    assignable > 0 && assigned == 0
 }
 
 /// Seconds from `now` until `expires_at` (pure). Negative once the moment has
@@ -1316,6 +1321,7 @@ mod tests {
     const BOB: &str = "bob::1220bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const CAROL: &str =
         "carol::1220cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    const DAVE: &str = "dave::1220dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 
     #[test]
     fn parse_delegation_record_reads_assigners_and_split() {
@@ -2156,16 +2162,45 @@ mod tests {
 
     #[test]
     fn a_sweep_that_paid_nothing_while_every_coupon_was_refused_counts() {
-        assert!(all_coupons_refused(0, 3));
+        assert!(sweep_assigned_nothing(3, 0));
+    }
+
+    #[test]
+    fn a_sweep_that_ended_before_it_paid_anything_counts() {
+        // The contention `break` ends a sweep with both tallies at zero while a
+        // backlog is still waiting.
+        assert!(sweep_assigned_nothing(9, 0));
     }
 
     #[test]
     fn a_sweep_that_paid_something_does_not_count() {
-        assert!(!all_coupons_refused(7, 3));
+        assert!(!sweep_assigned_nothing(10, 7));
     }
 
     #[test]
     fn a_sweep_with_nothing_to_do_does_not_count() {
-        assert!(!all_coupons_refused(0, 0));
+        assert!(!sweep_assigned_nothing(0, 0));
+    }
+
+    #[tokio::test]
+    async fn drain_counts_a_sweep_that_ended_before_assigning_anything() {
+        // Its own decparty fixture, since these tests share a process-wide
+        // metrics registry and run in parallel.
+        let decparty = CantonId::parse(DAVE).expect("DAVE is a valid canton id");
+        let label = decparty.to_string();
+        let read = || {
+            ZERO_ASSIGNED
+                .get_metric_with_label_values(&[&label])
+                .expect("label values are valid")
+                .get()
+        };
+        let before = read();
+
+        let all = cids(120);
+        let (_seen, submit) = recorder(vec![false]);
+        let assigned = drain_assignable(&all, 50, &decparty, submit).await;
+
+        assert_eq!(assigned, 0);
+        assert_eq!(read(), before + 1);
     }
 }
