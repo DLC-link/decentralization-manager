@@ -173,3 +173,86 @@ pub struct NetworkInfoResponse {
 pub struct OperatorInfoResponse {
     pub party_id: String,
 }
+
+/// `GET /provider-configurations` — the party's active `ProviderConfiguration`
+/// contracts. The response carries no requirement data. Two configurations
+/// therefore look identical. A caller that needs one must compare contract ids.
+#[derive(Debug, Deserialize)]
+pub struct ProviderConfigurationItem {
+    pub contract_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProviderConfigurationsResponse {
+    pub provider_configurations: Vec<ProviderConfigurationItem>,
+}
+
+/// `GET /registrar-service-requests` — the `RegistrarServiceRequest` contracts
+/// the party can see. The registrar signs a request. The provider observes it.
+/// The provider decparty therefore sees the registrar decparty's request.
+#[derive(Debug, Deserialize)]
+pub struct RegistrarServiceRequestItem {
+    pub contract_id: String,
+    pub operator: String,
+    pub provider: String,
+    pub registrar: String,
+    pub create_transfer_rule: bool,
+    pub create_allocation_factory: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RegistrarServiceRequestsResponse {
+    pub registrar_service_requests: Vec<RegistrarServiceRequestItem>,
+}
+
+/// `GET /services/registrar` — the party's `RegistrarService` contracts. The
+/// response names the registrar but not the provider. A caller that wants one
+/// service therefore matches on the registrar.
+#[derive(Debug, Deserialize)]
+pub struct RegistrarServiceItem {
+    pub contract_id: String,
+    pub operator: String,
+    pub registrar: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RegistrarServicesResponse {
+    pub services: Vec<RegistrarServiceItem>,
+}
+
+/// One claim on a credential. The subject names the party the credential
+/// attests for.
+#[derive(Debug, Deserialize)]
+pub struct CredentialClaim {
+    pub subject: String,
+    pub property: String,
+    pub value: String,
+}
+
+/// `GET /credentials` — the `Credential` contracts the party can see.
+/// Governance mints a credential with the decparty as both issuer and holder.
+/// It names the subject as an observer.
+#[derive(Debug, Deserialize)]
+pub struct CredentialItem {
+    pub contract_id: String,
+    pub credential_id: String,
+    pub claims: Vec<CredentialClaim>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CredentialsResponse {
+    pub credentials: Vec<CredentialItem>,
+}
+
+/// `GET /instruments` — the party's `InstrumentConfiguration` contracts. Each
+/// `contract_id` is the configuration's own contract id.
+#[derive(Debug, Deserialize)]
+pub struct InstrumentItem {
+    pub contract_id: String,
+    pub instrument_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InstrumentsResponse {
+    pub instruments: Vec<InstrumentItem>,
+}
