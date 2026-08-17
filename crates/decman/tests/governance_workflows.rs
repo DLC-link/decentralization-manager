@@ -113,6 +113,24 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     phases::deploy_gov_core::run(&mut f).await?;
     phases::token_custody::run(&mut f).await?;
     phases::utility_onboarding::run(&mut f).await?;
+    // Dual-decparty onboarding. Runs here for three reasons. It needs the
+    // ProviderService that utility_onboarding sets. It must precede
+    // contracts_quorum_completes, which leaves an unaccepted Contracts
+    // invitation that this phase would accept by mistake. It must precede
+    // kick, because the provider decparty needs all three members.
+    //
+    // Devnet is a shared network. Each run leaves a second decparty on it.
+    // Devnet is therefore opt-in, the same way coupon_reassignment is.
+    match f.target {
+        common::TestTarget::Localnet => {
+            phases::dual_governance_onboarding::run(&mut f).await?;
+        }
+        common::TestTarget::Devnet => {
+            if std::env::var("DECPM_IT_DUAL_GOV").is_ok() {
+                phases::dual_governance_onboarding::run(&mut f).await?;
+            }
+        }
+    }
     phases::generic_vote::run(&mut f).await?;
     phases::notification_feed::run(&mut f).await?;
     phases::owner_key_resilience::run(&mut f).await?;
