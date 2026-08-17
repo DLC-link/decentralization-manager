@@ -1200,6 +1200,29 @@ fn is_due(since_last: Option<Duration>, interval: Duration) -> bool {
     since_last.is_none_or(|elapsed| elapsed >= interval)
 }
 
+/// What this node may do for a decparty whose delegation it has just read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Role {
+    /// The delegation names this node, so it reads the backlog and assigns it.
+    Assign,
+    /// The delegation does not name this node. It reads the backlog anyway, so
+    /// the expiry gauge keeps reporting, and assigns nothing.
+    ReportOnly,
+}
+
+/// Whether the delegation lets this node assign (pure).
+///
+/// A delegation that exists and does not name this node is a governance mistake
+/// far more often than an intention, and the coupons expire either way. So the
+/// backlog still reaches the gauge, and only the assigning stops.
+fn role_for(delegation: &ActiveDelegation, member: &CantonId) -> Role {
+    if delegation.assigners.contains(member) {
+        Role::Assign
+    } else {
+        Role::ReportOnly
+    }
+}
+
 /// What a pass over the served decparties does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Pass {
@@ -1325,13 +1348,17 @@ async fn run_once_for_party(
     else {
         return Ok(SweepOutcome::Empty);
     };
-    // This node must be a listed assigner, else it cannot reassign.
-    if !delegation.assigners.contains(&member) {
-        tracing::debug!(%decparty, %member, "node not an assigner on the delegation — skipping");
-        return Ok(SweepOutcome::Empty);
+    let role = role_for(&delegation, &member);
+    if role == Role::ReportOnly {
+        tracing::warn!(
+            %decparty,
+            %member,
+            assigners = ?delegation.assigners,
+            "the delegation does not name this node as an assigner; reporting the backlog without assigning"
+        );
     }
-    let expires_at = match pass {
-        Pass::Sweep => {
+    let expires_at = match (role, pass) {
+        (Role::Assign, Pass::Sweep) => {
             run_reassign_once(
                 &data.config,
                 decparty,
@@ -1343,7 +1370,7 @@ async fn run_once_for_party(
             )
             .await?
         }
-        Pass::ExpiryRead => {
+        (Role::Assign, Pass::ExpiryRead) | (Role::ReportOnly, _) => {
             read_oldest_expiry(
                 &data.config,
                 decparty,
@@ -2266,6 +2293,43 @@ mod tests {
 
     fn secs(n: u64) -> Option<Duration> {
         Some(Duration::from_secs(n))
+    }
+
+    // ---- the assigner role (role_for) ---------------------------------------
+
+    fn delegation_naming(assigners: &[&str]) -> ActiveDelegation {
+        ActiveDelegation {
+            cid: "00cid".to_string(),
+            dso: CantonId::parse(GOV).expect("GOV is a valid canton id"),
+            assigners: assigners
+                .iter()
+                .map(|a| CantonId::parse(a).expect("valid canton id"))
+                .collect(),
+            beneficiary_count: 2,
+        }
+    }
+
+    #[test]
+    fn a_listed_assigner_may_assign() {
+        let d = delegation_naming(&[ALICE, BOB]);
+        let me = CantonId::parse(ALICE).expect("ALICE is a valid canton id");
+        assert_eq!(role_for(&d, &me), Role::Assign);
+    }
+
+    #[test]
+    fn a_node_the_delegation_does_not_name_still_reports() {
+        // A vote naming the wrong party is a mistake, not an off switch, so the
+        // backlog must keep reaching the expiry gauge.
+        let d = delegation_naming(&[ALICE, BOB]);
+        let me = CantonId::parse(CAROL).expect("CAROL is a valid canton id");
+        assert_eq!(role_for(&d, &me), Role::ReportOnly);
+    }
+
+    #[test]
+    fn a_delegation_naming_nobody_reports() {
+        let d = delegation_naming(&[]);
+        let me = CantonId::parse(ALICE).expect("ALICE is a valid canton id");
+        assert_eq!(role_for(&d, &me), Role::ReportOnly);
     }
 
     #[test]
