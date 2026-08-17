@@ -16,10 +16,11 @@
 use std::time::Duration;
 
 use anyhow::Context;
+use common::{api::DecentralizedPartiesResponse, canton_id::CantonId};
 use tokio::time::sleep;
 use tracing::info;
 
-use crate::common::{Fixture, scenario::Scenario, types::DecentralizedPartiesResponse};
+use crate::common::{Fixture, scenario::Scenario};
 
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: owner_key_resilience");
@@ -45,14 +46,17 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         Ok(v) => v.to_string(),
                         Err(e) => return Some(Err(e)),
                     };
-                    let p3_uid = f.p3.participant_id.clone();
+                    let p3_uid: CantonId = match f.p3.participant_id.parse() {
+                        Ok(v) => v,
+                        Err(e) => return Some(Err(e)),
+                    };
                     let path = format!("/decentralized-parties?prefix={prefix}");
                     let r: DecentralizedPartiesResponse =
                         f.probe_get_json(f.p1.http, &path).await?;
                     let party = r
                         .parties
                         .into_iter()
-                        .find(|p| p.party_id.starts_with(&prefix))?;
+                        .find(|p| p.party_id.prefix == prefix)?;
                     let pi = party
                         .participants
                         .into_iter()
@@ -112,13 +116,13 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
 
 async fn assert_owner_key_intact(f: &mut Fixture) -> anyhow::Result<()> {
     let prefix = f.party_prefix()?.to_string();
-    let p3_uid = f.p3.participant_id.clone();
+    let p3_uid: CantonId = f.p3.participant_id.parse()?;
     let path = format!("/decentralized-parties?prefix={prefix}");
     let r: DecentralizedPartiesResponse = f.get_json(f.p1.http, &path).await?;
     let party = r
         .parties
         .into_iter()
-        .find(|p| p.party_id.starts_with(&prefix))
+        .find(|p| p.party_id.prefix == prefix)
         .context("party not found after refresh")?;
     let p3 = party
         .participants

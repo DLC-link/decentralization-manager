@@ -16,6 +16,10 @@
 use std::time::Duration;
 
 use anyhow::Context;
+use common::{
+    api::DecentralizedPartiesResponse,
+    types::{InvitationType, WorkflowKind, WorkflowProgress, WorkflowRole},
+};
 use serde_json::{Value, json};
 use tracing::info;
 
@@ -25,7 +29,6 @@ use crate::common::{
     http::{probe_workflow_run_visible, probe_workflow_status},
     invitations::{InvitationIds, post_accept_invitation, probe_pending_invitation},
     scenario::Scenario,
-    types::DecentralizedPartiesResponse,
 };
 
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
@@ -61,7 +64,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         Duration::from_secs(60),
         |f, ctx| {
             Box::pin(async move {
-                let id = probe_pending_invitation(f, f.p2.http, "Onboarding").await?;
+                let id = probe_pending_invitation(f, f.p2.http, InvitationType::Onboarding).await?;
                 ctx.p2 = Some(id);
                 Some(Ok(()))
             })
@@ -93,8 +96,14 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         Duration::from_secs(30),
         |f, _| {
             Box::pin(async move {
-                probe_workflow_run_visible(f, f.p1.http, "Onboarding", "Coordinator", "completed")
-                    .await
+                probe_workflow_run_visible(
+                    f,
+                    f.p1.http,
+                    WorkflowKind::Onboarding,
+                    WorkflowRole::Coordinator,
+                    WorkflowProgress::Completed,
+                )
+                .await
             })
         },
     )
@@ -103,7 +112,14 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         Duration::from_secs(30),
         |f, _| {
             Box::pin(async move {
-                probe_workflow_run_visible(f, f.p2.http, "Onboarding", "Peer", "completed").await
+                probe_workflow_run_visible(
+                    f,
+                    f.p2.http,
+                    WorkflowKind::Onboarding,
+                    WorkflowRole::Peer,
+                    WorkflowProgress::Completed,
+                )
+                .await
             })
         },
     )
@@ -120,7 +136,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         .await?;
                     r.parties
                         .into_iter()
-                        .find(|p| p.party_id.starts_with(&prefix))?;
+                        .find(|p| p.party_id.prefix == prefix)?;
                     Some(Ok(()))
                 })
             }

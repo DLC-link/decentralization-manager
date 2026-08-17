@@ -286,10 +286,10 @@ fn encode_messages_length_prefixed<M: prost::Message>(messages: &[M]) -> Vec<u8>
 /// signing keys is the Daml key this node contributes to the party.
 ///
 /// The keys live in one of two places depending on when the party was
-/// onboarded: `PartyToParticipant.party_signing_keys` (Canton 3.4 — what the
+/// onboarded: `PartyToParticipant.party_signing_keys` (Canton 3.4+ — what the
 /// current onboarding submits) or a separate legacy `PartyToKeyMapping`
-/// transaction (Canton 3.3 — parties onboarded before the switch). Both are
-/// checked, newest format first.
+/// transaction (Canton 3.3 — parties onboarded before the switch; deprecated
+/// as of Canton 3.5, still served). Both are checked, newest format first.
 ///
 /// Returns the same `varint(len)||SigningPublicKey` × 2 byte layout that
 /// `read_all_messages_from_bytes` expects. Index `[0]` is unused downstream

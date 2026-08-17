@@ -905,7 +905,7 @@ pub struct ProposeActionRequest {
 }
 
 /// A pending domain action proposal with its confirmations
-#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct DomainGovernanceAction {
     /// Contract ID of the proposal
@@ -913,7 +913,7 @@ pub struct DomainGovernanceAction {
     /// Human-readable label (e.g., "SetupCcPreapproval")
     pub action_label: String,
     /// Human-readable description from the proposal's GovernableActionView
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// Confirmations for this proposal
     pub confirmations: Vec<GovernanceConfirmation>,
@@ -935,7 +935,7 @@ pub struct DomainGovernanceAction {
     /// notification card can display what's actually being transferred
     /// without the user having to inspect the contract CID. Only populated
     /// for `Transfer` proposals.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transfer_details: Option<TransferProposalDetails>,
     /// Sender / amount / instrument resolved from the `TransferInstruction`
     /// referenced by an `AcceptTransferProposal`. Lets the notification card
@@ -943,7 +943,7 @@ pub struct DomainGovernanceAction {
     /// follow-up fetch from the UI. Only populated for `AcceptTransfer`
     /// proposals, and only when the linked instruction was readable at query
     /// time.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accept_transfer_details: Option<AcceptTransferDetails>,
     /// Operator plus the counterparty (user or provider) pulled from a
     /// `CreateUserServiceRequest` / `CreateProviderServiceRequest` proposal so
@@ -951,14 +951,14 @@ pub struct DomainGovernanceAction {
     /// `action_label`), operator party, and the user or provider party — without
     /// the operator having to inspect the contract. Only populated for those two
     /// proposal kinds.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_request_details: Option<ServiceRequestDetails>,
     /// The member who created the proposal, read from the proposal contract.
     /// Only that member can retract it with `GovernableAction_ProposerCancel`,
     /// so the card shows the retract button when this equals the node's own
     /// member party. Absent on an orphaned card, where the proposal contract
     /// is no longer readable.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposer: Option<CantonId>,
 }
 
@@ -967,23 +967,23 @@ pub struct DomainGovernanceAction {
 /// inside `DomainGovernanceAction` so the pending-approval card can render who
 /// the request onboards. Exactly one of `user` / `provider` is set, matching
 /// the proposal kind.
-#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ServiceRequestDetails {
     /// Operator party — present on both request kinds.
     pub operator: CantonId,
     /// User party — present for `CreateUserServiceRequest`.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<CantonId>,
     /// Provider party — present for `CreateProviderServiceRequest`.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<CantonId>,
 }
 
 /// Recipient/amount/instrument extracted from a `TransferProposal`'s
 /// `transfer` field. Surfaced inside `DomainGovernanceAction` so the
 /// notification queue card shows the meaningful parameters of the proposal.
-#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct TransferProposalDetails {
     pub receiver: CantonId,
@@ -999,7 +999,7 @@ pub struct TransferProposalDetails {
 /// `DomainGovernanceAction` so the pending-approval card for an Accept can
 /// render who's transferring what to whom — the proposal contract itself
 /// only carries the `TransferInstruction` cid, not these fields.
-#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct AcceptTransferDetails {
     pub sender: CantonId,
@@ -1043,7 +1043,7 @@ pub struct ExecuteActionRequest {
 }
 
 /// A single governance confirmation with parsed action
-#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct GovernanceConfirmation {
     pub contract_id: String,
@@ -1059,7 +1059,7 @@ pub struct GovernanceConfirmation {
 }
 
 /// A governance action with its confirmations, grouped by action hash
-#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct GovernanceAction {
     /// Deterministic hash of the serialized action for grouping
@@ -1078,7 +1078,7 @@ pub struct GovernanceAction {
 }
 
 /// Response for governance confirmations endpoint
-#[derive(Serialize, utoipa::ToSchema)]
+#[derive(Deserialize, Serialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct GovernanceResponse {
     pub actions: Vec<GovernanceAction>,
@@ -1087,14 +1087,14 @@ pub struct GovernanceResponse {
     pub domain_actions: Vec<DomainGovernanceAction>,
     pub threshold: usize,
     /// The member party ID for the requesting party (used to identify own confirmations)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub member_party_id: Option<CantonId>,
     /// Current contract id of the active GovernanceRules / VaultGovernanceRules
     /// contract for this party. The choice exercised when confirming an action
     /// is consuming, so this id changes after each confirm/execute — clients
     /// should use this field rather than a cached value to avoid
     /// `CONTRACT_NOT_FOUND` on stale ids.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rules_contract_id: Option<String>,
     /// True when the active governance-core rules contract is under an older
     /// package than configured (see `GovernanceState::out_of_date`).
@@ -1102,7 +1102,7 @@ pub struct GovernanceResponse {
     pub gov_core_out_of_date: bool,
     /// The package ref the rules contract actually lives under (for display
     /// in the out-of-date warning).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gov_core_package_ref: Option<String>,
 }
 
@@ -1655,5 +1655,89 @@ mod tests {
 
         // Valid two-way split.
         assert!(validate_reward_beneficiaries(&[rb("a", "0.8"), rb("b", "0.2")]).is_ok());
+    }
+
+    fn test_party(prefix: &str) -> anyhow::Result<CantonId> {
+        CantonId::parse(&format!("{prefix}::1220{}", "ab".repeat(32)))
+    }
+
+    /// `/governance/confirmations` is deserialized by the integration-test
+    /// harness, so the response has to survive a round trip in the shape the
+    /// server actually emits — which omits every `skip_serializing_if` field.
+    /// Without a matching `default` those come back as "missing field" errors.
+    #[test]
+    fn governance_response_round_trips_with_every_optional_field_omitted() -> anyhow::Result<()> {
+        let response = GovernanceResponse {
+            actions: vec![GovernanceAction {
+                action_hash: "hash".to_owned(),
+                action: ActionType::GovernanceSetThreshold { new_threshold: 2 },
+                confirmations: vec![GovernanceConfirmation {
+                    contract_id: "00conf".to_owned(),
+                    action: ActionType::GovernanceSetThreshold { new_threshold: 2 },
+                    confirming_party: test_party("m1")?,
+                    created_at: 0,
+                    expires_at: 0,
+                }],
+                confirmation_count: 1,
+                can_execute: false,
+                last_confirmation_at: 0,
+            }],
+            domain_actions: vec![DomainGovernanceAction {
+                proposal_cid: "00prop".to_owned(),
+                action_label: "SetThreshold".to_owned(),
+                description: None,
+                confirmations: Vec::new(),
+                confirmation_count: 0,
+                can_execute: false,
+                orphaned: false,
+                transfer_details: None,
+                accept_transfer_details: None,
+                service_request_details: None,
+                proposer: None,
+            }],
+            threshold: 2,
+            member_party_id: None,
+            rules_contract_id: None,
+            gov_core_out_of_date: false,
+            gov_core_package_ref: None,
+        };
+
+        let json = serde_json::to_string(&response)?;
+        assert!(
+            !json.contains("member_party_id") && !json.contains("proposer"),
+            "optional fields must be omitted on the wire: {json}"
+        );
+
+        let back: GovernanceResponse = serde_json::from_str(&json)?;
+        assert_eq!(back.threshold, 2);
+        assert_eq!(back.member_party_id, None);
+        assert_eq!(
+            back.domain_actions.first().map(|a| a.action_label.as_str()),
+            Some("SetThreshold")
+        );
+        assert_eq!(
+            back.actions
+                .first()
+                .and_then(|a| a.confirmations.first())
+                .map(|c| c.confirming_party.clone()),
+            Some(test_party("m1")?)
+        );
+        Ok(())
+    }
+
+    /// `ServiceRequestDetails` sets exactly one of `user` / `provider`; the
+    /// unset one is omitted and must deserialize back as `None`.
+    #[test]
+    fn service_request_details_round_trips_with_one_side_unset() -> anyhow::Result<()> {
+        let details = ServiceRequestDetails {
+            operator: test_party("op")?,
+            user: None,
+            provider: Some(test_party("prov")?),
+        };
+        let json = serde_json::to_string(&details)?;
+        let back: ServiceRequestDetails = serde_json::from_str(&json)?;
+        assert_eq!(back.user, None);
+        assert_eq!(back.provider, Some(test_party("prov")?));
+        Ok(())
     }
 }

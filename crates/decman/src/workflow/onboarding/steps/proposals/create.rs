@@ -215,7 +215,8 @@ pub async fn create_proposals(
     );
 
     // Step 9: Create PartyToParticipant mapping
-    // Canton 3.4: PartyToParticipant now includes signing keys (PartyToKeyMapping is deprecated)
+    // PartyToParticipant carries the signing keys (Canton 3.4+); the standalone
+    // PartyToKeyMapping is formally deprecated as of Canton 3.5.
     let p2p_mapping = PartyToParticipant {
         party: party_id_str.clone(),
         threshold,
@@ -301,8 +302,8 @@ pub async fn create_proposals(
         .transaction
         .ok_or_else(|| anyhow::anyhow!("No P2P transaction returned"))?;
 
-    // Note: Canton 3.4+ - Signing keys are now included directly in the PartyToParticipant mapping above
-    // No separate PartyToKeyMapping transaction needed
+    // Signing keys ride in the PartyToParticipant mapping above (Canton 3.4+), so there is
+    // no separate PartyToKeyMapping transaction — that mapping is deprecated in Canton 3.5.
 
     // Step 13: Persist proposals to storage. Each protobuf is written with the
     // same `varint(len)||proto` framing the original on-disk format used.

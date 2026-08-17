@@ -16,6 +16,7 @@ use std::{path::Path, time::Duration};
 
 use anyhow::Context;
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
+use common::types::InvitationType;
 use serde_json::{Value, json};
 use tracing::info;
 
@@ -102,7 +103,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         Duration::from_secs(60),
         |f, ctx| {
             Box::pin(async move {
-                let id = probe_pending_invitation(f, f.p2.http, "Kick").await?;
+                let id = probe_pending_invitation(f, f.p2.http, InvitationType::Kick).await?;
                 ctx.p2 = Some(id);
                 Some(Ok(()))
             })
@@ -169,7 +170,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         Duration::from_secs(60),
         |f, ctx| {
             Box::pin(async move {
-                let id = probe_pending_invitation(f, f.p2.http, "Contracts").await?;
+                let id = probe_pending_invitation(f, f.p2.http, InvitationType::Contracts).await?;
                 ctx.p2 = Some(id);
                 Some(Ok(()))
             })
@@ -218,7 +219,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         Duration::from_secs(60),
         |f, ctx| {
             Box::pin(async move {
-                let id = probe_pending_invitation(f, f.p2.http, "AddParty").await?;
+                let id = probe_pending_invitation(f, f.p2.http, InvitationType::AddParty).await?;
                 ctx.p2 = Some(id);
                 Some(Ok(()))
             })
@@ -229,7 +230,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         Duration::from_secs(60),
         |f, ctx| {
             Box::pin(async move {
-                let id = probe_pending_invitation(f, f.p3.http, "AddParty").await?;
+                let id = probe_pending_invitation(f, f.p3.http, InvitationType::AddParty).await?;
                 ctx.p3 = Some(id);
                 Some(Ok(()))
             })

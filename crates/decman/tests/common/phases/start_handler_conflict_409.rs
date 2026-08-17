@@ -19,6 +19,7 @@
 
 use std::time::Duration;
 
+use common::api::PendingInvitationsResponse;
 use serde_json::{Value, json};
 use tracing::info;
 
@@ -102,10 +103,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 // Decline pending invitations on both peers.
                 for port in [f.p2.http, f.p3.http] {
                     if let Ok(r) = f
-                        .get_json::<crate::common::types::PendingInvitationsResponse>(
-                            port,
-                            "/invitations",
-                        )
+                        .get_json::<PendingInvitationsResponse>(port, "/invitations")
                         .await
                     {
                         for inv in r.invitations {

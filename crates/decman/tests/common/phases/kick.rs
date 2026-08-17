@@ -1,6 +1,11 @@
 use std::time::Duration;
 
 use anyhow::Context;
+use common::{
+    api::DecentralizedPartiesResponse,
+    canton_id::CantonId,
+    types::{InvitationType, WorkflowKind, WorkflowProgress, WorkflowRole},
+};
 use serde_json::{Value, json};
 use tracing::info;
 
@@ -9,7 +14,6 @@ use crate::common::{
     http::{probe_workflow_run_visible, probe_workflow_status},
     invitations::{InvitationIds, post_accept_invitation, probe_pending_invitation},
     scenario::Scenario,
-    types::DecentralizedPartiesResponse,
 };
 
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
@@ -32,14 +36,17 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         Ok(v) => v.to_string(),
                         Err(e) => return Some(Err(e)),
                     };
-                    let p3_uid = f.p3.participant_id.clone();
+                    let p3_uid: CantonId = match f.p3.participant_id.parse() {
+                        Ok(v) => v,
+                        Err(e) => return Some(Err(e)),
+                    };
                     let path = format!("/decentralized-parties?prefix={prefix}");
                     let r: DecentralizedPartiesResponse =
                         f.probe_get_json(f.p1.http, &path).await?;
                     let party = r
                         .parties
                         .into_iter()
-                        .find(|p| p.party_id.starts_with(&prefix))?;
+                        .find(|p| p.party_id.prefix == prefix)?;
                     let pi = party
                         .participants
                         .into_iter()
@@ -99,7 +106,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(60),
             |f, ctx| {
                 Box::pin(async move {
-                    let id = probe_pending_invitation(f, f.p2.http, "Kick").await?;
+                    let id = probe_pending_invitation(f, f.p2.http, InvitationType::Kick).await?;
                     ctx.p2 = Some(id);
                     Some(Ok(()))
                 })
@@ -131,8 +138,14 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(30),
             |f, _| {
                 Box::pin(async move {
-                    probe_workflow_run_visible(f, f.p1.http, "Kick", "Coordinator", "completed")
-                        .await
+                    probe_workflow_run_visible(
+                        f,
+                        f.p1.http,
+                        WorkflowKind::Kick,
+                        WorkflowRole::Coordinator,
+                        WorkflowProgress::Completed,
+                    )
+                    .await
                 })
             },
         )
@@ -141,7 +154,14 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(30),
             |f, _| {
                 Box::pin(async move {
-                    probe_workflow_run_visible(f, f.p2.http, "Kick", "Peer", "completed").await
+                    probe_workflow_run_visible(
+                        f,
+                        f.p2.http,
+                        WorkflowKind::Kick,
+                        WorkflowRole::Peer,
+                        WorkflowProgress::Completed,
+                    )
+                    .await
                 })
             },
         )
@@ -154,7 +174,10 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         Ok(v) => v.to_string(),
                         Err(e) => return Some(Err(e)),
                     };
-                    let p3_uid = f.p3.participant_id.clone();
+                    let p3_uid: CantonId = match f.p3.participant_id.parse() {
+                        Ok(v) => v,
+                        Err(e) => return Some(Err(e)),
+                    };
                     // `refresh=true` forces a fresh Canton fetch so we assert
                     // the real topology, not the up-to-60s-stale cache that
                     // would still list P3.
@@ -164,7 +187,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     let party = r
                         .parties
                         .into_iter()
-                        .find(|p| p.party_id.starts_with(&prefix))?;
+                        .find(|p| p.party_id.prefix == prefix)?;
                     let p3_present = party
                         .participants
                         .iter()

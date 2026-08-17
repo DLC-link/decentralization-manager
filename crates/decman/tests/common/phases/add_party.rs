@@ -1,6 +1,11 @@
 use std::time::Duration;
 
 use anyhow::Context;
+use common::{
+    api::DecentralizedPartiesResponse,
+    canton_id::CantonId,
+    types::{InvitationType, WorkflowKind, WorkflowProgress, WorkflowRole},
+};
 use serde_json::{Value, json};
 use tracing::info;
 
@@ -9,7 +14,6 @@ use crate::common::{
     http::{probe_workflow_run_visible, probe_workflow_status},
     invitations::{InvitationIds, post_accept_invitation, probe_pending_invitation},
     scenario::Scenario,
-    types::DecentralizedPartiesResponse,
 };
 
 /// Re-add P3 to the party the kick phase removed it from. Runs directly
@@ -120,7 +124,8 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(60),
             |f, ctx| {
                 Box::pin(async move {
-                    let id = probe_pending_invitation(f, f.p2.http, "AddParty").await?;
+                    let id =
+                        probe_pending_invitation(f, f.p2.http, InvitationType::AddParty).await?;
                     ctx.p2 = Some(id);
                     Some(Ok(()))
                 })
@@ -131,7 +136,8 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(60),
             |f, ctx| {
                 Box::pin(async move {
-                    let id = probe_pending_invitation(f, f.p3.http, "AddParty").await?;
+                    let id =
+                        probe_pending_invitation(f, f.p3.http, InvitationType::AddParty).await?;
                     ctx.p3 = Some(id);
                     Some(Ok(()))
                 })
@@ -178,8 +184,14 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(30),
             |f, _| {
                 Box::pin(async move {
-                    probe_workflow_run_visible(f, f.p1.http, "AddParty", "Coordinator", "completed")
-                        .await
+                    probe_workflow_run_visible(
+                        f,
+                        f.p1.http,
+                        WorkflowKind::AddParty,
+                        WorkflowRole::Coordinator,
+                        WorkflowProgress::Completed,
+                    )
+                    .await
                 })
             },
         )
@@ -188,7 +200,14 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(30),
             |f, _| {
                 Box::pin(async move {
-                    probe_workflow_run_visible(f, f.p2.http, "AddParty", "Peer", "completed").await
+                    probe_workflow_run_visible(
+                        f,
+                        f.p2.http,
+                        WorkflowKind::AddParty,
+                        WorkflowRole::Peer,
+                        WorkflowProgress::Completed,
+                    )
+                    .await
                 })
             },
         )
@@ -197,7 +216,14 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(30),
             |f, _| {
                 Box::pin(async move {
-                    probe_workflow_run_visible(f, f.p3.http, "AddParty", "Peer", "completed").await
+                    probe_workflow_run_visible(
+                        f,
+                        f.p3.http,
+                        WorkflowKind::AddParty,
+                        WorkflowRole::Peer,
+                        WorkflowProgress::Completed,
+                    )
+                    .await
                 })
             },
         )
@@ -210,7 +236,10 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         Ok(v) => v.to_string(),
                         Err(e) => return Some(Err(e)),
                     };
-                    let p3_uid = f.p3.participant_id.clone();
+                    let p3_uid: CantonId = match f.p3.participant_id.parse() {
+                        Ok(v) => v,
+                        Err(e) => return Some(Err(e)),
+                    };
                     // `refresh=true` forces a fresh Canton fetch so we assert
                     // the real topology, not the stale cache without P3.
                     let path = format!("/decentralized-parties?prefix={prefix}&refresh=true");
@@ -219,7 +248,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     let party = r
                         .parties
                         .into_iter()
-                        .find(|p| p.party_id.starts_with(&prefix))?;
+                        .find(|p| p.party_id.prefix == prefix)?;
                     let p3_present = party
                         .participants
                         .iter()
@@ -251,7 +280,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     let contract_ids = |r: DecentralizedPartiesResponse| {
                         r.parties
                             .into_iter()
-                            .find(|p| p.party_id.starts_with(&prefix))
+                            .find(|p| p.party_id.prefix == prefix)
                             .map(|p| {
                                 p.contracts
                                     .into_iter()

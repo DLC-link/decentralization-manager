@@ -301,7 +301,7 @@ pub struct WorkflowResponse {
 }
 
 /// Response wrapper for `GET /workflows`.
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct WorkflowRunsResponse {
@@ -563,7 +563,7 @@ pub struct ContractsInvitePayload {
 }
 
 /// Response for pending invitations endpoint
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct PendingInvitationsResponse {
@@ -863,7 +863,7 @@ pub struct CancelProposalRequest {
 }
 
 /// State of a VaultGovernanceRules contract
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct GovernanceState {
@@ -878,7 +878,7 @@ pub struct GovernanceState {
     pub action_confirmation_timeout_microseconds: Option<i64>,
     /// The package-name ref the active rules contract actually lives under,
     /// e.g. `#governance-core-v0-rc4`.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package_ref: Option<String>,
     /// True when the active governance-core rules contract was found under an
     /// older package than the configured `governance_core` ref (a fallback
@@ -888,7 +888,7 @@ pub struct GovernanceState {
 }
 
 /// Response for the governance state endpoint
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct GovernanceStateResponse {
@@ -916,7 +916,7 @@ pub struct VaultsResponse {
 }
 
 /// Information about a ProviderService contract
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ProviderServiceInfo {
@@ -926,7 +926,7 @@ pub struct ProviderServiceInfo {
 }
 
 /// Response for the provider services endpoint
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ProviderServicesResponse {
@@ -1041,7 +1041,7 @@ pub struct RegistrarServicesResponse {
 }
 
 /// A contract ID with its blob
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ContractWithBlob {
@@ -1050,7 +1050,7 @@ pub struct ContractWithBlob {
 }
 
 /// DSO network info (amulet rules + DSO party)
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct NetworkInfo {
@@ -1060,7 +1060,7 @@ pub struct NetworkInfo {
 }
 
 /// DA Utility operator info (operator party id)
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct OperatorInfo {
@@ -1082,7 +1082,7 @@ pub struct TransferPreapprovalsResponse {
 }
 
 /// Response for the generic contract query endpoint
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ContractQueryResponse {
@@ -1188,7 +1188,7 @@ pub struct PartyConfigResponse {
 // ============================================================================
 
 /// A decparty's active `CouponReassignmentDelegation`.
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct CouponReassignmentDelegationSummary {
@@ -1213,7 +1213,7 @@ pub struct CouponReassignmentDelegationSummary {
 ///
 /// Contains only the configured package's delegations. One in a superseded
 /// package is not exerciseable by the actions this build proposes.
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ActiveCouponReassignmentDelegation {
@@ -1307,4 +1307,87 @@ pub struct ChainAuditResponse {
     /// Cursor for the next (older) page: pass back as `before_offset`. `None`
     /// when the page was short, i.e. there is nothing older left to read.
     pub next_before_offset: Option<i64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::Result;
+
+    use super::*;
+
+    fn party(prefix: &str) -> Result<CantonId> {
+        CantonId::parse(&format!("{prefix}::1220{}", "ab".repeat(32)))
+    }
+
+    /// The response DTOs are deserialized by the integration-test harness and
+    /// the CLI, not just serialized by the server. A `skip_serializing_if`
+    /// without a matching `default` makes the omitted field a hard
+    /// "missing field" error on the way back in, so round-trip the shape the
+    /// server actually emits when every optional field is absent.
+    #[test]
+    fn governance_state_round_trips_with_every_optional_field_omitted() -> Result<()> {
+        let state = GovernanceState {
+            contract_id: "00rules".to_owned(),
+            vault_manager: party("mgr")?,
+            members: vec![party("m1")?],
+            threshold: 2,
+            action_confirmation_timeout_microseconds: None,
+            package_ref: None,
+            out_of_date: false,
+        };
+        let json = serde_json::to_string(&state)?;
+        assert!(!json.contains("package_ref"), "omitted on the wire: {json}");
+        let back: GovernanceState = serde_json::from_str(&json)?;
+        assert_eq!(back.contract_id, state.contract_id);
+        assert_eq!(back.package_ref, None);
+
+        let json = serde_json::to_string(&GovernanceStateResponse { state: None })?;
+        let back: GovernanceStateResponse = serde_json::from_str(&json)?;
+        assert!(back.state.is_none());
+        Ok(())
+    }
+
+    /// The `CantonId` fields cross the wire as `prefix::namespace` strings and
+    /// must parse back into the same id.
+    #[test]
+    fn canton_id_fields_round_trip() -> Result<()> {
+        let net = NetworkInfo {
+            dso_party_id: party("DSO")?,
+            amulet_rules_cid: "00amulet".to_owned(),
+            amulet_rules_blob: "blob".to_owned(),
+        };
+        let json = serde_json::to_string(&net)?;
+        let back: NetworkInfo = serde_json::from_str(&json)?;
+        assert_eq!(back.dso_party_id, net.dso_party_id);
+
+        let services = ProviderServicesResponse {
+            services: vec![ProviderServiceInfo {
+                contract_id: "00svc".to_owned(),
+                operator: party("op")?,
+                provider: party("prov")?,
+            }],
+        };
+        let json = serde_json::to_string(&services)?;
+        let back: ProviderServicesResponse = serde_json::from_str(&json)?;
+        assert_eq!(
+            back.services.first().map(|s| &s.operator),
+            Some(&party("op")?)
+        );
+
+        let delegations = ActiveCouponReassignmentDelegation {
+            delegations: vec![CouponReassignmentDelegationSummary {
+                cid: "00del".to_owned(),
+                dso: party("DSO")?,
+                assigners: vec![party("a1")?],
+                beneficiary_count: 1,
+            }],
+        };
+        let json = serde_json::to_string(&delegations)?;
+        let back: ActiveCouponReassignmentDelegation = serde_json::from_str(&json)?;
+        assert_eq!(
+            back.delegations.first().map(|d| d.assigners.as_slice()),
+            Some([party("a1")?].as_slice())
+        );
+        Ok(())
+    }
 }
