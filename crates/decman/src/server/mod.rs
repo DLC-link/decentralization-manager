@@ -1032,8 +1032,8 @@ pub async fn start_server(
     // live party credentials, auth, config — never a fresh AppState.
     //
     // The outer task reports the inner one's death and nothing more; it does not
-    // respawn. Design §6, change 6, covers what this catches that the panic hook
-    // in `main` does not.
+    // respawn. It catches a clean return, which never panics and so never reaches
+    // the panic hook in `main`.
     let reward_automation_state = app_state.clone();
     tokio::spawn(async move {
         let automation = tokio::spawn(async move {
@@ -1112,7 +1112,7 @@ pub async fn start_server(
 
     reward_automation::register_metrics();
 
-    // Separate from the API server; design §6, change 7. 0 disables it.
+    // Separate from the API server, whose ingress forwards every path. 0 disables it.
     let metrics_port = config.metrics_port;
     if metrics_port == 0 {
         tracing::info!("Metrics endpoint disabled (metrics_port = 0)");

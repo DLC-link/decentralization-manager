@@ -141,8 +141,8 @@ pub async fn healthz() -> impl Responder {
 }
 
 /// Prometheus exposition for the collector to scrape, served on
-/// `NodeConfig::metrics_port` rather than the API port. Design §6, change 7, covers
-/// the port choice and why `/healthz` ignores these numbers.
+/// `NodeConfig::metrics_port` rather than the API port, whose ingress forwards
+/// every path to every tailnet user.
 pub async fn metrics() -> impl Responder {
     let mut buffer = Vec::new();
     match TextEncoder::new().encode(&prometheus::gather(), &mut buffer) {

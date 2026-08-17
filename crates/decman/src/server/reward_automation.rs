@@ -242,7 +242,7 @@ pub(crate) async fn active_created_records(
 /// of members authorized to execute `Delegation_Assign`, and how many
 /// beneficiaries its split names. The split's *contents* are **not** carried
 /// here — they live in the on-ledger contract and `Delegation_Assign` enforces
-/// them by construction (design §12), so the Rust side never needs to read them.
+/// them by construction, so the Rust side never needs to read them.
 /// Only the count is read, to size a chunk: one assign creates
 /// `coupons × beneficiaries` contracts (see [`chunk_size`]).
 pub(crate) struct ActiveDelegation {
@@ -306,7 +306,7 @@ fn parse_delegation_record(cid: &str, rec: &Record) -> anyhow::Result<ActiveDele
 ///
 /// A decparty is meant to have at most one. Canton cannot enforce that without
 /// a contract key, and it has no cross-participant key uniqueness, so the
-/// convention rests on the propose-time 409 guard (design §12). If more than
+/// convention rests on the propose-time 409 guard. If more than
 /// one is live anyway, take the newest by created-event offset — the one the
 /// most recent vote produced — and warn. Every node reads the same ledger, so
 /// they all pick the same contract.
@@ -519,8 +519,7 @@ fn parse_unassigned_coupon(
 // Metrics
 // ============================================================================
 
-// The reward automation's health signal. Design §5 defines each instrument and
-// the alert that reads it.
+// The reward automation's health signal.
 
 static HEARTBEAT: LazyLock<IntCounter> = LazyLock::new(|| {
     prometheus::register_int_counter!(
@@ -584,8 +583,7 @@ static OLDEST_EXPIRES_IN: LazyLock<GaugeVec> = LazyLock::new(|| {
     .expect("metric name is a unique literal")
 });
 
-/// Registers every family at startup. Design §6, change 1, covers what this can and
-/// cannot expose.
+/// Registers every family at startup, so a family exists before its first event.
 pub(crate) fn register_metrics() {
     LazyLock::force(&HEARTBEAT);
     LazyLock::force(&SWEEPS);
@@ -704,7 +702,7 @@ fn delegation_template_id(package_id: String) -> Identifier {
 /// (`handlers/governance.rs:2107`); the differences are the target contract
 /// (the delegation cid), the choice (`Delegation_Assign`), the template
 /// (`Governance.Rewards.CouponReassignmentDelegation`), and `act_as =
-/// [assigner]` / `read_as = [decparty]` (co-hosting, design §4.6).
+/// [assigner]` / `read_as = [decparty]`, because the two are co-hosted.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn submit_delegation_assign(
     config: &NodeConfig,
@@ -786,7 +784,7 @@ pub(crate) async fn submit_delegation_assign(
 
 /// The earliest expiry among unassigned coupons still worth saving (pure): every
 /// coupon that has not yet expired counts, including ones inside the
-/// assignability margin — design §6, change 4. An already-expired coupon is
+/// assignability margin. An already-expired coupon is
 /// excluded; the DSO's reaper does not archive it promptly (it can sit active
 /// for weeks), so including it would pin the gauge to a corpse instead of the
 /// backlog a responder can still act on.
@@ -805,7 +803,7 @@ fn oldest_expiry(coupons: &[CouponInfo], now: DateTime<Utc>) -> Option<DateTime<
 /// A sweep drains the whole set rather than assigning one chunk and waiting for
 /// the next sweep, so throughput does not depend on the sweep interval: the
 /// interval is a latency/cost knob, not a safety-critical one. The chunk bounds
-/// one *transaction* (design §9/§11; see [`chunk_size`]).
+/// one *transaction* (see [`chunk_size`]).
 ///
 /// A transient failure ends the sweep; a rejected command is isolated to the one
 /// coupon at fault and the drain continues (see [`drain_assignable`]).
@@ -1066,8 +1064,7 @@ where
 // Background loop + registration
 // ============================================================================
 
-/// The loop's wake interval, independent of the reward cadence. Design §5, "Three
-/// clocks".
+/// The loop's wake interval, independent of the reward cadence.
 ///
 /// The heartbeat and the sweep share this one task, so a sweep that blocks for N
 /// minutes costs N heartbeats, and one blocking past the stall rule's 10-minute
@@ -1079,8 +1076,8 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
 /// `reward_automation_interval_secs`. Enablement is on-ledger: a decparty with no
 /// active delegation is skipped.
 ///
-/// The heartbeat shares this task with the sweep deliberately; design §6, the
-/// supervisor section, says why.
+/// The heartbeat shares this task with the sweep deliberately, so a sweep that
+/// hangs stops the beat and becomes visible.
 pub(crate) async fn run_reward_automation_loop(data: actix_web::web::Data<AppState>) {
     let interval_secs = data.config.reward_automation_interval_secs;
     if interval_secs == 0 {
@@ -1100,7 +1097,7 @@ pub(crate) async fn run_reward_automation_loop(data: actix_web::web::Data<AppSta
     // stretch an interval by up to one heartbeat — benign against a 36h coupon TTL.
     let mut last_sweep: Option<tokio::time::Instant> = None;
     let mut last_read: Option<tokio::time::Instant> = None;
-    // Recomputed into the gauge on every heartbeat (design §5).
+    // Recomputed into the gauge on every heartbeat.
     let mut oldest: HashMap<CantonId, DateTime<Utc>> = HashMap::new();
 
     loop {
@@ -1191,7 +1188,7 @@ enum Pass {
     ExpiryRead,
 }
 
-/// Which pass this tick owes, if any (pure). Design §5, the clocks.
+/// Which pass this tick owes, if any (pure).
 ///
 /// A sweep wins whenever both are due, because a sweep reads the ledger anyway
 /// and running both would pay for the same read twice.
@@ -1210,8 +1207,7 @@ fn due_pass(
     }
 }
 
-/// A sweep that found coupons to assign and assigned none of them (pure). Design
-/// §2, condition 3.
+/// A sweep that found coupons to assign and assigned none of them (pure).
 ///
 /// Keying on the backlog rather than on the refusal tally is what makes the
 /// contention `break` count: that path ends the sweep leaving both tallies at
@@ -1221,7 +1217,7 @@ fn sweep_assigned_nothing(assignable: usize, assigned: usize) -> bool {
 }
 
 /// Seconds from `now` until `expires_at` (pure). Negative once the moment has
-/// passed, and sub-second precise; design §5 and §9 rely on both.
+/// passed, and sub-second precise.
 fn seconds_until(expires_at: DateTime<Utc>, now: DateTime<Utc>) -> f64 {
     (expires_at - now).num_milliseconds() as f64 / 1000.0
 }
@@ -1251,8 +1247,8 @@ enum SweepOutcome {
 }
 
 /// Applies one sweep's outcome to the remembered timestamps. The four arms are
-/// asymmetrical on purpose — design §6, change 4. `CredentialsUnavailable` is
-/// treated like `Failed`: a token failure must not read as "safely off".
+/// asymmetrical on purpose. `CredentialsUnavailable` is treated like `Failed`: a
+/// token failure must not read as "safely off".
 fn apply_sweep_outcome(
     oldest: &mut HashMap<CantonId, DateTime<Utc>>,
     decparty: &CantonId,
@@ -1271,7 +1267,7 @@ fn apply_sweep_outcome(
 }
 
 /// Forgets every decparty this node no longer holds credentials for, dropping its
-/// gauge series with it. Design §5 says why the series must go too.
+/// gauge series with it. A series left behind would count down forever.
 fn prune_unserved(oldest: &mut HashMap<CantonId, DateTime<Utc>>, served: &[CantonId]) {
     oldest.retain(|decparty, _| {
         let still_served = served.contains(decparty);
@@ -2097,7 +2093,7 @@ mod tests {
     #[test]
     fn a_labelled_family_appears_once_a_decparty_is_known() {
         // `gather()` omits a labelled family with no series, so these appear only
-        // once a decparty is known. Design §6, change 1.
+        // once a decparty is known.
         register_metrics();
         SWEEPS.with_label_values(&["cbtc-network::1220test"]).inc(); // any string is a valid label
         assert!(
@@ -2141,7 +2137,7 @@ mod tests {
 
     #[test]
     fn the_expiry_countdown_falls_with_real_time_not_with_the_sweep() {
-        // Falls with real time, not with the sweep cadence (design §5).
+        // Falls with real time, not with the sweep cadence.
         let decparty = CantonId::parse(GOV).expect("GOV is a valid canton id");
         let expires_at = dt("2026-07-20T18:00:00Z");
         let mut oldest = HashMap::new();
@@ -2165,7 +2161,7 @@ mod tests {
 
     #[test]
     fn a_failed_sweep_keeps_the_countdown_running() {
-        // A failure must leave the timestamp alone (design §6, change 4).
+        // A failure must leave the timestamp alone.
         let decparty = CantonId::parse(ALICE).expect("ALICE is a valid canton id");
         let expires_at = dt("2026-07-20T18:00:00Z");
         let mut oldest = HashMap::new();
@@ -2186,8 +2182,8 @@ mod tests {
 
     #[test]
     fn unavailable_credentials_keep_the_countdown_running() {
-        // A Keycloak token failure must not read as "safely off" (design §6,
-        // change 4): the timestamp must survive exactly as it does on `Failed`.
+        // A Keycloak token failure must not read as "safely off": the timestamp
+        // must survive exactly as it does on `Failed`.
         // Its own decparty fixture, since these tests share a process-wide
         // metrics registry and run in parallel.
         let decparty = CantonId::parse(CAROL).expect("CAROL is a valid canton id");
@@ -2210,7 +2206,7 @@ mod tests {
 
     #[test]
     fn a_decparty_this_node_stopped_serving_is_forgotten() {
-        // Otherwise the countdown outlives the credentials (design §5).
+        // Otherwise the countdown outlives the credentials.
         let decparty = CantonId::parse(BOB).expect("BOB is a valid canton id");
         let mut oldest = HashMap::new();
         oldest.insert(decparty.clone(), dt("2026-07-20T18:00:00Z"));
@@ -2303,7 +2299,8 @@ mod tests {
 
     #[test]
     fn seconds_until_keeps_sub_second_precision() {
-        // §9 compares two samples 20 minutes apart.
+        // The gauge is compared across samples minutes apart, so a truncated
+        // second would read as drift.
         let now = dt("2026-07-20T12:00:00Z");
         assert_eq!(seconds_until(dt("2026-07-20T12:00:00.500Z"), now), 0.5);
     }

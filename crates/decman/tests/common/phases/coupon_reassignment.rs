@@ -23,8 +23,8 @@
 //!      (`seed_reward_coupons`) and hard-fails instead of skipping if none are
 //!      visible after a short poll — there is no silent no-op path there.
 //!
-//! To actually observe reassignment on devnet, operational preconditions
-//! (design §13) must hold — none are reproducible from this harness:
+//! To actually observe reassignment on devnet, operational preconditions must
+//! hold — none are reproducible from this harness:
 //!   - The decparty (`f.party_id()`) must be an app-provider whose coupons
 //!     carry `provider == decparty` and are **unassigned** (`beneficiary =
 //!     null`). On devnet that is `cbtc-network`; a fresh harness-allocated
@@ -60,8 +60,8 @@
 //! per-beneficiary field checks still require decoded reads not exposed by
 //! `/contracts/query` and must be verified against devnet PQS `pqs_cbtc` on the
 //! real run (issue #271) — see the TODO on the final assertion. Beneficiary
-//! self-minting (design §4.3) is a separate precondition (the beneficiaries' own
-//! agents) and is likewise verified out-of-band.
+//! self-minting is a separate precondition (the beneficiaries' own agents) and
+//! is likewise verified out-of-band.
 //!
 //! ## Security property
 //!
@@ -545,7 +545,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             .await?;
 
         // The instruments the alerts read, proven end to end: a real sweep
-        // assigned real coupons and the counters moved. Design §5.
+        // assigned real coupons and the counters moved.
         let assigner_metrics = [f.p1.metrics, f.p2.metrics];
         Scenario::new("the reward counters move")
             .then(
