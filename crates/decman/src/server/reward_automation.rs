@@ -574,6 +574,15 @@ static SWEEP_FAILED: LazyLock<IntCounterVec> = LazyLock::new(|| {
     .expect("metric name is a unique literal")
 });
 
+static EXPIRY_READS: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    prometheus::register_int_counter_vec!(
+        "decman_reward_expiry_read_total",
+        "Backlog reads that refreshed the expiry gauge without assigning anything.",
+        &["decparty"]
+    )
+    .expect("metric name is a unique literal")
+});
+
 static OLDEST_EXPIRES_IN: LazyLock<GaugeVec> = LazyLock::new(|| {
     prometheus::register_gauge_vec!(
         "decman_reward_oldest_unassigned_expires_in_seconds",
@@ -591,14 +600,21 @@ pub(crate) fn register_metrics() {
     LazyLock::force(&SKIPPED);
     LazyLock::force(&ZERO_ASSIGNED);
     LazyLock::force(&SWEEP_FAILED);
+    LazyLock::force(&EXPIRY_READS);
     LazyLock::force(&OLDEST_EXPIRES_IN);
 }
 
-/// Exports the outcome counters at zero for a decparty this node sweeps. A counter
-/// that only appears on its first event leaves a dashboard unable to tell a node
-/// that never failed from an instrument that is missing.
+/// Exports the per-decparty counters at zero for a decparty this node sweeps. A
+/// counter that only appears on its first event leaves a dashboard unable to tell
+/// a node that never failed from an instrument that is missing.
 fn ensure_outcome_series(label: &str) {
-    for counter in [&*ASSIGNED, &*SKIPPED, &*ZERO_ASSIGNED, &*SWEEP_FAILED] {
+    for counter in [
+        &*ASSIGNED,
+        &*SKIPPED,
+        &*ZERO_ASSIGNED,
+        &*SWEEP_FAILED,
+        &*EXPIRY_READS,
+    ] {
         counter.with_label_values(&[label]).inc_by(0);
     }
 }
@@ -1135,9 +1151,14 @@ pub(crate) async fn run_reward_automation_loop(data: actix_web::web::Data<AppSta
             // Only a sweep moves the sweep counters. A read that fails is not a
             // sweep that failed, and counting it would fire the sweep-failure
             // alert on a signal-path problem.
-            if pass == Pass::Sweep {
-                SWEEPS.with_label_values(&[&label]).inc();
-                ensure_outcome_series(&label);
+            match pass {
+                Pass::Sweep => {
+                    SWEEPS.with_label_values(&[&label]).inc();
+                    ensure_outcome_series(&label);
+                }
+                Pass::ExpiryRead => {
+                    EXPIRY_READS.with_label_values(&[&label]).inc();
+                }
             }
             let outcome = match run_once_for_party(&data, &decparty, pass).await {
                 Ok(outcome) => outcome,
@@ -2106,7 +2127,9 @@ mod tests {
     #[test]
     fn the_outcome_counters_read_zero_before_their_first_event() {
         // A dashboard cannot tell a missing family from a node that never failed,
-        // so a served decparty exports all four at zero from its first sweep.
+        // so a served decparty exports all five at zero from its first sweep.
+        // The read counter needs this most: a node whose sweep interval is
+        // shorter than its read interval never increments it at all.
         register_metrics();
         let label = "cbtc-network::1220outcomezero";
         ensure_outcome_series(label);
@@ -2117,6 +2140,7 @@ mod tests {
             "decman_reward_coupons_skipped_total",
             "decman_reward_sweep_zero_assigned_total",
             "decman_reward_sweep_failed_total",
+            "decman_reward_expiry_read_total",
         ] {
             let family = families
                 .iter()
