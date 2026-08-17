@@ -1073,16 +1073,19 @@ pub(crate) async fn run_reward_automation_loop(data: actix_web::web::Data<AppSta
         tracing::warn!("reward_automation_interval_secs is 0; using 1s instead");
     }
     let sweep_interval = Duration::from_secs(interval_secs.max(1));
+    let read_interval = Duration::from_secs(data.config.reward_expiry_read_interval_secs.max(1));
 
-    // The shorter of the two: a configured interval below HEARTBEAT_INTERVAL must
-    // still beat at its own rate, or sweep_is_due only ever sees HEARTBEAT_INTERVAL-
-    // sized steps and a short interval is silently floored to it. Beating faster is
+    // The shortest of the three: a configured interval below HEARTBEAT_INTERVAL must
+    // still beat at its own rate, or `is_due` only ever sees HEARTBEAT_INTERVAL-sized
+    // steps and a short interval is silently floored to it. Beating faster is
     // safe for the stall alert, whose `increase < 1 over 10m` is a lower bound.
-    let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL.min(sweep_interval));
+    let mut heartbeat =
+        tokio::time::interval(HEARTBEAT_INTERVAL.min(sweep_interval).min(read_interval));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Records the wake time, not the tick's own deadline, so scheduling jitter can
     // stretch an interval by up to one heartbeat — benign against a 36h coupon TTL.
     let mut last_sweep: Option<tokio::time::Instant> = None;
+    let mut last_read: Option<tokio::time::Instant> = None;
     // Recomputed into the gauge on every heartbeat (design §5).
     let mut oldest: HashMap<CantonId, DateTime<Utc>> = HashMap::new();
 
@@ -1092,10 +1095,19 @@ pub(crate) async fn run_reward_automation_loop(data: actix_web::web::Data<AppSta
         report_oldest_expiry(&oldest, Utc::now());
 
         let now = tokio::time::Instant::now();
-        if !sweep_is_due(last_sweep.map(|t| now.duration_since(t)), sweep_interval) {
+        let Some(pass) = due_pass(
+            last_sweep.map(|t| now.duration_since(t)),
+            sweep_interval,
+            last_read.map(|t| now.duration_since(t)),
+            read_interval,
+        ) else {
             continue;
+        };
+        if pass == Pass::Sweep {
+            last_sweep = Some(now);
         }
-        last_sweep = Some(now);
+        // A sweep reads the ledger too, so it satisfies the read clock.
+        last_read = Some(now);
 
         let parties: Vec<CantonId> = data
             .party_credentials
@@ -1109,13 +1121,25 @@ pub(crate) async fn run_reward_automation_loop(data: actix_web::web::Data<AppSta
 
         for decparty in parties {
             let label = decparty.to_string();
-            SWEEPS.with_label_values(&[&label]).inc();
-            ensure_outcome_series(&label);
-            let outcome = match run_once_for_party(&data, &decparty).await {
+            // Only a sweep moves the sweep counters. A read that fails is not a
+            // sweep that failed, and counting it would fire the sweep-failure
+            // alert on a signal-path problem.
+            if pass == Pass::Sweep {
+                SWEEPS.with_label_values(&[&label]).inc();
+                ensure_outcome_series(&label);
+            }
+            let outcome = match run_once_for_party(&data, &decparty, pass).await {
                 Ok(outcome) => outcome,
                 Err(e) => {
-                    SWEEP_FAILED.with_label_values(&[&label]).inc();
-                    tracing::warn!(%decparty, error = %e, "reward automation sweep failed");
+                    match pass {
+                        Pass::Sweep => {
+                            SWEEP_FAILED.with_label_values(&[&label]).inc();
+                            tracing::warn!(%decparty, error = %e, "reward automation sweep failed");
+                        }
+                        Pass::ExpiryRead => {
+                            tracing::warn!(%decparty, error = %e, "reward expiry read failed");
+                        }
+                    }
                     SweepOutcome::Failed
                 }
             };
@@ -1124,10 +1148,38 @@ pub(crate) async fn run_reward_automation_loop(data: actix_web::web::Data<AppSta
     }
 }
 
-/// Whether a reward sweep is due (pure). `None` is always due: a fresh pod drains
-/// its backlog rather than waiting out an interval.
-fn sweep_is_due(since_last_sweep: Option<Duration>, interval: Duration) -> bool {
-    since_last_sweep.is_none_or(|elapsed| elapsed >= interval)
+/// Whether an interval has elapsed (pure). `None` is always due: a fresh pod
+/// drains its backlog rather than waiting out an interval.
+fn is_due(since_last: Option<Duration>, interval: Duration) -> bool {
+    since_last.is_none_or(|elapsed| elapsed >= interval)
+}
+
+/// What a pass over the served decparties does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pass {
+    /// Read the backlog and assign every assignable coupon.
+    Sweep,
+    /// Read the backlog only, to refresh the expiry gauge between sweeps.
+    ExpiryRead,
+}
+
+/// Which pass this tick owes, if any (pure). Design §5, the clocks.
+///
+/// A sweep wins whenever both are due, because a sweep reads the ledger anyway
+/// and running both would pay for the same read twice.
+fn due_pass(
+    since_sweep: Option<Duration>,
+    sweep_interval: Duration,
+    since_read: Option<Duration>,
+    read_interval: Duration,
+) -> Option<Pass> {
+    if is_due(since_sweep, sweep_interval) {
+        Some(Pass::Sweep)
+    } else if is_due(since_read, read_interval) {
+        Some(Pass::ExpiryRead)
+    } else {
+        None
+    }
 }
 
 /// A sweep that found coupons to assign and assigned none of them (pure). Design
@@ -1211,6 +1263,7 @@ fn prune_unserved(oldest: &mut HashMap<CantonId, DateTime<Utc>>, served: &[Canto
 async fn run_once_for_party(
     data: &actix_web::web::Data<AppState>,
     decparty: &CantonId,
+    pass: Pass,
 ) -> anyhow::Result<SweepOutcome> {
     let pkgs = packages();
     let Some((token, member)) = get_party_credentials(data, decparty).await else {
@@ -1232,20 +1285,62 @@ async fn run_once_for_party(
         tracing::debug!(%decparty, %member, "node not an assigner on the delegation — skipping");
         return Ok(SweepOutcome::Empty);
     }
-    let expires_at = run_reassign_once(
-        &data.config,
-        decparty,
-        &member,
-        &token,
-        &delegation,
-        data.test_mode,
-        &pkgs,
-    )
-    .await?;
+    let expires_at = match pass {
+        Pass::Sweep => {
+            run_reassign_once(
+                &data.config,
+                decparty,
+                &member,
+                &token,
+                &delegation,
+                data.test_mode,
+                &pkgs,
+            )
+            .await?
+        }
+        Pass::ExpiryRead => {
+            read_oldest_expiry(
+                &data.config,
+                decparty,
+                &delegation.dso,
+                &token,
+                data.test_mode,
+                &pkgs,
+            )
+            .await?
+        }
+    };
     Ok(match expires_at {
         Some(t) => SweepOutcome::Backlog(t),
         None => SweepOutcome::Empty,
     })
+}
+
+/// The expiry of the oldest coupon this decparty still has time to save, read
+/// without assigning anything.
+///
+/// This is the read half of [`run_reassign_once`]. It exists so the gauge can
+/// refresh faster than the sweep cadence: the sweep interval is sized to fill a
+/// `Delegation_Assign` chunk, which is a transaction-cost choice, and detection
+/// should not inherit it.
+async fn read_oldest_expiry(
+    config: &NodeConfig,
+    decparty: &CantonId,
+    dso: &CantonId,
+    token: &str,
+    test_mode: bool,
+    packages: &PackageConfig,
+) -> anyhow::Result<Option<DateTime<Utc>>> {
+    let coupons = unassigned_coupons(
+        config,
+        decparty,
+        dso,
+        Some(token.to_string()),
+        test_mode,
+        packages,
+    )
+    .await?;
+    Ok(oldest_expiry(&coupons, Utc::now()))
 }
 
 #[cfg(test)]
@@ -2082,15 +2177,65 @@ mod tests {
 
     #[test]
     fn the_first_sweep_of_a_process_is_always_due() {
-        assert!(sweep_is_due(None, Duration::from_secs(21_600)));
+        assert!(is_due(None, Duration::from_secs(21_600)));
     }
 
     #[test]
     fn a_sweep_is_due_once_the_interval_has_elapsed() {
         let interval = Duration::from_secs(600);
-        assert!(!sweep_is_due(Some(Duration::from_secs(599)), interval));
-        assert!(sweep_is_due(Some(Duration::from_secs(600)), interval));
-        assert!(sweep_is_due(Some(Duration::from_secs(601)), interval));
+        assert!(!is_due(Some(Duration::from_secs(599)), interval));
+        assert!(is_due(Some(Duration::from_secs(600)), interval));
+        assert!(is_due(Some(Duration::from_secs(601)), interval));
+    }
+
+    // ---- the two clocks (due_pass) -------------------------------------------
+
+    /// Devnet's cadence: a 6h sweep against the default hourly read.
+    const SWEEP: Duration = Duration::from_secs(21_600);
+    const READ: Duration = Duration::from_secs(3_600);
+
+    fn secs(n: u64) -> Option<Duration> {
+        Some(Duration::from_secs(n))
+    }
+
+    #[test]
+    fn the_first_tick_sweeps_rather_than_only_reading() {
+        assert_eq!(due_pass(None, SWEEP, None, READ), Some(Pass::Sweep));
+    }
+
+    #[test]
+    fn a_due_sweep_wins_over_a_due_read() {
+        // A sweep reads the ledger anyway, so running both would pay for the
+        // same read twice.
+        assert_eq!(
+            due_pass(secs(21_600), SWEEP, secs(3_600), READ),
+            Some(Pass::Sweep)
+        );
+    }
+
+    #[test]
+    fn a_read_runs_between_sweeps() {
+        assert_eq!(
+            due_pass(secs(3_600), SWEEP, secs(3_600), READ),
+            Some(Pass::ExpiryRead)
+        );
+    }
+
+    #[test]
+    fn neither_clock_due_runs_nothing() {
+        assert_eq!(due_pass(secs(600), SWEEP, secs(600), READ), None);
+    }
+
+    #[test]
+    fn a_read_interval_longer_than_the_sweep_never_binds() {
+        // Mainnet's 300s default against an hourly read: every pass is a sweep,
+        // so the read clock costs nothing.
+        let sweep = Duration::from_secs(300);
+        assert_eq!(
+            due_pass(secs(300), sweep, secs(300), READ),
+            Some(Pass::Sweep)
+        );
+        assert_eq!(due_pass(secs(120), sweep, secs(120), READ), None);
     }
 
     #[test]

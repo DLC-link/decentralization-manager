@@ -254,6 +254,12 @@ pub struct NodeConfig {
     /// automation loop. Enablement is on-ledger (presence of a
     /// `CouponReassignmentDelegation`), so this only controls cadence. Default 300s.
     pub reward_automation_interval_secs: u64,
+    /// How often (seconds) to re-read the backlog purely to refresh the expiry
+    /// gauge, when no sweep is due. A sweep reads the ledger anyway, so the gauge
+    /// refreshes at whichever of the two intervals is shorter. Separating them lets
+    /// the sweep interval stay long enough to fill a `Delegation_Assign` chunk
+    /// without making the expiry signal that stale. Default 3600s.
+    pub reward_expiry_read_interval_secs: u64,
     /// Output contracts one `Delegation_Assign` may create, which bounds the
     /// coupons per transaction (`/ beneficiary_count`). The ledger's real
     /// ceiling for this transaction shape is unmeasured — configurable so it can
@@ -303,6 +309,7 @@ impl Default for NodeConfig {
             timeouts: Timeouts::default(),
             noise_retry: NoiseRetryConfig::default(),
             reward_automation_interval_secs: 300,
+            reward_expiry_read_interval_secs: 3600,
             reward_max_creates: 100,
             reward_min_expiry_margin_secs: 120,
             metrics_port: 9464,
