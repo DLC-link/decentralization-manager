@@ -678,7 +678,7 @@ const App = () => {
               onChange={(e) => setPartyFilter(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
-                  refreshParties();
+                  refreshParties(true);
                 }
               }}
               disabled={refreshingParties}
@@ -721,7 +721,7 @@ const App = () => {
               </span>
             </Tooltip>
             <IconButton
-              onClick={() => refreshParties()}
+              onClick={() => refreshParties(true)}
               disabled={refreshingParties}
               color="primary"
               sx={{
@@ -914,7 +914,7 @@ const App = () => {
                       onChange={(e) => setPartyFilter(e.target.value)}
                       onKeyDown={(e) => {
                         if (e.key === "Enter") {
-                          refreshParties();
+                          refreshParties(true);
                         }
                       }}
                       disabled={refreshingParties}
@@ -950,7 +950,7 @@ const App = () => {
                       </span>
                     </Tooltip>
                     <IconButton
-                      onClick={() => refreshParties()}
+                      onClick={() => refreshParties(true)}
                       disabled={refreshingParties}
                       color="primary"
                       sx={{ mt: "1px" }}
