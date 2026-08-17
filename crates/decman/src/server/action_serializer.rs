@@ -3342,6 +3342,38 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn build_proposal_accept_requests_empty_issuer_credentials_serialize_none() -> Result {
+        // An empty list must serialize as Optional None, not Some []. Daml drops a
+        // trailing added Optional field on downgrade only when it is None, so
+        // Some [] would break every accept on a participant still running 0.2.0.
+        let proposals = [
+            ProposalType::AcceptMintRequest {
+                mint_request_cid: "mrc".to_string(),
+                instrument_configuration_cid: "icc".to_string(),
+                issuer_credential_cids: vec![],
+                description: "d".to_string(),
+            },
+            ProposalType::AcceptBurnRequest {
+                burn_request_cid: "brc".to_string(),
+                instrument_configuration_cid: "icc".to_string(),
+                issuer_credential_cids: vec![],
+                description: "d".to_string(),
+            },
+        ];
+        for proposal in proposals {
+            let (_, module, _, record) =
+                build_proposal_create_args("gov", "proposer", &proposal, None, None)?;
+            match &field_value(&record, "issuerCredentialCids").sum {
+                Some(value::Sum::Optional(opt)) => {
+                    assert!(opt.value.is_none(), "expected None for {module}");
+                }
+                other => panic!("expected Optional for {module}, got {other:?}"),
+            }
+        }
+        Ok(())
+    }
+
     /// Unwrap a `value::Sum::List` reference into its elements.
     fn as_list_elements<'a>(value: &'a Value, label: &str) -> &'a Vec<Value> {
         match &value.sum {
