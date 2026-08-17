@@ -116,12 +116,20 @@ fn field_optional_is_none(rec: &Record, label: &str) -> bool {
 // Shared decoded ACS read
 // ============================================================================
 
+/// A Daml module path, e.g. `Splice.Amulet`.
+pub(crate) struct Module<'a>(pub &'a str);
+
+/// A Daml template or interface name, e.g. `RewardCouponV2`.
+pub(crate) struct Entity<'a>(pub &'a str);
+
 /// What an [`active_created_records`] read selects.
 ///
-/// One value rather than four positional arguments: `package_id`, `module` and
-/// `entity` are all `&str`, so a transposition compiles, passes clippy, and
-/// yields a filter that matches nothing — returning `Ok(vec![])`, which a
-/// caller reads as "the party holds no such contracts".
+/// One value rather than four positional arguments, and the two same-typed
+/// halves are wrapped: `package_id`, module and entity were all `&str`, so a
+/// transposition compiled, passed clippy, and yielded a filter matching
+/// nothing — `Ok(vec![])`, which a caller reads as "the party holds no such
+/// contracts". [`Module`] and [`Entity`] make each of those swaps a type
+/// error instead, so the hazard is closed rather than narrowed.
 pub(crate) struct ContractFilter<'a> {
     pub package_id: &'a str,
     pub module: &'a str,
@@ -135,11 +143,11 @@ pub(crate) struct ContractFilter<'a> {
 
 impl<'a> ContractFilter<'a> {
     /// A concrete-template read.
-    pub fn template(package_id: &'a str, module: &'a str, entity: &'a str) -> Self {
+    pub fn template(package_id: &'a str, module: Module<'a>, entity: Entity<'a>) -> Self {
         Self {
             package_id,
-            module,
-            entity,
+            module: module.0,
+            entity: entity.0,
             interface_view: false,
             implementer: None,
         }
@@ -147,19 +155,19 @@ impl<'a> ContractFilter<'a> {
 
     /// An interface read, admitting every implementation until narrowed by
     /// [`Self::implemented_by`].
-    pub fn interface(package_id: &'a str, module: &'a str, entity: &'a str) -> Self {
+    pub fn interface(package_id: &'a str, module: Module<'a>, entity: Entity<'a>) -> Self {
         Self {
             package_id,
-            module,
-            entity,
+            module: module.0,
+            entity: entity.0,
             interface_view: true,
             implementer: None,
         }
     }
 
     /// Keep only contracts created by this concrete template.
-    pub fn implemented_by(mut self, module: &'a str, entity: &'a str) -> Self {
-        self.implementer = Some((module, entity));
+    pub fn implemented_by(mut self, module: Module<'a>, entity: Entity<'a>) -> Self {
+        self.implementer = Some((module.0, entity.0));
         self
     }
 }
@@ -372,8 +380,8 @@ pub(crate) async fn active_delegation(
         test_mode,
         ContractFilter::template(
             package_id,
-            "Governance.Rewards.CouponReassignmentDelegation",
-            "CouponReassignmentDelegation",
+            Module("Governance.Rewards.CouponReassignmentDelegation"),
+            Entity("CouponReassignmentDelegation"),
         ),
     )
     .await?;
@@ -414,8 +422,8 @@ pub(crate) async fn active_delegations(
         test_mode,
         ContractFilter::template(
             package_id,
-            "Governance.Rewards.CouponReassignmentDelegation",
-            "CouponReassignmentDelegation",
+            Module("Governance.Rewards.CouponReassignmentDelegation"),
+            Entity("CouponReassignmentDelegation"),
         ),
     )
     .await?;
@@ -516,10 +524,10 @@ pub(crate) async fn unassigned_coupons(
         test_mode,
         ContractFilter::interface(
             "#splice-api-reward-assignment-v1",
-            "Splice.Api.RewardAssignmentV1",
-            "RewardCoupon",
+            Module("Splice.Api.RewardAssignmentV1"),
+            Entity("RewardCoupon"),
         )
-        .implemented_by("Splice.Amulet", "RewardCouponV2"),
+        .implemented_by(Module("Splice.Amulet"), Entity("RewardCouponV2")),
     )
     .await?;
 
