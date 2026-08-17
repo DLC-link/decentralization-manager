@@ -915,10 +915,10 @@ impl ProposalType {
                 provider_app_reward_beneficiaries: Some(beneficiaries),
                 ..
             } => validate_beneficiary_weights(beneficiaries),
-            // Mirrors the templates' `ensure` guards: an on/offboard action
-            // for zero issuers (or revoking zero credentials) does no work,
-            // and a duplicated issuer would mint two credentials sharing one
-            // id. Reject both with a 400 before the ledger sees the proposal.
+            // Mirrors the template's `ensure` guard: onboarding zero issuers
+            // does no work, and a duplicated issuer would mint two
+            // credentials sharing one id. Reject both with a 400 before the
+            // ledger sees the proposal.
             ProposalType::OnboardInstrumentIssuers {
                 instrument_issuers, ..
             } => {

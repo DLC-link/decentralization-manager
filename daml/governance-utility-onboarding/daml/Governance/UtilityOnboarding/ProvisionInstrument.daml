@@ -1,9 +1,11 @@
 -- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
--- | Granular onboarding action: the registrar decparty creates an
--- InstrumentConfiguration and credentials the initial instrument issuers.
--- Executed once per instrument.
+-- | The registrar decparty creates an InstrumentConfiguration and credentials
+-- the instrument's first issuers.
+--
+-- The registrar decparty runs this action once per instrument. It onboards
+-- later issuers through OnboardInstrumentIssuers.
 module Governance.UtilityOnboarding.ProvisionInstrument where
 
 import DA.Foldable (forA_)

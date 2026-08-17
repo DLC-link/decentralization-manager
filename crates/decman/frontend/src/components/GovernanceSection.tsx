@@ -804,7 +804,7 @@ export const GovernanceSection = ({
           c.holder === partyId &&
           c.claims.length > 0 &&
           c.claims.every((cl) => cl.subject === party) &&
-          c.credential_id.split("/")[0].endsWith("-instrument-issuer-credential"),
+          c.credential_id.includes("-instrument-issuer-credential/"),
       ),
     [availableCredentials, partyId],
   );
@@ -6532,8 +6532,13 @@ export const GovernanceSection = ({
                         label="Instrument Issuer Party"
                         value={row.party}
                         onChange={(e) => {
+                          const party = e.target.value;
+                          // Reset cids when the party changes. Stale
+                          // credentials name the wrong subject and fail at
+                          // execution.
                           const updated = [...proposalOffboardRows];
-                          updated[idx] = { ...row, party: e.target.value };
+                          updated[idx] =
+                            party === row.party ? row : { ...row, party, cids: [] };
                           setProposalOffboardRows(updated);
                         }}
                         size="small"
