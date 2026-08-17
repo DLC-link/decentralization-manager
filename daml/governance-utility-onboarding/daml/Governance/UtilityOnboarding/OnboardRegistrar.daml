@@ -1,13 +1,14 @@
 -- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
--- | Granular onboarding action: the provider decparty mints the registrar
--- credentials it can self-issue and accepts the registrar's service request
--- in one atomic vote. The SDK's accept validates ALL registrar requirements
--- (minted + extra) via assertFulfillsAllRequirements, so an uncovered
--- externally-issued requirement rolls back the whole action.
+-- | The provider decparty mints the registrar's credentials and accepts the
+-- registrar's service request. Both happen in one vote.
+--
+-- The SDK checks every registrar requirement inside the accept. A requirement
+-- the provider decparty cannot issue itself therefore rolls the action back.
 module Governance.UtilityOnboarding.OnboardRegistrar where
 
+import Splice.Util (require)
 import Utility.Registry.App.V0.Configuration.Provider (ProviderConfiguration)
 import Utility.Registry.App.V0.Service.Provider
   (ProviderService, ProviderService_AcceptRegistrarServiceRequest(..))
@@ -38,10 +39,10 @@ template OnboardRegistrar
 
       executeImpl = do
         request <- fetch registrarServiceRequestCid
-        assertMsg "OnboardRegistrar: request provider does not match the governance party"
+        require "OnboardRegistrar: request provider does not match the governance party"
           (request.provider == governanceParty)
         providerConfiguration <- fetch providerConfigurationCid
-        assertMsg "OnboardRegistrar: provider configuration provider does not match the governance party"
+        require "OnboardRegistrar: provider configuration provider does not match the governance party"
           (providerConfiguration.provider == governanceParty)
         mintedCredentialCids <- mintCredentialsMeetingRequirements
           governanceParty request.registrar "registrar-credential"

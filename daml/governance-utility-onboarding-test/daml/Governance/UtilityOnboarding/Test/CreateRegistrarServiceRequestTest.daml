@@ -1,6 +1,9 @@
 -- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- | These tests cover CreateRegistrarServiceRequest. They verify that flags
+-- map to Optional Bool correctly. They also verify that an outsider cannot
+-- confirm the proposal.
 module Governance.UtilityOnboarding.Test.CreateRegistrarServiceRequestTest where
 
 import Daml.Script

@@ -1,10 +1,9 @@
 -- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
--- | Fixtures emulating two decentralized parties: a provider decparty and a
--- registrar decparty, each with its own GovernanceRules and members. Tests
--- drive provider-side actions through the provider stack and registrar-side
--- actions through the registrar stack, mirroring the production topology.
+-- | This module builds fixtures for tests of the dual-decparty onboarding
+-- flow. Each fixture creates a provider decparty and a registrar decparty,
+-- each with its own governance stack and members.
 module Governance.UtilityOnboarding.DualDecpartyTestUtils where
 
 import DA.Set qualified as Set

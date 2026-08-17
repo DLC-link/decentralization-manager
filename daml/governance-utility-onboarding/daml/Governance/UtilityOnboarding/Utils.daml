@@ -9,6 +9,7 @@ import DA.Set qualified as Set
 import DA.Text (intercalate)
 import DA.Time (convertRelTimeToMicroseconds, subTime, time)
 
+import Splice.Util (require)
 import Utility.Credential.V0.Credential
   (Claim(..), Credential(..), PartyCredentialRequirement(..))
 
@@ -77,7 +78,7 @@ mintCredentialsMeetingRequirements governanceParty subject roleTag requirements 
         property
         value
   forA (zip [0 .. length selfIssuable - 1] selfIssuable) $ \(index, requirement) -> do
-    assertMsg
+    require
       ("mintCredentialsMeetingRequirements: requirement issued by the governance party has no required claims; a claimless credential attests for nobody: "
         <> show requirement)
       (not $ null requirement.requiredClaims)

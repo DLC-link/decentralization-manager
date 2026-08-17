@@ -1,6 +1,8 @@
 -- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- | These tests cover OnboardInstrumentIssuers: the happy path, the registrar
+-- and claimless-requirement checks, and the duplicate-issuer ensure guard.
 module Governance.UtilityOnboarding.Test.OnboardInstrumentIssuersTest where
 
 import DA.List (head, sort)

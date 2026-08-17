@@ -1,6 +1,8 @@
 -- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- | These tests cover OnboardRegistrar: the happy path, the external and
+-- provider-mismatch requirement checks, and the outsider-confirm rejection.
 module Governance.UtilityOnboarding.Test.OnboardRegistrarTest where
 
 import DA.Set qualified as Set

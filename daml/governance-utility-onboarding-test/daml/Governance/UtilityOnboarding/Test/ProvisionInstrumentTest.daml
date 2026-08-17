@@ -1,6 +1,8 @@
 -- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- | These tests cover ProvisionInstrument: the happy path, the claimless and
+-- duplicate-issuer ensure guards, and the proposer-owned-service check.
 module Governance.UtilityOnboarding.Test.ProvisionInstrumentTest where
 
 import DA.Text qualified as Text

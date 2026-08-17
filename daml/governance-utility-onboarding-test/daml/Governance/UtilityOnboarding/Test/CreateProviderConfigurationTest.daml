@@ -1,6 +1,8 @@
 -- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- | These tests cover CreateProviderConfiguration: the happy path, provider
+-- ownership checks, and the claimless-requirement ensure guard.
 module Governance.UtilityOnboarding.Test.CreateProviderConfigurationTest where
 
 import Daml.Script

@@ -1,11 +1,12 @@
 -- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
--- | End-to-end dual-decparty journey: provider decparty configures and
--- onboards a registrar decparty; the registrar provisions a credentialed
--- instrument; instrument issuers mint and burn holdings using their
--- governance-minted credentials. Scenarios also prove that late onboarding
--- grants minting ability and offboarding removes it.
+-- | These tests cover the whole dual-decparty flow. A provider decparty
+-- onboards a registrar decparty, the registrar then provisions an
+-- instrument, and a credentialed issuer mints and burns.
+--
+-- Scenarios also prove that a late-onboarded issuer can mint and an
+-- offboarded issuer cannot.
 module Governance.UtilityOnboarding.Test.DualGovernanceUtilityOnboardingTest where
 
 import DA.TextMap qualified as TextMap

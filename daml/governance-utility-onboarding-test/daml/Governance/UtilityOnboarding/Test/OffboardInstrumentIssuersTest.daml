@@ -1,6 +1,8 @@
 -- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- | These tests cover OffboardInstrumentIssuers: the happy paths, the subject
+-- and claim checks, and each ensure guard.
 module Governance.UtilityOnboarding.Test.OffboardInstrumentIssuersTest where
 
 import DA.Set qualified as Set

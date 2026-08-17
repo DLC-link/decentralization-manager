@@ -1,9 +1,11 @@
 -- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
--- | Granular onboarding action: create the provider decparty's
--- ProviderConfiguration with credential requirements for registrars and
--- holders. Executed once by the provider decparty at platform setup.
+-- | The provider decparty creates its ProviderConfiguration. The configuration
+-- records the credentials a registrar must hold, and the credentials a holder
+-- must hold.
+--
+-- The provider decparty runs this action once, when it sets up the platform.
 module Governance.UtilityOnboarding.CreateProviderConfiguration where
 
 import Utility.Credential.V0.Credential (PartyCredentialRequirement)
