@@ -8,7 +8,6 @@
 -- externally-issued requirement rolls back the whole action.
 module Governance.UtilityOnboarding.OnboardRegistrar where
 
-import Utility.Credential.V0.Credential (Credential)
 import Utility.Registry.App.V0.Configuration.Provider (ProviderConfiguration)
 import Utility.Registry.App.V0.Service.Provider
   (ProviderService, ProviderService_AcceptRegistrarServiceRequest(..))
@@ -26,9 +25,6 @@ template OnboardRegistrar
     providerServiceCid : ContractId ProviderService
     registrarServiceRequestCid : ContractId RegistrarServiceRequest
     providerConfigurationCid : ContractId ProviderConfiguration
-    extraRegistrarCredentialCids : [ContractId Credential]
-      -- ^ Credentials from issuers other than the governance party, covering
-      -- externally-issued registrar requirements.
   where
     signatory proposer
     observer governanceParty
@@ -54,5 +50,5 @@ template OnboardRegistrar
           cid = registrarServiceRequestCid
           payload = RegistrarServiceRequest_Accept with
             providerConfigurationCid
-            credentialCids = mintedCredentialCids <> extraRegistrarCredentialCids
+            credentialCids = mintedCredentialCids
         pure ()

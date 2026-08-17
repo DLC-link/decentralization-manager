@@ -37,7 +37,6 @@ onboardProposal fx = do
     providerServiceCid = fx.providerServiceCid
     registrarServiceRequestCid = fx.requestCid
     providerConfigurationCid = fx.providerConfigurationCid
-    extraRegistrarCredentialCids = []
   pure (toInterfaceContractId proposalCid)
 
 -- * Happy path: credential minted, service created, request consumed.
@@ -105,12 +104,6 @@ test_when_onboard_registrar_then_service_and_credential_created = script do
     when = when_onboard_registrar
     then_ = then_registrar_onboarded
 
--- * External requirement covered by an extra credential: accepted.
---
--- The outsider acts as an external credential issuer: it self-issues a
--- credential (issuer == holder == outsider) whose claims name the registrar.
--- The SDK accepts issuer-held credentials for any subject the claims name.
-
 given_external_requirement : Script Fixture
 given_external_requirement = do
   f <- givenDualGovernance
@@ -123,49 +116,9 @@ given_external_requirement = do
   requestCid <- setupRegistrarServiceRequest f
   pure Fixture with ..
 
-mintExternalCredential : Fixture -> Script (ContractId Credential)
-mintExternalCredential fx = do
-  let parties = fx.f.parties
-  submit parties.outsider $ createCmd Credential with
-    issuer = parties.outsider
-    holder = parties.outsider
-    id = "external-kyc"
-    description = "External KYC credential for the registrar"
-    validFrom = None
-    validUntil = None
-    claims = [Claim with
-      subject = partyToText parties.registrarGov
-      property = "kyc"
-      value = "passed"]
-    observers = Set.fromList [parties.registrarGov, parties.providerGov]
-
-when_onboard_with_extra_credential : Fixture -> Script ()
-when_onboard_with_extra_credential fx = do
-  externalCredentialCid <- mintExternalCredential fx
-  proposalCid <- submit fx.f.providerStack.member1 $ createCmd OnboardRegistrar with
-    governanceParty = fx.f.parties.providerGov
-    proposer = fx.f.providerStack.member1
-    providerServiceCid = fx.providerServiceCid
-    registrarServiceRequestCid = fx.requestCid
-    providerConfigurationCid = fx.providerConfigurationCid
-    extraRegistrarCredentialCids = [externalCredentialCid]
-  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
-  _ <- confirmAndExecuteAs fx.f.parties fx.f.providerStack proposalInterfaceCid
-  pure ()
-
-then_service_created : Fixture -> () -> Script Failures
-then_service_created fx _ = do
-  services <- query @RegistrarService fx.f.parties.registrarGov
-  pure $ shouldBe "RegistrarService count" 1 (length services)
-
-test_when_external_requirement_covered_then_accepted = script do
-  run Test with
-    given = given_external_requirement
-    when = when_onboard_with_extra_credential
-    then_ = then_service_created
-
--- * External requirement NOT covered: the SDK's requirement check fails
--- inside the accept, rolling back the whole action.
+-- * A registrar requirement issued by another party can no longer be covered.
+-- The SDK's requirement check fails inside the accept and rolls the whole
+-- action back.
 
 when_onboard_missing_external_credential : Fixture -> Script ()
 when_onboard_missing_external_credential fx = do
@@ -202,7 +155,6 @@ when_onboard_foreign_provider_request fx = do
     providerServiceCid = fx.providerServiceCid
     registrarServiceRequestCid = foreignRequestCid
     providerConfigurationCid = fx.providerConfigurationCid
-    extraRegistrarCredentialCids = []
   confirmThenExecuteMustFail fx.f.parties fx.f.providerStack (toInterfaceContractId proposalCid)
 
 test_when_request_provider_mismatch_then_execute_fails = script do
@@ -229,7 +181,6 @@ when_onboard_foreign_configuration fx = do
     providerServiceCid = fx.providerServiceCid
     registrarServiceRequestCid = fx.requestCid
     providerConfigurationCid = foreignConfigurationCid
-    extraRegistrarCredentialCids = []
   confirmThenExecuteMustFail fx.f.parties fx.f.providerStack (toInterfaceContractId proposalCid)
 
 test_when_configuration_provider_mismatch_then_execute_fails = script do

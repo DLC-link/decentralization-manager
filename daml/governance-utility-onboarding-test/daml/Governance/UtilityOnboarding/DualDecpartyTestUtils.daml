@@ -225,7 +225,6 @@ setupOnboardedRegistrar f registrarRequirements = do
     providerServiceCid
     registrarServiceRequestCid = requestCid
     providerConfigurationCid
-    extraRegistrarCredentialCids = []
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
   _ <- confirmAndExecuteAs f.parties f.providerStack proposalInterfaceCid
   [(registrarServiceCid, _)] <- query @RegistrarService f.parties.registrarGov
