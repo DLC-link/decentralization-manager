@@ -1203,7 +1203,7 @@ pub async fn propose_action(
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
     }
-    if let Err(msg) = body.proposal.validate() {
+    if let Err(msg) = body.proposal.validate(&body.party_id) {
         return HttpResponse::BadRequest().json(ErrorResponse {
             error: msg.to_string(),
         });

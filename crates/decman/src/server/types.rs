@@ -538,6 +538,26 @@ fn validate_unique_issuers(issuers: &[CantonId], field: &str) -> Result<(), Stri
     Ok(())
 }
 
+/// Mirrors the Daml `selfIssuedRequirementsHaveClaims` guard. A requirement the
+/// governance party issues itself must name at least one claim. The mint
+/// refuses a claimless self-issued credential, because it attests for nobody.
+/// Requirements from other issuers are out of scope: those credentials arrive
+/// out of band.
+fn validate_self_issued_requirements_have_claims(
+    requirements: &[PartyCredentialRequirement],
+    governance_party: &CantonId,
+    field: &str,
+) -> Result<(), String> {
+    for requirement in requirements {
+        if requirement.issuer == *governance_party && requirement.required_claims.is_empty() {
+            return Err(format!(
+                "{field}: a requirement issued by the governance party must list at least one required claim"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_positive_amount(amount: &DamlDecimal, field: &str) -> Result<(), String> {
     // `DamlDecimal` itself doesn't implement `PartialOrd`; compare via the
     // inner `rust_decimal::Decimal` returned by `value()` against a parsed
@@ -855,11 +875,11 @@ pub enum ProposalType {
 }
 
 impl ProposalType {
-    /// Validate the proposal's fields. Mirrors `ActionType::validate` —
-    /// catches non-positive token amounts before they reach Canton's Daml
-    /// checks so a 400 surfaces a precise reason rather than a generic
-    /// submission error after a proposal contract is already created.
-    pub fn validate(&self) -> Result<(), String> {
+    /// Validate the proposal's fields against the governance party the
+    /// proposal targets. Mirrors `ActionType::validate` — catches bad input
+    /// before it reaches Canton's Daml checks so a 400 surfaces a precise
+    /// reason rather than a generic submission error.
+    pub fn validate(&self, governance_party: &CantonId) -> Result<(), String> {
         match self {
             ProposalType::Transfer {
                 amount,
@@ -911,8 +931,24 @@ impl ProposalType {
             }
             ProposalType::ProvisionInstrument {
                 initial_instrument_issuers,
+                issuer_requirements,
                 ..
-            } => validate_unique_issuers(initial_instrument_issuers, "initial_instrument_issuers"),
+            } => {
+                validate_self_issued_requirements_have_claims(
+                    issuer_requirements,
+                    governance_party,
+                    "issuer_requirements",
+                )?;
+                validate_unique_issuers(initial_instrument_issuers, "initial_instrument_issuers")
+            }
+            ProposalType::CreateProviderConfiguration {
+                registrar_requirements,
+                ..
+            } => validate_self_issued_requirements_have_claims(
+                registrar_requirements,
+                governance_party,
+                "registrar_requirements",
+            ),
             ProposalType::OffboardInstrumentIssuers {
                 instrument_issuer_cids,
             } => {
@@ -1648,12 +1684,12 @@ mod tests {
             input_holding_cids: Vec::new(),
             validity_window_hours: window,
         };
-        assert!(mk("0", None).validate().is_err());
-        assert!(mk("-1.5", None).validate().is_err());
-        assert!(mk("0.0001", None).validate().is_ok());
+        assert!(mk("0", None).validate(&cid("gov")).is_err());
+        assert!(mk("-1.5", None).validate(&cid("gov")).is_err());
+        assert!(mk("0.0001", None).validate(&cid("gov")).is_ok());
         // A custom (positive) window is accepted; a zero-hour window is rejected.
-        assert!(mk("1.0", Some(48)).validate().is_ok());
-        assert!(mk("1.0", Some(0)).validate().is_err());
+        assert!(mk("1.0", Some(48)).validate(&cid("gov")).is_ok());
+        assert!(mk("1.0", Some(0)).validate(&cid("gov")).is_err());
     }
 
     #[test]
@@ -1666,8 +1702,8 @@ mod tests {
             instrument_configuration_cid: "icc".to_string(),
             instrument_issuers: issuers,
         };
-        assert!(mk(Vec::new()).validate().is_err());
-        assert!(mk(vec![issuer]).validate().is_ok());
+        assert!(mk(Vec::new()).validate(&cid("gov")).is_err());
+        assert!(mk(vec![issuer]).validate(&cid("gov")).is_ok());
     }
 
     #[test]
@@ -1677,8 +1713,8 @@ mod tests {
         let mk = |cids: Vec<String>| ProposalType::OffboardInstrumentIssuers {
             instrument_issuer_cids: cids,
         };
-        assert!(mk(Vec::new()).validate().is_err());
-        assert!(mk(vec!["cred-1".to_string()]).validate().is_ok());
+        assert!(mk(Vec::new()).validate(&cid("gov")).is_err());
+        assert!(mk(vec!["cred-1".to_string()]).validate(&cid("gov")).is_ok());
     }
 
     #[test]
@@ -1691,12 +1727,12 @@ mod tests {
         };
         assert!(
             mk(vec!["cred-1".to_string(), "cred-1".to_string()])
-                .validate()
+                .validate(&cid("gov"))
                 .is_err()
         );
         assert!(
             mk(vec!["cred-1".to_string(), "cred-2".to_string()])
-                .validate()
+                .validate(&cid("gov"))
                 .is_ok()
         );
     }
@@ -1715,10 +1751,10 @@ mod tests {
         };
         assert!(
             mk(vec![issuer_a.clone(), issuer_a.clone()])
-                .validate()
+                .validate(&cid("gov"))
                 .is_err()
         );
-        assert!(mk(vec![issuer_a, issuer_b]).validate().is_ok());
+        assert!(mk(vec![issuer_a, issuer_b]).validate(&cid("gov")).is_ok());
     }
 
     #[test]
@@ -1738,11 +1774,63 @@ mod tests {
         };
         assert!(
             mk(vec![issuer_a.clone(), issuer_a.clone()])
-                .validate()
+                .validate(&cid("gov"))
                 .is_err()
         );
-        assert!(mk(vec![issuer_a, issuer_b]).validate().is_ok());
-        assert!(mk(Vec::new()).validate().is_ok());
+        assert!(mk(vec![issuer_a, issuer_b]).validate(&cid("gov")).is_ok());
+        assert!(mk(Vec::new()).validate(&cid("gov")).is_ok());
+    }
+
+    #[test]
+    fn proposal_create_provider_configuration_rejects_claimless_self_issued_requirement() {
+        // Mirrors the template's `selfIssuedRequirementsHaveClaims`. The frontend
+        // prefills a new requirement row as the governance party with no claims,
+        // so the default UI path trips this.
+        let gov = cid("gov");
+        let mk = |issuer: CantonId, claims: Vec<RequiredClaim>| {
+            ProposalType::CreateProviderConfiguration {
+                provider_service_cid: "psc".to_string(),
+                registrar_requirements: vec![PartyCredentialRequirement {
+                    issuer,
+                    required_claims: claims,
+                }],
+                holder_requirements: vec![],
+            }
+        };
+        let claim = RequiredClaim {
+            property: "role".to_string(),
+            value: "registrar".to_string(),
+        };
+        // Self-issued and claimless: rejected.
+        assert!(mk(gov.clone(), vec![]).validate(&gov).is_err());
+        // Self-issued with a claim: accepted.
+        assert!(mk(gov.clone(), vec![claim]).validate(&gov).is_ok());
+        // Issued by another party and claimless: accepted, matching the Daml.
+        assert!(mk(cid("other"), vec![]).validate(&gov).is_ok());
+    }
+
+    #[test]
+    fn proposal_provision_instrument_rejects_claimless_self_issued_requirement() {
+        // The same guard on the other template that carries it in Daml.
+        let gov = cid("gov");
+        let mk = |issuer: CantonId, claims: Vec<RequiredClaim>| ProposalType::ProvisionInstrument {
+            registrar_service_cid: "rsc".to_string(),
+            instrument_id_text: "uuid-1".to_string(),
+            additional_identifiers: vec![],
+            issuer_requirements: vec![PartyCredentialRequirement {
+                issuer,
+                required_claims: claims,
+            }],
+            holder_requirements: vec![],
+            initial_instrument_issuers: vec![],
+        };
+        let claim = RequiredClaim {
+            property: "role".to_string(),
+            value: "instrument-issuer".to_string(),
+        };
+        assert!(mk(gov.clone(), vec![]).validate(&gov).is_err());
+        assert!(mk(gov.clone(), vec![claim]).validate(&gov).is_ok());
+        assert!(mk(cid("other"), vec![]).validate(&gov).is_ok());
     }
 
     /// Test-only helper: builds a `CantonId` with a fixed valid namespace so
@@ -1775,31 +1863,31 @@ mod tests {
             new_beneficiaries: vec![rb("a", "0.8"), rb("b", "0.2")],
             prior_delegation: None,
         };
-        assert!(ok.validate().is_ok());
+        assert!(ok.validate(&cid("gov")).is_ok());
         let no_exec = ProposalType::SetupCouponReassignmentDelegation {
             dso: rb("dso", "1.0").beneficiary,
             assigners: vec![],
             new_beneficiaries: vec![rb("a", "1.0")],
             prior_delegation: None,
         };
-        assert!(no_exec.validate().is_err());
+        assert!(no_exec.validate(&cid("gov")).is_err());
         let bad_sum = ProposalType::SetupCouponReassignmentDelegation {
             dso: rb("dso", "1.0").beneficiary,
             assigners: execs,
             new_beneficiaries: vec![rb("a", "0.5")],
             prior_delegation: None,
         };
-        assert!(bad_sum.validate().is_err());
+        assert!(bad_sum.validate(&cid("gov")).is_err());
         let revoke = ProposalType::RevokeCouponReassignmentDelegation {
             delegation: "00abc".into(),
         };
-        assert!(revoke.validate().is_ok());
+        assert!(revoke.validate(&cid("gov")).is_ok());
         // An empty delegation cid is rejected at the boundary (not left to fail
         // only at ledger submission).
         let revoke_empty = ProposalType::RevokeCouponReassignmentDelegation {
             delegation: "  ".into(),
         };
-        assert!(revoke_empty.validate().is_err());
+        assert!(revoke_empty.validate(&cid("gov")).is_err());
     }
 
     #[test]
