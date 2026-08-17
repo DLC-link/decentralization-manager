@@ -776,7 +776,16 @@ pub(crate) async fn run_reassign_once(
     .await?;
     let assignable = select_assignable(&coupons, Utc::now(), expiry_margin);
     if assignable.is_empty() {
-        return Ok(()); // nothing assignable -> no-op
+        // `visible` separates "this decparty has no coupons" from "this
+        // decparty has coupons this node cannot see": a RewardCouponV2 minted
+        // with providerIsObserver = false is absent from the decparty's ACS
+        // entirely (design §4), and both cases otherwise log nothing at all.
+        tracing::debug!(
+            %decparty,
+            visible = coupons.len(),
+            "no assignable coupons this tick"
+        );
+        return Ok(());
     }
 
     let assigned = drain_assignable(
