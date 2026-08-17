@@ -166,8 +166,9 @@ if [ ! -f "$BINARY" ]; then
     exit 1
 fi
 
-# Localnet
-log_phase "Starting localnet"
+# Canton bring-up. Both hooks are target-polymorphic: devnet.env.sh redefines
+# download_localnet as a no-op and start_localnet as start_canton_tunnels.
+log_phase "Starting Canton ($TARGET)"
 download_localnet
 start_localnet
 
