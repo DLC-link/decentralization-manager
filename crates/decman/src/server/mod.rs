@@ -1016,39 +1016,32 @@ pub async fn start_server(
         workflows: workflows.clone(),
         peer_job_sender: peer_job_sender.clone(),
     };
-    tokio::spawn(async move {
-        run_heartbeat(
-            heartbeat_config,
-            heartbeat_db,
-            heartbeat_status,
-            heartbeat_last_seen,
-            heartbeat_triggers,
-        )
-        .await;
-    });
+    spawn_supervised(
+        "heartbeat",
+        "peer liveness stops updating until this node restarts",
+        async move {
+            run_heartbeat(
+                heartbeat_config,
+                heartbeat_db,
+                heartbeat_status,
+                heartbeat_last_seen,
+                heartbeat_triggers,
+            )
+            .await;
+        },
+    );
 
     // Background task: CIP-104 Mode A reward-assignment automation. Clone the
     // existing `web::Data<AppState>` (an Arc) so the loop shares the SAME state —
     // live party credentials, auth, config — never a fresh AppState.
-    //
-    // The outer task reports the inner one's death and nothing more; it does not
-    // respawn. It catches a clean return, which never panics and so never reaches
-    // the panic hook in `main`.
     let reward_automation_state = app_state.clone();
-    tokio::spawn(async move {
-        let automation = tokio::spawn(async move {
+    spawn_supervised(
+        "reward automation",
+        "coupons will expire unassigned until this node restarts",
+        async move {
             reward_automation::run_reward_automation_loop(reward_automation_state).await;
-        });
-        match automation.await {
-            Ok(()) => tracing::error!(
-                "reward automation loop returned; coupons will expire unassigned until this node restarts"
-            ),
-            Err(e) => tracing::error!(
-                error = %e,
-                "reward automation task died; coupons will expire unassigned until this node restarts"
-            ),
-        }
-    });
+        },
+    );
 
     // Single peer-job listener: drains the queue and spawns one
     // `workflow::start_peer` per accepted / retried / resumed invite, so this
@@ -1056,15 +1049,19 @@ pub async fn start_server(
     let peer_listener_config = config.clone();
     let peer_listener_db = db.clone();
     let peer_listener_auth = auth.clone();
-    tokio::spawn(async move {
-        run_peer_listener(
-            peer_listener_config,
-            peer_listener_db,
-            peer_listener_auth,
-            peer_job_receiver,
-        )
-        .await;
-    });
+    spawn_supervised(
+        "peer listener",
+        "this node accepts no further peer jobs until it restarts",
+        async move {
+            run_peer_listener(
+                peer_listener_config,
+                peer_listener_db,
+                peer_listener_auth,
+                peer_job_receiver,
+            )
+            .await;
+        },
+    );
 
     // Background task: sync decentralized parties from Canton on startup
     let sync_config = config.clone();
@@ -1268,6 +1265,25 @@ pub async fn start_server(
     .await?;
 
     Ok(())
+}
+
+/// Spawns a task that must live as long as the process, and reports its death at
+/// `error` with what the operator loses. `consequence` completes the sentence
+/// "… returned; " and "… died; ".
+///
+/// The outer task is what catches a clean return, which never panics and so never
+/// reaches the panic hook in `main`. Nothing respawns: a task that returned left
+/// state nobody has inspected, and restarting it would hide that.
+fn spawn_supervised<F>(name: &'static str, consequence: &'static str, task: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(async move {
+        match tokio::spawn(task).await {
+            Ok(()) => tracing::error!(task = name, "{name} loop returned; {consequence}"),
+            Err(e) => tracing::error!(task = name, error = %e, "{name} task died; {consequence}"),
+        }
+    });
 }
 
 /// Background task that runs a Noise server for handling pings and invites
