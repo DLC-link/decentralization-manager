@@ -47,7 +47,7 @@ use crate::common::{
     scenario::Scenario,
     types::{
         CredentialsResponse, DecentralizedPartiesResponse, GovernanceStateLookup,
-        ProviderConfigurationsResponse, RegistrarServiceRequestsResponse,
+        InstrumentsResponse, ProviderConfigurationsResponse, RegistrarServiceRequestsResponse,
         RegistrarServicesResponse,
     },
 };
@@ -517,6 +517,224 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         "Registrar onboarded: configuration={provider_configuration_cid} \
          request={registrar_service_request_cid} service={registrar_service_cid}"
     );
+
+    // Cycle 4: the registrar decparty provisions an instrument.
+    // The second member party is the initial issuer.
+    // The first member party is also the localnet operator.
+    // A bug could read the operator's credential by mistake.
+    // The two issuers must differ.
+    // Cycle 6 revokes one and checks the other.
+    let instrument_id = format!("{run}-DUAL-GOV-TOKEN", run = f.run_id);
+    let issuer_a = f.p2_member_party()?.to_string();
+    let issuer_b = f.p3_member_party()?.to_string();
+    let registrar_cycle = CycleParty::Named {
+        party_id: registrar_party_id.clone(),
+        rules_contract_id: registrar_rules_contract_id.clone(),
+    };
+
+    propose_confirm_execute_on(
+        registrar_cycle.clone(),
+        "ProvisionInstrument",
+        json!({
+            "type": "provision_instrument",
+            "registrar_service_cid": &registrar_service_cid,
+            "instrument_id_text": &instrument_id,
+            "additional_identifiers": [],
+            "issuer_requirements": [{
+                "issuer": &registrar_party_id,
+                "required_claims": [
+                    {"property": ISSUER_CLAIM.0, "value": ISSUER_CLAIM.1},
+                ],
+            }],
+            "holder_requirements": [],
+            "initial_instrument_issuers": [&issuer_a],
+        }),
+    )
+    .run(f)
+    .await?;
+
+    // Cycle 4 builds this tag from the proposal's instrument id.
+    // Cycle 5 builds it from the stored configuration's default identifier.
+    // The SDK copies the instrument id into that identifier unchanged.
+    // Both cycles mint credentials under one prefix.
+    let credential_prefix = format!("{instrument_id}-instrument-issuer-credential/");
+
+    Scenario::new("instrument provisioned")
+        .then("instrument listed by id", Duration::from_secs(30), {
+            let registrar_party = registrar_party_id.clone();
+            let instrument_id = instrument_id.clone();
+            move |f, _| {
+                let registrar_party = registrar_party.clone();
+                let instrument_id = instrument_id.clone();
+                Box::pin(async move {
+                    let path = format!("/instruments?party_id={registrar_party}");
+                    let r: InstrumentsResponse = f.get_json(f.p1.http, &path).await.ok()?;
+                    let row = r
+                        .instruments
+                        .into_iter()
+                        .find(|i| i.instrument_id == instrument_id)?;
+                    // The row's contract_id is the InstrumentConfiguration id,
+                    // which cycle 5 needs.
+                    f.registrar_instrument_configuration_cid = Some(row.contract_id);
+                    Some(Ok(()))
+                })
+            }
+        })
+        .then(
+            "initial issuer holds an issuer credential",
+            Duration::from_secs(30),
+            {
+                let registrar_party = registrar_party_id.clone();
+                let prefix = credential_prefix.clone();
+                let subject = issuer_a.clone();
+                move |f, _| {
+                    let registrar_party = registrar_party.clone();
+                    let prefix = prefix.clone();
+                    let subject = subject.clone();
+                    Box::pin(async move {
+                        let path = format!("/credentials?party_id={registrar_party}");
+                        let r: CredentialsResponse = f.get_json(f.p1.http, &path).await.ok()?;
+                        r.credentials
+                            .iter()
+                            .find(|c| {
+                                c.credential_id.starts_with(&prefix)
+                                    && c.claims.iter().any(|claim| claim.subject == subject)
+                            })
+                            .map(|_| Ok(()))
+                    })
+                }
+            },
+        )
+        .run(f)
+        .await?;
+
+    let instrument_configuration_cid = f
+        .registrar_instrument_configuration_cid
+        .clone()
+        .context("registrar_instrument_configuration_cid not set")?;
+
+    // Cycle 5: the registrar decparty onboards the second member party.
+    // This party becomes an additional instrument issuer.
+    propose_confirm_execute_on(
+        registrar_cycle.clone(),
+        "OnboardInstrumentIssuers",
+        json!({
+            "type": "onboard_instrument_issuers",
+            "instrument_configuration_cid": &instrument_configuration_cid,
+            "instrument_issuers": [&issuer_b],
+        }),
+    )
+    .run(f)
+    .await?;
+
+    // This probe captures the second issuer's credential ids.
+    // Cycle 6 revokes exactly these ids.
+    Scenario::new("second issuer onboarded")
+        .then(
+            "second issuer holds an issuer credential",
+            Duration::from_secs(30),
+            {
+                let registrar_party = registrar_party_id.clone();
+                let prefix = credential_prefix.clone();
+                let subject = issuer_b.clone();
+                move |f, _| {
+                    let registrar_party = registrar_party.clone();
+                    let prefix = prefix.clone();
+                    let subject = subject.clone();
+                    Box::pin(async move {
+                        let path = format!("/credentials?party_id={registrar_party}");
+                        let r: CredentialsResponse = f.get_json(f.p1.http, &path).await.ok()?;
+                        let cids: Vec<String> = r
+                            .credentials
+                            .into_iter()
+                            .filter(|c| {
+                                c.credential_id.starts_with(&prefix)
+                                    && c.claims.iter().any(|claim| claim.subject == subject)
+                            })
+                            .map(|c| c.contract_id)
+                            .collect();
+                        if cids.is_empty() {
+                            return None;
+                        }
+                        f.registrar_issuer_credential_cids = cids;
+                        Some(Ok(()))
+                    })
+                }
+            },
+        )
+        .run(f)
+        .await?;
+
+    let revoke_cids = f.registrar_issuer_credential_cids.clone();
+    anyhow::ensure!(
+        !revoke_cids.is_empty(),
+        "no credential captured for the second issuer"
+    );
+
+    // Cycle 6: the registrar decparty offboards the second issuer.
+    // The payload groups credential ids under their issuer.
+    // InstrumentIssuerCredentials carries instrument_issuer and credential_cids.
+    propose_confirm_execute_on(
+        registrar_cycle,
+        "OffboardInstrumentIssuers",
+        json!({
+            "type": "offboard_instrument_issuers",
+            "instrument_issuers": [{
+                "instrument_issuer": &issuer_b,
+                "credential_cids": &revoke_cids,
+            }],
+        }),
+    )
+    .run(f)
+    .await?;
+
+    // This probe checks two conditions.
+    // The revoked credential ids are gone.
+    // The first issuer's credential still exists.
+    // The second check makes this cycle discriminating.
+    // A bug that revokes every credential could not pass this check.
+    Scenario::new("second issuer offboarded")
+        .then(
+            "revoked credentials gone, first issuer keeps its own",
+            Duration::from_secs(30),
+            {
+                let registrar_party = registrar_party_id.clone();
+                let prefix = credential_prefix.clone();
+                let kept_subject = issuer_a.clone();
+                let revoked = revoke_cids.clone();
+                move |f, _| {
+                    let registrar_party = registrar_party.clone();
+                    let prefix = prefix.clone();
+                    let kept_subject = kept_subject.clone();
+                    let revoked = revoked.clone();
+                    Box::pin(async move {
+                        let path = format!("/credentials?party_id={registrar_party}");
+                        let r: CredentialsResponse = f.get_json(f.p1.http, &path).await.ok()?;
+                        let still_there: Vec<&String> = r
+                            .credentials
+                            .iter()
+                            .map(|c| &c.contract_id)
+                            .filter(|cid| revoked.contains(cid))
+                            .collect();
+                        if !still_there.is_empty() {
+                            return None;
+                        }
+                        let kept = r.credentials.iter().any(|c| {
+                            c.credential_id.starts_with(&prefix)
+                                && c.claims.iter().any(|claim| claim.subject == kept_subject)
+                        });
+                        if !kept {
+                            return Some(Err(anyhow::anyhow!(
+                                "offboard revoked the first issuer's credential too"
+                            )));
+                        }
+                        Some(Ok(()))
+                    })
+                }
+            },
+        )
+        .run(f)
+        .await?;
 
     Ok(())
 }
