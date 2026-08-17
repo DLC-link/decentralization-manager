@@ -140,6 +140,15 @@ pub(crate) async fn configure_party_on_nodes(f: &Fixture, party_id: &str) -> any
     let p2m = f.p2_member_party()?.to_string();
     let p3m = f.p3_member_party()?.to_string();
 
+    // The decparty needs act-as and read-as rights on every node. These grants
+    // run for each decparty. The member-party grants stay in the caller,
+    // because they run once per participant.
+    if f.target == TestTarget::Localnet {
+        grant_rights(f, P1_JSON_API, party_id, "participant-1").await?;
+        grant_rights(f, P2_JSON_API, party_id, "participant-2").await?;
+        grant_rights(f, P3_JSON_API, party_id, "participant-3").await?;
+    }
+
     update_party_config(
         f,
         f.p1.http,
@@ -298,9 +307,6 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                             grant_rights(&*f, P1_JSON_API, &p1m, "participant-1").await?;
                             grant_rights(&*f, P2_JSON_API, &p2m, "participant-2").await?;
                             grant_rights(&*f, P3_JSON_API, &p3m, "participant-3").await?;
-                            grant_rights(&*f, P1_JSON_API, &party_id, "participant-1").await?;
-                            grant_rights(&*f, P2_JSON_API, &party_id, "participant-2").await?;
-                            grant_rights(&*f, P3_JSON_API, &party_id, "participant-3").await?;
                             (p1m, p2m, p3m)
                         }
                         TestTarget::Devnet => {
