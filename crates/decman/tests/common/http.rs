@@ -399,17 +399,25 @@ mod tests {
     /// case: retry, and never fail fast.
     #[tokio::test]
     async fn transport_failure_keeps_polling() {
-        let (f, server) = fixture_with_jwt("test-jwt").await;
-        let dead_port = server.address().port();
-        drop(server);
+        let (f, _server) = fixture_with_jwt("test-jwt").await;
+        let Ok(reserved) = std::net::TcpListener::bind("127.0.0.1:0") else {
+            panic!("could not reserve a loopback port");
+        };
+        let Ok(addr) = reserved.local_addr() else {
+            panic!("reserved listener has no address");
+        };
+        let dead_port = addr.port();
+        drop(reserved);
 
         for _ in 0..FATAL_STREAK * 2 {
             let v: Option<serde_json::Value> = f.probe_get_json(dead_port, "/probe").await;
             assert!(v.is_none());
         }
 
-        assert!(f.probe_diag.fatal().is_none());
-        assert!(f.probe_diag.last_error().is_some());
+        let Some(last) = f.probe_diag.last_error() else {
+            panic!("expected a recorded probe error");
+        };
+        assert!(f.probe_diag.fatal().is_none(), "got: {last}");
     }
 
     #[tokio::test]
