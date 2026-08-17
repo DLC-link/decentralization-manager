@@ -797,6 +797,13 @@ impl ProposalType {
     /// catches non-positive token amounts before they reach Canton's Daml
     /// checks so a 400 surfaces a precise reason rather than a generic
     /// submission error after a proposal contract is already created.
+    ///
+    /// **Propose-path only.** The single production caller is
+    /// `handlers::governance::propose_action`, and one arm
+    /// ([`validate_future_micros`]) reads the clock. Re-using this to
+    /// re-validate an already-stored proposal would reject it for nothing but
+    /// having aged, so a new call site needs to split the time-dependent arms
+    /// out first.
     pub fn validate(&self) -> Result<(), String> {
         match self {
             ProposalType::Transfer {
