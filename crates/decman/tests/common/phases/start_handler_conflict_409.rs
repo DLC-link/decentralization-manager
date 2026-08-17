@@ -59,11 +59,13 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(30),
             |f, _| {
                 let db_path = f.db_path(1);
+                let diag = f.probe_diag.clone();
                 Box::pin(async move {
-                    let n =
+                    let n = diag.ok(
+                        "count in-progress Onboarding runs",
                         db::count_workflow_runs_inprogress(&db_path, "Onboarding", "Coordinator")
-                            .await
-                            .ok()?;
+                            .await,
+                    )?;
                     (n >= 1).then_some(Ok(()))
                 })
             },

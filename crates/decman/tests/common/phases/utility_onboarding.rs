@@ -43,7 +43,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                                 };
                                 let path = format!("/services/provider?party_id={party_id}");
                                 let r: ProviderServicesResponse =
-                                    f.get_json(f.p1.http, &path).await.ok()?;
+                                    f.probe_get_json(f.p1.http, &path).await?;
                                 let cid = r.services.into_iter().next()?.contract_id;
                                 f.provider_service_cid = Some(cid);
                                 Some(Ok(()))
@@ -149,7 +149,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                          &module_name=Utility.Registry.App.V0.Service.AllocationFactory\
                          &entity_name=AllocationFactory"
                     );
-                    let r: ContractQueryResponse = f.get_json(f.p1.http, &path).await.ok()?;
+                    let r: ContractQueryResponse = f.probe_get_json(f.p1.http, &path).await?;
                     let cid = r.contracts.into_iter().next()?.contract_id;
                     f.allocation_factory_cid = Some(cid);
                     Some(Ok(()))
@@ -170,7 +170,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                          &module_name=Utility.Registry.V0.Configuration.Instrument\
                          &entity_name=InstrumentConfiguration"
                     );
-                    let r: ContractQueryResponse = f.get_json(f.p1.http, &path).await.ok()?;
+                    let r: ContractQueryResponse = f.probe_get_json(f.p1.http, &path).await?;
                     let cid = r.contracts.into_iter().next()?.contract_id;
                     f.instrument_configuration_cid = Some(cid);
                     Some(Ok(()))
@@ -216,7 +216,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                      &module_name=Utility.Registry.App.V0.Model.Mint\
                      &entity_name=MintOffer"
                 );
-                let r: ContractQueryResponse = f.get_json(f.p1.http, &path).await.ok()?;
+                let r: ContractQueryResponse = f.probe_get_json(f.p1.http, &path).await?;
                 (!r.contracts.is_empty()).then_some(Ok(()))
             })
         })
@@ -250,7 +250,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                      &module_name=Utility.Registry.App.V0.Model.Burn\
                      &entity_name=BurnOffer"
                 );
-                let r: ContractQueryResponse = f.get_json(f.p1.http, &path).await.ok()?;
+                let r: ContractQueryResponse = f.probe_get_json(f.p1.http, &path).await?;
                 (!r.contracts.is_empty()).then_some(Ok(()))
             })
         })
