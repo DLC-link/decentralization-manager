@@ -1122,7 +1122,7 @@ fn may_create_second_delegation(proposal: &ProposalType) -> bool {
         (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 409, description = "A CouponReassignmentDelegation is already active; set prior_delegation to replace it", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
-        (status = 503, description = "Cannot confirm whether a CouponReassignmentDelegation is already active", body = ErrorResponse)
+        (status = 503, description = "Node not provisioned for this proposal: the target package is not configured, or it cannot be confirmed whether a CouponReassignmentDelegation is already active", body = ErrorResponse)
     )
 )]
 #[post("/governance/propose")]
@@ -1366,7 +1366,7 @@ pub async fn propose_action(
             match packages.governance_core.as_deref() {
                 Some(pkg) => pkg,
                 None => {
-                    return HttpResponse::BadRequest().json(ErrorResponse {
+                    return HttpResponse::ServiceUnavailable().json(ErrorResponse {
                         error: "governance_core package not configured".to_string(),
                     });
                 }
@@ -1376,7 +1376,7 @@ pub async fn propose_action(
             match packages.governance_rewards.as_deref() {
                 Some(pkg) => pkg,
                 None => {
-                    return HttpResponse::BadRequest().json(ErrorResponse {
+                    return HttpResponse::ServiceUnavailable().json(ErrorResponse {
                         error: "governance_rewards package not configured".to_string(),
                     });
                 }
@@ -1386,7 +1386,7 @@ pub async fn propose_action(
             match packages.governance_token_custody.as_deref() {
                 Some(pkg) => pkg,
                 None => {
-                    return HttpResponse::BadRequest().json(ErrorResponse {
+                    return HttpResponse::ServiceUnavailable().json(ErrorResponse {
                         error: "governance_token_custody package not configured".to_string(),
                     });
                 }
@@ -1396,7 +1396,7 @@ pub async fn propose_action(
             match packages.governance_utility_credential.as_deref() {
                 Some(pkg) => pkg,
                 None => {
-                    return HttpResponse::BadRequest().json(ErrorResponse {
+                    return HttpResponse::ServiceUnavailable().json(ErrorResponse {
                         error: "governance_utility_credential package not configured".to_string(),
                     });
                 }
@@ -1406,7 +1406,7 @@ pub async fn propose_action(
             match packages.governance_utility_onboarding.as_deref() {
                 Some(pkg) => pkg,
                 None => {
-                    return HttpResponse::BadRequest().json(ErrorResponse {
+                    return HttpResponse::ServiceUnavailable().json(ErrorResponse {
                         error: "governance_utility_onboarding package not configured".to_string(),
                     });
                 }
