@@ -3,6 +3,7 @@ use std::time::Duration;
 use anyhow::Context;
 use common::{
     api::DecentralizedPartiesResponse,
+    canton_id::CantonId,
     types::{InvitationType, WorkflowKind, WorkflowProgress, WorkflowRole},
 };
 use serde_json::{Value, json};
@@ -232,7 +233,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             |f, _| {
                 Box::pin(async move {
                     let prefix = f.party_prefix().ok()?.to_string();
-                    let p3_uid = f.p3.participant_id.clone();
+                    let p3_uid: CantonId = f.p3.participant_id.parse().ok()?;
                     // `refresh=true` forces a fresh Canton fetch so we assert
                     // the real topology, not the stale cache without P3.
                     let path = format!("/decentralized-parties?prefix={prefix}&refresh=true");
@@ -245,7 +246,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     let p3_present = party
                         .participants
                         .iter()
-                        .any(|p| p.participant_uid.to_string() == p3_uid);
+                        .any(|p| p.participant_uid == p3_uid);
                     if !p3_present || party.participants.len() != 3 || party.threshold != 2 {
                         return None;
                     }

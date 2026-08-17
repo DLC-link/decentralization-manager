@@ -1,7 +1,10 @@
 use std::time::Duration;
 
 use anyhow::Context;
-use common::api::{ContractQueryResponse, ProviderServicesResponse};
+use common::{
+    api::{ContractQueryResponse, ProviderServicesResponse},
+    canton_id::CantonId,
+};
 use serde_json::json;
 use tracing::info;
 
@@ -69,8 +72,13 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 info!("Awaiting operator-driven ProviderService for {governance_party}");
                 let port = f.p1.http;
                 let path = format!("/services/provider?party_id={governance_party}");
-                let operator_for_match = operator.clone();
-                let governance_for_match = governance_party.clone();
+                let operator_for_match: CantonId = operator
+                    .parse()
+                    .with_context(|| format!("operator_party is not a Canton id: {operator}"))?;
+                let governance_for_match: CantonId =
+                    governance_party.parse().with_context(|| {
+                        format!("dec party id is not a Canton id: {governance_party}")
+                    })?;
                 let cid = await_operator_response::<ProviderServicesResponse, _>(
                     f,
                     port,
@@ -82,8 +90,8 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         r.services
                             .into_iter()
                             .find(|s| {
-                                s.operator.to_string() == operator_for_match
-                                    && s.provider.to_string() == governance_for_match
+                                s.operator == operator_for_match
+                                    && s.provider == governance_for_match
                             })
                             .map(|s| s.contract_id)
                     },
