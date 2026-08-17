@@ -789,16 +789,36 @@ fn canton_error_id(e: &anyhow::Error) -> Option<String> {
         .then(|| id.to_string())
 }
 
-/// Whether the tick failed only because this participant does not carry
-/// `governance-rewards-automation-v1`.
+/// Canton error ids that mean a package this automation reads is missing from
+/// the participant, or is present but unusable.
 ///
-/// The delegation query names the package by alias, so a participant that has
-/// never had the DAR uploaded rejects the read with `PACKAGE_NAMES_NOT_FOUND`
-/// before any contract is looked at. Every tick fails the same way, and an
-/// operator cannot act on the line, so the loop logs it at `trace`. Issue #334
+/// Every error the loop catches comes from a read: the delegation query, or the
+/// coupon interface query. [`drain_assignable`] absorbs every submission error,
+/// so the submission-side vetting ids cannot arrive here.
+///
+/// The ids split by what the read cannot resolve. The package name itself is
+/// unknown (`PACKAGE_NAMES_NOT_FOUND`), or a configured package id is
+/// (`PACKAGE_NOT_FOUND`). The name resolves but carries neither the template nor
+/// the interface asked for, which is what a partial or superseded upload looks
+/// like (`NO_TEMPLATES_…`, `NO_INTERFACE_…`). Or the participant holds the
+/// implementation and has not vetted it, so the interface view cannot be
+/// rendered (`NO_VETTED_INTERFACE_IMPLEMENTATION_PACKAGE`).
+///
+/// A node in any of these states fails identically on every tick, and no
+/// operator can act on the line, so the loop logs it at `trace`. Issue #334
 /// carries the fix — not running the loop on such a node at all.
-fn package_absent(e: &anyhow::Error) -> bool {
-    canton_error_id(e).as_deref() == Some("PACKAGE_NAMES_NOT_FOUND")
+const UNUSABLE_PACKAGE_ERROR_IDS: &[&str] = &[
+    "PACKAGE_NAMES_NOT_FOUND",
+    "PACKAGE_NOT_FOUND",
+    "NO_TEMPLATES_FOR_PACKAGE_NAME_AND_QUALIFIED_NAME",
+    "NO_INTERFACE_FOR_PACKAGE_NAME_AND_QUALIFIED_NAME",
+    "NO_VETTED_INTERFACE_IMPLEMENTATION_PACKAGE",
+];
+
+/// Whether the tick failed only because a package it reads is missing or
+/// unusable on this participant. See [`UNUSABLE_PACKAGE_ERROR_IDS`].
+fn package_unusable(e: &anyhow::Error) -> bool {
+    canton_error_id(e).is_some_and(|id| UNUSABLE_PACKAGE_ERROR_IDS.contains(&id.as_str()))
 }
 
 /// Whether a fresh read on the next tick is the cure.
@@ -970,11 +990,11 @@ pub(crate) async fn run_reward_automation_loop(data: actix_web::web::Data<AppSta
             .collect();
         for decparty in parties {
             if let Err(e) = run_once_for_party(&data, &decparty).await {
-                if package_absent(&e) {
+                if package_unusable(&e) {
                     tracing::trace!(
                         %decparty,
                         error = %e,
-                        "reward automation tick failed: this participant does not carry the DAR"
+                        "reward automation tick failed: this participant cannot use the DAR"
                     );
                 } else {
                     tracing::warn!(%decparty, error = %e, "reward automation tick failed");
@@ -1657,26 +1677,30 @@ mod tests {
     }
 
     #[test]
-    fn only_the_missing_dar_error_is_quiet() {
+    fn only_an_unusable_package_is_quiet() {
         // The devnet message, verbatim. The gRPC code here is deliberately not
         // the one Canton sends: the error id is what classifies.
         let absent = anyhow::Error::new(tonic::Status::internal(
             "PACKAGE_NAMES_NOT_FOUND(11,21a20a9f): The following package names do not match \
              upgradable packages uploaded on this participant: [governance-rewards-automation-v1].",
         ));
-        assert!(package_absent(&absent));
+        assert!(package_unusable(&absent));
         // A context added on the way up must not lose the id and send the line
         // back to warn.
-        assert!(package_absent(
+        assert!(package_unusable(
             &Err::<(), _>(absent)
                 .context("reading the delegation")
                 .unwrap_err()
         ));
+        // Uploaded but unvetted, on the coupon interface read.
+        assert!(package_unusable(&canton_err(
+            "NO_VETTED_INTERFACE_IMPLEMENTATION_PACKAGE"
+        )));
 
         // Every other failure stays at warn: another ledger rejection, and one
         // that carries no ledger status at all, such as auth or transport.
-        assert!(!package_absent(&canton_err("DAML_INTERPRETATION_ERROR")));
-        assert!(!package_absent(&anyhow::anyhow!("connection refused")));
+        assert!(!package_unusable(&canton_err("DAML_INTERPRETATION_ERROR")));
+        assert!(!package_unusable(&anyhow::anyhow!("connection refused")));
     }
 
     #[test]
