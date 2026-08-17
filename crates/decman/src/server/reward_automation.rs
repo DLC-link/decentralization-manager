@@ -776,10 +776,13 @@ pub(crate) async fn run_reassign_once(
     .await?;
     let assignable = select_assignable(&coupons, Utc::now(), expiry_margin);
     if assignable.is_empty() {
-        // `visible` separates "this decparty has no coupons" from "this
-        // decparty has coupons this node cannot see": a RewardCouponV2 minted
-        // with providerIsObserver = false is absent from the decparty's ACS
-        // entirely (design §4), and both cases otherwise log nothing at all.
+        // `visible` is what the ACS read returned, so it separates "coupons
+        // present but none assignable yet" from "nothing visible at all".
+        //
+        // It does NOT separate a decparty that earned nothing from one whose
+        // coupons carry providerIsObserver = false (design §4): such a coupon
+        // is absent from the ACS entirely, so both report 0. Telling those
+        // apart needs a signal this node does not hold.
         tracing::debug!(
             %decparty,
             visible = coupons.len(),
