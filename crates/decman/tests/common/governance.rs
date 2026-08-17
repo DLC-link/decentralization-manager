@@ -11,13 +11,24 @@ pub struct ProposalCycleCtx {
     pub confirmation_cids: Vec<String>,
 }
 
-/// Which decparty a governance cycle runs on.
+/// This enum names the decparty a governance cycle runs on.
+///
+/// The cycle sends every step to a fixed node. P1 proposes, P2 confirms and
+/// P3 executes. A decparty therefore qualifies only when it has one member
+/// party on each of those three nodes. Its threshold must also let two
+/// confirmations execute an action.
+///
+/// The suite holds decparties that fail both tests. A two-member party has no
+/// member on P3. A unanimous party needs three confirmations. Passing either
+/// one produces a timeout on `can_execute`. That message names the wrong
+/// cause.
 #[derive(Clone)]
 pub enum CycleParty {
     /// The suite's main decparty. Each step reads `f.party_id` and
     /// `f.rules_contract_id` when it runs.
     Primary,
-    /// Any other decparty. The caller supplies both ids.
+    /// Any other decparty that meets the rules above. The caller supplies
+    /// both ids.
     Named {
         party_id: String,
         rules_contract_id: String,

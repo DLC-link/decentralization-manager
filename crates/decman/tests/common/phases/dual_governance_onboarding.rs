@@ -30,6 +30,10 @@
 //!
 //! Each run leaves a second decparty on the network. Devnet is shared. The
 //! main sequence therefore gates this phase behind `DECPM_IT_DUAL_GOV`.
+//!
+//! No devnet run has exercised this phase yet. The first opt-in run must
+//! confirm that the participant-admin client may grant rights on a second
+//! decparty.
 
 use std::time::Duration;
 
@@ -367,11 +371,13 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             .context("operator_party not set on devnet")?,
     };
 
+    let registrar_cycle = CycleParty::Named {
+        party_id: registrar_party_id.clone(),
+        rules_contract_id: registrar_rules_contract_id.clone(),
+    };
+
     propose_confirm_execute_on(
-        CycleParty::Named {
-            party_id: registrar_party_id.clone(),
-            rules_contract_id: registrar_rules_contract_id.clone(),
-        },
+        registrar_cycle.clone(),
         "CreateRegistrarServiceRequest",
         json!({
             "type": "create_registrar_service_request",
@@ -527,10 +533,6 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     let instrument_id = format!("{run}-DUAL-GOV-TOKEN", run = f.run_id);
     let issuer_a = f.p2_member_party()?.to_string();
     let issuer_b = f.p3_member_party()?.to_string();
-    let registrar_cycle = CycleParty::Named {
-        party_id: registrar_party_id.clone(),
-        rules_contract_id: registrar_rules_contract_id.clone(),
-    };
 
     propose_confirm_execute_on(
         registrar_cycle.clone(),
@@ -598,7 +600,11 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                             .iter()
                             .find(|c| {
                                 c.credential_id.starts_with(&prefix)
-                                    && c.claims.iter().any(|claim| claim.subject == subject)
+                                    && c.claims.iter().any(|claim| {
+                                        claim.subject == subject
+                                            && claim.property == ISSUER_CLAIM.0
+                                            && claim.value == ISSUER_CLAIM.1
+                                    })
                             })
                             .map(|_| Ok(()))
                     })
@@ -608,10 +614,10 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         .run(f)
         .await?;
 
-    let instrument_configuration_cid = f
-        .registrar_instrument_configuration_cid
-        .clone()
-        .context("registrar_instrument_configuration_cid not set")?;
+    let registrar_instrument_configuration_cid =
+        f.registrar_instrument_configuration_cid
+            .clone()
+            .context("registrar_instrument_configuration_cid not set")?;
 
     // Cycle 5: the registrar decparty onboards the second member party.
     // This party becomes an additional instrument issuer.
@@ -620,7 +626,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         "OnboardInstrumentIssuers",
         json!({
             "type": "onboard_instrument_issuers",
-            "instrument_configuration_cid": &instrument_configuration_cid,
+            "instrument_configuration_cid": &registrar_instrument_configuration_cid,
             "instrument_issuers": [&issuer_b],
         }),
     )
@@ -649,7 +655,11 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                             .into_iter()
                             .filter(|c| {
                                 c.credential_id.starts_with(&prefix)
-                                    && c.claims.iter().any(|claim| claim.subject == subject)
+                                    && c.claims.iter().any(|claim| {
+                                        claim.subject == subject
+                                            && claim.property == ISSUER_CLAIM.0
+                                            && claim.value == ISSUER_CLAIM.1
+                                    })
                             })
                             .map(|c| c.contract_id)
                             .collect();
@@ -721,7 +731,11 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         }
                         let kept = r.credentials.iter().any(|c| {
                             c.credential_id.starts_with(&prefix)
-                                && c.claims.iter().any(|claim| claim.subject == kept_subject)
+                                && c.claims.iter().any(|claim| {
+                                    claim.subject == kept_subject
+                                        && claim.property == ISSUER_CLAIM.0
+                                        && claim.value == ISSUER_CLAIM.1
+                                })
                         });
                         if !kept {
                             return Some(Err(anyhow::anyhow!(
