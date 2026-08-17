@@ -228,3 +228,28 @@ async fn external_party_e2e() -> anyhow::Result<()> {
     phases::external_party_tenant::run(&mut f).await?;
     Ok(())
 }
+
+/// Runs ONLY the dual-decparty onboarding phase, plus the shortest chain that
+/// reaches it. Use this to work on that phase without the full sequence.
+///
+/// `distribute_dars` is required: Canton must vet the DARs before `/contracts`
+/// can create a `GovernanceRules` from `#governance-core-v1`. The chain omits
+/// `check_peer_dars`, which only asserts, and `token_custody`, which is
+/// unrelated. It therefore skips the chaos block, which is most of the suite's
+/// run time.
+///
+/// Invoke with `DECPM_E2E_TEST=dual_governance_e2e ./integration-tests/run.sh`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires running localnet — invoke via integration-tests/run.sh"]
+async fn dual_governance_e2e() -> anyhow::Result<()> {
+    init_tracing();
+
+    let mut f = Fixture::from_env()?;
+    f.discover_network_parties().await?;
+    phases::create_dec_party::run(&mut f).await?;
+    phases::distribute_dars::run(&mut f).await?;
+    phases::deploy_gov_core::run(&mut f).await?;
+    phases::utility_onboarding::run(&mut f).await?;
+    phases::dual_governance_onboarding::run(&mut f).await?;
+    Ok(())
+}
