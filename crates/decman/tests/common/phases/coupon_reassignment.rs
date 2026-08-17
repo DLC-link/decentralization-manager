@@ -137,13 +137,25 @@ fn delegation_query_path(party_id: &str) -> String {
 /// Contract ids of the decparty's `RewardCoupon` contracts (cid-only; the HTTP
 /// endpoint does not surface decoded fields, so we cannot filter by
 /// `beneficiary == null` here — see the module doc).
-async fn query_reward_coupons(f: &Fixture, party_id: &str) -> anyhow::Result<HashSet<String>> {
-    let path = match f.target {
+fn reward_coupon_path(f: &Fixture, party_id: &str) -> String {
+    match f.target {
         crate::common::TestTarget::Localnet => reward_coupon_v2_query_path(party_id),
         crate::common::TestTarget::Devnet => reward_coupon_query_path(party_id),
-    };
-    let r: ContractsQueryResponse = f.get_json(f.p1.http, &path).await?;
+    }
+}
+
+async fn query_reward_coupons(f: &Fixture, party_id: &str) -> anyhow::Result<HashSet<String>> {
+    let r: ContractsQueryResponse = f
+        .get_json(f.p1.http, &reward_coupon_path(f, party_id))
+        .await?;
     Ok(r.contracts.into_iter().map(|c| c.contract_id).collect())
+}
+
+async fn probe_reward_coupons(f: &Fixture, party_id: &str) -> Option<HashSet<String>> {
+    let r: ContractsQueryResponse = f
+        .probe_get_json(f.p1.http, &reward_coupon_path(f, party_id))
+        .await?;
+    Some(r.contracts.into_iter().map(|c| c.contract_id).collect())
 }
 
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
@@ -267,9 +279,8 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         Err(e) => return Some(Err(e)),
                     };
                     let r: ContractsQueryResponse = f
-                        .get_json(f.p1.http, &delegation_query_path(party_id))
-                        .await
-                        .ok()?;
+                        .probe_get_json(f.p1.http, &delegation_query_path(party_id))
+                        .await?;
                     (r.contracts.len() == 1).then_some(Ok(()))
                 })
             },
@@ -291,19 +302,17 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         Err(e) => return Some(Err(e)),
                     };
                     let acs: ContractsQueryResponse = f
-                        .get_json(f.p1.http, &delegation_query_path(party_id))
-                        .await
-                        .ok()?;
+                        .probe_get_json(f.p1.http, &delegation_query_path(party_id))
+                        .await?;
                     let [only] = acs.contracts.as_slice() else {
                         return None;
                     };
                     let r: ActiveDelegationResponse = f
-                        .get_json(
+                        .probe_get_json(
                             f.p1.http,
                             &format!("/coupon-reassignment-delegation?party_id={party_id}"),
                         )
-                        .await
-                        .ok()?;
+                        .await?;
                     let [active] = r.delegations.as_slice() else {
                         return Some(Err(anyhow::anyhow!(
                             "endpoint reported {} delegations while the ACS holds exactly one ({})",
@@ -369,7 +378,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         Ok(p) => p,
                         Err(e) => return Some(Err(e)),
                     };
-                    let current = query_reward_coupons(f, party_id).await.ok()?;
+                    let current = probe_reward_coupons(f, party_id).await?;
                     // Delegation_Assign archives each targeted unassigned
                     // coupon and creates one per beneficiary.
                     //
@@ -412,25 +421,14 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     let benef = benef.clone();
                     let operator = operator.clone();
                     Box::pin(async move {
-                        // Log a hard read error (e.g. an ACS shape mismatch) on
-                        // each attempt instead of silently swallowing it into a
-                        // retry that ends in a generic timeout — makes the first
-                        // live/CI run diagnosable. Still returns None to retry
-                        // (the 120s deadline bounds it).
-                        let b = match f.active_reward_coupons(P1_JSON_API, &benef).await {
-                            Ok(v) => v,
-                            Err(e) => {
-                                warn!("split assertion: reading beneficiary coupons failed: {e:#}");
-                                return None;
-                            }
-                        };
-                        let o = match f.active_reward_coupons(P1_JSON_API, &operator).await {
-                            Ok(v) => v,
-                            Err(e) => {
-                                warn!("split assertion: reading operator coupons failed: {e:#}");
-                                return None;
-                            }
-                        };
+                        let b = f.probe_diag.ok(
+                            "split assertion: read beneficiary coupons",
+                            f.active_reward_coupons(P1_JSON_API, &benef).await,
+                        )?;
+                        let o = f.probe_diag.ok(
+                            "split assertion: read operator coupons",
+                            f.active_reward_coupons(P1_JSON_API, &operator).await,
+                        )?;
                         let sum = |v: &[(Option<String>, String)], who: &str| -> f64 {
                             v.iter()
                                 .filter(|(bene, _)| bene.as_deref() == Some(who))
@@ -482,13 +480,10 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                             Ok(p) => p,
                             Err(e) => return Some(Err(e)),
                         };
-                        let all = match f.active_reward_coupons(P1_JSON_API, party_id).await {
-                            Ok(v) => v,
-                            Err(e) => {
-                                warn!("unassignable assertion: reading coupons failed: {e:#}");
-                                return None;
-                            }
-                        };
+                        let all = f.probe_diag.ok(
+                            "unassignable assertion: read coupons",
+                            f.active_reward_coupons(P1_JSON_API, party_id).await,
+                        )?;
                         let unassigned: Vec<&String> = all
                             .iter()
                             .filter(|(bene, _)| bene.is_none())

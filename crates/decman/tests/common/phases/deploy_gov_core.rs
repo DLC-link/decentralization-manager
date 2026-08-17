@@ -367,7 +367,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
 
                     // Primary: scan /decentralized-parties for the contract.
                     let r: DecentralizedPartiesResponse =
-                        f.get_json(f.p1.http, "/decentralized-parties").await.ok()?;
+                        f.probe_get_json(f.p1.http, "/decentralized-parties").await?;
                     let cid = r
                         .parties
                         .into_iter()
@@ -387,7 +387,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         None => {
                             let path = format!("/governance/state?party_id={party_id}");
                             let r: GovernanceStateLookup =
-                                f.get_json(f.p1.http, &path).await.ok()?;
+                                f.probe_get_json(f.p1.http, &path).await?;
                             r.state?.contract_id
                         }
                     };

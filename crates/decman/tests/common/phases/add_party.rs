@@ -206,13 +206,16 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(60),
             |f, _| {
                 Box::pin(async move {
-                    let prefix = f.party_prefix().ok()?.to_string();
+                    let prefix = match f.party_prefix() {
+                        Ok(v) => v.to_string(),
+                        Err(e) => return Some(Err(e)),
+                    };
                     let p3_uid = f.p3.participant_id.clone();
                     // `refresh=true` forces a fresh Canton fetch so we assert
                     // the real topology, not the stale cache without P3.
                     let path = format!("/decentralized-parties?prefix={prefix}&refresh=true");
                     let r: DecentralizedPartiesResponse =
-                        f.get_json(f.p1.http, &path).await.ok()?;
+                        f.probe_get_json(f.p1.http, &path).await?;
                     let party = r
                         .parties
                         .into_iter()
@@ -237,7 +240,10 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(120),
             |f, _| {
                 Box::pin(async move {
-                    let prefix = f.party_prefix().ok()?.to_string();
+                    let prefix = match f.party_prefix() {
+                        Ok(v) => v.to_string(),
+                        Err(e) => return Some(Err(e)),
+                    };
                     // refresh=true makes each side answer from a fresh Canton
                     // query of its own participant, not a cache.
                     let path = format!("/decentralized-parties?prefix={prefix}&refresh=true");
@@ -254,8 +260,8 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                             })
                     };
 
-                    let p1 = contract_ids(f.get_json(f.p1.http, &path).await.ok()?)?;
-                    let p3 = contract_ids(f.get_json(f.p3.http, &path).await.ok()?)?;
+                    let p1 = contract_ids(f.probe_get_json(f.p1.http, &path).await?)?;
+                    let p3 = contract_ids(f.probe_get_json(f.p3.http, &path).await?)?;
 
                     // Non-empty baseline that P3 fully covers == import worked.
                     // Retry until P3's freshly-imported view catches up to P1's.

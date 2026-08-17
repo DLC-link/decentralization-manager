@@ -148,7 +148,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         |f, _| {
             Box::pin(async move {
                 let r: PendingInvitationsResponse =
-                    f.get_json(f.p3.http, "/invitations").await.ok()?;
+                    f.probe_get_json(f.p3.http, "/invitations").await?;
                 let n = r
                     .invitations
                     .iter()

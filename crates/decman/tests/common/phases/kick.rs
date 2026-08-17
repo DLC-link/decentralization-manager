@@ -28,11 +28,14 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(60),
             |f, _| {
                 Box::pin(async move {
-                    let prefix = f.party_prefix().ok()?.to_string();
+                    let prefix = match f.party_prefix() {
+                        Ok(v) => v.to_string(),
+                        Err(e) => return Some(Err(e)),
+                    };
                     let p3_uid = f.p3.participant_id.clone();
                     let path = format!("/decentralized-parties?prefix={prefix}");
                     let r: DecentralizedPartiesResponse =
-                        f.get_json(f.p1.http, &path).await.ok()?;
+                        f.probe_get_json(f.p1.http, &path).await?;
                     let party = r
                         .parties
                         .into_iter()
@@ -147,14 +150,17 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(60),
             |f, _| {
                 Box::pin(async move {
-                    let prefix = f.party_prefix().ok()?.to_string();
+                    let prefix = match f.party_prefix() {
+                        Ok(v) => v.to_string(),
+                        Err(e) => return Some(Err(e)),
+                    };
                     let p3_uid = f.p3.participant_id.clone();
                     // `refresh=true` forces a fresh Canton fetch so we assert
                     // the real topology, not the up-to-60s-stale cache that
                     // would still list P3.
                     let path = format!("/decentralized-parties?prefix={prefix}&refresh=true");
                     let r: DecentralizedPartiesResponse =
-                        f.get_json(f.p1.http, &path).await.ok()?;
+                        f.probe_get_json(f.p1.http, &path).await?;
                     let party = r
                         .parties
                         .into_iter()

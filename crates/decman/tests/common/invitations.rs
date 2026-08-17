@@ -23,7 +23,7 @@ pub async fn probe_pending_invitation(
     port: u16,
     invitation_type: &str,
 ) -> Option<String> {
-    let r: PendingInvitationsResponse = f.get_json(port, "/invitations").await.ok()?;
+    let r: PendingInvitationsResponse = f.probe_get_json(port, "/invitations").await?;
     r.invitations
         .into_iter()
         .find(|i| i.invitation_type == invitation_type)

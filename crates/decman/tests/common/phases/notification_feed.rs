@@ -55,7 +55,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         |f, _| {
             Box::pin(async move {
                 for port in [f.p1.http, f.p2.http, f.p3.http] {
-                    let r: WorkflowRunsResponse = f.get_json(port, "/workflows").await.ok()?;
+                    let r: WorkflowRunsResponse = f.probe_get_json(port, "/workflows").await?;
                     if r.runs.is_empty() {
                         return None;
                     }
@@ -69,7 +69,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         Duration::from_secs(15),
         |f, _| {
             Box::pin(async move {
-                let r: WorkflowRunsResponse = f.get_json(f.p1.http, "/workflows").await.ok()?;
+                let r: WorkflowRunsResponse = f.probe_get_json(f.p1.http, "/workflows").await?;
                 let row = r
                     .runs
                     .iter()
@@ -89,7 +89,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         Duration::from_secs(15),
         |f, _| {
             Box::pin(async move {
-                let r: WorkflowRunsResponse = f.get_json(f.p2.http, "/workflows").await.ok()?;
+                let r: WorkflowRunsResponse = f.probe_get_json(f.p2.http, "/workflows").await?;
                 let row = r
                     .runs
                     .iter()
@@ -147,7 +147,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             let target = ctx.dismiss_target.clone();
             Box::pin(async move {
                 let target = target?;
-                let r: WorkflowRunsResponse = f.get_json(f.p1.http, "/workflows").await.ok()?;
+                let r: WorkflowRunsResponse = f.probe_get_json(f.p1.http, "/workflows").await?;
                 if r.runs.iter().any(|w| w.instance_name == target) {
                     return None;
                 }
@@ -213,9 +213,12 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         Duration::from_secs(30),
         |f, ctx| {
             Box::pin(async move {
-                let party_id = f.party_id().ok()?.to_string();
+                let party_id = match f.party_id() {
+                    Ok(v) => v.to_string(),
+                    Err(e) => return Some(Err(e)),
+                };
                 let path = format!("/governance/confirmations?party_id={party_id}");
-                let s: GovernanceState = f.get_json(f.p1.http, &path).await.ok()?;
+                let s: GovernanceState = f.probe_get_json(f.p1.http, &path).await?;
                 let last = s.domain_actions.last()?;
                 ctx.proposal_cid = Some(last.proposal_cid.clone());
                 Some(Ok(()))
@@ -229,10 +232,13 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             let cid = ctx.proposal_cid.clone();
             Box::pin(async move {
                 let cid = cid?;
-                let party_id = f.party_id().ok()?.to_string();
+                let party_id = match f.party_id() {
+                    Ok(v) => v.to_string(),
+                    Err(e) => return Some(Err(e)),
+                };
                 let path = format!("/governance/confirmations?party_id={party_id}");
                 for port in [f.p1.http, f.p2.http, f.p3.http] {
-                    let s: GovernanceState = f.get_json(port, &path).await.ok()?;
+                    let s: GovernanceState = f.probe_get_json(port, &path).await?;
                     if !s.domain_actions.iter().any(|a| a.proposal_cid == cid) {
                         return None;
                     }
@@ -246,11 +252,14 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         Duration::from_secs(15),
         |f, _| {
             Box::pin(async move {
-                let party_id = f.party_id().ok()?.to_string();
+                let party_id = match f.party_id() {
+                    Ok(v) => v.to_string(),
+                    Err(e) => return Some(Err(e)),
+                };
                 let path = format!("/governance/confirmations?party_id={party_id}");
-                let s1: GovernanceState = f.get_json(f.p1.http, &path).await.ok()?;
-                let s2: GovernanceState = f.get_json(f.p2.http, &path).await.ok()?;
-                let s3: GovernanceState = f.get_json(f.p3.http, &path).await.ok()?;
+                let s1: GovernanceState = f.probe_get_json(f.p1.http, &path).await?;
+                let s2: GovernanceState = f.probe_get_json(f.p2.http, &path).await?;
+                let s3: GovernanceState = f.probe_get_json(f.p3.http, &path).await?;
                 if s1.threshold != s2.threshold || s2.threshold != s3.threshold {
                     return Some(Err(anyhow::anyhow!(
                         "threshold mismatch: P1={}, P2={}, P3={}",
