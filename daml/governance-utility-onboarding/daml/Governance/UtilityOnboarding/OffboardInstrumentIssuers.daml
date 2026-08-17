@@ -1,71 +1,72 @@
 -- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
--- | Granular onboarding action: the registrar decparty revokes the
--- credentials it self-issued for instrument issuers, removing their
--- issuing privileges. Externally-issued credentials are out of scope: the
--- checked fetch on issuer == holder == governanceParty rejects them.
+-- | The registrar decparty revokes the credentials it issued for instrument
+-- issuers. A revoked issuer loses the right to mint and burn the instrument.
 --
--- The offboarded parties are not restated in the payload: each credential's
--- claims name the issuer it attests for, and the claims are the single
--- source of truth.
+-- The caller names each instrument issuer and lists that issuer's credentials.
+-- The action checks that every claim on a credential names the declared issuer.
 --
--- The action revokes only the credentials the caller lists. On-chain checks
--- cannot enumerate a party's credentials, so completeness is the caller's
--- responsibility: an issuer keeps minting rights through any live credential
--- the proposal omits. Proposal tooling must list every credential the
--- governance party self-issued for the offboarded issuers.
+-- The action revokes only the credentials the caller lists. Daml cannot
+-- enumerate a party's credentials. The caller must therefore list every
+-- credential the governance party issued for each offboarded issuer.
 module Governance.UtilityOnboarding.OffboardInstrumentIssuers where
 
-import DA.List (dedup, unique)
+import DA.Foldable (forA_)
+import DA.List (unique)
 
-import Splice.Util (fetchChecked)
+import Splice.Util (fetchChecked, require)
 import Utility.Credential.V0.Credential
   (Credential, Credential_Revoke(..), WithIssuerHolder(..))
 
 import Governance.Action
+import Governance.UtilityOnboarding.Utils (partyList)
+
+-- | One offboarded instrument issuer, and the credentials to revoke for it.
+data InstrumentIssuerCredentials = InstrumentIssuerCredentials
+  with
+    instrumentIssuer : Party
+    credentialCids : [ContractId Credential]
+  deriving (Eq, Show)
 
 template OffboardInstrumentIssuers
   with
     governanceParty : Party
       -- ^ The registrar decparty that issued the credentials.
     proposer : Party
-    instrumentIssuerCids : [ContractId Credential]
-      -- ^ Credentials the governance party self-issued for the offboarded
-      -- instrument issuers.
+    instrumentIssuers : [InstrumentIssuerCredentials]
+      -- ^ The offboarded issuers, each with the credentials to revoke.
   where
     signatory proposer
     observer governanceParty
-    -- An offboard action that revokes no credentials does no work; reject
-    -- it at creation rather than record a no-op governance result. A
-    -- duplicated cid would revoke the same credential twice — the second
-    -- revoke hits an archived contract and fails the whole action at
-    -- execution — so reject duplicates too.
-    ensure not (null instrumentIssuerCids)
-        && unique instrumentIssuerCids
+    ensure not (null instrumentIssuers)
+        && all (\row -> not (null row.credentialCids)) instrumentIssuers
+        && unique (map (.instrumentIssuer) instrumentIssuers)
+        && unique (concatMap (.credentialCids) instrumentIssuers)
 
     interface instance GovernableAction for OffboardInstrumentIssuers where
       view = GovernableActionView with
         governanceParty
         proposer
         actionLabel = "OffboardInstrumentIssuers"
-        description = "Offboard instrument issuers (revoke "
-          <> show (length instrumentIssuerCids) <> " credentials)"
+        -- Voters see only this text; name every party losing minting rights.
+        description = "Offboard instrument issuers "
+          <> partyList (map (.instrumentIssuer) instrumentIssuers)
+          <> " (revoke "
+          <> show (length (concatMap (.credentialCids) instrumentIssuers))
+          <> " credentials)"
 
-      executeImpl = do
-        _ <- forA instrumentIssuerCids $ \credentialCid -> do
-          credential <- fetchChecked
-            (WithIssuerHolder with
-               issuer = governanceParty
-               holder = governanceParty)
-            credentialCid
-          -- A claimless credential attests for nobody; refuse to treat it
-          -- as belonging to any particular issuer.
-          assertMsg "OffboardInstrumentIssuers: credential has no claims"
-            (not $ null credential.claims)
-          -- Claims naming several subjects would revoke more than one
-          -- issuer's attestation in one opaque step; refuse them.
-          assertMsg "OffboardInstrumentIssuers: credential claims name more than one subject"
-            (length (dedup (map (.subject) credential.claims)) == 1)
-          exercise credentialCid Credential_Revoke with actor = governanceParty
-        pure ()
+      executeImpl =
+        forA_ instrumentIssuers $ \row ->
+          forA_ row.credentialCids $ \credentialCid -> do
+            credential <- fetchChecked
+              (WithIssuerHolder with
+                 issuer = governanceParty
+                 holder = governanceParty)
+              credentialCid
+            require "OffboardInstrumentIssuers: credential has no claims"
+              (not $ null credential.claims)
+            require "OffboardInstrumentIssuers: credential claims name a subject other than the declared instrument issuer"
+              (all (\claim -> claim.subject == partyToText row.instrumentIssuer)
+                 credential.claims)
+            exercise credentialCid Credential_Revoke with actor = governanceParty
