@@ -2,9 +2,11 @@ use std::{path::Path, process::Command};
 
 fn main() {
     // The frontend's TypeScript wire types are generated from the Rust DTOs by
-    // the `gen-types` binary (ts-rs) and committed to the repo — see
-    // `crates/decman/src/bin/gen_types.rs` and `just gen-types`. This build
-    // script only compiles and embeds the frontend bundle.
+    // the `gen-types` binary (ts-rs) and are gitignored — see
+    // `crates/decman/src/bin/gen_types.rs` and `just gen-types`. CI regenerates
+    // them before every frontend build. This build script only compiles and
+    // embeds the frontend bundle; it cannot generate the types itself, because
+    // the generator is a binary in this same crate.
     //
     // `DECMAN_SKIP_FRONTEND=1` skips the (slow) npm build while iterating on the
     // Rust side locally. CI and release builds leave it unset.
@@ -57,5 +59,18 @@ fn build_frontend() {
         .status()
         .expect("Failed to run npm build");
 
-    assert!(status.success(), "Frontend build failed");
+    let generated_types = frontend_dir.join("src/types.generated.ts");
+    assert!(
+        status.success(),
+        "Frontend build failed.\n\
+         \n\
+         If the error above is TypeScript rejecting a property that should \
+         exist, {} is stale. It is generated from the Rust DTOs and \
+         gitignored, so merging or rebasing onto main brings new backend \
+         fields without the matching types, and nothing prompts a \
+         regeneration.\n\
+         \n\
+         Fix: run `just gen-types`, then build again.",
+        generated_types.display()
+    );
 }
