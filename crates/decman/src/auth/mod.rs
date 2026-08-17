@@ -581,10 +581,26 @@ mod tests {
 
         assert!(registry.party_ids().is_empty());
         let logs = captured(&buffer)?;
+
+        // Scoped to the summary line, because each party id also appears in
+        // its own warning above. A search over the whole capture would pass
+        // even if the summary named nobody.
+        let summary = logs
+            .lines()
+            .find(|line| line.contains("Authentication failed for all"))
+            .ok_or_else(|| anyhow!("no all-parties-failed error was logged: {logs}"))?;
         assert!(
-            logs.contains("ERROR") && logs.contains("all 2 configured parties"),
-            "the all-parties-failed error is missing: {logs}"
+            summary.contains("ERROR"),
+            "the summary is not an error: {summary}"
         );
+        assert!(
+            summary.contains("all 2 configured parties"),
+            "the summary miscounts the failures: {summary}"
+        );
+        for party in &parties {
+            let id = party.dec_party_id.to_string();
+            assert!(summary.contains(&id), "the summary omits {id}: {summary}");
+        }
         Ok(())
     }
 
