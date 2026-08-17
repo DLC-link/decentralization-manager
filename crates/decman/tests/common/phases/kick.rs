@@ -1,6 +1,10 @@
 use std::time::Duration;
 
 use anyhow::Context;
+use common::{
+    api::DecentralizedPartiesResponse,
+    types::{InvitationType, WorkflowKind, WorkflowProgress, WorkflowRole},
+};
 use serde_json::{Value, json};
 use tracing::info;
 
@@ -9,7 +13,6 @@ use crate::common::{
     http::{probe_workflow_run_visible, probe_workflow_status},
     invitations::{InvitationIds, post_accept_invitation, probe_pending_invitation},
     scenario::Scenario,
-    types::DecentralizedPartiesResponse,
 };
 
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
@@ -36,11 +39,11 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     let party = r
                         .parties
                         .into_iter()
-                        .find(|p| p.party_id.starts_with(&prefix))?;
+                        .find(|p| p.party_id.prefix == prefix)?;
                     let pi = party
                         .participants
                         .into_iter()
-                        .find(|p| p.participant_uid == p3_uid)?;
+                        .find(|p| p.participant_uid.to_string() == p3_uid)?;
                     pi.owner_key.map(|_| Ok(()))
                 })
             },
@@ -96,7 +99,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(60),
             |f, ctx| {
                 Box::pin(async move {
-                    let id = probe_pending_invitation(f, f.p2.http, "Kick").await?;
+                    let id = probe_pending_invitation(f, f.p2.http, InvitationType::Kick).await?;
                     ctx.p2 = Some(id);
                     Some(Ok(()))
                 })
@@ -128,8 +131,14 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(30),
             |f, _| {
                 Box::pin(async move {
-                    probe_workflow_run_visible(f, f.p1.http, "Kick", "Coordinator", "completed")
-                        .await
+                    probe_workflow_run_visible(
+                        f,
+                        f.p1.http,
+                        WorkflowKind::Kick,
+                        WorkflowRole::Coordinator,
+                        WorkflowProgress::Completed,
+                    )
+                    .await
                 })
             },
         )
@@ -138,7 +147,14 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(30),
             |f, _| {
                 Box::pin(async move {
-                    probe_workflow_run_visible(f, f.p2.http, "Kick", "Peer", "completed").await
+                    probe_workflow_run_visible(
+                        f,
+                        f.p2.http,
+                        WorkflowKind::Kick,
+                        WorkflowRole::Peer,
+                        WorkflowProgress::Completed,
+                    )
+                    .await
                 })
             },
         )
@@ -158,11 +174,11 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     let party = r
                         .parties
                         .into_iter()
-                        .find(|p| p.party_id.starts_with(&prefix))?;
+                        .find(|p| p.party_id.prefix == prefix)?;
                     let p3_present = party
                         .participants
                         .iter()
-                        .any(|p| p.participant_uid == p3_uid);
+                        .any(|p| p.participant_uid.to_string() == p3_uid);
                     // Retry until the topology change has propagated (the kick
                     // already reached `completed` above, so this converges
                     // promptly); a lingering P3 or wrong threshold then surfaces

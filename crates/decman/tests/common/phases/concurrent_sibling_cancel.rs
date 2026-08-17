@@ -17,6 +17,7 @@
 use std::time::Duration;
 
 use anyhow::Context;
+use common::api::PendingInvitationsResponse;
 use serde_json::json;
 use tracing::info;
 
@@ -128,7 +129,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         let keep = keep_for_poll.clone();
         let cancel = cancel_for_poll.clone();
         async move {
-            let r: crate::common::types::PendingInvitationsResponse =
+            let r: PendingInvitationsResponse =
                 f_imm.get_json(f_imm.p2.http, "/invitations").await?;
             let has_keep = r
                 .invitations

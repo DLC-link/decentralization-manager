@@ -1,6 +1,10 @@
 use std::time::Duration;
 
 use anyhow::Context;
+use common::{
+    api::DecentralizedPartiesResponse,
+    types::{InvitationType, WorkflowKind, WorkflowProgress, WorkflowRole},
+};
 use serde_json::{Value, json};
 use tracing::info;
 
@@ -9,7 +13,6 @@ use crate::common::{
     http::{probe_workflow_run_visible, probe_workflow_status},
     invitations::{InvitationIds, post_accept_invitation, probe_pending_invitation},
     scenario::Scenario,
-    types::DecentralizedPartiesResponse,
 };
 
 /// Re-add P3 to the party the kick phase removed it from. Runs directly
@@ -120,7 +123,8 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(60),
             |f, ctx| {
                 Box::pin(async move {
-                    let id = probe_pending_invitation(f, f.p2.http, "AddParty").await?;
+                    let id =
+                        probe_pending_invitation(f, f.p2.http, InvitationType::AddParty).await?;
                     ctx.p2 = Some(id);
                     Some(Ok(()))
                 })
@@ -131,7 +135,8 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(60),
             |f, ctx| {
                 Box::pin(async move {
-                    let id = probe_pending_invitation(f, f.p3.http, "AddParty").await?;
+                    let id =
+                        probe_pending_invitation(f, f.p3.http, InvitationType::AddParty).await?;
                     ctx.p3 = Some(id);
                     Some(Ok(()))
                 })
@@ -178,8 +183,14 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(30),
             |f, _| {
                 Box::pin(async move {
-                    probe_workflow_run_visible(f, f.p1.http, "AddParty", "Coordinator", "completed")
-                        .await
+                    probe_workflow_run_visible(
+                        f,
+                        f.p1.http,
+                        WorkflowKind::AddParty,
+                        WorkflowRole::Coordinator,
+                        WorkflowProgress::Completed,
+                    )
+                    .await
                 })
             },
         )
@@ -188,7 +199,14 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(30),
             |f, _| {
                 Box::pin(async move {
-                    probe_workflow_run_visible(f, f.p2.http, "AddParty", "Peer", "completed").await
+                    probe_workflow_run_visible(
+                        f,
+                        f.p2.http,
+                        WorkflowKind::AddParty,
+                        WorkflowRole::Peer,
+                        WorkflowProgress::Completed,
+                    )
+                    .await
                 })
             },
         )
@@ -197,7 +215,14 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(30),
             |f, _| {
                 Box::pin(async move {
-                    probe_workflow_run_visible(f, f.p3.http, "AddParty", "Peer", "completed").await
+                    probe_workflow_run_visible(
+                        f,
+                        f.p3.http,
+                        WorkflowKind::AddParty,
+                        WorkflowRole::Peer,
+                        WorkflowProgress::Completed,
+                    )
+                    .await
                 })
             },
         )
@@ -216,11 +241,11 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     let party = r
                         .parties
                         .into_iter()
-                        .find(|p| p.party_id.starts_with(&prefix))?;
+                        .find(|p| p.party_id.prefix == prefix)?;
                     let p3_present = party
                         .participants
                         .iter()
-                        .any(|p| p.participant_uid == p3_uid);
+                        .any(|p| p.participant_uid.to_string() == p3_uid);
                     if !p3_present || party.participants.len() != 3 || party.threshold != 2 {
                         return None;
                     }
@@ -245,7 +270,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     let contract_ids = |r: DecentralizedPartiesResponse| {
                         r.parties
                             .into_iter()
-                            .find(|p| p.party_id.starts_with(&prefix))
+                            .find(|p| p.party_id.prefix == prefix)
                             .map(|p| {
                                 p.contracts
                                     .into_iter()

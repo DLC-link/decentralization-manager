@@ -16,10 +16,11 @@
 use std::time::Duration;
 
 use anyhow::Context;
+use common::api::DecentralizedPartiesResponse;
 use tokio::time::sleep;
 use tracing::info;
 
-use crate::common::{Fixture, scenario::Scenario, types::DecentralizedPartiesResponse};
+use crate::common::{Fixture, scenario::Scenario};
 
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: owner_key_resilience");
@@ -49,11 +50,11 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     let party = r
                         .parties
                         .into_iter()
-                        .find(|p| p.party_id.starts_with(&prefix))?;
+                        .find(|p| p.party_id.prefix == prefix)?;
                     let pi = party
                         .participants
                         .into_iter()
-                        .find(|p| p.participant_uid == p3_uid)?;
+                        .find(|p| p.participant_uid.to_string() == p3_uid)?;
                     pi.owner_key.map(|_| Ok(()))
                 })
             },
@@ -115,12 +116,12 @@ async fn assert_owner_key_intact(f: &mut Fixture) -> anyhow::Result<()> {
     let party = r
         .parties
         .into_iter()
-        .find(|p| p.party_id.starts_with(&prefix))
+        .find(|p| p.party_id.prefix == prefix)
         .context("party not found after refresh")?;
     let p3 = party
         .participants
         .into_iter()
-        .find(|p| p.participant_uid == p3_uid)
+        .find(|p| p.participant_uid.to_string() == p3_uid)
         .context("P3 not in participants after refresh")?;
     p3.owner_key
         .context("P3 owner_key was wiped by refresh — UPSERT/COALESCE regression")?;

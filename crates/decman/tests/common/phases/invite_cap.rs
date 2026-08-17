@@ -14,10 +14,11 @@
 use std::time::Duration;
 
 use anyhow::Context;
+use common::api::PendingInvitationsResponse;
 use serde_json::json;
 use tracing::info;
 
-use crate::common::{Fixture, chaos, db, types::PendingInvitationsResponse};
+use crate::common::{Fixture, chaos, db};
 
 const RUNS: usize = 17;
 const CAP: usize = 16;
