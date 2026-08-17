@@ -846,6 +846,17 @@ pub struct PartyCredentialRequirement {
     pub required_claims: Vec<RequiredClaim>,
 }
 
+/// One offboarded instrument issuer and the credentials to revoke for it. The
+/// Daml side checks that every claim on each credential names this issuer.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct InstrumentIssuerCredentials {
+    pub instrument_issuer: CantonId,
+    #[serde(default)]
+    pub credential_cids: Vec<String>,
+}
+
 /// Which governance system a request targets
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

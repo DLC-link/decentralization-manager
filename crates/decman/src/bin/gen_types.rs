@@ -128,6 +128,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         PendingInvitation,
         PendingInvitationsResponse,
         PartyCredentialRequirement,
+        InstrumentIssuerCredentials,
         Permission,
         ProviderConfigurationInfo,
         ProviderConfigurationsResponse,

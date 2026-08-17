@@ -24,11 +24,12 @@ pub use common::api::{
     DiscoverMemberPartyRequest, DiscoverMemberPartyResponse, ErrorResponse,
     ExpireConfirmationRequest, ExternalPartiesResponse, ExternalPartyInfo, GovernanceState,
     GovernanceStateResponse, GovernanceType, GrantRightsRequest, GrantRightsResponse,
-    InstrumentAllowance, InstrumentId, InstrumentIdentifier, InstrumentInfo, InstrumentsResponse,
-    InvitationActionRequest, KeyStatusResponse, KickInvitePayload, KickRequest, KnownMember,
-    KnownMembersResponse, MessageResponse, MissingEdgeKind, MissingPeerEdge, NetworkInfo,
-    OnboardingInvitePayload, OnboardingMeshErrorResponse, OnboardingRequest, OperatorInfo,
-    PartyAuthStatus, PartyConfigRequest, PartyConfigResponse, PartyCredentialRequirement,
+    InstrumentAllowance, InstrumentId, InstrumentIdentifier, InstrumentInfo,
+    InstrumentIssuerCredentials, InstrumentsResponse, InvitationActionRequest, KeyStatusResponse,
+    KickInvitePayload, KickRequest, KnownMember, KnownMembersResponse, MessageResponse,
+    MissingEdgeKind, MissingPeerEdge, NetworkInfo, OnboardingInvitePayload,
+    OnboardingMeshErrorResponse, OnboardingRequest, OperatorInfo, PartyAuthStatus,
+    PartyConfigRequest, PartyConfigResponse, PartyCredentialRequirement,
     PendingInvitationsResponse, ProviderConfigurationInfo, ProviderConfigurationsResponse,
     ProviderServiceInfo, ProviderServicesResponse, RegistrarServiceInfo,
     RegistrarServiceRequestInfo, RegistrarServiceRequestsResponse, RegistrarServicesResponse,
@@ -868,10 +869,12 @@ pub enum ProposalType {
         instrument_configuration_cid: String,
         instrument_issuers: Vec<CantonId>,
     },
-    /// Revoke the credentials the governance party self-issued for
-    /// instrument issuers, removing their issuing privileges. Each
-    /// credential's claims name the issuer it attests for.
-    OffboardInstrumentIssuers { instrument_issuer_cids: Vec<String> },
+    /// Revoke the credentials the governance party issued for instrument
+    /// issuers, removing their issuing privileges. Each row names one issuer
+    /// and lists that issuer's credentials.
+    OffboardInstrumentIssuers {
+        instrument_issuers: Vec<InstrumentIssuerCredentials>,
+    },
 }
 
 impl ProposalType {
@@ -949,16 +952,29 @@ impl ProposalType {
                 governance_party,
                 "registrar_requirements",
             ),
-            ProposalType::OffboardInstrumentIssuers {
-                instrument_issuer_cids,
-            } => {
-                if instrument_issuer_cids.is_empty() {
-                    return Err("instrument_issuer_cids must not be empty".to_string());
+            ProposalType::OffboardInstrumentIssuers { instrument_issuers } => {
+                if instrument_issuers.is_empty() {
+                    return Err("instrument_issuers must not be empty".to_string());
                 }
-                let mut seen = std::collections::HashSet::new();
-                for cid in instrument_issuer_cids {
-                    if !seen.insert(cid) {
-                        return Err(format!("duplicate credential cid not allowed: {cid}"));
+                let mut seen_parties = HashSet::new();
+                let mut seen_cids = HashSet::new();
+                for row in instrument_issuers {
+                    if row.credential_cids.is_empty() {
+                        return Err(format!(
+                            "credential_cids must not be empty for issuer {}",
+                            row.instrument_issuer
+                        ));
+                    }
+                    if !seen_parties.insert(&row.instrument_issuer) {
+                        return Err(format!(
+                            "duplicate instrument issuer not allowed: {}",
+                            row.instrument_issuer
+                        ));
+                    }
+                    for cid in &row.credential_cids {
+                        if !seen_cids.insert(cid) {
+                            return Err(format!("duplicate credential cid not allowed: {cid}"));
+                        }
                     }
                 }
                 Ok(())
@@ -1707,33 +1723,59 @@ mod tests {
     }
 
     #[test]
-    fn proposal_offboard_instrument_issuers_rejects_empty_list() {
-        // Mirrors the template's `ensure`: the credential list must be
-        // non-empty.
-        let mk = |cids: Vec<String>| ProposalType::OffboardInstrumentIssuers {
-            instrument_issuer_cids: cids,
+    fn proposal_offboard_instrument_issuers_validates_rows() {
+        // Mirrors the template's four ensure guards.
+        let gov = cid("gov");
+        let issuer_a = cid("issuer-a");
+        let issuer_b = cid("issuer-b");
+        let row = |issuer: CantonId, cids: Vec<&str>| InstrumentIssuerCredentials {
+            instrument_issuer: issuer,
+            credential_cids: cids.into_iter().map(str::to_string).collect(),
         };
-        assert!(mk(Vec::new()).validate(&cid("gov")).is_err());
-        assert!(mk(vec!["cred-1".to_string()]).validate(&cid("gov")).is_ok());
-    }
+        let mk = |rows: Vec<InstrumentIssuerCredentials>| ProposalType::OffboardInstrumentIssuers {
+            instrument_issuers: rows,
+        };
 
-    #[test]
-    fn proposal_offboard_instrument_issuers_rejects_duplicate_cids() {
-        // Mirrors the template's `ensure unique instrumentIssuerCids`: a
-        // duplicated cid would revoke the same credential twice and fail
-        // the whole action at execution.
-        let mk = |cids: Vec<String>| ProposalType::OffboardInstrumentIssuers {
-            instrument_issuer_cids: cids,
-        };
+        // No rows: revokes nothing.
+        assert!(mk(vec![]).validate(&gov).is_err());
+        // A row with no cids: revokes nothing.
         assert!(
-            mk(vec!["cred-1".to_string(), "cred-1".to_string()])
-                .validate(&cid("gov"))
+            mk(vec![row(issuer_a.clone(), vec![])])
+                .validate(&gov)
                 .is_err()
         );
+        // The same party in two rows.
         assert!(
-            mk(vec!["cred-1".to_string(), "cred-2".to_string()])
-                .validate(&cid("gov"))
-                .is_ok()
+            mk(vec![
+                row(issuer_a.clone(), vec!["cred-1"]),
+                row(issuer_a.clone(), vec!["cred-2"]),
+            ])
+            .validate(&gov)
+            .is_err()
+        );
+        // The same cid in two rows.
+        assert!(
+            mk(vec![
+                row(issuer_a.clone(), vec!["cred-1"]),
+                row(issuer_b.clone(), vec!["cred-1"]),
+            ])
+            .validate(&gov)
+            .is_err()
+        );
+        // The same cid twice inside one row.
+        assert!(
+            mk(vec![row(issuer_a.clone(), vec!["cred-1", "cred-1"])])
+                .validate(&gov)
+                .is_err()
+        );
+        // Two issuers, distinct cids.
+        assert!(
+            mk(vec![
+                row(issuer_a, vec!["cred-1", "cred-2"]),
+                row(issuer_b, vec!["cred-3"]),
+            ])
+            .validate(&gov)
+            .is_ok()
         );
     }
 

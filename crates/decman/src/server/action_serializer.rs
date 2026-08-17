@@ -1727,9 +1727,7 @@ pub fn build_proposal_create_args(
                 ],
             },
         ),
-        ProposalType::OffboardInstrumentIssuers {
-            instrument_issuer_cids,
-        } => (
+        ProposalType::OffboardInstrumentIssuers { instrument_issuers } => (
             ProposalPackage::GovernanceUtilityOnboarding,
             "Governance.UtilityOnboarding.OffboardInstrumentIssuers",
             "OffboardInstrumentIssuers",
@@ -1739,11 +1737,27 @@ pub fn build_proposal_create_args(
                     field("governanceParty", make_party(governance_party)),
                     field("proposer", make_party(proposer)),
                     field(
-                        "instrumentIssuerCids",
+                        "instrumentIssuers",
                         make_list(
-                            instrument_issuer_cids
+                            instrument_issuers
                                 .iter()
-                                .map(|cid| make_contract_id(cid))
+                                .map(|row| {
+                                    make_record(vec![
+                                        field(
+                                            "instrumentIssuer",
+                                            make_party(&row.instrument_issuer),
+                                        ),
+                                        field(
+                                            "credentialCids",
+                                            make_list(
+                                                row.credential_cids
+                                                    .iter()
+                                                    .map(|cid| make_contract_id(cid))
+                                                    .collect(),
+                                            ),
+                                        ),
+                                    ])
+                                })
                                 .collect(),
                         ),
                     ),
@@ -2263,7 +2277,7 @@ mod tests {
     use super::*;
     use crate::{
         canton_id::{NAMESPACE_LENGTH, Namespace},
-        server::types::RequiredClaim,
+        server::types::{InstrumentIssuerCredentials, RequiredClaim},
     };
 
     #[test]
@@ -3269,12 +3283,15 @@ mod tests {
             },
             Case {
                 proposal: ProposalType::OffboardInstrumentIssuers {
-                    instrument_issuer_cids: vec!["cred-1".to_string()],
+                    instrument_issuers: vec![InstrumentIssuerCredentials {
+                        instrument_issuer: party_id(),
+                        credential_cids: vec!["cred-1".to_string()],
+                    }],
                 },
                 package: ProposalPackage::GovernanceUtilityOnboarding,
                 module: "Governance.UtilityOnboarding.OffboardInstrumentIssuers",
                 entity: "OffboardInstrumentIssuers",
-                labels: &["governanceParty", "proposer", "instrumentIssuerCids"],
+                labels: &["governanceParty", "proposer", "instrumentIssuers"],
             },
         ];
 
@@ -3394,25 +3411,39 @@ mod tests {
     }
 
     #[test]
-    fn build_proposal_offboard_instrument_issuers_serializes_credential_cids() -> Result {
-        // The arm forwards the supplied credential cids into the
-        // `instrumentIssuerCids` list as ContractId values. Labels alone
-        // cannot catch a regression to a hardcoded empty list.
+    fn build_proposal_offboard_instrument_issuers_serializes_rows() -> Result {
+        // The arm forwards each row as a record of a Party and a list of
+        // ContractId. Labels alone cannot catch a regression to a flat list.
+        let issuer = party_id();
         let proposal = ProposalType::OffboardInstrumentIssuers {
-            instrument_issuer_cids: vec!["cred-1".to_string(), "cred-2".to_string()],
+            instrument_issuers: vec![InstrumentIssuerCredentials {
+                instrument_issuer: issuer.clone(),
+                credential_cids: vec!["cred-1".to_string(), "cred-2".to_string()],
+            }],
         };
         let (_, _, _, record) =
             build_proposal_create_args("gov", "proposer", &proposal, None, None)?;
-        let cids: Vec<_> = as_list_elements(
-            field_value(&record, "instrumentIssuerCids"),
-            "instrumentIssuerCids",
-        )
-        .iter()
-        .map(|v| match &v.sum {
-            Some(value::Sum::ContractId(cid)) => cid.as_str(),
-            other => panic!("expected ContractId element, got {other:?}"),
-        })
-        .collect();
+        let rows = as_list_elements(
+            field_value(&record, "instrumentIssuers"),
+            "instrumentIssuers",
+        );
+        assert_eq!(rows.len(), 1);
+        let row = match &rows[0].sum {
+            Some(value::Sum::Record(r)) => r,
+            other => panic!("expected Record element, got {other:?}"),
+        };
+        let party = match &field_value(row, "instrumentIssuer").sum {
+            Some(value::Sum::Party(p)) => p.as_str(),
+            other => panic!("expected Party, got {other:?}"),
+        };
+        assert_eq!(party, issuer.to_string().as_str());
+        let cids: Vec<_> = as_list_elements(field_value(row, "credentialCids"), "credentialCids")
+            .iter()
+            .map(|v| match &v.sum {
+                Some(value::Sum::ContractId(cid)) => cid.as_str(),
+                other => panic!("expected ContractId element, got {other:?}"),
+            })
+            .collect();
         assert_eq!(cids, ["cred-1", "cred-2"]);
         Ok(())
     }
