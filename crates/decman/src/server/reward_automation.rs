@@ -795,7 +795,6 @@ fn canton_error_id(e: &anyhow::Error) -> Option<String> {
 /// Both reads name their package by alias, so the ledger rejects the request
 /// before it reads a contract. A node in that state fails identically on every
 /// tick and no operator can act on the line, so the loop logs it at `trace`.
-/// Issue #334 stops running the loop there at all.
 ///
 /// One id covers both reads, because the delegation read runs first: a missing
 /// `governance-rewards-automation-v1` fails there, and a missing
