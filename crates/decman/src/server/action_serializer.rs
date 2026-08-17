@@ -245,7 +245,11 @@ fn serialize_instrument_id(id: &InstrumentId) -> Value {
 fn make_optional_list(values: Vec<Value>) -> Value {
     Value {
         sum: Some(value::Sum::Optional(Box::new(Optional {
-            value: Some(Box::new(make_list(values))),
+            value: if values.is_empty() {
+                None
+            } else {
+                Some(Box::new(make_list(values)))
+            },
         }))),
     }
 }
