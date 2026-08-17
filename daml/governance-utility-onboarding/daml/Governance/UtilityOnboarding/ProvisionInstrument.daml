@@ -6,8 +6,10 @@
 -- Executed once per instrument.
 module Governance.UtilityOnboarding.ProvisionInstrument where
 
+import DA.Foldable (forA_)
 import DA.List (unique)
 
+import Splice.Util (require)
 import Utility.Credential.V0.Credential (PartyCredentialRequirement)
 import Utility.Registry.App.V0.Service.Registrar
   (RegistrarService, RegistrarService_CreateInstrumentConfiguration(..))
@@ -48,31 +50,19 @@ template ProvisionInstrument
                issuers -> ", initial issuers " <> partyList issuers
 
       executeImpl = do
-        -- Controller authorization alone is not enough: the proposer's
-        -- authority is in scope during execution, so a service owned by the
-        -- proposer would pass it. Pin the service to the governance party.
+        -- The proposer's authority is in scope during execution. Controller
+        -- authorization alone would therefore accept a service the proposer
+        -- owns. Pin the service to the governance party.
         registrarService <- fetch registrarServiceCid
-        assertMsg "ProvisionInstrument: registrar service registrar does not match the governance party"
+        require "ProvisionInstrument: registrar service registrar does not match the governance party"
           (registrarService.registrar == governanceParty)
-        result <- exercise registrarServiceCid RegistrarService_CreateInstrumentConfiguration with
+        _ <- exercise registrarServiceCid RegistrarService_CreateInstrumentConfiguration with
           instrumentId = instrumentIdText
           additionalIdentifiers
           issuerRequirements
           holderRequirements
-        -- Mint from the stored configuration, not the proposal parameter.
-        -- OnboardInstrumentIssuers credentials later issuers from what the
-        -- configuration stores, so if the SDK choice ever rewrites the
-        -- requirements it records, minting from the proposal's copy would
-        -- give initial issuers different credentials than later ones.
-        instrumentConfiguration <- fetch result.instrumentConfigurationCid
-        -- The role tag carries the instrument symbol so a credential id
-        -- names the instrument it grants issuing rights for. A registrar
-        -- running several instruments would otherwise see identical-looking
-        -- rows in the offboard picker.
-        _ <- forA initialInstrumentIssuers $ \instrumentIssuer ->
+        forA_ initialInstrumentIssuers $ \instrumentIssuer ->
           mintCredentialsMeetingRequirements
             governanceParty instrumentIssuer
-            (instrumentConfiguration.defaultIdentifier.id
-               <> "-instrument-issuer-credential")
-            instrumentConfiguration.issuerRequirements
-        pure ()
+            (instrumentIdText <> "-instrument-issuer-credential")
+            issuerRequirements
