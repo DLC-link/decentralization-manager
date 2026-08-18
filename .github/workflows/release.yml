@@ -30,8 +30,13 @@ jobs:
           fi
           echo "Tag $GITHUB_REF_NAME matches crate version v$crate_version"
 
+  # Deliberately does NOT wait for `ci`: the binary build consumes nothing CI
+  # produces, so gating it on the ~29m integration tests only serialized two
+  # independent jobs. `docker` gates on both, so nothing unverified is ever
+  # published — a CI failure still blocks the push, it just no longer blocks
+  # the compile that runs alongside it.
   binary:
-    needs: [ci, verify-tag]
+    needs: [verify-tag]
     uses: ./.github/workflows/build-binary.yml
     with:
       profile: release
@@ -39,7 +44,7 @@ jobs:
 
   docker:
     name: Build & Push Public Image
-    needs: binary
+    needs: [ci, binary]
     runs-on: ubuntu-latest
     permissions:
       id-token: write
