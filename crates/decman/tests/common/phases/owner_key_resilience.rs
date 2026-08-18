@@ -42,11 +42,17 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(30),
             |f, _| {
                 Box::pin(async move {
-                    let prefix = f.party_prefix().ok()?.to_string();
-                    let p3_uid: CantonId = f.p3.participant_id.parse().ok()?;
+                    let prefix = match f.party_prefix() {
+                        Ok(v) => v.to_string(),
+                        Err(e) => return Some(Err(e)),
+                    };
+                    let p3_uid: CantonId = match f.p3.participant_id.parse() {
+                        Ok(v) => v,
+                        Err(e) => return Some(Err(e)),
+                    };
                     let path = format!("/decentralized-parties?prefix={prefix}");
                     let r: DecentralizedPartiesResponse =
-                        f.get_json(f.p1.http, &path).await.ok()?;
+                        f.probe_get_json(f.p1.http, &path).await?;
                     let party = r
                         .parties
                         .into_iter()

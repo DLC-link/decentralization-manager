@@ -13,7 +13,7 @@ use std::{
 use anyhow::Result;
 use tracing::{error, info};
 
-use super::Fixture;
+use super::{Fixture, probe::FATAL_STREAK};
 
 pub type BoxFut<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 pub type BoxProbe<'a> = Pin<Box<dyn Future<Output = Option<Result<()>>> + Send + 'a>>;
@@ -165,6 +165,7 @@ impl<Ctx: Send + 'static> Scenario<Ctx> {
                     let kind = StepKind::Then;
                     info!(step_kind = ?kind, step_name = %name, "    {} {}", kind.label(), name);
                     let step_start = Instant::now();
+                    f.probe_diag.reset();
                     let outcome: Result<()> = loop {
                         match probe(f, &mut self.ctx).await {
                             Some(Ok(())) => break Ok(()),
@@ -172,13 +173,30 @@ impl<Ctx: Send + 'static> Scenario<Ctx> {
                                 break Err(e.context(format!("THEN \"{name}\" failed")));
                             }
                             None => {
+                                if let Some(fatal) = f.probe_diag.fatal() {
+                                    break Err(anyhow::anyhow!(
+                                        "THEN \"{}\" failed fast: same terminal probe error \
+                                         {FATAL_STREAK}x: {}",
+                                        name,
+                                        fatal
+                                    ));
+                                }
                                 let elapsed = step_start.elapsed();
                                 if elapsed >= *deadline {
-                                    break Err(anyhow::anyhow!(
-                                        "THEN \"{}\" timed out after {:?}",
-                                        name,
-                                        *deadline
-                                    ));
+                                    break Err(match f.probe_diag.last_error() {
+                                        Some(last) => anyhow::anyhow!(
+                                            "THEN \"{}\" timed out after {:?}; \
+                                             last probe error: {}",
+                                            name,
+                                            *deadline,
+                                            last
+                                        ),
+                                        None => anyhow::anyhow!(
+                                            "THEN \"{}\" timed out after {:?}",
+                                            name,
+                                            *deadline
+                                        ),
+                                    });
                                 }
                                 let remaining = *deadline - elapsed;
                                 tokio::time::sleep(std::cmp::min(POLL_INTERVAL, remaining)).await;
@@ -223,6 +241,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::common::probe::Class;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn steps_execute_in_order() {
@@ -360,6 +379,111 @@ mod tests {
         );
         assert!(chain.contains("eternal None"), "got: {chain}");
         assert!(chain.contains("timed out"), "got: {chain}");
+    }
+
+    /// The #82 case: a probe that can never succeed must not spend the whole
+    /// deadline, and the failure it kept swallowing must reach the report.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn then_fails_fast_on_a_repeated_fatal_probe_error() {
+        let mut f = Fixture::for_test();
+        let started = Instant::now();
+        let attempts = Arc::new(AtomicU32::new(0));
+        let a = attempts.clone();
+
+        let outcome = Scenario::new("typo")
+            .then(
+                "never observable",
+                Duration::from_secs(600),
+                move |f, _c| {
+                    let a = a.clone();
+                    let diag = f.probe_diag.clone();
+                    Box::pin(async move {
+                        a.fetch_add(1, Ordering::SeqCst);
+                        diag.record(
+                            "GET :8081/parties/participants-status",
+                            Class::Fatal,
+                            "GET http://localhost:8081/parties/participants-status returned 404 \
+                         Not Found: 404 Not Found"
+                                .to_string(),
+                        );
+                        None
+                    })
+                },
+            )
+            .run(&mut f)
+            .await;
+
+        let Err(err) = outcome else {
+            panic!("expected the scenario to fail");
+        };
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "elapsed: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), FATAL_STREAK);
+        let chain = format!("{err:#}");
+        assert!(chain.contains("failed fast"), "got: {chain}");
+        assert!(chain.contains("participants-status"), "got: {chain}");
+        assert!(chain.contains("404"), "got: {chain}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn timeout_message_carries_the_last_probe_error() {
+        let mut f = Fixture::for_test();
+        let outcome = Scenario::new("slow")
+            .then("never ready", Duration::from_millis(100), |f, _c| {
+                let diag = f.probe_diag.clone();
+                Box::pin(async move {
+                    diag.record(
+                        "GET :8081/workflows",
+                        Class::Transient,
+                        "GET http://localhost:8081/workflows returned 503".to_string(),
+                    );
+                    None
+                })
+            })
+            .run(&mut f)
+            .await;
+
+        let Err(err) = outcome else {
+            panic!("expected the scenario to fail");
+        };
+        let chain = format!("{err:#}");
+        assert!(chain.contains("timed out"), "got: {chain}");
+        assert!(chain.contains("last probe error"), "got: {chain}");
+        assert!(chain.contains("503"), "got: {chain}");
+    }
+
+    /// Each step starts from a clean slate, so a step never gets blamed for
+    /// the failure an earlier one recovered from.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_previous_steps_probe_error_does_not_leak_into_the_next() {
+        let mut f = Fixture::for_test();
+        let outcome = Scenario::new("two steps")
+            .then("recovers", Duration::from_secs(10), |f, _c| {
+                let diag = f.probe_diag.clone();
+                Box::pin(async move {
+                    diag.record(
+                        "GET :8081/a",
+                        Class::Transient,
+                        "stale error from step one".to_string(),
+                    );
+                    Some(Ok(()))
+                })
+            })
+            .then("times out clean", Duration::from_millis(100), |_f, _c| {
+                Box::pin(async move { None })
+            })
+            .run(&mut f)
+            .await;
+
+        let Err(err) = outcome else {
+            panic!("expected the scenario to fail");
+        };
+        let chain = format!("{err:#}");
+        assert!(chain.contains("times out clean"), "got: {chain}");
+        assert!(!chain.contains("stale error"), "got: {chain}");
     }
 
     #[tokio::test(flavor = "multi_thread")]

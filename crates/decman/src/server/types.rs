@@ -5,6 +5,7 @@ use std::{
 
 use canton_common::decimal::DamlDecimal;
 use canton_proto_rs::com::digitalasset::canton::protocol::v30::enums::ParticipantPermission;
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
@@ -525,6 +526,24 @@ fn validate_timeout(microseconds: i64) -> Result<(), String> {
     Ok(())
 }
 
+/// Reject an epoch-microsecond instant that is not in the future.
+///
+/// The on-ledger `executeImpl` asserts the same thing, but only at execute
+/// time — after a full propose/confirm round has been spent on a value that
+/// could never have worked.
+fn validate_future_micros(micros: i64, field: &str) -> Result<(), String> {
+    if micros <= 0 {
+        return Err(format!("{field} must be positive, got {micros}"));
+    }
+    let now_micros = Utc::now().timestamp_micros();
+    if micros <= now_micros {
+        return Err(format!(
+            "{field} must be in the future, got {micros} (now {now_micros})"
+        ));
+    }
+    Ok(())
+}
+
 fn validate_positive_amount(amount: &DamlDecimal, field: &str) -> Result<(), String> {
     // `DamlDecimal` itself doesn't implement `PartialOrd`; compare via the
     // inner `rust_decimal::Decimal` returned by `value()` against a parsed
@@ -778,6 +797,13 @@ impl ProposalType {
     /// catches non-positive token amounts before they reach Canton's Daml
     /// checks so a 400 surfaces a precise reason rather than a generic
     /// submission error after a proposal contract is already created.
+    ///
+    /// **Propose-path only.** The single production caller is
+    /// `handlers::governance::propose_action`, and one arm
+    /// ([`validate_future_micros`]) reads the clock. Re-using this to
+    /// re-validate an already-stored proposal would reject it for nothing but
+    /// having aged, so a new call site needs to split the time-dependent arms
+    /// out first.
     pub fn validate(&self) -> Result<(), String> {
         match self {
             ProposalType::Transfer {
@@ -799,12 +825,14 @@ impl ProposalType {
                 ..
             } => validate_positive_amount(d, "deposit_initial_amount_usd"),
             ProposalType::SetupMintingDelegation {
-                amulet_merge_limit, ..
+                expires_at_micros,
+                amulet_merge_limit,
+                ..
             } => {
                 if *amulet_merge_limit <= 0 {
                     return Err("amulet_merge_limit must be greater than 0".to_string());
                 }
-                Ok(())
+                validate_future_micros(*expires_at_micros, "expires_at_micros")
             }
             ProposalType::AcceptExternalPartySetup { proposal_cid } => {
                 if proposal_cid.trim().is_empty() {
@@ -1738,6 +1766,54 @@ mod tests {
         let back: ServiceRequestDetails = serde_json::from_str(&json)?;
         assert_eq!(back.user, None);
         assert_eq!(back.provider, Some(test_party("prov")?));
+        Ok(())
+    }
+
+    fn minting_delegation(
+        expires_at_micros: i64,
+        amulet_merge_limit: i64,
+    ) -> anyhow::Result<ProposalType> {
+        Ok(ProposalType::SetupMintingDelegation {
+            delegate: test_party("delegate")?,
+            dso: test_party("dso")?,
+            expires_at_micros,
+            amulet_merge_limit,
+            description: "test".to_string(),
+        })
+    }
+
+    #[test]
+    fn setup_minting_delegation_rejects_a_non_future_expiry() -> anyhow::Result<()> {
+        let hour_micros = 3_600_000_000i64;
+        let now = Utc::now().timestamp_micros();
+
+        // An expiry in the future is the only accepted shape.
+        assert!(
+            minting_delegation(now + hour_micros, 10)?
+                .validate()
+                .is_ok()
+        );
+
+        // Zero and negative are the raw-caller mistakes the DAML assert would
+        // otherwise catch only at execute time, after a full governance round.
+        assert!(minting_delegation(0, 10)?.validate().is_err());
+        assert!(minting_delegation(-1, 10)?.validate().is_err());
+
+        // Positive but already past is the same waste, and `> 0` alone misses it.
+        assert!(
+            minting_delegation(now - hour_micros, 10)?
+                .validate()
+                .is_err()
+        );
+
+        // The pre-existing amulet_merge_limit guard still fires when the expiry
+        // is valid, so the new arm did not displace it.
+        assert!(
+            minting_delegation(now + hour_micros, 0)?
+                .validate()
+                .is_err()
+        );
+
         Ok(())
     }
 }

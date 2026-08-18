@@ -105,8 +105,9 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             move |f, _| {
                 let prefix = prefix.clone();
                 Box::pin(async move {
-                    let r: DecentralizedPartiesResponse =
-                        f.get_json(f.p1.http, "/decentralized-parties").await.ok()?;
+                    let r: DecentralizedPartiesResponse = f
+                        .probe_get_json(f.p1.http, "/decentralized-parties")
+                        .await?;
                     let party = r
                         .parties
                         .into_iter()

@@ -56,7 +56,7 @@ pub fn propose_confirm_execute(label: &str, proposal: Value) -> Scenario<Proposa
                             Err(e) => return Some(Err(e)),
                         };
                         let path = format!("/governance/confirmations?party_id={party_id}");
-                        let s: GovernanceResponse = f.get_json(f.p1.http, &path).await.ok()?;
+                        let s: GovernanceResponse = f.probe_get_json(f.p1.http, &path).await?;
                         // Match THIS cycle's proposal by action label rather than
                         // assuming it is the only pending domain action. A prior
                         // phase (e.g. notification_feed) can leave an unrelated
@@ -89,7 +89,7 @@ pub fn propose_confirm_execute(label: &str, proposal: Value) -> Scenario<Proposa
                         Err(e) => return Some(Err(e)),
                     };
                     let path = format!("/governance/confirmations?party_id={party_id}");
-                    let s: GovernanceResponse = f.get_json(f.p2.http, &path).await.ok()?;
+                    let s: GovernanceResponse = f.probe_get_json(f.p2.http, &path).await?;
                     s.domain_actions
                         .iter()
                         .any(|a| a.proposal_cid == cid)
@@ -123,7 +123,7 @@ pub fn propose_confirm_execute(label: &str, proposal: Value) -> Scenario<Proposa
                         Err(e) => return Some(Err(e)),
                     };
                     let path = format!("/governance/confirmations?party_id={party_id}");
-                    let s: GovernanceResponse = f.get_json(f.p1.http, &path).await.ok()?;
+                    let s: GovernanceResponse = f.probe_get_json(f.p1.http, &path).await?;
                     let our_cid = ctx.proposal_cid.clone();
                     let action = s
                         .domain_actions
@@ -156,7 +156,7 @@ pub fn propose_confirm_execute(label: &str, proposal: Value) -> Scenario<Proposa
                         Err(e) => return Some(Err(e)),
                     };
                     let path = format!("/governance/confirmations?party_id={party_id}");
-                    let s: GovernanceResponse = f.get_json(f.p3.http, &path).await.ok()?;
+                    let s: GovernanceResponse = f.probe_get_json(f.p3.http, &path).await?;
                     let action = s
                         .domain_actions
                         .into_iter()
@@ -198,7 +198,7 @@ pub fn propose_confirm_execute(label: &str, proposal: Value) -> Scenario<Proposa
                         Err(e) => return Some(Err(e)),
                     };
                     let path = format!("/governance/confirmations?party_id={party_id}");
-                    let s: GovernanceResponse = f.get_json(f.p1.http, &path).await.ok()?;
+                    let s: GovernanceResponse = f.probe_get_json(f.p1.http, &path).await?;
                     // This cycle is done when ITS proposal is gone (executed).
                     // Don't assert a globally empty slate — an unrelated prior
                     // proposal may still be pending (see the P1 visibility note).

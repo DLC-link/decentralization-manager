@@ -92,30 +92,53 @@ pub async fn generate_keys(
         )
         .await?;
 
-    // Capture this participant's pre-activation ledger offset. Idempotent on
-    // retry by design: only the FIRST capture is kept, so a retry after the
-    // topology already activated can't move the offset past the activation.
-    let existing_offset = storage
-        .read_artifact(
-            instance_name,
-            artifact_kinds::ADD_PARTY_PRE_ACTIVATION_OFFSET,
-            Some(&self_id),
-        )
-        .await?;
-    if existing_offset.is_none() {
-        let offset = current_ledger_offset(config, ledger_token).await?;
-        storage
-            .write_artifact(
-                instance_name,
-                artifact_kinds::ADD_PARTY_PRE_ACTIVATION_OFFSET,
-                Some(&self_id),
-                offset.to_string().as_bytes(),
-            )
-            .await?;
-        tracing::info!("Captured pre-activation ledger offset {offset}");
-    }
+    capture_offset_once(
+        config,
+        storage,
+        instance_name,
+        artifact_kinds::ADD_PARTY_PRE_ACTIVATION_OFFSET,
+        Some(&self_id),
+        ledger_token,
+        "pre-activation",
+    )
+    .await?;
 
     tracing::info!("Add-party keys persisted to workflow_artifacts");
+    Ok(())
+}
+
+/// Capture this participant's ledger offset into `kind` exactly once.
+///
+/// Both add-party offsets (`ADD_PARTY_PRE_ACTIVATION_OFFSET`, scoped to the
+/// participant, and `ADD_PARTY_EXPORT_OFFSET`, unscoped) exist to name a point
+/// BEFORE the party is activated. A resumed run that re-enters its step after
+/// the activation must therefore keep the original value: re-capturing would
+/// move the offset past the activation, and `ExportPartyAcs` /
+/// `ClearPartyOnboardingFlag` would then look for it in a window that no longer
+/// contains it.
+///
+/// So the first capture wins and later calls are a no-op.
+pub(crate) async fn capture_offset_once(
+    config: &NodeConfig,
+    storage: &SqlitePool,
+    instance_name: &str,
+    kind: &str,
+    scope: Option<&str>,
+    ledger_token: Option<&str>,
+    label: &str,
+) -> Result {
+    if storage
+        .read_artifact(instance_name, kind, scope)
+        .await?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let offset = current_ledger_offset(config, ledger_token).await?;
+    storage
+        .write_artifact(instance_name, kind, scope, offset.to_string().as_bytes())
+        .await?;
+    tracing::info!("Captured {label} ledger offset {offset}");
     Ok(())
 }
 

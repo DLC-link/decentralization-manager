@@ -9,6 +9,7 @@ pub mod invitations;
 pub mod ledger_api;
 pub mod operator;
 pub mod phases;
+pub mod probe;
 pub mod processes;
 pub mod scenario;
 pub mod tls_proxy;
@@ -83,6 +84,11 @@ pub struct Fixture {
     /// vars at boot; restart helpers update the slot in place so subsequent
     /// chaos tests target the freshly-spawned process.
     pub current_pids: [Option<u32>; 3],
+
+    /// Why the most recent polled probe returned `None`. Written by
+    /// [`Fixture::probe_get_json`], read by the `Scenario` runner so a step
+    /// that never becomes observable reports the underlying failure.
+    pub probe_diag: probe::ProbeDiag,
 
     pub target: TestTarget,
     pub run_id: String,
@@ -233,6 +239,7 @@ impl Fixture {
             p2,
             p3,
             current_pids,
+            probe_diag: probe::ProbeDiag::default(),
             target,
             run_id,
             operator_party: None,
@@ -360,6 +367,7 @@ impl Fixture {
                 participant_id: "p3".to_string(),
                 metrics: 9103,
             },
+            probe_diag: probe::ProbeDiag::default(),
             target: TestTarget::Localnet,
             run_id: "test-run-id".to_string(),
             operator_party: None,
