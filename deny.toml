@@ -12,4 +12,20 @@ ignore = [
   # maintained drop-in until ratatui moves off it, so ignore the advisory
   # rather than block CI.
   "RUSTSEC-2024-0436",
+  # h2 0.3 accepts and queues empty DATA frames without limit (RUSTSEC-2026-0258,
+  # low severity: unbounded memory, or a panic if the length overflows).
+  #
+  # Unfixable by updating: 0.3.27 is the last 0.3.x release ever published and
+  # the patch landed only in 0.4.16. It arrives via actix-http (actix-web 4,
+  # `http2` on by default) and via hyper 0.14, which hyper-noise 0.0.3 requires
+  # with `features = ["full"]` — so the feature cannot be switched off from
+  # here either. Unlike the other entries in this file, cargo-deny flags this
+  # one too, i.e. it really is in the compiled graph, not just the lockfile.
+  #
+  # The separate h2 0.4 instance (AWS SDK / hyper 1.x) is fixed by the 0.4.16
+  # bump that accompanies this ignore.
+  #
+  # Drop when hyper-noise moves off hyper 0.14 or actix-web ships an h2 0.4
+  # release. Tracked in #351.
+  "RUSTSEC-2026-0258",
 ]
