@@ -618,17 +618,24 @@ so individual test cases narrate.
 
 The chaos phases (`restart_coordinator_resume`, `restart_peer_resume`,
 `invite_survives_peer_restart`, `retry_with_offline_peer`,
-`peer_3_strikes_abort`, `restart_with_concurrent_kinds`) kill and restart
-nodes on purpose. The lines below are the node correctly reporting what the
-test just did to it, so read them as part of the scenario rather than as
-findings. Anything **not** on this list is worth a look.
+`restart_with_concurrent_kinds`, `peer_health_flip`) kill and restart nodes
+on purpose. The lines below are the surviving nodes correctly reporting what
+the test just did to their peers, so read them as part of the scenario rather
+than as findings. Anything **not** on this list is worth a look.
 
-| Line | Source | Why it fires |
+(`peer_3_strikes_abort` is named G8 in the suite but is currently a skipped
+stub — it needs a raw-Noise-frame injection harness — so it kills nothing and
+emits none of this.)
+
+Grep the message text to find these; the emitting function is named so the
+reference survives the code moving.
+
+| Line | Emitted by | Why it fires |
 |---|---|---|
-| `Failed to send <label> to <participant>: TCP connection failed: … Connection refused` | `handlers/workflows.rs:3547` | The peer was killed by the phase. One shared broadcast helper, so `<label>` is whichever message was in flight — `CancelInvite`, `RetryWorkflow`, an invite. |
-| `Onboarding rejected: N missing peer mesh edge(s)` | `handlers/workflows.rs:1589` | The mesh is genuinely incomplete while a node is down. |
-| `Participant owner_key unresolved after onboarding` | `handlers/workflows.rs:1802` | The run was interrupted before it reached key resolution. |
-| `Best-effort CancelInvite to <peer> after decline failed` | `noise/server.rs:604` | Best-effort by name: the peer it would notify is the one that was killed. |
+| `Failed to send <label> to <participant>: TCP connection failed: … Connection refused` | `handlers::workflows::broadcast_simple_message` | The peer was killed by the phase. One shared broadcast helper, so `<label>` is whichever message was in flight — `CancelInvite`, `RetryWorkflow`, an invite. |
+| `Onboarding rejected: N missing peer mesh edge(s)` | `handlers::workflows::start_onboarding` | The mesh is genuinely incomplete while a node is down. |
+| `Participant owner_key unresolved after onboarding` | `handlers::workflows::start_onboarding` | The run was interrupted before it reached key resolution. |
+| `Best-effort CancelInvite to <peer> after decline failed` | `noise::server::broadcast_cancel_to_others` | Best-effort by name: the peer it would notify is the one that was killed. |
 
 Each is a real condition the code detects correctly, which is why none is
 downgraded — in production every one of them warrants a WARN. The two
