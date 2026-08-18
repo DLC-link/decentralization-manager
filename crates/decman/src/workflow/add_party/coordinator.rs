@@ -487,6 +487,23 @@ mod tests {
     use super::*;
     use crate::db::MIGRATOR;
 
+    /// `workflow_artifacts.instance_name` has a foreign key onto
+    /// `workflow_runs`, so an artefact needs its run row to exist first.
+    async fn insert_run(pool: &SqlitePool, instance_name: &str) -> anyhow::Result<()> {
+        sqlx::query(
+            "INSERT INTO workflow_runs (
+                 instance_name, kind, role, status, current_step, step_index, step_total,
+                 config_json, expected_peers_json, completed_peers_json,
+                 created_at, updated_at
+             ) VALUES (?1, 'AddParty', 'Coordinator', 'inprogress', 'SubmitProposals',
+                       0, 1, '{}', '[]', '[]', 0, 0)",
+        )
+        .bind(instance_name)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
     /// The window this guards: peers uploaded, the peer-gated step advanced
     /// and persisted, then the coordinator restarted before the artefacts were
     /// written. `peer_data` comes back empty and the peers stay `completed`,
@@ -520,6 +537,7 @@ mod tests {
     /// fail. Without this the guard would break every resumed run.
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn no_uploads_but_artefacts_present_continues(pool: SqlitePool) -> anyhow::Result<()> {
+        insert_run(&pool, "run-1").await?;
         pool.write_artifact(
             "run-1",
             artifact_kinds::SIGNED_ADD_PARTY_DNS,
@@ -542,6 +560,7 @@ mod tests {
     /// DNS signatures must not thereby satisfy the clearing-signature guard.
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn the_guard_is_per_artefact_kind(pool: SqlitePool) -> anyhow::Result<()> {
+        insert_run(&pool, "run-1").await?;
         pool.write_artifact(
             "run-1",
             artifact_kinds::SIGNED_ADD_PARTY_DNS,
