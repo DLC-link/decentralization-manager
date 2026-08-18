@@ -11,7 +11,9 @@ mod action_serializer;
 mod assets;
 mod audit;
 mod chain_audit;
+mod event_filters;
 mod handlers;
+mod ledger_paging;
 mod middleware;
 mod package_inventory;
 mod queries;
@@ -1146,9 +1148,6 @@ pub async fn start_server(
             .service(handlers::tenant_prepare)
             .service(handlers::tenant_onboard)
             .service(handlers::tenant_status)
-            .service(handlers::tenant_prepare_submission)
-            .service(handlers::tenant_execute_submission)
-            .service(handlers::tenant_acs)
             .service(handlers::start_onboarding)
             .service(handlers::get_onboarding_status)
             .service(handlers::cancel_onboarding)
@@ -1196,6 +1195,7 @@ pub async fn start_server(
             .service(handlers::execute_action)
             .service(handlers::expire_confirmation)
             .service(handlers::cancel_confirmation)
+            .service(handlers::cancel_proposal)
             .service(handlers::get_governance_audit)
             .service(handlers::get_governance_chain_audit)
             .service(handlers::get_token_standard_contracts)

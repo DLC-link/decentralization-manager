@@ -102,7 +102,7 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     // P3 back on the plaintext port before returning.
     phases::canton_admin_tls::run(&mut f).await?;
     // Decentrally-hosted external-party onboarding, wallet-driven via the
-    // /v0/tenant/* API: the key is generated + the multi-hash signed client-side
+    // /v0/tenant/* API: the key is generated + each transaction hash signed client-side
     // and the wallet calls /onboard on each host itself, hosting it across
     // P1+P2+P3 at a 2-of-3 confirmation threshold. No Noise mesh is involved (the
     // calls are plain HTTP to each host), so it can run anywhere in the suite.
@@ -224,6 +224,10 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
         }
     }
 
+    // Runs dead last: kicks P3, seeds contracts of a package P3 lacks, and
+    // drives a re-add that the DAR-preflight must reject — leaving P3 out of the
+    // party, so nothing may run after it (the CIP-104 phases above need P3 in).
+    phases::add_party_missing_dar::run(&mut f).await?;
     Ok(())
 }
 

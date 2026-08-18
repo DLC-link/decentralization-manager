@@ -38,6 +38,12 @@
 use std::time::Duration;
 
 use anyhow::Context;
+use common::api::{
+    CredentialsResponse, DecentralizedPartiesResponse, GovernanceStateResponse,
+    InstrumentsResponse, ProviderConfigurationsResponse, RegistrarServiceRequestsResponse,
+    RegistrarServicesResponse,
+};
+use common::types::InvitationType;
 use serde_json::{Value, json};
 use tracing::info;
 
@@ -49,11 +55,6 @@ use crate::common::{
     invitations::{post_accept_invitation, probe_pending_invitation},
     phases::deploy_gov_core::{configure_party_on_nodes, post_governance_rules},
     scenario::Scenario,
-    types::{
-        CredentialsResponse, DecentralizedPartiesResponse, GovernanceStateLookup,
-        InstrumentsResponse, ProviderConfigurationsResponse, RegistrarServiceRequestsResponse,
-        RegistrarServicesResponse,
-    },
 };
 
 /// The claim the provider decparty demands of a registrar. The provider issues
@@ -108,7 +109,7 @@ async fn create_registrar_decparty(f: &mut Fixture) -> anyhow::Result<()> {
         Duration::from_secs(60),
         |f, ctx| {
             Box::pin(async move {
-                let id = probe_pending_invitation(f, f.p2.http, "Onboarding").await?;
+                let id = probe_pending_invitation(f, f.p2.http, InvitationType::Onboarding).await?;
                 ctx.p2_invite = Some(id);
                 Some(Ok(()))
             })
@@ -119,7 +120,7 @@ async fn create_registrar_decparty(f: &mut Fixture) -> anyhow::Result<()> {
         Duration::from_secs(60),
         |f, ctx| {
             Box::pin(async move {
-                let id = probe_pending_invitation(f, f.p3.http, "Onboarding").await?;
+                let id = probe_pending_invitation(f, f.p3.http, InvitationType::Onboarding).await?;
                 ctx.p3_invite = Some(id);
                 Some(Ok(()))
             })
@@ -168,8 +169,8 @@ async fn create_registrar_decparty(f: &mut Fixture) -> anyhow::Result<()> {
                     let party = r
                         .parties
                         .into_iter()
-                        .find(|p| p.party_id.starts_with(&prefix))?;
-                    f.registrar_party_id = Some(party.party_id);
+                        .find(|p| p.party_id.prefix == prefix)?;
+                    f.registrar_party_id = Some(party.party_id.to_string());
                     Some(Ok(()))
                 })
             }
@@ -194,7 +195,7 @@ async fn create_registrar_decparty(f: &mut Fixture) -> anyhow::Result<()> {
         Duration::from_secs(60),
         |f, ctx| {
             Box::pin(async move {
-                let id = probe_pending_invitation(f, f.p2.http, "Contracts").await?;
+                let id = probe_pending_invitation(f, f.p2.http, InvitationType::Contracts).await?;
                 ctx.p2_invite = Some(id);
                 Some(Ok(()))
             })
@@ -205,7 +206,7 @@ async fn create_registrar_decparty(f: &mut Fixture) -> anyhow::Result<()> {
         Duration::from_secs(60),
         |f, ctx| {
             Box::pin(async move {
-                let id = probe_pending_invitation(f, f.p3.http, "Contracts").await?;
+                let id = probe_pending_invitation(f, f.p3.http, InvitationType::Contracts).await?;
                 ctx.p3_invite = Some(id);
                 Some(Ok(()))
             })
@@ -253,7 +254,7 @@ async fn create_registrar_decparty(f: &mut Fixture) -> anyhow::Result<()> {
                     }
                 };
                 let path = format!("/governance/state?party_id={party_id}");
-                let r: GovernanceStateLookup = f.get_json(f.p1.http, &path).await.ok()?;
+                let r: GovernanceStateResponse = f.get_json(f.p1.http, &path).await.ok()?;
                 f.registrar_rules_contract_id = Some(r.state?.contract_id);
                 Some(Ok(()))
             })
@@ -411,14 +412,14 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         let row = r
                             .registrar_service_requests
                             .into_iter()
-                            .find(|q| q.registrar == registrar_party)?;
-                        if row.provider != provider_party {
+                            .find(|q| q.registrar.to_string() == registrar_party)?;
+                        if row.provider.to_string() != provider_party {
                             return Some(Err(anyhow::anyhow!(
                                 "request provider is {got}, expected {provider_party}",
                                 got = row.provider
                             )));
                         }
-                        if row.operator != operator {
+                        if row.operator.to_string() != operator {
                             return Some(Err(anyhow::anyhow!(
                                 "request operator is {got}, expected {operator}",
                                 got = row.operator
@@ -478,7 +479,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         let row = r
                             .services
                             .into_iter()
-                            .find(|s| s.registrar == registrar_party)?;
+                            .find(|s| s.registrar.to_string() == registrar_party)?;
                         f.registrar_service_cid = Some(row.contract_id);
                         Some(Ok(()))
                     })

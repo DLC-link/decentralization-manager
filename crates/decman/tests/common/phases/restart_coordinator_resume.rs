@@ -8,10 +8,9 @@
 
 use std::time::Duration;
 
-use crate::common::{
-    Fixture, chaos, db, invitations::post_accept_invitation, processes,
-    types::PendingInvitationsResponse,
-};
+use common::{api::PendingInvitationsResponse, types::InvitationType};
+
+use crate::common::{Fixture, chaos, db, invitations::post_accept_invitation, processes};
 
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     chaos::ensure_nodes_healthy(f).await?;
@@ -38,11 +37,11 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         let p2_has = inv_p2
             .invitations
             .iter()
-            .any(|i| i.invitation_type == "Onboarding");
+            .any(|i| i.invitation_type == InvitationType::Onboarding);
         let p3_has = inv_p3
             .invitations
             .iter()
-            .any(|i| i.invitation_type == "Onboarding");
+            .any(|i| i.invitation_type == InvitationType::Onboarding);
         Ok(p2_has && p3_has)
     })
     .await?;
@@ -51,10 +50,20 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     processes::restart_node(f, 1).await?;
 
     // Now accept on both peers.
-    let p2_inv =
-        chaos::wait_for_invite(f, f.p2.http, "Onboarding", Duration::from_secs(60)).await?;
-    let p3_inv =
-        chaos::wait_for_invite(f, f.p3.http, "Onboarding", Duration::from_secs(60)).await?;
+    let p2_inv = chaos::wait_for_invite(
+        f,
+        f.p2.http,
+        InvitationType::Onboarding,
+        Duration::from_secs(60),
+    )
+    .await?;
+    let p3_inv = chaos::wait_for_invite(
+        f,
+        f.p3.http,
+        InvitationType::Onboarding,
+        Duration::from_secs(60),
+    )
+    .await?;
     post_accept_invitation(f, f.p2.http, &p2_inv).await?;
     post_accept_invitation(f, f.p3.http, &p3_inv).await?;
 

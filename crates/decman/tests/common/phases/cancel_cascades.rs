@@ -8,6 +8,7 @@
 use std::time::Duration;
 
 use anyhow::Context;
+use common::{api::PendingInvitationsResponse, types::InvitationType};
 use serde_json::{Value, json};
 use tracing::info;
 
@@ -15,7 +16,6 @@ use crate::common::{
     Fixture, db,
     invitations::{InvitationIds, post_accept_invitation, probe_pending_invitation},
     scenario::Scenario,
-    types::PendingInvitationsResponse,
 };
 
 #[derive(Default)]
@@ -68,7 +68,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         Duration::from_secs(60),
         |f, ctx| {
             Box::pin(async move {
-                let id = probe_pending_invitation(f, f.p2.http, "Onboarding").await?;
+                let id = probe_pending_invitation(f, f.p2.http, InvitationType::Onboarding).await?;
                 ctx.invites.p2 = Some(id);
                 Some(Ok(()))
             })
@@ -79,7 +79,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         Duration::from_secs(60),
         |f, ctx| {
             Box::pin(async move {
-                let id = probe_pending_invitation(f, f.p3.http, "Onboarding").await?;
+                let id = probe_pending_invitation(f, f.p3.http, InvitationType::Onboarding).await?;
                 ctx.invites.p3 = Some(id);
                 Some(Ok(()))
             })
@@ -148,11 +148,11 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         |f, _| {
             Box::pin(async move {
                 let r: PendingInvitationsResponse =
-                    f.get_json(f.p3.http, "/invitations").await.ok()?;
+                    f.probe_get_json(f.p3.http, "/invitations").await?;
                 let n = r
                     .invitations
                     .iter()
-                    .filter(|i| i.invitation_type == "Onboarding")
+                    .filter(|i| i.invitation_type == InvitationType::Onboarding)
                     .count();
                 (n == 0).then_some(Ok(()))
             })

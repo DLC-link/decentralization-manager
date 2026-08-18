@@ -5,6 +5,7 @@ use std::{
 
 use canton_common::decimal::DamlDecimal;
 use canton_proto_rs::com::digitalasset::canton::protocol::v30::enums::ParticipantPermission;
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
@@ -13,12 +14,13 @@ use tokio::sync::RwLock;
 // `crate::server::types::X` (and the glob `pub use types::*` in `server/mod.rs`)
 // keep resolving unchanged. `common::api` holds the HTTP request/response DTOs
 // the frontend's TypeScript is generated from (see `decman/build.rs`).
+pub use common::api::PAGE_SIZE;
 pub use common::api::{
     ActiveCouponReassignmentDelegation, AddPartyInvitePayload, AddPartyRequest, AuditLogResponse,
     AuthStatus, AuthStatusResponse, AuthTestResponse, AuthTestResult, CancelConfirmationRequest,
-    ChainAuditEntry, ChainAuditResponse, ChangeThresholdInvitePayload, ChangeThresholdRequest,
-    Claim, ContractQueryResponse, ContractWithBlob, ContractsInvitePayload, ContractsRequest,
-    CouponReassignmentDelegationSummary, CredentialInfo, CredentialOfferInfo,
+    CancelProposalRequest, ChainAuditEntry, ChainAuditResponse, ChangeThresholdInvitePayload,
+    ChangeThresholdRequest, Claim, ContractQueryResponse, ContractWithBlob, ContractsInvitePayload,
+    ContractsRequest, CouponReassignmentDelegationSummary, CredentialInfo, CredentialOfferInfo,
     CredentialOffersResponse, CredentialsResponse, DarsInvitePayload, DarsRequest,
     DecentralizedPartiesResponse, DeclineInvitationPayload, DisclosedContractInput,
     DiscoverMemberPartyRequest, DiscoverMemberPartyResponse, ErrorResponse,
@@ -33,10 +35,8 @@ pub use common::api::{
     PendingInvitationsResponse, ProviderConfigurationInfo, ProviderConfigurationsResponse,
     ProviderServiceInfo, ProviderServicesResponse, RegistrarServiceInfo,
     RegistrarServiceRequestInfo, RegistrarServiceRequestsResponse, RegistrarServicesResponse,
-    RequiredClaim, ResponseSource, RightsStatus, SuccessResponse, TenantAcsResponse,
-    TenantContract, TenantExecuteSubmissionRequest, TenantOnboardRequest, TenantOnboardResponse,
-    TenantPrepareRequest, TenantPrepareResponse, TenantPrepareSubmissionRequest,
-    TenantPrepareSubmissionResponse, TenantTemplateId, TransferFactoriesResponse,
+    RequiredClaim, ResponseSource, RightsStatus, SuccessResponse, TenantOnboardRequest,
+    TenantOnboardResponse, TenantPrepareRequest, TenantPrepareResponse, TransferFactoriesResponse,
     TransferFactoryInfo, TransferPreapprovalsResponse, UserServiceInfo, UserServicesResponse,
     VaultInfo, VaultsResponse, WorkflowResponse, WorkflowRunsResponse, WorkflowStatusResponse,
 };
@@ -559,6 +559,24 @@ fn validate_self_issued_requirements_have_claims(
     Ok(())
 }
 
+/// Reject an epoch-microsecond instant that is not in the future.
+///
+/// The on-ledger `executeImpl` asserts the same thing, but only at execute
+/// time — after a full propose/confirm round has been spent on a value that
+/// could never have worked.
+fn validate_future_micros(micros: i64, field: &str) -> Result<(), String> {
+    if micros <= 0 {
+        return Err(format!("{field} must be positive, got {micros}"));
+    }
+    let now_micros = Utc::now().timestamp_micros();
+    if micros <= now_micros {
+        return Err(format!(
+            "{field} must be in the future, got {micros} (now {now_micros})"
+        ));
+    }
+    Ok(())
+}
+
 fn validate_positive_amount(amount: &DamlDecimal, field: &str) -> Result<(), String> {
     // `DamlDecimal` itself doesn't implement `PartialOrd`; compare via the
     // inner `rust_decimal::Decimal` returned by `value()` against a parsed
@@ -877,6 +895,13 @@ impl ProposalType {
     /// proposal targets. Mirrors `ActionType::validate` — catches bad input
     /// before it reaches Canton's Daml checks so a 400 surfaces a precise
     /// reason rather than a generic submission error.
+    ///
+    /// **Propose-path only.** The single production caller is
+    /// `handlers::governance::propose_action`, and one arm
+    /// ([`validate_future_micros`]) reads the clock. Re-using this to
+    /// re-validate an already-stored proposal would reject it for nothing but
+    /// having aged, so a new call site needs to split the time-dependent arms
+    /// out first.
     pub fn validate(&self, governance_party: &CantonId) -> Result<(), String> {
         match self {
             ProposalType::Transfer {
@@ -898,12 +923,14 @@ impl ProposalType {
                 ..
             } => validate_positive_amount(d, "deposit_initial_amount_usd"),
             ProposalType::SetupMintingDelegation {
-                amulet_merge_limit, ..
+                expires_at_micros,
+                amulet_merge_limit,
+                ..
             } => {
                 if *amulet_merge_limit <= 0 {
                     return Err("amulet_merge_limit must be greater than 0".to_string());
                 }
-                Ok(())
+                validate_future_micros(*expires_at_micros, "expires_at_micros")
             }
             ProposalType::AcceptExternalPartySetup { proposal_cid } => {
                 if proposal_cid.trim().is_empty() {
@@ -1063,7 +1090,7 @@ pub struct ProposeActionRequest {
 }
 
 /// A pending domain action proposal with its confirmations
-#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct DomainGovernanceAction {
     /// Contract ID of the proposal
@@ -1071,7 +1098,7 @@ pub struct DomainGovernanceAction {
     /// Human-readable label (e.g., "SetupCcPreapproval")
     pub action_label: String,
     /// Human-readable description from the proposal's GovernableActionView
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// Confirmations for this proposal
     pub confirmations: Vec<GovernanceConfirmation>,
@@ -1093,7 +1120,7 @@ pub struct DomainGovernanceAction {
     /// notification card can display what's actually being transferred
     /// without the user having to inspect the contract CID. Only populated
     /// for `Transfer` proposals.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transfer_details: Option<TransferProposalDetails>,
     /// Sender / amount / instrument resolved from the `TransferInstruction`
     /// referenced by an `AcceptTransferProposal`. Lets the notification card
@@ -1101,7 +1128,7 @@ pub struct DomainGovernanceAction {
     /// follow-up fetch from the UI. Only populated for `AcceptTransfer`
     /// proposals, and only when the linked instruction was readable at query
     /// time.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accept_transfer_details: Option<AcceptTransferDetails>,
     /// Operator plus the counterparty (user or provider) pulled from a
     /// `CreateUserServiceRequest` / `CreateProviderServiceRequest` proposal so
@@ -1109,8 +1136,15 @@ pub struct DomainGovernanceAction {
     /// `action_label`), operator party, and the user or provider party — without
     /// the operator having to inspect the contract. Only populated for those two
     /// proposal kinds.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_request_details: Option<ServiceRequestDetails>,
+    /// The member who created the proposal, read from the proposal contract.
+    /// Only that member can retract it with `GovernableAction_ProposerCancel`,
+    /// so the card shows the retract button when this equals the node's own
+    /// member party. Absent on an orphaned card, where the proposal contract
+    /// is no longer readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposer: Option<CantonId>,
 }
 
 /// Operator + counterparty parties extracted from a service-request proposal
@@ -1118,23 +1152,23 @@ pub struct DomainGovernanceAction {
 /// inside `DomainGovernanceAction` so the pending-approval card can render who
 /// the request onboards. Exactly one of `user` / `provider` is set, matching
 /// the proposal kind.
-#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ServiceRequestDetails {
     /// Operator party — present on both request kinds.
     pub operator: CantonId,
     /// User party — present for `CreateUserServiceRequest`.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<CantonId>,
     /// Provider party — present for `CreateProviderServiceRequest`.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<CantonId>,
 }
 
 /// Recipient/amount/instrument extracted from a `TransferProposal`'s
 /// `transfer` field. Surfaced inside `DomainGovernanceAction` so the
 /// notification queue card shows the meaningful parameters of the proposal.
-#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct TransferProposalDetails {
     pub receiver: CantonId,
@@ -1150,7 +1184,7 @@ pub struct TransferProposalDetails {
 /// `DomainGovernanceAction` so the pending-approval card for an Accept can
 /// render who's transferring what to whom — the proposal contract itself
 /// only carries the `TransferInstruction` cid, not these fields.
-#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct AcceptTransferDetails {
     pub sender: CantonId,
@@ -1194,7 +1228,7 @@ pub struct ExecuteActionRequest {
 }
 
 /// A single governance confirmation with parsed action
-#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct GovernanceConfirmation {
     pub contract_id: String,
@@ -1210,7 +1244,7 @@ pub struct GovernanceConfirmation {
 }
 
 /// A governance action with its confirmations, grouped by action hash
-#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct GovernanceAction {
     /// Deterministic hash of the serialized action for grouping
@@ -1229,7 +1263,7 @@ pub struct GovernanceAction {
 }
 
 /// Response for governance confirmations endpoint
-#[derive(Serialize, utoipa::ToSchema)]
+#[derive(Deserialize, Serialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct GovernanceResponse {
     pub actions: Vec<GovernanceAction>,
@@ -1238,14 +1272,14 @@ pub struct GovernanceResponse {
     pub domain_actions: Vec<DomainGovernanceAction>,
     pub threshold: usize,
     /// The member party ID for the requesting party (used to identify own confirmations)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub member_party_id: Option<CantonId>,
     /// Current contract id of the active GovernanceRules / VaultGovernanceRules
     /// contract for this party. The choice exercised when confirming an action
     /// is consuming, so this id changes after each confirm/execute — clients
     /// should use this field rather than a cached value to avoid
     /// `CONTRACT_NOT_FOUND` on stale ids.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rules_contract_id: Option<String>,
     /// True when the active governance-core rules contract is under an older
     /// package than configured (see `GovernanceState::out_of_date`).
@@ -1253,7 +1287,7 @@ pub struct GovernanceResponse {
     pub gov_core_out_of_date: bool,
     /// The package ref the rules contract actually lives under (for display
     /// in the out-of-date warning).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gov_core_package_ref: Option<String>,
 }
 
@@ -1405,16 +1439,36 @@ fn default_audit_limit() -> i64 {
 pub struct ChainAuditQuery {
     /// Decentralized party ID to query chain events for
     pub party_id: CantonId,
-    /// Maximum number of entries to return (default 100)
+    /// Maximum number of entries to return (default [`PAGE_SIZE`], capped at
+    /// [`MAX_CHAIN_AUDIT_LIMIT`])
     #[serde(default = "default_chain_audit_limit")]
     pub limit: usize,
+    /// Cursor: return only entries strictly older than this ledger offset.
+    /// Pass the previous response's `next_before_offset` to get the next page.
+    #[serde(default)]
+    pub before_offset: Option<i64>,
     /// When true, fetches fresh data from Canton and updates cache
     #[serde(default)]
     pub refresh: bool,
 }
 
 fn default_chain_audit_limit() -> usize {
-    100
+    PAGE_SIZE as usize
+}
+
+/// Ceiling on a chain-audit page size.
+///
+/// `limit` arrives on the query string, so it is untrusted: left unbounded it
+/// would drain the whole retained ledger into one response, and a value above
+/// `i64::MAX` wraps negative when cast for SQLite — which reads a negative
+/// `LIMIT` as no limit at all.
+pub const MAX_CHAIN_AUDIT_LIMIT: usize = 1_000;
+
+impl ChainAuditQuery {
+    /// The requested page size, bounded by [`MAX_CHAIN_AUDIT_LIMIT`].
+    pub fn clamped_limit(&self) -> usize {
+        self.limit.min(MAX_CHAIN_AUDIT_LIMIT)
+    }
 }
 
 /// Build a [`ChainAuditEntry`] wire DTO from a cached DB row.
@@ -1953,5 +2007,137 @@ mod tests {
 
         // Valid two-way split.
         assert!(validate_reward_beneficiaries(&[rb("a", "0.8"), rb("b", "0.2")]).is_ok());
+    }
+
+    fn test_party(prefix: &str) -> anyhow::Result<CantonId> {
+        CantonId::parse(&format!("{prefix}::1220{}", "ab".repeat(32)))
+    }
+
+    /// `/governance/confirmations` is deserialized by the integration-test
+    /// harness, so the response has to survive a round trip in the shape the
+    /// server actually emits — which omits every `skip_serializing_if` field.
+    /// Without a matching `default` those come back as "missing field" errors.
+    #[test]
+    fn governance_response_round_trips_with_every_optional_field_omitted() -> anyhow::Result<()> {
+        let response = GovernanceResponse {
+            actions: vec![GovernanceAction {
+                action_hash: "hash".to_owned(),
+                action: ActionType::GovernanceSetThreshold { new_threshold: 2 },
+                confirmations: vec![GovernanceConfirmation {
+                    contract_id: "00conf".to_owned(),
+                    action: ActionType::GovernanceSetThreshold { new_threshold: 2 },
+                    confirming_party: test_party("m1")?,
+                    created_at: 0,
+                    expires_at: 0,
+                }],
+                confirmation_count: 1,
+                can_execute: false,
+                last_confirmation_at: 0,
+            }],
+            domain_actions: vec![DomainGovernanceAction {
+                proposal_cid: "00prop".to_owned(),
+                action_label: "SetThreshold".to_owned(),
+                description: None,
+                confirmations: Vec::new(),
+                confirmation_count: 0,
+                can_execute: false,
+                orphaned: false,
+                transfer_details: None,
+                accept_transfer_details: None,
+                service_request_details: None,
+                proposer: None,
+            }],
+            threshold: 2,
+            member_party_id: None,
+            rules_contract_id: None,
+            gov_core_out_of_date: false,
+            gov_core_package_ref: None,
+        };
+
+        let json = serde_json::to_string(&response)?;
+        assert!(
+            !json.contains("member_party_id") && !json.contains("proposer"),
+            "optional fields must be omitted on the wire: {json}"
+        );
+
+        let back: GovernanceResponse = serde_json::from_str(&json)?;
+        assert_eq!(back.threshold, 2);
+        assert_eq!(back.member_party_id, None);
+        assert_eq!(
+            back.domain_actions.first().map(|a| a.action_label.as_str()),
+            Some("SetThreshold")
+        );
+        assert_eq!(
+            back.actions
+                .first()
+                .and_then(|a| a.confirmations.first())
+                .map(|c| c.confirming_party.clone()),
+            Some(test_party("m1")?)
+        );
+        Ok(())
+    }
+
+    /// `ServiceRequestDetails` sets exactly one of `user` / `provider`; the
+    /// unset one is omitted and must deserialize back as `None`.
+    #[test]
+    fn service_request_details_round_trips_with_one_side_unset() -> anyhow::Result<()> {
+        let details = ServiceRequestDetails {
+            operator: test_party("op")?,
+            user: None,
+            provider: Some(test_party("prov")?),
+        };
+        let json = serde_json::to_string(&details)?;
+        let back: ServiceRequestDetails = serde_json::from_str(&json)?;
+        assert_eq!(back.user, None);
+        assert_eq!(back.provider, Some(test_party("prov")?));
+        Ok(())
+    }
+
+    fn minting_delegation(
+        expires_at_micros: i64,
+        amulet_merge_limit: i64,
+    ) -> anyhow::Result<ProposalType> {
+        Ok(ProposalType::SetupMintingDelegation {
+            delegate: test_party("delegate")?,
+            dso: test_party("dso")?,
+            expires_at_micros,
+            amulet_merge_limit,
+            description: "test".to_string(),
+        })
+    }
+
+    #[test]
+    fn setup_minting_delegation_rejects_a_non_future_expiry() -> anyhow::Result<()> {
+        let hour_micros = 3_600_000_000i64;
+        let now = Utc::now().timestamp_micros();
+
+        // An expiry in the future is the only accepted shape.
+        assert!(
+            minting_delegation(now + hour_micros, 10)?
+                .validate(&cid("gov"))
+                .is_ok()
+        );
+
+        // Zero and negative are the raw-caller mistakes the DAML assert would
+        // otherwise catch only at execute time, after a full governance round.
+        assert!(minting_delegation(0, 10)?.validate(&cid("gov")).is_err());
+        assert!(minting_delegation(-1, 10)?.validate(&cid("gov")).is_err());
+
+        // Positive but already past is the same waste, and `> 0` alone misses it.
+        assert!(
+            minting_delegation(now - hour_micros, 10)?
+                .validate(&cid("gov"))
+                .is_err()
+        );
+
+        // The pre-existing amulet_merge_limit guard still fires when the expiry
+        // is valid, so the new arm did not displace it.
+        assert!(
+            minting_delegation(now + hour_micros, 0)?
+                .validate(&cid("gov"))
+                .is_err()
+        );
+
+        Ok(())
     }
 }

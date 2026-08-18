@@ -1,6 +1,11 @@
 use std::time::Duration;
 
 use anyhow::Context;
+use common::{
+    api::{DecentralizedPartiesResponse, GovernanceStateResponse},
+    types::{InvitationType, WorkflowKind, WorkflowProgress, WorkflowRole},
+};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::info;
 
@@ -10,8 +15,20 @@ use crate::common::{
     invitations::{InvitationIds, post_accept_invitation, probe_pending_invitation},
     ledger_api::{P1_JSON_API, P2_JSON_API, P3_JSON_API},
     scenario::Scenario,
-    types::{AllocatePartyResponse, DecentralizedPartiesResponse, GovernanceStateLookup},
 };
+
+/// `POST /v2/parties` on the **Canton JSON Ledger API** — not a DecMan
+/// endpoint, so there is no wire DTO in the lib to share.
+#[derive(Debug, Deserialize)]
+struct AllocatePartyResponse {
+    #[serde(rename = "partyDetails")]
+    party_details: PartyDetails,
+}
+
+#[derive(Debug, Deserialize)]
+struct PartyDetails {
+    party: String,
+}
 
 pub(crate) async fn allocate_party(
     f: &Fixture,
@@ -217,12 +234,12 @@ pub(crate) async fn post_governance_rules(
     let party = parties
         .parties
         .into_iter()
-        .find(|p| p.party_id == party_id)
+        .find(|p| p.party_id.to_string() == party_id)
         .with_context(|| format!("party {party_id} not found"))?;
     let uids: Vec<String> = party
         .participants
         .iter()
-        .map(|p| p.participant_uid.clone())
+        .map(|p| p.participant_uid.to_string())
         .collect();
     anyhow::ensure!(
         uids.len() == 3,
@@ -349,7 +366,8 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(60),
             |f, ctx| {
                 Box::pin(async move {
-                    let id = probe_pending_invitation(f, f.p2.http, "Contracts").await?;
+                    let id =
+                        probe_pending_invitation(f, f.p2.http, InvitationType::Contracts).await?;
                     ctx.p2 = Some(id);
                     Some(Ok(()))
                 })
@@ -360,7 +378,8 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(60),
             |f, ctx| {
                 Box::pin(async move {
-                    let id = probe_pending_invitation(f, f.p3.http, "Contracts").await?;
+                    let id =
+                        probe_pending_invitation(f, f.p3.http, InvitationType::Contracts).await?;
                     ctx.p3 = Some(id);
                     Some(Ok(()))
                 })
@@ -403,9 +422,9 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     probe_workflow_run_visible(
                         f,
                         f.p1.http,
-                        "Contracts",
-                        "Coordinator",
-                        "completed",
+                        WorkflowKind::Contracts,
+                        WorkflowRole::Coordinator,
+                        WorkflowProgress::Completed,
                     )
                     .await
                 })
@@ -416,7 +435,14 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(30),
             |f, _| {
                 Box::pin(async move {
-                    probe_workflow_run_visible(f, f.p2.http, "Contracts", "Peer", "completed").await
+                    probe_workflow_run_visible(
+                        f,
+                        f.p2.http,
+                        WorkflowKind::Contracts,
+                        WorkflowRole::Peer,
+                        WorkflowProgress::Completed,
+                    )
+                    .await
                 })
             },
         )
@@ -425,7 +451,14 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(30),
             |f, _| {
                 Box::pin(async move {
-                    probe_workflow_run_visible(f, f.p3.http, "Contracts", "Peer", "completed").await
+                    probe_workflow_run_visible(
+                        f,
+                        f.p3.http,
+                        WorkflowKind::Contracts,
+                        WorkflowRole::Peer,
+                        WorkflowProgress::Completed,
+                    )
+                    .await
                 })
             },
         )
@@ -440,12 +473,13 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     };
 
                     // Primary: scan /decentralized-parties for the contract.
-                    let r: DecentralizedPartiesResponse =
-                        f.get_json(f.p1.http, "/decentralized-parties").await.ok()?;
+                    let r: DecentralizedPartiesResponse = f
+                        .probe_get_json(f.p1.http, "/decentralized-parties")
+                        .await?;
                     let cid = r
                         .parties
                         .into_iter()
-                        .find(|p| p.party_id == party_id)
+                        .find(|p| p.party_id.to_string() == party_id)
                         .and_then(|p| {
                             p.contracts
                                 .into_iter()
@@ -460,8 +494,8 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         Some(c) => c,
                         None => {
                             let path = format!("/governance/state?party_id={party_id}");
-                            let r: GovernanceStateLookup =
-                                f.get_json(f.p1.http, &path).await.ok()?;
+                            let r: GovernanceStateResponse =
+                                f.probe_get_json(f.p1.http, &path).await?;
                             r.state?.contract_id
                         }
                     };

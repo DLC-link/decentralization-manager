@@ -1,5 +1,10 @@
 [workspace]
-members = ["crates/common", "crates/decman", "crates/decman-cli"]
+members = [
+    "crates/common",
+    "crates/decman",
+    "crates/decman-cli",
+    "crates/decman-wallet",
+]
 resolver = "2"
 
 # Shared dependency versions. Member crates reference these with
@@ -12,7 +17,7 @@ actix-web = { version = "4" }
 aes-gcm = { version = "0.11" }
 anyhow = { version = "1.0.98" }
 async-trait = { version = "0.1" }
-aws-config = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio", "default-https-client"] }
+aws-config = { version = "1", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio", "sso"] }
 aws-sdk-kms = { version = "1", default-features = false, features = ["rt-tokio", "default-https-client"] }
 base64 = { version = "0.23" }
 bytes = { version = "1.11.1" }
@@ -83,7 +88,7 @@ tonic = { version = "0.14.2", features = [
 ] }
 tonic-prost = { version = "0.14.2" }
 tracing = { version = "0.1" }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 ts-rs = { version = "12", features = ["no-serde-warnings"] }
 utoipa = { version = "5" }
 utoipa-actix-web = { version = "0.1" }
@@ -97,6 +102,7 @@ canton-common = { package = "common", git = "ssh://git@github.com/DLC-link/canto
 canton-proto-rs = { git = "ssh://git@github.com/DLC-link/canton-lib", rev = "651ea5221b4794f55bd152e9f3e762a92af69afd" }
 canton-registry = { package = "registry", git = "ssh://git@github.com/DLC-link/canton-lib", rev = "651ea5221b4794f55bd152e9f3e762a92af69afd" }
 common = { path = "crates/common" }
+decman-wallet = { path = "crates/decman-wallet" }
 keycloak = { git = "ssh://git@github.com/DLC-link/canton-lib", rev = "651ea5221b4794f55bd152e9f3e762a92af69afd" }
 
 [profile.release]

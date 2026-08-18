@@ -28,6 +28,63 @@ use crate::{
 
 pub static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
+/// Checksum rewrites for migration files that were edited in place after
+/// operators had already applied them: (version, checksum recorded by the old
+/// file, checksum of the current file). Every entry must be a semantically
+/// neutral edit (comments, whitespace) — an edit that changes what the
+/// migration does needs a new migration, never an entry here.
+///
+/// Version 4: #239 changed "DAML" to "Daml" in a comment of
+/// `000004_workflow_runs.up.sql` after the migration had shipped, so databases
+/// initialized before that commit fail sqlx's checksum validation with
+/// "migration 4 was previously applied but has been modified".
+const MIGRATION_CHECKSUM_REPAIRS: &[(i64, &str, &str)] = &[(
+    4,
+    "137f46dbb8207525f71a15371f122ac9a22bddf6dfed826ff1d8dc1dd46e5b80965e1b8e46a0b7943b4a67ca9ddc5b33",
+    "eda7576bac7480932ea8b0a8e3d6ddddb65d045a3cec2ccff85a425ee8b89baf64dc5ca8e5482f5670198aafe350eb9e",
+)];
+
+/// Rewrite the recorded checksums of known post-ship-edited migrations to
+/// match the files this binary embeds. Run this before `MIGRATOR.run`, which
+/// otherwise refuses to start on a database that applied the pre-edit file.
+///
+/// # Errors
+///
+/// Returns an error if the `_sqlx_migrations` table cannot be read or updated.
+pub async fn repair_migration_checksums(pool: &SqlitePool) -> Result<()> {
+    // A fresh database has no `_sqlx_migrations` table yet — nothing to repair.
+    let table_exists = sqlx::query(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_optional(pool)
+    .await?
+    .is_some();
+    if !table_exists {
+        return Ok(());
+    }
+
+    for (version, old_checksum, new_checksum) in MIGRATION_CHECKSUM_REPAIRS {
+        // The checksums are compile-time hex constants, so inlining the blob
+        // literal is safe; version and the old checksum are bound.
+        let result = sqlx::query(&format!(
+            "UPDATE _sqlx_migrations SET checksum = X'{new_checksum}' \
+             WHERE version = ? AND lower(hex(checksum)) = ?"
+        ))
+        .bind(version)
+        .bind(old_checksum)
+        .execute(pool)
+        .await?;
+        if result.rows_affected() > 0 {
+            tracing::info!(
+                "Repaired the recorded checksum of migration {version} \
+                 (applied by an older build from a since-edited file)"
+            );
+        }
+    }
+
+    Ok(())
+}
+
 /// Create a new SQLite connection pool
 ///
 /// # Errors
@@ -302,16 +359,32 @@ impl SchemaRead for SqlitePool {
         &self,
         party_id: &CantonId,
         limit: i64,
+        before_offset: Option<i64>,
     ) -> Result<Vec<ChainAuditCacheRow>> {
+        // Selects whole offset groups for the newest `limit` distinct offsets
+        // rather than the newest `limit` rows. One transaction can produce
+        // several entries sharing an offset, and the cursor handed to the
+        // client is an offset — a page cut mid-offset would make the next page
+        // skip the remainder. Matches how the live path pages.
         let rows = sqlx::query_as::<_, ChainAuditCacheRow>(
             r"
             SELECT * FROM chain_audit_cache
-            WHERE party_id = ?
+            WHERE party_id = ?1
+              AND (?2 IS NULL OR offset < ?2)
+              AND offset >= (
+                SELECT MIN(offset) FROM (
+                  SELECT DISTINCT offset FROM chain_audit_cache
+                  WHERE party_id = ?1
+                    AND (?2 IS NULL OR offset < ?2)
+                  ORDER BY offset DESC
+                  LIMIT ?3
+                )
+              )
             ORDER BY offset DESC
-            LIMIT ?
             ",
         )
         .bind(party_id.to_string())
+        .bind(before_offset)
         .bind(limit)
         .fetch_all(self)
         .await?;
@@ -1134,7 +1207,7 @@ mod tests {
         },
     };
 
-    use super::MIGRATOR;
+    use super::{MIGRATION_CHECKSUM_REPAIRS, MIGRATOR, repair_migration_checksums};
 
     const TEST_NS: &str = "1220aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -1824,6 +1897,150 @@ mod tests {
         // Beyond end
         let entries = pool.get_governance_audit(&party_id, 50, 5).await?;
         assert!(entries.is_empty());
+
+        Ok(())
+    }
+
+    // ====================================================================
+    // Chain audit cache
+    // ====================================================================
+
+    /// One cached chain-audit row. `contract_id` is part of the primary key, so
+    /// it is what lets several rows share an offset — the case the paging query
+    /// has to keep together.
+    async fn insert_chain_audit_row(
+        pool: &SqlitePool,
+        party_id: &str,
+        offset: i64,
+        contract_id: &str,
+    ) -> Result {
+        sqlx::query(
+            r"
+            INSERT INTO chain_audit_cache (
+                party_id, offset, timestamp, event_type, contract_id,
+                template_id, package_id, governance_type, action_summary,
+                choice, acting_parties, update_id, details
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ",
+        )
+        .bind(party_id)
+        .bind(offset)
+        .bind(offset)
+        .bind("propose")
+        .bind(contract_id)
+        .bind("Governance:Action")
+        .bind("pkg-1")
+        .bind("core_domain")
+        .bind("propose_add_member")
+        .bind(None::<String>)
+        .bind("[]")
+        .bind(format!("update-{offset}"))
+        .bind("null")
+        .execute(pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Party A holds a trail whose middle offset carries three entries, plus a
+    /// second party's row at an interleaving offset to prove the party filter.
+    async fn seed_chain_audit_trail(pool: &SqlitePool, party_a: &str, party_b: &str) -> Result {
+        for (offset, contract_id) in [
+            (30, "c-30"),
+            (20, "c-20-a"),
+            (20, "c-20-b"),
+            (20, "c-20-c"),
+            (10, "c-10"),
+        ] {
+            insert_chain_audit_row(pool, party_a, offset, contract_id).await?;
+        }
+        insert_chain_audit_row(pool, party_b, 25, "other-25").await?;
+
+        Ok(())
+    }
+
+    fn cached_offsets(rows: &[crate::db::rows::ChainAuditCacheRow]) -> Vec<i64> {
+        rows.iter().map(|r| r.offset).collect()
+    }
+
+    /// The page is cut on whole offsets, not on rows: `limit = 2` reaches
+    /// offset 20 and then keeps all three of its entries. Cutting at two rows
+    /// would strand the rest of offset 20 — the next page asks for
+    /// `offset < 20` and would never return them.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_chain_audit_cache_keeps_offset_groups_whole(pool: SqlitePool) -> Result {
+        let party_a = test_party_id("party-a");
+        let party_b = test_party_id("party-b");
+        seed_chain_audit_trail(&pool, &party_a.to_string(), &party_b.to_string()).await?;
+
+        let rows = pool.get_chain_audit_cache(&party_a, 2, None).await?;
+        assert_eq!(cached_offsets(&rows), vec![30, 20, 20, 20]);
+
+        Ok(())
+    }
+
+    /// The cursor is exclusive, so paging from offset 20 returns what is
+    /// strictly older and never repeats that offset's group.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_chain_audit_cache_pages_before_a_cursor(pool: SqlitePool) -> Result {
+        let party_a = test_party_id("party-a");
+        let party_b = test_party_id("party-b");
+        seed_chain_audit_trail(&pool, &party_a.to_string(), &party_b.to_string()).await?;
+
+        let rows = pool.get_chain_audit_cache(&party_a, 2, Some(20)).await?;
+        assert_eq!(cached_offsets(&rows), vec![10]);
+
+        // Past the oldest cached offset there is nothing left to hand back —
+        // the handler treats this empty result as a miss and reads Canton.
+        let rows = pool.get_chain_audit_cache(&party_a, 2, Some(10)).await?;
+        assert!(rows.is_empty());
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_chain_audit_cache_returns_all_rows_for_an_oversized_limit(
+        pool: SqlitePool,
+    ) -> Result {
+        let party_a = test_party_id("party-a");
+        let party_b = test_party_id("party-b");
+        seed_chain_audit_trail(&pool, &party_a.to_string(), &party_b.to_string()).await?;
+
+        let rows = pool.get_chain_audit_cache(&party_a, 500, None).await?;
+        assert_eq!(cached_offsets(&rows), vec![30, 20, 20, 20, 10]);
+
+        Ok(())
+    }
+
+    /// A single offset bigger than the page still comes back whole, since the
+    /// cursor cannot address part of an offset group.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_chain_audit_cache_keeps_an_oversized_group_intact(pool: SqlitePool) -> Result {
+        let party_a = test_party_id("party-a");
+        let party_a_str = party_a.to_string();
+        for contract_id in ["c-a", "c-b", "c-c"] {
+            insert_chain_audit_row(&pool, &party_a_str, 20, contract_id).await?;
+        }
+
+        let rows = pool.get_chain_audit_cache(&party_a, 1, None).await?;
+        assert_eq!(cached_offsets(&rows), vec![20, 20, 20]);
+
+        Ok(())
+    }
+
+    /// Another party's rows never leak into a page, even at an offset that
+    /// interleaves with the queried party's trail.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_chain_audit_cache_filters_by_party(pool: SqlitePool) -> Result {
+        let party_a = test_party_id("party-a");
+        let party_b = test_party_id("party-b");
+        seed_chain_audit_trail(&pool, &party_a.to_string(), &party_b.to_string()).await?;
+
+        let rows = pool.get_chain_audit_cache(&party_b, 50, None).await?;
+        assert_eq!(cached_offsets(&rows), vec![25]);
+
+        let rows = pool.get_chain_audit_cache(&party_a, 50, None).await?;
+        assert!(rows.iter().all(|r| r.offset != 25));
 
         Ok(())
     }
@@ -2569,6 +2786,62 @@ mod tests {
         assert_eq!(remaining[0].id, dars.id);
         assert_eq!(remaining[0].invitation_type, InvitationType::Dars);
 
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn repair_migration_checksums_unblocks_pre_edit_database(pool: SqlitePool) -> Result {
+        let (version, old_checksum, _) = MIGRATION_CHECKSUM_REPAIRS[0];
+
+        // Simulate a database whose migration was applied from the pre-edit
+        // file: record the old checksum, as operator databases have it.
+        sqlx::query(&format!(
+            "UPDATE _sqlx_migrations SET checksum = X'{old_checksum}' WHERE version = ?"
+        ))
+        .bind(version)
+        .execute(&pool)
+        .await?;
+
+        // Without the repair, the migrator refuses to start — this is the
+        // operator-reported crash.
+        let err = MIGRATOR
+            .run(&pool)
+            .await
+            .expect_err("checksum must mismatch");
+        assert!(
+            err.to_string()
+                .contains("previously applied but has been modified"),
+            "unexpected error: {err}"
+        );
+
+        repair_migration_checksums(&pool).await?;
+        MIGRATOR.run(&pool).await?;
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn repair_migration_checksums_is_a_noop_on_current_database(pool: SqlitePool) -> Result {
+        let (version, _, new_checksum) = MIGRATION_CHECKSUM_REPAIRS[0];
+
+        repair_migration_checksums(&pool).await?;
+
+        let recorded: (String,) =
+            sqlx::query_as("SELECT lower(hex(checksum)) FROM _sqlx_migrations WHERE version = ?")
+                .bind(version)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(recorded.0, new_checksum);
+        MIGRATOR.run(&pool).await?;
+
+        Ok(())
+    }
+
+    #[sqlx::test]
+    async fn repair_migration_checksums_tolerates_missing_table(pool: SqlitePool) -> Result {
+        // A database that has never run migrations has no `_sqlx_migrations`
+        // table; the repair must not fail on it.
+        repair_migration_checksums(&pool).await?;
         Ok(())
     }
 }

@@ -2,6 +2,7 @@ use std::{path::Path, time::Duration};
 
 use anyhow::Context;
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
+use common::types::{InvitationType, WorkflowKind, WorkflowProgress, WorkflowRole};
 use serde_json::{Value, json};
 use tracing::info;
 
@@ -148,7 +149,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(60),
             |f, ctx| {
                 Box::pin(async move {
-                    let id = probe_pending_invitation(f, f.p2.http, "Dars").await?;
+                    let id = probe_pending_invitation(f, f.p2.http, InvitationType::Dars).await?;
                     ctx.p2 = Some(id);
                     Some(Ok(()))
                 })
@@ -159,7 +160,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(60),
             |f, ctx| {
                 Box::pin(async move {
-                    let id = probe_pending_invitation(f, f.p3.http, "Dars").await?;
+                    let id = probe_pending_invitation(f, f.p3.http, InvitationType::Dars).await?;
                     ctx.p3 = Some(id);
                     Some(Ok(()))
                 })
@@ -205,7 +206,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(30),
             |f, _| {
                 Box::pin(async move {
-                    probe_workflow_run_visible(f, f.p1.http, "Dars", "Coordinator", "completed")
+                    probe_workflow_run_visible(f, f.p1.http, WorkflowKind::Dars, WorkflowRole::Coordinator, WorkflowProgress::Completed)
                         .await
                 })
             },
@@ -215,7 +216,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(30),
             |f, _| {
                 Box::pin(async move {
-                    probe_workflow_run_visible(f, f.p2.http, "Dars", "Peer", "completed").await
+                    probe_workflow_run_visible(f, f.p2.http, WorkflowKind::Dars, WorkflowRole::Peer, WorkflowProgress::Completed).await
                 })
             },
         )
@@ -224,7 +225,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(30),
             |f, _| {
                 Box::pin(async move {
-                    probe_workflow_run_visible(f, f.p3.http, "Dars", "Peer", "completed").await
+                    probe_workflow_run_visible(f, f.p3.http, WorkflowKind::Dars, WorkflowRole::Peer, WorkflowProgress::Completed).await
                 })
             },
         )

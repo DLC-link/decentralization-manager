@@ -45,6 +45,7 @@ All configuration is supplied via `DECPM_*` environment variables. The key ones:
 |----------|-------------|---------|
 | `DECPM_PORT` | Port for the HTTP / web UI server | `8080` |
 | `DECPM_NOISE_PORT` | Port for the Noise P2P transport | `9000` |
+| `DECPM_LOG_FORMAT` | Log format. Set `text` for the readable console format while working locally | `json` |
 | `DECPM_CANTON_ADMIN_HOST` | Canton Admin API host | `127.0.0.1` |
 | `DECPM_CANTON_ADMIN_PORT` | Canton Admin API port | `5002` |
 | `DECPM_CANTON_LEDGER_HOST` | Canton Ledger API host | `127.0.0.1` |

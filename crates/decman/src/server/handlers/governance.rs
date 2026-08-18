@@ -21,7 +21,7 @@ use crate::{
     auth::WorkflowAuth,
     canton_id::CantonId,
     config::{NetworkConfig, NodeConfig, PackageConfig, default_package_config},
-    db::schema::SchemaRead,
+    db::{rows::ChainAuditCacheRow, schema::SchemaRead},
     error::Result,
     noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
     server::{
@@ -45,17 +45,17 @@ use crate::{
         },
         types::{
             ActiveCouponReassignmentDelegation, AuditLogEntry, AuditLogQuery, AuditLogResponse,
-            BurnRequestsResponse, CancelConfirmationRequest, ChainAuditEntry, ChainAuditQuery,
-            ChainAuditResponse, ConfirmActionRequest, ContractQueryResponse,
-            CouponReassignmentDelegationSummary, CredentialOffersResponse, CredentialsResponse,
-            ErrorResponse, ExecuteActionRequest, ExpireConfirmationRequest, GovernanceResponse,
-            GovernanceStateResponse, GovernanceType, HoldingsResponse, InstrumentsResponse,
-            KnownMember, KnownMembersResponse, MessageResponse, MintRequestsResponse, NetworkInfo,
-            OperatorInfo, ProposalType, ProposeActionRequest, ProviderConfigurationsResponse,
-            ProviderServicesResponse, RegistrarServiceRequestsResponse, RegistrarServicesResponse,
-            TransferFactoriesResponse, TransferFactoryInfo, TransferInstructionsResponse,
-            TransferPreapprovalsResponse, UserServicesResponse, VaultsResponse,
-            chain_audit_entry_from_row,
+            BurnRequestsResponse, CancelConfirmationRequest, CancelProposalRequest,
+            ChainAuditEntry, ChainAuditQuery, ChainAuditResponse, ConfirmActionRequest,
+            ContractQueryResponse, CouponReassignmentDelegationSummary, CredentialOffersResponse,
+            CredentialsResponse, ErrorResponse, ExecuteActionRequest, ExpireConfirmationRequest,
+            GovernanceResponse, GovernanceStateResponse, GovernanceType, HoldingsResponse,
+            InstrumentsResponse, KnownMember, KnownMembersResponse, MessageResponse,
+            MintRequestsResponse, NetworkInfo, OperatorInfo, ProposalType, ProposeActionRequest,
+            ProviderConfigurationsResponse, ProviderServicesResponse,
+            RegistrarServiceRequestsResponse, RegistrarServicesResponse, TransferFactoriesResponse,
+            TransferFactoryInfo, TransferInstructionsResponse, TransferPreapprovalsResponse,
+            UserServicesResponse, VaultsResponse, chain_audit_entry_from_row,
         },
     },
     utils,
@@ -1084,6 +1084,45 @@ pub async fn get_governance_audit(
     }
 }
 
+/// Wrap a page of audit entries, deriving the cursor for the next (older) page.
+///
+/// `has_more` is passed in rather than inferred from the row count: a page can
+/// hold more than `limit` rows (it is extended to the end of an offset group),
+/// so counting rows would hand out a cursor to a page that turns out empty.
+fn chain_audit_response(entries: Vec<ChainAuditEntry>, has_more: bool) -> ChainAuditResponse {
+    let total_returned = entries.len();
+    let next_before_offset = has_more.then(|| entries.last().map(|e| e.offset)).flatten();
+
+    ChainAuditResponse {
+        entries,
+        total_returned,
+        next_before_offset,
+    }
+}
+
+/// The cached answer for a page request, or `None` when the cache cannot answer
+/// it and the read has to reach Canton.
+///
+/// An empty result is a miss rather than an answer: the cache only holds the
+/// pages fetched so far, so paging past its tail (or a cold start) must not be
+/// reported as an exhausted trail.
+fn cached_chain_audit_page(
+    rows: Vec<ChainAuditCacheRow>,
+    limit: usize,
+) -> Option<ChainAuditResponse> {
+    if rows.is_empty() {
+        return None;
+    }
+
+    // The cache cannot prove the trail is exhausted either, so a full page is
+    // reported as "more" and the next request falls through to Canton — better
+    // a spare empty page than hiding entries that do exist.
+    let has_more = rows.len() >= limit;
+    let entries: Vec<ChainAuditEntry> = rows.into_iter().map(chain_audit_entry_from_row).collect();
+
+    Some(chain_audit_response(entries, has_more))
+}
+
 /// Get on-chain governance audit entries.
 /// Returns cached data by default. Pass `refresh=true` to fetch from Canton and update cache.
 #[utoipa::path(
@@ -1100,22 +1139,25 @@ pub async fn get_governance_chain_audit(
     query: web::Query<ChainAuditQuery>,
 ) -> impl Responder {
     let party_id = &query.party_id;
+    // `limit` is caller-supplied, so it is bounded here rather than trusted:
+    // one page must not be able to ask for the whole retained ledger.
+    let limit = query.clamped_limit();
+
+    // A zero-row page needs no ledger reads.
+    if limit == 0 {
+        return HttpResponse::Ok().json(chain_audit_response(Vec::new(), false));
+    }
 
     if !query.refresh {
-        // Return from cache
         match data
             .db
-            .get_chain_audit_cache(party_id, query.limit as i64)
+            .get_chain_audit_cache(party_id, limit as i64, query.before_offset)
             .await
         {
             Ok(rows) => {
-                let entries: Vec<ChainAuditEntry> =
-                    rows.into_iter().map(chain_audit_entry_from_row).collect();
-                let total_returned = entries.len();
-                return HttpResponse::Ok().json(ChainAuditResponse {
-                    entries,
-                    total_returned,
-                });
+                if let Some(response) = cached_chain_audit_page(rows, limit) {
+                    return HttpResponse::Ok().json(response);
+                }
             }
             Err(e) => {
                 tracing::warn!("Failed to read chain audit cache: {e}");
@@ -1128,21 +1170,26 @@ pub async fn get_governance_chain_audit(
     let token = get_party_token(&data, party_id).await;
     let pkgs = packages();
 
-    match chain_audit::get_chain_audit(&data.config, party_id, token, &pkgs, query.limit).await {
-        Ok(entries) => {
+    match chain_audit::get_chain_audit(
+        &data.config,
+        party_id,
+        token,
+        &pkgs,
+        limit,
+        query.before_offset,
+    )
+    .await
+    {
+        Ok(page) => {
             // Save to cache in background
             let pool = data.db.clone();
             let pid = party_id.clone();
-            let cached = entries.clone();
+            let cached = page.entries.clone();
             tokio::spawn(async move {
                 chain_audit::save_chain_audit_cache(&pool, &pid, &cached).await;
             });
 
-            let total_returned = entries.len();
-            HttpResponse::Ok().json(ChainAuditResponse {
-                entries,
-                total_returned,
-            })
+            HttpResponse::Ok().json(chain_audit_response(page.entries, page.has_more))
         }
         Err(e) => {
             tracing::error!("Failed to fetch chain audit for {party_id}: {e:#}");
@@ -1191,7 +1238,7 @@ fn may_create_second_delegation(proposal: &ProposalType) -> bool {
         (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 409, description = "A CouponReassignmentDelegation is already active; set prior_delegation to replace it", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
-        (status = 503, description = "Cannot confirm whether a CouponReassignmentDelegation is already active", body = ErrorResponse)
+        (status = 503, description = "Node not provisioned for this proposal: the target package is not configured (the response says so, and whether the proposal was already created), or it cannot be confirmed whether a CouponReassignmentDelegation is already active", body = ErrorResponse)
     )
 )]
 #[post("/governance/propose")]
@@ -1435,7 +1482,7 @@ pub async fn propose_action(
             match packages.governance_core.as_deref() {
                 Some(pkg) => pkg,
                 None => {
-                    return HttpResponse::BadRequest().json(ErrorResponse {
+                    return HttpResponse::ServiceUnavailable().json(ErrorResponse {
                         error: "governance_core package not configured".to_string(),
                     });
                 }
@@ -1445,7 +1492,7 @@ pub async fn propose_action(
             match packages.governance_rewards.as_deref() {
                 Some(pkg) => pkg,
                 None => {
-                    return HttpResponse::BadRequest().json(ErrorResponse {
+                    return HttpResponse::ServiceUnavailable().json(ErrorResponse {
                         error: "governance_rewards package not configured".to_string(),
                     });
                 }
@@ -1455,7 +1502,7 @@ pub async fn propose_action(
             match packages.governance_token_custody.as_deref() {
                 Some(pkg) => pkg,
                 None => {
-                    return HttpResponse::BadRequest().json(ErrorResponse {
+                    return HttpResponse::ServiceUnavailable().json(ErrorResponse {
                         error: "governance_token_custody package not configured".to_string(),
                     });
                 }
@@ -1465,7 +1512,7 @@ pub async fn propose_action(
             match packages.governance_utility_credential.as_deref() {
                 Some(pkg) => pkg,
                 None => {
-                    return HttpResponse::BadRequest().json(ErrorResponse {
+                    return HttpResponse::ServiceUnavailable().json(ErrorResponse {
                         error: "governance_utility_credential package not configured".to_string(),
                     });
                 }
@@ -1475,7 +1522,7 @@ pub async fn propose_action(
             match packages.governance_utility_onboarding.as_deref() {
                 Some(pkg) => pkg,
                 None => {
-                    return HttpResponse::BadRequest().json(ErrorResponse {
+                    return HttpResponse::ServiceUnavailable().json(ErrorResponse {
                         error: "governance_utility_onboarding package not configured".to_string(),
                     });
                 }
@@ -1580,11 +1627,21 @@ pub async fn propose_action(
     tracing::info!("Proposal created with CID: {proposal_cid}");
 
     // Step 2: Immediately confirm the proposal as the proposer
+    //
+    // Reachable independently of the Step 1 checks: those only verify the
+    // package the proposal type itself needs, so a rewards / token-custody /
+    // utility proposal reaches here on a node with no governance_core. The
+    // proposal is already on the ledger by this point, so the body has to say
+    // so — the caller must not retry into a second proposal.
     let governance_core_pkg = match packages.governance_core.as_deref() {
         Some(pkg) => pkg,
         None => {
-            return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: "governance_core package not configured".to_string(),
+            return HttpResponse::ServiceUnavailable().json(ErrorResponse {
+                error: format!(
+                    "Proposal {proposal_cid} was created but could not be confirmed: \
+                     governance_core package not configured. Configure it and confirm \
+                     the existing proposal; do not re-propose."
+                ),
             });
         }
     };
@@ -2017,6 +2074,85 @@ pub async fn cancel_confirmation(
             );
             HttpResponse::InternalServerError().json(ErrorResponse {
                 error: format!("Failed to cancel confirmation: {e}"),
+            })
+        }
+    }
+}
+
+/// Retract a proposal the caller proposed
+#[utoipa::path(
+    tag = "Governance",
+    request_body = CancelProposalRequest,
+    responses(
+        (status = 200, description = "Proposal cancelled", body = MessageResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[post("/governance/cancel-proposal")]
+pub async fn cancel_proposal(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    body: web::Json<CancelProposalRequest>,
+) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
+    let party_id = &body.party_id;
+
+    let (token, member_party_id) = match get_party_credentials(&data, party_id).await {
+        Some(creds) => creds,
+        None => {
+            return HttpResponse::Unauthorized().json(ErrorResponse {
+                error: "No credentials configured for party".to_string(),
+            });
+        }
+    };
+
+    let audit_pool = data.db.clone();
+    let audit_details = serde_json::to_string(&*body).unwrap_or_default();
+    let audit_party_id = party_id.clone();
+    let audit_member = member_party_id.clone();
+
+    let packages = packages();
+
+    match execute_cancel_proposal(&data.config, &body, &token, &member_party_id, &packages).await {
+        Ok(()) => {
+            spawn_audit_log(
+                audit_pool,
+                AuditParams {
+                    event_type: AuditEvent::CancelProposal,
+                    party_id: audit_party_id,
+                    member_party_id: audit_member,
+                    governance_type: GovernanceType::CoreDomain,
+                    action_summary: "cancel_proposal".to_string(),
+                    details: audit_details,
+                    status: "success",
+                    error_message: None,
+                },
+            );
+            HttpResponse::Ok().json(MessageResponse {
+                message: "Proposal cancelled successfully".to_string(),
+            })
+        }
+        Err(e) => {
+            tracing::error!("Failed to cancel proposal: {e}");
+            spawn_audit_log(
+                audit_pool,
+                AuditParams {
+                    event_type: AuditEvent::CancelProposal,
+                    party_id: audit_party_id,
+                    member_party_id: audit_member,
+                    governance_type: GovernanceType::CoreDomain,
+                    action_summary: "cancel_proposal".to_string(),
+                    details: audit_details,
+                    status: "failed",
+                    error_message: Some(format!("{e}")),
+                },
+            );
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to cancel proposal: {e}"),
             })
         }
     }
@@ -2931,6 +3067,220 @@ async fn execute_cancel_confirmation(
     Ok(())
 }
 
+/// Build the exercise commands that retract a proposal.
+///
+/// The first command archives the proposal itself. `GovernableAction_ProposerCancel`
+/// is declared on the interface rather than on any one template, so the
+/// exercise carries the `GovernableAction` interface id and never the id of
+/// the template that actually created the contract. That also rules out
+/// [`resolve_contract_package_ref`]: it reports the package of the contract,
+/// which here is the proposal's own package, not the interface's.
+///
+/// The second command archives the caller's confirmation on that proposal,
+/// which `/governance/propose` creates for every proposal. Both choices take
+/// no arguments, and the caller controls both — `proposer` on one, `confirmer`
+/// on the other — so one submission covers them.
+fn build_cancel_proposal_commands(
+    proposal_cid: &str,
+    action_package_ref: &str,
+    confirmation: Option<(&str, &str)>,
+) -> Vec<Command> {
+    let no_arguments = || {
+        Some(Value {
+            sum: Some(value::Sum::Record(Record {
+                record_id: None,
+                fields: vec![],
+            })),
+        })
+    };
+
+    let mut commands = vec![Command {
+        command: Some(command::Command::Exercise(ExerciseCommand {
+            template_id: Some(Identifier {
+                package_id: action_package_ref.to_string(),
+                module_name: "Governance.Action".to_string(),
+                entity_name: "GovernableAction".to_string(),
+            }),
+            contract_id: proposal_cid.to_string(),
+            choice: "GovernableAction_ProposerCancel".to_string(),
+            choice_argument: no_arguments(),
+        })),
+    }];
+
+    if let Some((confirmation_cid, confirmation_package_ref)) = confirmation {
+        commands.push(Command {
+            command: Some(command::Command::Exercise(ExerciseCommand {
+                template_id: Some(Identifier {
+                    package_id: confirmation_package_ref.to_string(),
+                    module_name: "Governance.Confirmation".to_string(),
+                    entity_name: "GovernanceConfirmation".to_string(),
+                }),
+                contract_id: confirmation_cid.to_string(),
+                choice: "GovernanceConfirmation_Cancel".to_string(),
+                choice_argument: no_arguments(),
+            })),
+        });
+    }
+
+    commands
+}
+
+/// Exercise `GovernableAction_ProposerCancel` on a proposal, and archive the
+/// caller's own confirmation alongside it.
+///
+/// The two commands share one submission so they succeed or fail together. A
+/// confirmation that outlives its proposal is only clearable by its own
+/// confirmer: `GovernanceConfirmation_Expire` refuses to run before the
+/// confirmation's expiry time.
+async fn execute_cancel_proposal(
+    config: &NodeConfig,
+    request: &CancelProposalRequest,
+    token: &str,
+    member_party_id: &CantonId,
+    packages: &PackageConfig,
+) -> Result {
+    let action_package_ref = packages
+        .governance_action
+        .as_deref()
+        .context("governance_action package not configured")?;
+
+    let confirmation_package_ref = match request.confirmation_cid.as_deref() {
+        Some(cid) => {
+            let core = packages
+                .governance_core
+                .as_deref()
+                .context("governance_core package not configured")?;
+            // The confirmation is created by the rules contract's choice, so it
+            // shares that contract's possibly out-of-date package.
+            Some(
+                resolve_contract_package_ref(
+                    config,
+                    &request.party_id,
+                    Some(token.to_string()),
+                    cid,
+                    core,
+                )
+                .await,
+            )
+        }
+        None => None,
+    };
+
+    let commands = build_cancel_proposal_commands(
+        &request.proposal_cid,
+        action_package_ref,
+        request
+            .confirmation_cid
+            .as_deref()
+            .zip(confirmation_package_ref.as_deref()),
+    );
+
+    let channel = config.ledger_channel().await?;
+
+    let mut client =
+        CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
+
+    let commands = Commands {
+        workflow_id: String::new(),
+        user_id: String::new(),
+        command_id: uuid::Uuid::new_v4().to_string(),
+        commands,
+        deduplication_period: None,
+        min_ledger_time_abs: None,
+        min_ledger_time_rel: None,
+        act_as: vec![member_party_id.to_string()],
+        read_as: vec![request.party_id.to_string()],
+        submission_id: String::new(),
+        disclosed_contracts: vec![],
+        synchronizer_id: String::new(),
+        package_id_selection_preference: vec![],
+        prefetch_contract_keys: vec![],
+        taps_max_passes: None,
+    };
+
+    let mut req = tonic::Request::new(SubmitAndWaitRequest {
+        commands: Some(commands),
+    });
+    req.metadata_mut()
+        .insert("authorization", format!("Bearer {token}").parse().unwrap());
+
+    client.submit_and_wait(req).await?;
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod cancel_proposal_tests {
+    use super::*;
+
+    fn exercise(command: &Command) -> &ExerciseCommand {
+        match command.command.as_ref() {
+            Some(command::Command::Exercise(e)) => e,
+            _ => panic!("the builder only emits exercise commands"),
+        }
+    }
+
+    #[test]
+    fn cancels_the_proposal_through_the_interface() {
+        let commands = build_cancel_proposal_commands("proposal-1", "action-pkg", None);
+
+        assert_eq!(commands.len(), 1);
+        let exercised = exercise(&commands[0]);
+        assert_eq!(exercised.contract_id, "proposal-1");
+        assert_eq!(exercised.choice, "GovernableAction_ProposerCancel");
+
+        let template_id = exercised
+            .template_id
+            .as_ref()
+            .expect("exercise carries a template id");
+        assert_eq!(template_id.package_id, "action-pkg");
+        assert_eq!(template_id.module_name, "Governance.Action");
+        assert_eq!(template_id.entity_name, "GovernableAction");
+    }
+
+    #[test]
+    fn archives_the_own_confirmation_in_the_same_batch() {
+        let commands = build_cancel_proposal_commands(
+            "proposal-1",
+            "action-pkg",
+            Some(("confirmation-1", "core-pkg")),
+        );
+
+        assert_eq!(commands.len(), 2);
+        let exercised = exercise(&commands[1]);
+        assert_eq!(exercised.contract_id, "confirmation-1");
+        assert_eq!(exercised.choice, "GovernanceConfirmation_Cancel");
+
+        let template_id = exercised
+            .template_id
+            .as_ref()
+            .expect("exercise carries a template id");
+        assert_eq!(template_id.package_id, "core-pkg");
+        assert_eq!(template_id.module_name, "Governance.Confirmation");
+        assert_eq!(template_id.entity_name, "GovernanceConfirmation");
+    }
+
+    #[test]
+    fn neither_choice_takes_arguments() {
+        let commands = build_cancel_proposal_commands(
+            "proposal-1",
+            "action-pkg",
+            Some(("confirmation-1", "core-pkg")),
+        );
+
+        for command in &commands {
+            let argument = exercise(command)
+                .choice_argument
+                .as_ref()
+                .and_then(|v| v.sum.as_ref());
+            match argument {
+                Some(value::Sum::Record(record)) => assert!(record.fields.is_empty()),
+                _ => panic!("choice argument is an empty record"),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod propose_guard_tests {
     use super::*;
@@ -2971,5 +3321,104 @@ mod propose_guard_tests {
         assert!(!may_create_second_delegation(&setup_with_prior));
         // unrelated proposals are never blocked, and never pay for the read
         assert!(!may_create_second_delegation(&unrelated));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry_at(offset: i64) -> ChainAuditEntry {
+        ChainAuditEntry {
+            offset,
+            timestamp: 0,
+            event_type: "propose".to_string(),
+            contract_id: String::new(),
+            template_id: String::new(),
+            package_id: String::new(),
+            governance_type: "core_domain".to_string(),
+            action_summary: String::new(),
+            choice: None,
+            acting_parties: Vec::new(),
+            update_id: String::new(),
+            details: serde_json::Value::Null,
+        }
+    }
+
+    fn cache_row_at(offset: i64) -> ChainAuditCacheRow {
+        ChainAuditCacheRow {
+            party_id: "dec::1220ff".to_string(),
+            offset,
+            timestamp: 0,
+            event_type: "propose".to_string(),
+            contract_id: String::new(),
+            template_id: String::new(),
+            package_id: String::new(),
+            governance_type: "core_domain".to_string(),
+            action_summary: String::new(),
+            choice: None,
+            acting_parties: "[]".to_string(),
+            update_id: String::new(),
+            details: "null".to_string(),
+        }
+    }
+
+    /// The cursor is the oldest offset on the page, since the next request asks
+    /// for `offset < cursor`.
+    #[test]
+    fn cursor_is_the_oldest_offset_when_more_exist() {
+        let response = chain_audit_response(vec![entry_at(30), entry_at(20), entry_at(10)], true);
+        assert_eq!(response.next_before_offset, Some(10));
+        assert_eq!(response.total_returned, 3);
+    }
+
+    #[test]
+    fn no_cursor_when_nothing_older_exists() {
+        let response = chain_audit_response(vec![entry_at(30), entry_at(20)], false);
+        assert_eq!(response.next_before_offset, None);
+        assert_eq!(response.total_returned, 2);
+    }
+
+    /// A `has_more` with no rows to derive a cursor from must not hand out one:
+    /// there is no offset to page before, and inventing one would skip entries.
+    #[test]
+    fn no_cursor_from_an_empty_page() {
+        let response = chain_audit_response(Vec::new(), true);
+        assert_eq!(response.next_before_offset, None);
+        assert_eq!(response.total_returned, 0);
+    }
+
+    /// An empty cache read is a miss, not "the trail ends here" — the caller
+    /// has to fall through to Canton.
+    #[test]
+    fn empty_cache_is_a_miss() {
+        assert!(cached_chain_audit_page(Vec::new(), 2).is_none());
+    }
+
+    /// A cache page that fills `limit` is reported as having more, so the next
+    /// request reaches Canton rather than stopping at the cache's tail.
+    #[test]
+    fn full_cache_page_reports_more() {
+        let response = cached_chain_audit_page(vec![cache_row_at(30), cache_row_at(20)], 2)
+            .expect("non-empty rows are a hit");
+        assert_eq!(response.next_before_offset, Some(20));
+    }
+
+    #[test]
+    fn short_cache_page_reports_no_more() {
+        let response =
+            cached_chain_audit_page(vec![cache_row_at(30)], 2).expect("non-empty rows are a hit");
+        assert_eq!(response.next_before_offset, None);
+        assert_eq!(response.total_returned, 1);
+    }
+
+    /// An over-`limit` cache page (a whole offset group kept together) still
+    /// reports more, and its cursor is the oldest offset returned.
+    #[test]
+    fn oversized_cache_page_reports_more() {
+        let rows = vec![cache_row_at(30), cache_row_at(20), cache_row_at(20)];
+        let response = cached_chain_audit_page(rows, 2).expect("non-empty rows are a hit");
+        assert_eq!(response.total_returned, 3);
+        assert_eq!(response.next_before_offset, Some(20));
     }
 }

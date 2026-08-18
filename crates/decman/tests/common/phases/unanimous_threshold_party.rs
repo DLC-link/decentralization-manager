@@ -26,6 +26,7 @@
 use std::time::Duration;
 
 use anyhow::Context;
+use common::{api::DecentralizedPartiesResponse, types::InvitationType};
 use serde_json::{Value, json};
 use tracing::info;
 
@@ -35,7 +36,6 @@ use crate::common::{
     http::probe_workflow_status,
     invitations::{InvitationIds, post_accept_invitation, probe_pending_invitation},
     scenario::Scenario,
-    types::DecentralizedPartiesResponse,
 };
 
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
@@ -70,7 +70,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         Duration::from_secs(60),
         |f, ctx| {
             Box::pin(async move {
-                let id = probe_pending_invitation(f, f.p2.http, "Onboarding").await?;
+                let id = probe_pending_invitation(f, f.p2.http, InvitationType::Onboarding).await?;
                 ctx.p2 = Some(id);
                 Some(Ok(()))
             })
@@ -105,12 +105,13 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             move |f, _| {
                 let prefix = prefix.clone();
                 Box::pin(async move {
-                    let r: DecentralizedPartiesResponse =
-                        f.get_json(f.p1.http, "/decentralized-parties").await.ok()?;
+                    let r: DecentralizedPartiesResponse = f
+                        .probe_get_json(f.p1.http, "/decentralized-parties")
+                        .await?;
                     let party = r
                         .parties
                         .into_iter()
-                        .find(|p| p.party_id.starts_with(&prefix))?;
+                        .find(|p| p.party_id.prefix == prefix)?;
                     // Guards the regression against a vacuous pass: if the
                     // requested threshold were ever dropped on the way to the
                     // topology, the party would come back as the 1-of-2

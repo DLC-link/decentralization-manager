@@ -1,8 +1,8 @@
 use anyhow::Context;
+use common::{api::PendingInvitationsResponse, types::InvitationType};
 use serde_json::json;
 
 use super::Fixture;
-use super::types::PendingInvitationsResponse;
 
 /// Captured pending-invitation ids on P2 and P3, threaded through a
 /// `Scenario` `Ctx` so a THEN that observes the invitation can hand its
@@ -21,9 +21,9 @@ pub struct InvitationIds {
 pub async fn probe_pending_invitation(
     f: &Fixture,
     port: u16,
-    invitation_type: &str,
+    invitation_type: InvitationType,
 ) -> Option<String> {
-    let r: PendingInvitationsResponse = f.get_json(port, "/invitations").await.ok()?;
+    let r: PendingInvitationsResponse = f.probe_get_json(port, "/invitations").await?;
     r.invitations
         .into_iter()
         .find(|i| i.invitation_type == invitation_type)

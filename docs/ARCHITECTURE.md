@@ -487,6 +487,16 @@ Choices:
 - `GovernanceConfirmation_Expire` -- Remove if past `expiresAt`
 - `GovernanceConfirmation_Cancel` -- Confirmer revokes their own confirmation
 
+### Cancelling a proposal
+
+The proposer retracts their own proposal with `GovernableAction_ProposerCancel`, which needs no vote. `POST /governance/cancel-proposal` exercises it, and the UI offers it as "Cancel proposal" on the proposer's card.
+
+A cancel archives the proposal, and it leaves the confirmations behind. Those confirmations are inert, because execution fetches the proposal and fails without it. Decman marks such a card `orphaned` and shows the stranded contracts.
+
+Each member clears their own confirmation whenever they want, through `GovernanceConfirmation_Cancel` ("Revoke"). Nobody clears another member's confirmation early: `GovernanceConfirmation_Expire` requires the confirmation to be past `expiresAt`, which is `actionConfirmationTimeout` after the vote. That time lock is deliberate, because the same choice would otherwise let one member strip another member's live vote.
+
+The cancel endpoint therefore archives the proposer's own confirmation in the same transaction as the proposal. `POST /governance/propose` always creates that confirmation, so a cancel would otherwise strand a contract that only the proposer could clear.
+
 ### GovernanceExecutionResult
 
 The `GovernanceExecutionResult` contract (from `Governance.ExecutionResult`) provides an immutable on-chain audit trail. It is created automatically when a domain action is executed:

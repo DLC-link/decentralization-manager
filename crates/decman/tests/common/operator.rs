@@ -23,11 +23,23 @@ pub fn operator_response_timeout_devnet() -> Duration {
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Error)]
-#[error("operator automation did not produce {awaited} for action {action} within {elapsed:?}")]
-pub struct OperatorAutomationTimeout {
-    pub action: String,
-    pub awaited: String,
-    pub elapsed: Duration,
+pub enum OperatorAutomationFailure {
+    /// This wait polled for its full budget and produced nothing.
+    #[error("operator automation did not produce {awaited} for action {action} within {elapsed:?}")]
+    Timeout {
+        action: String,
+        awaited: String,
+        elapsed: Duration,
+    },
+    /// An *earlier* wait timed out and tripped the fixture's circuit breaker,
+    /// so this one bailed without polling. Reported separately because the
+    /// timeout that matters happened in a previous phase, and a shared
+    /// `elapsed` field could only have described this one.
+    #[error(
+        "skipped waiting for {awaited} on action {action}: an earlier operator-automation wait \
+         already timed out and tripped the suite's circuit breaker"
+    )]
+    BreakerTripped { action: String, awaited: String },
 }
 
 /// Poll `path` on `port`, deserialize the response as `R`, and call
@@ -49,10 +61,9 @@ where
     F: Fn(R) -> Option<String>,
 {
     if f.operator_timeout_tripped {
-        anyhow::bail!(OperatorAutomationTimeout {
+        anyhow::bail!(OperatorAutomationFailure::BreakerTripped {
             action: action.to_string(),
             awaited: awaited.to_string(),
-            elapsed: Duration::ZERO,
         });
     }
 
@@ -67,7 +78,7 @@ where
         }
         if start.elapsed() >= timeout {
             f.operator_timeout_tripped = true;
-            anyhow::bail!(OperatorAutomationTimeout {
+            anyhow::bail!(OperatorAutomationFailure::Timeout {
                 action: action.to_string(),
                 awaited: awaited.to_string(),
                 elapsed: start.elapsed(),
@@ -155,7 +166,14 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(format!("{err:#}").contains("TestAction"));
+        let msg = format!("{err:#}");
+        assert!(msg.contains("TestAction"));
+        // A real timeout reports as one, and carries the elapsed budget.
+        assert!(msg.contains("did not produce"), "unexpected message: {msg}");
+        assert!(
+            !msg.contains("circuit breaker"),
+            "unexpected message: {msg}"
+        );
         assert!(f.operator_timeout_tripped);
     }
 
@@ -178,7 +196,15 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(format!("{err:#}").contains("TestAction"));
+        let msg = format!("{err:#}");
+        assert!(msg.contains("TestAction"));
+        // The pre-tripped path must not read as a 0ns timeout of its own.
+        assert!(msg.contains("circuit breaker"), "unexpected message: {msg}");
+        assert!(
+            !msg.contains("did not produce"),
+            "unexpected message: {msg}"
+        );
+        assert!(!msg.contains("0ns"), "unexpected message: {msg}");
 
         // Verify the breaker short-circuited BEFORE any HTTP call — wiremock
         // received zero requests on the mounted MockServer.

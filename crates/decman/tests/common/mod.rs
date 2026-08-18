@@ -9,11 +9,10 @@ pub mod invitations;
 pub mod ledger_api;
 pub mod operator;
 pub mod phases;
+pub mod probe;
 pub mod processes;
 pub mod scenario;
 pub mod tls_proxy;
-pub mod types;
-pub mod wallet;
 
 use std::{
     path::PathBuf,
@@ -22,6 +21,7 @@ use std::{
 };
 
 use anyhow::Context;
+use common::api::{NetworkInfo, OperatorInfo};
 use reqwest::Client;
 
 #[derive(Debug, Clone)]
@@ -83,6 +83,11 @@ pub struct Fixture {
     /// vars at boot; restart helpers update the slot in place so subsequent
     /// chaos tests target the freshly-spawned process.
     pub current_pids: [Option<u32>; 3],
+
+    /// Why the most recent polled probe returned `None`. Written by
+    /// [`Fixture::probe_get_json`], read by the `Scenario` runner so a step
+    /// that never becomes observable reports the underlying failure.
+    pub probe_diag: probe::ProbeDiag,
 
     pub target: TestTarget,
     pub run_id: String,
@@ -243,6 +248,7 @@ impl Fixture {
             p2,
             p3,
             current_pids,
+            probe_diag: probe::ProbeDiag::default(),
             target,
             run_id,
             operator_party: None,
@@ -283,17 +289,17 @@ impl Fixture {
         if self.target == TestTarget::Localnet {
             return Ok(());
         }
-        let net: types::NetworkInfoResponse = self
+        let net: NetworkInfo = self
             .get_json(self.p1.http, "/network-info")
             .await
             .context("GET /network-info")?;
-        self.dso_party = Some(net.dso_party_id);
+        self.dso_party = Some(net.dso_party_id.to_string());
 
-        let op: types::OperatorInfoResponse = self
+        let op: OperatorInfo = self
             .get_json(self.p1.http, "/operator-info")
             .await
             .context("GET /operator-info")?;
-        self.operator_party = Some(op.party_id);
+        self.operator_party = Some(op.party_id.to_string());
         Ok(())
     }
 
@@ -374,6 +380,7 @@ impl Fixture {
                 noise: 9003,
                 participant_id: "p3".to_string(),
             },
+            probe_diag: probe::ProbeDiag::default(),
             target: TestTarget::Localnet,
             run_id: "test-run-id".to_string(),
             operator_party: None,
@@ -635,18 +642,27 @@ mod tests {
             Mock, MockServer, ResponseTemplate,
             matchers::{method, path},
         };
+        // Full 34-byte namespaces and the amulet_rules fields: the fixture now
+        // deserializes the server's own `NetworkInfo` / `OperatorInfo`, whose
+        // `CantonId` rejects a truncated fingerprint.
+        const DSO: &str =
+            "DSO::1220dededededededededededededededededededededededededededededededede";
+        const OPERATOR: &str =
+            "Operator::12200f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f";
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/network-info"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "dso_party_id": "DSO::1220abc"
+                "dso_party_id": DSO,
+                "amulet_rules_cid": "00amulet",
+                "amulet_rules_blob": "blob",
             })))
             .mount(&server)
             .await;
         Mock::given(method("GET"))
             .and(path("/operator-info"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "party_id": "Operator::1220def"
+                "party_id": OPERATOR
             })))
             .mount(&server)
             .await;
@@ -656,8 +672,8 @@ mod tests {
         f.target = TestTarget::Devnet;
 
         f.discover_network_parties().await.unwrap();
-        assert_eq!(f.dso_party.as_deref(), Some("DSO::1220abc"));
-        assert_eq!(f.operator_party.as_deref(), Some("Operator::1220def"));
+        assert_eq!(f.dso_party.as_deref(), Some(DSO));
+        assert_eq!(f.operator_party.as_deref(), Some(OPERATOR));
     }
 
     #[tokio::test]

@@ -1,6 +1,10 @@
 use std::time::Duration;
 
 use anyhow::Context;
+use common::{
+    api::DecentralizedPartiesResponse,
+    types::{InvitationType, WorkflowKind, WorkflowProgress, WorkflowRole},
+};
 use serde_json::{Value, json};
 use tracing::info;
 
@@ -9,7 +13,6 @@ use crate::common::{
     http::{probe_workflow_run_visible, probe_workflow_status},
     invitations::{InvitationIds, post_accept_invitation, probe_pending_invitation},
     scenario::Scenario,
-    types::DecentralizedPartiesResponse,
 };
 
 async fn next_test_network_prefix(f: &Fixture) -> anyhow::Result<String> {
@@ -21,7 +24,7 @@ async fn next_test_network_prefix(f: &Fixture) -> anyhow::Result<String> {
         .parties
         .iter()
         .filter_map(|p| {
-            let id = p.party_id.split("::").next()?;
+            let id = &p.party_id.prefix;
             let n = id.strip_prefix("test-network-")?;
             n.parse::<u32>().ok()
         })
@@ -32,7 +35,7 @@ async fn next_test_network_prefix(f: &Fixture) -> anyhow::Result<String> {
 
 async fn ensure_no_party_with_prefix(f: &Fixture, prefix: &str) -> anyhow::Result<()> {
     let r: DecentralizedPartiesResponse = f.get_json(f.p1.http, "/decentralized-parties").await?;
-    if r.parties.iter().any(|p| p.party_id.starts_with(prefix)) {
+    if r.parties.iter().any(|p| p.party_id.prefix == prefix) {
         anyhow::bail!("party with prefix {prefix} already exists");
     }
     Ok(())
@@ -73,7 +76,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         Duration::from_secs(60),
         |f, ctx| {
             Box::pin(async move {
-                let id = probe_pending_invitation(f, f.p2.http, "Onboarding").await?;
+                let id = probe_pending_invitation(f, f.p2.http, InvitationType::Onboarding).await?;
                 ctx.p2 = Some(id);
                 Some(Ok(()))
             })
@@ -84,7 +87,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         Duration::from_secs(60),
         |f, ctx| {
             Box::pin(async move {
-                let id = probe_pending_invitation(f, f.p3.http, "Onboarding").await?;
+                let id = probe_pending_invitation(f, f.p3.http, InvitationType::Onboarding).await?;
                 ctx.p3 = Some(id);
                 Some(Ok(()))
             })
@@ -124,8 +127,14 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         Duration::from_secs(30),
         |f, _| {
             Box::pin(async move {
-                probe_workflow_run_visible(f, f.p1.http, "Onboarding", "Coordinator", "completed")
-                    .await
+                probe_workflow_run_visible(
+                    f,
+                    f.p1.http,
+                    WorkflowKind::Onboarding,
+                    WorkflowRole::Coordinator,
+                    WorkflowProgress::Completed,
+                )
+                .await
             })
         },
     )
@@ -134,7 +143,14 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         Duration::from_secs(30),
         |f, _| {
             Box::pin(async move {
-                probe_workflow_run_visible(f, f.p2.http, "Onboarding", "Peer", "completed").await
+                probe_workflow_run_visible(
+                    f,
+                    f.p2.http,
+                    WorkflowKind::Onboarding,
+                    WorkflowRole::Peer,
+                    WorkflowProgress::Completed,
+                )
+                .await
             })
         },
     )
@@ -143,7 +159,14 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         Duration::from_secs(30),
         |f, _| {
             Box::pin(async move {
-                probe_workflow_run_visible(f, f.p3.http, "Onboarding", "Peer", "completed").await
+                probe_workflow_run_visible(
+                    f,
+                    f.p3.http,
+                    WorkflowKind::Onboarding,
+                    WorkflowRole::Peer,
+                    WorkflowProgress::Completed,
+                )
+                .await
             })
         },
     )
@@ -155,13 +178,14 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             move |f, _| {
                 let prefix = prefix.clone();
                 Box::pin(async move {
-                    let r: DecentralizedPartiesResponse =
-                        f.get_json(f.p1.http, "/decentralized-parties").await.ok()?;
+                    let r: DecentralizedPartiesResponse = f
+                        .probe_get_json(f.p1.http, "/decentralized-parties")
+                        .await?;
                     let party = r
                         .parties
                         .into_iter()
-                        .find(|p| p.party_id.starts_with(&prefix))?;
-                    f.party_id = Some(party.party_id);
+                        .find(|p| p.party_id.prefix == prefix)?;
+                    f.party_id = Some(party.party_id.to_string());
                     f.party_prefix = Some(prefix.clone());
                     Some(Ok(()))
                 })

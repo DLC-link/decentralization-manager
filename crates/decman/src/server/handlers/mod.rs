@@ -13,7 +13,7 @@ pub use config::{
     NodeConfigResponse, get_network_config, get_node_config, healthz, save_network_config,
 };
 pub use governance::{
-    cancel_confirmation, confirm_action, execute_action, expire_confirmation,
+    cancel_confirmation, cancel_proposal, confirm_action, execute_action, expire_confirmation,
     get_burn_requests_handler, get_coupon_reassignment_delegation, get_credential_offers_handler,
     get_credentials_handler, get_governance, get_governance_audit, get_governance_chain_audit,
     get_governance_state, get_holdings_handler, get_instruments_handler, get_known_members,
@@ -36,10 +36,7 @@ pub use parties::{
     store_parties_to_db,
 };
 pub use party_config::{discover_member_party, get_party_config, save_party_config};
-pub use tenant::{
-    tenant_acs, tenant_execute_submission, tenant_onboard, tenant_prepare,
-    tenant_prepare_submission, tenant_status,
-};
+pub use tenant::{tenant_onboard, tenant_prepare, tenant_status};
 pub use workflows::{
     cancel_add_party, cancel_change_threshold, cancel_contracts, cancel_dars, cancel_kick,
     cancel_onboarding, cancel_workflow_instance, dismiss_workflow, get_add_party_status,

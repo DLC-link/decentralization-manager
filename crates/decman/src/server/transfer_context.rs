@@ -23,8 +23,7 @@ use canton_common::{
     },
 };
 use canton_proto_rs::com::daml::ledger::api::v2::{
-    CumulativeFilter, DisclosedContract, EventFormat, Filters, GetEventsByContractIdRequest,
-    Identifier, InterfaceFilter, Record, WildcardFilter, cumulative_filter, value,
+    DisclosedContract, GetEventsByContractIdRequest, Identifier, Record, value,
 };
 use chrono::DateTime;
 
@@ -32,6 +31,7 @@ use crate::{
     canton_id::CantonId,
     config::{Network, NodeConfig},
     error::Result,
+    server::event_filters::{interface_filter, party_event_format, wildcard_filter},
     utils,
 };
 
@@ -228,33 +228,20 @@ async fn fetch_instruction_registrar(
 ) -> Result<CantonId> {
     let mut client = utils::create_event_query_client(config, token).await?;
 
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::InterfaceFilter(
-                    InterfaceFilter {
-                        interface_id: Some(Identifier {
-                            package_id: "#splice-api-token-transfer-instruction-v1".to_string(),
-                            module_name: "Splice.Api.Token.TransferInstructionV1".to_string(),
-                            entity_name: "TransferInstruction".to_string(),
-                        }),
-                        include_interface_view: true,
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
-    );
-
     let request = GetEventsByContractIdRequest {
         contract_id: transfer_instruction_cid.to_string(),
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            verbose: true,
-        }),
+        event_format: Some(party_event_format(
+            party_id,
+            vec![interface_filter(
+                Identifier {
+                    package_id: "#splice-api-token-transfer-instruction-v1".to_string(),
+                    module_name: "Splice.Api.Token.TransferInstructionV1".to_string(),
+                    entity_name: "TransferInstruction".to_string(),
+                },
+                false,
+            )],
+            true,
+        )),
     };
 
     let created_event = client
@@ -335,27 +322,14 @@ pub async fn maybe_fetch_for_proposal(
     // `GetEventsByContractId` filters by party-visibility so the requester
     // must be authorized to read the proposal. Use the party that's executing
     // the action — they're a stakeholder on the governance proposal.
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
-                    WildcardFilter {
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
-    );
 
     let request = GetEventsByContractIdRequest {
         contract_id: proposal_cid.to_string(),
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            verbose: true,
-        }),
+        event_format: Some(party_event_format(
+            party_id,
+            vec![wildcard_filter(false)],
+            true,
+        )),
     };
 
     let response = client

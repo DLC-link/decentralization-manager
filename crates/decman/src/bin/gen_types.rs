@@ -58,6 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         AuthTestResponse,
         AuthTestResult,
         CancelConfirmationRequest,
+        CancelProposalRequest,
         ChainAuditEntry,
         ChainAuditResponse,
         ChangeThresholdInvitePayload,
@@ -221,6 +222,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             blocks.push(body.trim().to_string());
         }
     }
+
+    // ts-rs only emits types, so the shared page size is appended by hand from
+    // the Rust constant — that keeps `common::api::PAGE_SIZE` the only place
+    // the value is written down.
+    blocks.push(format!(
+        "export const PAGE_SIZE = {page_size};",
+        page_size = common::api::PAGE_SIZE
+    ));
 
     let header = "// Code generated from the Rust wire DTOs by `gen-types` (ts-rs).\n\
                   // DO NOT EDIT. Regenerate with `just gen-types`.\n\n";

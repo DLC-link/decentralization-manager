@@ -31,15 +31,11 @@
 //! [`chunk_size`]) are unit-tested here; the gRPC reads and command submission
 //! are exercised by the localnet and devnet integration tests.
 
-use std::collections::HashMap;
-
 use anyhow::{Context, anyhow};
 use canton_common::decimal::DamlDecimal;
 use canton_proto_rs::com::daml::ledger::api::v2::{
-    Command, Commands, CumulativeFilter, EventFormat, ExerciseCommand, Filters,
-    GetActiveContractsRequest, GetLedgerEndRequest, Identifier, InterfaceFilter, Record,
-    SubmitAndWaitRequest, TemplateFilter, Value, WildcardFilter, command,
-    command_service_client::CommandServiceClient, cumulative_filter,
+    Command, Commands, ExerciseCommand, GetActiveContractsRequest, GetLedgerEndRequest, Identifier,
+    Record, SubmitAndWaitRequest, Value, command, command_service_client::CommandServiceClient,
     get_active_contracts_response::ContractEntry, value,
 };
 use chrono::{DateTime, Utc};
@@ -55,6 +51,9 @@ use std::time::Duration;
 use super::AppState;
 use super::action_serializer::{
     field, make_contract_id, make_extra_args, make_list, make_party, make_text_map,
+};
+use super::event_filters::{
+    interface_filter, party_event_format, template_filter, wildcard_filter,
 };
 use super::handlers::{get_party_credentials, packages};
 use super::queries::resolve_contract_package_ref;
@@ -117,6 +116,62 @@ fn field_optional_is_none(rec: &Record, label: &str) -> bool {
 // Shared decoded ACS read
 // ============================================================================
 
+/// A Daml module path, e.g. `Splice.Amulet`.
+pub(crate) struct Module<'a>(pub &'a str);
+
+/// A Daml template or interface name, e.g. `RewardCouponV2`.
+pub(crate) struct Entity<'a>(pub &'a str);
+
+/// What an [`active_created_records`] read selects.
+///
+/// One value rather than four positional arguments, and the two same-typed
+/// halves are wrapped: `package_id`, module and entity were all `&str`, so a
+/// transposition compiled, passed clippy, and yielded a filter matching
+/// nothing — `Ok(vec![])`, which a caller reads as "the party holds no such
+/// contracts". [`Module`] and [`Entity`] make each of those swaps a type
+/// error instead, so the hazard is closed rather than narrowed.
+pub(crate) struct ContractFilter<'a> {
+    pub package_id: &'a str,
+    pub module: &'a str,
+    pub entity: &'a str,
+    /// Read the interface view instead of the concrete template's arguments.
+    pub interface_view: bool,
+    /// Interface reads only: keep a contract only if this concrete template
+    /// created it.
+    pub implementer: Option<(&'a str, &'a str)>,
+}
+
+impl<'a> ContractFilter<'a> {
+    /// A concrete-template read.
+    pub fn template(package_id: &'a str, module: Module<'a>, entity: Entity<'a>) -> Self {
+        Self {
+            package_id,
+            module: module.0,
+            entity: entity.0,
+            interface_view: false,
+            implementer: None,
+        }
+    }
+
+    /// An interface read, admitting every implementation until narrowed by
+    /// [`Self::implemented_by`].
+    pub fn interface(package_id: &'a str, module: Module<'a>, entity: Entity<'a>) -> Self {
+        Self {
+            package_id,
+            module: module.0,
+            entity: entity.0,
+            interface_view: true,
+            implementer: None,
+        }
+    }
+
+    /// Keep only contracts created by this concrete template.
+    pub fn implemented_by(mut self, module: Module<'a>, entity: Entity<'a>) -> Self {
+        self.implementer = Some((module.0, entity.0));
+        self
+    }
+}
+
 /// A single decoded `GetActiveContracts` read.
 ///
 /// For `interface_view = false` this uses a `TemplateFilter` (or, under
@@ -137,21 +192,20 @@ fn field_optional_is_none(rec: &Record, label: &str) -> bool {
 /// consumer needs a specific one — see [`unassigned_coupons`].
 ///
 /// Modeled on `queries::fetch_proposal_infos`.
-// The full filter descriptor (package/module/entity + template-vs-interface) is
-// intentionally passed positionally so this stays the single shared read for
-// every reward-automation query.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn active_created_records(
     config: &NodeConfig,
     party_id: &CantonId,
     token: Option<String>,
     test_mode: bool,
-    package_id: &str,
-    module: &str,
-    entity: &str,
-    interface_view: bool,
-    implementer: Option<(&str, &str)>,
+    filter: ContractFilter<'_>,
 ) -> anyhow::Result<Vec<(String, i64, Record)>> {
+    let ContractFilter {
+        package_id,
+        module,
+        entity,
+        interface_view,
+        implementer,
+    } = filter;
     let mut state_client = utils::create_state_client(config, token).await?;
 
     let ledger_end = state_client
@@ -160,48 +214,22 @@ pub(crate) async fn active_created_records(
         .into_inner()
         .offset;
 
-    let identifier_filter = if interface_view {
-        cumulative_filter::IdentifierFilter::InterfaceFilter(InterfaceFilter {
-            interface_id: Some(Identifier {
-                package_id: package_id.to_string(),
-                module_name: module.to_string(),
-                entity_name: entity.to_string(),
-            }),
-            include_interface_view: true,
-            include_created_event_blob: false,
-        })
-    } else if test_mode {
-        cumulative_filter::IdentifierFilter::WildcardFilter(WildcardFilter {
-            include_created_event_blob: false,
-        })
-    } else {
-        cumulative_filter::IdentifierFilter::TemplateFilter(TemplateFilter {
-            template_id: Some(Identifier {
-                package_id: package_id.to_string(),
-                module_name: module.to_string(),
-                entity_name: entity.to_string(),
-            }),
-            include_created_event_blob: false,
-        })
+    let identifier = || Identifier {
+        package_id: package_id.to_string(),
+        module_name: module.to_string(),
+        entity_name: entity.to_string(),
     };
-
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(identifier_filter),
-            }],
-        },
-    );
+    let filter = if interface_view {
+        interface_filter(identifier(), false)
+    } else if test_mode {
+        wildcard_filter(false)
+    } else {
+        template_filter(identifier(), false)
+    };
 
     let acs_request = GetActiveContractsRequest {
         active_at_offset: ledger_end,
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            verbose: true,
-        }),
+        event_format: Some(party_event_format(party_id, vec![filter], true)),
         stream_continuation_token: None,
     };
 
@@ -350,11 +378,11 @@ pub(crate) async fn active_delegation(
         decparty,
         Some(token.to_string()),
         test_mode,
-        package_id,
-        "Governance.Rewards.CouponReassignmentDelegation",
-        "CouponReassignmentDelegation",
-        false,
-        None, // template read: the template *is* the filter
+        ContractFilter::template(
+            package_id,
+            Module("Governance.Rewards.CouponReassignmentDelegation"),
+            Entity("CouponReassignmentDelegation"),
+        ),
     )
     .await?;
 
@@ -392,11 +420,11 @@ pub(crate) async fn active_delegations(
         decparty,
         Some(token.to_string()),
         test_mode,
-        package_id,
-        "Governance.Rewards.CouponReassignmentDelegation",
-        "CouponReassignmentDelegation",
-        false,
-        None,
+        ContractFilter::template(
+            package_id,
+            Module("Governance.Rewards.CouponReassignmentDelegation"),
+            Entity("CouponReassignmentDelegation"),
+        ),
     )
     .await?;
 
@@ -494,11 +522,12 @@ pub(crate) async fn unassigned_coupons(
         decparty,
         token,
         test_mode,
-        "#splice-api-reward-assignment-v1",
-        "Splice.Api.RewardAssignmentV1",
-        "RewardCoupon",
-        true,
-        Some(("Splice.Amulet", "RewardCouponV2")),
+        ContractFilter::interface(
+            "#splice-api-reward-assignment-v1",
+            Module("Splice.Api.RewardAssignmentV1"),
+            Entity("RewardCoupon"),
+        )
+        .implemented_by(Module("Splice.Amulet"), Entity("RewardCouponV2")),
     )
     .await?;
 
@@ -755,7 +784,19 @@ pub(crate) async fn run_reassign_once(
     .await?;
     let assignable = select_assignable(&coupons, Utc::now(), expiry_margin);
     if assignable.is_empty() {
-        return Ok(()); // nothing assignable -> no-op
+        // `visible` is what the ACS read returned, so it separates "coupons
+        // present but none assignable yet" from "nothing visible at all".
+        //
+        // It does NOT separate a decparty that earned nothing from one whose
+        // coupons carry providerIsObserver = false (design §4): such a coupon
+        // is absent from the ACS entirely, so both report 0. Telling those
+        // apart needs a signal this node does not hold.
+        tracing::debug!(
+            %decparty,
+            visible = coupons.len(),
+            "no assignable coupons this tick"
+        );
+        return Ok(());
     }
 
     let assigned = drain_assignable(
@@ -814,6 +855,20 @@ fn canton_error_id(e: &anyhow::Error) -> Option<String> {
     let id = status.message().split('(').next()?.trim();
     (!id.is_empty() && id.bytes().all(|b| b.is_ascii_uppercase() || b == b'_'))
         .then(|| id.to_string())
+}
+
+/// Whether the tick failed only because a package it reads by name is absent
+/// from this participant.
+///
+/// Both reads name their package by alias, so the ledger rejects the request
+/// before it reads a contract. A node in that state fails identically on every
+/// tick and no operator can act on the line, so the loop logs it at `trace`.
+///
+/// One id covers both reads, because the delegation read runs first: a missing
+/// `governance-rewards-automation-v1` fails there, and a missing
+/// `splice-api-reward-assignment-v1` fails the same way on the coupon read.
+fn package_absent(e: &anyhow::Error) -> bool {
+    canton_error_id(e).as_deref() == Some("PACKAGE_NAMES_NOT_FOUND")
 }
 
 /// Whether a fresh read on the next tick is the cure.
@@ -985,7 +1040,15 @@ pub(crate) async fn run_reward_automation_loop(data: actix_web::web::Data<AppSta
             .collect();
         for decparty in parties {
             if let Err(e) = run_once_for_party(&data, &decparty).await {
-                tracing::warn!(%decparty, error = %e, "reward automation tick failed");
+                if package_absent(&e) {
+                    tracing::trace!(
+                        %decparty,
+                        error = %e,
+                        "reward automation tick failed: this participant does not hold the DAR"
+                    );
+                } else {
+                    tracing::warn!(%decparty, error = %e, "reward automation tick failed");
+                }
             }
         }
     }
@@ -1661,6 +1724,28 @@ mod tests {
             Some("LOCAL_VERDICT_LOCKED_CONTRACTS")
         );
         assert!(assign_failure_is_transient(&e));
+    }
+
+    #[test]
+    fn only_an_absent_package_is_quiet() {
+        // The devnet message, verbatim. The gRPC code here is deliberately not
+        // the one Canton sends: the error id is what classifies.
+        let absent = anyhow::Error::new(tonic::Status::internal(
+            "PACKAGE_NAMES_NOT_FOUND(11,21a20a9f): The following package names do not match \
+             upgradable packages uploaded on this participant: [governance-rewards-automation-v1].",
+        ));
+        assert!(package_absent(&absent));
+        // A context added on the way up must not send the line back to warn.
+        assert!(package_absent(
+            &Err::<(), _>(absent)
+                .context("reading the delegation")
+                .unwrap_err()
+        ));
+
+        // Another ledger rejection, then a failure carrying no ledger status at
+        // all, such as auth or transport.
+        assert!(!package_absent(&canton_err("DAML_INTERPRETATION_ERROR")));
+        assert!(!package_absent(&anyhow::anyhow!("connection refused")));
     }
 
     #[test]

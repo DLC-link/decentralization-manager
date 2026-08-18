@@ -20,10 +20,11 @@ import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import ExpandLessIcon from "@mui/icons-material/ExpandLess";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import { JSONTree } from "react-json-tree";
-import { API_BASE } from "../constants";
+import { API_BASE, PAGE_SIZE } from "../constants";
 import { authenticatedFetch } from "../api";
 import { zebraRow } from "../styles";
 import { CopyableText } from "./CopyableText";
+import { CursorPagination } from "./Pagination";
 import type { ChainAuditEntry, ChainAuditResponse } from "../types";
 
 interface GovernanceAuditTrailProps {
@@ -33,14 +34,16 @@ interface GovernanceAuditTrailProps {
   /// trigger a fresh fetch.
   refreshNonce?: number;
   /// Reports the loaded entry count to the parent so it can render a badge in
-  /// the section header (matches the Contracts pattern).
-  onCountChange?: (count: number) => void;
+  /// the section header (matches the Contracts pattern). `hasMore` says whether
+  /// older entries exist beyond this page — a page can legally hold more than
+  /// `CHAIN_LIMIT` rows, so the count alone can't tell the parent that.
+  onCountChange?: (count: number, hasMore: boolean) => void;
   /// Reports fetch in-flight state up so the parent can disable its Refresh
   /// icon while a request is pending.
   onLoadingChange?: (loading: boolean) => void;
 }
 
-export const CHAIN_LIMIT = 200;
+export const CHAIN_LIMIT = PAGE_SIZE;
 
 const formatTimestamp = (epochSeconds: number): string =>
   new Date(epochSeconds * 1000).toLocaleString();
@@ -58,6 +61,7 @@ const eventTypeColor = (
     case "expire":
       return "warning";
     case "cancel":
+    case "cancel_proposal":
       return "error";
     default:
       return "default";
@@ -135,6 +139,12 @@ export const GovernanceAuditTrail = ({
   );
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
   const [cacheLoaded, setCacheLoaded] = useState(false);
+  // One cursor per visited page. Index 0 is `undefined` (newest page); each
+  // Next pushes the `next_before_offset` the server handed back, so Previous
+  // is a pop rather than a re-query from the top.
+  const [cursors, setCursors] = useState<(number | undefined)[]>([undefined]);
+  const [page, setPage] = useState(0);
+  const [nextCursor, setNextCursor] = useState<number | null>(null);
   const [canScrollUp, setCanScrollUp] = useState(false);
   const [canScrollDown, setCanScrollDown] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -162,15 +172,22 @@ export const GovernanceAuditTrail = ({
   }, [entries, updateScrollShadows]);
 
   const fetchAudit = useCallback(
-    async (refresh: boolean) => {
+    async (refresh: boolean, before?: number): Promise<boolean> => {
       setLoading(true);
       setError(null);
+      // A refresh pulls in events newer than anything we've paged past, which
+      // invalidates every cursor below — start the stack over at the top.
+      if (refresh && before === undefined) {
+        setCursors([undefined]);
+        setPage(0);
+      }
       try {
         const params = new URLSearchParams({
           party_id: partyId,
           limit: String(CHAIN_LIMIT),
         });
         if (refresh) params.set("refresh", "true");
+        if (before !== undefined) params.set("before_offset", String(before));
 
         const res = await authenticatedFetch(
           `${API_BASE}/governance/chain-audit?${params}`,
@@ -178,14 +195,17 @@ export const GovernanceAuditTrail = ({
         if (res.ok) {
           const response: ChainAuditResponse = await res.json();
           setEntries(response.entries);
-        } else {
-          const errData = await res.json().catch(() => ({}));
-          setError(errData.error || "Failed to fetch audit trail");
+          setNextCursor(response.next_before_offset ?? null);
+          return true;
         }
+        const errData = await res.json().catch(() => ({}));
+        setError(errData.error || "Failed to fetch audit trail");
+        return false;
       } catch (e) {
         setError(
           e instanceof Error ? e.message : "Failed to fetch audit trail",
         );
+        return false;
       } finally {
         setLoading(false);
       }
@@ -208,9 +228,36 @@ export const GovernanceAuditTrail = ({
     fetchAudit(true);
   }, [refreshNonce, fetchAudit]);
 
+  // A new page is read from its top, same as the client-paged views — see
+  // `usePagination`, which scrolls for the same reason.
+  const scrollToFirstRow = useCallback(() => {
+    scrollRef.current?.scrollTo({ top: 0 });
+  }, []);
+
+  // Both advance the page only once the fetch has landed. Moving first would
+  // leave the indicator and the cursor stack describing a page whose rows
+  // never arrived, and the next Prev would then walk from the wrong cursor.
+  const goToNextPage = useCallback(async () => {
+    if (nextCursor === null) return;
+    const cursor = nextCursor;
+    if (await fetchAudit(false, cursor)) {
+      setCursors((prev) => [...prev.slice(0, page + 1), cursor]);
+      setPage(page + 1);
+      scrollToFirstRow();
+    }
+  }, [nextCursor, page, fetchAudit, scrollToFirstRow]);
+
+  const goToPrevPage = useCallback(async () => {
+    if (page === 0) return;
+    if (await fetchAudit(false, cursors[page - 1])) {
+      setPage(page - 1);
+      scrollToFirstRow();
+    }
+  }, [page, cursors, fetchAudit, scrollToFirstRow]);
+
   useEffect(() => {
-    onCountChange?.(entries.length);
-  }, [entries.length, onCountChange]);
+    onCountChange?.(entries.length, nextCursor !== null);
+  }, [entries.length, nextCursor, onCountChange]);
 
   useEffect(() => {
     onLoadingChange?.(loading);
@@ -458,6 +505,13 @@ export const GovernanceAuditTrail = ({
           />
         </Box>
       )}
+      <CursorPagination
+        page={page}
+        hasNext={nextCursor !== null}
+        disabled={loading}
+        onPrev={goToPrevPage}
+        onNext={goToNextPage}
+      />
     </Box>
   );
 };

@@ -7,6 +7,10 @@
 use std::time::Duration;
 
 use anyhow::Context;
+use common::{
+    api::DecentralizedPartiesResponse,
+    types::{InvitationType, WorkflowKind, WorkflowProgress, WorkflowRole},
+};
 use serde_json::{Value, json};
 use tracing::info;
 
@@ -15,7 +19,6 @@ use crate::common::{
     http::{probe_workflow_run_visible, probe_workflow_status},
     invitations::{InvitationIds, post_accept_invitation, probe_pending_invitation},
     scenario::Scenario,
-    types::DecentralizedPartiesResponse,
 };
 
 #[derive(Default)]
@@ -64,7 +67,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         Duration::from_secs(60),
         |f, ctx| {
             Box::pin(async move {
-                let id = probe_pending_invitation(f, f.p2.http, "Onboarding").await?;
+                let id = probe_pending_invitation(f, f.p2.http, InvitationType::Onboarding).await?;
                 ctx.invites.p2 = Some(id);
                 Some(Ok(()))
             })
@@ -75,7 +78,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         Duration::from_secs(60),
         |f, ctx| {
             Box::pin(async move {
-                let id = probe_pending_invitation(f, f.p3.http, "Onboarding").await?;
+                let id = probe_pending_invitation(f, f.p3.http, InvitationType::Onboarding).await?;
                 ctx.invites.p3 = Some(id);
                 Some(Ok(()))
             })
@@ -117,8 +120,14 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         Duration::from_secs(30),
         |f, _| {
             Box::pin(async move {
-                probe_workflow_run_visible(f, f.p1.http, "Onboarding", "Coordinator", "completed")
-                    .await
+                probe_workflow_run_visible(
+                    f,
+                    f.p1.http,
+                    WorkflowKind::Onboarding,
+                    WorkflowRole::Coordinator,
+                    WorkflowProgress::Completed,
+                )
+                .await
             })
         },
     )
@@ -132,12 +141,12 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 Box::pin(async move {
                     let path = format!("/decentralized-parties?prefix={prefix}");
                     let r: DecentralizedPartiesResponse =
-                        f.get_json(f.p1.http, &path).await.ok()?;
+                        f.probe_get_json(f.p1.http, &path).await?;
                     let party = r
                         .parties
                         .into_iter()
-                        .find(|p| p.party_id.starts_with(&prefix))?;
-                    ctx.dec_party_id = Some(party.party_id);
+                        .find(|p| p.party_id.prefix == prefix)?;
+                    ctx.dec_party_id = Some(party.party_id.to_string());
                     Some(Ok(()))
                 })
             }
@@ -174,11 +183,13 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         Duration::from_secs(15),
         |f, ctx| {
             let db_path = f.db_path(1);
+            let diag = f.probe_diag.clone();
             Box::pin(async move {
                 let dec_party_id = ctx.dec_party_id.as_deref()?.to_string();
-                let after = db::count_dec_party_identity(&db_path, &dec_party_id)
-                    .await
-                    .ok()?;
+                let after = diag.ok(
+                    "count dec_party_identity rows",
+                    db::count_dec_party_identity(&db_path, &dec_party_id).await,
+                )?;
                 if after != ctx.identity_before {
                     return Some(Err(anyhow::anyhow!(
                         "dec_party_identity rows changed across dismiss ({} → {})",

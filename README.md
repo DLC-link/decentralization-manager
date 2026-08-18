@@ -153,6 +153,7 @@ The database file path can be overridden with the `--db` CLI flag.
 | `DECPM_DB_ENCRYPTION_KEY` | Encryption key for secrets stored in the database | _(none)_ |
 | `DECPM_ADMIN_ROLE` | Role name that gates sensitive endpoints (unset skips the role check) | _(none)_ |
 | `DECPM_ALLOWED_ORIGIN` | Origin permitted by CORS (e.g. `https://decman.example.com`) | _(none, same-origin only)_ |
+| `DECPM_LOG_FORMAT` | Log format. `text` gives the readable console format for local work; any other value gives one JSON object per line | `json` |
 | `DECPM_LISTEN_ADDRESS` | Address to listen on for Noise protocol connections | `0.0.0.0` |
 | `DECPM_NOISE_PORT` | Port for Noise protocol connections | `9000` |
 | `DECPM_PUBLIC_ADDRESS` | Public address that peers use to connect to this node | _(falls back to listen address)_ |
@@ -446,16 +447,20 @@ The table below is a curated subset. A complete, interactive API reference is av
 
 ## Development
 
-This repository is a Cargo workspace with three crates under `crates/`:
+This repository is a Cargo workspace with four crates under `crates/`:
 
 - **`decman`** — the server (HTTP API, Noise P2P, Canton gRPC, workflows) and
   the embedded React frontend. Its binary is `dec-party-manager`.
-- **`common`** — shared wire DTOs and the Canton-ID helpers, consumed by both
-  `decman` and `decman-cli`. Kept dependency-light; OpenAPI (`utoipa`) schema
-  derives are behind its `openapi` feature.
+- **`common`** — shared wire DTOs, the Canton-ID helpers, and the external-party
+  fingerprint derivation, consumed by the other crates. Kept dependency-light;
+  OpenAPI (`utoipa`) schema derives are behind its `openapi` feature.
 - **`decman-cli`** — a terminal UI client for the server.
+- **`decman-wallet`** — the client side of the tenant API (`/v0/tenant/*`): the
+  library a wallet provider embeds to run a co-validated party from a key it holds
+  itself, and to transact as it. See
+  [crates/decman-wallet/README.md](crates/decman-wallet/README.md).
 
-Workspace-wide `cargo` commands build all three; pass `-p decman` to act on
+Workspace-wide `cargo` commands build all four; pass `-p decman` to act on
 just the server (e.g. `cargo run -p decman -- serve`).
 
 ### Building
@@ -730,21 +735,18 @@ TypeScript imports won't resolve.
 
 ## Docker Image
 
-Build and push to ECR:
+Release images are built and published by CI: pushing a `v<version>` tag (which
+must match the crate version in `crates/decman/Cargo.toml`) runs the release
+workflow, which builds the binary and pushes
+`public.ecr.aws/dlc-link/decentralization-manager:v<version>`. The root
+`Dockerfile` is that workflow's runtime wrapper — it copies in the CI-built
+binary and does no compilation, so it is not useful for a local build.
+
+To build an image from source locally, use the full-source build instead:
 
 ```bash
-# Build (forward an SSH key to fetch the canton-lib dependency — see
-# "Running with Docker" above)
-docker build --ssh default=$HOME/.ssh/id_ed25519 -t dec-party-manager .
-
-# Tag for ECR
-docker tag dec-party-manager:latest public.ecr.aws/dlc-link/canton-decparty-manager:<version>
-
-# Push
-docker push public.ecr.aws/dlc-link/canton-decparty-manager:<version>
+docker build --ssh default=$HOME/.ssh/id_ed25519 -f development/Dockerfile -t dec-party-manager .
 ```
-
-Replace the registry/org (`public.ecr.aws/dlc-link`) and `<version>` with your own.
 
 ## Deployment
 

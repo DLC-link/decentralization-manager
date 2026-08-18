@@ -21,6 +21,12 @@ use crate::{
     },
 };
 
+/// Rows per page for every paginated list, on the wire and in the UI. Drives
+/// the Canton `max_page_size` on ledger-API reads and the frontend's page size
+/// (re-exported into `types.generated.ts` by `gen-types`, so the two cannot
+/// drift). `i32` to match the ledger API's page-size fields.
+pub const PAGE_SIZE: i32 = 25;
+
 // ============================================================================
 // Config DTOs (shared with the server's config layer)
 // ============================================================================
@@ -299,7 +305,7 @@ pub struct WorkflowResponse {
 }
 
 /// Response wrapper for `GET /workflows`.
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct WorkflowRunsResponse {
@@ -317,10 +323,14 @@ pub struct ExternalPartyInfo {
     pub party_id: String,
     /// The party's namespace fingerprint (the `{fingerprint}` half of the id).
     pub fingerprint: String,
-    /// Confirmation threshold from the mapping (the M in M-of-N).
+    /// How many of the hosting participants must confirm a transaction involving
+    /// this party (the M in M-of-N). Distinct from the party's *signing* threshold,
+    /// which for a wallet-held party is 1 — one key authorizes, M hosts confirm.
     pub threshold: u32,
-    /// Number of participants hosting the party (the N in M-of-N).
+    /// How many participants host the party (the N in M-of-N).
     pub host_count: u32,
+    /// When the hosting mapping became effective, RFC 3339.
+    pub created_at: Option<String>,
 }
 
 /// Response wrapper for `GET /external-parties`.
@@ -336,12 +346,16 @@ pub struct ExternalPartiesResponse {
 //
 // Wallet-driven flow: the wallet generates and holds the Ed25519 key and DPM
 // relays. Every binary field on the wire is base64 (STANDARD engine).
+//
+// Both halves of each pair derive `Serialize` + `Deserialize`: the server reads
+// the requests and writes the responses, and the `decman-wallet` client does the
+// mirror image. One definition per message keeps the two ends from drifting.
 // ============================================================================
 
 /// Request to prepare the onboarding topology for a wallet-held external party.
 /// The wallet sends only its public key; DPM relays it to Canton and returns the
 /// unsigned topology for the wallet to sign.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct TenantPrepareRequest {
@@ -359,24 +373,31 @@ pub struct TenantPrepareRequest {
     pub confirmation_threshold: Option<u32>,
 }
 
-/// The unsigned onboarding topology for the wallet to sign. `multi_hash` and
-/// each entry of `topology_transactions` are base64-encoded.
-#[derive(Serialize)]
+/// The unsigned onboarding topology for the wallet to sign. Every entry of
+/// `transaction_hashes` and `topology_transactions` is base64-encoded, and the two
+/// are index-aligned: `transaction_hashes[i]` is the hash to sign for
+/// `topology_transactions[i]`.
+///
+/// The wallet signs each hash separately rather than one combined hash. Canton
+/// hands us these hashes, so nothing here re-derives a Canton hash — and the
+/// signatures go straight onto the transactions the node submits.
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct TenantPrepareResponse {
     /// The party id Canton derived (`{party_hint}::{fingerprint}`).
     pub party_id: String,
-    /// The combined multi-hash the wallet signs, base64-encoded.
-    pub multi_hash: String,
+    /// The hash to sign for each transaction, base64-encoded, index-aligned with
+    /// `topology_transactions`.
+    pub transaction_hashes: Vec<String>,
     /// The serialized topology transactions, each base64-encoded.
     pub topology_transactions: Vec<String>,
 }
 
 /// Request to onboard a wallet-held external party from its signed topology.
-/// `public_key`, each `topology_transactions` entry, and `multi_hash_signature`
-/// are base64-encoded.
-#[derive(Clone, Debug, Deserialize)]
+/// `public_key` and every `topology_transactions` / `signatures` entry are
+/// base64-encoded.
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct TenantOnboardRequest {
@@ -387,8 +408,10 @@ pub struct TenantOnboardRequest {
     /// host set and confirmation threshold are carried inside these signed
     /// transactions, so they are not (and must not be) passed separately.
     pub topology_transactions: Vec<String>,
-    /// The wallet's Ed25519 signature over the multi-hash, base64-encoded.
-    pub multi_hash_signature: String,
+    /// One base64-encoded Ed25519 signature per transaction, index-aligned with
+    /// `topology_transactions`: `signatures[i]` signs the hash the prepare step
+    /// returned for `topology_transactions[i]`.
+    pub signatures: Vec<String>,
     /// Fingerprint of the signing key (the `{fingerprint}` party-id segment).
     pub signed_by: String,
 }
@@ -397,78 +420,12 @@ pub struct TenantOnboardRequest {
 /// wallet calls `/onboard` on every host and aggregates. `Completed` means this
 /// host's authorized `PartyToParticipant` names it; `InProgress` means the
 /// topology is still a proposal here (more hosts must sign).
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct TenantOnboardResponse {
     pub status: WorkflowProgress,
     pub party_id: String,
-}
-
-/// A Daml template identifier for a tenant create command.
-#[derive(Clone, Debug, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct TenantTemplateId {
-    pub package_id: String,
-    pub module_name: String,
-    pub entity_name: String,
-}
-
-/// Request to prepare an interactive submission for a wallet-held party. Only a
-/// single CREATE command is supported; `create_arguments` is JSON that maps to
-/// the template's Daml record.
-#[derive(Clone, Debug, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct TenantPrepareSubmissionRequest {
-    pub template_id: TenantTemplateId,
-    #[cfg_attr(feature = "typegen", ts(type = "any"))]
-    pub create_arguments: serde_json::Value,
-}
-
-/// The prepared transaction for the wallet to sign. `prepared_transaction` and
-/// `prepared_transaction_hash` are base64-encoded.
-#[derive(Serialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct TenantPrepareSubmissionResponse {
-    pub prepared_transaction: String,
-    pub prepared_transaction_hash: String,
-    pub hashing_scheme_version: i32,
-}
-
-/// Request to execute a wallet-signed interactive submission.
-/// `prepared_transaction` and `signature` are base64-encoded.
-#[derive(Clone, Debug, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct TenantExecuteSubmissionRequest {
-    pub prepared_transaction: String,
-    pub signature: String,
-    pub signed_by: String,
-    pub hashing_scheme_version: i32,
-}
-
-/// One active contract owned by a tenant party.
-#[derive(Serialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct TenantContract {
-    pub contract_id: String,
-    /// `package_id:module_name:entity_name`.
-    pub template_id: String,
-    /// The contract's payload rendered as JSON.
-    #[cfg_attr(feature = "typegen", ts(type = "any"))]
-    pub create_arguments: serde_json::Value,
-}
-
-/// Response wrapper for `GET /v0/tenant/{party}/acs`.
-#[derive(Serialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct TenantAcsResponse {
-    pub contracts: Vec<TenantContract>,
 }
 
 /// Response for key status check
@@ -610,7 +567,7 @@ pub struct ContractsInvitePayload {
 }
 
 /// Response for pending invitations endpoint
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct PendingInvitationsResponse {
@@ -925,8 +882,25 @@ pub struct CancelConfirmationRequest {
     pub governance_type: GovernanceType,
 }
 
+/// Request to retract a proposal the caller proposed.
+///
+/// `confirmation_cid` carries the caller's own confirmation on that proposal,
+/// which `/governance/propose` always creates. The server archives it in the
+/// same transaction, because a confirmation that outlives its proposal can
+/// only be cleared by its own confirmer, and only `GovernanceConfirmation_Cancel`
+/// clears it without waiting for the expiry time.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct CancelProposalRequest {
+    pub party_id: CantonId,
+    pub proposal_cid: String,
+    #[serde(default)]
+    pub confirmation_cid: Option<String>,
+}
+
 /// State of a VaultGovernanceRules contract
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct GovernanceState {
@@ -941,7 +915,7 @@ pub struct GovernanceState {
     pub action_confirmation_timeout_microseconds: Option<i64>,
     /// The package-name ref the active rules contract actually lives under,
     /// e.g. `#governance-core-v0-rc4`.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package_ref: Option<String>,
     /// True when the active governance-core rules contract was found under an
     /// older package than the configured `governance_core` ref (a fallback
@@ -951,7 +925,7 @@ pub struct GovernanceState {
 }
 
 /// Response for the governance state endpoint
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct GovernanceStateResponse {
@@ -979,7 +953,7 @@ pub struct VaultsResponse {
 }
 
 /// Information about a ProviderService contract
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ProviderServiceInfo {
@@ -989,7 +963,7 @@ pub struct ProviderServiceInfo {
 }
 
 /// Response for the provider services endpoint
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ProviderServicesResponse {
@@ -1019,7 +993,7 @@ pub struct UserServicesResponse {
 /// `instrument_id` are read off the contract's `defaultIdentifier` field and
 /// match the `InstrumentId { admin, id }` shape required by Mint/Burn
 /// proposals.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct InstrumentInfo {
@@ -1029,7 +1003,7 @@ pub struct InstrumentInfo {
 }
 
 /// Response for the instruments endpoint
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct InstrumentsResponse {
@@ -1088,7 +1062,7 @@ pub struct CredentialOffersResponse {
 /// A `Utility.Credential.V0.Credential:Credential` contract visible to the
 /// party. The accept mint/burn request forms list these so the issuer
 /// credentials backing the accept no longer have to be pasted in by hand.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct CredentialInfo {
@@ -1104,7 +1078,7 @@ pub struct CredentialInfo {
 }
 
 /// Response for the credentials endpoint
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct CredentialsResponse {
@@ -1112,7 +1086,7 @@ pub struct CredentialsResponse {
 }
 
 /// Information about a RegistrarService contract
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct RegistrarServiceInfo {
@@ -1122,7 +1096,7 @@ pub struct RegistrarServiceInfo {
 }
 
 /// Response for the registrar services endpoint
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct RegistrarServicesResponse {
@@ -1132,7 +1106,7 @@ pub struct RegistrarServicesResponse {
 /// A pending `RegistrarServiceRequest` contract visible to the party. The
 /// OnboardRegistrar form lists these so the request backing the onboard can
 /// be picked instead of pasted in by hand.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct RegistrarServiceRequestInfo {
@@ -1149,7 +1123,7 @@ pub struct RegistrarServiceRequestInfo {
 }
 
 /// Response for the registrar service requests endpoint
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct RegistrarServiceRequestsResponse {
@@ -1159,7 +1133,7 @@ pub struct RegistrarServiceRequestsResponse {
 /// A `ProviderConfiguration` contract visible to the party. The
 /// OnboardRegistrar form lists these so the configuration backing the
 /// onboard can be picked instead of pasted in by hand.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ProviderConfigurationInfo {
@@ -1169,7 +1143,7 @@ pub struct ProviderConfigurationInfo {
 }
 
 /// Response for the provider configurations endpoint
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ProviderConfigurationsResponse {
@@ -1177,7 +1151,7 @@ pub struct ProviderConfigurationsResponse {
 }
 
 /// A contract ID with its blob
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ContractWithBlob {
@@ -1186,7 +1160,7 @@ pub struct ContractWithBlob {
 }
 
 /// DSO network info (amulet rules + DSO party)
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct NetworkInfo {
@@ -1196,7 +1170,7 @@ pub struct NetworkInfo {
 }
 
 /// DA Utility operator info (operator party id)
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct OperatorInfo {
@@ -1218,7 +1192,7 @@ pub struct TransferPreapprovalsResponse {
 }
 
 /// Response for the generic contract query endpoint
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ContractQueryResponse {
@@ -1324,7 +1298,7 @@ pub struct PartyConfigResponse {
 // ============================================================================
 
 /// A decparty's active `CouponReassignmentDelegation`.
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct CouponReassignmentDelegationSummary {
@@ -1349,7 +1323,7 @@ pub struct CouponReassignmentDelegationSummary {
 ///
 /// Contains only the configured package's delegations. One in a superseded
 /// package is not exerciseable by the actions this build proposes.
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ActiveCouponReassignmentDelegation {
@@ -1383,7 +1357,7 @@ pub struct SuccessResponse {
 }
 
 /// Response for workflow status check endpoints
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct WorkflowStatusResponse {
@@ -1440,4 +1414,90 @@ pub struct ChainAuditEntry {
 pub struct ChainAuditResponse {
     pub entries: Vec<ChainAuditEntry>,
     pub total_returned: usize,
+    /// Cursor for the next (older) page: pass back as `before_offset`. `None`
+    /// when the page was short, i.e. there is nothing older left to read.
+    pub next_before_offset: Option<i64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::Result;
+
+    use super::*;
+
+    fn party(prefix: &str) -> Result<CantonId> {
+        CantonId::parse(&format!("{prefix}::1220{}", "ab".repeat(32)))
+    }
+
+    /// The response DTOs are deserialized by the integration-test harness and
+    /// the CLI, not just serialized by the server. A `skip_serializing_if`
+    /// without a matching `default` makes the omitted field a hard
+    /// "missing field" error on the way back in, so round-trip the shape the
+    /// server actually emits when every optional field is absent.
+    #[test]
+    fn governance_state_round_trips_with_every_optional_field_omitted() -> Result<()> {
+        let state = GovernanceState {
+            contract_id: "00rules".to_owned(),
+            vault_manager: party("mgr")?,
+            members: vec![party("m1")?],
+            threshold: 2,
+            action_confirmation_timeout_microseconds: None,
+            package_ref: None,
+            out_of_date: false,
+        };
+        let json = serde_json::to_string(&state)?;
+        assert!(!json.contains("package_ref"), "omitted on the wire: {json}");
+        let back: GovernanceState = serde_json::from_str(&json)?;
+        assert_eq!(back.contract_id, state.contract_id);
+        assert_eq!(back.package_ref, None);
+
+        let json = serde_json::to_string(&GovernanceStateResponse { state: None })?;
+        let back: GovernanceStateResponse = serde_json::from_str(&json)?;
+        assert!(back.state.is_none());
+        Ok(())
+    }
+
+    /// The `CantonId` fields cross the wire as `prefix::namespace` strings and
+    /// must parse back into the same id.
+    #[test]
+    fn canton_id_fields_round_trip() -> Result<()> {
+        let net = NetworkInfo {
+            dso_party_id: party("DSO")?,
+            amulet_rules_cid: "00amulet".to_owned(),
+            amulet_rules_blob: "blob".to_owned(),
+        };
+        let json = serde_json::to_string(&net)?;
+        let back: NetworkInfo = serde_json::from_str(&json)?;
+        assert_eq!(back.dso_party_id, net.dso_party_id);
+
+        let services = ProviderServicesResponse {
+            services: vec![ProviderServiceInfo {
+                contract_id: "00svc".to_owned(),
+                operator: party("op")?,
+                provider: party("prov")?,
+            }],
+        };
+        let json = serde_json::to_string(&services)?;
+        let back: ProviderServicesResponse = serde_json::from_str(&json)?;
+        assert_eq!(
+            back.services.first().map(|s| &s.operator),
+            Some(&party("op")?)
+        );
+
+        let delegations = ActiveCouponReassignmentDelegation {
+            delegations: vec![CouponReassignmentDelegationSummary {
+                cid: "00del".to_owned(),
+                dso: party("DSO")?,
+                assigners: vec![party("a1")?],
+                beneficiary_count: 1,
+            }],
+        };
+        let json = serde_json::to_string(&delegations)?;
+        let back: ActiveCouponReassignmentDelegation = serde_json::from_str(&json)?;
+        assert_eq!(
+            back.delegations.first().map(|d| d.assigners.as_slice()),
+            Some([party("a1")?].as_slice())
+        );
+        Ok(())
+    }
 }

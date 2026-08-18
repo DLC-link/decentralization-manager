@@ -7,16 +7,16 @@
 use std::{
     cmp::Reverse,
     collections::HashMap,
+    future::Future,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use canton_common::decimal::DamlDecimal;
 use canton_proto_rs::com::{
     daml::ledger::api::v2::{
-        CreatedEvent, CumulativeFilter, EventFormat, Filters, GetActiveContractsRequest,
-        GetEventsByContractIdRequest, GetLedgerEndRequest, Identifier, InterfaceFilter, Record,
-        TemplateFilter, Value, WildcardFilter, admin::ListKnownPartiesRequest, cumulative_filter,
-        get_active_contracts_response::ContractEntry, value,
+        CreatedEvent, GetEventsByContractIdRequest, Identifier, Record, Value,
+        admin::{ListKnownPartiesRequest, ListKnownPartiesResponse},
+        value,
     },
     digitalasset::canton::admin::participant::v30::{
         ListPackagesRequest, package_service_client::PackageServiceClient,
@@ -32,6 +32,11 @@ use crate::{
 
 use super::{
     action_serializer,
+    event_filters::{interface_filter, party_event_format, template_filter, wildcard_filter},
+    ledger_paging::{
+        FETCH_CHUNK, fetch_active_contracts_filtered, fetch_first_active_contract,
+        fetch_first_matching, for_each_active_contract,
+    },
     package_inventory::{
         fetch_package_id_to_name, fetch_package_names, newest_matching_names, package_name_prefix,
     },
@@ -494,61 +499,22 @@ async fn fetch_contracts_with_wildcard(
     package_versions: &HashMap<String, String>,
     contracts: &mut Vec<ContractInfo>,
 ) -> Result {
-    let mut state_client = utils::create_state_client(config, token).await?;
+    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], false);
 
-    let ledger_end = state_client
-        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
-        .await?
-        .into_inner()
-        .offset;
+    for_each_active_contract(config, token, event_format, |created| {
+        // Test mode reads the ACS wildcard, so the template narrowing happens
+        // here rather than Canton-side.
+        let is_wanted = created
+            .template_id
+            .as_ref()
+            .map(|t| is_contract_template(&t.module_name, &t.entity_name))
+            .unwrap_or(false);
 
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
-                    WildcardFilter {
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
-    );
-
-    let acs_request = GetActiveContractsRequest {
-        active_at_offset: ledger_end,
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            verbose: false,
-        }),
-        stream_continuation_token: None,
-    };
-
-    let mut stream = state_client
-        .get_active_contracts(tonic::Request::new(acs_request))
-        .await?
-        .into_inner();
-
-    while let Some(response) = stream.message().await? {
-        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
-            && let Some(created) = active.created_event
-        {
-            // Filter in-memory for contract templates
-            let is_wanted = created
-                .template_id
-                .as_ref()
-                .map(|t| is_contract_template(&t.module_name, &t.entity_name))
-                .unwrap_or(false);
-
-            if !is_wanted {
-                continue;
-            }
-
+        if is_wanted {
             contracts.push(render_contract_info(&created, package_versions));
         }
-    }
+    })
+    .await?;
 
     Ok(())
 }
@@ -562,55 +528,23 @@ async fn fetch_contracts_for_template(
     package_versions: &HashMap<String, String>,
     contracts: &mut Vec<ContractInfo>,
 ) -> Result {
-    let mut state_client = utils::create_state_client(config, token).await?;
-
-    let ledger_end = state_client
-        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
-        .await?
-        .into_inner()
-        .offset;
-
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
-                    TemplateFilter {
-                        template_id: Some(Identifier {
-                            package_id: template.package_id.to_string(),
-                            module_name: template.module_name.to_string(),
-                            entity_name: template.entity_name.to_string(),
-                        }),
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
+    let event_format = party_event_format(
+        party_id,
+        vec![template_filter(
+            Identifier {
+                package_id: template.package_id.to_string(),
+                module_name: template.module_name.to_string(),
+                entity_name: template.entity_name.to_string(),
+            },
+            false,
+        )],
+        false,
     );
 
-    let acs_request = GetActiveContractsRequest {
-        active_at_offset: ledger_end,
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            verbose: false,
-        }),
-        stream_continuation_token: None,
-    };
-
-    let mut stream = state_client
-        .get_active_contracts(tonic::Request::new(acs_request))
-        .await?
-        .into_inner();
-
-    while let Some(response) = stream.message().await? {
-        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
-            && let Some(created) = active.created_event
-        {
-            contracts.push(render_contract_info(&created, package_versions));
-        }
-    }
+    for_each_active_contract(config, token, event_format, |created| {
+        contracts.push(render_contract_info(&created, package_versions));
+    })
+    .await?;
 
     Ok(())
 }
@@ -621,33 +555,73 @@ pub async fn get_party_metadata(
     party_id: &CantonId,
     token: Option<String>,
 ) -> Result<Option<PartyMetadata>> {
-    let mut client = utils::create_party_client(config, token).await?;
-
-    let response = client
-        .list_known_parties(tonic::Request::new(ListKnownPartiesRequest {
-            identity_provider_id: String::new(),
-            page_token: String::new(),
-            page_size: 1000,
-            filter_party: String::new(),
-        }))
-        .await?
-        .into_inner();
-
+    let client = utils::create_party_client(config, token).await?;
     let party_id_str = party_id.to_string();
-    let party_details = response
-        .party_details
-        .iter()
-        .find(|p| p.party == party_id_str);
 
-    let annotations = party_details
-        .and_then(|d| d.local_metadata.as_ref())
-        .map(|m| m.annotations.clone())
-        .unwrap_or_default();
+    // `filter_party` is a server-side prefix match, so a full party id narrows
+    // this to the one party we want. Paging is still walked because the prefix
+    // can in principle match more than one id, and a participant hosting more
+    // parties than one page holds would otherwise silently report no metadata.
+    //
+    // `FETCH_CHUNK` rather than the wire `PAGE_SIZE`: this is an internal
+    // full-collection read, and on a participant that ignores `filter_party`
+    // the wire size would turn the walk into a round trip per 25 parties.
+    find_party_annotations(&party_id_str, |page_token| {
+        let request = ListKnownPartiesRequest {
+            identity_provider_id: String::new(),
+            page_token,
+            page_size: FETCH_CHUNK,
+            filter_party: party_id_str.clone(),
+        };
+        let mut client = client.clone();
 
-    if annotations.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(PartyMetadata { annotations }))
+        async move {
+            Ok(client
+                .list_known_parties(tonic::Request::new(request))
+                .await?
+                .into_inner())
+        }
+    })
+    .await
+}
+
+/// Walk `ListKnownParties` pages for `party_id`, returning its annotations.
+///
+/// `fetch_page` takes the token of the page to read and is a parameter so the
+/// walk can be tested; production passes the Ledger API call.
+async fn find_party_annotations<F, Fut>(
+    party_id: &str,
+    mut fetch_page: F,
+) -> Result<Option<PartyMetadata>>
+where
+    F: FnMut(String) -> Fut,
+    Fut: Future<Output = Result<ListKnownPartiesResponse>>,
+{
+    let mut page_token = String::new();
+
+    loop {
+        let response = fetch_page(page_token.clone()).await?;
+
+        if let Some(details) = response.party_details.iter().find(|p| p.party == party_id) {
+            let annotations = details
+                .local_metadata
+                .as_ref()
+                .map(|m| m.annotations.clone())
+                .unwrap_or_default();
+
+            return if annotations.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(PartyMetadata { annotations }))
+            };
+        }
+
+        // A repeated token means the server is not advancing; treating it as the
+        // end keeps a misbehaving participant from walking forever.
+        if response.next_page_token.is_empty() || response.next_page_token == page_token {
+            return Ok(None);
+        }
+        page_token = response.next_page_token;
     }
 }
 
@@ -805,6 +779,7 @@ pub async fn get_governance_confirmations(
                 transfer_details,
                 accept_transfer_details,
                 service_request_info,
+                proposer,
                 orphaned,
             ) = match proposal_infos.remove(&proposal_cid) {
                 Some(info) => (
@@ -812,9 +787,10 @@ pub async fn get_governance_confirmations(
                     info.transfer,
                     info.accept_transfer,
                     info.service_request,
+                    info.proposer,
                     false,
                 ),
-                None => (None, None, None, None, proposal_infos_complete),
+                None => (None, None, None, None, None, proposal_infos_complete),
             };
             // Service-request parties are only meaningful on the two
             // service-request proposal kinds; clear them otherwise so an
@@ -845,6 +821,7 @@ pub async fn get_governance_confirmations(
                 transfer_details,
                 accept_transfer_details,
                 service_request_details,
+                proposer,
             }
         })
         .collect();
@@ -861,62 +838,27 @@ async fn fetch_governance_with_wildcard(
     domain_confirmations: &mut HashMap<String, (String, Vec<GovernanceConfirmation>)>,
     proposal_infos: &mut HashMap<String, ProposalInfo>,
 ) -> Result {
-    let mut state_client = utils::create_state_client(config, token).await?;
+    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], true);
 
-    let ledger_end = state_client
-        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
-        .await?
-        .into_inner()
-        .offset;
+    for_each_active_contract(config, token, event_format, |created| {
+        let Some(ref template_id) = created.template_id else {
+            return;
+        };
 
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
-                    WildcardFilter {
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
-    );
-
-    let acs_request = GetActiveContractsRequest {
-        active_at_offset: ledger_end,
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            verbose: true,
-        }),
-        stream_continuation_token: None,
-    };
-
-    let mut stream = state_client
-        .get_active_contracts(tonic::Request::new(acs_request))
-        .await?
-        .into_inner();
-
-    while let Some(response) = stream.message().await? {
-        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
-            && let Some(created) = active.created_event
-            && let Some(ref template_id) = created.template_id
-        {
-            if is_governance_template(&template_id.module_name, &template_id.entity_name) {
-                if template_id.module_name == "Governance.Confirmation"
-                    && template_id.entity_name == "GovernanceConfirmation"
-                {
-                    extract_and_add_domain_confirmation(&created, domain_confirmations);
-                } else {
-                    extract_and_add_confirmation(&created, confirmations_by_hash);
-                }
+        if is_governance_template(&template_id.module_name, &template_id.entity_name) {
+            if template_id.module_name == "Governance.Confirmation"
+                && template_id.entity_name == "GovernanceConfirmation"
+            {
+                extract_and_add_domain_confirmation(&created, domain_confirmations);
             } else {
-                // Capture proposal info from GovernableAction contracts
-                extract_proposal_info(&created, proposal_infos);
+                extract_and_add_confirmation(&created, confirmations_by_hash);
             }
+        } else {
+            // Capture proposal info from GovernableAction contracts
+            extract_proposal_info(&created, proposal_infos);
         }
-    }
+    })
+    .await?;
 
     Ok(())
 }
@@ -930,62 +872,29 @@ async fn fetch_governance_for_template(
     confirmations_by_hash: &mut HashMap<String, (ActionType, Vec<GovernanceConfirmation>)>,
     domain_confirmations: &mut HashMap<String, (String, Vec<GovernanceConfirmation>)>,
 ) -> Result {
-    let mut state_client = utils::create_state_client(config, token).await?;
-
-    let ledger_end = state_client
-        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
-        .await?
-        .into_inner()
-        .offset;
-
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
-                    TemplateFilter {
-                        template_id: Some(Identifier {
-                            package_id: template.package_id.to_string(),
-                            module_name: template.module_name.to_string(),
-                            entity_name: template.entity_name.to_string(),
-                        }),
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
+    let event_format = party_event_format(
+        party_id,
+        vec![template_filter(
+            Identifier {
+                package_id: template.package_id.to_string(),
+                module_name: template.module_name.to_string(),
+                entity_name: template.entity_name.to_string(),
+            },
+            false,
+        )],
+        true,
     );
 
-    let acs_request = GetActiveContractsRequest {
-        active_at_offset: ledger_end,
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            verbose: true,
-        }),
-        stream_continuation_token: None,
-    };
-
-    let mut stream = state_client
-        .get_active_contracts(tonic::Request::new(acs_request))
-        .await?
-        .into_inner();
-
-    while let Some(response) = stream.message().await? {
-        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
-            && let Some(created) = active.created_event
-        {
-            if created.template_id.as_ref().is_some_and(|t| {
-                t.module_name == "Governance.Confirmation"
-                    && t.entity_name == "GovernanceConfirmation"
-            }) {
-                extract_and_add_domain_confirmation(&created, domain_confirmations);
-            } else {
-                extract_and_add_confirmation(&created, confirmations_by_hash);
-            }
+    for_each_active_contract(config, token, event_format, |created| {
+        if created.template_id.as_ref().is_some_and(|t| {
+            t.module_name == "Governance.Confirmation" && t.entity_name == "GovernanceConfirmation"
+        }) {
+            extract_and_add_domain_confirmation(&created, domain_confirmations);
+        } else {
+            extract_and_add_confirmation(&created, confirmations_by_hash);
         }
-    }
+    })
+    .await?;
 
     Ok(())
 }
@@ -1172,6 +1081,10 @@ pub struct ProposalInfo {
     /// `Create{User,Provider}ServiceRequest` proposals so the notification card
     /// can render the full summary.
     pub service_request: Option<ServiceRequestDetails>,
+    /// The member who created the proposal. Only that member controls
+    /// `GovernableAction_ProposerCancel`, so the card offers the retract
+    /// button on this field alone. `None` when the party id fails to parse.
+    pub proposer: Option<CantonId>,
 }
 
 /// Extract proposal info from a GovernableAction contract's create_arguments.
@@ -1207,6 +1120,17 @@ fn extract_proposal_info(
             _ => None,
         });
 
+    let proposer = field_party(record, "proposer").and_then(|p| match CantonId::parse(&p) {
+        Ok(id) => Some(id),
+        Err(e) => {
+            tracing::warn!(
+                "Proposal {cid} carries an unparseable proposer '{p}': {e}",
+                cid = created.contract_id
+            );
+            None
+        }
+    });
+
     let transfer = extract_transfer_proposal_details(record);
     let service_request = extract_service_request_details(record);
 
@@ -1235,6 +1159,7 @@ fn extract_proposal_info(
             accept_transfer_instruction_cid,
             accept_transfer: None,
             service_request,
+            proposer,
         },
     );
 }
@@ -1318,32 +1243,20 @@ async fn resolve_accept_transfer_details(
     let mut client = utils::create_event_query_client(config, token).await?;
 
     for (proposal_cid, instruction_cid) in pending {
-        let mut filters_by_party = HashMap::new();
-        filters_by_party.insert(
-            party_id.to_string(),
-            Filters {
-                cumulative: vec![CumulativeFilter {
-                    identifier_filter: Some(cumulative_filter::IdentifierFilter::InterfaceFilter(
-                        InterfaceFilter {
-                            interface_id: Some(Identifier {
-                                package_id: "#splice-api-token-transfer-instruction-v1".to_string(),
-                                module_name: "Splice.Api.Token.TransferInstructionV1".to_string(),
-                                entity_name: "TransferInstruction".to_string(),
-                            }),
-                            include_interface_view: true,
-                            include_created_event_blob: false,
-                        },
-                    )),
-                }],
-            },
-        );
         let request = GetEventsByContractIdRequest {
             contract_id: instruction_cid.clone(),
-            event_format: Some(EventFormat {
-                filters_by_party,
-                filters_for_any_party: None,
-                verbose: true,
-            }),
+            event_format: Some(party_event_format(
+                party_id,
+                vec![interface_filter(
+                    Identifier {
+                        package_id: "#splice-api-token-transfer-instruction-v1".to_string(),
+                        module_name: "Splice.Api.Token.TransferInstructionV1".to_string(),
+                        entity_name: "TransferInstruction".to_string(),
+                    },
+                    false,
+                )],
+                true,
+            )),
         };
         let created_event = match client
             .get_events_by_contract_id(tonic::Request::new(request))
@@ -1441,56 +1354,23 @@ async fn fetch_proposal_infos(
         return Ok(());
     };
 
-    let mut state_client = utils::create_state_client(config, token.clone()).await?;
-
-    let ledger_end = state_client
-        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
-        .await?
-        .into_inner()
-        .offset;
-
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::InterfaceFilter(
-                    InterfaceFilter {
-                        interface_id: Some(Identifier {
-                            package_id: pkg.clone(),
-                            module_name: "Governance.Action".to_string(),
-                            entity_name: "GovernableAction".to_string(),
-                        }),
-                        include_created_event_blob: false,
-                        include_interface_view: true,
-                    },
-                )),
-            }],
-        },
+    let event_format = party_event_format(
+        party_id,
+        vec![interface_filter(
+            Identifier {
+                package_id: pkg.clone(),
+                module_name: "Governance.Action".to_string(),
+                entity_name: "GovernableAction".to_string(),
+            },
+            false,
+        )],
+        true,
     );
 
-    let acs_request = GetActiveContractsRequest {
-        active_at_offset: ledger_end,
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            verbose: true,
-        }),
-        stream_continuation_token: None,
-    };
-
-    let mut stream = state_client
-        .get_active_contracts(tonic::Request::new(acs_request))
-        .await?
-        .into_inner();
-
-    while let Some(response) = stream.message().await? {
-        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
-            && let Some(created) = active.created_event
-        {
-            extract_proposal_info(&created, proposal_infos);
-        }
-    }
+    for_each_active_contract(config, token.clone(), event_format, |created| {
+        extract_proposal_info(&created, proposal_infos);
+    })
+    .await?;
 
     // Resolve the linked `TransferInstruction` for any
     // `AcceptTransferProposal`s we just captured so the notification card has
@@ -1623,60 +1503,21 @@ async fn fetch_governance_state_with_wildcard(
     party_id: &CantonId,
     token: Option<String>,
 ) -> Result<Option<GovernanceState>> {
-    let mut state_client = utils::create_state_client(config, token).await?;
+    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], true);
 
-    let ledger_end = state_client
-        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
-        .await?
-        .into_inner()
-        .offset;
-
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
-                    WildcardFilter {
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
-    );
-
-    let acs_request = GetActiveContractsRequest {
-        active_at_offset: ledger_end,
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            verbose: true,
-        }),
-        stream_continuation_token: None,
-    };
-
-    let mut stream = state_client
-        .get_active_contracts(tonic::Request::new(acs_request))
-        .await?
-        .into_inner();
-
-    while let Some(response) = stream.message().await? {
-        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
-            && let Some(created) = active.created_event
-        {
-            // Check if this is a governance rules template (vault or core)
-            if let Some(ref template_id) = created.template_id
-                && ((template_id.module_name == "BitsafeVault.VaultGovernance"
-                    && template_id.entity_name == "VaultGovernanceRules")
-                    || (template_id.module_name == "Governance.Rules"
-                        && template_id.entity_name == "GovernanceRules"))
-            {
-                return Ok(extract_governance_state(&created));
-            }
-        }
-    }
-
-    Ok(None)
+    // Test mode reads the ACS wildcard, so the governance-rules templates are
+    // matched here; stops at the first one rather than draining the ACS.
+    fetch_first_matching(config, token, event_format, |created| {
+        let template_id = created.template_id.as_ref()?;
+        let is_rules = (template_id.module_name == "BitsafeVault.VaultGovernance"
+            && template_id.entity_name == "VaultGovernanceRules")
+            || (template_id.module_name == "Governance.Rules"
+                && template_id.entity_name == "GovernanceRules");
+        is_rules
+            .then(|| extract_governance_state(&created))
+            .flatten()
+    })
+    .await
 }
 
 /// Fetch governance state for a specific template
@@ -1686,57 +1527,23 @@ async fn fetch_governance_state_for_template(
     token: Option<String>,
     template: &TemplateId,
 ) -> Result<Option<GovernanceState>> {
-    let mut state_client = utils::create_state_client(config, token).await?;
-
-    let ledger_end = state_client
-        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
-        .await?
-        .into_inner()
-        .offset;
-
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
-                    TemplateFilter {
-                        template_id: Some(Identifier {
-                            package_id: template.package_id.clone(),
-                            module_name: template.module_name.to_string(),
-                            entity_name: template.entity_name.to_string(),
-                        }),
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
+    let event_format = party_event_format(
+        party_id,
+        vec![template_filter(
+            Identifier {
+                package_id: template.package_id.clone(),
+                module_name: template.module_name.to_string(),
+                entity_name: template.entity_name.to_string(),
+            },
+            false,
+        )],
+        true,
     );
 
-    let acs_request = GetActiveContractsRequest {
-        active_at_offset: ledger_end,
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            verbose: true,
-        }),
-        stream_continuation_token: None,
-    };
-
-    let mut stream = state_client
-        .get_active_contracts(tonic::Request::new(acs_request))
+    Ok(fetch_first_active_contract(config, token, event_format)
         .await?
-        .into_inner();
-
-    while let Some(response) = stream.message().await? {
-        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
-            && let Some(created) = active.created_event
-        {
-            return Ok(extract_governance_state(&created));
-        }
-    }
-
-    Ok(None)
+        .as_ref()
+        .and_then(extract_governance_state))
 }
 
 /// Extract governance state from a VaultGovernanceRules or GovernanceRules created event
@@ -1838,26 +1645,13 @@ async fn fetch_contract_package_ref(
 ) -> Result<Option<String>> {
     let mut client = utils::create_event_query_client(config, token).await?;
 
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
-                    WildcardFilter {
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
-    );
     let request = GetEventsByContractIdRequest {
         contract_id: contract_id.to_string(),
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            verbose: false,
-        }),
+        event_format: Some(party_event_format(
+            party_id,
+            vec![wildcard_filter(false)],
+            false,
+        )),
     };
 
     let package_id = client
@@ -1984,55 +1778,19 @@ async fn fetch_vaults_with_wildcard(
     party_id: &CantonId,
     token: Option<String>,
 ) -> Result<Vec<VaultInfo>> {
-    let mut state_client = utils::create_state_client(config, token).await?;
-
-    let ledger_end = state_client
-        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
-        .await?
-        .into_inner()
-        .offset;
-
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
-                    WildcardFilter {
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
-    );
-
-    let acs_request = GetActiveContractsRequest {
-        active_at_offset: ledger_end,
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            verbose: true,
-        }),
-        stream_continuation_token: None,
-    };
-
-    let mut stream = state_client
-        .get_active_contracts(acs_request)
-        .await?
-        .into_inner();
+    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], true);
 
     let mut vaults = Vec::new();
-    while let Some(response) = stream.message().await? {
-        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
-            && let Some(created) = active.created_event
-            && let Some(template_id) = &created.template_id
+    for_each_active_contract(config, token, event_format, |created| {
+        if let Some(template_id) = &created.template_id
             && template_id.module_name == "BitsafeVault.Vault"
             && template_id.entity_name == "Vault"
             && let Some(vault_info) = extract_vault_info(&created)
         {
             vaults.push(vault_info);
         }
-    }
+    })
+    .await?;
 
     Ok(vaults)
 }
@@ -2044,59 +1802,23 @@ async fn fetch_vaults_for_template(
     token: Option<String>,
     template: &TemplateId,
 ) -> Result<Vec<VaultInfo>> {
-    let mut state_client = utils::create_state_client(config, token).await?;
-
-    let ledger_end = state_client
-        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
-        .await?
-        .into_inner()
-        .offset;
-
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
-                    TemplateFilter {
-                        template_id: Some(Identifier {
-                            package_id: template.package_id.clone(),
-                            module_name: template.module_name.to_string(),
-                            entity_name: template.entity_name.to_string(),
-                        }),
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
+    let event_format = party_event_format(
+        party_id,
+        vec![template_filter(
+            Identifier {
+                package_id: template.package_id.clone(),
+                module_name: template.module_name.to_string(),
+                entity_name: template.entity_name.to_string(),
+            },
+            false,
+        )],
+        true,
     );
 
-    let acs_request = GetActiveContractsRequest {
-        active_at_offset: ledger_end,
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            verbose: true,
-        }),
-        stream_continuation_token: None,
-    };
-
-    let mut stream = state_client
-        .get_active_contracts(acs_request)
-        .await?
-        .into_inner();
-
-    let mut vaults = Vec::new();
-    while let Some(response) = stream.message().await? {
-        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
-            && let Some(created) = active.created_event
-            && let Some(vault_info) = extract_vault_info(&created)
-        {
-            vaults.push(vault_info);
-        }
-    }
-
-    Ok(vaults)
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        extract_vault_info(&created)
+    })
+    .await
 }
 
 /// Extract VaultInfo from a Vault created event
@@ -2204,57 +1926,18 @@ async fn fetch_provider_services_with_wildcard(
     party_id: &CantonId,
     token: Option<String>,
 ) -> Result<Vec<ProviderServiceInfo>> {
-    let mut state_client = utils::create_state_client(config, token).await?;
+    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], true);
 
-    let ledger_end = state_client
-        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
-        .await?
-        .into_inner()
-        .offset;
-
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
-                    WildcardFilter {
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
-    );
-
-    let acs_request = GetActiveContractsRequest {
-        active_at_offset: ledger_end,
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            verbose: true,
-        }),
-        stream_continuation_token: None,
-    };
-
-    let mut stream = state_client
-        .get_active_contracts(acs_request)
-        .await?
-        .into_inner();
-
-    let mut services = Vec::new();
-    while let Some(response) = stream.message().await? {
-        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
-            && let Some(created) = active.created_event
-            && let Some(template_id) = &created.template_id
-            && template_id.module_name == "Utility.Registry.App.V0.Service.Provider"
-            && template_id.entity_name == "ProviderService"
-            && let Some(info) = extract_provider_service_info(&created)
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        let template_id = created.template_id.as_ref()?;
+        if template_id.module_name != "Utility.Registry.App.V0.Service.Provider"
+            || template_id.entity_name != "ProviderService"
         {
-            services.push(info);
+            return None;
         }
-    }
-
-    Ok(services)
+        extract_provider_service_info(&created)
+    })
+    .await
 }
 
 /// Fetch provider services using TemplateFilter
@@ -2264,59 +1947,23 @@ async fn fetch_provider_services_for_template(
     token: Option<String>,
     template: &TemplateId,
 ) -> Result<Vec<ProviderServiceInfo>> {
-    let mut state_client = utils::create_state_client(config, token).await?;
-
-    let ledger_end = state_client
-        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
-        .await?
-        .into_inner()
-        .offset;
-
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
-                    TemplateFilter {
-                        template_id: Some(Identifier {
-                            package_id: template.package_id.clone(),
-                            module_name: template.module_name.to_string(),
-                            entity_name: template.entity_name.to_string(),
-                        }),
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
+    let event_format = party_event_format(
+        party_id,
+        vec![template_filter(
+            Identifier {
+                package_id: template.package_id.clone(),
+                module_name: template.module_name.to_string(),
+                entity_name: template.entity_name.to_string(),
+            },
+            false,
+        )],
+        true,
     );
 
-    let acs_request = GetActiveContractsRequest {
-        active_at_offset: ledger_end,
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            verbose: true,
-        }),
-        stream_continuation_token: None,
-    };
-
-    let mut stream = state_client
-        .get_active_contracts(acs_request)
-        .await?
-        .into_inner();
-
-    let mut services = Vec::new();
-    while let Some(response) = stream.message().await? {
-        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
-            && let Some(created) = active.created_event
-            && let Some(info) = extract_provider_service_info(&created)
-        {
-            services.push(info);
-        }
-    }
-
-    Ok(services)
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        extract_provider_service_info(&created)
+    })
+    .await
 }
 
 /// Extract ProviderServiceInfo from a ProviderService created event
@@ -2376,57 +2023,18 @@ async fn fetch_user_services_with_wildcard(
     party_id: &CantonId,
     token: Option<String>,
 ) -> Result<Vec<UserServiceInfo>> {
-    let mut state_client = utils::create_state_client(config, token).await?;
+    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], true);
 
-    let ledger_end = state_client
-        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
-        .await?
-        .into_inner()
-        .offset;
-
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
-                    WildcardFilter {
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
-    );
-
-    let acs_request = GetActiveContractsRequest {
-        active_at_offset: ledger_end,
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            verbose: true,
-        }),
-        stream_continuation_token: None,
-    };
-
-    let mut stream = state_client
-        .get_active_contracts(acs_request)
-        .await?
-        .into_inner();
-
-    let mut services = Vec::new();
-    while let Some(response) = stream.message().await? {
-        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
-            && let Some(created) = active.created_event
-            && let Some(template_id) = &created.template_id
-            && template_id.module_name == "Utility.Credential.App.V0.Service.User"
-            && template_id.entity_name == "UserService"
-            && let Some(info) = extract_user_service_info(&created)
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        let template_id = created.template_id.as_ref()?;
+        if template_id.module_name != "Utility.Credential.App.V0.Service.User"
+            || template_id.entity_name != "UserService"
         {
-            services.push(info);
+            return None;
         }
-    }
-
-    Ok(services)
+        extract_user_service_info(&created)
+    })
+    .await
 }
 
 /// Fetch user services using TemplateFilter
@@ -2436,59 +2044,23 @@ async fn fetch_user_services_for_template(
     token: Option<String>,
     template: &TemplateId,
 ) -> Result<Vec<UserServiceInfo>> {
-    let mut state_client = utils::create_state_client(config, token).await?;
-
-    let ledger_end = state_client
-        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
-        .await?
-        .into_inner()
-        .offset;
-
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
-                    TemplateFilter {
-                        template_id: Some(Identifier {
-                            package_id: template.package_id.clone(),
-                            module_name: template.module_name.to_string(),
-                            entity_name: template.entity_name.to_string(),
-                        }),
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
+    let event_format = party_event_format(
+        party_id,
+        vec![template_filter(
+            Identifier {
+                package_id: template.package_id.clone(),
+                module_name: template.module_name.to_string(),
+                entity_name: template.entity_name.to_string(),
+            },
+            false,
+        )],
+        true,
     );
 
-    let acs_request = GetActiveContractsRequest {
-        active_at_offset: ledger_end,
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            verbose: true,
-        }),
-        stream_continuation_token: None,
-    };
-
-    let mut stream = state_client
-        .get_active_contracts(acs_request)
-        .await?
-        .into_inner();
-
-    let mut services = Vec::new();
-    while let Some(response) = stream.message().await? {
-        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
-            && let Some(created) = active.created_event
-            && let Some(info) = extract_user_service_info(&created)
-        {
-            services.push(info);
-        }
-    }
-
-    Ok(services)
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        extract_user_service_info(&created)
+    })
+    .await
 }
 
 /// Extract UserServiceInfo from a UserService created event
@@ -2554,57 +2126,18 @@ async fn fetch_credential_offers_with_wildcard(
     party_id: &CantonId,
     token: Option<String>,
 ) -> Result<Vec<CredentialOfferInfo>> {
-    let mut state_client = utils::create_state_client(config, token).await?;
+    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], true);
 
-    let ledger_end = state_client
-        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
-        .await?
-        .into_inner()
-        .offset;
-
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
-                    WildcardFilter {
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
-    );
-
-    let acs_request = GetActiveContractsRequest {
-        active_at_offset: ledger_end,
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            verbose: true,
-        }),
-        stream_continuation_token: None,
-    };
-
-    let mut stream = state_client
-        .get_active_contracts(acs_request)
-        .await?
-        .into_inner();
-
-    let mut offers = Vec::new();
-    while let Some(response) = stream.message().await? {
-        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
-            && let Some(created) = active.created_event
-            && let Some(template_id) = &created.template_id
-            && template_id.module_name == "Utility.Credential.App.V0.Model.Offer"
-            && template_id.entity_name == "CredentialOffer"
-            && let Some(info) = extract_credential_offer_info(&created)
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        let template_id = created.template_id.as_ref()?;
+        if template_id.module_name != "Utility.Credential.App.V0.Model.Offer"
+            || template_id.entity_name != "CredentialOffer"
         {
-            offers.push(info);
+            return None;
         }
-    }
-
-    Ok(offers)
+        extract_credential_offer_info(&created)
+    })
+    .await
 }
 
 /// Fetch credential offers using TemplateFilter
@@ -2614,59 +2147,23 @@ async fn fetch_credential_offers_for_template(
     token: Option<String>,
     template: &TemplateId,
 ) -> Result<Vec<CredentialOfferInfo>> {
-    let mut state_client = utils::create_state_client(config, token).await?;
-
-    let ledger_end = state_client
-        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
-        .await?
-        .into_inner()
-        .offset;
-
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
-                    TemplateFilter {
-                        template_id: Some(Identifier {
-                            package_id: template.package_id.clone(),
-                            module_name: template.module_name.to_string(),
-                            entity_name: template.entity_name.to_string(),
-                        }),
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
+    let event_format = party_event_format(
+        party_id,
+        vec![template_filter(
+            Identifier {
+                package_id: template.package_id.clone(),
+                module_name: template.module_name.to_string(),
+                entity_name: template.entity_name.to_string(),
+            },
+            false,
+        )],
+        true,
     );
 
-    let acs_request = GetActiveContractsRequest {
-        active_at_offset: ledger_end,
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            verbose: true,
-        }),
-        stream_continuation_token: None,
-    };
-
-    let mut stream = state_client
-        .get_active_contracts(acs_request)
-        .await?
-        .into_inner();
-
-    let mut offers = Vec::new();
-    while let Some(response) = stream.message().await? {
-        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
-            && let Some(created) = active.created_event
-            && let Some(info) = extract_credential_offer_info(&created)
-        {
-            offers.push(info);
-        }
-    }
-
-    Ok(offers)
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        extract_credential_offer_info(&created)
+    })
+    .await
 }
 
 /// Extract CredentialOfferInfo from a CredentialOffer created event. An offer
@@ -2728,57 +2225,20 @@ async fn fetch_credentials_with_wildcard(
     party_id: &CantonId,
     token: Option<String>,
 ) -> Result<Vec<CredentialInfo>> {
-    let mut state_client = utils::create_state_client(config, token).await?;
+    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], true);
 
-    let ledger_end = state_client
-        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
-        .await?
-        .into_inner()
-        .offset;
-
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
-                    WildcardFilter {
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
-    );
-
-    let acs_request = GetActiveContractsRequest {
-        active_at_offset: ledger_end,
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            verbose: true,
-        }),
-        stream_continuation_token: None,
-    };
-
-    let mut stream = state_client
-        .get_active_contracts(acs_request)
-        .await?
-        .into_inner();
-
-    let mut credentials = Vec::new();
-    while let Some(response) = stream.message().await? {
-        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
-            && let Some(created) = active.created_event
-            && let Some(template_id) = &created.template_id
-            && template_id.module_name == "Utility.Credential.V0.Credential"
-            && template_id.entity_name == "Credential"
-            && let Some(info) = extract_credential_info(&created)
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        // The wildcard read returns every active contract, so the template
+        // narrowing happens here rather than Canton-side.
+        let template_id = created.template_id.as_ref()?;
+        if template_id.module_name != "Utility.Credential.V0.Credential"
+            || template_id.entity_name != "Credential"
         {
-            credentials.push(info);
+            return None;
         }
-    }
-
-    Ok(credentials)
+        extract_credential_info(&created)
+    })
+    .await
 }
 
 /// Fetch credentials using TemplateFilter
@@ -2788,59 +2248,23 @@ async fn fetch_credentials_for_template(
     token: Option<String>,
     template: &TemplateId,
 ) -> Result<Vec<CredentialInfo>> {
-    let mut state_client = utils::create_state_client(config, token).await?;
-
-    let ledger_end = state_client
-        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
-        .await?
-        .into_inner()
-        .offset;
-
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
-                    TemplateFilter {
-                        template_id: Some(Identifier {
-                            package_id: template.package_id.clone(),
-                            module_name: template.module_name.to_string(),
-                            entity_name: template.entity_name.to_string(),
-                        }),
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
+    let event_format = party_event_format(
+        party_id,
+        vec![template_filter(
+            Identifier {
+                package_id: template.package_id.clone(),
+                module_name: template.module_name.to_string(),
+                entity_name: template.entity_name.to_string(),
+            },
+            false,
+        )],
+        true,
     );
 
-    let acs_request = GetActiveContractsRequest {
-        active_at_offset: ledger_end,
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            verbose: true,
-        }),
-        stream_continuation_token: None,
-    };
-
-    let mut stream = state_client
-        .get_active_contracts(acs_request)
-        .await?
-        .into_inner();
-
-    let mut credentials = Vec::new();
-    while let Some(response) = stream.message().await? {
-        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
-            && let Some(created) = active.created_event
-            && let Some(info) = extract_credential_info(&created)
-        {
-            credentials.push(info);
-        }
-    }
-
-    Ok(credentials)
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        extract_credential_info(&created)
+    })
+    .await
 }
 
 /// Extract CredentialInfo from a Credential created event.
@@ -2916,57 +2340,18 @@ async fn fetch_registrar_services_with_wildcard(
     party_id: &CantonId,
     token: Option<String>,
 ) -> Result<Vec<RegistrarServiceInfo>> {
-    let mut state_client = utils::create_state_client(config, token).await?;
+    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], true);
 
-    let ledger_end = state_client
-        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
-        .await?
-        .into_inner()
-        .offset;
-
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
-                    WildcardFilter {
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
-    );
-
-    let acs_request = GetActiveContractsRequest {
-        active_at_offset: ledger_end,
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            verbose: true,
-        }),
-        stream_continuation_token: None,
-    };
-
-    let mut stream = state_client
-        .get_active_contracts(acs_request)
-        .await?
-        .into_inner();
-
-    let mut services = Vec::new();
-    while let Some(response) = stream.message().await? {
-        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
-            && let Some(created) = active.created_event
-            && let Some(template_id) = &created.template_id
-            && template_id.module_name == "Utility.Registry.App.V0.Service.Registrar"
-            && template_id.entity_name == "RegistrarService"
-            && let Some(info) = extract_registrar_service_info(&created)
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        let template_id = created.template_id.as_ref()?;
+        if template_id.module_name != "Utility.Registry.App.V0.Service.Registrar"
+            || template_id.entity_name != "RegistrarService"
         {
-            services.push(info);
+            return None;
         }
-    }
-
-    Ok(services)
+        extract_registrar_service_info(&created)
+    })
+    .await
 }
 
 /// Fetch registrar services using TemplateFilter
@@ -2976,59 +2361,23 @@ async fn fetch_registrar_services_for_template(
     token: Option<String>,
     template: &TemplateId,
 ) -> Result<Vec<RegistrarServiceInfo>> {
-    let mut state_client = utils::create_state_client(config, token).await?;
-
-    let ledger_end = state_client
-        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
-        .await?
-        .into_inner()
-        .offset;
-
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
-                    TemplateFilter {
-                        template_id: Some(Identifier {
-                            package_id: template.package_id.clone(),
-                            module_name: template.module_name.to_string(),
-                            entity_name: template.entity_name.to_string(),
-                        }),
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
+    let event_format = party_event_format(
+        party_id,
+        vec![template_filter(
+            Identifier {
+                package_id: template.package_id.clone(),
+                module_name: template.module_name.to_string(),
+                entity_name: template.entity_name.to_string(),
+            },
+            false,
+        )],
+        true,
     );
 
-    let acs_request = GetActiveContractsRequest {
-        active_at_offset: ledger_end,
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            verbose: true,
-        }),
-        stream_continuation_token: None,
-    };
-
-    let mut stream = state_client
-        .get_active_contracts(acs_request)
-        .await?
-        .into_inner();
-
-    let mut services = Vec::new();
-    while let Some(response) = stream.message().await? {
-        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
-            && let Some(created) = active.created_event
-            && let Some(info) = extract_registrar_service_info(&created)
-        {
-            services.push(info);
-        }
-    }
-
-    Ok(services)
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        extract_registrar_service_info(&created)
+    })
+    .await
 }
 
 /// Extract RegistrarServiceInfo from a RegistrarService created event
@@ -3095,57 +2444,20 @@ async fn fetch_registrar_service_requests_with_wildcard(
     party_id: &CantonId,
     token: Option<String>,
 ) -> Result<Vec<RegistrarServiceRequestInfo>> {
-    let mut state_client = utils::create_state_client(config, token).await?;
+    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], true);
 
-    let ledger_end = state_client
-        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
-        .await?
-        .into_inner()
-        .offset;
-
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
-                    WildcardFilter {
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
-    );
-
-    let acs_request = GetActiveContractsRequest {
-        active_at_offset: ledger_end,
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            verbose: true,
-        }),
-        stream_continuation_token: None,
-    };
-
-    let mut stream = state_client
-        .get_active_contracts(acs_request)
-        .await?
-        .into_inner();
-
-    let mut requests = Vec::new();
-    while let Some(response) = stream.message().await? {
-        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
-            && let Some(created) = active.created_event
-            && let Some(template_id) = &created.template_id
-            && template_id.module_name == "Utility.Registry.App.V0.Service.Registrar"
-            && template_id.entity_name == "RegistrarServiceRequest"
-            && let Some(info) = extract_registrar_service_request_info(&created)
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        // The wildcard read returns every active contract, so the template
+        // narrowing happens here rather than Canton-side.
+        let template_id = created.template_id.as_ref()?;
+        if template_id.module_name != "Utility.Registry.App.V0.Service.Registrar"
+            || template_id.entity_name != "RegistrarServiceRequest"
         {
-            requests.push(info);
+            return None;
         }
-    }
-
-    Ok(requests)
+        extract_registrar_service_request_info(&created)
+    })
+    .await
 }
 
 /// Fetch registrar service requests using TemplateFilter
@@ -3155,59 +2467,23 @@ async fn fetch_registrar_service_requests_for_template(
     token: Option<String>,
     template: &TemplateId,
 ) -> Result<Vec<RegistrarServiceRequestInfo>> {
-    let mut state_client = utils::create_state_client(config, token).await?;
-
-    let ledger_end = state_client
-        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
-        .await?
-        .into_inner()
-        .offset;
-
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
-                    TemplateFilter {
-                        template_id: Some(Identifier {
-                            package_id: template.package_id.clone(),
-                            module_name: template.module_name.to_string(),
-                            entity_name: template.entity_name.to_string(),
-                        }),
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
+    let event_format = party_event_format(
+        party_id,
+        vec![template_filter(
+            Identifier {
+                package_id: template.package_id.clone(),
+                module_name: template.module_name.to_string(),
+                entity_name: template.entity_name.to_string(),
+            },
+            false,
+        )],
+        true,
     );
 
-    let acs_request = GetActiveContractsRequest {
-        active_at_offset: ledger_end,
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            verbose: true,
-        }),
-        stream_continuation_token: None,
-    };
-
-    let mut stream = state_client
-        .get_active_contracts(acs_request)
-        .await?
-        .into_inner();
-
-    let mut requests = Vec::new();
-    while let Some(response) = stream.message().await? {
-        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
-            && let Some(created) = active.created_event
-            && let Some(info) = extract_registrar_service_request_info(&created)
-        {
-            requests.push(info);
-        }
-    }
-
-    Ok(requests)
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        extract_registrar_service_request_info(&created)
+    })
+    .await
 }
 
 /// Read an `Optional Bool` field. An absent field or a `None` value reads as
@@ -3283,57 +2559,20 @@ async fn fetch_provider_configurations_with_wildcard(
     party_id: &CantonId,
     token: Option<String>,
 ) -> Result<Vec<ProviderConfigurationInfo>> {
-    let mut state_client = utils::create_state_client(config, token).await?;
+    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], true);
 
-    let ledger_end = state_client
-        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
-        .await?
-        .into_inner()
-        .offset;
-
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
-                    WildcardFilter {
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
-    );
-
-    let acs_request = GetActiveContractsRequest {
-        active_at_offset: ledger_end,
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            verbose: true,
-        }),
-        stream_continuation_token: None,
-    };
-
-    let mut stream = state_client
-        .get_active_contracts(acs_request)
-        .await?
-        .into_inner();
-
-    let mut configurations = Vec::new();
-    while let Some(response) = stream.message().await? {
-        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
-            && let Some(created) = active.created_event
-            && let Some(template_id) = &created.template_id
-            && template_id.module_name == "Utility.Registry.App.V0.Configuration.Provider"
-            && template_id.entity_name == "ProviderConfiguration"
-            && let Some(info) = extract_provider_configuration_info(&created)
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        // The wildcard read returns every active contract, so the template
+        // narrowing happens here rather than Canton-side.
+        let template_id = created.template_id.as_ref()?;
+        if template_id.module_name != "Utility.Registry.App.V0.Configuration.Provider"
+            || template_id.entity_name != "ProviderConfiguration"
         {
-            configurations.push(info);
+            return None;
         }
-    }
-
-    Ok(configurations)
+        extract_provider_configuration_info(&created)
+    })
+    .await
 }
 
 /// Fetch provider configurations using TemplateFilter
@@ -3343,59 +2582,23 @@ async fn fetch_provider_configurations_for_template(
     token: Option<String>,
     template: &TemplateId,
 ) -> Result<Vec<ProviderConfigurationInfo>> {
-    let mut state_client = utils::create_state_client(config, token).await?;
-
-    let ledger_end = state_client
-        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
-        .await?
-        .into_inner()
-        .offset;
-
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
-                    TemplateFilter {
-                        template_id: Some(Identifier {
-                            package_id: template.package_id.clone(),
-                            module_name: template.module_name.to_string(),
-                            entity_name: template.entity_name.to_string(),
-                        }),
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
+    let event_format = party_event_format(
+        party_id,
+        vec![template_filter(
+            Identifier {
+                package_id: template.package_id.clone(),
+                module_name: template.module_name.to_string(),
+                entity_name: template.entity_name.to_string(),
+            },
+            false,
+        )],
+        true,
     );
 
-    let acs_request = GetActiveContractsRequest {
-        active_at_offset: ledger_end,
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            verbose: true,
-        }),
-        stream_continuation_token: None,
-    };
-
-    let mut stream = state_client
-        .get_active_contracts(acs_request)
-        .await?
-        .into_inner();
-
-    let mut configurations = Vec::new();
-    while let Some(response) = stream.message().await? {
-        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
-            && let Some(created) = active.created_event
-            && let Some(info) = extract_provider_configuration_info(&created)
-        {
-            configurations.push(info);
-        }
-    }
-
-    Ok(configurations)
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        extract_provider_configuration_info(&created)
+    })
+    .await
 }
 
 /// Extract ProviderConfigurationInfo from a ProviderConfiguration created
@@ -3458,57 +2661,18 @@ async fn fetch_instruments_with_wildcard(
     party_id: &CantonId,
     token: Option<String>,
 ) -> Result<Vec<InstrumentInfo>> {
-    let mut state_client = utils::create_state_client(config, token).await?;
+    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], true);
 
-    let ledger_end = state_client
-        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
-        .await?
-        .into_inner()
-        .offset;
-
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
-                    WildcardFilter {
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
-    );
-
-    let acs_request = GetActiveContractsRequest {
-        active_at_offset: ledger_end,
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            verbose: true,
-        }),
-        stream_continuation_token: None,
-    };
-
-    let mut stream = state_client
-        .get_active_contracts(acs_request)
-        .await?
-        .into_inner();
-
-    let mut instruments = Vec::new();
-    while let Some(response) = stream.message().await? {
-        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
-            && let Some(created) = active.created_event
-            && let Some(template_id) = &created.template_id
-            && template_id.module_name == "Utility.Registry.V0.Configuration.Instrument"
-            && template_id.entity_name == "InstrumentConfiguration"
-            && let Some(info) = extract_instrument_info(&created)
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        let template_id = created.template_id.as_ref()?;
+        if template_id.module_name != "Utility.Registry.V0.Configuration.Instrument"
+            || template_id.entity_name != "InstrumentConfiguration"
         {
-            instruments.push(info);
+            return None;
         }
-    }
-
-    Ok(instruments)
+        extract_instrument_info(&created)
+    })
+    .await
 }
 
 async fn fetch_instruments_for_template(
@@ -3517,59 +2681,23 @@ async fn fetch_instruments_for_template(
     token: Option<String>,
     template: &TemplateId,
 ) -> Result<Vec<InstrumentInfo>> {
-    let mut state_client = utils::create_state_client(config, token).await?;
-
-    let ledger_end = state_client
-        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
-        .await?
-        .into_inner()
-        .offset;
-
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
-                    TemplateFilter {
-                        template_id: Some(Identifier {
-                            package_id: template.package_id.clone(),
-                            module_name: template.module_name.to_string(),
-                            entity_name: template.entity_name.to_string(),
-                        }),
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
+    let event_format = party_event_format(
+        party_id,
+        vec![template_filter(
+            Identifier {
+                package_id: template.package_id.clone(),
+                module_name: template.module_name.to_string(),
+                entity_name: template.entity_name.to_string(),
+            },
+            false,
+        )],
+        true,
     );
 
-    let acs_request = GetActiveContractsRequest {
-        active_at_offset: ledger_end,
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            verbose: true,
-        }),
-        stream_continuation_token: None,
-    };
-
-    let mut stream = state_client
-        .get_active_contracts(acs_request)
-        .await?
-        .into_inner();
-
-    let mut instruments = Vec::new();
-    while let Some(response) = stream.message().await? {
-        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
-            && let Some(created) = active.created_event
-            && let Some(info) = extract_instrument_info(&created)
-        {
-            instruments.push(info);
-        }
-    }
-
-    Ok(instruments)
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        extract_instrument_info(&created)
+    })
+    .await
 }
 
 /// Extract InstrumentInfo from an InstrumentConfiguration created event.
@@ -3644,94 +2772,48 @@ pub async fn query_contracts_by_template(
 ) -> Result<Vec<ContractWithBlob>> {
     use base64::Engine;
 
-    let mut state_client = utils::create_state_client(config, token).await?;
-
-    let ledger_end = state_client
-        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
-        .await?
-        .into_inner()
-        .offset;
-
     let identifier = Identifier {
         package_id: params.package_id.clone(),
         module_name: params.module_name.clone(),
         entity_name: params.entity_name.clone(),
     };
 
-    let identifier_filter = if test_mode {
-        cumulative_filter::IdentifierFilter::WildcardFilter(WildcardFilter {
-            include_created_event_blob: true,
-        })
+    let filter = if test_mode {
+        wildcard_filter(true)
     } else if params.use_interface_filter {
-        cumulative_filter::IdentifierFilter::InterfaceFilter(InterfaceFilter {
-            interface_id: Some(identifier),
-            include_interface_view: true,
-            include_created_event_blob: true,
-        })
+        interface_filter(identifier, true)
     } else {
-        cumulative_filter::IdentifierFilter::TemplateFilter(TemplateFilter {
-            template_id: Some(identifier),
-            include_created_event_blob: true,
-        })
+        template_filter(identifier, true)
     };
 
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(identifier_filter),
-            }],
-        },
-    );
+    let event_format = party_event_format(party_id, vec![filter], true);
 
-    let acs_request = GetActiveContractsRequest {
-        active_at_offset: ledger_end,
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            verbose: true,
-        }),
-        stream_continuation_token: None,
-    };
-
-    let mut stream = state_client
-        .get_active_contracts(acs_request)
-        .await?
-        .into_inner();
-
-    let mut contracts = Vec::new();
-    while let Some(response) = stream.message().await? {
-        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
-            && let Some(created) = active.created_event
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        // Test mode reads the ACS wildcard, so the template narrowing Canton
+        // would otherwise have done has to happen here.
+        if test_mode
+            && !created.template_id.as_ref().is_some_and(|t| {
+                t.module_name == params.module_name && t.entity_name == params.entity_name
+            })
         {
-            let matches = if test_mode {
-                created.template_id.as_ref().is_some_and(|t| {
-                    t.module_name == params.module_name && t.entity_name == params.entity_name
-                })
-            } else {
-                true
-            };
-
-            if matches {
-                // QA flagged the Accept Mint Request dropdown for surfacing
-                // contracts whose `executeBefore` has already passed —
-                // accepting them would fail at interpretation with
-                // deadline-exceeded. Drop them here when the caller opts in.
-                if params.active_only && is_execute_before_expired(&created) {
-                    continue;
-                }
-                let blob =
-                    base64::engine::general_purpose::STANDARD.encode(&created.created_event_blob);
-                contracts.push(ContractWithBlob {
-                    contract_id: created.contract_id,
-                    blob,
-                });
-            }
+            return None;
         }
-    }
 
-    Ok(contracts)
+        // QA flagged the Accept Mint Request dropdown for surfacing contracts
+        // whose `executeBefore` has already passed — accepting them would fail
+        // at interpretation with deadline-exceeded. Drop them here when the
+        // caller opts in.
+        if params.active_only && is_execute_before_expired(&created) {
+            return None;
+        }
+
+        let blob = base64::engine::general_purpose::STANDARD.encode(&created.created_event_blob);
+        Some(ContractWithBlob {
+            contract_id: created.contract_id,
+            blob,
+        })
+    })
+    .await
 }
 
 // ============================================================================
@@ -3756,66 +2838,30 @@ pub async fn get_open_transfer_instructions(
     party_id: &CantonId,
     token: Option<String>,
 ) -> Result<Vec<TransferInstructionInfo>> {
-    let mut state_client = utils::create_state_client(config, token).await?;
-
-    let ledger_end = state_client
-        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
-        .await?
-        .into_inner()
-        .offset;
-
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::InterfaceFilter(
-                    InterfaceFilter {
-                        interface_id: Some(Identifier {
-                            package_id: "#splice-api-token-transfer-instruction-v1".to_string(),
-                            module_name: "Splice.Api.Token.TransferInstructionV1".to_string(),
-                            entity_name: "TransferInstruction".to_string(),
-                        }),
-                        include_interface_view: true,
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
+    let event_format = party_event_format(
+        party_id,
+        vec![interface_filter(
+            Identifier {
+                package_id: "#splice-api-token-transfer-instruction-v1".to_string(),
+                module_name: "Splice.Api.Token.TransferInstructionV1".to_string(),
+                entity_name: "TransferInstruction".to_string(),
+            },
+            false,
+        )],
+        true,
     );
 
-    let acs_request = GetActiveContractsRequest {
-        active_at_offset: ledger_end,
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            verbose: true,
-        }),
-        stream_continuation_token: None,
-    };
-
-    let mut stream = state_client
-        .get_active_contracts(tonic::Request::new(acs_request))
-        .await?
-        .into_inner();
-
     let receiver_str = party_id.to_string();
-    let mut instructions = Vec::new();
-    while let Some(response) = stream.message().await? {
-        // The InterfaceFilter only enforces party visibility — this party can
-        // see the contract as sender, receiver, or an instrument-admin
-        // stakeholder. Keep only the ones where it's the *receiver*, since
-        // those are the only ones it can Accept.
-        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
-            && let Some(created) = active.created_event
-            && let Some(info) = extract_transfer_instruction_info(&created)
-            && info.receiver.to_string() == receiver_str
-        {
-            instructions.push(info);
-        }
-    }
 
-    Ok(instructions)
+    // The InterfaceFilter only enforces party visibility — this party can see
+    // the contract as sender, receiver, or an instrument-admin stakeholder.
+    // Keep only the ones where it's the *receiver*, since those are the only
+    // ones it can Accept.
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        extract_transfer_instruction_info(&created)
+            .filter(|info| info.receiver.to_string() == receiver_str)
+    })
+    .await
 }
 
 /// Pull sender / receiver / amount / instrument out of a `TransferInstruction`
@@ -3878,6 +2924,20 @@ fn extract_transfer_instruction_info(created: &CreatedEvent) -> Option<TransferI
             _ => None,
         })?;
 
+    transfer_instruction_from_transfer(created, transfer_record, status, pending_actions)
+}
+
+/// Read the token-standard `Transfer` record shared by every transfer instruction.
+///
+/// The utility registry supplies it inside the `TransferInstruction` interface view;
+/// Canton Coin supplies the same shape in the template's own create arguments. One
+/// parser reads both, so the two paths cannot drift.
+fn transfer_instruction_from_transfer(
+    created: &CreatedEvent,
+    transfer_record: &Record,
+    status: TransferInstructionStatus,
+    pending_actions: Vec<PendingAction>,
+) -> Option<TransferInstructionInfo> {
     // Surface the deadline so the UI can disable past-deadline rows; do *not*
     // hide them. Accepting an expired offer would fail at interpretation with
     // `deadline-exceeded`, but staying silent left users wondering where their
@@ -3971,60 +3031,26 @@ async fn fetch_token_requests_for_template(
     template: &TemplateId,
     payload_field: &str,
 ) -> Result<Vec<TokenRequestInfo>> {
-    let mut state_client = utils::create_state_client(config, token).await?;
-
-    let ledger_end = state_client
-        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
-        .await?
-        .into_inner()
-        .offset;
-
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
-                    TemplateFilter {
-                        template_id: Some(Identifier {
-                            package_id: template.package_id.clone(),
-                            module_name: template.module_name.to_string(),
-                            entity_name: template.entity_name.to_string(),
-                        }),
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
+    let event_format = party_event_format(
+        party_id,
+        vec![template_filter(
+            Identifier {
+                package_id: template.package_id.clone(),
+                module_name: template.module_name.to_string(),
+                entity_name: template.entity_name.to_string(),
+            },
+            false,
+        )],
+        true,
     );
 
-    let acs_request = GetActiveContractsRequest {
-        active_at_offset: ledger_end,
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            verbose: true,
-        }),
-        stream_continuation_token: None,
-    };
-
-    let mut stream = state_client
-        .get_active_contracts(tonic::Request::new(acs_request))
-        .await?
-        .into_inner();
-
-    let mut requests = Vec::new();
-    while let Some(response) = stream.message().await? {
-        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
-            && let Some(created) = active.created_event
-            && !is_execute_before_expired_in_payload(&created, payload_field)
-            && let Some(info) = extract_token_request_info(&created, payload_field)
-        {
-            requests.push(info);
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        if is_execute_before_expired_in_payload(&created, payload_field) {
+            return None;
         }
-    }
-
-    Ok(requests)
+        extract_token_request_info(&created, payload_field)
+    })
+    .await
 }
 
 /// Extract `{holder, amount, instrumentId.{admin,id}, executeBefore}` from a
@@ -4216,59 +3242,23 @@ pub async fn get_transfer_factories(
     party_id: &CantonId,
     token: Option<String>,
 ) -> Result<Vec<TransferFactoryInfo>> {
-    let mut state_client = utils::create_state_client(config, token).await?;
-
-    let ledger_end = state_client
-        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
-        .await?
-        .into_inner()
-        .offset;
-
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::InterfaceFilter(
-                    InterfaceFilter {
-                        interface_id: Some(Identifier {
-                            package_id: "#splice-api-token-transfer-instruction-v1".to_string(),
-                            module_name: "Splice.Api.Token.TransferInstructionV1".to_string(),
-                            entity_name: "TransferFactory".to_string(),
-                        }),
-                        include_interface_view: true,
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
+    let event_format = party_event_format(
+        party_id,
+        vec![interface_filter(
+            Identifier {
+                package_id: "#splice-api-token-transfer-instruction-v1".to_string(),
+                module_name: "Splice.Api.Token.TransferInstructionV1".to_string(),
+                entity_name: "TransferFactory".to_string(),
+            },
+            false,
+        )],
+        true,
     );
 
-    let acs_request = GetActiveContractsRequest {
-        active_at_offset: ledger_end,
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            verbose: true,
-        }),
-        stream_continuation_token: None,
-    };
-
-    let mut stream = state_client
-        .get_active_contracts(tonic::Request::new(acs_request))
-        .await?
-        .into_inner();
-
-    let mut factories = Vec::new();
-    while let Some(response) = stream.message().await? {
-        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
-            && let Some(created) = active.created_event
-            && let Some(info) = extract_transfer_factory_info(&created)
-        {
-            factories.push(info);
-        }
-    }
-    Ok(factories)
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        extract_transfer_factory_info(&created)
+    })
+    .await
 }
 
 /// Pull `admin` (the instrument admin / expected admin) out of the
@@ -4395,61 +3385,25 @@ async fn fetch_holding_views(
     party_id: &CantonId,
     token: Option<String>,
 ) -> Result<Vec<HoldingView>> {
-    let mut state_client = utils::create_state_client(config, token).await?;
-
-    let ledger_end = state_client
-        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
-        .await?
-        .into_inner()
-        .offset;
-
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::InterfaceFilter(
-                    InterfaceFilter {
-                        interface_id: Some(Identifier {
-                            package_id: "#splice-api-token-holding-v1".to_string(),
-                            module_name: "Splice.Api.Token.HoldingV1".to_string(),
-                            entity_name: "Holding".to_string(),
-                        }),
-                        include_interface_view: true,
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
+    let event_format = party_event_format(
+        party_id,
+        vec![interface_filter(
+            Identifier {
+                package_id: "#splice-api-token-holding-v1".to_string(),
+                module_name: "Splice.Api.Token.HoldingV1".to_string(),
+                entity_name: "Holding".to_string(),
+            },
+            false,
+        )],
+        true,
     );
 
-    let acs_request = GetActiveContractsRequest {
-        active_at_offset: ledger_end,
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            verbose: true,
-        }),
-        stream_continuation_token: None,
-    };
-
-    let mut stream = state_client
-        .get_active_contracts(tonic::Request::new(acs_request))
-        .await?
-        .into_inner();
-
     let owner_str = party_id.to_string();
-    let mut holdings = Vec::new();
-    while let Some(response) = stream.message().await? {
-        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
-            && let Some(created) = active.created_event
-            && let Some(view) = extract_holding_view(&created)
-            && view.owner == owner_str
-        {
-            holdings.push(view);
-        }
-    }
-    Ok(holdings)
+
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        extract_holding_view(&created).filter(|view| view.owner == owner_str)
+    })
+    .await
 }
 
 /// Intermediate parse result. `owner` lets `fetch_holding_views` drop holdings
@@ -4613,60 +3567,28 @@ async fn fetch_utility_preapproval_instruments(
     party_id: &CantonId,
     token: Option<String>,
 ) -> Result<std::collections::HashSet<(String, String)>> {
-    let mut state_client = utils::create_state_client(config, token).await?;
-    let ledger_end = state_client
-        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
-        .await?
-        .into_inner()
-        .offset;
-
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
-                    TemplateFilter {
-                        template_id: Some(Identifier {
-                            package_id: "#utility-registry-app-v0".to_string(),
-                            module_name: "Utility.Registry.App.V0.Model.TransferPreapproval"
-                                .to_string(),
-                            entity_name: "TransferPreapproval".to_string(),
-                        }),
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
+    let event_format = party_event_format(
+        party_id,
+        vec![template_filter(
+            Identifier {
+                package_id: "#utility-registry-app-v0".to_string(),
+                module_name: "Utility.Registry.App.V0.Model.TransferPreapproval".to_string(),
+                entity_name: "TransferPreapproval".to_string(),
+            },
+            false,
+        )],
+        true,
     );
 
-    let acs_request = GetActiveContractsRequest {
-        active_at_offset: ledger_end,
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            verbose: true,
-        }),
-        stream_continuation_token: None,
-    };
+    let entries = fetch_active_contracts_filtered(config, token, event_format, |created| {
+        created
+            .create_arguments
+            .as_ref()
+            .map(extract_preapproval_entries)
+    })
+    .await?;
 
-    let mut stream = state_client
-        .get_active_contracts(tonic::Request::new(acs_request))
-        .await?
-        .into_inner();
-
-    let mut set = std::collections::HashSet::new();
-    while let Some(response) = stream.message().await? {
-        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
-            && let Some(created) = active.created_event
-            && let Some(args) = created.create_arguments
-        {
-            for entry in extract_preapproval_entries(&args) {
-                set.insert(entry);
-            }
-        }
-    }
-    Ok(set)
+    Ok(entries.into_iter().flatten().collect())
 }
 
 /// Sentinel `instrument_id` for a preapproval whose `instrumentAllowances` is
@@ -4712,6 +3634,8 @@ fn extract_preapproval_entries(args: &Record) -> Vec<(String, String)> {
 
 #[cfg(test)]
 mod tests {
+    use canton_proto_rs::com::daml::ledger::api::v2::admin::{ObjectMeta, PartyDetails};
+
     use super::*;
 
     #[test]
@@ -5467,5 +4391,106 @@ mod tests {
             record.fields.retain(|f| f.label != "provider");
         }
         assert!(extract_provider_configuration_info(&event).is_none());
+    }
+
+    // ====================================================================
+    // Party metadata page walk
+    // ====================================================================
+
+    fn party_page(parties: &[(&str, &[(&str, &str)])], next: &str) -> ListKnownPartiesResponse {
+        ListKnownPartiesResponse {
+            party_details: parties
+                .iter()
+                .map(|(party, annotations)| PartyDetails {
+                    party: (*party).to_string(),
+                    is_local: true,
+                    local_metadata: Some(ObjectMeta {
+                        resource_version: String::new(),
+                        annotations: annotations
+                            .iter()
+                            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                            .collect(),
+                    }),
+                    identity_provider_id: String::new(),
+                })
+                .collect(),
+            next_page_token: next.to_string(),
+        }
+    }
+
+    /// Walk `pages` in order. Asking past the script is an error, so a test that
+    /// over-reads fails instead of quietly passing.
+    async fn walk_parties(
+        party_id: &str,
+        pages: Vec<ListKnownPartiesResponse>,
+    ) -> Result<Option<PartyMetadata>> {
+        let mut remaining = std::collections::VecDeque::from(pages);
+
+        find_party_annotations(party_id, |_page_token| {
+            let page = remaining.pop_front();
+            async move { page.ok_or_else(|| anyhow::anyhow!("asked for a page beyond the script")) }
+        })
+        .await
+    }
+
+    /// `filter_party` is only a prefix match, so the wanted party can sit behind
+    /// a page of others — the walk has to follow the token to find it.
+    #[tokio::test]
+    async fn party_walk_finds_the_party_on_a_later_page() -> Result {
+        let pages = vec![
+            party_page(&[("other::1220aa", &[("k", "v")])], "page-2"),
+            party_page(&[("wanted::1220bb", &[("owner", "alice")])], ""),
+        ];
+
+        let metadata = walk_parties("wanted::1220bb", pages).await?;
+
+        assert_eq!(
+            metadata.map(|m| m.annotations),
+            Some([("owner".to_string(), "alice".to_string())].into())
+        );
+
+        Ok(())
+    }
+
+    /// An exhausted token list means the party is not hosted here.
+    #[tokio::test]
+    async fn party_walk_reports_nothing_when_the_tokens_run_out() -> Result {
+        let pages = vec![
+            party_page(&[("other::1220aa", &[])], "page-2"),
+            party_page(&[("another::1220cc", &[])], ""),
+        ];
+
+        assert!(walk_parties("wanted::1220bb", pages).await?.is_none());
+
+        Ok(())
+    }
+
+    /// A participant that keeps handing back the same token would otherwise walk
+    /// forever; the walk treats a repeat as the end. The script holds two pages,
+    /// so a third read would error rather than return `None`.
+    #[tokio::test]
+    async fn party_walk_stops_on_a_repeated_page_token() -> Result {
+        let pages = vec![
+            party_page(&[("other::1220aa", &[])], "stuck"),
+            party_page(&[("other::1220aa", &[])], "stuck"),
+        ];
+
+        assert!(walk_parties("wanted::1220bb", pages).await?.is_none());
+
+        Ok(())
+    }
+
+    /// Found, but carrying no annotations — there is no metadata to report, and
+    /// the walk must not keep looking for a better match.
+    #[tokio::test]
+    async fn party_walk_reports_nothing_for_a_party_without_annotations() -> Result {
+        let pages = vec![
+            party_page(&[("wanted::1220bb", &[])], "page-2"),
+            party_page(&[("wanted::1220bb", &[("owner", "alice")])], ""),
+        ];
+
+        assert!(walk_parties("wanted::1220bb", pages).await?.is_none());
+
+        Ok(())
     }
 }
