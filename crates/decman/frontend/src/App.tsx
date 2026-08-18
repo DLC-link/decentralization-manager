@@ -22,7 +22,7 @@ import AddIcon from "@mui/icons-material/Add";
 import VisibilityIcon from "@mui/icons-material/Visibility";
 import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 import { Header } from "./components/Header";
-import { Sidebar, SIDEBAR_WIDTH } from "./components/Sidebar";
+import { Sidebar, SIDEBAR_WIDTH, SIDEBAR_WIDTH_COLLAPSED } from "./components/Sidebar";
 import { PartyList } from "./components/PartyList";
 import { PartyDetail } from "./components/PartyDetail";
 import { NodeConfigAccordion } from "./components/NodeConfigAccordion";
@@ -38,6 +38,7 @@ import { useSnackbar } from "./contexts";
 import { API_BASE, ADMIN_ACCESS } from "./constants";
 import { authenticatedFetch, pingLatency } from "./api";
 import { useHiddenParties } from "./useHiddenParties";
+import { columnSx } from "./styles";
 import type {
   DecentralizedParty,
   DecentralizedPartiesResponse,
@@ -85,6 +86,13 @@ function buildHash(tab: number, partySlug?: string | null): string {
 const App = () => {
   const muiTheme = useTheme();
   const isLargeScreen = useMediaQuery(muiTheme.breakpoints.up("lg"));
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(
+    () => localStorage.getItem("sidebar-collapsed") === "true",
+  );
+  useEffect(() => {
+    localStorage.setItem("sidebar-collapsed", String(sidebarCollapsed));
+  }, [sidebarCollapsed]);
+  const sidebarWidth = sidebarCollapsed ? SIDEBAR_WIDTH_COLLAPSED : SIDEBAR_WIDTH;
   const [activeTab, setActiveTab] = useState(INITIAL_ROUTE.tab);
   const [parties, setParties] = useState<DecentralizedParty[]>([]);
   const [externalParties, setExternalParties] = useState<ExternalPartyInfo[]>([]);
@@ -626,6 +634,9 @@ const App = () => {
           packageCount={packageCount}
           notificationCount={notificationCount}
           buildInfo={buildInfo}
+          collapsed={sidebarCollapsed}
+          onToggleCollapsed={() => setSidebarCollapsed((c) => !c)}
+          network={nodeConfig?.canton.network}
         />
       ) : (
         <Header buildInfo={buildInfo} />
@@ -636,7 +647,7 @@ const App = () => {
           sx={{
             position: "fixed",
             top: 16,
-            left: `${SIDEBAR_WIDTH}px`,
+            left: `${sidebarWidth}px`,
             right: 0,
             zIndex: 1050,
             display: "flex",
@@ -645,7 +656,7 @@ const App = () => {
             transform: showSearchBar
               ? "translateY(0)"
               : "translateY(-20px)",
-            transition: "opacity 0.3s ease, transform 0.3s ease",
+            transition: "left 0.15s ease-out, opacity 0.3s ease, transform 0.3s ease",
             pointerEvents: showSearchBar ? "auto" : "none",
           }}
         >
@@ -744,10 +755,18 @@ const App = () => {
 
       <Box
         sx={{
-          ...(isLargeScreen && { ml: `${SIDEBAR_WIDTH}px` }),
+          ...(isLargeScreen && { ml: `${sidebarWidth}px`, transition: "margin-left 0.15s ease-out" }),
           ...(activeTab === 1 && {
             height: "100vh",
             overflow: "hidden",
+            display: "flex",
+            flexDirection: "column",
+          }),
+          // The parties list ends in a footer bar that should sit at the bottom
+          // of the view even when a short page doesn't fill it — so the region
+          // is at least a screen tall and the list flexes into the leftover.
+          ...(activeTab === 0 && {
+            minHeight: "100vh",
             display: "flex",
             flexDirection: "column",
           }),
@@ -804,7 +823,7 @@ const App = () => {
                   color={activeTab === 3 ? "primary" : "error"}
                   sx={{ pr: notificationCount ? 2.5 : 0 }}
                 >
-                  Pending approvals
+                  Approvals
                 </Badge>
               }
             />
@@ -875,7 +894,16 @@ const App = () => {
 
       {/* Tab 0: Parties — edge-to-edge */}
       {activeTab === 0 && !loading && !error && (
-        <Box sx={{ pt: isLargeScreen ? 4 : 0 }}>
+        // Passes the region's leftover height down to the list, so its footer
+        // bar can sit at the bottom of the view on a short page.
+        <Box
+          sx={{
+            pt: isLargeScreen ? 4 : 0,
+            flex: 1,
+            display: "flex",
+            flexDirection: "column",
+          }}
+        >
           {selectedPartyId && parties.find((p) => p.party_id === selectedPartyId) ? (
             <PartyDetail
               party={parties.find((p) => p.party_id === selectedPartyId)!}
@@ -967,7 +995,7 @@ const App = () => {
               <Tabs
                 value={partiesView}
                 onChange={(_e, v) => setPartiesView(v)}
-                sx={{ px: 2, mb: 1 }}
+                sx={{ ...columnSx, mb: 1 }}
               >
                 <Tab value="decentralized" label="Decentralized Parties" />
                 <Tab value="external" label="External Parties" />
@@ -1035,7 +1063,7 @@ const App = () => {
         <Box sx={{ pt: isLargeScreen ? 4 : 0 }}>
           {nodeConfig ? (
             <>
-              <Box sx={{ px: 3, py: 2 }}>
+              <Box sx={{ px: "var(--content-pad)", py: 2 }}>
                 <NodeConfigAccordion config={nodeConfig} />
               </Box>
               <Divider />
