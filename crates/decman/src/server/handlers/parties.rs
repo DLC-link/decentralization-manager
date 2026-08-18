@@ -299,10 +299,14 @@ pub async fn resolve_owner_keys_from_peers(
             }
         };
 
-        // An empty body is the single most misleading case: the always-on
-        // listener answers a denied or unparseable request with an empty 503,
-        // and a proxy with no healthy backend answers the same way. Reporting
-        // it as "message too short" reads like a protocol bug in the peer.
+        // A 200 with an empty body. The peer accepted the request and then
+        // said nothing, which used to surface as "message too short: got 0" and
+        // read like a protocol bug in the peer.
+        //
+        // A denied request is NOT this case: it arrives as a 503, so
+        // `send_noise_message` returns `BadStatusCode` above and never reaches
+        // here. This arm is a peer that answered 200 with no frame at all, or a
+        // proxy that terminated the request and returned an empty 200.
         if response.is_empty() {
             tracing::warn!(
                 peer = %peer_uid,
@@ -316,8 +320,11 @@ pub async fn resolve_owner_keys_from_peers(
         let response_msg = match Message::from_bytes(&response) {
             Ok(m) if m.msg_type == MessageType::OwnerKeys => m,
             Ok(m) if m.msg_type == MessageType::Error => {
-                // The peer told us why (see the Error frame the listener now
-                // sends on its deny path); prefer its words to our guess.
+                // An Error frame under 200 OK. The listener's own deny paths
+                // send that frame with a 503, so those surface as
+                // `BadStatusCode(_, Some(reason))` above rather than here. This
+                // arm catches a peer that reports the error in the body while
+                // still answering 200. Either way, prefer its words to a guess.
                 tracing::warn!(
                     peer = %peer_uid,
                     endpoint = %format!("{}:{}", peer.address, peer.port),

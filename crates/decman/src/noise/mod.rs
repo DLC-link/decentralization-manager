@@ -571,7 +571,22 @@ async fn send_noise_message_with_timeout(
         hyper_noise::client::send_request(tcp_stream, initiator, request, Some(timeout)).await?;
 
     if response.status() != StatusCode::OK {
-        return Err(NoiseError::BadStatusCode(response.status(), None));
+        // Read the body before giving up. The listener's deny paths answer a
+        // non-2xx with a `MessageType::Error` frame naming the reason, and this
+        // is the path every peer-to-peer call takes (`send_noise_message`), so
+        // dropping it here would leave the fan-out exactly as blind as before
+        // (#332). Best-effort and bounded by the same timeout: a peer that
+        // sends no body, or an unparseable one, still yields the bare status.
+        let status = response.status();
+        let reason =
+            match tokio::time::timeout(timeout, hyper::body::to_bytes(response.body_mut())).await {
+                Ok(Ok(bytes)) if !bytes.is_empty() => Message::from_bytes(&bytes)
+                    .ok()
+                    .filter(|m| m.msg_type == MessageType::Error)
+                    .map(|m| String::from_utf8_lossy(&m.payload).into_owned()),
+                _ => None,
+            };
+        return Err(NoiseError::BadStatusCode(status, reason));
     }
 
     let resp_body_bytes = hyper::body::to_bytes(response.body_mut()).await?;
