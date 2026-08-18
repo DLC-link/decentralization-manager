@@ -5,7 +5,7 @@ use crate::{
     error::Result,
     utils,
     workflow::{
-        add_party::{AddPartyConfig, steps::generate_keys::current_ledger_offset},
+        add_party::{AddPartyConfig, steps::generate_keys::capture_offset_once},
         storage::{WorkflowStorage, artifact_kinds},
         topology,
     },
@@ -78,24 +78,16 @@ pub async fn export_state(
         .await?;
     tracing::info!("Saved namespace definition to storage");
 
-    // Capture the export offset exactly once: a resumed run that re-enters
-    // ExportState after the topology already activated must NOT move the
-    // offset forward past the activation, or ExportPartyAcs won't find it.
-    let existing = storage
-        .read_artifact(instance_name, artifact_kinds::ADD_PARTY_EXPORT_OFFSET, None)
-        .await?;
-    if existing.is_none() {
-        let offset = current_ledger_offset(config, ledger_token).await?;
-        storage
-            .write_artifact(
-                instance_name,
-                artifact_kinds::ADD_PARTY_EXPORT_OFFSET,
-                None,
-                offset.to_string().as_bytes(),
-            )
-            .await?;
-        tracing::info!("Captured pre-activation export offset {offset}");
-    }
+    capture_offset_once(
+        config,
+        storage,
+        instance_name,
+        artifact_kinds::ADD_PARTY_EXPORT_OFFSET,
+        None,
+        ledger_token,
+        "pre-activation export",
+    )
+    .await?;
 
     tracing::info!("Add-party state exported successfully");
     Ok(())
