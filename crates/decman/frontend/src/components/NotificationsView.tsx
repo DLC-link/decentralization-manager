@@ -2027,13 +2027,15 @@ export const NotificationsView = ({
     ...partyActions.flatMap<FeedEntry>((party) =>
       party.domainActions.map((domainAction) => ({
         kind: "domain_action",
-        // Domain proposals don't carry a server-side timestamp; fall back to
-        // the latest confirmation we know about, then 0 for unconfirmed
-        // proposals (they sort to the bottom of the feed).
-        ts: domainAction.confirmations.reduce(
-          (max, c) => Math.max(max, c.created_at ?? 0),
-          0,
-        ),
+        // The proposal's own create time, so a card holds its place between
+        // refreshes whether or not anyone has confirmed it. An orphaned card
+        // has no readable proposal, so fall back to its newest confirmation.
+        ts:
+          domainAction.created_at ??
+          domainAction.confirmations.reduce(
+            (max, c) => Math.max(max, c.created_at ?? 0),
+            0,
+          ),
         party,
         domainAction,
       })),

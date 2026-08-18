@@ -960,6 +960,12 @@ pub struct DomainGovernanceAction {
     /// is no longer readable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposer: Option<CantonId>,
+    /// Ledger effective time of the proposal's create event, in seconds. The
+    /// notification feed sorts on this, so a proposal holds its place between
+    /// refreshes whether or not anyone has confirmed it. Absent on an orphaned
+    /// card, where the proposal contract is no longer readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<i64>,
 }
 
 /// Operator + counterparty parties extracted from a service-request proposal
@@ -1694,6 +1700,7 @@ mod tests {
                 accept_transfer_details: None,
                 service_request_details: None,
                 proposer: None,
+                created_at: None,
             }],
             threshold: 2,
             member_party_id: None,
