@@ -239,6 +239,7 @@ jobs:
         run: |
           set -uo pipefail
           rc=0
+          compared=0
           matched=""
           for built in */.daml/dist/*.dar; do
             [ -e "$built" ] || continue
@@ -246,6 +247,7 @@ jobs:
             committed="../releases/v1/$base"
             [ -f "$committed" ] || continue
             matched="$matched $base"
+            compared=$((compared + 1))
             if cmp -s "$built" "$committed"; then
               echo "ok        $base"
             else
@@ -255,12 +257,23 @@ jobs:
           done
           echo
           for committed in ../releases/v1/*.dar; do
+            [ -e "$committed" ] || continue
             base=$(basename "$committed")
             case " $matched " in
               *" $base "*) ;;
               *) echo "not rebuilt (no current source at this version): $base" ;;
             esac
           done
+          # Zero comparisons means the gate verified nothing — a moved build
+          # output, a changed working-directory or a renamed releases/ would
+          # otherwise leave it passing while checking no DAR at all. There is
+          # always at least one package whose built name matches a committed
+          # one, so zero is a broken job, not a legitimate state.
+          if [ "$compared" -eq 0 ]; then
+            echo "::error::Verified no DARs at all. Expected at least one built DAR whose name matches a file in releases/v1/ — check the build output path and this step's working-directory."
+            rc=1
+          fi
+          echo "compared $compared DAR(s)"
           exit $rc
       - name: Test governance-core
         run: cd governance-core-test && ~/.dpm/bin/dpm test
