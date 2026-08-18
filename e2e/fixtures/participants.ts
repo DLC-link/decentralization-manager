@@ -49,19 +49,43 @@ export async function authedFetch(
   return res;
 }
 
+// The only error worth retrying: the coordinator allows one in-flight workflow
+// at a time and releases the guard just after the prior run's card flips to
+// completed. Backend text is "A workflow with instance <name> is already
+// running" (handlers/workflows.rs).
+const RETRYABLE_SUBMIT_ERROR = /already running|already in progress/i;
+
 // Click a workflow-start submit button (in a dialog that closes on success),
-// retrying the transient "Another workflow is already running" 409 — the
-// coordinator allows one in-flight workflow at a time and the guard releases
-// just after the prior run's card flips to completed. A persistent error (e.g.
-// a real mesh hole / bad config) keeps the dialog open and surfaces on timeout.
+// retrying the transient 409 above.
+//
+// Any OTHER error the dialog surfaces is terminal — a mesh hole, bad config, a
+// rejected payload — so it fails immediately with that text instead of
+// re-clicking for the full 90s and reporting only "timed out". A wrong config
+// used to cost 90 seconds and say nothing about why.
 export async function submitAndAwaitClose(dialog: Locator, submitName: string | RegExp) {
   const btn = dialog.getByRole("button", { name: submitName });
   await expect(btn).toBeEnabled({ timeout: 15_000 });
+  // Set when the dialog shows an error that retrying cannot clear. The callback
+  // then RESOLVES rather than throwing, because a throw inside `toPass` is just
+  // another retry — resolving ends the loop at once and we rethrow below.
+  let fatal: string | undefined;
   await expect(async () => {
+    if (fatal) return;
     if (await dialog.isHidden()) return;
     await btn.click();
+    const alert = dialog.getByRole("alert");
+    if (await alert.first().isVisible().catch(() => false)) {
+      const text = (await alert.allInnerTexts()).join(" ").trim();
+      if (text && !RETRYABLE_SUBMIT_ERROR.test(text)) {
+        fatal = text;
+        return;
+      }
+    }
     await expect(dialog).toBeHidden({ timeout: 8_000 });
   }).toPass({ timeout: 90_000, intervals: [3000, 3000, 5000] });
+  if (fatal) {
+    throw new Error(`submit "${submitName}" failed with a non-retryable error: ${fatal}`);
+  }
 }
 
 export const PORTS = { p1: 8081, p2: 8082, p3: 8083 } as const;
