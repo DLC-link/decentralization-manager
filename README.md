@@ -614,6 +614,33 @@ Surfaces all dec-party-manager INFO output (peer connections, Noise
 handshakes, workflow internals). The cargo test runner is also INFO,
 so individual test cases narrate.
 
+#### Expected WARN noise during chaos phases
+
+The chaos phases (`restart_coordinator_resume`, `restart_peer_resume`,
+`invite_survives_peer_restart`, `retry_with_offline_peer`,
+`peer_3_strikes_abort`, `restart_with_concurrent_kinds`) kill and restart
+nodes on purpose. The lines below are the node correctly reporting what the
+test just did to it, so read them as part of the scenario rather than as
+findings. Anything **not** on this list is worth a look.
+
+| Line | Source | Why it fires |
+|---|---|---|
+| `Failed to send <label> to <participant>: TCP connection failed: … Connection refused` | `handlers/workflows.rs:3547` | The peer was killed by the phase. One shared broadcast helper, so `<label>` is whichever message was in flight — `CancelInvite`, `RetryWorkflow`, an invite. |
+| `Onboarding rejected: N missing peer mesh edge(s)` | `handlers/workflows.rs:1589` | The mesh is genuinely incomplete while a node is down. |
+| `Participant owner_key unresolved after onboarding` | `handlers/workflows.rs:1802` | The run was interrupted before it reached key resolution. |
+| `Best-effort CancelInvite to <peer> after decline failed` | `noise/server.rs:604` | Best-effort by name: the peer it would notify is the one that was killed. |
+
+Each is a real condition the code detects correctly, which is why none is
+downgraded — in production every one of them warrants a WARN. The two
+alternatives weighed in #175, plumbing a "chaos window" hint down to the
+emitting code or tagging the lines with a structured `chaos_expected` field,
+both founder on the same point: the code emitting the warning has no way to
+know that a test killed the peer.
+
+When triaging a chaos-phase failure the signal is the scenario trace
+(`ERROR Scenario "<name>" failed at <KIND> "<step>"`) and its `anyhow` cause
+trail, not the WARN cluster around it.
+
 #### Prerequisites
 
 `docker`, `docker compose v2`, `jq`, `curl`, `lsof`. The script
