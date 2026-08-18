@@ -224,6 +224,44 @@ jobs:
         run: ~/.dpm/bin/dpm install 3.4.11
       - name: Build
         run: ~/.dpm/bin/dpm build --all
+      # No reviewer can read a DAR by eye, so a stale or hand-edited binary in
+      # releases/v1/ would otherwise pass review and ship. `dpm build` is
+      # byte-reproducible for a pinned SDK, so a plain `cmp` is the check.
+      #
+      # Only DARs whose freshly-built name+version still exists in releases/v1/
+      # are compared. A committed DAR with no current source is reported, not
+      # failed, because that is a legitimate state in two ways: a superseded
+      # version kept for the upgrade path (governance-utility-onboarding-v1
+      # 0.1.0 next to the current 0.2.0), and a package since renamed (the
+      # three governance-rewards-v1 DARs, now governance-rewards-automation-v1).
+      # Read the "not rebuilt" list: anything there is unverifiable by this job.
+      - name: Verify committed DARs match a fresh build
+        run: |
+          set -uo pipefail
+          rc=0
+          matched=""
+          for built in */.daml/dist/*.dar; do
+            [ -e "$built" ] || continue
+            base=$(basename "$built")
+            committed="../releases/v1/$base"
+            [ -f "$committed" ] || continue
+            matched="$matched $base"
+            if cmp -s "$built" "$committed"; then
+              echo "ok        $base"
+            else
+              echo "::error file=releases/v1/$base::$base differs from a fresh build of its source. Rebuild with 'dpm build' and commit the result, or revert the source change."
+              rc=1
+            fi
+          done
+          echo
+          for committed in ../releases/v1/*.dar; do
+            base=$(basename "$committed")
+            case " $matched " in
+              *" $base "*) ;;
+              *) echo "not rebuilt (no current source at this version): $base" ;;
+            esac
+          done
+          exit $rc
       - name: Test governance-core
         run: cd governance-core-test && ~/.dpm/bin/dpm test
       - name: Test governance-token-custody
