@@ -330,6 +330,48 @@ async fn save_new_member_keys(
     Ok(())
 }
 
+/// Guard the resume path for a coordinator step that turns peer uploads into
+/// per-peer artefacts.
+///
+/// `peer_data` lives only in memory (`WorkflowState::from_persisted` restores
+/// `completed_peers` but re-initialises `peer_data` empty), while the peers
+/// that uploaded are already marked `completed` and will never re-send. So a
+/// coordinator restart in the window between the peer-gated step advancing and
+/// this step writing its artefacts leaves nothing to write.
+///
+/// Writing nothing used to be silent: the loop over an empty map is a no-op,
+/// and the submit step's `len == len` check passes at `0 == 0`, so the run
+/// submitted carrying only the coordinator's own signature. For threshold > 1
+/// Canton rejects that, and `retry_workflow` cannot recover it because the
+/// peers stay complete.
+///
+/// So: nothing uploaded this pass is fine only if a previous pass already
+/// persisted artefacts of this kind. Otherwise the signatures are gone, and
+/// failing here names the reason instead of failing later as an opaque
+/// under-signed submission.
+async fn require_persisted_or_uploaded(
+    storage: &SqlitePool,
+    instance_name: &str,
+    artifact_kind: &str,
+    step: &str,
+) -> Result {
+    let persisted = storage.list_artifacts(instance_name, artifact_kind).await?;
+    if persisted.is_empty() {
+        anyhow::bail!(
+            "{step}: peers are marked complete but no {artifact_kind} artefacts exist and no \
+             uploads are buffered. The uploads were lost with the in-memory state, most likely a \
+             coordinator restart mid-handoff; the peers will not re-send. Start a fresh add-party \
+             run for this party."
+        );
+    }
+    tracing::info!(
+        "{step}: no uploads this pass; {count} {artifact_kind} artefact(s) already persisted \
+         (resumed run) — continuing",
+        count = persisted.len()
+    );
+    Ok(())
+}
+
 /// Split each peer's combined DNS||P2P signature upload into the two
 /// per-peer artefacts the submit step joins by peer id.
 async fn save_signature_pairs(
@@ -338,6 +380,15 @@ async fn save_signature_pairs(
     instance_name: &str,
 ) -> Result {
     let peer_data = workflow_state.get_all_peer_data().await;
+    if peer_data.is_empty() {
+        require_persisted_or_uploaded(
+            storage,
+            instance_name,
+            artifact_kinds::SIGNED_ADD_PARTY_DNS,
+            "SubmitProposals",
+        )
+        .await?;
+    }
     for (peer_id, combined) in &peer_data {
         let (dns_blob, p2p_blob) = split_signed_kick_pair(combined).with_context(|| {
             format!("Failed to split signed add-party pair from peer {peer_id}")
@@ -371,6 +422,15 @@ async fn save_clear_signatures(
     instance_name: &str,
 ) -> Result {
     let peer_data = workflow_state.get_all_peer_data().await;
+    if peer_data.is_empty() {
+        require_persisted_or_uploaded(
+            storage,
+            instance_name,
+            artifact_kinds::SIGNED_ADD_PARTY_CLEAR,
+            "SubmitClearOnboarding",
+        )
+        .await?;
+    }
     for (peer_id, data) in &peer_data {
         storage
             .write_artifact(
@@ -418,4 +478,89 @@ async fn copy_new_member_identity(
     }
     tracing::info!("Persisted new member identity for {party_id}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlx::SqlitePool;
+
+    use super::*;
+    use crate::db::MIGRATOR;
+
+    /// The window this guards: peers uploaded, the peer-gated step advanced
+    /// and persisted, then the coordinator restarted before the artefacts were
+    /// written. `peer_data` comes back empty and the peers stay `completed`,
+    /// so nothing will re-send.
+    ///
+    /// Before the guard this returned `Ok(())` and the run submitted with only
+    /// the coordinator's own signature — Canton then rejected it for
+    /// threshold > 1, with nothing pointing at the cause.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn no_uploads_and_no_artefacts_fails_loudly(pool: SqlitePool) -> anyhow::Result<()> {
+        let err = require_persisted_or_uploaded(
+            &pool,
+            "run-1",
+            artifact_kinds::SIGNED_ADD_PARTY_DNS,
+            "SubmitProposals",
+        )
+        .await
+        .expect_err("empty uploads with no persisted artefacts must not pass");
+
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("coordinator restart"),
+            "unhelpful error: {msg}"
+        );
+        assert!(msg.contains("will not re-send"), "unhelpful error: {msg}");
+        Ok(())
+    }
+
+    /// The legitimate resume: a previous pass already wrote the artefacts, so
+    /// re-entering the step with an empty buffer must continue rather than
+    /// fail. Without this the guard would break every resumed run.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn no_uploads_but_artefacts_present_continues(pool: SqlitePool) -> anyhow::Result<()> {
+        pool.write_artifact(
+            "run-1",
+            artifact_kinds::SIGNED_ADD_PARTY_DNS,
+            Some("peer-a"),
+            b"sig",
+        )
+        .await?;
+
+        require_persisted_or_uploaded(
+            &pool,
+            "run-1",
+            artifact_kinds::SIGNED_ADD_PARTY_DNS,
+            "SubmitProposals",
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// The two steps key on different artefact kinds, so a run that persisted
+    /// DNS signatures must not thereby satisfy the clearing-signature guard.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_guard_is_per_artefact_kind(pool: SqlitePool) -> anyhow::Result<()> {
+        pool.write_artifact(
+            "run-1",
+            artifact_kinds::SIGNED_ADD_PARTY_DNS,
+            Some("peer-a"),
+            b"sig",
+        )
+        .await?;
+
+        assert!(
+            require_persisted_or_uploaded(
+                &pool,
+                "run-1",
+                artifact_kinds::SIGNED_ADD_PARTY_CLEAR,
+                "SubmitClearOnboarding",
+            )
+            .await
+            .is_err(),
+            "DNS artefacts must not satisfy the clearing-signature guard"
+        );
+        Ok(())
+    }
 }
