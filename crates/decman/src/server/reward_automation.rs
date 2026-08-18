@@ -1162,28 +1162,24 @@ pub(crate) async fn run_reward_automation_loop(data: actix_web::web::Data<AppSta
             }
             let outcome = match run_once_for_party(&data, &decparty, pass).await {
                 Ok(outcome) => outcome,
+                Err(e) if package_absent(&e) => {
+                    tracing::trace!(
+                        %decparty,
+                        error = %e,
+                        "reward automation is off: this participant holds no rewards DAR"
+                    );
+                    SweepOutcome::Off
+                }
                 Err(e) => {
                     if pass == Pass::Sweep {
                         SWEEP_FAILED.with_label_values(&[&label]).inc();
                     }
-                    if package_absent(&e) {
-                        tracing::trace!(
-                            %decparty,
-                            error = %e,
-                            "reward automation sweep failed: this participant does not hold the DAR"
-                        );
-                    } else {
-                        match pass {
-                            Pass::Sweep => {
-                                tracing::warn!(
-                                    %decparty,
-                                    error = %e,
-                                    "reward automation sweep failed"
-                                );
-                            }
-                            Pass::ExpiryRead => {
-                                tracing::warn!(%decparty, error = %e, "reward expiry read failed");
-                            }
+                    match pass {
+                        Pass::Sweep => {
+                            tracing::warn!(%decparty, error = %e, "reward automation sweep failed");
+                        }
+                        Pass::ExpiryRead => {
+                            tracing::warn!(%decparty, error = %e, "reward expiry read failed");
                         }
                     }
                     SweepOutcome::Failed
@@ -1288,6 +1284,11 @@ enum SweepOutcome {
     /// to be served (it holds a row in `party_credentials`), so this is an
     /// error condition rather than the automation being off for it.
     CredentialsUnavailable,
+    /// This participant holds no rewards DAR, so it cannot host a delegation and
+    /// the automation is off for it. Distinct from `Empty`, which asserts that
+    /// nothing is left to save and drops the gauge series: this outcome asserts
+    /// nothing and changes nothing.
+    Off,
 }
 
 /// Applies one sweep's outcome to the remembered timestamps. The four arms are
@@ -1306,7 +1307,7 @@ fn apply_sweep_outcome(
             oldest.remove(decparty);
             let _ = OLDEST_EXPIRES_IN.remove_label_values(&[&decparty.to_string()]);
         }
-        SweepOutcome::Failed | SweepOutcome::CredentialsUnavailable => {}
+        SweepOutcome::Failed | SweepOutcome::CredentialsUnavailable | SweepOutcome::Off => {}
     }
 }
 
@@ -1489,6 +1490,7 @@ mod tests {
     const CAROL: &str =
         "carol::1220cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
     const DAVE: &str = "dave::1220dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    const EVE: &str = "eve::1220eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
     #[test]
     fn parse_delegation_record_reads_assigners_and_split() {
@@ -2253,6 +2255,27 @@ mod tests {
 
         apply_sweep_outcome(&mut oldest, &decparty, SweepOutcome::Empty);
         assert!(oldest.is_empty(), "an empty backlog removes");
+    }
+
+    #[test]
+    fn a_missing_dar_changes_nothing() {
+        // A participant with no rewards DAR is a no-op, not a failure and not an
+        // empty backlog. `Empty` would drop the gauge series, which asserts that
+        // nothing is left to save.
+        let decparty = CantonId::parse(EVE).expect("EVE is a valid canton id");
+        let expires_at = dt("2026-07-20T18:00:00Z");
+        let mut oldest = HashMap::new();
+
+        apply_sweep_outcome(&mut oldest, &decparty, SweepOutcome::Backlog(expires_at));
+        apply_sweep_outcome(&mut oldest, &decparty, SweepOutcome::Off);
+        assert_eq!(
+            oldest.get(&decparty),
+            Some(&expires_at),
+            "a missing DAR must leave the timestamp exactly as it was"
+        );
+
+        apply_sweep_outcome(&mut oldest, &decparty, SweepOutcome::Empty);
+        assert!(oldest.is_empty(), "an empty backlog still removes");
     }
 
     #[test]
