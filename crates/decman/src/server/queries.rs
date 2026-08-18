@@ -217,24 +217,6 @@ fn registrar_service_template(packages: &PackageConfig) -> Option<TemplateId> {
     })
 }
 
-/// Module/entity names for contract templates (used for wildcard filtering)
-const CONTRACT_TEMPLATE_NAMES: &[(&str, &str)] = &[
-    ("BitsafeVault.VaultGovernance", "VaultGovernanceRules"),
-    ("CBTC.DepositAccount", "CBTCDepositAccount"),
-    ("CBTC.DepositAccount", "CBTCDepositAccountRules"),
-    ("CBTC.Governance", "CBTCGovernanceRules"),
-    ("CBTC.WithdrawAccount", "CBTCWithdrawAccount"),
-    ("CBTC.WithdrawAccount", "CBTCWithdrawAccountRules"),
-    ("Governance.Rules", "GovernanceRules"),
-];
-
-/// Check if a template matches any contract template we want to display
-fn is_contract_template(module_name: &str, entity_name: &str) -> bool {
-    CONTRACT_TEMPLATE_NAMES
-        .iter()
-        .any(|(m, e)| *m == module_name && *e == entity_name)
-}
-
 /// Module/entity names for governance templates (used for wildcard filtering)
 const GOVERNANCE_TEMPLATE_NAMES: &[(&str, &str)] = &[
     (
@@ -248,16 +230,13 @@ const GOVERNANCE_TEMPLATE_NAMES: &[(&str, &str)] = &[
 
 /// Get active contracts for a party
 ///
-/// When `test_mode` is true, uses WildcardFilter with in-memory filtering
-/// (mock auth doesn't have TemplateFilter permissions).
-///
-/// In production mode, queries each template separately to gracefully handle
-/// cases where some packages may not be deployed on the participant.
+/// Queries each template separately, so a package that is not deployed on this
+/// participant degrades to "no contracts of that type" rather than failing the
+/// whole read.
 pub async fn get_contracts(
     config: &NodeConfig,
     party_id: &CantonId,
     token: Option<String>,
-    test_mode: bool,
     packages: &PackageConfig,
 ) -> Result<Vec<ContractInfo>> {
     let mut contracts = Vec::new();
@@ -275,13 +254,9 @@ pub async fn get_contracts(
         }
     };
 
-    if test_mode {
-        // Test mode: use WildcardFilter with in-memory filtering
-        tracing::debug!("Using WildcardFilter for contracts query (test mode)");
-        fetch_contracts_with_wildcard(config, party_id, token, &package_versions, &mut contracts)
-            .await?;
-    } else {
-        // Production mode: query each template separately to handle missing packages
+    {
+        // One query per template, so a package missing from this participant
+        // degrades to "no contracts of that type" instead of failing the read.
         tracing::debug!("Using TemplateFilter for contracts query (per-template)");
         for t in &contract_templates(packages) {
             match fetch_contracts_for_template(
@@ -453,34 +428,6 @@ fn render_contract_info(
         package_version,
         created_at,
     }
-}
-
-/// Fetch contracts using WildcardFilter (for test mode)
-async fn fetch_contracts_with_wildcard(
-    config: &NodeConfig,
-    party_id: &CantonId,
-    token: Option<String>,
-    package_versions: &HashMap<String, String>,
-    contracts: &mut Vec<ContractInfo>,
-) -> Result {
-    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], false);
-
-    for_each_active_contract(config, token, event_format, |created| {
-        // Test mode reads the ACS wildcard, so the template narrowing happens
-        // here rather than Canton-side.
-        let is_wanted = created
-            .template_id
-            .as_ref()
-            .map(|t| is_contract_template(&t.module_name, &t.entity_name))
-            .unwrap_or(false);
-
-        if is_wanted {
-            contracts.push(render_contract_info(&created, package_versions));
-        }
-    })
-    .await?;
-
-    Ok(())
 }
 
 /// Fetch contracts for a specific template
