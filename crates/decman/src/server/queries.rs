@@ -35,7 +35,7 @@ use super::{
     event_filters::{interface_filter, party_event_format, template_filter, wildcard_filter},
     ledger_paging::{
         FETCH_CHUNK, fetch_active_contracts_filtered, fetch_first_active_contract,
-        fetch_first_matching, for_each_active_contract,
+        for_each_active_contract,
     },
     package_inventory::{
         fetch_package_id_to_name, fetch_package_names, newest_matching_names, package_name_prefix,
@@ -216,17 +216,6 @@ fn registrar_service_template(packages: &PackageConfig) -> Option<TemplateId> {
         entity_name: "RegistrarService",
     })
 }
-
-/// Module/entity names for governance templates (used for wildcard filtering)
-const GOVERNANCE_TEMPLATE_NAMES: &[(&str, &str)] = &[
-    (
-        "BitsafeVault.VaultGovernance",
-        "VaultGovernanceConfirmation",
-    ),
-    ("CBTC.Governance", "Confirmation"),
-    ("Governance.Rules", "GovernanceSelfConfirmation"),
-    ("Governance.Confirmation", "GovernanceConfirmation"),
-];
 
 /// Get active contracts for a party
 ///
@@ -536,13 +525,6 @@ where
     }
 }
 
-/// Check if a template matches any governance confirmation template
-fn is_governance_template(module_name: &str, entity_name: &str) -> bool {
-    GOVERNANCE_TEMPLATE_NAMES
-        .iter()
-        .any(|(m, e)| *m == module_name && *e == entity_name)
-}
-
 // ============================================================================
 // Governance Queries (with parsed actions)
 // ============================================================================
@@ -556,7 +538,6 @@ pub async fn get_governance_confirmations(
     party_id: &CantonId,
     threshold: usize,
     token: Option<String>,
-    test_mode: bool,
     packages: &PackageConfig,
 ) -> Result<(Vec<GovernanceAction>, Vec<DomainGovernanceAction>)> {
     // Collect confirmations grouped by action hash (vault + core self-management)
@@ -580,59 +561,46 @@ pub async fn get_governance_confirmations(
     // orphans to the user.
     let mut proposal_infos_complete = true;
 
-    if test_mode {
-        tracing::debug!("Using WildcardFilter for governance query (test mode)");
-        fetch_governance_with_wildcard(
+    tracing::debug!("Using TemplateFilter for governance query (per-template)");
+    for t in &governance_templates(packages) {
+        match fetch_governance_for_template(
             config,
             party_id,
-            token,
+            token.clone(),
+            t,
             &mut confirmations_by_hash,
             &mut domain_confirmations,
-            &mut proposal_infos,
         )
-        .await?;
-    } else {
-        tracing::debug!("Using TemplateFilter for governance query (per-template)");
-        for t in &governance_templates(packages) {
-            match fetch_governance_for_template(
-                config,
-                party_id,
-                token.clone(),
-                t,
-                &mut confirmations_by_hash,
-                &mut domain_confirmations,
-            )
-            .await
-            {
-                Ok(()) => {
-                    tracing::debug!("Successfully queried {}:{}", t.module_name, t.entity_name);
-                }
-                Err(e) => {
-                    let err_str = e.to_string();
-                    if err_str.contains("PACKAGE_NAMES_NOT_FOUND") {
-                        tracing::debug!(
-                            "Package {} not found, skipping {}:{}",
-                            t.package_id,
-                            t.module_name,
-                            t.entity_name
-                        );
-                    } else {
-                        tracing::warn!(
-                            "Failed to query {}:{}: {e}, continuing...",
-                            t.module_name,
-                            t.entity_name
-                        );
-                    }
+        .await
+        {
+            Ok(()) => {
+                tracing::debug!("Successfully queried {}:{}", t.module_name, t.entity_name);
+            }
+            Err(e) => {
+                let err_str = e.to_string();
+                if err_str.contains("PACKAGE_NAMES_NOT_FOUND") {
+                    tracing::debug!(
+                        "Package {} not found, skipping {}:{}",
+                        t.package_id,
+                        t.module_name,
+                        t.entity_name
+                    );
+                } else {
+                    tracing::warn!(
+                        "Failed to query {}:{}: {e}, continuing...",
+                        t.module_name,
+                        t.entity_name
+                    );
                 }
             }
         }
-        // Fetch proposal infos via GovernableAction interface query
-        if let Err(e) =
-            fetch_proposal_infos(config, party_id, token, packages, &mut proposal_infos).await
-        {
-            tracing::debug!("Could not fetch proposal infos: {e}");
-            proposal_infos_complete = false;
-        }
+    }
+    // Fetch proposal infos via GovernableAction interface query
+    if let Err(e) =
+        fetch_proposal_infos(config, party_id, token, packages, &mut proposal_infos).await
+    {
+        tracing::debug!("Could not fetch proposal infos: {e}");
+        proposal_infos_complete = false;
     }
 
     let now_seconds = SystemTime::now()
@@ -738,40 +706,6 @@ pub async fn get_governance_confirmations(
         .collect();
 
     Ok((actions, domain_actions))
-}
-
-/// Fetch governance confirmations using WildcardFilter (for test mode)
-async fn fetch_governance_with_wildcard(
-    config: &NodeConfig,
-    party_id: &CantonId,
-    token: Option<String>,
-    confirmations_by_hash: &mut HashMap<String, (ActionType, Vec<GovernanceConfirmation>)>,
-    domain_confirmations: &mut HashMap<String, (String, Vec<GovernanceConfirmation>)>,
-    proposal_infos: &mut HashMap<String, ProposalInfo>,
-) -> Result {
-    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], true);
-
-    for_each_active_contract(config, token, event_format, |created| {
-        let Some(ref template_id) = created.template_id else {
-            return;
-        };
-
-        if is_governance_template(&template_id.module_name, &template_id.entity_name) {
-            if template_id.module_name == "Governance.Confirmation"
-                && template_id.entity_name == "GovernanceConfirmation"
-            {
-                extract_and_add_domain_confirmation(&created, domain_confirmations);
-            } else {
-                extract_and_add_confirmation(&created, confirmations_by_hash);
-            }
-        } else {
-            // Capture proposal info from GovernableAction contracts
-            extract_proposal_info(&created, proposal_infos);
-        }
-    })
-    .await?;
-
-    Ok(())
 }
 
 /// Fetch governance confirmations for a specific template
@@ -1315,42 +1249,36 @@ pub async fn get_governance_state(
     config: &NodeConfig,
     party_id: &CantonId,
     token: Option<String>,
-    test_mode: bool,
     packages: &PackageConfig,
 ) -> Result<Option<GovernanceState>> {
-    if test_mode {
-        fetch_governance_state_with_wildcard(config, party_id, token).await
-    } else {
-        // Try each governance template (vault, core) until we find a match
-        for template in governance_state_templates(packages) {
-            match fetch_governance_state_for_template(config, party_id, token.clone(), &template)
-                .await
-            {
-                Ok(Some(mut state)) => {
-                    // Found under the configured package — not out of date.
-                    state.package_ref = Some(template.package_id.clone());
-                    state.out_of_date = false;
-                    return Ok(Some(state));
+    // Try each governance template (vault, core) until we find a match
+    for template in governance_state_templates(packages) {
+        match fetch_governance_state_for_template(config, party_id, token.clone(), &template).await
+        {
+            Ok(Some(mut state)) => {
+                // Found under the configured package — not out of date.
+                state.package_ref = Some(template.package_id.clone());
+                state.out_of_date = false;
+                return Ok(Some(state));
+            }
+            Ok(None) => continue,
+            Err(e) => {
+                let err_str = e.to_string();
+                if err_str.contains("PACKAGE_NAMES_NOT_FOUND") {
+                    continue;
                 }
-                Ok(None) => continue,
-                Err(e) => {
-                    let err_str = e.to_string();
-                    if err_str.contains("PACKAGE_NAMES_NOT_FOUND") {
-                        continue;
-                    }
-                    tracing::warn!(
-                        "Failed to query governance state for {}:{}: {e}",
-                        template.module_name,
-                        template.entity_name
-                    );
-                }
+                tracing::warn!(
+                    "Failed to query governance state for {}:{}: {e}",
+                    template.module_name,
+                    template.entity_name
+                );
             }
         }
-        // Nothing under the configured packages — look for a GovernanceRules
-        // contract under an older governance-core package version still
-        // uploaded to the participant.
-        fetch_governance_state_fallback(config, party_id, token, packages).await
     }
+    // Nothing under the configured packages — look for a GovernanceRules
+    // contract under an older governance-core package version still
+    // uploaded to the participant.
+    fetch_governance_state_fallback(config, party_id, token, packages).await
 }
 
 /// Look for a GovernanceRules contract under any OLDER governance-core
@@ -1406,29 +1334,6 @@ async fn fetch_governance_state_fallback(
         }
     }
     Ok(None)
-}
-
-/// Fetch governance state using WildcardFilter (for test mode)
-async fn fetch_governance_state_with_wildcard(
-    config: &NodeConfig,
-    party_id: &CantonId,
-    token: Option<String>,
-) -> Result<Option<GovernanceState>> {
-    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], true);
-
-    // Test mode reads the ACS wildcard, so the governance-rules templates are
-    // matched here; stops at the first one rather than draining the ACS.
-    fetch_first_matching(config, token, event_format, |created| {
-        let template_id = created.template_id.as_ref()?;
-        let is_rules = (template_id.module_name == "BitsafeVault.VaultGovernance"
-            && template_id.entity_name == "VaultGovernanceRules")
-            || (template_id.module_name == "Governance.Rules"
-                && template_id.entity_name == "GovernanceRules");
-        is_rules
-            .then(|| extract_governance_state(&created))
-            .flatten()
-    })
-    .await
 }
 
 /// Fetch governance state for a specific template
@@ -1670,40 +1575,12 @@ pub async fn get_vaults(
     config: &NodeConfig,
     party_id: &CantonId,
     token: Option<String>,
-    test_mode: bool,
     packages: &PackageConfig,
 ) -> Result<Vec<VaultInfo>> {
-    if test_mode {
-        fetch_vaults_with_wildcard(config, party_id, token).await
-    } else {
-        match vault_template(packages) {
-            Some(template) => fetch_vaults_for_template(config, party_id, token, &template).await,
-            None => Ok(Vec::new()),
-        }
+    match vault_template(packages) {
+        Some(template) => fetch_vaults_for_template(config, party_id, token, &template).await,
+        None => Ok(Vec::new()),
     }
-}
-
-/// Fetch vaults using WildcardFilter (for test mode)
-async fn fetch_vaults_with_wildcard(
-    config: &NodeConfig,
-    party_id: &CantonId,
-    token: Option<String>,
-) -> Result<Vec<VaultInfo>> {
-    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], true);
-
-    let mut vaults = Vec::new();
-    for_each_active_contract(config, token, event_format, |created| {
-        if let Some(template_id) = &created.template_id
-            && template_id.module_name == "BitsafeVault.Vault"
-            && template_id.entity_name == "Vault"
-            && let Some(vault_info) = extract_vault_info(&created)
-        {
-            vaults.push(vault_info);
-        }
-    })
-    .await?;
-
-    Ok(vaults)
 }
 
 /// Fetch vaults using TemplateFilter
@@ -1816,39 +1693,14 @@ pub async fn get_provider_services(
     config: &NodeConfig,
     party_id: &CantonId,
     token: Option<String>,
-    test_mode: bool,
     packages: &PackageConfig,
 ) -> Result<Vec<ProviderServiceInfo>> {
-    if test_mode {
-        fetch_provider_services_with_wildcard(config, party_id, token).await
-    } else {
-        match provider_service_template(packages) {
-            Some(template) => {
-                fetch_provider_services_for_template(config, party_id, token, &template).await
-            }
-            None => Ok(Vec::new()),
+    match provider_service_template(packages) {
+        Some(template) => {
+            fetch_provider_services_for_template(config, party_id, token, &template).await
         }
+        None => Ok(Vec::new()),
     }
-}
-
-/// Fetch provider services using WildcardFilter (for test mode)
-async fn fetch_provider_services_with_wildcard(
-    config: &NodeConfig,
-    party_id: &CantonId,
-    token: Option<String>,
-) -> Result<Vec<ProviderServiceInfo>> {
-    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], true);
-
-    fetch_active_contracts_filtered(config, token, event_format, |created| {
-        let template_id = created.template_id.as_ref()?;
-        if template_id.module_name != "Utility.Registry.App.V0.Service.Provider"
-            || template_id.entity_name != "ProviderService"
-        {
-            return None;
-        }
-        extract_provider_service_info(&created)
-    })
-    .await
 }
 
 /// Fetch provider services using TemplateFilter
@@ -1913,39 +1765,14 @@ pub async fn get_user_services(
     config: &NodeConfig,
     party_id: &CantonId,
     token: Option<String>,
-    test_mode: bool,
     packages: &PackageConfig,
 ) -> Result<Vec<UserServiceInfo>> {
-    if test_mode {
-        fetch_user_services_with_wildcard(config, party_id, token).await
-    } else {
-        match user_service_template(packages) {
-            Some(template) => {
-                fetch_user_services_for_template(config, party_id, token, &template).await
-            }
-            None => Ok(Vec::new()),
+    match user_service_template(packages) {
+        Some(template) => {
+            fetch_user_services_for_template(config, party_id, token, &template).await
         }
+        None => Ok(Vec::new()),
     }
-}
-
-/// Fetch user services using WildcardFilter (for test mode)
-async fn fetch_user_services_with_wildcard(
-    config: &NodeConfig,
-    party_id: &CantonId,
-    token: Option<String>,
-) -> Result<Vec<UserServiceInfo>> {
-    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], true);
-
-    fetch_active_contracts_filtered(config, token, event_format, |created| {
-        let template_id = created.template_id.as_ref()?;
-        if template_id.module_name != "Utility.Credential.App.V0.Service.User"
-            || template_id.entity_name != "UserService"
-        {
-            return None;
-        }
-        extract_user_service_info(&created)
-    })
-    .await
 }
 
 /// Fetch user services using TemplateFilter
@@ -2016,39 +1843,14 @@ pub async fn get_credential_offers(
     config: &NodeConfig,
     party_id: &CantonId,
     token: Option<String>,
-    test_mode: bool,
     packages: &PackageConfig,
 ) -> Result<Vec<CredentialOfferInfo>> {
-    if test_mode {
-        fetch_credential_offers_with_wildcard(config, party_id, token).await
-    } else {
-        match credential_offer_template(packages) {
-            Some(template) => {
-                fetch_credential_offers_for_template(config, party_id, token, &template).await
-            }
-            None => Ok(Vec::new()),
+    match credential_offer_template(packages) {
+        Some(template) => {
+            fetch_credential_offers_for_template(config, party_id, token, &template).await
         }
+        None => Ok(Vec::new()),
     }
-}
-
-/// Fetch credential offers using WildcardFilter (for test mode)
-async fn fetch_credential_offers_with_wildcard(
-    config: &NodeConfig,
-    party_id: &CantonId,
-    token: Option<String>,
-) -> Result<Vec<CredentialOfferInfo>> {
-    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], true);
-
-    fetch_active_contracts_filtered(config, token, event_format, |created| {
-        let template_id = created.template_id.as_ref()?;
-        if template_id.module_name != "Utility.Credential.App.V0.Model.Offer"
-            || template_id.entity_name != "CredentialOffer"
-        {
-            return None;
-        }
-        extract_credential_offer_info(&created)
-    })
-    .await
 }
 
 /// Fetch credential offers using TemplateFilter
@@ -2119,39 +1921,14 @@ pub async fn get_registrar_services(
     config: &NodeConfig,
     party_id: &CantonId,
     token: Option<String>,
-    test_mode: bool,
     packages: &PackageConfig,
 ) -> Result<Vec<RegistrarServiceInfo>> {
-    if test_mode {
-        fetch_registrar_services_with_wildcard(config, party_id, token).await
-    } else {
-        match registrar_service_template(packages) {
-            Some(template) => {
-                fetch_registrar_services_for_template(config, party_id, token, &template).await
-            }
-            None => Ok(Vec::new()),
+    match registrar_service_template(packages) {
+        Some(template) => {
+            fetch_registrar_services_for_template(config, party_id, token, &template).await
         }
+        None => Ok(Vec::new()),
     }
-}
-
-/// Fetch registrar services using WildcardFilter (for test mode)
-async fn fetch_registrar_services_with_wildcard(
-    config: &NodeConfig,
-    party_id: &CantonId,
-    token: Option<String>,
-) -> Result<Vec<RegistrarServiceInfo>> {
-    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], true);
-
-    fetch_active_contracts_filtered(config, token, event_format, |created| {
-        let template_id = created.template_id.as_ref()?;
-        if template_id.module_name != "Utility.Registry.App.V0.Service.Registrar"
-            || template_id.entity_name != "RegistrarService"
-        {
-            return None;
-        }
-        extract_registrar_service_info(&created)
-    })
-    .await
 }
 
 /// Fetch registrar services using TemplateFilter
@@ -2233,37 +2010,13 @@ pub async fn get_instruments(
     config: &NodeConfig,
     party_id: &CantonId,
     token: Option<String>,
-    test_mode: bool,
 ) -> Result<Vec<InstrumentInfo>> {
-    if test_mode {
-        fetch_instruments_with_wildcard(config, party_id, token).await
-    } else {
-        fetch_instruments_for_template(
-            config,
-            party_id,
-            token,
-            &instrument_configuration_template(),
-        )
-        .await
-    }
-}
-
-async fn fetch_instruments_with_wildcard(
-    config: &NodeConfig,
-    party_id: &CantonId,
-    token: Option<String>,
-) -> Result<Vec<InstrumentInfo>> {
-    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], true);
-
-    fetch_active_contracts_filtered(config, token, event_format, |created| {
-        let template_id = created.template_id.as_ref()?;
-        if template_id.module_name != "Utility.Registry.V0.Configuration.Instrument"
-            || template_id.entity_name != "InstrumentConfiguration"
-        {
-            return None;
-        }
-        extract_instrument_info(&created)
-    })
+    fetch_instruments_for_template(
+        config,
+        party_id,
+        token,
+        &instrument_configuration_template(),
+    )
     .await
 }
 
@@ -2359,7 +2112,6 @@ pub async fn query_contracts_by_template(
     config: &NodeConfig,
     party_id: &CantonId,
     token: Option<String>,
-    test_mode: bool,
     params: &ContractQueryParams,
 ) -> Result<Vec<ContractWithBlob>> {
     use base64::Engine;
@@ -2370,9 +2122,7 @@ pub async fn query_contracts_by_template(
         entity_name: params.entity_name.clone(),
     };
 
-    let filter = if test_mode {
-        wildcard_filter(true)
-    } else if params.use_interface_filter {
+    let filter = if params.use_interface_filter {
         interface_filter(identifier, true)
     } else {
         template_filter(identifier, true)
@@ -2381,16 +2131,6 @@ pub async fn query_contracts_by_template(
     let event_format = party_event_format(party_id, vec![filter], true);
 
     fetch_active_contracts_filtered(config, token, event_format, |created| {
-        // Test mode reads the ACS wildcard, so the template narrowing Canton
-        // would otherwise have done has to happen here.
-        if test_mode
-            && !created.template_id.as_ref().is_some_and(|t| {
-                t.module_name == params.module_name && t.entity_name == params.entity_name
-            })
-        {
-            return None;
-        }
-
         // QA flagged the Accept Mint Request dropdown for surfacing contracts
         // whose `executeBefore` has already passed — accepting them would fail
         // at interpretation with deadline-exceeded. Drop them here when the
@@ -2893,7 +2633,6 @@ pub async fn get_holdings(
     config: &NodeConfig,
     party_id: &CantonId,
     token: Option<String>,
-    test_mode: bool,
 ) -> Result<Vec<HoldingInfo>> {
     let raw = fetch_holding_views(config, party_id, token.clone()).await?;
 
@@ -2933,7 +2672,7 @@ pub async fn get_holdings(
     }
 
     // Look up preapprovals once and join.
-    let preapprovals = fetch_preapproved_instruments(config, party_id, token, test_mode).await?;
+    let preapprovals = fetch_preapproved_instruments(config, party_id, token).await?;
 
     let mut holdings: Vec<HoldingInfo> = totals
         .into_values()
@@ -3112,7 +2851,6 @@ async fn fetch_preapproved_instruments(
     config: &NodeConfig,
     party_id: &CantonId,
     token: Option<String>,
-    test_mode: bool,
 ) -> Result<PartyPreapprovals> {
     let amulet_params = ContractQueryParams {
         package_id: "#splice-amulet".to_string(),
@@ -3121,21 +2859,14 @@ async fn fetch_preapproved_instruments(
         use_interface_filter: false,
         active_only: false,
     };
-    let has_amulet = match query_contracts_by_template(
-        config,
-        party_id,
-        token.clone(),
-        test_mode,
-        &amulet_params,
-    )
-    .await
-    {
-        Ok(rows) => !rows.is_empty(),
-        Err(e) => {
-            log_preapproval_lookup_error("Amulet TransferPreapproval", &e);
-            false
-        }
-    };
+    let has_amulet =
+        match query_contracts_by_template(config, party_id, token.clone(), &amulet_params).await {
+            Ok(rows) => !rows.is_empty(),
+            Err(e) => {
+                log_preapproval_lookup_error("Amulet TransferPreapproval", &e);
+                false
+            }
+        };
 
     // Utility preapprovals carry their instrument on the create-arguments
     // payload, so re-fetch with a TemplateFilter to get create_arguments and
