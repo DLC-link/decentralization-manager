@@ -1141,10 +1141,15 @@ pub async fn propose_action(
     }
     let party_id = &body.party_id;
     let (token, member_party_id) = match get_party_credentials(&data, party_id).await {
-        Some(creds) => creds,
-        None => {
+        Ok(Some(creds)) => creds,
+        Ok(None) => {
             return HttpResponse::Unauthorized().json(ErrorResponse {
                 error: "No credentials configured for party".to_string(),
+            });
+        }
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch auth token for party: {e}"),
             });
         }
     };
@@ -1656,10 +1661,15 @@ pub async fn confirm_action(
 
     // Get token and credentials for this party
     let (token, member_party_id) = match get_party_credentials(&data, party_id).await {
-        Some(creds) => creds,
-        None => {
+        Ok(Some(creds)) => creds,
+        Ok(None) => {
             return HttpResponse::Unauthorized().json(ErrorResponse {
                 error: "No credentials configured for party".to_string(),
+            });
+        }
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch auth token for party: {e}"),
             });
         }
     };
@@ -1740,10 +1750,15 @@ pub async fn execute_action(
 
     // Get token and credentials for this party
     let (token, member_party_id) = match get_party_credentials(&data, party_id).await {
-        Some(creds) => creds,
-        None => {
+        Ok(Some(creds)) => creds,
+        Ok(None) => {
             return HttpResponse::Unauthorized().json(ErrorResponse {
                 error: "No credentials configured for party".to_string(),
+            });
+        }
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch auth token for party: {e}"),
             });
         }
     };
@@ -1827,10 +1842,15 @@ pub async fn expire_confirmation(
 
     // Get token and credentials for this party
     let (token, member_party_id) = match get_party_credentials(&data, party_id).await {
-        Some(creds) => creds,
-        None => {
+        Ok(Some(creds)) => creds,
+        Ok(None) => {
             return HttpResponse::Unauthorized().json(ErrorResponse {
                 error: "No credentials configured for party".to_string(),
+            });
+        }
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch auth token for party: {e}"),
             });
         }
     };
@@ -1904,10 +1924,15 @@ pub async fn cancel_confirmation(
     let party_id = &body.party_id;
 
     let (token, member_party_id) = match get_party_credentials(&data, party_id).await {
-        Some(creds) => creds,
-        None => {
+        Ok(Some(creds)) => creds,
+        Ok(None) => {
             return HttpResponse::Unauthorized().json(ErrorResponse {
                 error: "No credentials configured for party".to_string(),
+            });
+        }
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch auth token for party: {e}"),
             });
         }
     };
@@ -1986,10 +2011,15 @@ pub async fn cancel_proposal(
     let party_id = &body.party_id;
 
     let (token, member_party_id) = match get_party_credentials(&data, party_id).await {
-        Some(creds) => creds,
-        None => {
+        Ok(Some(creds)) => creds,
+        Ok(None) => {
             return HttpResponse::Unauthorized().json(ErrorResponse {
                 error: "No credentials configured for party".to_string(),
+            });
+        }
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch auth token for party: {e}"),
             });
         }
     };
@@ -2070,6 +2100,7 @@ pub async fn get_packages() -> impl Responder {
             body = ActiveCouponReassignmentDelegation
         ),
         (status = 401, description = "No credentials for party", body = ErrorResponse),
+        (status = 500, description = "Failed to fetch an auth token for party", body = ErrorResponse),
         (status = 503, description = "The delegations could not be read", body = ErrorResponse)
     )
 )]
@@ -2079,10 +2110,18 @@ pub async fn get_coupon_reassignment_delegation(
     query: web::Query<GovernanceQuery>,
 ) -> impl Responder {
     let party_id = &query.party_id;
-    let Some((token, _member)) = get_party_credentials(&data, party_id).await else {
-        return HttpResponse::Unauthorized().json(ErrorResponse {
-            error: "No credentials configured for party".to_string(),
-        });
+    let (token, _member) = match get_party_credentials(&data, party_id).await {
+        Ok(Some(creds)) => creds,
+        Ok(None) => {
+            return HttpResponse::Unauthorized().json(ErrorResponse {
+                error: "No credentials configured for party".to_string(),
+            });
+        }
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch auth token for party: {e}"),
+            });
+        }
     };
 
     match crate::server::reward_automation::active_delegations(
@@ -2333,23 +2372,33 @@ async fn get_member_party_id(data: &web::Data<AppState>, party_id: &CantonId) ->
         .map(|p| p.member_party_id.clone())
 }
 
-/// Get token and member_party_id for a party
+/// Get token and member_party_id for a party.
+///
+/// `Ok(None)`: no auth configured, or the party is unknown to the registry.
+/// `Err`: the party is known, but the token fetch failed (logged here).
 pub(crate) async fn get_party_credentials(
     data: &web::Data<AppState>,
     party_id: &CantonId,
-) -> Option<(String, CantonId)> {
+) -> Result<Option<(String, CantonId)>> {
     let auth = data.auth.read().await;
     match &*auth {
         Some(WorkflowAuth::Keycloak(registry)) => {
-            let tm = registry.get(party_id)?;
-            let token = tm.get_token().await.ok()?;
-            Some((token, tm.member_party_id().clone()))
+            let Some(tm) = registry.get(party_id) else {
+                return Ok(None);
+            };
+            match tm.get_token().await {
+                Ok(token) => Ok(Some((token, tm.member_party_id().clone()))),
+                Err(e) => {
+                    tracing::warn!(%party_id, error = %e, "failed to fetch auth token for party");
+                    Err(e.into())
+                }
+            }
         }
         Some(WorkflowAuth::Mock(mock_registry)) => {
             let mm = mock_registry.get(party_id).await;
-            Some((mm.get_token(), mm.member_party_id().clone()))
+            Ok(Some((mm.get_token(), mm.member_party_id().clone())))
         }
-        None => None,
+        None => Ok(None),
     }
 }
 
@@ -3304,5 +3353,171 @@ mod tests {
         let response = cached_chain_audit_page(rows, 2).expect("non-empty rows are a hit");
         assert_eq!(response.total_returned, 3);
         assert_eq!(response.next_before_offset, Some(20));
+    }
+}
+
+#[cfg(test)]
+mod get_party_credentials_tests {
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex as StdMutex},
+    };
+
+    use actix_web::web::Data;
+    use sqlx::SqlitePool;
+    use tokio::sync::RwLock;
+    use tracing_subscriber::fmt::MakeWriter;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path_regex},
+    };
+
+    use super::*;
+    use crate::{
+        auth::{AuthRegistry, MockValidator, TokenValidator, WorkflowAuth},
+        config::{KeycloakConfig, PartyCredentials},
+    };
+
+    #[derive(Clone, Default)]
+    struct LogBuffer(Arc<StdMutex<Vec<u8>>>);
+
+    impl std::io::Write for LogBuffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let mut written = self
+                .0
+                .lock()
+                .map_err(|_| std::io::Error::other("log buffer lock poisoned"))?;
+            written.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for LogBuffer {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    impl LogBuffer {
+        fn captured(&self) -> Result<String> {
+            let written = self
+                .0
+                .lock()
+                .map_err(|_| anyhow::anyhow!("log buffer lock poisoned"))?
+                .clone();
+            Ok(String::from_utf8(written)?)
+        }
+    }
+
+    async fn app_state(auth: Option<WorkflowAuth>) -> Result<Data<AppState>> {
+        let db = SqlitePool::connect("sqlite::memory:").await?;
+        Ok(Data::new(AppState {
+            db,
+            config: NodeConfig::default(),
+            peer_status: Arc::new(RwLock::new(HashMap::new())),
+            last_seen: Arc::new(RwLock::new(HashMap::new())),
+            peer_job_sender: tokio::sync::mpsc::unbounded_channel().0,
+            workflows: crate::server::WorkflowRegistry::new(),
+            pending_invitations: Arc::new(RwLock::new(Vec::new())),
+            auth: Arc::new(RwLock::new(auth)),
+            token_validator: TokenValidator::Mock(Arc::new(MockValidator::new(
+                "decman-admin".to_string(),
+            ))),
+            admin_role: None,
+            party_credentials: Arc::new(RwLock::new(Vec::new())),
+            bootstrap_mu: Arc::new(tokio::sync::Mutex::new(())),
+            test_mode: true,
+            refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
+            http_client: reqwest::Client::new(),
+        }))
+    }
+
+    fn party_id() -> Result<CantonId> {
+        CantonId::parse(&format!("p::{}", "0".repeat(68)))
+    }
+
+    #[tokio::test]
+    async fn no_auth_configured_is_ok_none() -> Result<()> {
+        let data = app_state(None).await?;
+        assert!(get_party_credentials(&data, &party_id()?).await?.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unknown_party_is_ok_none() -> Result<()> {
+        let registry = AuthRegistry::new(&[]).await?;
+        let data = app_state(Some(WorkflowAuth::Keycloak(Arc::new(registry)))).await?;
+        assert!(get_party_credentials(&data, &party_id()?).await?.is_none());
+        Ok(())
+    }
+
+    /// The party authenticates fine at startup (`expires_in: 0` puts the token
+    /// on the refresh path immediately), then the Keycloak stand-in fails the
+    /// very next request — the one `get_party_credentials` makes.
+    #[tokio::test]
+    async fn token_fetch_failure_is_err_and_logged() -> Result<()> {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r".*/token$"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"access_token": "t", "expires_in": 0})),
+            )
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex(r".*/token$"))
+            .respond_with(
+                ResponseTemplate::new(500).set_body_json(serde_json::json!({"error": "down"})),
+            )
+            .mount(&server)
+            .await;
+
+        let id = party_id()?;
+        let credentials = PartyCredentials {
+            dec_party_id: id.clone(),
+            member_party_id: id.clone(),
+            user_id: "user".to_string(),
+            keycloak: KeycloakConfig {
+                url: server.uri(),
+                realm: "test-realm".to_string(),
+                client_id: "decman".to_string(),
+                client_secret: Some("secret".to_string()),
+                ..KeycloakConfig::default()
+            },
+            auth0: None,
+            packages: PackageConfig::default(),
+        };
+        let registry = AuthRegistry::new(&[credentials]).await?;
+        let data = app_state(Some(WorkflowAuth::Keycloak(Arc::new(registry)))).await?;
+
+        let buffer = LogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buffer.clone())
+            .with_ansi(false)
+            .finish();
+        let result = {
+            let _guard = tracing::subscriber::set_default(subscriber);
+            get_party_credentials(&data, &id).await
+        };
+
+        assert!(
+            result.is_err(),
+            "a failed token fetch must be an error, not a silent None"
+        );
+        let logs = buffer.captured()?;
+        assert!(logs.contains("WARN"), "no warning was logged: {logs}");
+        assert!(
+            logs.contains(&id.to_string()),
+            "the log omits the party id: {logs}"
+        );
+        Ok(())
     }
 }
