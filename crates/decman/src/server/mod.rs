@@ -21,8 +21,8 @@ mod reward_automation;
 mod transfer_context;
 mod types;
 
-pub mod health;
-pub mod peer_status;
+pub(crate) mod health;
+pub(crate) mod peer_status;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -71,8 +71,21 @@ use crate::{
     workflow::{self, WorkflowType},
 };
 
+// Reached externally as `dec_party_manager::server::NodeConfigResponse` by the
+// `gen-types` binary (a separate crate from this lib), so it must stay `pub`.
 pub use handlers::NodeConfigResponse;
-pub use types::*;
+pub(crate) use types::*;
+// These wire DTOs are likewise reached externally as `dec_party_manager::server::…`,
+// by `gen-types` (TS generation) and, for `GovernanceResponse`, by the integration
+// tests under `tests/` — both are separate crates that can only see `pub` items.
+pub use types::{
+    AcceptTransferDetails, ActionType, AppRewardBeneficiary, BillingParams, BurnRequestsResponse,
+    ConfirmActionRequest, DomainGovernanceAction, ExecuteActionRequest, FarConfig,
+    GovernanceAction, GovernanceConfirmation, GovernanceResponse, HoldingInfo, HoldingsResponse,
+    MintRequestsResponse, PendingAction, ProposalType, ProposeActionRequest, ServiceRequestDetails,
+    TokenRequestInfo, TransferInstructionInfo, TransferInstructionStatus,
+    TransferInstructionsResponse, TransferProposalDetails, VaultLimits,
+};
 
 /// TTL for cached chunked ListPackages payloads (per peer).
 const LIST_PACKAGES_CHUNK_CACHE_TTL: Duration = Duration::from_secs(30);
@@ -1177,6 +1190,9 @@ pub async fn start_server(
             .service(handlers::get_provider_services_handler)
             .service(handlers::get_user_services_handler)
             .service(handlers::get_credential_offers_handler)
+            .service(handlers::get_credentials_handler)
+            .service(handlers::get_registrar_service_requests_handler)
+            .service(handlers::get_provider_configurations_handler)
             .service(handlers::get_registrar_services_handler)
             .service(handlers::get_instruments_handler)
             .service(handlers::get_transfer_instructions_handler)

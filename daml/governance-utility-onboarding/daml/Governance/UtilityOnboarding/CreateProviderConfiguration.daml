@@ -1,0 +1,46 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | The provider decparty creates its ProviderConfiguration. The configuration
+-- records the credentials a registrar must hold, and the credentials a holder
+-- must hold.
+--
+-- The provider decparty runs this action once, when it sets up the platform.
+module Governance.UtilityOnboarding.CreateProviderConfiguration where
+
+import Utility.Credential.V0.Credential (PartyCredentialRequirement)
+import Utility.Registry.App.V0.Service.Provider
+  (ProviderService, ProviderService_CreateProviderConfiguration(..))
+
+import Governance.Action
+import Governance.UtilityOnboarding.Utils (selfIssuedRequirementsHaveClaims)
+
+template CreateProviderConfiguration
+  with
+    governanceParty : Party
+      -- ^ The provider decparty. Must equal the ProviderService's provider.
+    proposer : Party
+    providerServiceCid : ContractId ProviderService
+    registrarRequirements : [PartyCredentialRequirement]
+    holderRequirements : [PartyCredentialRequirement]
+  where
+    signatory proposer
+    observer governanceParty
+    -- We don't allow any claimless self-issued (issuer=holder) requirements, as they will later translate
+    -- into credentials that have no subject (as subject is marked on only the claims in this case).
+    ensure selfIssuedRequirementsHaveClaims governanceParty registrarRequirements
+
+    interface instance GovernableAction for CreateProviderConfiguration where
+      view = GovernableActionView with
+        governanceParty
+        proposer
+        actionLabel = "CreateProviderConfiguration"
+        description = "Create ProviderConfiguration ("
+          <> show (length registrarRequirements) <> " registrar requirements, "
+          <> show (length holderRequirements) <> " holder requirements)"
+
+      executeImpl = do
+        _ <- exercise providerServiceCid ProviderService_CreateProviderConfiguration with
+          registrarRequirements
+          holderRequirements
+        pure ()

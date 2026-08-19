@@ -147,6 +147,144 @@ async fn update_party_config(
     Ok(())
 }
 
+/// Registers the decparty on all three nodes. On devnet the function then
+/// grants the rights the decparty needs.
+///
+/// The devnet grants must run after the party-config PUTs. A PUT stores the
+/// party credentials. The grant handler reads them.
+pub(crate) async fn configure_party_on_nodes(f: &Fixture, party_id: &str) -> anyhow::Result<()> {
+    let p1m = f.p1_member_party()?.to_string();
+    let p2m = f.p2_member_party()?.to_string();
+    let p3m = f.p3_member_party()?.to_string();
+
+    // The decparty needs act-as and read-as rights on every node. These grants
+    // run for each decparty. The member-party grants stay in the caller,
+    // because they run once per participant.
+    if f.target == TestTarget::Localnet {
+        grant_rights(f, P1_JSON_API, party_id, "participant-1").await?;
+        grant_rights(f, P2_JSON_API, party_id, "participant-2").await?;
+        grant_rights(f, P3_JSON_API, party_id, "participant-3").await?;
+    }
+
+    update_party_config(
+        f,
+        f.p1.http,
+        party_id,
+        &p1m,
+        "participant-1",
+        f.p1_member_creds.as_ref(),
+    )
+    .await?;
+    update_party_config(
+        f,
+        f.p2.http,
+        party_id,
+        &p2m,
+        "participant-2",
+        f.p2_member_creds.as_ref(),
+    )
+    .await?;
+    update_party_config(
+        f,
+        f.p3.http,
+        party_id,
+        &p3m,
+        "participant-3",
+        f.p3_member_creds.as_ref(),
+    )
+    .await?;
+
+    if f.target == TestTarget::Devnet {
+        let p1a = f
+            .p1_participant_admin_creds
+            .as_ref()
+            .context("P1 participant-admin creds missing on devnet")?;
+        let p2a = f
+            .p2_participant_admin_creds
+            .as_ref()
+            .context("P2 participant-admin creds missing on devnet")?;
+        let p3a = f
+            .p3_participant_admin_creds
+            .as_ref()
+            .context("P3 participant-admin creds missing on devnet")?;
+        grant_rights_devnet(f, f.p1.http, party_id, p1a, "participant-1").await?;
+        grant_rights_devnet(f, f.p2.http, party_id, p2a, "participant-2").await?;
+        grant_rights_devnet(f, f.p3.http, party_id, p3a, "participant-3").await?;
+    }
+    Ok(())
+}
+
+/// Posts the decparty's `GovernanceRules` contract. The call starts a contracts
+/// workflow and returns while that workflow runs. The caller accepts the peer
+/// invitations and waits for the result.
+///
+/// `contract_id` names the contract inside the request. Several callers deploy
+/// rules against one decparty. Each passes its own name.
+pub(crate) async fn post_governance_rules(
+    f: &Fixture,
+    party_id: &str,
+    contract_id: &str,
+) -> anyhow::Result<()> {
+    let p1m = f.p1_member_party()?.to_string();
+    let p2m = f.p2_member_party()?.to_string();
+    let p3m = f.p3_member_party()?.to_string();
+
+    let parties: DecentralizedPartiesResponse =
+        f.get_json(f.p1.http, "/decentralized-parties").await?;
+    let party = parties
+        .parties
+        .into_iter()
+        .find(|p| p.party_id.to_string() == party_id)
+        .with_context(|| format!("party {party_id} not found"))?;
+    let uids: Vec<String> = party
+        .participants
+        .iter()
+        .map(|p| p.participant_uid.to_string())
+        .collect();
+    anyhow::ensure!(
+        uids.len() == 3,
+        "expected 3 participants, got {count}",
+        count = uids.len()
+    );
+
+    // Localnet has nothing that separates the operator from a member party.
+    // The p1m party serves as both. Devnet has a real operator identity. The
+    // SetupUtility contract checks the operator at execute time. A wrong choice
+    // fails later with a contract-group mismatch.
+    let operator_party = match f.target {
+        TestTarget::Localnet => p1m.clone(),
+        TestTarget::Devnet => f.operator_party.clone().context(
+            "operator_party not set on devnet — discover_network_parties must run first",
+        )?,
+    };
+
+    let req = json!({
+        "decentralized_party_id": party_id,
+        "participant_ids": uids,
+        "participant_parties": [&p1m, &p2m, &p3m],
+        "operator_party": &operator_party,
+        "contracts": [{
+            "id": contract_id,
+            "name": "GovernanceRules",
+            "package_id": "#governance-core-v1",
+            "module_name": "Governance.Rules",
+            "entity_name": "GovernanceRules",
+            "fields": [
+                {"type": "decentralized_party"},
+                {"type": "party_set", "parties": [&p1m, &p2m, &p3m]},
+                {"type": "int64", "value": 2},
+                {"type": "rel_time", "microseconds": 1800000000_i64},
+                {"type": "none"},
+            ],
+        }],
+    });
+    let _: Value = f
+        .post_json(f.p1.http, "/contracts", &req)
+        .await
+        .context("POST /contracts")?;
+    Ok(())
+}
+
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: deploy_gov_core");
 
@@ -163,30 +301,6 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 Box::pin(async move {
                     let party_id = f.party_id()?.to_string();
 
-                    // Re-fetch party to get participant_uids
-                    let parties: DecentralizedPartiesResponse =
-                        f.get_json(f.p1.http, "/decentralized-parties").await?;
-                    let party = parties
-                        .parties
-                        .into_iter()
-                        .find(|p| p.party_id.to_string() == party_id)
-                        .with_context(|| format!("party {party_id} not found"))?;
-                    let p1_uid = party
-                        .participants
-                        .first()
-                        .map(|p| p.participant_uid.clone())
-                        .context("party has no p1")?;
-                    let p2_uid = party
-                        .participants
-                        .get(1)
-                        .map(|p| p.participant_uid.clone())
-                        .context("party has no p2")?;
-                    let p3_uid = party
-                        .participants
-                        .get(2)
-                        .map(|p| p.participant_uid.clone())
-                        .context("party has no p3")?;
-
                     // On localnet we allocate fresh gov-member-pN parties on each
                     // participant's JSON Ledger API and grant ledger-api-user the
                     // rights to act/read as them (and as the decentralized party).
@@ -198,91 +312,51 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     // ledger-api-user doesn't exist there anyway).
                     let (p1m, p2m, p3m) = match f.target {
                         TestTarget::Localnet => {
-                            let p1m = allocate_party(&*f, P1_JSON_API, "gov-member-p1", "participant-1").await?;
-                            let p2m = allocate_party(&*f, P2_JSON_API, "gov-member-p2", "participant-2").await?;
-                            let p3m = allocate_party(&*f, P3_JSON_API, "gov-member-p3", "participant-3").await?;
+                            let p1m =
+                                allocate_party(&*f, P1_JSON_API, "gov-member-p1", "participant-1")
+                                    .await?;
+                            let p2m =
+                                allocate_party(&*f, P2_JSON_API, "gov-member-p2", "participant-2")
+                                    .await?;
+                            let p3m =
+                                allocate_party(&*f, P3_JSON_API, "gov-member-p3", "participant-3")
+                                    .await?;
                             grant_rights(&*f, P1_JSON_API, &p1m, "participant-1").await?;
                             grant_rights(&*f, P2_JSON_API, &p2m, "participant-2").await?;
                             grant_rights(&*f, P3_JSON_API, &p3m, "participant-3").await?;
-                            grant_rights(&*f, P1_JSON_API, &party_id, "participant-1").await?;
-                            grant_rights(&*f, P2_JSON_API, &party_id, "participant-2").await?;
-                            grant_rights(&*f, P3_JSON_API, &party_id, "participant-3").await?;
                             (p1m, p2m, p3m)
                         }
                         TestTarget::Devnet => {
-                            let p1m = f.p1_member_creds.as_ref()
-                                .context("P1 member creds missing on devnet")?.party_id.clone();
-                            let p2m = f.p2_member_creds.as_ref()
-                                .context("P2 member creds missing on devnet")?.party_id.clone();
-                            let p3m = f.p3_member_creds.as_ref()
-                                .context("P3 member creds missing on devnet")?.party_id.clone();
+                            let p1m = f
+                                .p1_member_creds
+                                .as_ref()
+                                .context("P1 member creds missing on devnet")?
+                                .party_id
+                                .clone();
+                            let p2m = f
+                                .p2_member_creds
+                                .as_ref()
+                                .context("P2 member creds missing on devnet")?
+                                .party_id
+                                .clone();
+                            let p3m = f
+                                .p3_member_creds
+                                .as_ref()
+                                .context("P3 member creds missing on devnet")?
+                                .party_id
+                                .clone();
                             (p1m, p2m, p3m)
                         }
                     };
 
-                    update_party_config(&*f, f.p1.http, &party_id, &p1m, "participant-1", f.p1_member_creds.as_ref()).await?;
-                    update_party_config(&*f, f.p2.http, &party_id, &p2m, "participant-2", f.p2_member_creds.as_ref()).await?;
-                    update_party_config(&*f, f.p3.http, &party_id, &p3m, "participant-3", f.p3_member_creds.as_ref()).await?;
-
-                    // On devnet, the act_as/read_as grants for the freshly-
-                    // created dec party are issued by each DecMan via its own
-                    // POST /auth/grant-rights (uses participant-admin creds
-                    // to call Canton's UserManagementService). Must run AFTER
-                    // update_party_config so party_credentials are registered.
-                    if f.target == TestTarget::Devnet {
-                        let p1a = f.p1_participant_admin_creds.as_ref()
-                            .context("P1 participant-admin creds missing on devnet")?;
-                        let p2a = f.p2_participant_admin_creds.as_ref()
-                            .context("P2 participant-admin creds missing on devnet")?;
-                        let p3a = f.p3_participant_admin_creds.as_ref()
-                            .context("P3 participant-admin creds missing on devnet")?;
-                        grant_rights_devnet(&*f, f.p1.http, &party_id, p1a, "participant-1").await?;
-                        grant_rights_devnet(&*f, f.p2.http, &party_id, p2a, "participant-2").await?;
-                        grant_rights_devnet(&*f, f.p3.http, &party_id, p3a, "participant-3").await?;
-                    }
-
-                    // On localnet, p1m (gov-member-p1) doubles as the operator
-                    // party because nothing distinguishes them. On devnet, the
-                    // operator is a real, separate identity (auth0_...) that was
-                    // discovered earlier via /operator-info; the SetupUtility
-                    // Daml contract enforces the operator identity at execute
-                    // time, so using attestor-1 here would fail with a
-                    // "Contract group identifier mismatch" later.
-                    let operator_party = match f.target {
-                        TestTarget::Localnet => p1m.clone(),
-                        TestTarget::Devnet => f
-                            .operator_party
-                            .clone()
-                            .context("operator_party not set on devnet — discover_network_parties must run first")?,
-                    };
-                    let req = json!({
-                        "decentralized_party_id": party_id,
-                        "participant_ids": [p1_uid, p2_uid, p3_uid],
-                        "participant_parties": [&p1m, &p2m, &p3m],
-                        "operator_party": &operator_party,
-                        "contracts": [{
-                            "id": "governance-rules",
-                            "name": "GovernanceRules",
-                            "package_id": "#governance-core-v1",
-                            "module_name": "Governance.Rules",
-                            "entity_name": "GovernanceRules",
-                            "fields": [
-                                {"type": "decentralized_party"},
-                                {"type": "party_set", "parties": [&p1m, &p2m, &p3m]},
-                                {"type": "int64", "value": 2},
-                                {"type": "rel_time", "microseconds": 1800000000_i64},
-                                {"type": "none"},
-                            ],
-                        }],
-                    });
-                    let _: Value = f
-                        .post_json(f.p1.http, "/contracts", &req)
-                        .await
-                        .context("POST /contracts")?;
-
+                    // Record the member parties before the two calls below.
+                    // Both read them from the fixture.
                     f.p1_member_party = Some(p1m);
                     f.p2_member_party = Some(p2m);
                     f.p3_member_party = Some(p3m);
+
+                    configure_party_on_nodes(&*f, &party_id).await?;
+                    post_governance_rules(&*f, &party_id, "governance-rules").await?;
                     Ok(())
                 })
             },
@@ -292,7 +366,8 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(60),
             |f, ctx| {
                 Box::pin(async move {
-                    let id = probe_pending_invitation(f, f.p2.http, InvitationType::Contracts).await?;
+                    let id =
+                        probe_pending_invitation(f, f.p2.http, InvitationType::Contracts).await?;
                     ctx.p2 = Some(id);
                     Some(Ok(()))
                 })
@@ -303,7 +378,8 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(60),
             |f, ctx| {
                 Box::pin(async move {
-                    let id = probe_pending_invitation(f, f.p3.http, InvitationType::Contracts).await?;
+                    let id =
+                        probe_pending_invitation(f, f.p3.http, InvitationType::Contracts).await?;
                     ctx.p3 = Some(id);
                     Some(Ok(()))
                 })
@@ -359,7 +435,14 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(30),
             |f, _| {
                 Box::pin(async move {
-                    probe_workflow_run_visible(f, f.p2.http, WorkflowKind::Contracts, WorkflowRole::Peer, WorkflowProgress::Completed).await
+                    probe_workflow_run_visible(
+                        f,
+                        f.p2.http,
+                        WorkflowKind::Contracts,
+                        WorkflowRole::Peer,
+                        WorkflowProgress::Completed,
+                    )
+                    .await
                 })
             },
         )
@@ -368,7 +451,14 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(30),
             |f, _| {
                 Box::pin(async move {
-                    probe_workflow_run_visible(f, f.p3.http, WorkflowKind::Contracts, WorkflowRole::Peer, WorkflowProgress::Completed).await
+                    probe_workflow_run_visible(
+                        f,
+                        f.p3.http,
+                        WorkflowKind::Contracts,
+                        WorkflowRole::Peer,
+                        WorkflowProgress::Completed,
+                    )
+                    .await
                 })
             },
         )
@@ -383,8 +473,9 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     };
 
                     // Primary: scan /decentralized-parties for the contract.
-                    let r: DecentralizedPartiesResponse =
-                        f.probe_get_json(f.p1.http, "/decentralized-parties").await?;
+                    let r: DecentralizedPartiesResponse = f
+                        .probe_get_json(f.p1.http, "/decentralized-parties")
+                        .await?;
                     let cid = r
                         .parties
                         .into_iter()

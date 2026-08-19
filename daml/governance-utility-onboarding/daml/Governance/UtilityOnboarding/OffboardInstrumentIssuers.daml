@@ -1,0 +1,72 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | The registrar decparty revokes the credentials it issued for instrument
+-- issuers. A revoked issuer loses the right to mint and burn the instrument.
+--
+-- The caller names each instrument issuer and lists that issuer's credentials.
+-- The action checks that every claim on a credential names the declared issuer.
+--
+-- The action revokes only the credentials the caller lists. Daml cannot
+-- enumerate a party's credentials. The caller must therefore list every
+-- credential the governance party issued for each offboarded issuer.
+module Governance.UtilityOnboarding.OffboardInstrumentIssuers where
+
+import DA.Foldable (forA_)
+import DA.List (unique)
+
+import Splice.Util (fetchChecked, require)
+import Utility.Credential.V0.Credential
+  (Credential, Credential_Revoke(..), WithIssuerHolder(..))
+
+import Governance.Action
+import Governance.UtilityOnboarding.Utils (partyList)
+
+-- | One offboarded instrument issuer, and the credentials to revoke for it.
+data InstrumentIssuerCredentials = InstrumentIssuerCredentials
+  with
+    instrumentIssuer : Party
+    credentialCids : [ContractId Credential]
+  deriving (Eq, Show)
+
+template OffboardInstrumentIssuers
+  with
+    governanceParty : Party
+      -- ^ The registrar decparty that issued the credentials.
+    proposer : Party
+    instrumentIssuers : [InstrumentIssuerCredentials]
+      -- ^ The offboarded issuers, each with the credentials to revoke.
+  where
+    signatory proposer
+    observer governanceParty
+    ensure not (null instrumentIssuers)
+        && all (\row -> not (null row.credentialCids)) instrumentIssuers
+        && unique (map (.instrumentIssuer) instrumentIssuers)
+        && unique (concatMap (.credentialCids) instrumentIssuers)
+
+    interface instance GovernableAction for OffboardInstrumentIssuers where
+      view = GovernableActionView with
+        governanceParty
+        proposer
+        actionLabel = "OffboardInstrumentIssuers"
+        -- Voters see only this text; name every party losing minting rights.
+        description = "Offboard instrument issuers "
+          <> partyList (map (.instrumentIssuer) instrumentIssuers)
+          <> " (revoke "
+          <> show (length (concatMap (.credentialCids) instrumentIssuers))
+          <> " credentials)"
+
+      executeImpl =
+        forA_ instrumentIssuers $ \row ->
+          forA_ row.credentialCids $ \credentialCid -> do
+            credential <- fetchChecked
+              (WithIssuerHolder with
+                 issuer = governanceParty
+                 holder = governanceParty)
+              credentialCid
+            require "OffboardInstrumentIssuers: credential has no claims"
+              (not $ null credential.claims)
+            require "OffboardInstrumentIssuers: credential claims name a subject other than the declared instrument issuer"
+              (all (\claim -> claim.subject == partyToText row.instrumentIssuer)
+                 credential.claims)
+            exercise credentialCid Credential_Revoke with actor = governanceParty

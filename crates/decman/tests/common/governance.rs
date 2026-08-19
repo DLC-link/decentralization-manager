@@ -4,7 +4,7 @@ use anyhow::Context;
 use dec_party_manager::server::GovernanceResponse;
 use serde_json::{Value, json};
 
-use crate::common::scenario::Scenario;
+use crate::common::{Fixture, scenario::Scenario};
 
 #[derive(Default)]
 pub struct ProposalCycleCtx {
@@ -12,30 +12,81 @@ pub struct ProposalCycleCtx {
     pub confirmation_cids: Vec<String>,
 }
 
-/// Build a scenario that drives a single propose → confirm → execute cycle:
-/// P1 proposes, P2 confirms, P3 executes, asserting no pending actions remain.
+/// This enum names the decparty a governance cycle runs on.
 ///
-/// Includes cross-participant ACS visibility gates so the WHEN steps don't fire
-/// before the confirmer/executor has observed the proposal/confirmations on its
-/// own ledger view.
-pub fn propose_confirm_execute(label: &str, proposal: Value) -> Scenario<ProposalCycleCtx> {
+/// The cycle sends every step to a fixed node. P1 proposes, P2 confirms and
+/// P3 executes. A decparty therefore qualifies only when it has one member
+/// party on each of those three nodes. Its threshold must also let two
+/// confirmations execute an action.
+///
+/// The suite holds decparties that fail both tests. A two-member party has no
+/// member on P3. A unanimous party needs three confirmations. Passing either
+/// one produces a timeout on `can_execute`. That message names the wrong
+/// cause.
+#[derive(Clone)]
+pub enum CycleParty {
+    /// The suite's main decparty. Each step reads `f.party_id` and
+    /// `f.rules_contract_id` when it runs.
+    Primary,
+    /// Any other decparty that meets the rules above. The caller supplies
+    /// both ids.
+    Named {
+        party_id: String,
+        rules_contract_id: String,
+    },
+}
+
+impl CycleParty {
+    /// Returns the party id and the rules contract id for this cycle.
+    fn resolve(&self, f: &Fixture) -> anyhow::Result<(String, String)> {
+        match self {
+            CycleParty::Primary => Ok((
+                f.party_id()?.to_string(),
+                f.rules_contract_id()?.to_string(),
+            )),
+            CycleParty::Named {
+                party_id,
+                rules_contract_id,
+            } => Ok((party_id.clone(), rules_contract_id.clone())),
+        }
+    }
+}
+
+/// Build a scenario that drives one propose → confirm → execute cycle on the
+/// named decparty: P1 proposes, P2 confirms, P3 executes. The scenario asserts
+/// that no pending action remains for this proposal.
+///
+/// The scenario includes cross-participant visibility steps. They stop a WHEN
+/// step from running before the confirmer or the executor sees the proposal on
+/// its own ledger view.
+pub fn propose_confirm_execute_on(
+    party: CycleParty,
+    label: &str,
+    proposal: Value,
+) -> Scenario<ProposalCycleCtx> {
     let label = label.to_string();
     Scenario::with_ctx(label.clone(), ProposalCycleCtx::default())
-        .given("party and governance rules contract present", |f, _ctx| {
-            Box::pin(async move {
-                f.party_id()?;
-                f.rules_contract_id()?;
-                Ok(())
-            })
+        .given("party and governance rules contract present", {
+            let party = party.clone();
+            move |f, _ctx| {
+                let party = party.clone();
+                Box::pin(async move {
+                    party.resolve(f)?;
+                    Ok(())
+                })
+            }
         })
         .when(format!("P1 proposes {label}"), {
             let proposal = proposal.clone();
+            let party = party.clone();
             move |f, _ctx| {
                 let proposal = proposal.clone();
+                let party = party.clone();
                 Box::pin(async move {
+                    let (party_id, rules_contract_id) = party.resolve(f)?;
                     let req = json!({
-                        "party_id": f.party_id()?,
-                        "rules_contract_id": f.rules_contract_id()?,
+                        "party_id": party_id,
+                        "rules_contract_id": rules_contract_id,
                         "proposal": proposal,
                     });
                     let _: Value = f.post_json(f.p1.http, "/governance/propose", &req).await?;
@@ -48,11 +99,13 @@ pub fn propose_confirm_execute(label: &str, proposal: Value) -> Scenario<Proposa
             Duration::from_secs(60),
             {
                 let label_p1 = label.clone();
+                let party = party.clone();
                 move |f, ctx| {
                     let label_p1 = label_p1.clone();
+                    let party = party.clone();
                     Box::pin(async move {
-                        let party_id = match f.party_id() {
-                            Ok(p) => p,
+                        let party_id = match party.resolve(f) {
+                            Ok((p, _)) => p,
                             Err(e) => return Some(Err(e)),
                         };
                         let path = format!("/governance/confirmations?party_id={party_id}");
@@ -71,10 +124,10 @@ pub fn propose_confirm_execute(label: &str, proposal: Value) -> Scenario<Proposa
                 }
             },
         )
-        .then(
-            "proposal visible on P2",
-            Duration::from_secs(60),
-            |f, ctx| {
+        .then("proposal visible on P2", Duration::from_secs(60), {
+            let party = party.clone();
+            move |f, ctx| {
+                let party = party.clone();
                 Box::pin(async move {
                     let cid = match ctx.proposal_cid.as_ref() {
                         Some(c) => c.clone(),
@@ -84,8 +137,8 @@ pub fn propose_confirm_execute(label: &str, proposal: Value) -> Scenario<Proposa
                             )));
                         }
                     };
-                    let party_id = match f.party_id() {
-                        Ok(p) => p,
+                    let party_id = match party.resolve(f) {
+                        Ok((p, _)) => p,
                         Err(e) => return Some(Err(e)),
                     };
                     let path = format!("/governance/confirmations?party_id={party_id}");
@@ -95,31 +148,36 @@ pub fn propose_confirm_execute(label: &str, proposal: Value) -> Scenario<Proposa
                         .any(|a| a.proposal_cid == cid)
                         .then_some(Ok(()))
                 })
-            },
-        )
-        .when("P2 confirms", |f, ctx| {
-            Box::pin(async move {
-                let proposal_cid = ctx
-                    .proposal_cid
-                    .as_deref()
-                    .context("proposal_cid not set")?
-                    .to_string();
-                let req = json!({
-                    "party_id": f.party_id()?, "rules_contract_id": f.rules_contract_id()?,
-                    "action": {"type": "governance_set_threshold", "new_threshold": 1},
-                    "governance_type": "core_domain", "proposal_cid": proposal_cid,
-                });
-                let _: Value = f.post_json(f.p2.http, "/governance/confirm", &req).await?;
-                Ok(())
-            })
+            }
         })
-        .then(
-            "can_execute=true on P1",
-            Duration::from_secs(60),
-            |f, ctx| {
+        .when("P2 confirms", {
+            let party = party.clone();
+            move |f, ctx| {
+                let party = party.clone();
                 Box::pin(async move {
-                    let party_id = match f.party_id() {
-                        Ok(p) => p,
+                    let proposal_cid = ctx
+                        .proposal_cid
+                        .as_deref()
+                        .context("proposal_cid not set")?
+                        .to_string();
+                    let (party_id, rules_contract_id) = party.resolve(f)?;
+                    let req = json!({
+                        "party_id": party_id, "rules_contract_id": rules_contract_id,
+                        "action": {"type": "governance_set_threshold", "new_threshold": 1},
+                        "governance_type": "core_domain", "proposal_cid": proposal_cid,
+                    });
+                    let _: Value = f.post_json(f.p2.http, "/governance/confirm", &req).await?;
+                    Ok(())
+                })
+            }
+        })
+        .then("can_execute=true on P1", Duration::from_secs(60), {
+            let party = party.clone();
+            move |f, ctx| {
+                let party = party.clone();
+                Box::pin(async move {
+                    let party_id = match party.resolve(f) {
+                        Ok((p, _)) => p,
                         Err(e) => return Some(Err(e)),
                     };
                     let path = format!("/governance/confirmations?party_id={party_id}");
@@ -136,78 +194,96 @@ pub fn propose_confirm_execute(label: &str, proposal: Value) -> Scenario<Proposa
                         .collect();
                     Some(Ok(()))
                 })
-            },
-        )
+            }
+        })
         .then(
             "proposal + confirmations visible on P3",
             Duration::from_secs(60),
-            |f, ctx| {
-                Box::pin(async move {
-                    let cid = match ctx.proposal_cid.as_ref() {
-                        Some(c) => c.clone(),
-                        None => {
-                            return Some(Err(anyhow::anyhow!(
-                                "proposal_cid not set by previous step"
-                            )));
-                        }
-                    };
-                    let party_id = match f.party_id() {
-                        Ok(p) => p,
-                        Err(e) => return Some(Err(e)),
-                    };
-                    let path = format!("/governance/confirmations?party_id={party_id}");
-                    let s: GovernanceResponse = f.probe_get_json(f.p3.http, &path).await?;
-                    let action = s
-                        .domain_actions
-                        .into_iter()
-                        .find(|a| a.proposal_cid == cid && a.can_execute)?;
-                    ctx.confirmation_cids = action
-                        .confirmations
-                        .iter()
-                        .map(|c| c.contract_id.clone())
-                        .collect();
-                    Some(Ok(()))
-                })
+            {
+                let party = party.clone();
+                move |f, ctx| {
+                    let party = party.clone();
+                    Box::pin(async move {
+                        let cid = match ctx.proposal_cid.as_ref() {
+                            Some(c) => c.clone(),
+                            None => {
+                                return Some(Err(anyhow::anyhow!(
+                                    "proposal_cid not set by previous step"
+                                )));
+                            }
+                        };
+                        let party_id = match party.resolve(f) {
+                            Ok((p, _)) => p,
+                            Err(e) => return Some(Err(e)),
+                        };
+                        let path = format!("/governance/confirmations?party_id={party_id}");
+                        let s: GovernanceResponse = f.probe_get_json(f.p3.http, &path).await?;
+                        let action = s
+                            .domain_actions
+                            .into_iter()
+                            .find(|a| a.proposal_cid == cid && a.can_execute)?;
+                        ctx.confirmation_cids = action
+                            .confirmations
+                            .iter()
+                            .map(|c| c.contract_id.clone())
+                            .collect();
+                        Some(Ok(()))
+                    })
+                }
             },
         )
-        .when("P3 executes", |f, ctx| {
-            Box::pin(async move {
-                let proposal_cid = ctx
-                    .proposal_cid
-                    .as_deref()
-                    .context("proposal_cid not set")?
-                    .to_string();
-                let confirmation_cids = ctx.confirmation_cids.clone();
-                let req = json!({
-                    "party_id": f.party_id()?, "rules_contract_id": f.rules_contract_id()?,
-                    "action": {"type": "governance_set_threshold", "new_threshold": 1},
-                    "confirmation_cids": confirmation_cids, "disclosed_contracts": [],
-                    "governance_type": "core_domain", "proposal_cid": proposal_cid,
-                });
-                let _: Value = f.post_json(f.p3.http, "/governance/execute", &req).await?;
-                Ok(())
-            })
+        .when("P3 executes", {
+            let party = party.clone();
+            move |f, ctx| {
+                let party = party.clone();
+                Box::pin(async move {
+                    let proposal_cid = ctx
+                        .proposal_cid
+                        .as_deref()
+                        .context("proposal_cid not set")?
+                        .to_string();
+                    let confirmation_cids = ctx.confirmation_cids.clone();
+                    let (party_id, rules_contract_id) = party.resolve(f)?;
+                    let req = json!({
+                        "party_id": party_id, "rules_contract_id": rules_contract_id,
+                        "action": {"type": "governance_set_threshold", "new_threshold": 1},
+                        "confirmation_cids": confirmation_cids, "disclosed_contracts": [],
+                        "governance_type": "core_domain", "proposal_cid": proposal_cid,
+                    });
+                    let _: Value = f.post_json(f.p3.http, "/governance/execute", &req).await?;
+                    Ok(())
+                })
+            }
         })
         .then(
             "this proposal no longer pending",
             Duration::from_secs(60),
-            |f, ctx| {
-                Box::pin(async move {
-                    let party_id = match f.party_id() {
-                        Ok(p) => p,
-                        Err(e) => return Some(Err(e)),
-                    };
-                    let path = format!("/governance/confirmations?party_id={party_id}");
-                    let s: GovernanceResponse = f.probe_get_json(f.p1.http, &path).await?;
-                    // This cycle is done when ITS proposal is gone (executed).
-                    // Don't assert a globally empty slate — an unrelated prior
-                    // proposal may still be pending (see the P1 visibility note).
-                    let our_cid = ctx.proposal_cid.clone();
-                    (!s.domain_actions
-                        .iter()
-                        .any(|a| Some(&a.proposal_cid) == our_cid.as_ref()))
-                    .then_some(Ok(()))
-                })
+            {
+                let party = party.clone();
+                move |f, ctx| {
+                    let party = party.clone();
+                    Box::pin(async move {
+                        let party_id = match party.resolve(f) {
+                            Ok((p, _)) => p,
+                            Err(e) => return Some(Err(e)),
+                        };
+                        let path = format!("/governance/confirmations?party_id={party_id}");
+                        let s: GovernanceResponse = f.probe_get_json(f.p1.http, &path).await?;
+                        // This cycle is done when ITS proposal is gone (executed).
+                        // Don't assert a globally empty slate — an unrelated prior
+                        // proposal may still be pending (see the P1 visibility note).
+                        let our_cid = ctx.proposal_cid.clone();
+                        (!s.domain_actions
+                            .iter()
+                            .any(|a| Some(&a.proposal_cid) == our_cid.as_ref()))
+                        .then_some(Ok(()))
+                    })
+                }
             },
         )
+}
+
+/// Drive one cycle on the decparty the fixture holds.
+pub fn propose_confirm_execute(label: &str, proposal: Value) -> Scenario<ProposalCycleCtx> {
+    propose_confirm_execute_on(CycleParty::Primary, label, proposal)
 }
