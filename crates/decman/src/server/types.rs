@@ -35,10 +35,10 @@ pub use common::api::{
     PendingInvitationsResponse, ProviderConfigurationInfo, ProviderConfigurationsResponse,
     ProviderServiceInfo, ProviderServicesResponse, RegistrarServiceInfo,
     RegistrarServiceRequestInfo, RegistrarServiceRequestsResponse, RegistrarServicesResponse,
-    RequiredClaim, ResponseSource, RightsStatus, SuccessResponse, TenantOnboardRequest,
-    TenantOnboardResponse, TenantPrepareRequest, TenantPrepareResponse, TransferFactoriesResponse,
-    TransferFactoryInfo, TransferPreapprovalsResponse, UserServiceInfo, UserServicesResponse,
-    VaultInfo, VaultsResponse, WorkflowResponse, WorkflowRunsResponse, WorkflowStatusResponse,
+    ResponseSource, RightsStatus, SuccessResponse, TenantOnboardRequest, TenantOnboardResponse,
+    TenantPrepareRequest, TenantPrepareResponse, TransferFactoriesResponse, TransferFactoryInfo,
+    TransferPreapprovalsResponse, UserServiceInfo, UserServicesResponse, VaultInfo, VaultsResponse,
+    WorkflowResponse, WorkflowRunsResponse, WorkflowStatusResponse,
 };
 pub use common::types::{
     AuditLogEntry, AuthConfigResponse, ConnectionStatus, ContractInfo, DecentralizedParty,
@@ -1100,7 +1100,7 @@ pub struct DomainGovernanceAction {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// Confirmations for this proposal
-    pub confirmations: Vec<GovernanceConfirmation>,
+    pub confirmations: Vec<DomainConfirmation>,
     /// Number of unique confirmers
     pub confirmation_count: usize,
     /// Whether threshold is met for execution
@@ -1238,6 +1238,28 @@ pub struct ExecuteActionRequest {
 pub struct GovernanceConfirmation {
     pub contract_id: String,
     pub action: ActionType,
+    pub confirming_party: CantonId,
+    /// Unix seconds when the confirmation contract was created on the ledger.
+    /// 0 if the timestamp could not be resolved.
+    #[serde(default)]
+    pub created_at: i64,
+    /// Unix seconds of the confirmation's `expiresAt`. 0 if unresolved.
+    #[serde(default)]
+    pub expires_at: i64,
+}
+
+/// A single confirmation of a domain-action proposal (governance-core
+/// `Governance.Confirmation`). Unlike [`GovernanceConfirmation`] (which
+/// backs vault / core-self-management confirmations, each carrying its own
+/// real inline `action`), the on-chain `Confirmation` contract carries no
+/// action at all — only `actionProposalCid` and `actionLabel`, surfaced at
+/// the parent [`DomainGovernanceAction`] level. There is no meaningful
+/// per-confirmation action to serialize, so this type has no `action` field
+/// rather than papering over the gap with a placeholder.
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct DomainConfirmation {
+    pub contract_id: String,
     pub confirming_party: CantonId,
     /// Unix seconds when the confirmation contract was created on the ledger.
     /// 0 if the timestamp could not be resolved.
@@ -1500,6 +1522,7 @@ pub fn chain_audit_entry_from_row(row: crate::db::rows::ChainAuditCacheRow) -> C
 
 #[cfg(test)]
 mod tests {
+    use common::api::RequiredClaim;
     use serde_json::Value;
     use sqlx::SqlitePool;
 
@@ -2080,6 +2103,76 @@ mod tests {
                 .map(|c| c.confirming_party.clone()),
             Some(test_party("m1")?)
         );
+        Ok(())
+    }
+
+    /// A domain-action confirmation (`DomainConfirmation`, backing
+    /// governance-core `Confirmation` contracts) has no real inline action —
+    /// only the parent `DomainGovernanceAction.action_label` describes it —
+    /// so it must never serialize an `"action"` key at all, placeholder or
+    /// otherwise. The sibling vault/self-management confirmation
+    /// (`GovernanceConfirmation`) genuinely does carry its own action and
+    /// must keep serializing the real one.
+    #[test]
+    fn domain_confirmation_omits_action_vault_confirmation_keeps_it() -> anyhow::Result<()> {
+        let response = GovernanceResponse {
+            actions: vec![GovernanceAction {
+                action_hash: "hash".to_owned(),
+                action: ActionType::GovernanceSetThreshold { new_threshold: 7 },
+                confirmations: vec![GovernanceConfirmation {
+                    contract_id: "vault-conf".to_owned(),
+                    action: ActionType::GovernanceSetThreshold { new_threshold: 7 },
+                    confirming_party: test_party("m1")?,
+                    created_at: 0,
+                    expires_at: 0,
+                }],
+                confirmation_count: 1,
+                can_execute: false,
+                last_confirmation_at: 0,
+            }],
+            domain_actions: vec![DomainGovernanceAction {
+                proposal_cid: "00prop".to_owned(),
+                action_label: "WithdrawPending".to_owned(),
+                description: None,
+                confirmations: vec![DomainConfirmation {
+                    contract_id: "domain-conf".to_owned(),
+                    confirming_party: test_party("m2")?,
+                    created_at: 0,
+                    expires_at: 0,
+                }],
+                confirmation_count: 1,
+                can_execute: false,
+                orphaned: false,
+                transfer_details: None,
+                accept_transfer_details: None,
+                service_request_details: None,
+                proposer: None,
+                created_at: None,
+            }],
+            threshold: 2,
+            member_party_id: None,
+            rules_contract_id: None,
+            gov_core_out_of_date: false,
+            gov_core_package_ref: None,
+        };
+
+        let value = serde_json::to_value(&response)?;
+
+        let domain_confirmation = &value["domain_actions"][0]["confirmations"][0];
+        assert!(
+            domain_confirmation.get("action").is_none(),
+            "domain confirmation must not carry an action field: {domain_confirmation}"
+        );
+        // Sanity: not just an empty object — the fields we do expect are there.
+        assert_eq!(domain_confirmation["contract_id"], "domain-conf");
+
+        let vault_confirmation = &value["actions"][0]["confirmations"][0];
+        assert_eq!(
+            vault_confirmation["action"]["type"], "governance_set_threshold",
+            "vault confirmation must keep its real action: {vault_confirmation}"
+        );
+        assert_eq!(vault_confirmation["action"]["new_threshold"], 7);
+
         Ok(())
     }
 
