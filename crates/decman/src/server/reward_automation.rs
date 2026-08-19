@@ -984,8 +984,9 @@ async fn run_once_for_party(
     decparty: &CantonId,
 ) -> anyhow::Result<()> {
     let pkgs = packages();
-    let Some((token, member)) = get_party_credentials(data, decparty).await else {
-        return Ok(());
+    let (token, member) = match get_party_credentials(data, decparty).await {
+        Ok(Some(creds)) => creds,
+        Ok(None) | Err(_) => return Ok(()),
     };
     // Enablement: an active delegation. None => off (no-op).
     let Some(delegation) =
