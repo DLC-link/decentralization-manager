@@ -41,12 +41,13 @@ use super::{
         fetch_package_id_to_name, fetch_package_names, newest_matching_names, package_name_prefix,
     },
     types::{
-        AcceptTransferDetails, ActionType, ContractInfo, ContractWithBlob, CredentialOfferInfo,
-        DomainConfirmation, DomainGovernanceAction, GovernanceAction, GovernanceConfirmation,
-        GovernanceState, HoldingInfo, InstrumentInfo, PartyMetadata, PendingAction,
-        ProviderServiceInfo, RegistrarServiceInfo, ServiceRequestDetails, TokenRequestInfo,
-        TransferFactoryInfo, TransferInstructionInfo, TransferInstructionStatus,
-        TransferProposalDetails, UserServiceInfo, VaultInfo,
+        AcceptTransferDetails, ActionType, Claim, ContractInfo, ContractWithBlob, CredentialInfo,
+        CredentialOfferInfo, DomainConfirmation, DomainGovernanceAction, GovernanceAction,
+        GovernanceConfirmation, GovernanceState, HoldingInfo, InstrumentInfo, PartyMetadata,
+        PendingAction, ProviderConfigurationInfo, ProviderServiceInfo, RegistrarServiceInfo,
+        RegistrarServiceRequestInfo, ServiceRequestDetails, TokenRequestInfo, TransferFactoryInfo,
+        TransferInstructionInfo, TransferInstructionStatus, TransferProposalDetails,
+        UserServiceInfo, VaultInfo,
     },
 };
 
@@ -192,19 +193,36 @@ fn provider_service_template(packages: &PackageConfig) -> Option<TemplateId> {
 
 /// UserService template identifier
 fn user_service_template(packages: &PackageConfig) -> Option<TemplateId> {
-    packages.utility_credential.as_ref().map(|pkg| TemplateId {
-        package_id: pkg.clone(),
-        module_name: "Utility.Credential.App.V0.Service.User",
-        entity_name: "UserService",
-    })
+    packages
+        .utility_credential_app
+        .as_ref()
+        .map(|pkg| TemplateId {
+            package_id: pkg.clone(),
+            module_name: "Utility.Credential.App.V0.Service.User",
+            entity_name: "UserService",
+        })
 }
 
 /// CredentialOffer template identifier
 fn credential_offer_template(packages: &PackageConfig) -> Option<TemplateId> {
+    packages
+        .utility_credential_app
+        .as_ref()
+        .map(|pkg| TemplateId {
+            package_id: pkg.clone(),
+            module_name: "Utility.Credential.App.V0.Model.Offer",
+            entity_name: "CredentialOffer",
+        })
+}
+
+/// Credential template identifier. Uses the base `utility_credential`
+/// package, which defines the `Credential` template; the app package
+/// (`utility_credential_app`) only bundles it as a dependency.
+fn credential_template(packages: &PackageConfig) -> Option<TemplateId> {
     packages.utility_credential.as_ref().map(|pkg| TemplateId {
         package_id: pkg.clone(),
-        module_name: "Utility.Credential.App.V0.Model.Offer",
-        entity_name: "CredentialOffer",
+        module_name: "Utility.Credential.V0.Credential",
+        entity_name: "Credential",
     })
 }
 
@@ -214,6 +232,24 @@ fn registrar_service_template(packages: &PackageConfig) -> Option<TemplateId> {
         package_id: pkg.clone(),
         module_name: "Utility.Registry.App.V0.Service.Registrar",
         entity_name: "RegistrarService",
+    })
+}
+
+/// RegistrarServiceRequest template identifier
+fn registrar_service_request_template(packages: &PackageConfig) -> Option<TemplateId> {
+    packages.utility_registry.as_ref().map(|pkg| TemplateId {
+        package_id: pkg.clone(),
+        module_name: "Utility.Registry.App.V0.Service.Registrar",
+        entity_name: "RegistrarServiceRequest",
+    })
+}
+
+/// ProviderConfiguration template identifier
+fn provider_configuration_template(packages: &PackageConfig) -> Option<TemplateId> {
+    packages.utility_registry.as_ref().map(|pkg| TemplateId {
+        package_id: pkg.clone(),
+        module_name: "Utility.Registry.App.V0.Configuration.Provider",
+        entity_name: "ProviderConfiguration",
     })
 }
 
@@ -632,8 +668,10 @@ pub async fn get_governance_confirmations(
     // we skip orphan-marking below to avoid surfacing a flood of false
     // orphans to the user.
     let mut proposal_infos_complete = true;
-    // Whether `domain_confirmations` reflects every active `GovernanceConfirmation`
-    // for this party. A confirmation query that fails leaves a confirmed
+    // Whether `domain_confirmations` reflects every active on-ledger
+    // `Governance.Confirmation:GovernanceConfirmation` contract for this party.
+    // (The Rust value carrying each one is a `DomainConfirmation`; the Daml
+    // template it comes from keeps its own name.) A confirmation query that fails leaves a confirmed
     // proposal looking untouched, and synthesizing it as a zero-confirmation
     // card would offer Confirm to a member who has already confirmed. Skip
     // synthesis in that case and wait for a refresh that reads cleanly.
@@ -754,8 +792,9 @@ const FALLBACK_PROPOSAL_LABEL: &str = "Proposal";
 
 /// Merge confirmed domain proposals with the full active-proposal set.
 ///
-/// `domain_confirmations` covers only proposals that already have at least
-/// one `GovernanceConfirmation`; `proposal_infos` covers every active
+/// `domain_confirmations` covers only proposals that already have at least one
+/// on-ledger `Governance.Confirmation:GovernanceConfirmation` contract, carried
+/// here as a [`DomainConfirmation`]; `proposal_infos` covers every active
 /// `GovernableAction` visible to the party, confirmed or not. Confirmations
 /// whose proposal isn't in `proposal_infos` are marked `orphaned` (rather
 /// than dropped) so the UI can offer a dismiss-only card — the underlying
@@ -2308,6 +2347,117 @@ fn extract_credential_offer_info(created: &CreatedEvent) -> Option<CredentialOff
     })
 }
 
+/// Get all Credential contracts visible to a party
+pub async fn get_credentials(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    test_mode: bool,
+    packages: &PackageConfig,
+) -> Result<Vec<CredentialInfo>> {
+    if test_mode {
+        fetch_credentials_with_wildcard(config, party_id, token).await
+    } else {
+        match credential_template(packages) {
+            Some(template) => {
+                fetch_credentials_for_template(config, party_id, token, &template).await
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+}
+
+/// Fetch credentials using WildcardFilter (for test mode)
+async fn fetch_credentials_with_wildcard(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+) -> Result<Vec<CredentialInfo>> {
+    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], true);
+
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        // The wildcard read returns every active contract, so the template
+        // narrowing happens here rather than Canton-side.
+        let template_id = created.template_id.as_ref()?;
+        if template_id.module_name != "Utility.Credential.V0.Credential"
+            || template_id.entity_name != "Credential"
+        {
+            return None;
+        }
+        extract_credential_info(&created)
+    })
+    .await
+}
+
+/// Fetch credentials using TemplateFilter
+async fn fetch_credentials_for_template(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    template: &TemplateId,
+) -> Result<Vec<CredentialInfo>> {
+    let event_format = party_event_format(
+        party_id,
+        vec![template_filter(
+            Identifier {
+                package_id: template.package_id.clone(),
+                module_name: template.module_name.to_string(),
+                entity_name: template.entity_name.to_string(),
+            },
+            false,
+        )],
+        true,
+    );
+
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        extract_credential_info(&created)
+    })
+    .await
+}
+
+/// Extract CredentialInfo from a Credential created event.
+fn extract_credential_info(created: &CreatedEvent) -> Option<CredentialInfo> {
+    let record = created.create_arguments.as_ref()?;
+
+    let issuer: CantonId = field_party(record, "issuer")?.parse().ok()?;
+    let holder: CantonId = field_party(record, "holder")?.parse().ok()?;
+    let credential_id = field_text(record, "id")?;
+    let description = field_text(record, "description").unwrap_or_default();
+
+    let claims = record
+        .fields
+        .iter()
+        .find(|f| f.label == "claims")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::List(l)) => Some(&l.elements),
+            _ => None,
+        })
+        .map(|elements| {
+            elements
+                .iter()
+                .filter_map(|v| match &v.sum {
+                    Some(value::Sum::Record(r)) => Some(Claim {
+                        subject: field_text(r, "subject")?,
+                        property: field_text(r, "property")?,
+                        value: field_text(r, "value")?,
+                    }),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Some(CredentialInfo {
+        contract_id: created.contract_id.clone(),
+        issuer,
+        holder,
+        credential_id,
+        description,
+        claims,
+    })
+}
+
 // ============================================================================
 // Registrar Service Queries
 // ============================================================================
@@ -2406,6 +2556,214 @@ fn extract_registrar_service_info(created: &CreatedEvent) -> Option<RegistrarSer
         contract_id: created.contract_id.clone(),
         operator,
         registrar,
+    })
+}
+
+// ============================================================================
+// Registrar Service Request Queries
+// ============================================================================
+
+/// Get all RegistrarServiceRequest contracts visible to a party. The
+/// OnboardRegistrar form lists these so the request backing the onboard can
+/// be picked instead of pasted in by hand.
+pub async fn get_registrar_service_requests(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    test_mode: bool,
+    packages: &PackageConfig,
+) -> Result<Vec<RegistrarServiceRequestInfo>> {
+    if test_mode {
+        fetch_registrar_service_requests_with_wildcard(config, party_id, token).await
+    } else {
+        match registrar_service_request_template(packages) {
+            Some(template) => {
+                fetch_registrar_service_requests_for_template(config, party_id, token, &template)
+                    .await
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+}
+
+/// Fetch registrar service requests using WildcardFilter (for test mode)
+async fn fetch_registrar_service_requests_with_wildcard(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+) -> Result<Vec<RegistrarServiceRequestInfo>> {
+    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], true);
+
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        // The wildcard read returns every active contract, so the template
+        // narrowing happens here rather than Canton-side.
+        let template_id = created.template_id.as_ref()?;
+        if template_id.module_name != "Utility.Registry.App.V0.Service.Registrar"
+            || template_id.entity_name != "RegistrarServiceRequest"
+        {
+            return None;
+        }
+        extract_registrar_service_request_info(&created)
+    })
+    .await
+}
+
+/// Fetch registrar service requests using TemplateFilter
+async fn fetch_registrar_service_requests_for_template(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    template: &TemplateId,
+) -> Result<Vec<RegistrarServiceRequestInfo>> {
+    let event_format = party_event_format(
+        party_id,
+        vec![template_filter(
+            Identifier {
+                package_id: template.package_id.clone(),
+                module_name: template.module_name.to_string(),
+                entity_name: template.entity_name.to_string(),
+            },
+            false,
+        )],
+        true,
+    );
+
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        extract_registrar_service_request_info(&created)
+    })
+    .await
+}
+
+/// Read an `Optional Bool` field. An absent field or a `None` value reads as
+/// `false`, matching the SDK's treatment of the request's flags.
+fn field_optional_bool_or_false(record: &Record, label: &str) -> bool {
+    record
+        .fields
+        .iter()
+        .find(|f| f.label == label)
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Optional(opt)) => {
+                opt.value.as_deref().and_then(|inner| match &inner.sum {
+                    Some(value::Sum::Bool(b)) => Some(*b),
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .unwrap_or(false)
+}
+
+/// Extract RegistrarServiceRequestInfo from a RegistrarServiceRequest
+/// created event.
+fn extract_registrar_service_request_info(
+    created: &CreatedEvent,
+) -> Option<RegistrarServiceRequestInfo> {
+    let record = created.create_arguments.as_ref()?;
+
+    let operator: CantonId = field_party(record, "operator")?.parse().ok()?;
+    let provider: CantonId = field_party(record, "provider")?.parse().ok()?;
+    let registrar: CantonId = field_party(record, "registrar")?.parse().ok()?;
+
+    Some(RegistrarServiceRequestInfo {
+        contract_id: created.contract_id.clone(),
+        operator,
+        provider,
+        registrar,
+        create_transfer_rule: field_optional_bool_or_false(record, "createTransferRule"),
+        create_allocation_factory: field_optional_bool_or_false(record, "createAllocationFactory"),
+    })
+}
+
+// ============================================================================
+// Provider Configuration Queries
+// ============================================================================
+
+/// Get all ProviderConfiguration contracts visible to a party. The
+/// OnboardRegistrar form lists these so the configuration backing the
+/// onboard can be picked instead of pasted in by hand.
+pub async fn get_provider_configurations(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    test_mode: bool,
+    packages: &PackageConfig,
+) -> Result<Vec<ProviderConfigurationInfo>> {
+    if test_mode {
+        fetch_provider_configurations_with_wildcard(config, party_id, token).await
+    } else {
+        match provider_configuration_template(packages) {
+            Some(template) => {
+                fetch_provider_configurations_for_template(config, party_id, token, &template).await
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+}
+
+/// Fetch provider configurations using WildcardFilter (for test mode)
+async fn fetch_provider_configurations_with_wildcard(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+) -> Result<Vec<ProviderConfigurationInfo>> {
+    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], true);
+
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        // The wildcard read returns every active contract, so the template
+        // narrowing happens here rather than Canton-side.
+        let template_id = created.template_id.as_ref()?;
+        if template_id.module_name != "Utility.Registry.App.V0.Configuration.Provider"
+            || template_id.entity_name != "ProviderConfiguration"
+        {
+            return None;
+        }
+        extract_provider_configuration_info(&created)
+    })
+    .await
+}
+
+/// Fetch provider configurations using TemplateFilter
+async fn fetch_provider_configurations_for_template(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    template: &TemplateId,
+) -> Result<Vec<ProviderConfigurationInfo>> {
+    let event_format = party_event_format(
+        party_id,
+        vec![template_filter(
+            Identifier {
+                package_id: template.package_id.clone(),
+                module_name: template.module_name.to_string(),
+                entity_name: template.entity_name.to_string(),
+            },
+            false,
+        )],
+        true,
+    );
+
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        extract_provider_configuration_info(&created)
+    })
+    .await
+}
+
+/// Extract ProviderConfigurationInfo from a ProviderConfiguration created
+/// event. The requirement lists stay behind: the picker labels
+/// configurations by contract id alone.
+fn extract_provider_configuration_info(
+    created: &CreatedEvent,
+) -> Option<ProviderConfigurationInfo> {
+    let record = created.create_arguments.as_ref()?;
+
+    let operator: CantonId = field_party(record, "operator")?.parse().ok()?;
+    let provider: CantonId = field_party(record, "provider")?.parse().ok()?;
+
+    Some(ProviderConfigurationInfo {
+        contract_id: created.contract_id.clone(),
+        operator,
+        provider,
     })
 }
 
@@ -3428,6 +3786,19 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn credential_template_names_the_defining_package() {
+        // The `Credential` template is defined in `utility-credential-v0`;
+        // `utility-credential-app-v0` only bundles that dalf as a dependency.
+        // Canton resolves a `#name` filter against the defining package's
+        // name, so naming the app package matches no contracts.
+        let template = credential_template(&crate::config::default_package_config())
+            .expect("default package config sets utility_credential");
+        assert_eq!(template.package_id, "#utility-credential-v0");
+        assert_eq!(template.module_name, "Utility.Credential.V0.Credential");
+        assert_eq!(template.entity_name, "Credential");
+    }
+
     fn ci(name: &str, version: &str, created_at: &str, contract_id: &str) -> ContractInfo {
         ContractInfo {
             contract_id: contract_id.to_string(),
@@ -3503,7 +3874,7 @@ mod tests {
     // ------------------------------------------------------------------------
 
     use canton_proto_rs::com::daml::ledger::api::v2::{
-        InterfaceView, Optional, RecordField, Variant,
+        InterfaceView, List, Optional, RecordField, Variant,
     };
 
     fn field(label: &str, value: Value) -> RecordField {
@@ -3908,6 +4279,68 @@ mod tests {
     }
 
     // ------------------------------------------------------------------------
+    // extract_credential_info
+    //
+    // `Utility.Credential.V0.Credential:Credential` carries issuer/holder,
+    // the credential id/description, and a `claims` list whose `subject`
+    // names the party each claim attests for. The extractor feeds the
+    // issuer-credential picker on the accept mint/burn request forms.
+    // ------------------------------------------------------------------------
+
+    fn list_value(elements: Vec<Value>) -> Value {
+        Value {
+            sum: Some(value::Sum::List(List { elements })),
+        }
+    }
+
+    fn claim_value(subject: &str, property: &str, value: &str) -> Value {
+        record_value(vec![
+            field("subject", text_value(subject)),
+            field("property", text_value(property)),
+            field("value", text_value(value)),
+        ])
+    }
+
+    /// A Credential created event; `claims` is the raw value of the
+    /// template's `claims : [Claim]` field.
+    fn credential_event(claims: Value) -> CreatedEvent {
+        let record = Record {
+            record_id: None,
+            fields: vec![
+                field("issuer", party_value(&format!("issuer::{SR_FP}"))),
+                field("holder", party_value(&format!("holder::{SR_FP}"))),
+                field(
+                    "id",
+                    text_value("LAUNCH-TOKEN-instrument-issuer-credential/subject/0-0"),
+                ),
+                field("description", text_value("Governance-minted credential")),
+                field("validFrom", optional_value(None)),
+                field("validUntil", optional_value(None)),
+                field("claims", claims),
+                field("observers", list_value(vec![])),
+            ],
+        };
+        CreatedEvent {
+            offset: 0,
+            node_id: 0,
+            contract_id: "credential-cid-1".to_string(),
+            template_id: None,
+            contract_key: None,
+            create_arguments: Some(record),
+            created_event_blob: vec![],
+            interface_views: vec![],
+            witness_parties: vec![],
+            signatories: vec![],
+            observers: vec![],
+            created_at: None,
+            package_name: String::new(),
+            representative_package_id: String::new(),
+            acs_delta: false,
+            contract_key_hash: Vec::new(),
+        }
+    }
+
+    // ------------------------------------------------------------------------
     // extract_proposal_info / build_domain_actions
     //
     // Covers the pending-approvals fix: every active GovernableAction should
@@ -3933,6 +4366,207 @@ mod tests {
             acs_delta: false,
             contract_key_hash: Vec::new(),
         }
+    }
+
+    #[test]
+    fn extract_credential_info_reads_credential_with_claims() {
+        let claims = list_value(vec![
+            claim_value("subject-party", "role", "instrument-issuer"),
+            claim_value("subject-party", "kyc", "passed"),
+        ]);
+        let Some(info) = extract_credential_info(&credential_event(claims)) else {
+            panic!("credential should yield info");
+        };
+        assert_eq!(info.contract_id, "credential-cid-1");
+        assert_eq!(info.issuer.to_string(), format!("issuer::{SR_FP}"));
+        assert_eq!(info.holder.to_string(), format!("holder::{SR_FP}"));
+        assert_eq!(
+            info.credential_id,
+            "LAUNCH-TOKEN-instrument-issuer-credential/subject/0-0"
+        );
+        assert_eq!(info.description, "Governance-minted credential");
+        assert_eq!(info.claims.len(), 2);
+        assert_eq!(info.claims[0].subject, "subject-party");
+        assert_eq!(info.claims[0].property, "role");
+        assert_eq!(info.claims[0].value, "instrument-issuer");
+    }
+
+    #[test]
+    fn extract_credential_info_defaults_missing_description_and_empty_claims() {
+        let mut event = credential_event(list_value(vec![]));
+        if let Some(record) = event.create_arguments.as_mut() {
+            record.fields.retain(|f| f.label != "description");
+        }
+        let Some(info) = extract_credential_info(&event) else {
+            panic!("claimless credential should still yield info");
+        };
+        assert!(info.claims.is_empty());
+        assert_eq!(info.description, "");
+    }
+
+    #[test]
+    fn extract_credential_info_skips_event_without_holder() {
+        let mut event = credential_event(list_value(vec![]));
+        if let Some(record) = event.create_arguments.as_mut() {
+            record.fields.retain(|f| f.label != "holder");
+        }
+        assert!(extract_credential_info(&event).is_none());
+    }
+
+    // ------------------------------------------------------------------------
+    // extract_registrar_service_request_info
+    //
+    // `Utility.Registry.App.V0.Service.Registrar:RegistrarServiceRequest`
+    // carries the operator/provider/registrar parties plus two
+    // `Optional Bool` flags the SDK reads as `false` when absent. The
+    // extractor feeds the request picker on the OnboardRegistrar form.
+    // ------------------------------------------------------------------------
+
+    fn bool_value(b: bool) -> Value {
+        Value {
+            sum: Some(value::Sum::Bool(b)),
+        }
+    }
+
+    /// A RegistrarServiceRequest created event; the two arguments are the
+    /// raw values of the template's `Optional Bool` flag fields.
+    fn registrar_service_request_event(
+        create_transfer_rule: Value,
+        create_allocation_factory: Value,
+    ) -> CreatedEvent {
+        let record = Record {
+            record_id: None,
+            fields: vec![
+                field("operator", party_value(&format!("operator::{SR_FP}"))),
+                field("provider", party_value(&format!("provider::{SR_FP}"))),
+                field("registrar", party_value(&format!("registrar::{SR_FP}"))),
+                field("createTransferRule", create_transfer_rule),
+                field("createAllocationFactory", create_allocation_factory),
+            ],
+        };
+        CreatedEvent {
+            offset: 0,
+            node_id: 0,
+            contract_id: "rsr-cid-1".to_string(),
+            template_id: None,
+            contract_key: None,
+            create_arguments: Some(record),
+            created_event_blob: vec![],
+            interface_views: vec![],
+            witness_parties: vec![],
+            signatories: vec![],
+            observers: vec![],
+            created_at: None,
+            package_name: String::new(),
+            representative_package_id: String::new(),
+            acs_delta: false,
+            contract_key_hash: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn extract_registrar_service_request_info_reads_request_with_flags() {
+        let event = registrar_service_request_event(
+            optional_value(Some(bool_value(true))),
+            optional_value(Some(bool_value(false))),
+        );
+        let Some(info) = extract_registrar_service_request_info(&event) else {
+            panic!("request should yield info");
+        };
+        assert_eq!(info.contract_id, "rsr-cid-1");
+        assert_eq!(info.operator.to_string(), format!("operator::{SR_FP}"));
+        assert_eq!(info.provider.to_string(), format!("provider::{SR_FP}"));
+        assert_eq!(info.registrar.to_string(), format!("registrar::{SR_FP}"));
+        assert!(info.create_transfer_rule);
+        assert!(!info.create_allocation_factory);
+    }
+
+    #[test]
+    fn extract_registrar_service_request_info_defaults_absent_flags_to_false() {
+        // `None` flags — and fields missing outright — read as `false`,
+        // matching the SDK's treatment.
+        let mut event = registrar_service_request_event(optional_value(None), optional_value(None));
+        if let Some(record) = event.create_arguments.as_mut() {
+            record
+                .fields
+                .retain(|f| f.label != "createAllocationFactory");
+        }
+        let Some(info) = extract_registrar_service_request_info(&event) else {
+            panic!("flagless request should still yield info");
+        };
+        assert!(!info.create_transfer_rule);
+        assert!(!info.create_allocation_factory);
+    }
+
+    #[test]
+    fn extract_registrar_service_request_info_skips_event_without_registrar() {
+        let mut event = registrar_service_request_event(optional_value(None), optional_value(None));
+        if let Some(record) = event.create_arguments.as_mut() {
+            record.fields.retain(|f| f.label != "registrar");
+        }
+        assert!(extract_registrar_service_request_info(&event).is_none());
+    }
+
+    // ------------------------------------------------------------------------
+    // extract_provider_configuration_info
+    //
+    // `Utility.Registry.App.V0.Configuration.Provider:ProviderConfiguration`
+    // carries the operator/provider parties plus the registrar and holder
+    // requirement lists. The extractor reads the parties only — the picker
+    // labels configurations by contract id — and must tolerate the
+    // requirement lists it ignores. It feeds the configuration picker on the
+    // OnboardRegistrar form.
+    // ------------------------------------------------------------------------
+
+    /// A ProviderConfiguration created event, with empty requirement lists.
+    fn provider_configuration_event() -> CreatedEvent {
+        let record = Record {
+            record_id: None,
+            fields: vec![
+                field("operator", party_value(&format!("operator::{SR_FP}"))),
+                field("provider", party_value(&format!("provider::{SR_FP}"))),
+                field("registrarRequirements", list_value(vec![])),
+                field("holderRequirements", list_value(vec![])),
+            ],
+        };
+        CreatedEvent {
+            offset: 0,
+            node_id: 0,
+            contract_id: "pc-cid-1".to_string(),
+            template_id: None,
+            contract_key: None,
+            create_arguments: Some(record),
+            created_event_blob: vec![],
+            interface_views: vec![],
+            witness_parties: vec![],
+            signatories: vec![],
+            observers: vec![],
+            created_at: None,
+            package_name: String::new(),
+            representative_package_id: String::new(),
+            acs_delta: false,
+            contract_key_hash: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn extract_provider_configuration_info_reads_parties() {
+        let Some(info) = extract_provider_configuration_info(&provider_configuration_event())
+        else {
+            panic!("configuration should yield info");
+        };
+        assert_eq!(info.contract_id, "pc-cid-1");
+        assert_eq!(info.operator.to_string(), format!("operator::{SR_FP}"));
+        assert_eq!(info.provider.to_string(), format!("provider::{SR_FP}"));
+    }
+
+    #[test]
+    fn extract_provider_configuration_info_skips_event_without_provider() {
+        let mut event = provider_configuration_event();
+        if let Some(record) = event.create_arguments.as_mut() {
+            record.fields.retain(|f| f.label != "provider");
+        }
+        assert!(extract_provider_configuration_info(&event).is_none());
     }
 
     /// A created event as the production `InterfaceFilter` query returns it:

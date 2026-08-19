@@ -279,3 +279,5 @@ jobs:
         run: cd governance-core-test && ~/.dpm/bin/dpm test
       - name: Test governance-token-custody
         run: cd governance-token-custody-test && ~/.dpm/bin/dpm test
+      - name: Test governance-utility-onboarding
+        run: cd governance-utility-onboarding-test && ~/.dpm/bin/dpm test

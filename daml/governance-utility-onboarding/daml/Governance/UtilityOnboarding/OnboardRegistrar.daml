@@ -1,0 +1,55 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | The provider decparty mints the registrar's credentials and accepts the
+-- registrar's service request. Both happen in one vote.
+--
+-- The SDK checks every registrar requirement inside the accept. A requirement
+-- the provider decparty cannot issue itself therefore rolls the action back.
+module Governance.UtilityOnboarding.OnboardRegistrar where
+
+import Splice.Util (require)
+import Utility.Registry.App.V0.Configuration.Provider (ProviderConfiguration)
+import Utility.Registry.App.V0.Service.Provider
+  (ProviderService, ProviderService_AcceptRegistrarServiceRequest(..))
+import Utility.Registry.App.V0.Service.Registrar
+  (RegistrarServiceRequest, RegistrarServiceRequest_Accept(..))
+
+import Governance.Action
+import Governance.UtilityOnboarding.Utils (mintCredentialsMeetingRequirements)
+
+template OnboardRegistrar
+  with
+    governanceParty : Party
+      -- ^ The provider decparty.
+    proposer : Party
+    providerServiceCid : ContractId ProviderService
+    registrarServiceRequestCid : ContractId RegistrarServiceRequest
+    providerConfigurationCid : ContractId ProviderConfiguration
+  where
+    signatory proposer
+    observer governanceParty
+
+    interface instance GovernableAction for OnboardRegistrar where
+      view = GovernableActionView with
+        governanceParty
+        proposer
+        actionLabel = "OnboardRegistrar"
+        description = "Onboard the registrar named in the service request"
+
+      executeImpl = do
+        request <- fetch registrarServiceRequestCid
+        require "OnboardRegistrar: request provider does not match the governance party"
+          (request.provider == governanceParty)
+        providerConfiguration <- fetch providerConfigurationCid
+        require "OnboardRegistrar: provider configuration provider does not match the governance party"
+          (providerConfiguration.provider == governanceParty)
+        mintedCredentialCids <- mintCredentialsMeetingRequirements
+          governanceParty request.registrar "registrar-credential"
+          providerConfiguration.registrarRequirements
+        _ <- exercise providerServiceCid ProviderService_AcceptRegistrarServiceRequest with
+          cid = registrarServiceRequestCid
+          payload = RegistrarServiceRequest_Accept with
+            providerConfigurationCid
+            credentialCids = mintedCredentialCids
+        pure ()

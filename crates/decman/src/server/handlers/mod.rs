@@ -8,17 +8,21 @@ mod party_config;
 mod tenant;
 mod workflows;
 
-pub use auth::{get_auth_config, get_auth_status, grant_rights, test_auth};
-pub use config::{
-    NodeConfigResponse, get_network_config, get_node_config, healthz, save_network_config,
-};
-pub use governance::{
+pub(crate) use auth::{get_auth_config, get_auth_status, grant_rights, test_auth};
+// `NodeConfigResponse` is reached externally as `dec_party_manager::server::NodeConfigResponse`
+// by the `gen-types` binary (a separate crate from this lib), so it must stay `pub`; the
+// handler functions beside it have no such consumer.
+pub use config::NodeConfigResponse;
+pub(crate) use config::{get_network_config, get_node_config, healthz, save_network_config};
+pub(crate) use governance::{
     cancel_confirmation, cancel_proposal, confirm_action, execute_action, expire_confirmation,
     get_burn_requests_handler, get_coupon_reassignment_delegation, get_credential_offers_handler,
-    get_governance, get_governance_audit, get_governance_chain_audit, get_governance_state,
-    get_holdings_handler, get_instruments_handler, get_known_members, get_mint_requests_handler,
-    get_network_info, get_operator_info, get_packages, get_provider_services_handler,
-    get_registrar_services_handler, get_token_standard_contracts, get_transfer_factories_handler,
+    get_credentials_handler, get_governance, get_governance_audit, get_governance_chain_audit,
+    get_governance_state, get_holdings_handler, get_instruments_handler, get_known_members,
+    get_mint_requests_handler, get_network_info, get_operator_info, get_packages,
+    get_provider_configurations_handler, get_provider_services_handler,
+    get_registrar_service_requests_handler, get_registrar_services_handler,
+    get_token_standard_contracts, get_transfer_factories_handler,
     get_transfer_instructions_handler, get_transfer_preapprovals_handler,
     get_user_services_handler, get_vaults_handler, propose_action, query_contracts_handler,
 };
@@ -26,16 +30,16 @@ pub use governance::{
 // re-exported here so they are reachable through the private `governance`
 // submodule.
 pub(crate) use governance::{get_party_credentials, packages};
-pub use invitations::{accept_invitation, decline_invitation, get_invitations};
-pub use keys::get_key_status;
-pub use parties::{
+pub(crate) use invitations::{accept_invitation, decline_invitation, get_invitations};
+pub(crate) use keys::get_key_status;
+pub(crate) use parties::{
     compare_peer_packages, fetch_decentralized_parties, get_decentralized_parties,
     get_participants_status, get_vetted_packages, resolve_owner_keys_from_peers,
     store_parties_to_db,
 };
-pub use party_config::{discover_member_party, get_party_config, save_party_config};
-pub use tenant::{tenant_onboard, tenant_prepare, tenant_status};
-pub use workflows::{
+pub(crate) use party_config::{discover_member_party, get_party_config, save_party_config};
+pub(crate) use tenant::{tenant_onboard, tenant_prepare, tenant_status};
+pub(crate) use workflows::{
     cancel_add_party, cancel_change_threshold, cancel_contracts, cancel_dars, cancel_kick,
     cancel_onboarding, cancel_workflow_instance, dismiss_workflow, get_add_party_status,
     get_change_threshold_status, get_contracts_status, get_dars_status, get_kick_status,

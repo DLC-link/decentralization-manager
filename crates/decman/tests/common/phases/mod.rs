@@ -16,6 +16,7 @@ pub mod create_dec_party;
 pub mod deploy_gov_core;
 pub mod dismiss_failed_cleans_artifacts;
 pub mod distribute_dars;
+pub mod dual_governance_onboarding;
 pub mod external_party_tenant;
 pub mod generate_keys_idempotent;
 pub mod generic_vote;

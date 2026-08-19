@@ -8,11 +8,13 @@
 -- that the request previously locked.
 module Governance.TokenIssuance.AcceptBurnRequest where
 
+import DA.Optional (fromOptional)
 import DA.TextMap qualified as TextMap
 
 import Splice.Api.Token.MetadataV1
   (AnyValue(..), ChoiceContext(..), ExtraArgs(..), Metadata)
 
+import Utility.Credential.V0.Credential (Credential)
 import Utility.Registry.App.V0.Model.Burn (BurnRequest, BurnRequest_Accept(..))
 import Utility.Registry.V0.Configuration.Instrument (InstrumentConfiguration)
 import Utility.Registry.V0.Holding.TokenApiUtils
@@ -28,6 +30,7 @@ template AcceptBurnRequest
     instrumentConfigurationCid : ContractId InstrumentConfiguration
     description : Text
     extraArgsMeta : Metadata
+    issuerCredentialCids : Optional [ContractId Credential]
   where
     signatory proposer
     observer governanceParty
@@ -45,7 +48,8 @@ template AcceptBurnRequest
                 [ (instrumentConfigurationContextKey,
                    AV_ContractId $ coerceContractId instrumentConfigurationCid)
                 , (issuerCredentialsContextKey,
-                   AV_List [])
+                   AV_List $ map (AV_ContractId . coerceContractId) $
+                     fromOptional [] issuerCredentialCids)
                 ]
         _ <- exercise burnRequestCid BurnRequest_Accept with
           extraArgs = ExtraArgs with
