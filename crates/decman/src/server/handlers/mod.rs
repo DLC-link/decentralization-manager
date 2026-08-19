@@ -6,6 +6,7 @@ mod keys;
 mod parties;
 mod party_config;
 mod tenant;
+mod token_standard;
 mod workflows;
 
 pub(crate) use auth::{get_auth_config, get_auth_status, grant_rights, test_auth};
@@ -16,15 +17,8 @@ pub use config::NodeConfigResponse;
 pub(crate) use config::{get_network_config, get_node_config, healthz, save_network_config};
 pub(crate) use governance::{
     cancel_confirmation, cancel_proposal, confirm_action, execute_action, expire_confirmation,
-    get_burn_requests_handler, get_coupon_reassignment_delegation, get_credential_offers_handler,
-    get_credentials_handler, get_governance, get_governance_audit, get_governance_chain_audit,
-    get_governance_state, get_holdings_handler, get_instruments_handler, get_known_members,
-    get_mint_requests_handler, get_network_info, get_operator_info, get_packages,
-    get_provider_configurations_handler, get_provider_services_handler,
-    get_registrar_service_requests_handler, get_registrar_services_handler,
-    get_token_standard_contracts, get_transfer_factories_handler,
-    get_transfer_instructions_handler, get_transfer_preapprovals_handler,
-    get_user_services_handler, get_vaults_handler, propose_action, query_contracts_handler,
+    get_coupon_reassignment_delegation, get_governance, get_governance_audit,
+    get_governance_chain_audit, get_governance_state, get_known_members, propose_action,
 };
 // Crate-internal governance helpers reused by the reward-automation module,
 // re-exported here so they are reachable through the private `governance`
@@ -39,6 +33,15 @@ pub(crate) use parties::{
 };
 pub(crate) use party_config::{discover_member_party, get_party_config, save_party_config};
 pub(crate) use tenant::{tenant_onboard, tenant_prepare, tenant_status};
+pub(crate) use token_standard::{
+    get_burn_requests_handler, get_credential_offers_handler, get_credentials_handler,
+    get_holdings_handler, get_instruments_handler, get_mint_requests_handler, get_network_info,
+    get_operator_info, get_packages, get_provider_configurations_handler,
+    get_provider_services_handler, get_registrar_service_requests_handler,
+    get_registrar_services_handler, get_token_standard_contracts, get_transfer_factories_handler,
+    get_transfer_instructions_handler, get_transfer_preapprovals_handler,
+    get_user_services_handler, get_vaults_handler, query_contracts_handler,
+};
 pub(crate) use workflows::{
     cancel_add_party, cancel_change_threshold, cancel_contracts, cancel_dars, cancel_kick,
     cancel_onboarding, cancel_workflow_instance, dismiss_workflow, get_add_party_status,
