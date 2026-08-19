@@ -1455,7 +1455,19 @@ async fn handle_incoming_connection(
                             "Denied Noise request from {sender}: {e}",
                             sender = peer_id_str.as_deref().unwrap_or("<unidentified peer>")
                         );
-                        let mut resp = Response::new(Body::empty());
+                        // Answer WITH the reason rather than an empty body.
+                        // An empty 503 here is indistinguishable at the
+                        // requester from a proxy with no healthy backend, so
+                        // the operator on the other side saw only "message too
+                        // short" (#332). Status stays 503, so an older
+                        // requester behaves exactly as before.
+                        let mut resp = Response::new(Body::from(
+                            Message::new(
+                                MessageType::Error,
+                                format!("request rejected: {e}").into_bytes(),
+                            )
+                            .to_bytes(),
+                        ));
                         *resp.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
                         return Ok(resp);
                     }
@@ -1607,7 +1619,17 @@ async fn handle_incoming_connection(
                                     (None, _) => {
                                         // The named run is gone (cancelled/finished) —
                                         // 503 so the peer's bounded retry gives up.
-                                        let mut resp = Response::new(Body::empty());
+                                        // Says so in the body, so the requester
+                                        // reports the cause rather than an empty reply.
+                                        let mut resp = Response::new(Body::from(
+                                            Message::new(
+                                                MessageType::Error,
+                                                b"no such workflow run on this peer: it was \
+                                                  cancelled or already finished"
+                                                    .to_vec(),
+                                            )
+                                            .to_bytes(),
+                                        ));
                                         *resp.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
                                         return Ok(resp);
                                     }
