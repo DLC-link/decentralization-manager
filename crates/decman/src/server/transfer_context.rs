@@ -436,6 +436,12 @@ struct StoredTransfer {
 
 /// Pull the `transfer` record out of a `TransferProposal` create_arguments.
 fn transfer_record_from_proposal(record: &Record) -> Result<StoredTransfer> {
+    // `record_field` reaches all the way to the `Sum`, so a `transfer` field
+    // that exists but carries `Value { sum: None }` reports as missing rather
+    // than as "not a record", which is what the previous two-step read said.
+    // That is a deliberate narrowing: a field holding no value at all is better
+    // described as missing, nothing outside this module reads these strings,
+    // and the case is pinned by a test below.
     let transfer_record = match record_field(record, "transfer") {
         Some(value::Sum::Record(r)) => r,
         Some(_) => anyhow::bail!("TransferProposal transfer field is not a record"),
@@ -686,6 +692,21 @@ mod tests {
         let proposal = as_record(record(vec![("transfer", text("not a record"))]));
 
         assert_err_contains(transfer_record_from_proposal(&proposal), "is not a record");
+    }
+
+    /// A `transfer` field that is present but carries no value at all.
+    ///
+    /// The previous two-step read called this "is not a record"; going straight
+    /// to the `Sum` calls it missing. Pinned so the wording is a decision rather
+    /// than an accident. Both are errors and neither reaches the parse below.
+    #[test]
+    fn transfer_record_from_proposal_valueless_transfer_field_errs() {
+        let proposal = as_record(record(vec![("transfer", Value { sum: None })]));
+
+        assert_err_contains(
+            transfer_record_from_proposal(&proposal),
+            "missing transfer field",
+        );
     }
 
     #[test]
