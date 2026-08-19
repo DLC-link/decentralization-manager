@@ -108,6 +108,19 @@ pub struct Fixture {
     pub allocation_factory_cid: Option<String>,
     pub instrument_configuration_cid: Option<String>,
 
+    /// These fields hold the registrar decparty and the artifacts its cycles
+    /// pass to each other. Only the dual-governance phase reads them.
+    pub registrar_party_id: Option<String>,
+    pub registrar_rules_contract_id: Option<String>,
+    pub provider_configuration_cid: Option<String>,
+    pub registrar_service_request_cid: Option<String>,
+    pub registrar_service_cid: Option<String>,
+    /// The instrument configuration the registrar decparty provisions. This is
+    /// a different instrument from the one `instrument_configuration_cid`
+    /// holds. The two must not share a field.
+    pub registrar_instrument_configuration_cid: Option<String>,
+    pub registrar_issuer_credential_cids: Vec<String>,
+
     pub p1_member_creds: Option<MemberCreds>,
     pub p2_member_creds: Option<MemberCreds>,
     pub p3_member_creds: Option<MemberCreds>,
@@ -256,6 +269,13 @@ impl Fixture {
             provider_service_cid: None,
             allocation_factory_cid: None,
             instrument_configuration_cid: None,
+            registrar_party_id: None,
+            registrar_rules_contract_id: None,
+            provider_configuration_cid: None,
+            registrar_service_request_cid: None,
+            registrar_service_cid: None,
+            registrar_instrument_configuration_cid: None,
+            registrar_issuer_credential_cids: Vec::new(),
             p1_member_creds,
             p2_member_creds,
             p3_member_creds,
@@ -384,6 +404,13 @@ impl Fixture {
             provider_service_cid: None,
             allocation_factory_cid: None,
             instrument_configuration_cid: None,
+            registrar_party_id: None,
+            registrar_rules_contract_id: None,
+            provider_configuration_cid: None,
+            registrar_service_request_cid: None,
+            registrar_service_cid: None,
+            registrar_instrument_configuration_cid: None,
+            registrar_issuer_credential_cids: Vec::new(),
             p1_member_creds: None,
             p2_member_creds: None,
             p3_member_creds: None,

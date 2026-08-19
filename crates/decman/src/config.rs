@@ -444,7 +444,8 @@ pub fn default_package_config() -> PackageConfig {
         governance_token_custody: Some("#governance-token-custody-v1".to_string()),
         governance_utility_credential: Some("#governance-utility-credential-v1".to_string()),
         governance_utility_onboarding: Some("#governance-utility-onboarding-v1".to_string()),
-        utility_credential: Some("#utility-credential-app-v0".to_string()),
+        utility_credential: Some("#utility-credential-v0".to_string()),
+        utility_credential_app: Some("#utility-credential-app-v0".to_string()),
         utility_registry: Some("#utility-registry-app-v0".to_string()),
         vault: Some("#bitsafe-vault-v0-rc8".to_string()),
         vault_governance: Some("#bitsafe-vault-governance-v0-rc8".to_string()),
@@ -921,6 +922,10 @@ mod tests {
         );
         assert_eq!(
             packages.utility_credential.as_deref(),
+            Some("#utility-credential-v0"),
+        );
+        assert_eq!(
+            packages.utility_credential_app.as_deref(),
             Some("#utility-credential-app-v0"),
         );
         assert_eq!(

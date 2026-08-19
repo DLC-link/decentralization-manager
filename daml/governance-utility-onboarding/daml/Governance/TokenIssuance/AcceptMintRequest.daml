@@ -8,11 +8,13 @@
 -- the original requester.
 module Governance.TokenIssuance.AcceptMintRequest where
 
+import DA.Optional (fromOptional)
 import DA.TextMap qualified as TextMap
 
 import Splice.Api.Token.MetadataV1
   (AnyValue(..), ChoiceContext(..), ExtraArgs(..), Metadata)
 
+import Utility.Credential.V0.Credential (Credential)
 import Utility.Registry.App.V0.Model.Mint (MintRequest, MintRequest_Accept(..))
 import Utility.Registry.V0.Configuration.Instrument (InstrumentConfiguration)
 import Utility.Registry.V0.Holding.TokenApiUtils
@@ -28,6 +30,7 @@ template AcceptMintRequest
     instrumentConfigurationCid : ContractId InstrumentConfiguration
     description : Text
     extraArgsMeta : Metadata
+    issuerCredentialCids : Optional [ContractId Credential]
   where
     signatory proposer
     observer governanceParty
@@ -45,7 +48,8 @@ template AcceptMintRequest
                 [ (instrumentConfigurationContextKey,
                    AV_ContractId $ coerceContractId instrumentConfigurationCid)
                 , (issuerCredentialsContextKey,
-                   AV_List [])
+                   AV_List $ map (AV_ContractId . coerceContractId) $
+                     fromOptional [] issuerCredentialCids)
                 ]
         _ <- exercise mintRequestCid MintRequest_Accept with
           extraArgs = ExtraArgs with

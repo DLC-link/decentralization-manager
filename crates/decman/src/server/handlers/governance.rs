@@ -30,11 +30,12 @@ use crate::{
         chain_audit,
         middleware::require_admin,
         queries::{
-            ContractQueryParams as QueryContractParams, get_credential_offers,
+            ContractQueryParams as QueryContractParams, get_credential_offers, get_credentials,
             get_governance_confirmations, get_governance_state as query_governance_state,
             get_holdings, get_instruments, get_open_burn_requests, get_open_mint_requests,
-            get_open_transfer_instructions, get_provider_services, get_registrar_services,
-            get_transfer_factories, get_user_services, get_vaults, query_contracts_by_template,
+            get_open_transfer_instructions, get_provider_configurations, get_provider_services,
+            get_registrar_service_requests, get_registrar_services, get_transfer_factories,
+            get_user_services, get_vaults, query_contracts_by_template,
             resolve_contract_package_ref, select_input_holdings,
         },
         transfer_context::{
@@ -47,13 +48,14 @@ use crate::{
             BurnRequestsResponse, CancelConfirmationRequest, CancelProposalRequest,
             ChainAuditEntry, ChainAuditQuery, ChainAuditResponse, ConfirmActionRequest,
             ContractQueryResponse, CouponReassignmentDelegationSummary, CredentialOffersResponse,
-            ErrorResponse, ExecuteActionRequest, ExpireConfirmationRequest, GovernanceResponse,
-            GovernanceStateResponse, GovernanceType, HoldingsResponse, InstrumentsResponse,
-            KnownMember, KnownMembersResponse, MessageResponse, MintRequestsResponse, NetworkInfo,
-            OperatorInfo, ProposalType, ProposeActionRequest, ProviderServicesResponse,
-            RegistrarServicesResponse, TransferFactoriesResponse, TransferFactoryInfo,
-            TransferInstructionsResponse, TransferPreapprovalsResponse, UserServicesResponse,
-            VaultsResponse, chain_audit_entry_from_row,
+            CredentialsResponse, ErrorResponse, ExecuteActionRequest, ExpireConfirmationRequest,
+            GovernanceResponse, GovernanceStateResponse, GovernanceType, HoldingsResponse,
+            InstrumentsResponse, KnownMember, KnownMembersResponse, MessageResponse,
+            MintRequestsResponse, NetworkInfo, OperatorInfo, ProposalType, ProposeActionRequest,
+            ProviderConfigurationsResponse, ProviderServicesResponse,
+            RegistrarServiceRequestsResponse, RegistrarServicesResponse, TransferFactoriesResponse,
+            TransferFactoryInfo, TransferInstructionsResponse, TransferPreapprovalsResponse,
+            UserServicesResponse, VaultsResponse, chain_audit_entry_from_row,
         },
     },
     utils,
@@ -108,7 +110,6 @@ pub async fn get_governance(
     let party_id = &query.party_id;
 
     let token = get_party_token(&data, party_id).await;
-    let test_mode = data.test_mode;
 
     let member_party_id = get_member_party_id(&data, party_id).await;
     let packages = packages();
@@ -121,9 +122,7 @@ pub async fn get_governance(
     // PartyToParticipant updates. Falling back to the DNS threshold for
     // historical compatibility only when the gov state isn't reachable.
     let (rules_contract_id, gov_state_threshold, gov_core_out_of_date, gov_core_package_ref) =
-        match query_governance_state(&data.config, party_id, token.clone(), test_mode, &packages)
-            .await
-        {
+        match query_governance_state(&data.config, party_id, token.clone(), &packages).await {
             Ok(Some(state)) => (
                 Some(state.contract_id),
                 Some(state.threshold as usize),
@@ -141,16 +140,7 @@ pub async fn get_governance(
         None => get_party_threshold(&data, party_id).await.unwrap_or(2),
     };
 
-    match get_governance_confirmations(
-        &data.config,
-        party_id,
-        threshold,
-        token,
-        test_mode,
-        &packages,
-    )
-    .await
-    {
+    match get_governance_confirmations(&data.config, party_id, threshold, token, &packages).await {
         Ok((actions, domain_actions)) => HttpResponse::Ok().json(GovernanceResponse {
             actions,
             domain_actions,
@@ -186,10 +176,9 @@ pub async fn get_governance_state(
     let party_id = &query.party_id;
 
     let token = get_party_token(&data, party_id).await;
-    let test_mode = data.test_mode;
     let packages = packages();
 
-    match query_governance_state(&data.config, party_id, token, test_mode, &packages).await {
+    match query_governance_state(&data.config, party_id, token, &packages).await {
         Ok(state) => HttpResponse::Ok().json(GovernanceStateResponse { state }),
         Err(e) => {
             tracing::error!("Failed to fetch governance state: {e}");
@@ -337,10 +326,9 @@ pub async fn get_vaults_handler(
     let party_id = &query.party_id;
 
     let token = get_party_token(&data, party_id).await;
-    let test_mode = data.test_mode;
     let packages = packages();
 
-    match get_vaults(&data.config, party_id, token, test_mode, &packages).await {
+    match get_vaults(&data.config, party_id, token, &packages).await {
         Ok(vaults) => HttpResponse::Ok().json(VaultsResponse { vaults }),
         Err(e) => {
             tracing::error!("Failed to fetch vaults: {e}");
@@ -368,10 +356,9 @@ pub async fn get_provider_services_handler(
     let party_id = &query.party_id;
 
     let token = get_party_token(&data, party_id).await;
-    let test_mode = data.test_mode;
     let packages = packages();
 
-    match get_provider_services(&data.config, party_id, token, test_mode, &packages).await {
+    match get_provider_services(&data.config, party_id, token, &packages).await {
         Ok(services) => HttpResponse::Ok().json(ProviderServicesResponse { services }),
         Err(e) => {
             tracing::error!("Failed to fetch provider services: {e}");
@@ -399,10 +386,9 @@ pub async fn get_user_services_handler(
     let party_id = &query.party_id;
 
     let token = get_party_token(&data, party_id).await;
-    let test_mode = data.test_mode;
     let packages = packages();
 
-    match get_user_services(&data.config, party_id, token, test_mode, &packages).await {
+    match get_user_services(&data.config, party_id, token, &packages).await {
         Ok(services) => HttpResponse::Ok().json(UserServicesResponse { services }),
         Err(e) => {
             tracing::error!("Failed to fetch user services: {e}");
@@ -430,10 +416,9 @@ pub async fn get_credential_offers_handler(
     let party_id = &query.party_id;
 
     let token = get_party_token(&data, party_id).await;
-    let test_mode = data.test_mode;
     let packages = packages();
 
-    match get_credential_offers(&data.config, party_id, token, test_mode, &packages).await {
+    match get_credential_offers(&data.config, party_id, token, &packages).await {
         Ok(credential_offers) => {
             HttpResponse::Ok().json(CredentialOffersResponse { credential_offers })
         }
@@ -441,6 +426,116 @@ pub async fn get_credential_offers_handler(
             tracing::error!("Failed to fetch credential offers: {e}");
             HttpResponse::InternalServerError().json(ErrorResponse {
                 error: format!("Failed to fetch credential offers: {e}"),
+            })
+        }
+    }
+}
+
+/// Get `Credential` contracts visible to the party. The accept mint/burn
+/// request forms list these so the issuer credentials backing the accept can
+/// be picked instead of pasted in by hand.
+#[utoipa::path(
+    tag = "Services",
+    params(GovernanceQuery),
+    responses(
+        (status = 200, description = "Credentials", body = CredentialsResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[get("/credentials")]
+pub async fn get_credentials_handler(
+    data: web::Data<AppState>,
+    query: web::Query<GovernanceQuery>,
+) -> impl Responder {
+    let party_id = &query.party_id;
+
+    let token = get_party_token(&data, party_id).await;
+    let packages = packages();
+
+    match get_credentials(&data.config, party_id, token, &packages).await {
+        Ok(credentials) => HttpResponse::Ok().json(CredentialsResponse { credentials }),
+        Err(e) => {
+            tracing::error!("Failed to fetch credentials: {e}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch credentials: {e}"),
+            })
+        }
+    }
+}
+
+/// Get `RegistrarServiceRequest` contracts visible to the party. The
+/// OnboardRegistrar form lists these so the request backing the onboard can
+/// be picked instead of pasted in by hand.
+#[utoipa::path(
+    tag = "Services",
+    params(GovernanceQuery),
+    responses(
+        (
+            status = 200,
+            description = "Registrar service requests",
+            body = RegistrarServiceRequestsResponse,
+        ),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[get("/registrar-service-requests")]
+pub async fn get_registrar_service_requests_handler(
+    data: web::Data<AppState>,
+    query: web::Query<GovernanceQuery>,
+) -> impl Responder {
+    let party_id = &query.party_id;
+
+    let token = get_party_token(&data, party_id).await;
+    let packages = packages();
+
+    match get_registrar_service_requests(&data.config, party_id, token, &packages).await {
+        Ok(registrar_service_requests) => {
+            HttpResponse::Ok().json(RegistrarServiceRequestsResponse {
+                registrar_service_requests,
+            })
+        }
+        Err(e) => {
+            tracing::error!("Failed to fetch registrar service requests: {e}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch registrar service requests: {e}"),
+            })
+        }
+    }
+}
+
+/// Get `ProviderConfiguration` contracts visible to the party. The
+/// OnboardRegistrar form lists these so the configuration backing the
+/// onboard can be picked instead of pasted in by hand.
+#[utoipa::path(
+    tag = "Services",
+    params(GovernanceQuery),
+    responses(
+        (
+            status = 200,
+            description = "Provider configurations",
+            body = ProviderConfigurationsResponse,
+        ),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[get("/provider-configurations")]
+pub async fn get_provider_configurations_handler(
+    data: web::Data<AppState>,
+    query: web::Query<GovernanceQuery>,
+) -> impl Responder {
+    let party_id = &query.party_id;
+
+    let token = get_party_token(&data, party_id).await;
+    let packages = packages();
+
+    match get_provider_configurations(&data.config, party_id, token, &packages).await {
+        Ok(provider_configurations) => HttpResponse::Ok().json(ProviderConfigurationsResponse {
+            provider_configurations,
+        }),
+        Err(e) => {
+            tracing::error!("Failed to fetch provider configurations: {e}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch provider configurations: {e}"),
             })
         }
     }
@@ -463,10 +558,9 @@ pub async fn get_registrar_services_handler(
     let party_id = &query.party_id;
 
     let token = get_party_token(&data, party_id).await;
-    let test_mode = data.test_mode;
     let packages = packages();
 
-    match get_registrar_services(&data.config, party_id, token, test_mode, &packages).await {
+    match get_registrar_services(&data.config, party_id, token, &packages).await {
         Ok(services) => HttpResponse::Ok().json(RegistrarServicesResponse { services }),
         Err(e) => {
             tracing::error!("Failed to fetch registrar services: {e}");
@@ -594,7 +688,6 @@ pub async fn get_transfer_preapprovals_handler(
 ) -> impl Responder {
     let party_id = &query.party_id;
     let token = get_party_token(&data, party_id).await;
-    let test_mode = data.test_mode;
 
     // Canton Coin: the actual `TransferPreapproval` template lives in
     // `Splice.AmuletRules` (signatories: receiver, provider, dso — gov party
@@ -628,11 +721,10 @@ pub async fn get_transfer_preapprovals_handler(
         config: &crate::config::NodeConfig,
         party: &CantonId,
         token: Option<String>,
-        test_mode: bool,
         params: &QueryContractParams,
         label: &str,
     ) -> usize {
-        match query_contracts_by_template(config, party, token, test_mode, params).await {
+        match query_contracts_by_template(config, party, token, params).await {
             Ok(c) => c.len(),
             Err(e) => {
                 // Template-not-uploaded means there are simply no such
@@ -656,7 +748,6 @@ pub async fn get_transfer_preapprovals_handler(
         &data.config,
         party_id,
         token.clone(),
-        test_mode,
         &cc_preapproval,
         "CC TransferPreapproval",
     )
@@ -665,7 +756,6 @@ pub async fn get_transfer_preapprovals_handler(
         &data.config,
         party_id,
         token.clone(),
-        test_mode,
         &cc_proposal,
         "CC TransferPreapprovalProposal",
     )
@@ -674,7 +764,6 @@ pub async fn get_transfer_preapprovals_handler(
         &data.config,
         party_id,
         token,
-        test_mode,
         &token_params,
         "utility TransferPreapproval",
     )
@@ -707,9 +796,8 @@ pub async fn get_instruments_handler(
     let party_id = &query.party_id;
 
     let token = get_party_token(&data, party_id).await;
-    let test_mode = data.test_mode;
 
-    match get_instruments(&data.config, party_id, token, test_mode).await {
+    match get_instruments(&data.config, party_id, token).await {
         Ok(instruments) => HttpResponse::Ok().json(InstrumentsResponse { instruments }),
         Err(e) => {
             tracing::error!("Failed to fetch instruments: {e}");
@@ -767,8 +855,7 @@ pub async fn get_transfer_factories_handler(
                 .map(|f| f.expected_admin.to_string())
                 .collect();
             existing_admins.insert(party_id.to_string());
-            if let Ok(holdings) = get_holdings(&data.config, party_id, token, data.test_mode).await
-            {
+            if let Ok(holdings) = get_holdings(&data.config, party_id, token).await {
                 for holding in holdings {
                     let admin_str = holding.instrument_admin.to_string();
                     if existing_admins.insert(admin_str) {
@@ -841,9 +928,8 @@ pub async fn get_holdings_handler(
 ) -> impl Responder {
     let party_id = &query.party_id;
     let token = get_party_token(&data, party_id).await;
-    let test_mode = data.test_mode;
 
-    match get_holdings(&data.config, party_id, token, test_mode).await {
+    match get_holdings(&data.config, party_id, token).await {
         Ok(holdings) => HttpResponse::Ok().json(HoldingsResponse { holdings }),
         Err(e) => {
             tracing::error!("Failed to fetch holdings: {e}");
@@ -871,7 +957,6 @@ pub async fn query_contracts_handler(
     let party_id = &query.party_id;
 
     let token = get_party_token(&data, party_id).await;
-    let test_mode = data.test_mode;
 
     let contract_params = QueryContractParams {
         package_id: query.package_id.clone(),
@@ -881,9 +966,7 @@ pub async fn query_contracts_handler(
         active_only: query.active_only,
     };
 
-    match query_contracts_by_template(&data.config, party_id, token, test_mode, &contract_params)
-        .await
-    {
+    match query_contracts_by_template(&data.config, party_id, token, &contract_params).await {
         Ok(contracts) => HttpResponse::Ok().json(ContractQueryResponse { contracts }),
         Err(e) => {
             tracing::error!("Failed to query contracts: {e}");
@@ -1134,7 +1217,7 @@ pub async fn propose_action(
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
     }
-    if let Err(msg) = body.proposal.validate() {
+    if let Err(msg) = body.proposal.validate(&body.party_id) {
         return HttpResponse::BadRequest().json(ErrorResponse {
             error: msg.to_string(),
         });

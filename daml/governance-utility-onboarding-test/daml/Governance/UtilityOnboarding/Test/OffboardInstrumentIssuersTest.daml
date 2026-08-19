@@ -1,0 +1,319 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | These tests cover OffboardInstrumentIssuers: the happy paths, the subject
+-- and claim checks, and each ensure guard.
+module Governance.UtilityOnboarding.Test.OffboardInstrumentIssuersTest where
+
+import DA.Set qualified as Set
+import Daml.Script
+
+import Utility.Credential.V0.Credential (Claim(..), Credential(..))
+
+import Governance.Action (GovernableAction)
+-- Instances only: record-dot access to the execution result's fields.
+import Governance.ExecutionResult ()
+
+import Governance.UtilityOnboarding.DualDecpartyTestUtils
+import Governance.UtilityOnboarding.OffboardInstrumentIssuers
+import Governance.UtilityOnboarding.Utils (partyList)
+
+import TestHarness
+
+data Fixture = Fixture
+  with
+    f : DualGovFixture
+    issuer1CredentialCids : [ContractId Credential]
+    issuer2CredentialCids : [ContractId Credential]
+  deriving (Eq, Show)
+
+-- | Two issuers credentialed at provisioning; offboarding removes one.
+given_two_credentialed_issuers : Script Fixture
+given_two_credentialed_issuers = do
+  f <- givenDualGovernance
+  _ <- setupProvisionedInstrument f [defaultIssuerRequirement f.parties]
+    [f.parties.issuer1, f.parties.issuer2]
+  issuer1CredentialCids <- map fst <$> query @Credential f.parties.issuer1
+  issuer2CredentialCids <- map fst <$> query @Credential f.parties.issuer2
+  pure Fixture with ..
+
+-- | Build one payload row.
+issuerRow : Party -> [ContractId Credential] -> InstrumentIssuerCredentials
+issuerRow instrumentIssuer credentialCids = InstrumentIssuerCredentials with ..
+
+offboardProposal
+  : Fixture -> [InstrumentIssuerCredentials] -> Script (ContractId GovernableAction)
+offboardProposal fx instrumentIssuers = do
+  proposalCid <- submit fx.f.registrarStack.member1 $ createCmd OffboardInstrumentIssuers with
+    governanceParty = fx.f.parties.registrarGov
+    proposer = fx.f.registrarStack.member1
+    instrumentIssuers
+  pure (toInterfaceContractId proposalCid)
+
+-- | Mint a credential the governance party issued and holds, naming `subject`.
+governanceCredential
+  : Fixture -> Text -> [Claim] -> Script (ContractId Credential)
+governanceCredential fx credentialId claims =
+  submit fx.f.parties.registrarGov $ createCmd Credential with
+    issuer = fx.f.parties.registrarGov
+    holder = fx.f.parties.registrarGov
+    id = credentialId
+    description = "Test credential"
+    validFrom = None
+    validUntil = None
+    claims
+    observers = Set.empty
+
+issuerClaim : Party -> Claim
+issuerClaim subjectParty = Claim with
+  subject = partyToText subjectParty
+  property = "role"
+  value = "instrument-issuer"
+
+then_nothing : Fixture -> () -> Script Failures
+then_nothing _ _ = pure []
+
+then_both_kept : Fixture -> () -> Script Failures
+then_both_kept fx _ = do
+  credentials1 <- query @Credential fx.f.parties.issuer1
+  credentials2 <- query @Credential fx.f.parties.issuer2
+  pure $
+    shouldBe "issuer1 credentials kept" 1 (length credentials1) <>
+    shouldBe "issuer2 credentials kept" 1 (length credentials2)
+
+-- * Happy path: issuer1's credentials revoked, issuer2's untouched.
+
+when_offboard_issuer1 : Fixture -> Script ()
+when_offboard_issuer1 fx = do
+  proposalCid <- offboardProposal fx
+    [issuerRow fx.f.parties.issuer1 fx.issuer1CredentialCids]
+  _ <- confirmAndExecuteAs fx.f.parties fx.f.registrarStack proposalCid
+  pure ()
+
+then_issuer1_revoked_issuer2_kept : Fixture -> () -> Script Failures
+then_issuer1_revoked_issuer2_kept fx _ = do
+  credentials1 <- query @Credential fx.f.parties.issuer1
+  credentials2 <- query @Credential fx.f.parties.issuer2
+  pure $
+    shouldBe "issuer1 credentials after offboard" 0 (length credentials1) <>
+    shouldBe "issuer2 credentials after offboard" 1 (length credentials2)
+
+test_when_offboard_issuer1_then_only_their_credentials_revoked = script do
+  run Test with
+    given = given_two_credentialed_issuers
+    when = when_offboard_issuer1
+    then_ = then_issuer1_revoked_issuer2_kept
+
+-- * Two issuers offboarded in one action.
+
+when_offboard_both : Fixture -> Script ()
+when_offboard_both fx = do
+  proposalCid <- offboardProposal fx
+    [ issuerRow fx.f.parties.issuer1 fx.issuer1CredentialCids
+    , issuerRow fx.f.parties.issuer2 fx.issuer2CredentialCids
+    ]
+  _ <- confirmAndExecuteAs fx.f.parties fx.f.registrarStack proposalCid
+  pure ()
+
+then_both_revoked : Fixture -> () -> Script Failures
+then_both_revoked fx _ = do
+  credentials1 <- query @Credential fx.f.parties.issuer1
+  credentials2 <- query @Credential fx.f.parties.issuer2
+  pure $
+    shouldBe "issuer1 credentials" 0 (length credentials1) <>
+    shouldBe "issuer2 credentials" 0 (length credentials2)
+
+test_when_offboard_both_then_all_revoked = script do
+  run Test with
+    given = given_two_credentialed_issuers
+    when = when_offboard_both
+    then_ = then_both_revoked
+
+-- * A credential naming a different subject than its row: the subject check
+-- fails. This is the guard the grouped payload exists to enable.
+
+when_offboard_subject_mismatch : Fixture -> Script ()
+when_offboard_subject_mismatch fx = do
+  mismatchedCid <- governanceCredential fx "subject-mismatch"
+    [issuerClaim fx.f.parties.issuer2]
+  proposalCid <- offboardProposal fx
+    [issuerRow fx.f.parties.issuer1 [mismatchedCid]]
+  confirmThenExecuteMustFail fx.f.parties fx.f.registrarStack proposalCid
+
+test_when_subject_mismatch_then_execute_fails = script do
+  run Test with
+    given = given_two_credentialed_issuers
+    when = when_offboard_subject_mismatch
+    then_ = then_both_kept
+
+-- * Foreign credential (issuer == holder == outsider): checked fetch fails.
+-- registrarGov observes it so the failure is the group check, not visibility.
+
+when_offboard_foreign_credential : Fixture -> Script ()
+when_offboard_foreign_credential fx = do
+  let parties = fx.f.parties
+  foreignCredentialCid <- submit parties.outsider $ createCmd Credential with
+    issuer = parties.outsider
+    holder = parties.outsider
+    id = "foreign-credential"
+    description = "Credential issued outside governance"
+    validFrom = None
+    validUntil = None
+    claims = [issuerClaim parties.issuer1]
+    observers = Set.fromList [parties.registrarGov]
+  proposalCid <- offboardProposal fx
+    [issuerRow parties.issuer1 [foreignCredentialCid]]
+  confirmThenExecuteMustFail fx.f.parties fx.f.registrarStack proposalCid
+
+test_when_foreign_credential_then_execute_fails = script do
+  run Test with
+    given = given_two_credentialed_issuers
+    when = when_offboard_foreign_credential
+    then_ = then_both_kept
+
+-- * Claims naming two subjects: one claim names a party other than the row's
+-- issuer, so the subject check fails.
+
+when_offboard_mixed_subject_credential : Fixture -> Script ()
+when_offboard_mixed_subject_credential fx = do
+  let parties = fx.f.parties
+  mixedCredentialCid <- governanceCredential fx "mixed-subject"
+    [issuerClaim parties.issuer1, issuerClaim parties.issuer2]
+  proposalCid <- offboardProposal fx
+    [issuerRow parties.issuer1 [mixedCredentialCid]]
+  confirmThenExecuteMustFail fx.f.parties fx.f.registrarStack proposalCid
+
+test_when_mixed_subject_credential_then_execute_fails = script do
+  run Test with
+    given = given_two_credentialed_issuers
+    when = when_offboard_mixed_subject_credential
+    then_ = then_both_kept
+
+-- * Claimless credential: attests for nobody, refuse to revoke. Without this
+-- check `all` over an empty claim list would return True.
+
+when_offboard_claimless_credential : Fixture -> Script ()
+when_offboard_claimless_credential fx = do
+  claimlessCredentialCid <- governanceCredential fx "claimless" []
+  proposalCid <- offboardProposal fx
+    [issuerRow fx.f.parties.issuer1 [claimlessCredentialCid]]
+  confirmThenExecuteMustFail fx.f.parties fx.f.registrarStack proposalCid
+
+test_when_claimless_credential_then_execute_fails = script do
+  run Test with
+    given = given_two_credentialed_issuers
+    when = when_offboard_claimless_credential
+    then_ = then_both_kept
+
+-- * An empty row list is refused at creation: the proposal revokes nothing.
+
+when_offboard_no_rows : Fixture -> Script ()
+when_offboard_no_rows fx =
+  submitMustFail fx.f.registrarStack.member1 $ createCmd OffboardInstrumentIssuers with
+    governanceParty = fx.f.parties.registrarGov
+    proposer = fx.f.registrarStack.member1
+    instrumentIssuers = []
+
+test_when_no_rows_then_create_fails = script do
+  run Test with
+    given = given_two_credentialed_issuers
+    when = when_offboard_no_rows
+    then_ = then_both_kept
+
+-- * A row listing no credentials is refused at creation: it revokes nothing.
+
+when_offboard_row_without_cids : Fixture -> Script ()
+when_offboard_row_without_cids fx =
+  submitMustFail fx.f.registrarStack.member1 $ createCmd OffboardInstrumentIssuers with
+    governanceParty = fx.f.parties.registrarGov
+    proposer = fx.f.registrarStack.member1
+    instrumentIssuers = [issuerRow fx.f.parties.issuer1 []]
+
+test_when_row_without_cids_then_create_fails = script do
+  run Test with
+    given = given_two_credentialed_issuers
+    when = when_offboard_row_without_cids
+    then_ = then_both_kept
+
+-- * A party listed in two rows is refused at creation: the rows would have to
+-- be merged for the count in the description to mean anything.
+
+when_offboard_duplicate_party : Fixture -> Script ()
+when_offboard_duplicate_party fx =
+  submitMustFail fx.f.registrarStack.member1 $ createCmd OffboardInstrumentIssuers with
+    governanceParty = fx.f.parties.registrarGov
+    proposer = fx.f.registrarStack.member1
+    instrumentIssuers =
+      [ issuerRow fx.f.parties.issuer1 fx.issuer1CredentialCids
+      , issuerRow fx.f.parties.issuer1 fx.issuer2CredentialCids
+      ]
+
+test_when_duplicate_party_then_create_fails = script do
+  run Test with
+    given = given_two_credentialed_issuers
+    when = when_offboard_duplicate_party
+    then_ = then_both_kept
+
+-- * A duplicated credential cid is refused at creation: the second revoke
+-- would hit an archived contract and fail the whole action at execution.
+
+when_offboard_duplicate_cid : Fixture -> Script ()
+when_offboard_duplicate_cid fx =
+  submitMustFail fx.f.registrarStack.member1 $ createCmd OffboardInstrumentIssuers with
+    governanceParty = fx.f.parties.registrarGov
+    proposer = fx.f.registrarStack.member1
+    instrumentIssuers =
+      [ issuerRow fx.f.parties.issuer1
+          (fx.issuer1CredentialCids <> fx.issuer1CredentialCids)
+      ]
+
+test_when_duplicate_cid_then_create_fails = script do
+  run Test with
+    given = given_two_credentialed_issuers
+    when = when_offboard_duplicate_cid
+    then_ = then_both_kept
+
+-- * Non-member confirm is rejected.
+
+when_outsider_confirms : Fixture -> Script ()
+when_outsider_confirms fx = do
+  proposalCid <- offboardProposal fx
+    [issuerRow fx.f.parties.issuer1 fx.issuer1CredentialCids]
+  outsiderCannotConfirm fx.f.parties fx.f.registrarStack proposalCid
+
+test_when_outsider_confirms_then_rejected = script do
+  run Test with
+    given = given_two_credentialed_issuers
+    when = when_outsider_confirms
+    then_ = then_nothing
+
+-- * The description names the offboarded issuers and the revoke count.
+-- Execution copies it into the GovernanceExecutionResult, and confirmers see
+-- only this text.
+
+when_offboard_both_capturing_description : Fixture -> Script Text
+when_offboard_both_capturing_description fx = do
+  proposalCid <- offboardProposal fx
+    [ issuerRow fx.f.parties.issuer1 fx.issuer1CredentialCids
+    , issuerRow fx.f.parties.issuer2 fx.issuer2CredentialCids
+    ]
+  result <- confirmAndExecuteAs fx.f.parties fx.f.registrarStack proposalCid
+  Some executionResult <-
+    queryContractId fx.f.parties.registrarGov result.executionResultCid
+  pure executionResult.description
+
+-- Party ids are allocated per script run, so the expected text is built with
+-- the same helper the template uses.
+then_description_names_issuers : Fixture -> Text -> Script Failures
+then_description_names_issuers fx description =
+  pure $ shouldBe "executed description"
+    ("Offboard instrument issuers "
+      <> partyList [fx.f.parties.issuer1, fx.f.parties.issuer2]
+      <> " (revoke 2 credentials)")
+    description
+
+test_when_offboard_then_description_names_issuers = script do
+  run Test with
+    given = given_two_credentialed_issuers
+    when = when_offboard_both_capturing_description
+    then_ = then_description_names_issuers

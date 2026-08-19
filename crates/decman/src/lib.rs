@@ -11,6 +11,10 @@ pub mod consts;
 pub mod db;
 pub mod error;
 pub mod noise;
+// The `dec-party-manager` and `gen-types` binaries, plus the `tests/` integration
+// suite, are separate crates from this lib and reach into `server::` (e.g.
+// `server::start_server`, the `gen-types` wire DTOs, `server::GovernanceResponse`),
+// so this module path must stay `pub`.
 pub mod server;
 pub mod signing;
 pub mod utils;

@@ -1,0 +1,188 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | These tests cover CreateProviderConfiguration: the happy path, provider
+-- ownership checks, and the claimless-requirement ensure guard.
+module Governance.UtilityOnboarding.Test.CreateProviderConfigurationTest where
+
+import Daml.Script
+
+import Utility.Credential.V0.Credential (PartyCredentialRequirement(..))
+import Utility.Registry.App.V0.Configuration.Provider (ProviderConfiguration(..))
+import Utility.Registry.App.V0.Service.Provider (ProviderService(..))
+
+import Governance.Action (GovernableAction)
+
+import Governance.UtilityOnboarding.CreateProviderConfiguration
+import Governance.UtilityOnboarding.DualDecpartyTestUtils
+
+import TestHarness
+
+data Fixture = Fixture
+  with
+    f : DualGovFixture
+    providerServiceCid : ContractId ProviderService
+  deriving (Eq, Show)
+
+given_provider_service : Script Fixture
+given_provider_service = do
+  f <- givenDualGovernance
+  providerServiceCid <- setupProviderService f.parties
+  pure Fixture with ..
+
+when_create_provider_configuration : Fixture -> Script ()
+when_create_provider_configuration fx = do
+  proposalCid <- submit fx.f.providerStack.member1 $ createCmd CreateProviderConfiguration with
+    governanceParty = fx.f.parties.providerGov
+    proposer = fx.f.providerStack.member1
+    providerServiceCid = fx.providerServiceCid
+    registrarRequirements = [defaultRegistrarRequirement fx.f.parties]
+    holderRequirements = []
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  _ <- confirmAndExecuteAs fx.f.parties fx.f.providerStack proposalInterfaceCid
+  pure ()
+
+then_configuration_records_requirements : Fixture -> () -> Script Failures
+then_configuration_records_requirements fx _ = do
+  configurations <- query @ProviderConfiguration fx.f.parties.providerGov
+  case configurations of
+    [(_, configuration)] -> pure $
+      shouldBe "registrarRequirements"
+        [defaultRegistrarRequirement fx.f.parties] configuration.registrarRequirements <>
+      shouldBe "holderRequirements" [] configuration.holderRequirements <>
+      shouldBe "provider" fx.f.parties.providerGov configuration.provider <>
+      shouldBe "operator" fx.f.parties.operator configuration.operator
+    _ -> pure $ shouldBe "ProviderConfiguration count" 1 (length configurations)
+
+test_when_create_provider_configuration_then_requirements_recorded = script do
+  run Test with
+    given = given_provider_service
+    when = when_create_provider_configuration
+    then_ = then_configuration_records_requirements
+
+-- * Authorization: a ProviderService owned by a different provider is
+-- refused. The service's provider is the outsider, so the choice's provider
+-- controller rejects the exercise; operator = providerGov keeps the service
+-- fetchable by the governance party, isolating the authorization failure.
+
+when_create_against_foreign_service : Fixture -> Script ()
+when_create_against_foreign_service fx = do
+  let parties = fx.f.parties
+  foreignServiceCid <- submit (actAs parties.outsider <> actAs parties.providerGov) $
+    createCmd ProviderService with
+      operator = parties.providerGov
+      provider = parties.outsider
+  proposalCid <- submit fx.f.providerStack.member1 $ createCmd CreateProviderConfiguration with
+    governanceParty = parties.providerGov
+    proposer = fx.f.providerStack.member1
+    providerServiceCid = foreignServiceCid
+    registrarRequirements = []
+    holderRequirements = []
+  confirmThenExecuteMustFail fx.f.parties fx.f.providerStack (toInterfaceContractId proposalCid)
+
+then_no_configuration : Fixture -> () -> Script Failures
+then_no_configuration fx _ = do
+  configurations <- query @ProviderConfiguration fx.f.parties.providerGov
+  pure $ shouldBe "ProviderConfiguration count" 0 (length configurations)
+
+test_when_foreign_service_then_execute_fails = script do
+  run Test with
+    given = given_provider_service
+    when = when_create_against_foreign_service
+    then_ = then_no_configuration
+
+-- * Non-member confirm is rejected.
+
+when_outsider_confirms : Fixture -> Script ()
+when_outsider_confirms fx = do
+  proposalCid <- submit fx.f.providerStack.member1 $ createCmd CreateProviderConfiguration with
+    governanceParty = fx.f.parties.providerGov
+    proposer = fx.f.providerStack.member1
+    providerServiceCid = fx.providerServiceCid
+    registrarRequirements = []
+    holderRequirements = []
+  outsiderCannotConfirm fx.f.parties fx.f.providerStack (toInterfaceContractId proposalCid)
+
+then_nothing : Fixture -> () -> Script Failures
+then_nothing _ _ = pure []
+
+test_when_outsider_confirms_then_rejected = script do
+  run Test with
+    given = given_provider_service
+    when = when_outsider_confirms
+    then_ = then_nothing
+
+-- * A claimless registrar requirement the provider would self-issue is
+-- refused at creation: the ensure clause rejects the proposal before any
+-- vote. No action archives a ProviderConfiguration, so a bad one would
+-- otherwise persist and fail every OnboardRegistrar that selects it.
+
+when_create_claimless_self_requirement : Fixture -> Script ()
+when_create_claimless_self_requirement fx =
+  submitMustFail fx.f.providerStack.member1 $ createCmd CreateProviderConfiguration with
+    governanceParty = fx.f.parties.providerGov
+    proposer = fx.f.providerStack.member1
+    providerServiceCid = fx.providerServiceCid
+    registrarRequirements = [PartyCredentialRequirement with
+      issuer = fx.f.parties.providerGov
+      requiredClaims = []]
+    holderRequirements = []
+
+test_when_claimless_self_requirement_then_create_fails = script do
+  run Test with
+    given = given_provider_service
+    when = when_create_claimless_self_requirement
+    then_ = then_no_configuration
+
+-- * The ensure clause is narrow: a claimless requirement from an external
+-- issuer is legal. Its credentials arrive out of band, so the governance
+-- party never mints against it.
+
+when_create_claimless_external_requirement : Fixture -> Script ()
+when_create_claimless_external_requirement fx = do
+  let externalClaimless = PartyCredentialRequirement with
+        issuer = fx.f.parties.outsider
+        requiredClaims = []
+  proposalCid <- submit fx.f.providerStack.member1 $ createCmd CreateProviderConfiguration with
+    governanceParty = fx.f.parties.providerGov
+    proposer = fx.f.providerStack.member1
+    providerServiceCid = fx.providerServiceCid
+    registrarRequirements = [externalClaimless]
+    holderRequirements = []
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  _ <- confirmAndExecuteAs fx.f.parties fx.f.providerStack proposalInterfaceCid
+  pure ()
+
+then_one_configuration : Fixture -> () -> Script Failures
+then_one_configuration fx _ = do
+  configurations <- query @ProviderConfiguration fx.f.parties.providerGov
+  pure $ shouldBe "ProviderConfiguration count" 1 (length configurations)
+
+test_when_claimless_external_requirement_then_created = script do
+  run Test with
+    given = given_provider_service
+    when = when_create_claimless_external_requirement
+    then_ = then_one_configuration
+
+-- * The ensure clause is narrow: holder requirements are never minted
+-- against, so a claimless self-issued holder requirement is legal.
+
+when_create_claimless_holder_requirement : Fixture -> Script ()
+when_create_claimless_holder_requirement fx = do
+  proposalCid <- submit fx.f.providerStack.member1 $ createCmd CreateProviderConfiguration with
+    governanceParty = fx.f.parties.providerGov
+    proposer = fx.f.providerStack.member1
+    providerServiceCid = fx.providerServiceCid
+    registrarRequirements = [defaultRegistrarRequirement fx.f.parties]
+    holderRequirements = [PartyCredentialRequirement with
+      issuer = fx.f.parties.providerGov
+      requiredClaims = []]
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  _ <- confirmAndExecuteAs fx.f.parties fx.f.providerStack proposalInterfaceCid
+  pure ()
+
+test_when_claimless_self_holder_requirement_then_created = script do
+  run Test with
+    given = given_provider_service
+    when = when_create_claimless_holder_requirement
+    then_ = then_one_configuration

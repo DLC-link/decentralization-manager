@@ -794,7 +794,7 @@ pub async fn fetch_decentralized_parties(
                 let (contracts, local_metadata) = if token.is_some() || test_mode {
                     tokio::join!(
                         async {
-                            get_contracts(&config, &party_id, token, test_mode, &packages)
+                            get_contracts(&config, &party_id, token, &packages)
                                 .await
                                 .unwrap_or_else(|e| {
                                     tracing::warn!(

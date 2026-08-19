@@ -42,7 +42,11 @@ pub struct PackageConfig {
     pub governance_token_custody: Option<String>,
     pub governance_utility_credential: Option<String>,
     pub governance_utility_onboarding: Option<String>,
+    /// Base credential package; defines the `Credential` template.
     pub utility_credential: Option<String>,
+    /// Credential app package (services, offers). Bundles the base package
+    /// as a dependency but does not define its templates.
+    pub utility_credential_app: Option<String>,
     pub utility_registry: Option<String>,
     pub vault: Option<String>,
     pub vault_governance: Option<String>,
@@ -777,6 +781,39 @@ pub struct Claim {
     pub value: String,
 }
 
+/// One claim a `PartyCredentialRequirement` demands: a credential's claims
+/// must contain this `(property, value)` pair. The Daml side is a
+/// `DA.Types:Tuple2 Text Text`; the wire shape names the halves instead.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct RequiredClaim {
+    pub property: String,
+    pub value: String,
+}
+
+/// A credential requirement on a party: `issuer` must have issued the party
+/// a credential whose claims contain every entry of `required_claims`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct PartyCredentialRequirement {
+    pub issuer: CantonId,
+    #[serde(default)]
+    pub required_claims: Vec<RequiredClaim>,
+}
+
+/// One offboarded instrument issuer and the credentials to revoke for it. The
+/// Daml side checks that every claim on each credential names this issuer.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct InstrumentIssuerCredentials {
+    pub instrument_issuer: CantonId,
+    #[serde(default)]
+    pub credential_cids: Vec<String>,
+}
+
 /// Which governance system a request targets
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -956,7 +993,7 @@ pub struct UserServicesResponse {
 /// `instrument_id` are read off the contract's `defaultIdentifier` field and
 /// match the `InstrumentId { admin, id }` shape required by Mint/Burn
 /// proposals.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct InstrumentInfo {
@@ -966,7 +1003,7 @@ pub struct InstrumentInfo {
 }
 
 /// Response for the instruments endpoint
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct InstrumentsResponse {
@@ -1022,8 +1059,34 @@ pub struct CredentialOffersResponse {
     pub credential_offers: Vec<CredentialOfferInfo>,
 }
 
+/// A `Utility.Credential.V0.Credential:Credential` contract visible to the
+/// party. The accept mint/burn request forms list these so the issuer
+/// credentials backing the accept no longer have to be pasted in by hand.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct CredentialInfo {
+    pub contract_id: String,
+    pub issuer: CantonId,
+    pub holder: CantonId,
+    /// The template's `id` field — the credential's identifier.
+    pub credential_id: String,
+    pub description: String,
+    /// The credential's claims. Each claim's `subject` names the party the
+    /// credential attests for.
+    pub claims: Vec<Claim>,
+}
+
+/// Response for the credentials endpoint
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct CredentialsResponse {
+    pub credentials: Vec<CredentialInfo>,
+}
+
 /// Information about a RegistrarService contract
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct RegistrarServiceInfo {
@@ -1033,11 +1096,58 @@ pub struct RegistrarServiceInfo {
 }
 
 /// Response for the registrar services endpoint
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct RegistrarServicesResponse {
     pub services: Vec<RegistrarServiceInfo>,
+}
+
+/// A pending `RegistrarServiceRequest` contract visible to the party. The
+/// OnboardRegistrar form lists these so the request backing the onboard can
+/// be picked instead of pasted in by hand.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct RegistrarServiceRequestInfo {
+    pub contract_id: String,
+    pub operator: CantonId,
+    pub provider: CantonId,
+    pub registrar: CantonId,
+    /// The request's `createTransferRule` flag. The SDK treats an absent
+    /// flag like `false`, and this field mirrors that reading.
+    pub create_transfer_rule: bool,
+    /// The request's `createAllocationFactory` flag, read like
+    /// `create_transfer_rule`.
+    pub create_allocation_factory: bool,
+}
+
+/// Response for the registrar service requests endpoint
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct RegistrarServiceRequestsResponse {
+    pub registrar_service_requests: Vec<RegistrarServiceRequestInfo>,
+}
+
+/// A `ProviderConfiguration` contract visible to the party. The
+/// OnboardRegistrar form lists these so the configuration backing the
+/// onboard can be picked instead of pasted in by hand.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct ProviderConfigurationInfo {
+    pub contract_id: String,
+    pub operator: CantonId,
+    pub provider: CantonId,
+}
+
+/// Response for the provider configurations endpoint
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct ProviderConfigurationsResponse {
+    pub provider_configurations: Vec<ProviderConfigurationInfo>,
 }
 
 /// A contract ID with its blob

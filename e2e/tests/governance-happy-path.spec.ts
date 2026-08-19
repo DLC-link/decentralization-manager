@@ -148,7 +148,7 @@ test.describe.serial("governance happy path", () => {
       "governance-action-v1-0.1.0.dar",
       "governance-core-v1-0.1.0.dar",
       "governance-token-custody-v1-0.1.0.dar",
-      "governance-utility-onboarding-v1-0.2.0.dar",
+      "governance-utility-onboarding-v1-0.3.0.dar",
     ].map((f) => `${darDir}/${f}`);
 
     await gotoTab(parts.p1, "Packages");
@@ -330,7 +330,18 @@ test.describe.serial("governance happy path", () => {
     // Participants section is expanded by default. The kick control is an
     // icon button (aria-label "Kick participant"; self is "Cannot kick
     // yourself" and disabled). Kick the last non-self participant.
-    const kickBtn = parts.p1.getByRole("button", { name: "Kick participant" }).last();
+    //
+    // Resolve the ROW first and capture its participant uid, so the assertion
+    // at the end can be "this participant is gone" rather than only "the count
+    // dropped" — a count check passes even if the wrong row was removed.
+    const kickableRow = parts.p1
+      .getByTestId("participant-row")
+      .filter({ has: parts.p1.getByRole("button", { name: "Kick participant" }) })
+      .last();
+    await expect(kickableRow).toBeVisible({ timeout: 30_000 });
+    const kickedUid = (await kickableRow.locator("td").first().innerText()).trim();
+    expect(kickedUid).not.toEqual("");
+    const kickBtn = kickableRow.getByRole("button", { name: "Kick participant" });
     await expect(kickBtn).toBeVisible({ timeout: 30_000 });
     await kickBtn.click();
     const dialog = parts.p1.getByRole("dialog");
@@ -352,6 +363,12 @@ test.describe.serial("governance happy path", () => {
       await openParty(parts.p1, partyPrefix!);
       await expect(parts.p1.getByTestId("participant-row")).toHaveCount(2);
       await expect(parts.p1.getByTestId("party-threshold")).toHaveText("2");
+      // The participant that was kicked is the one that is gone. Matched on the
+      // uid text as rendered (CopyableText truncates it), captured from this
+      // same table above, so the comparison is like for like.
+      await expect(
+        parts.p1.getByTestId("participant-row").filter({ hasText: kickedUid }),
+      ).toHaveCount(0);
     }).toPass({ timeout: 120_000, intervals: [5000, 5000, 10_000] });
     await test.info().attach("After kick: party has 2 participants", {
       body: await parts.p1.screenshot({ fullPage: true }), contentType: "image/png",

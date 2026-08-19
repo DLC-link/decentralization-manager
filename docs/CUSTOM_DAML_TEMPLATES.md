@@ -205,7 +205,8 @@ curl http://localhost:8080/packages/compare-peers   # admin-only — catches mis
 ```
 governance_action, governance_core, governance_token_custody,
 governance_utility_credential, governance_utility_onboarding,
-utility_credential, utility_registry, vault, vault_governance
+utility_credential, utility_credential_app, utility_registry,
+vault, vault_governance
 ```
 
 Custom packages are **not** in that map. That is fine — for the `core_domain` flow, only `governance_core` is dereferenced by name (to target `GovernanceRules`); the proposal's own package id is implied by the contract id and never needs to be resolved by DecMan.

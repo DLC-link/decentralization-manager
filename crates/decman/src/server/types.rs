@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, RwLock as StdRwLock},
 };
 
@@ -20,19 +20,22 @@ pub use common::api::{
     AuthStatus, AuthStatusResponse, AuthTestResponse, AuthTestResult, CancelConfirmationRequest,
     CancelProposalRequest, ChainAuditEntry, ChainAuditResponse, ChangeThresholdInvitePayload,
     ChangeThresholdRequest, Claim, ContractQueryResponse, ContractWithBlob, ContractsInvitePayload,
-    ContractsRequest, CouponReassignmentDelegationSummary, CredentialOfferInfo,
-    CredentialOffersResponse, DarsInvitePayload, DarsRequest, DecentralizedPartiesResponse,
-    DeclineInvitationPayload, DisclosedContractInput, DiscoverMemberPartyRequest,
-    DiscoverMemberPartyResponse, ErrorResponse, ExpireConfirmationRequest, ExternalPartiesResponse,
-    ExternalPartyInfo, GovernanceState, GovernanceStateResponse, GovernanceType,
-    GrantRightsRequest, GrantRightsResponse, InstrumentAllowance, InstrumentId,
-    InstrumentIdentifier, InstrumentInfo, InstrumentsResponse, InvitationActionRequest,
-    KeyStatusResponse, KickInvitePayload, KickRequest, KnownMember, KnownMembersResponse,
-    MessageResponse, MissingEdgeKind, MissingPeerEdge, NetworkInfo, OnboardingInvitePayload,
+    ContractsRequest, CouponReassignmentDelegationSummary, CredentialInfo, CredentialOfferInfo,
+    CredentialOffersResponse, CredentialsResponse, DarsInvitePayload, DarsRequest,
+    DecentralizedPartiesResponse, DeclineInvitationPayload, DisclosedContractInput,
+    DiscoverMemberPartyRequest, DiscoverMemberPartyResponse, ErrorResponse,
+    ExpireConfirmationRequest, ExternalPartiesResponse, ExternalPartyInfo, GovernanceState,
+    GovernanceStateResponse, GovernanceType, GrantRightsRequest, GrantRightsResponse,
+    InstrumentAllowance, InstrumentId, InstrumentIdentifier, InstrumentInfo,
+    InstrumentIssuerCredentials, InstrumentsResponse, InvitationActionRequest, KeyStatusResponse,
+    KickInvitePayload, KickRequest, KnownMember, KnownMembersResponse, MessageResponse,
+    MissingEdgeKind, MissingPeerEdge, NetworkInfo, OnboardingInvitePayload,
     OnboardingMeshErrorResponse, OnboardingRequest, OperatorInfo, PartyAuthStatus,
-    PartyConfigRequest, PartyConfigResponse, PendingInvitationsResponse, ProviderServiceInfo,
-    ProviderServicesResponse, RegistrarServiceInfo, RegistrarServicesResponse, ResponseSource,
-    RightsStatus, SuccessResponse, TenantOnboardRequest, TenantOnboardResponse,
+    PartyConfigRequest, PartyConfigResponse, PartyCredentialRequirement,
+    PendingInvitationsResponse, ProviderConfigurationInfo, ProviderConfigurationsResponse,
+    ProviderServiceInfo, ProviderServicesResponse, RegistrarServiceInfo,
+    RegistrarServiceRequestInfo, RegistrarServiceRequestsResponse, RegistrarServicesResponse,
+    ResponseSource, RightsStatus, SuccessResponse, TenantOnboardRequest, TenantOnboardResponse,
     TenantPrepareRequest, TenantPrepareResponse, TransferFactoriesResponse, TransferFactoryInfo,
     TransferPreapprovalsResponse, UserServiceInfo, UserServicesResponse, VaultInfo, VaultsResponse,
     WorkflowResponse, WorkflowRunsResponse, WorkflowStatusResponse,
@@ -41,8 +44,7 @@ pub use common::types::{
     AuditLogEntry, AuthConfigResponse, ConnectionStatus, ContractInfo, DecentralizedParty,
     InvitationType, PackageInfo, ParticipantInfo, ParticipantStatus, ParticipantsStatusResponse,
     PartyMetadata, PeerErrorKind, PeerPackageComparison, PeerPackageResult, PendingInvitation,
-    Permission, VettedPackageInfo, WorkflowInfo, WorkflowKind, WorkflowProgress, WorkflowRole,
-    WorkflowRun,
+    Permission, VettedPackageInfo, WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun,
 };
 
 use crate::{canton_id::CantonId, noise::server::ActiveWorkflow};
@@ -526,6 +528,36 @@ fn validate_timeout(microseconds: i64) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_unique_issuers(issuers: &[CantonId], field: &str) -> Result<(), String> {
+    let mut seen = HashSet::new();
+    for issuer in issuers {
+        if !seen.insert(issuer) {
+            return Err(format!("{field} must not list {issuer} more than once"));
+        }
+    }
+    Ok(())
+}
+
+/// Mirrors the Daml `selfIssuedRequirementsHaveClaims` guard. A requirement the
+/// governance party issues itself must name at least one claim. The mint
+/// refuses a claimless self-issued credential, because it attests for nobody.
+/// Requirements from other issuers are out of scope: those credentials arrive
+/// out of band.
+fn validate_self_issued_requirements_have_claims(
+    requirements: &[PartyCredentialRequirement],
+    governance_party: &CantonId,
+    field: &str,
+) -> Result<(), String> {
+    for requirement in requirements {
+        if requirement.issuer == *governance_party && requirement.required_claims.is_empty() {
+            return Err(format!(
+                "{field}: a requirement issued by the governance party must list at least one required claim"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Reject an epoch-microsecond instant that is not in the future.
 ///
 /// The on-ledger `executeImpl` asserts the same thing, but only at execute
@@ -780,6 +812,11 @@ pub enum ProposalType {
     AcceptMintRequest {
         mint_request_cid: String,
         instrument_configuration_cid: String,
+        /// Credential contract ids proving the mint holder meets the
+        /// instrument's issuer requirements. Empty for instruments without
+        /// issuer requirements.
+        #[serde(default)]
+        issuer_credential_cids: Vec<String>,
         description: String,
     },
     /// Accept a holder-initiated `BurnRequest` via `BurnRequest_Accept`. The
@@ -788,15 +825,75 @@ pub enum ProposalType {
     AcceptBurnRequest {
         burn_request_cid: String,
         instrument_configuration_cid: String,
+        /// Credential contract ids proving the burn holder meets the
+        /// instrument's issuer requirements. Empty for instruments without
+        /// issuer requirements.
+        #[serde(default)]
+        issuer_credential_cids: Vec<String>,
         description: String,
+    },
+    /// Create the provider decparty's `ProviderConfiguration` with
+    /// credential requirements for registrars and holders. Executed once by
+    /// the provider decparty at platform setup.
+    CreateProviderConfiguration {
+        provider_service_cid: String,
+        #[serde(default)]
+        registrar_requirements: Vec<PartyCredentialRequirement>,
+        #[serde(default)]
+        holder_requirements: Vec<PartyCredentialRequirement>,
+    },
+    /// Create a `RegistrarServiceRequest` asking `provider` for registrar
+    /// service, with the governance party as the registrar. The provider
+    /// accepts later via `OnboardRegistrar` on its own decparty.
+    CreateRegistrarServiceRequest {
+        operator: CantonId,
+        provider: CantonId,
+        create_transfer_rule: bool,
+        create_allocation_factory: bool,
+    },
+    /// Accept a `RegistrarServiceRequest` on the provider decparty: mint the
+    /// registrar credentials the governance party can self-issue against the
+    /// `ProviderConfiguration`'s registrar requirements, then accept the
+    /// request in the same vote.
+    OnboardRegistrar {
+        provider_service_cid: String,
+        registrar_service_request_cid: String,
+        provider_configuration_cid: String,
+    },
+    /// Create an `InstrumentConfiguration` on the registrar decparty and
+    /// credential the initial instrument issuers against its issuer
+    /// requirements. Executed once per instrument.
+    ProvisionInstrument {
+        registrar_service_cid: String,
+        instrument_id_text: String,
+        #[serde(default)]
+        additional_identifiers: Vec<InstrumentIdentifier>,
+        #[serde(default)]
+        issuer_requirements: Vec<PartyCredentialRequirement>,
+        #[serde(default)]
+        holder_requirements: Vec<PartyCredentialRequirement>,
+        #[serde(default)]
+        initial_instrument_issuers: Vec<CantonId>,
+    },
+    /// Credential new instrument issuers against an existing
+    /// `InstrumentConfiguration`'s issuer requirements.
+    OnboardInstrumentIssuers {
+        instrument_configuration_cid: String,
+        instrument_issuers: Vec<CantonId>,
+    },
+    /// Revoke the credentials the governance party issued for instrument
+    /// issuers, removing their issuing privileges. Each row names one issuer
+    /// and lists that issuer's credentials.
+    OffboardInstrumentIssuers {
+        instrument_issuers: Vec<InstrumentIssuerCredentials>,
     },
 }
 
 impl ProposalType {
-    /// Validate the proposal's fields. Mirrors `ActionType::validate` —
-    /// catches non-positive token amounts before they reach Canton's Daml
-    /// checks so a 400 surfaces a precise reason rather than a generic
-    /// submission error after a proposal contract is already created.
+    /// Validate the proposal's fields against the governance party the
+    /// proposal targets. Mirrors `ActionType::validate` — catches bad input
+    /// before it reaches Canton's Daml checks so a 400 surfaces a precise
+    /// reason rather than a generic submission error.
     ///
     /// **Propose-path only.** The single production caller is
     /// `handlers::governance::propose_action`, and one arm
@@ -804,7 +901,7 @@ impl ProposalType {
     /// re-validate an already-stored proposal would reject it for nothing but
     /// having aged, so a new call site needs to split the time-dependent arms
     /// out first.
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self, governance_party: &CantonId) -> Result<(), String> {
         match self {
             ProposalType::Transfer {
                 amount,
@@ -844,6 +941,65 @@ impl ProposalType {
                 provider_app_reward_beneficiaries: Some(beneficiaries),
                 ..
             } => validate_beneficiary_weights(beneficiaries),
+            // Mirrors the template's `ensure` guard: onboarding zero issuers
+            // does no work, and a duplicated issuer would mint two
+            // credentials sharing one id. Reject both with a 400 before the
+            // ledger sees the proposal.
+            ProposalType::OnboardInstrumentIssuers {
+                instrument_issuers, ..
+            } => {
+                if instrument_issuers.is_empty() {
+                    return Err("instrument_issuers must not be empty".to_string());
+                }
+                validate_unique_issuers(instrument_issuers, "instrument_issuers")
+            }
+            ProposalType::ProvisionInstrument {
+                initial_instrument_issuers,
+                issuer_requirements,
+                ..
+            } => {
+                validate_self_issued_requirements_have_claims(
+                    issuer_requirements,
+                    governance_party,
+                    "issuer_requirements",
+                )?;
+                validate_unique_issuers(initial_instrument_issuers, "initial_instrument_issuers")
+            }
+            ProposalType::CreateProviderConfiguration {
+                registrar_requirements,
+                ..
+            } => validate_self_issued_requirements_have_claims(
+                registrar_requirements,
+                governance_party,
+                "registrar_requirements",
+            ),
+            ProposalType::OffboardInstrumentIssuers { instrument_issuers } => {
+                if instrument_issuers.is_empty() {
+                    return Err("instrument_issuers must not be empty".to_string());
+                }
+                let mut seen_parties = HashSet::new();
+                let mut seen_cids = HashSet::new();
+                for row in instrument_issuers {
+                    if row.credential_cids.is_empty() {
+                        return Err(format!(
+                            "credential_cids must not be empty for issuer {}",
+                            row.instrument_issuer
+                        ));
+                    }
+                    if !seen_parties.insert(&row.instrument_issuer) {
+                        return Err(format!(
+                            "duplicate instrument issuer not allowed: {}",
+                            row.instrument_issuer
+                        ));
+                    }
+                    for cid in &row.credential_cids {
+                        if !seen_cids.insert(cid) {
+                            return Err(format!("duplicate credential cid not allowed: {cid}"));
+                        }
+                    }
+                }
+                Ok(())
+            }
             ProposalType::SetupCouponReassignmentDelegation {
                 assigners,
                 new_beneficiaries,
@@ -988,6 +1144,12 @@ pub struct DomainGovernanceAction {
     /// is no longer readable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposer: Option<CantonId>,
+    /// Ledger effective time of the proposal's create event, in seconds. The
+    /// notification feed sorts on this, so a proposal holds its place between
+    /// refreshes whether or not anyone has confirmed it. Absent on an orphaned
+    /// card, where the proposal contract is no longer readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<i64>,
 }
 
 /// Operator + counterparty parties extracted from a service-request proposal
@@ -1338,6 +1500,7 @@ pub fn chain_audit_entry_from_row(row: crate::db::rows::ChainAuditCacheRow) -> C
 
 #[cfg(test)]
 mod tests {
+    use common::api::RequiredClaim;
     use serde_json::Value;
     use sqlx::SqlitePool;
 
@@ -1592,12 +1755,179 @@ mod tests {
             input_holding_cids: Vec::new(),
             validity_window_hours: window,
         };
-        assert!(mk("0", None).validate().is_err());
-        assert!(mk("-1.5", None).validate().is_err());
-        assert!(mk("0.0001", None).validate().is_ok());
+        assert!(mk("0", None).validate(&cid("gov")).is_err());
+        assert!(mk("-1.5", None).validate(&cid("gov")).is_err());
+        assert!(mk("0.0001", None).validate(&cid("gov")).is_ok());
         // A custom (positive) window is accepted; a zero-hour window is rejected.
-        assert!(mk("1.0", Some(48)).validate().is_ok());
-        assert!(mk("1.0", Some(0)).validate().is_err());
+        assert!(mk("1.0", Some(48)).validate(&cid("gov")).is_ok());
+        assert!(mk("1.0", Some(0)).validate(&cid("gov")).is_err());
+    }
+
+    #[test]
+    fn proposal_onboard_instrument_issuers_rejects_empty_issuer_list() {
+        // Mirrors the template's `ensure not (null instrumentIssuers)` so the
+        // rejection surfaces as a 400 before the ledger sees the proposal.
+        let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
+        let issuer = CantonId::parse(&format!("issuer::{ns}")).unwrap();
+        let mk = |issuers: Vec<CantonId>| ProposalType::OnboardInstrumentIssuers {
+            instrument_configuration_cid: "icc".to_string(),
+            instrument_issuers: issuers,
+        };
+        assert!(mk(Vec::new()).validate(&cid("gov")).is_err());
+        assert!(mk(vec![issuer]).validate(&cid("gov")).is_ok());
+    }
+
+    #[test]
+    fn proposal_offboard_instrument_issuers_validates_rows() {
+        // Mirrors the template's four ensure guards.
+        let gov = cid("gov");
+        let issuer_a = cid("issuer-a");
+        let issuer_b = cid("issuer-b");
+        let row = |issuer: CantonId, cids: Vec<&str>| InstrumentIssuerCredentials {
+            instrument_issuer: issuer,
+            credential_cids: cids.into_iter().map(str::to_string).collect(),
+        };
+        let mk = |rows: Vec<InstrumentIssuerCredentials>| ProposalType::OffboardInstrumentIssuers {
+            instrument_issuers: rows,
+        };
+
+        // No rows: revokes nothing.
+        assert!(mk(vec![]).validate(&gov).is_err());
+        // A row with no cids: revokes nothing.
+        assert!(
+            mk(vec![row(issuer_a.clone(), vec![])])
+                .validate(&gov)
+                .is_err()
+        );
+        // The same party in two rows.
+        assert!(
+            mk(vec![
+                row(issuer_a.clone(), vec!["cred-1"]),
+                row(issuer_a.clone(), vec!["cred-2"]),
+            ])
+            .validate(&gov)
+            .is_err()
+        );
+        // The same cid in two rows.
+        assert!(
+            mk(vec![
+                row(issuer_a.clone(), vec!["cred-1"]),
+                row(issuer_b.clone(), vec!["cred-1"]),
+            ])
+            .validate(&gov)
+            .is_err()
+        );
+        // The same cid twice inside one row.
+        assert!(
+            mk(vec![row(issuer_a.clone(), vec!["cred-1", "cred-1"])])
+                .validate(&gov)
+                .is_err()
+        );
+        // Two issuers, distinct cids.
+        assert!(
+            mk(vec![
+                row(issuer_a, vec!["cred-1", "cred-2"]),
+                row(issuer_b, vec!["cred-3"]),
+            ])
+            .validate(&gov)
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn proposal_onboard_instrument_issuers_rejects_duplicate_issuers() {
+        // Mirrors the template's `ensure unique instrumentIssuers`: a
+        // duplicated issuer would mint two credentials sharing one id, so
+        // the rejection surfaces as a 400 before the ledger sees it.
+        let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
+        let issuer_a = CantonId::parse(&format!("issuer-a::{ns}")).unwrap();
+        let issuer_b = CantonId::parse(&format!("issuer-b::{ns}")).unwrap();
+        let mk = |issuers: Vec<CantonId>| ProposalType::OnboardInstrumentIssuers {
+            instrument_configuration_cid: "icc".to_string(),
+            instrument_issuers: issuers,
+        };
+        assert!(
+            mk(vec![issuer_a.clone(), issuer_a.clone()])
+                .validate(&cid("gov"))
+                .is_err()
+        );
+        assert!(mk(vec![issuer_a, issuer_b]).validate(&cid("gov")).is_ok());
+    }
+
+    #[test]
+    fn proposal_provision_instrument_rejects_duplicate_initial_issuers() {
+        // Mirrors the template's `ensure unique initialInstrumentIssuers`.
+        // An empty list stays legal: issuers can be onboarded later.
+        let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
+        let issuer_a = CantonId::parse(&format!("issuer-a::{ns}")).unwrap();
+        let issuer_b = CantonId::parse(&format!("issuer-b::{ns}")).unwrap();
+        let mk = |issuers: Vec<CantonId>| ProposalType::ProvisionInstrument {
+            registrar_service_cid: "rsc".to_string(),
+            instrument_id_text: "uuid-1".to_string(),
+            additional_identifiers: vec![],
+            issuer_requirements: vec![],
+            holder_requirements: vec![],
+            initial_instrument_issuers: issuers,
+        };
+        assert!(
+            mk(vec![issuer_a.clone(), issuer_a.clone()])
+                .validate(&cid("gov"))
+                .is_err()
+        );
+        assert!(mk(vec![issuer_a, issuer_b]).validate(&cid("gov")).is_ok());
+        assert!(mk(Vec::new()).validate(&cid("gov")).is_ok());
+    }
+
+    #[test]
+    fn proposal_create_provider_configuration_rejects_claimless_self_issued_requirement() {
+        // Mirrors the template's `selfIssuedRequirementsHaveClaims`. The frontend
+        // prefills a new requirement row as the governance party with no claims,
+        // so the default UI path trips this.
+        let gov = cid("gov");
+        let mk = |issuer: CantonId, claims: Vec<RequiredClaim>| {
+            ProposalType::CreateProviderConfiguration {
+                provider_service_cid: "psc".to_string(),
+                registrar_requirements: vec![PartyCredentialRequirement {
+                    issuer,
+                    required_claims: claims,
+                }],
+                holder_requirements: vec![],
+            }
+        };
+        let claim = RequiredClaim {
+            property: "role".to_string(),
+            value: "registrar".to_string(),
+        };
+        // Self-issued and claimless: rejected.
+        assert!(mk(gov.clone(), vec![]).validate(&gov).is_err());
+        // Self-issued with a claim: accepted.
+        assert!(mk(gov.clone(), vec![claim]).validate(&gov).is_ok());
+        // Issued by another party and claimless: accepted, matching the Daml.
+        assert!(mk(cid("other"), vec![]).validate(&gov).is_ok());
+    }
+
+    #[test]
+    fn proposal_provision_instrument_rejects_claimless_self_issued_requirement() {
+        // The same guard on the other template that carries it in Daml.
+        let gov = cid("gov");
+        let mk = |issuer: CantonId, claims: Vec<RequiredClaim>| ProposalType::ProvisionInstrument {
+            registrar_service_cid: "rsc".to_string(),
+            instrument_id_text: "uuid-1".to_string(),
+            additional_identifiers: vec![],
+            issuer_requirements: vec![PartyCredentialRequirement {
+                issuer,
+                required_claims: claims,
+            }],
+            holder_requirements: vec![],
+            initial_instrument_issuers: vec![],
+        };
+        let claim = RequiredClaim {
+            property: "role".to_string(),
+            value: "instrument-issuer".to_string(),
+        };
+        assert!(mk(gov.clone(), vec![]).validate(&gov).is_err());
+        assert!(mk(gov.clone(), vec![claim]).validate(&gov).is_ok());
+        assert!(mk(cid("other"), vec![]).validate(&gov).is_ok());
     }
 
     /// Test-only helper: builds a `CantonId` with a fixed valid namespace so
@@ -1630,31 +1960,31 @@ mod tests {
             new_beneficiaries: vec![rb("a", "0.8"), rb("b", "0.2")],
             prior_delegation: None,
         };
-        assert!(ok.validate().is_ok());
+        assert!(ok.validate(&cid("gov")).is_ok());
         let no_exec = ProposalType::SetupCouponReassignmentDelegation {
             dso: rb("dso", "1.0").beneficiary,
             assigners: vec![],
             new_beneficiaries: vec![rb("a", "1.0")],
             prior_delegation: None,
         };
-        assert!(no_exec.validate().is_err());
+        assert!(no_exec.validate(&cid("gov")).is_err());
         let bad_sum = ProposalType::SetupCouponReassignmentDelegation {
             dso: rb("dso", "1.0").beneficiary,
             assigners: execs,
             new_beneficiaries: vec![rb("a", "0.5")],
             prior_delegation: None,
         };
-        assert!(bad_sum.validate().is_err());
+        assert!(bad_sum.validate(&cid("gov")).is_err());
         let revoke = ProposalType::RevokeCouponReassignmentDelegation {
             delegation: "00abc".into(),
         };
-        assert!(revoke.validate().is_ok());
+        assert!(revoke.validate(&cid("gov")).is_ok());
         // An empty delegation cid is rejected at the boundary (not left to fail
         // only at ledger submission).
         let revoke_empty = ProposalType::RevokeCouponReassignmentDelegation {
             delegation: "  ".into(),
         };
-        assert!(revoke_empty.validate().is_err());
+        assert!(revoke_empty.validate(&cid("gov")).is_err());
     }
 
     #[test]
@@ -1722,6 +2052,7 @@ mod tests {
                 accept_transfer_details: None,
                 service_request_details: None,
                 proposer: None,
+                created_at: None,
             }],
             threshold: 2,
             member_party_id: None,
@@ -1790,19 +2121,19 @@ mod tests {
         // An expiry in the future is the only accepted shape.
         assert!(
             minting_delegation(now + hour_micros, 10)?
-                .validate()
+                .validate(&cid("gov"))
                 .is_ok()
         );
 
         // Zero and negative are the raw-caller mistakes the DAML assert would
         // otherwise catch only at execute time, after a full governance round.
-        assert!(minting_delegation(0, 10)?.validate().is_err());
-        assert!(minting_delegation(-1, 10)?.validate().is_err());
+        assert!(minting_delegation(0, 10)?.validate(&cid("gov")).is_err());
+        assert!(minting_delegation(-1, 10)?.validate(&cid("gov")).is_err());
 
         // Positive but already past is the same waste, and `> 0` alone misses it.
         assert!(
             minting_delegation(now - hour_micros, 10)?
-                .validate()
+                .validate(&cid("gov"))
                 .is_err()
         );
 
@@ -1810,7 +2141,7 @@ mod tests {
         // is valid, so the new arm did not displace it.
         assert!(
             minting_delegation(now + hour_micros, 0)?
-                .validate()
+                .validate(&cid("gov"))
                 .is_err()
         );
 
