@@ -186,6 +186,15 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
         }
     }
 
+    /// The peers this run marked complete for the current step.
+    ///
+    /// Restored by [`Self::from_persisted`], unlike `peer_data`, so a resumed
+    /// coordinator can reconcile what it has on disk against who it believes
+    /// already uploaded.
+    pub async fn completed_peers(&self) -> HashSet<CantonId> {
+        self.completed_peers.read().await.clone()
+    }
+
     pub async fn store_peer_data(&self, peer_id: CantonId, data: Vec<u8>) {
         let mut peer_data = self.peer_data.write().await;
         peer_data.insert(peer_id, data);
