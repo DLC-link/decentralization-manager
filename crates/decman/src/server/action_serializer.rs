@@ -2265,9 +2265,11 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use common::api::RequiredClaim;
+
     use crate::{
         canton_id::{NAMESPACE_LENGTH, Namespace},
-        server::types::{InstrumentIssuerCredentials, RequiredClaim},
+        server::types::InstrumentIssuerCredentials,
     };
 
     #[test]
