@@ -14,7 +14,7 @@ use std::{
 use canton_common::decimal::DamlDecimal;
 use canton_proto_rs::com::{
     daml::ledger::api::v2::{
-        CreatedEvent, GetEventsByContractIdRequest, Identifier, Record, Value,
+        CreatedEvent, GetEventsByContractIdRequest, Identifier, Record,
         admin::{ListKnownPartiesRequest, ListKnownPartiesResponse},
         value,
     },
@@ -40,6 +40,7 @@ use super::{
     package_inventory::{
         fetch_package_id_to_name, fetch_package_names, newest_matching_names, package_name_prefix,
     },
+    record::{field_record, record_field},
     types::{
         AcceptTransferDetails, ActionType, Claim, ContractInfo, ContractWithBlob, CredentialInfo,
         CredentialOfferInfo, DomainGovernanceAction, GovernanceAction, GovernanceConfirmation,
@@ -880,15 +881,8 @@ fn extract_and_add_confirmation(
     // is missing or the party string isn't a valid CantonId — propagating
     // garbage upstream (the old code used "unknown") makes the consumer
     // fragile.
-    let Some(confirming_party_str) = record
-        .fields
-        .iter()
-        .find(|f| f.label == "confirmingParty" || f.label == "confirmer")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Party(p)) => Some(p.clone()),
-            _ => None,
-        })
+    let Some(confirming_party_str) =
+        field_party(record, "confirmingParty").or_else(|| field_party(record, "confirmer"))
     else {
         tracing::warn!(
             "Skipping confirmation {cid}: missing confirmingParty/confirmer field",
@@ -938,41 +932,18 @@ fn extract_and_add_domain_confirmation(
     };
 
     // Extract actionProposalCid (ContractId)
-    let proposal_cid = record
-        .fields
-        .iter()
-        .find(|f| f.label == "actionProposalCid")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::ContractId(cid)) => Some(cid.clone()),
-            _ => None,
-        })
-        .unwrap_or_default();
+    let proposal_cid = match record_field(record, "actionProposalCid") {
+        Some(value::Sum::ContractId(cid)) => Some(cid.clone()),
+        _ => None,
+    }
+    .unwrap_or_default();
 
     // Extract actionLabel (Text)
-    let action_label = record
-        .fields
-        .iter()
-        .find(|f| f.label == "actionLabel")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Text(t)) => Some(t.clone()),
-            _ => None,
-        })
-        .unwrap_or_default();
+    let action_label = field_text(record, "actionLabel").unwrap_or_default();
 
     // Extract confirmer (Party). Skip the confirmation if missing or
     // malformed (see the off-chain extractor above for the same rationale).
-    let Some(confirmer_str) = record
-        .fields
-        .iter()
-        .find(|f| f.label == "confirmer")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Party(p)) => Some(p.clone()),
-            _ => None,
-        })
-    else {
+    let Some(confirmer_str) = field_party(record, "confirmer") else {
         tracing::warn!(
             "Skipping domain confirmation {cid}: missing confirmer field",
             cid = created.contract_id
@@ -1159,14 +1130,8 @@ fn extract_proposal_info(
     // transfer fields. Capture it here; the post-pass in `fetch_proposal_infos`
     // resolves each cid to an `AcceptTransferDetails` via a per-cid event
     // query so the card can render sender/amount/instrument.
-    let accept_transfer_instruction_cid = record
-        .and_then(|r| {
-            r.fields
-                .iter()
-                .find(|f| f.label == "transferInstructionCid")
-        })
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
+    let accept_transfer_instruction_cid =
+        record.and_then(|r| match record_field(r, "transferInstructionCid") {
             Some(value::Sum::ContractId(cid)) => Some(cid.clone()),
             _ => None,
         });
@@ -1206,28 +1171,12 @@ fn extract_accept_transfer_details_from_view(
         })
     })?;
     let view_record = view.view_value.as_ref()?;
-    let transfer_record = view_record
-        .fields
-        .iter()
-        .find(|f| f.label == "transfer")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Record(r)) => Some(r),
-            _ => None,
-        })?;
+    let transfer_record = field_record(view_record, "transfer")?;
     let sender: CantonId = field_party(transfer_record, "sender")?.parse().ok()?;
     let receiver: CantonId = field_party(transfer_record, "receiver")?.parse().ok()?;
     let amount =
         field_numeric(transfer_record, "amount").and_then(|s| DamlDecimal::parse(&s).ok())?;
-    let instrument_record = transfer_record
-        .fields
-        .iter()
-        .find(|f| f.label == "instrumentId")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Record(r)) => Some(r),
-            _ => None,
-        })?;
+    let instrument_record = field_record(transfer_record, "instrumentId")?;
     let instrument_admin: CantonId = field_party(instrument_record, "admin")?.parse().ok()?;
     let instrument_id = field_text(instrument_record, "id")?;
     Some(AcceptTransferDetails {
@@ -1312,27 +1261,11 @@ async fn resolve_accept_transfer_details(
 /// `TransferProposal`'s `transfer` field. Returns `None` for any proposal
 /// that doesn't have a `transfer` record (every non-transfer template).
 fn extract_transfer_proposal_details(record: &Record) -> Option<TransferProposalDetails> {
-    let transfer_record = record
-        .fields
-        .iter()
-        .find(|f| f.label == "transfer")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Record(r)) => Some(r),
-            _ => None,
-        })?;
+    let transfer_record = field_record(record, "transfer")?;
     let receiver: CantonId = field_party(transfer_record, "receiver")?.parse().ok()?;
     let amount =
         field_numeric(transfer_record, "amount").and_then(|s| DamlDecimal::parse(&s).ok())?;
-    let instrument_record = transfer_record
-        .fields
-        .iter()
-        .find(|f| f.label == "instrumentId")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Record(r)) => Some(r),
-            _ => None,
-        })?;
+    let instrument_record = field_record(transfer_record, "instrumentId")?;
     let instrument_admin: CantonId = field_party(instrument_record, "admin")?.parse().ok()?;
     let instrument_id = field_text(instrument_record, "id")?;
     Some(TransferProposalDetails {
@@ -1547,22 +1480,12 @@ fn extract_governance_state(created: &CreatedEvent) -> Option<GovernanceState> {
     let record = created.create_arguments.as_ref()?;
 
     // Extract governance party (vaultManager for vault, governanceParty for core)
-    let vault_manager: CantonId = record
-        .fields
-        .iter()
-        .find(|f| f.label == "vaultManager" || f.label == "governanceParty")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Party(p)) => p.parse().ok(),
-            _ => None,
-        })?;
+    let vault_manager: CantonId = field_party(record, "vaultManager")
+        .or_else(|| field_party(record, "governanceParty"))
+        .and_then(|p| p.parse().ok())?;
 
     // Extract members (Set Party - stored as GenMap<Party, Unit> inside a Record)
-    let members: Vec<CantonId> = record
-        .fields
-        .iter()
-        .find(|f| f.label == "members")
-        .and_then(|f| f.value.as_ref())
+    let members: Vec<CantonId> = record_field(record, "members")
         .and_then(extract_party_set)
         .unwrap_or_default()
         .into_iter()
@@ -1570,24 +1493,15 @@ fn extract_governance_state(created: &CreatedEvent) -> Option<GovernanceState> {
         .collect();
 
     // Extract threshold (Int)
-    let threshold = record
-        .fields
-        .iter()
-        .find(|f| f.label == "threshold")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Int64(i)) => Some(*i),
-            _ => None,
-        })
-        .unwrap_or(0);
+    let threshold = match record_field(record, "threshold") {
+        Some(value::Sum::Int64(i)) => Some(*i),
+        _ => None,
+    }
+    .unwrap_or(0);
 
     // Extract actionConfirmationTimeout
     // VaultGovernanceRules: Optional RelTime; GovernanceRules: RelTime (non-optional)
-    let timeout = record
-        .fields
-        .iter()
-        .find(|f| f.label == "actionConfirmationTimeout")
-        .and_then(|f| f.value.as_ref())
+    let timeout = record_field(record, "actionConfirmationTimeout")
         .and_then(|v| extract_optional_reltime(v).or_else(|| extract_reltime(v)));
 
     Some(GovernanceState {
@@ -1670,20 +1584,12 @@ async fn fetch_contract_package_ref(
 }
 
 /// Extract a Set Party (DA.Set.Types:Set) which is stored as Record { map: GenMap<Party, Unit> }
-fn extract_party_set(value: &Value) -> Option<Vec<String>> {
-    // Set Party is represented as a Record containing a GenMap
-    match &value.sum {
-        Some(value::Sum::Record(record)) => {
-            // The record should have a "map" field containing the GenMap
-            record
-                .fields
-                .iter()
-                .find(|f| f.label == "map")
-                .and_then(|f| f.value.as_ref())
-                .and_then(extract_genmap_parties)
-        }
+fn extract_party_set(sum: &value::Sum) -> Option<Vec<String>> {
+    match sum {
+        // Set Party is represented as a Record containing a GenMap, under a "map" field.
+        value::Sum::Record(record) => record_field(record, "map").and_then(extract_genmap_parties),
         // Fallback: try as GenMap directly
-        Some(value::Sum::GenMap(gen_map)) => Some(
+        value::Sum::GenMap(gen_map) => Some(
             gen_map
                 .entries
                 .iter()
@@ -1700,9 +1606,9 @@ fn extract_party_set(value: &Value) -> Option<Vec<String>> {
 }
 
 /// Extract parties from a GenMap<Party, Unit>
-fn extract_genmap_parties(value: &Value) -> Option<Vec<String>> {
-    match &value.sum {
-        Some(value::Sum::GenMap(gen_map)) => Some(
+fn extract_genmap_parties(sum: &value::Sum) -> Option<Vec<String>> {
+    match sum {
+        value::Sum::GenMap(gen_map) => Some(
             gen_map
                 .entries
                 .iter()
@@ -1719,29 +1625,26 @@ fn extract_genmap_parties(value: &Value) -> Option<Vec<String>> {
 }
 
 /// Extract Optional RelTime (DA.Time.Types:RelTime is Record { microseconds: Int64 })
-fn extract_optional_reltime(value: &Value) -> Option<i64> {
-    match &value.sum {
-        Some(value::Sum::Optional(opt)) => {
-            opt.value.as_ref().and_then(|v| extract_reltime(v.as_ref()))
-        }
+fn extract_optional_reltime(sum: &value::Sum) -> Option<i64> {
+    match sum {
+        value::Sum::Optional(opt) => opt
+            .value
+            .as_deref()
+            .and_then(|v| v.sum.as_ref())
+            .and_then(extract_reltime),
         _ => None,
     }
 }
 
 /// Extract RelTime (stored as Record { microseconds: Int64 })
-fn extract_reltime(value: &Value) -> Option<i64> {
-    match &value.sum {
-        Some(value::Sum::Record(record)) => record
-            .fields
-            .iter()
-            .find(|f| f.label == "microseconds")
-            .and_then(|f| f.value.as_ref())
-            .and_then(|v| match &v.sum {
-                Some(value::Sum::Int64(i)) => Some(*i),
-                _ => None,
-            }),
+fn extract_reltime(sum: &value::Sum) -> Option<i64> {
+    match sum {
+        value::Sum::Record(record) => match record_field(record, "microseconds") {
+            Some(value::Sum::Int64(i)) => Some(*i),
+            _ => None,
+        },
         // Fallback: try as Int64 directly
-        Some(value::Sum::Int64(i)) => Some(*i),
+        value::Sum::Int64(i) => Some(*i),
         _ => None,
     }
 }
@@ -1794,36 +1697,20 @@ fn extract_vault_info(created: &CreatedEvent) -> Option<VaultInfo> {
     let record = created.create_arguments.as_ref()?;
 
     // Extract vaultConfig (Record with name and shareSymbol)
-    let vault_config = record
-        .fields
-        .iter()
-        .find(|f| f.label == "vaultConfig")
-        .and_then(|f| f.value.as_ref())?;
+    let vault_config = field_record(record, "vaultConfig")?;
 
     let (vault_name, share_symbol) = extract_vault_config(vault_config)?;
 
     // Extract isPaused (Bool)
-    let is_paused = record
-        .fields
-        .iter()
-        .find(|f| f.label == "isPaused")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Bool(b)) => Some(*b),
-            _ => None,
-        })
-        .unwrap_or(false);
+    let is_paused = match record_field(record, "isPaused") {
+        Some(value::Sum::Bool(b)) => Some(*b),
+        _ => None,
+    }
+    .unwrap_or(false);
 
     // Extract vaultManager (Party)
-    let vault_manager: CantonId = record
-        .fields
-        .iter()
-        .find(|f| f.label == "vaultManager")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Party(p)) => p.parse().ok(),
-            _ => None,
-        })?;
+    let vault_manager: CantonId =
+        field_party(record, "vaultManager").and_then(|p| p.parse().ok())?;
 
     Some(VaultInfo {
         contract_id: created.contract_id.clone(),
@@ -1835,33 +1722,10 @@ fn extract_vault_info(created: &CreatedEvent) -> Option<VaultInfo> {
 }
 
 /// Extract vault name and share symbol from VaultConfig record
-fn extract_vault_config(value: &Value) -> Option<(String, String)> {
-    match &value.sum {
-        Some(value::Sum::Record(record)) => {
-            let name = record
-                .fields
-                .iter()
-                .find(|f| f.label == "name")
-                .and_then(|f| f.value.as_ref())
-                .and_then(|v| match &v.sum {
-                    Some(value::Sum::Text(t)) => Some(t.clone()),
-                    _ => None,
-                })?;
-
-            let share_symbol = record
-                .fields
-                .iter()
-                .find(|f| f.label == "shareSymbol")
-                .and_then(|f| f.value.as_ref())
-                .and_then(|v| match &v.sum {
-                    Some(value::Sum::Text(t)) => Some(t.clone()),
-                    _ => None,
-                })?;
-
-            Some((name, share_symbol))
-        }
-        _ => None,
-    }
+fn extract_vault_config(record: &Record) -> Option<(String, String)> {
+    let name = field_text(record, "name")?;
+    let share_symbol = field_text(record, "shareSymbol")?;
+    Some((name, share_symbol))
 }
 
 // ============================================================================
@@ -1913,25 +1777,8 @@ async fn fetch_provider_services_for_template(
 fn extract_provider_service_info(created: &CreatedEvent) -> Option<ProviderServiceInfo> {
     let record = created.create_arguments.as_ref()?;
 
-    let operator: CantonId = record
-        .fields
-        .iter()
-        .find(|f| f.label == "operator")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Party(p)) => p.parse().ok(),
-            _ => None,
-        })?;
-
-    let provider: CantonId = record
-        .fields
-        .iter()
-        .find(|f| f.label == "provider")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Party(p)) => p.parse().ok(),
-            _ => None,
-        })?;
+    let operator: CantonId = field_party(record, "operator").and_then(|p| p.parse().ok())?;
+    let provider: CantonId = field_party(record, "provider").and_then(|p| p.parse().ok())?;
 
     Some(ProviderServiceInfo {
         contract_id: created.contract_id.clone(),
@@ -1985,25 +1832,8 @@ async fn fetch_user_services_for_template(
 fn extract_user_service_info(created: &CreatedEvent) -> Option<UserServiceInfo> {
     let record = created.create_arguments.as_ref()?;
 
-    let operator: CantonId = record
-        .fields
-        .iter()
-        .find(|f| f.label == "operator")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Party(p)) => p.parse().ok(),
-            _ => None,
-        })?;
-
-    let user: CantonId = record
-        .fields
-        .iter()
-        .find(|f| f.label == "user")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Party(p)) => p.parse().ok(),
-            _ => None,
-        })?;
+    let operator: CantonId = field_party(record, "operator").and_then(|p| p.parse().ok())?;
+    let user: CantonId = field_party(record, "user").and_then(|p| p.parse().ok())?;
 
     Some(UserServiceInfo {
         contract_id: created.contract_id.clone(),
@@ -2071,15 +1901,10 @@ fn extract_credential_offer_info(created: &CreatedEvent) -> Option<CredentialOff
     let credential_id = field_text(record, "id")?;
     let description = field_text(record, "description").unwrap_or_default();
 
-    let has_billing_params = record
-        .fields
-        .iter()
-        .find(|f| f.label == "billingParams")
-        .and_then(|f| f.value.as_ref())
-        .is_some_and(|v| match &v.sum {
-            Some(value::Sum::Optional(opt)) => opt.value.is_some(),
-            _ => false,
-        });
+    let has_billing_params = match record_field(record, "billingParams") {
+        Some(value::Sum::Optional(opt)) => opt.value.is_some(),
+        _ => false,
+    };
 
     Some(CredentialOfferInfo {
         contract_id: created.contract_id.clone(),
@@ -2140,29 +1965,24 @@ fn extract_credential_info(created: &CreatedEvent) -> Option<CredentialInfo> {
     let credential_id = field_text(record, "id")?;
     let description = field_text(record, "description").unwrap_or_default();
 
-    let claims = record
-        .fields
-        .iter()
-        .find(|f| f.label == "claims")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::List(l)) => Some(&l.elements),
-            _ => None,
-        })
-        .map(|elements| {
-            elements
-                .iter()
-                .filter_map(|v| match &v.sum {
-                    Some(value::Sum::Record(r)) => Some(Claim {
-                        subject: field_text(r, "subject")?,
-                        property: field_text(r, "property")?,
-                        value: field_text(r, "value")?,
-                    }),
-                    _ => None,
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let claims = match record_field(record, "claims") {
+        Some(value::Sum::List(l)) => Some(&l.elements),
+        _ => None,
+    }
+    .map(|elements| {
+        elements
+            .iter()
+            .filter_map(|v| match &v.sum {
+                Some(value::Sum::Record(r)) => Some(Claim {
+                    subject: field_text(r, "subject")?,
+                    property: field_text(r, "property")?,
+                    value: field_text(r, "value")?,
+                }),
+                _ => None,
+            })
+            .collect()
+    })
+    .unwrap_or_default();
 
     Some(CredentialInfo {
         contract_id: created.contract_id.clone(),
@@ -2223,25 +2043,8 @@ async fn fetch_registrar_services_for_template(
 fn extract_registrar_service_info(created: &CreatedEvent) -> Option<RegistrarServiceInfo> {
     let record = created.create_arguments.as_ref()?;
 
-    let operator: CantonId = record
-        .fields
-        .iter()
-        .find(|f| f.label == "operator")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Party(p)) => p.parse().ok(),
-            _ => None,
-        })?;
-
-    let registrar: CantonId = record
-        .fields
-        .iter()
-        .find(|f| f.label == "registrar")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Party(p)) => p.parse().ok(),
-            _ => None,
-        })?;
+    let operator: CantonId = field_party(record, "operator").and_then(|p| p.parse().ok())?;
+    let registrar: CantonId = field_party(record, "registrar").and_then(|p| p.parse().ok())?;
 
     Some(RegistrarServiceInfo {
         contract_id: created.contract_id.clone(),
@@ -2300,21 +2103,16 @@ async fn fetch_registrar_service_requests_for_template(
 /// Read an `Optional Bool` field. An absent field or a `None` value reads as
 /// `false`, matching the SDK's treatment of the request's flags.
 fn field_optional_bool_or_false(record: &Record, label: &str) -> bool {
-    record
-        .fields
-        .iter()
-        .find(|f| f.label == label)
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Optional(opt)) => {
-                opt.value.as_deref().and_then(|inner| match &inner.sum {
-                    Some(value::Sum::Bool(b)) => Some(*b),
-                    _ => None,
-                })
-            }
-            _ => None,
-        })
-        .unwrap_or(false)
+    match record_field(record, label) {
+        Some(value::Sum::Optional(opt)) => {
+            opt.value.as_deref().and_then(|inner| match &inner.sum {
+                Some(value::Sum::Bool(b)) => Some(*b),
+                _ => None,
+            })
+        }
+        _ => None,
+    }
+    .unwrap_or(false)
 }
 
 /// Extract RegistrarServiceRequestInfo from a RegistrarServiceRequest
@@ -2467,35 +2265,12 @@ async fn fetch_instruments_for_template(
 fn extract_instrument_info(created: &CreatedEvent) -> Option<InstrumentInfo> {
     let record = created.create_arguments.as_ref()?;
 
-    let default_identifier = record
-        .fields
-        .iter()
-        .find(|f| f.label == "defaultIdentifier")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Record(r)) => Some(r),
-            _ => None,
-        })?;
+    let default_identifier = field_record(record, "defaultIdentifier")?;
 
-    let instrument_admin: CantonId = default_identifier
-        .fields
-        .iter()
-        .find(|f| f.label == "source")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Party(p)) => p.parse().ok(),
-            _ => None,
-        })?;
+    let instrument_admin: CantonId =
+        field_party(default_identifier, "source").and_then(|p| p.parse().ok())?;
 
-    let instrument_id: String = default_identifier
-        .fields
-        .iter()
-        .find(|f| f.label == "id")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Text(t)) => Some(t.clone()),
-            _ => None,
-        })?;
+    let instrument_id: String = field_text(default_identifier, "id")?;
 
     Some(InstrumentInfo {
         contract_id: created.contract_id.clone(),
@@ -2630,12 +2405,7 @@ fn extract_transfer_instruction_info(created: &CreatedEvent) -> Option<TransferI
     // pending-internal-workflow (blocked on an admin/registrar action). The UI
     // disables the latter with a "Pending: <party> — <action>" subtitle so
     // operators see the offer exists instead of getting silent "no offers".
-    let status_value = view_record
-        .fields
-        .iter()
-        .find(|f| f.label == "status")
-        .and_then(|f| f.value.as_ref())?;
-    let status_variant = match &status_value.sum {
+    let status_variant = match record_field(view_record, "status") {
         Some(value::Sum::Variant(v)) => v,
         _ => return None,
     };
@@ -2652,8 +2422,7 @@ fn extract_transfer_instruction_info(created: &CreatedEvent) -> Option<TransferI
                     Some(value::Sum::Record(r)) => Some(r),
                     _ => None,
                 })
-                .and_then(|r| r.fields.iter().find(|f| f.label == "pendingActions"))
-                .and_then(|f| f.value.as_ref())
+                .and_then(|r| record_field(r, "pendingActions"))
                 .map(extract_pending_actions)
                 .unwrap_or_default();
             (TransferInstructionStatus::PendingInternalWorkflow, actions)
@@ -2661,15 +2430,7 @@ fn extract_transfer_instruction_info(created: &CreatedEvent) -> Option<TransferI
         _ => return None,
     };
 
-    let transfer_record = view_record
-        .fields
-        .iter()
-        .find(|f| f.label == "transfer")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Record(r)) => Some(r),
-            _ => None,
-        })?;
+    let transfer_record = field_record(view_record, "transfer")?;
 
     transfer_instruction_from_transfer(created, transfer_record, status, pending_actions)
 }
@@ -2696,15 +2457,7 @@ fn transfer_instruction_from_transfer(
     let amount =
         field_numeric(transfer_record, "amount").and_then(|s| DamlDecimal::parse(&s).ok())?;
 
-    let instrument_record = transfer_record
-        .fields
-        .iter()
-        .find(|f| f.label == "instrumentId")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Record(r)) => Some(r),
-            _ => None,
-        })?;
+    let instrument_record = field_record(transfer_record, "instrumentId")?;
     let instrument_admin: CantonId = field_party(instrument_record, "admin")?.parse().ok()?;
     let instrument_id = field_text(instrument_record, "id")?;
 
@@ -2808,28 +2561,12 @@ fn extract_token_request_info(
     payload_field: &str,
 ) -> Option<TokenRequestInfo> {
     let record = created.create_arguments.as_ref()?;
-    let payload = record
-        .fields
-        .iter()
-        .find(|f| f.label == payload_field)
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Record(r)) => Some(r),
-            _ => None,
-        })?;
+    let payload = field_record(record, payload_field)?;
 
     let holder: CantonId = field_party(payload, "holder")?.parse().ok()?;
     let amount = field_numeric(payload, "amount").and_then(|s| DamlDecimal::parse(&s).ok())?;
 
-    let instrument_record = payload
-        .fields
-        .iter()
-        .find(|f| f.label == "instrumentId")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Record(r)) => Some(r),
-            _ => None,
-        })?;
+    let instrument_record = field_record(payload, "instrumentId")?;
     let instrument_admin: CantonId = field_party(instrument_record, "admin")?.parse().ok()?;
     let instrument_id = field_text(instrument_record, "id")?;
 
@@ -2851,16 +2588,7 @@ fn is_execute_before_expired_in_payload(created: &CreatedEvent, payload_field: &
     let Some(record) = created.create_arguments.as_ref() else {
         return false;
     };
-    let Some(payload) = record
-        .fields
-        .iter()
-        .find(|f| f.label == payload_field)
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Record(r)) => Some(r),
-            _ => None,
-        })
-    else {
+    let Some(payload) = field_record(record, payload_field) else {
         return false;
     };
     let Some(execute_before_micros) = field_timestamp(payload, "executeBefore") else {
@@ -2877,10 +2605,10 @@ fn is_execute_before_expired_in_payload(created: &CreatedEvent, payload_field: &
 /// `TransferPendingInternalWorkflow`. Daml `Map` is delivered as a `GenMap` of
 /// key/value pairs; we drop entries with malformed party ids rather than
 /// failing the whole instruction.
-fn extract_pending_actions(value: &Value) -> Vec<PendingAction> {
-    let entries = match &value.sum {
-        Some(value::Sum::GenMap(m)) => &m.entries,
-        Some(value::Sum::TextMap(_)) => return Vec::new(), // party-keyed maps come as GenMap
+fn extract_pending_actions(sum: &value::Sum) -> Vec<PendingAction> {
+    let entries = match sum {
+        value::Sum::GenMap(m) => &m.entries,
+        value::Sum::TextMap(_) => return Vec::new(), // party-keyed maps come as GenMap
         _ => return Vec::new(),
     };
     entries
@@ -2911,39 +2639,24 @@ fn extract_pending_actions(value: &Value) -> Vec<PendingAction> {
 }
 
 fn field_party(record: &Record, label: &str) -> Option<String> {
-    record
-        .fields
-        .iter()
-        .find(|f| f.label == label)
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Party(p)) => Some(p.clone()),
-            _ => None,
-        })
+    match record_field(record, label) {
+        Some(value::Sum::Party(p)) => Some(p.clone()),
+        _ => None,
+    }
 }
 
 fn field_text(record: &Record, label: &str) -> Option<String> {
-    record
-        .fields
-        .iter()
-        .find(|f| f.label == label)
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Text(t)) => Some(t.clone()),
-            _ => None,
-        })
+    match record_field(record, label) {
+        Some(value::Sum::Text(t)) => Some(t.clone()),
+        _ => None,
+    }
 }
 
 fn field_numeric(record: &Record, label: &str) -> Option<String> {
-    record
-        .fields
-        .iter()
-        .find(|f| f.label == label)
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Numeric(n)) => Some(n.clone()),
-            _ => None,
-        })
+    match record_field(record, label) {
+        Some(value::Sum::Numeric(n)) => Some(n.clone()),
+        _ => None,
+    }
 }
 
 /// Returns true if the contract's create-arguments carry an `executeBefore`
@@ -2964,15 +2677,10 @@ fn is_execute_before_expired(created: &CreatedEvent) -> bool {
 }
 
 fn field_timestamp(record: &Record, label: &str) -> Option<i64> {
-    record
-        .fields
-        .iter()
-        .find(|f| f.label == label)
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Timestamp(t)) => Some(*t),
-            _ => None,
-        })
+    match record_field(record, label) {
+        Some(value::Sum::Timestamp(t)) => Some(*t),
+        _ => None,
+    }
 }
 
 // ============================================================================
@@ -3177,29 +2885,16 @@ fn extract_holding_view(created: &CreatedEvent) -> Option<HoldingView> {
     let owner = field_party(view_record, "owner")?;
     let amount = field_numeric(view_record, "amount").and_then(|s| DamlDecimal::parse(&s).ok())?;
 
-    let instrument_record = view_record
-        .fields
-        .iter()
-        .find(|f| f.label == "instrumentId")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Record(r)) => Some(r),
-            _ => None,
-        })?;
+    let instrument_record = field_record(view_record, "instrumentId")?;
     let instrument_admin: CantonId = field_party(instrument_record, "admin")?.parse().ok()?;
     let instrument_id = field_text(instrument_record, "id")?;
 
     // `lock : Optional Lock` — present (`Some`) means the holding is locked for
     // an in-flight transfer/allocation. A missing field is treated as unlocked.
-    let is_locked = view_record
-        .fields
-        .iter()
-        .find(|f| f.label == "lock")
-        .and_then(|f| f.value.as_ref())
-        .is_some_and(|v| match &v.sum {
-            Some(value::Sum::Optional(opt)) => opt.value.is_some(),
-            _ => false,
-        });
+    let is_locked = match record_field(view_record, "lock") {
+        Some(value::Sum::Optional(opt)) => opt.value.is_some(),
+        _ => false,
+    };
 
     Some(HoldingView {
         contract_id: created.contract_id.clone(),
@@ -3345,15 +3040,10 @@ fn extract_preapproval_entries(args: &Record) -> Vec<(String, String)> {
     let Some(admin) = field_party(args, "instrumentAdmin") else {
         return Vec::new();
     };
-    let allowances = args
-        .fields
-        .iter()
-        .find(|f| f.label == "instrumentAllowances")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::List(l)) => Some(&l.elements),
-            _ => None,
-        });
+    let allowances = match record_field(args, "instrumentAllowances") {
+        Some(value::Sum::List(l)) => Some(&l.elements),
+        _ => None,
+    };
     let Some(elements) = allowances else {
         return vec![(admin, PREAPPROVAL_WILDCARD_ID.to_string())];
     };
@@ -3372,7 +3062,10 @@ fn extract_preapproval_entries(args: &Record) -> Vec<(String, String)> {
 
 #[cfg(test)]
 mod tests {
-    use canton_proto_rs::com::daml::ledger::api::v2::admin::{ObjectMeta, PartyDetails};
+    use canton_proto_rs::com::daml::ledger::api::v2::{
+        Value,
+        admin::{ObjectMeta, PartyDetails},
+    };
 
     use super::*;
 
