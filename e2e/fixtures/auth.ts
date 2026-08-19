@@ -17,9 +17,12 @@ export async function getAuthConfig(port: number): Promise<AuthConfig> {
 }
 
 function tokenUrl(cfg: AuthConfig): string {
-  // Mirror src/auth/mod.rs / tests/common/auth.rs: tolerate trailing /auth.
-  const base = cfg.keycloak_host.replace(/\/+$/, "").replace(/\/auth$/, "");
-  return `${base}/auth/realms/${cfg.keycloak_realm}/protocol/openid-connect/token`;
+  // Match DecMan's runtime auth path (src/auth/validators/common.rs::
+  // oidc_issuer_of): Keycloak issues `{url}/realms/{realm}`. KeycloakX serves
+  // no `/auth` prefix, so a deployment that still needs one carries it in the
+  // configured URL rather than having it appended here.
+  const base = cfg.keycloak_host.replace(/\/+$/, "");
+  return `${base}/realms/${cfg.keycloak_realm}/protocol/openid-connect/token`;
 }
 
 export async function fetchRopcTokens(cfg: AuthConfig) {
