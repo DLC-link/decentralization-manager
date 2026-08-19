@@ -17,6 +17,7 @@ mod ledger_paging;
 mod middleware;
 mod package_inventory;
 mod queries;
+mod record;
 mod reward_automation;
 mod transfer_context;
 mod types;
