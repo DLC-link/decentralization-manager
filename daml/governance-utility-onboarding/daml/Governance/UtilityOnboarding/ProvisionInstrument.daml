@@ -1,0 +1,70 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | The registrar decparty creates an InstrumentConfiguration and credentials
+-- the instrument's first issuers.
+--
+-- The registrar decparty runs this action once per instrument. It onboards
+-- later issuers through OnboardInstrumentIssuers.
+module Governance.UtilityOnboarding.ProvisionInstrument where
+
+import DA.Foldable (forA_)
+import DA.List (unique)
+
+import Splice.Util (require)
+import Utility.Credential.V0.Credential (PartyCredentialRequirement)
+import Utility.Registry.App.V0.Service.Registrar
+  (RegistrarService, RegistrarService_CreateInstrumentConfiguration(..))
+import Utility.Registry.Holding.V0.Types (InstrumentIdentifier)
+
+import Governance.Action
+import Governance.UtilityOnboarding.Utils
+  (mintCredentialsMeetingRequirements, partyList, selfIssuedRequirementsHaveClaims)
+
+template ProvisionInstrument
+  with
+    governanceParty : Party
+      -- ^ The registrar decparty. Must equal the RegistrarService's registrar.
+    proposer : Party
+    registrarServiceCid : ContractId RegistrarService
+    instrumentIdText : Text
+    additionalIdentifiers : [InstrumentIdentifier]
+    issuerRequirements : [PartyCredentialRequirement]
+    holderRequirements : [PartyCredentialRequirement]
+    initialInstrumentIssuers : [Party]
+  where
+    signatory proposer
+    observer governanceParty
+    -- We don't allow any claimless self-issued (issuer=holder) requirements, as they will later translate
+    -- into credentials that have no subject (as subject is marked on only the claims in this case).
+    ensure selfIssuedRequirementsHaveClaims governanceParty issuerRequirements
+        && unique initialInstrumentIssuers
+
+    interface instance GovernableAction for ProvisionInstrument where
+      view = GovernableActionView with
+        governanceParty
+        proposer
+        actionLabel = "ProvisionInstrument"
+        -- Voters see only this text; name every party gaining minting rights.
+        description = "Provision instrument " <> instrumentIdText
+          <> case initialInstrumentIssuers of
+               [] -> ", no initial issuers"
+               issuers -> ", initial issuers " <> partyList issuers
+
+      executeImpl = do
+        -- The proposer's authority is in scope during execution. Controller
+        -- authorization alone would therefore accept a service the proposer
+        -- owns. Pin the service to the governance party.
+        registrarService <- fetch registrarServiceCid
+        require "ProvisionInstrument: registrar service registrar does not match the governance party"
+          (registrarService.registrar == governanceParty)
+        _ <- exercise registrarServiceCid RegistrarService_CreateInstrumentConfiguration with
+          instrumentId = instrumentIdText
+          additionalIdentifiers
+          issuerRequirements
+          holderRequirements
+        forA_ initialInstrumentIssuers $ \instrumentIssuer ->
+          mintCredentialsMeetingRequirements
+            governanceParty instrumentIssuer
+            (instrumentIdText <> "-instrument-issuer-credential")
+            issuerRequirements
