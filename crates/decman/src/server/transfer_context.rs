@@ -32,6 +32,7 @@ use crate::{
     config::{Network, NodeConfig},
     error::Result,
     server::event_filters::{interface_filter, party_event_format, wildcard_filter},
+    server::record::record_field,
     utils,
 };
 
@@ -265,35 +266,22 @@ async fn fetch_instruction_registrar(
         .and_then(|v| v.view_value.as_ref())
         .context("Transfer instruction interface view missing")?;
 
-    let instrument_record = view_record
-        .fields
-        .iter()
-        .find(|f| f.label == "transfer")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Record(r)) => Some(r),
+    let instrument_record = record_field(view_record, "transfer")
+        .and_then(|s| match s {
+            value::Sum::Record(r) => Some(r),
             _ => None,
         })
         .and_then(|transfer| {
-            transfer
-                .fields
-                .iter()
-                .find(|f| f.label == "instrumentId")
-                .and_then(|f| f.value.as_ref())
-                .and_then(|v| match &v.sum {
-                    Some(value::Sum::Record(r)) => Some(r),
-                    _ => None,
-                })
+            record_field(transfer, "instrumentId").and_then(|s| match s {
+                value::Sum::Record(r) => Some(r),
+                _ => None,
+            })
         })
         .context("Transfer instruction missing transfer.instrumentId")?;
 
-    let admin = instrument_record
-        .fields
-        .iter()
-        .find(|f| f.label == "admin")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Party(p)) => Some(p.clone()),
+    let admin = record_field(instrument_record, "admin")
+        .and_then(|s| match s {
+            value::Sum::Party(p) => Some(p.clone()),
             _ => None,
         })
         .context("instrumentId missing admin party")?;
@@ -371,13 +359,9 @@ pub async fn maybe_fetch_for_proposal(
     };
 
     if is_accept_transfer {
-        let transfer_instruction_cid = create_args
-            .fields
-            .iter()
-            .find(|f| f.label == "transferInstructionCid")
-            .and_then(|f| f.value.as_ref())
-            .and_then(|v| match &v.sum {
-                Some(value::Sum::ContractId(cid)) => Some(cid.clone()),
+        let transfer_instruction_cid = record_field(&create_args, "transferInstructionCid")
+            .and_then(|s| match s {
+                value::Sum::ContractId(cid) => Some(cid.clone()),
                 _ => None,
             })
             .context("AcceptTransferProposal missing transferInstructionCid field")?;
@@ -452,39 +436,26 @@ struct StoredTransfer {
 
 /// Pull the `transfer` record out of a `TransferProposal` create_arguments.
 fn transfer_record_from_proposal(record: &Record) -> Result<StoredTransfer> {
-    let transfer_value = record
-        .fields
-        .iter()
-        .find(|f| f.label == "transfer")
-        .and_then(|f| f.value.as_ref())
-        .context("TransferProposal missing transfer field")?;
-    let transfer_record = match &transfer_value.sum {
+    let transfer_record = match record_field(record, "transfer") {
         Some(value::Sum::Record(r)) => r,
-        _ => anyhow::bail!("TransferProposal transfer field is not a record"),
+        Some(_) => anyhow::bail!("TransferProposal transfer field is not a record"),
+        None => anyhow::bail!("TransferProposal missing transfer field"),
     };
     let sender = field_party_str(transfer_record, "sender")?;
     let receiver = field_party_str(transfer_record, "receiver")?;
     let amount = DamlDecimal::parse(&field_numeric_str(transfer_record, "amount")?)
         .context("TransferProposal transfer.amount is not a valid Daml decimal")?;
-    let instrument_record = transfer_record
-        .fields
-        .iter()
-        .find(|f| f.label == "instrumentId")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Record(r)) => Some(r),
+    let instrument_record = record_field(transfer_record, "instrumentId")
+        .and_then(|s| match s {
+            value::Sum::Record(r) => Some(r),
             _ => None,
         })
         .context("transfer record missing instrumentId")?;
     let admin = field_party_str(instrument_record, "admin")?;
     let id = field_text_str(instrument_record, "id")?;
-    let input_holding_cids = transfer_record
-        .fields
-        .iter()
-        .find(|f| f.label == "inputHoldingCids")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::List(l)) => Some(
+    let input_holding_cids =
+        record_field(transfer_record, "inputHoldingCids").and_then(|s| match s {
+            value::Sum::List(l) => Some(
                 l.elements
                     .iter()
                     .filter_map(|el| match &el.sum {
@@ -511,54 +482,34 @@ fn transfer_record_from_proposal(record: &Record) -> Result<StoredTransfer> {
 }
 
 fn field_timestamp_micros(record: &Record, label: &str) -> Option<i64> {
-    record
-        .fields
-        .iter()
-        .find(|f| f.label == label)
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Timestamp(t)) => Some(*t),
-            _ => None,
-        })
+    match record_field(record, label) {
+        Some(value::Sum::Timestamp(t)) => Some(*t),
+        _ => None,
+    }
 }
 
 fn field_party_str(record: &Record, label: &str) -> Result<String> {
-    record
-        .fields
-        .iter()
-        .find(|f| f.label == label)
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Party(p)) => Some(p.clone()),
-            _ => None,
-        })
-        .with_context(|| format!("missing party field {label}"))
+    match record_field(record, label) {
+        Some(value::Sum::Party(p)) => Some(p.clone()),
+        _ => None,
+    }
+    .with_context(|| format!("missing party field {label}"))
 }
 
 fn field_text_str(record: &Record, label: &str) -> Result<String> {
-    record
-        .fields
-        .iter()
-        .find(|f| f.label == label)
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Text(t)) => Some(t.clone()),
-            _ => None,
-        })
-        .with_context(|| format!("missing text field {label}"))
+    match record_field(record, label) {
+        Some(value::Sum::Text(t)) => Some(t.clone()),
+        _ => None,
+    }
+    .with_context(|| format!("missing text field {label}"))
 }
 
 fn field_numeric_str(record: &Record, label: &str) -> Result<String> {
-    record
-        .fields
-        .iter()
-        .find(|f| f.label == label)
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Numeric(n)) => Some(n.clone()),
-            _ => None,
-        })
-        .with_context(|| format!("missing numeric field {label}"))
+    match record_field(record, label) {
+        Some(value::Sum::Numeric(n)) => Some(n.clone()),
+        _ => None,
+    }
+    .with_context(|| format!("missing numeric field {label}"))
 }
 
 /// Translate the registry's JSON `DisclosedContract` view into the Ledger
