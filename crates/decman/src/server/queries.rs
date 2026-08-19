@@ -42,11 +42,11 @@ use super::{
     },
     types::{
         AcceptTransferDetails, ActionType, ContractInfo, ContractWithBlob, CredentialOfferInfo,
-        DomainGovernanceAction, GovernanceAction, GovernanceConfirmation, GovernanceState,
-        HoldingInfo, InstrumentInfo, PartyMetadata, PendingAction, ProviderServiceInfo,
-        RegistrarServiceInfo, ServiceRequestDetails, TokenRequestInfo, TransferFactoryInfo,
-        TransferInstructionInfo, TransferInstructionStatus, TransferProposalDetails,
-        UserServiceInfo, VaultInfo,
+        DomainConfirmation, DomainGovernanceAction, GovernanceAction, GovernanceConfirmation,
+        GovernanceState, HoldingInfo, InstrumentInfo, PartyMetadata, PendingAction,
+        ProviderServiceInfo, RegistrarServiceInfo, ServiceRequestDetails, TokenRequestInfo,
+        TransferFactoryInfo, TransferInstructionInfo, TransferInstructionStatus,
+        TransferProposalDetails, UserServiceInfo, VaultInfo,
     },
 };
 
@@ -616,7 +616,7 @@ pub async fn get_governance_confirmations(
     let mut confirmations_by_hash: HashMap<String, (ActionType, Vec<GovernanceConfirmation>)> =
         HashMap::new();
     // Collect domain confirmations grouped by proposal CID (core domain actions)
-    let mut domain_confirmations: HashMap<String, (String, Vec<GovernanceConfirmation>)> =
+    let mut domain_confirmations: HashMap<String, (String, Vec<DomainConfirmation>)> =
         HashMap::new();
     // Map of `contract_id -> ProposalInfo` for every active
     // `GovernableAction` proposal visible to this party on this participant.
@@ -774,7 +774,7 @@ const FALLBACK_PROPOSAL_LABEL: &str = "Proposal";
 /// its card would offer Confirm to a member who already confirmed. Either way,
 /// missing a card for one refresh beats showing a wrong one.
 fn build_domain_actions(
-    domain_confirmations: HashMap<String, (String, Vec<GovernanceConfirmation>)>,
+    domain_confirmations: HashMap<String, (String, Vec<DomainConfirmation>)>,
     mut proposal_infos: HashMap<String, ProposalInfo>,
     proposal_infos_complete: bool,
     domain_confirmations_complete: bool,
@@ -809,7 +809,7 @@ fn build_domain_actions(
                 None => (None, None, None, None, None, None, proposal_infos_complete),
             };
             let mut seen_parties = std::collections::HashSet::new();
-            let unique_confirmations: Vec<GovernanceConfirmation> = confirmations
+            let unique_confirmations: Vec<DomainConfirmation> = confirmations
                 .into_iter()
                 .filter(|c| seen_parties.insert(c.confirming_party.clone()))
                 .collect();
@@ -868,7 +868,7 @@ async fn fetch_governance_with_wildcard(
     party_id: &CantonId,
     token: Option<String>,
     confirmations_by_hash: &mut HashMap<String, (ActionType, Vec<GovernanceConfirmation>)>,
-    domain_confirmations: &mut HashMap<String, (String, Vec<GovernanceConfirmation>)>,
+    domain_confirmations: &mut HashMap<String, (String, Vec<DomainConfirmation>)>,
     proposal_infos: &mut HashMap<String, ProposalInfo>,
 ) -> Result {
     let event_format = party_event_format(party_id, vec![wildcard_filter(false)], true);
@@ -903,7 +903,7 @@ async fn fetch_governance_for_template(
     token: Option<String>,
     template: &TemplateId,
     confirmations_by_hash: &mut HashMap<String, (ActionType, Vec<GovernanceConfirmation>)>,
-    domain_confirmations: &mut HashMap<String, (String, Vec<GovernanceConfirmation>)>,
+    domain_confirmations: &mut HashMap<String, (String, Vec<DomainConfirmation>)>,
 ) -> Result {
     let event_format = party_event_format(
         party_id,
@@ -1015,7 +1015,7 @@ fn extract_and_add_confirmation(
 /// and add it to the domain confirmations map, grouped by actionProposalCid
 fn extract_and_add_domain_confirmation(
     created: &CreatedEvent,
-    domain_confirmations: &mut HashMap<String, (String, Vec<GovernanceConfirmation>)>,
+    domain_confirmations: &mut HashMap<String, (String, Vec<DomainConfirmation>)>,
 ) {
     let Some(record) = &created.create_arguments else {
         return;
@@ -1074,11 +1074,11 @@ fn extract_and_add_domain_confirmation(
         }
     };
 
-    // Use a dummy ActionType for the GovernanceConfirmation struct (domain confirmations
-    // don't have inline actions — they reference a proposal CID instead)
-    let confirmation = GovernanceConfirmation {
+    // Domain confirmations (governance-core `Confirmation`) carry no inline
+    // action on-chain — only `actionProposalCid` and `actionLabel`, both
+    // handled above — so `DomainConfirmation` has no `action` field to fill.
+    let confirmation = DomainConfirmation {
         contract_id: created.contract_id.clone(),
-        action: ActionType::GovernanceSetThreshold { new_threshold: 0 }, // placeholder
         confirming_party,
         created_at: created.created_at.as_ref().map(|t| t.seconds).unwrap_or(0),
         expires_at: field_timestamp(record, "expiresAt")
@@ -4271,10 +4271,9 @@ mod tests {
         CantonId::parse(&format!("gov::{SR_FP}"))
     }
 
-    fn confirmation(confirming_party: &str) -> Result<GovernanceConfirmation> {
-        Ok(GovernanceConfirmation {
+    fn domain_confirmation(confirming_party: &str) -> Result<DomainConfirmation> {
+        Ok(DomainConfirmation {
             contract_id: format!("confirmation-{confirming_party}"),
-            action: ActionType::GovernanceSetThreshold { new_threshold: 0 },
             confirming_party: CantonId::parse(&format!(
                 "{confirming_party}::1220aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             ))?,
@@ -4356,7 +4355,7 @@ mod tests {
             "confirmed-cid".to_string(),
             (
                 "SetupCcPreapproval".to_string(),
-                vec![confirmation("alice")?],
+                vec![domain_confirmation("alice")?],
             ),
         );
         let mut proposal_infos = HashMap::new();
@@ -4396,7 +4395,7 @@ mod tests {
             "missing-cid".to_string(),
             (
                 "SetupCcPreapproval".to_string(),
-                vec![confirmation("alice")?],
+                vec![domain_confirmation("alice")?],
             ),
         );
         let proposal_infos = HashMap::new();
