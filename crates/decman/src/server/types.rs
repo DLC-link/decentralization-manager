@@ -44,8 +44,7 @@ pub use common::types::{
     AuditLogEntry, AuthConfigResponse, ConnectionStatus, ContractInfo, DecentralizedParty,
     InvitationType, PackageInfo, ParticipantInfo, ParticipantStatus, ParticipantsStatusResponse,
     PartyMetadata, PeerErrorKind, PeerPackageComparison, PeerPackageResult, PendingInvitation,
-    Permission, VettedPackageInfo, WorkflowInfo, WorkflowKind, WorkflowProgress, WorkflowRole,
-    WorkflowRun,
+    Permission, VettedPackageInfo, WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun,
 };
 
 use crate::{canton_id::CantonId, noise::server::ActiveWorkflow};
