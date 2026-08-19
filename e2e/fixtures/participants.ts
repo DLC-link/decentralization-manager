@@ -1,19 +1,91 @@
 import { expect, type Browser, type Page, type Locator } from "@playwright/test";
 import { getAuthConfig, fetchRopcTokens, seedAuth } from "./auth.js";
 
+// --- Shared polling / fetch helpers ----------------------------------------
+
+/** Poll `fn` until it returns a value, or throw naming `label` and the last
+ *  reason it did not. `fn` returns `undefined` to keep polling; it may also
+ *  report *why* by writing to `reason`, which the timeout message quotes.
+ *  Replaces three near-identical hand-rolled loops. */
+export async function pollUntil<T>(
+  label: string,
+  fn: (reason: (why: string) => void) => Promise<T | undefined>,
+  opts: { timeoutMs?: number; intervalMs?: number } = {},
+): Promise<T> {
+  const timeoutMs = opts.timeoutMs ?? 90_000;
+  const intervalMs = opts.intervalMs ?? 3000;
+  const deadline = Date.now() + timeoutMs;
+  let last = "no attempt completed";
+  const reason = (why: string) => { last = why; };
+  while (Date.now() < deadline) {
+    try {
+      const got = await fn(reason);
+      if (got !== undefined) return got;
+    } catch (e) {
+      last = String(e);
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  throw new Error(`${label} after ${Math.round(timeoutMs / 1000)}s (${last})`);
+}
+
+/** Bearer-authenticated fetch against a node. Pass `token` to reuse one across
+ *  a poll; omit it and a fresh ROPC token is minted per call. Throws on a
+ *  non-2xx, with the status and body, so no caller repeats that check. */
+export async function authedFetch(
+  port: number,
+  path: string,
+  init: RequestInit & { token?: string } = {},
+): Promise<Response> {
+  const { token, headers, ...rest } = init;
+  const tok = token ?? (await bearer(port));
+  const res = await fetch(`http://localhost:${port}${path}`, {
+    ...rest,
+    headers: { ...(headers ?? {}), authorization: `Bearer ${tok}` },
+  });
+  if (!res.ok) {
+    throw new Error(`${path} on :${port} → ${res.status}: ${await res.text()}`);
+  }
+  return res;
+}
+
+// The only error worth retrying: the coordinator allows one in-flight workflow
+// at a time and releases the guard just after the prior run's card flips to
+// completed. Backend text is "A workflow with instance <name> is already
+// running" (handlers/workflows.rs).
+const RETRYABLE_SUBMIT_ERROR = /already running|already in progress/i;
+
 // Click a workflow-start submit button (in a dialog that closes on success),
-// retrying the transient "Another workflow is already running" 409 — the
-// coordinator allows one in-flight workflow at a time and the guard releases
-// just after the prior run's card flips to completed. A persistent error (e.g.
-// a real mesh hole / bad config) keeps the dialog open and surfaces on timeout.
+// retrying the transient 409 above.
+//
+// Any OTHER error the dialog surfaces is terminal — a mesh hole, bad config, a
+// rejected payload — so it fails immediately with that text instead of
+// re-clicking for the full 90s and reporting only "timed out". A wrong config
+// used to cost 90 seconds and say nothing about why.
 export async function submitAndAwaitClose(dialog: Locator, submitName: string | RegExp) {
   const btn = dialog.getByRole("button", { name: submitName });
   await expect(btn).toBeEnabled({ timeout: 15_000 });
+  // Set when the dialog shows an error that retrying cannot clear. The callback
+  // then RESOLVES rather than throwing, because a throw inside `toPass` is just
+  // another retry — resolving ends the loop at once and we rethrow below.
+  let fatal: string | undefined;
   await expect(async () => {
+    if (fatal) return;
     if (await dialog.isHidden()) return;
     await btn.click();
+    const alert = dialog.getByRole("alert");
+    if (await alert.first().isVisible().catch(() => false)) {
+      const text = (await alert.allInnerTexts()).join(" ").trim();
+      if (text && !RETRYABLE_SUBMIT_ERROR.test(text)) {
+        fatal = text;
+        return;
+      }
+    }
     await expect(dialog).toBeHidden({ timeout: 8_000 });
   }).toPass({ timeout: 90_000, intervals: [3000, 3000, 5000] });
+  if (fatal) {
+    throw new Error(`submit "${submitName}" failed with a non-retryable error: ${fatal}`);
+  }
 }
 
 export const PORTS = { p1: 8081, p2: 8082, p3: 8083 } as const;
@@ -101,32 +173,25 @@ export async function expectWorkflowCompleted(page: Page, prefix: string, kind?:
 // force a refresh, so a brand-new party lags there). Used to thread state to
 // downstream phases.
 export async function resolvePartyId(port: number, prefix: string): Promise<string> {
-  const cfg = await getAuthConfig(port);
   // One token for the whole poll (ROPC tokens last minutes) — avoids ~30
   // password-grant requests at Keycloak over a 90s poll.
-  const { access_token } = await fetchRopcTokens(cfg);
-  const deadline = Date.now() + 90_000;
-  let last = "no response";
+  const token = await bearer(port);
   // A freshly-onboarded party can lag the topology view briefly even with
   // refresh=true, so poll until it surfaces.
-  while (Date.now() < deadline) {
-    const res = await fetch(
-      `http://localhost:${port}/decentralized-parties?prefix=${encodeURIComponent(prefix)}&refresh=true`,
-      { headers: { authorization: `Bearer ${access_token}` } },
+  return pollUntil(`party with prefix ${prefix} not found on :${port}`, async (reason) => {
+    const res = await authedFetch(
+      port,
+      `/decentralized-parties?prefix=${encodeURIComponent(prefix)}&refresh=true`,
+      { token },
     );
-    if (res.ok) {
-      const data = await res.json();
-      const party = (data.parties ?? []).find((p: { party_id?: string }) =>
-        (p.party_id ?? "").startsWith(`${prefix}::`),
-      );
-      if (party) return party.party_id as string;
-      last = "not in topology yet";
-    } else {
-      last = `status ${res.status}`;
-    }
-    await new Promise((r) => setTimeout(r, 3000));
-  }
-  throw new Error(`party with prefix ${prefix} not found on :${port} after 90s (${last})`);
+    const data = await res.json();
+    const party = (data.parties ?? []).find((p: { party_id?: string }) =>
+      (p.party_id ?? "").startsWith(`${prefix}::`),
+    );
+    if (party) return party.party_id as string;
+    reason("not in topology yet");
+    return undefined;
+  });
 }
 
 // --- Governance hybrid helpers ---------------------------------------------
@@ -145,23 +210,17 @@ async function bearer(port: number): Promise<string> {
 interface DomainAction { proposal_cid: string; can_execute?: boolean; confirmations?: { contract_id: string }[]; }
 
 async function govConfirmations(port: number, partyId: string, token?: string): Promise<DomainAction[]> {
-  const tok = token ?? await bearer(port);
-  const res = await fetch(
-    `http://localhost:${port}/governance/confirmations?party_id=${encodeURIComponent(partyId)}`,
-    { headers: { authorization: `Bearer ${tok}` } },
+  const res = await authedFetch(
+    port,
+    `/governance/confirmations?party_id=${encodeURIComponent(partyId)}`,
+    { token },
   );
-  if (!res.ok) throw new Error(`/governance/confirmations on :${port} → ${res.status}`);
   return (await res.json()).domain_actions ?? [];
 }
 
 // GovernanceRules contract id for a party (from /governance/state).
 export async function govRulesContractId(port: number, partyId: string): Promise<string> {
-  const tok = await bearer(port);
-  const res = await fetch(
-    `http://localhost:${port}/governance/state?party_id=${encodeURIComponent(partyId)}`,
-    { headers: { authorization: `Bearer ${tok}` } },
-  );
-  if (!res.ok) throw new Error(`/governance/state on :${port} → ${res.status}`);
+  const res = await authedFetch(port, `/governance/state?party_id=${encodeURIComponent(partyId)}`);
   const cid = (await res.json())?.state?.contract_id;
   if (!cid) throw new Error(`no GovernanceRules contract for ${partyId} on :${port}`);
   return cid;
@@ -173,17 +232,12 @@ export async function govRulesContractId(port: number, partyId: string): Promise
 // loudly here instead of silently confirming/executing the wrong CID.
 export async function waitForProposalCid(port: number, partyId: string): Promise<string> {
   const tok = await bearer(port); // one token for the whole poll
-  let last = "none";
-  const deadline = Date.now() + 90_000;
-  while (Date.now() < deadline) {
-    try {
-      const actions = await govConfirmations(port, partyId, tok);
-      if (actions.length === 1 && actions[0].proposal_cid) return actions[0].proposal_cid;
-      last = `${actions.length} actions`;
-    } catch (e) { last = String(e); }
-    await new Promise((r) => setTimeout(r, 3000));
-  }
-  throw new Error(`expected exactly one pending proposal on :${port}; after 90s saw ${last}`);
+  return pollUntil(`expected exactly one pending proposal on :${port}`, async (reason) => {
+    const actions = await govConfirmations(port, partyId, tok);
+    if (actions.length === 1 && actions[0].proposal_cid) return actions[0].proposal_cid;
+    reason(`${actions.length} actions`);
+    return undefined;
+  });
 }
 
 // `action` is required by the /governance/{confirm,execute} request schema but
@@ -195,44 +249,35 @@ const THRESHOLD_ACTION = { type: "governance_set_threshold", new_threshold: 1 };
 
 // Confirm the proposal as this node's member (mirrors IT propose_confirm_execute).
 export async function govConfirm(port: number, partyId: string, rulesCid: string, proposalCid: string) {
-  const tok = await bearer(port);
-  const res = await fetch(`http://localhost:${port}/governance/confirm`, {
+  await authedFetch(port, "/governance/confirm", {
     method: "POST",
-    headers: { authorization: `Bearer ${tok}`, "content-type": "application/json" },
+    headers: { "content-type": "application/json" },
     body: JSON.stringify({
       party_id: partyId, rules_contract_id: rulesCid,
       action: THRESHOLD_ACTION, governance_type: "core_domain", proposal_cid: proposalCid,
     }),
   });
-  if (!res.ok) throw new Error(`/governance/confirm on :${port} → ${res.status}: ${await res.text()}`);
 }
 
 // Poll until the proposal is executable; return its confirmation contract ids.
 export async function waitForExecutable(port: number, partyId: string, proposalCid: string): Promise<string[]> {
   const tok = await bearer(port); // one token for the whole poll
-  let last = "none";
-  const deadline = Date.now() + 90_000;
-  while (Date.now() < deadline) {
-    try {
-      const a = (await govConfirmations(port, partyId, tok)).find((x) => x.proposal_cid === proposalCid && x.can_execute);
-      if (a) return (a.confirmations ?? []).map((c) => c.contract_id);
-      last = "not executable yet";
-    } catch (e) { last = String(e); }
-    await new Promise((r) => setTimeout(r, 3000));
-  }
-  throw new Error(`proposal ${proposalCid} not executable on :${port} after 90s (${last})`);
+  return pollUntil(`proposal ${proposalCid} not executable on :${port}`, async (reason) => {
+    const a = (await govConfirmations(port, partyId, tok)).find((x) => x.proposal_cid === proposalCid && x.can_execute);
+    if (a) return (a.confirmations ?? []).map((c) => c.contract_id);
+    reason("not executable yet");
+    return undefined;
+  });
 }
 
 export async function govExecute(port: number, partyId: string, rulesCid: string, proposalCid: string, confirmationCids: string[]) {
-  const tok = await bearer(port);
-  const res = await fetch(`http://localhost:${port}/governance/execute`, {
+  await authedFetch(port, "/governance/execute", {
     method: "POST",
-    headers: { authorization: `Bearer ${tok}`, "content-type": "application/json" },
+    headers: { "content-type": "application/json" },
     body: JSON.stringify({
       party_id: partyId, rules_contract_id: rulesCid, action: THRESHOLD_ACTION,
       confirmation_cids: confirmationCids, disclosed_contracts: [],
       governance_type: "core_domain", proposal_cid: proposalCid,
     }),
   });
-  if (!res.ok) throw new Error(`/governance/execute on :${port} → ${res.status}: ${await res.text()}`);
 }

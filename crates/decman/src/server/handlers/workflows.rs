@@ -898,19 +898,11 @@ pub async fn start_add_party(
         });
     }
 
-    if !data.workflows.insert(instance.clone()) {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format!(
-                "A workflow with instance {} is already running",
-                instance.instance_name
-            ),
-        });
-    }
-
-    if let Err(e) = insert_coordinator_run(
-        &data.db,
-        &instance_name,
-        WorkflowKind::AddParty,
+    // Register + persist atomically w.r.t. duplicates (registry insert dedups
+    // before the upsert; a persist failure unregisters so nothing leaks).
+    if let Err(resp) = register_and_persist(
+        &data,
+        &instance,
         AddPartyStep::WaitingForPeers,
         &add_party_config,
         &invitees,
@@ -918,11 +910,7 @@ pub async fn start_add_party(
     )
     .await
     {
-        data.workflows.remove(&instance_name);
-        tracing::warn!("Failed to persist add-party workflow run: {e:#}");
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format!("Failed to start add-party workflow: {e}"),
-        });
+        return resp;
     }
 
     let invitees_for_invites = invitees.clone();

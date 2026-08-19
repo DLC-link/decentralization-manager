@@ -668,6 +668,12 @@ pub async fn get_governance_confirmations(
     // we skip orphan-marking below to avoid surfacing a flood of false
     // orphans to the user.
     let mut proposal_infos_complete = true;
+    // Whether `domain_confirmations` reflects every active `GovernanceConfirmation`
+    // for this party. A confirmation query that fails leaves a confirmed
+    // proposal looking untouched, and synthesizing it as a zero-confirmation
+    // card would offer Confirm to a member who has already confirmed. Skip
+    // synthesis in that case and wait for a refresh that reads cleanly.
+    let mut domain_confirmations_complete = true;
 
     if test_mode {
         tracing::debug!("Using WildcardFilter for governance query (test mode)");
@@ -711,6 +717,7 @@ pub async fn get_governance_confirmations(
                             t.module_name,
                             t.entity_name
                         );
+                        domain_confirmations_complete = false;
                     }
                 }
             }
@@ -719,7 +726,9 @@ pub async fn get_governance_confirmations(
         if let Err(e) =
             fetch_proposal_infos(config, party_id, token, packages, &mut proposal_infos).await
         {
-            tracing::debug!("Could not fetch proposal infos: {e}");
+            // Warn, not debug: this drops every unconfirmed card from the page,
+            // and the operator needs to know why the queue looks empty.
+            tracing::warn!("Could not fetch proposal infos: {e}");
             proposal_infos_complete = false;
         }
     }
@@ -762,12 +771,53 @@ pub async fn get_governance_confirmations(
         })
         .collect();
 
-    // Build domain actions from domain confirmations. Confirmations whose
-    // proposal isn't in this participant's active set are marked `orphaned`
-    // (rather than dropped) so the UI can offer a dismiss-only card — the
-    // underlying Confirmation contracts are still on-ledger and need to be
-    // expired explicitly to clear them.
-    let domain_actions: Vec<DomainGovernanceAction> = domain_confirmations
+    let domain_actions = build_domain_actions(
+        domain_confirmations,
+        proposal_infos,
+        proposal_infos_complete,
+        domain_confirmations_complete,
+        threshold,
+        now_seconds,
+    );
+
+    Ok((actions, domain_actions))
+}
+
+/// Label used for a proposal synthesized from a bare `GovernableAction` when
+/// nothing names it — no `actionLabel` in the interface view or the
+/// create-arguments, and no template id on the event either.
+const FALLBACK_PROPOSAL_LABEL: &str = "Proposal";
+
+/// Merge confirmed domain proposals with the full active-proposal set.
+///
+/// `domain_confirmations` covers only proposals that already have at least
+/// one `GovernanceConfirmation`; `proposal_infos` covers every active
+/// `GovernableAction` visible to the party, confirmed or not. Confirmations
+/// whose proposal isn't in `proposal_infos` are marked `orphaned` (rather
+/// than dropped) so the UI can offer a dismiss-only card — the underlying
+/// Confirmation contracts are still on-ledger and need to be expired
+/// explicitly to clear them.
+///
+/// Whatever remains in `proposal_infos` after the confirmed proposals are
+/// enriched and removed is a proposal nobody has confirmed yet. Those are
+/// synthesized into zero-confirmation cards so a freshly created proposal is
+/// visible and confirmable from the notifications queue, instead of staying
+/// invisible until its first confirmation lands.
+///
+/// Synthesis needs both fetches to have succeeded. Without the full proposal
+/// set we can't tell a genuinely new proposal from one we failed to enrich.
+/// Without the full confirmation set a confirmed proposal looks untouched, and
+/// its card would offer Confirm to a member who already confirmed. Either way,
+/// missing a card for one refresh beats showing a wrong one.
+fn build_domain_actions(
+    domain_confirmations: HashMap<String, (String, Vec<GovernanceConfirmation>)>,
+    mut proposal_infos: HashMap<String, ProposalInfo>,
+    proposal_infos_complete: bool,
+    domain_confirmations_complete: bool,
+    threshold: usize,
+    now_seconds: i64,
+) -> Vec<DomainGovernanceAction> {
+    let mut domain_actions: Vec<DomainGovernanceAction> = domain_confirmations
         .into_iter()
         .map(|(proposal_cid, (action_label, mut confirmations))| {
             confirmations.sort_by_key(|c| Reverse(c.created_at));
@@ -778,8 +828,9 @@ pub async fn get_governance_confirmations(
                 description,
                 transfer_details,
                 accept_transfer_details,
-                service_request_info,
+                service_request_details,
                 proposer,
+                created_at,
                 orphaned,
             ) = match proposal_infos.remove(&proposal_cid) {
                 Some(info) => (
@@ -788,17 +839,10 @@ pub async fn get_governance_confirmations(
                     info.accept_transfer,
                     info.service_request,
                     info.proposer,
+                    info.created_at,
                     false,
                 ),
-                None => (None, None, None, None, None, proposal_infos_complete),
-            };
-            // Service-request parties are only meaningful on the two
-            // service-request proposal kinds; clear them otherwise so an
-            // unrelated proposal that happens to carry operator/provider
-            // parties doesn't render a misleading summary.
-            let service_request_details = match action_label.as_str() {
-                "CreateUserServiceRequest" | "CreateProviderServiceRequest" => service_request_info,
-                _ => None,
+                None => (None, None, None, None, None, None, proposal_infos_complete),
             };
             let mut seen_parties = std::collections::HashSet::new();
             let unique_confirmations: Vec<GovernanceConfirmation> = confirmations
@@ -822,11 +866,36 @@ pub async fn get_governance_confirmations(
                 accept_transfer_details,
                 service_request_details,
                 proposer,
+                created_at,
             }
         })
         .collect();
 
-    Ok((actions, domain_actions))
+    if proposal_infos_complete && domain_confirmations_complete {
+        for (proposal_cid, info) in proposal_infos {
+            let action_label = info
+                .action_label
+                .unwrap_or_else(|| FALLBACK_PROPOSAL_LABEL.to_string());
+            domain_actions.push(DomainGovernanceAction {
+                proposal_cid,
+                action_label,
+                description: info.description,
+                confirmations: Vec::new(),
+                confirmation_count: 0,
+                can_execute: false,
+                orphaned: false,
+                transfer_details: info.transfer,
+                accept_transfer_details: info.accept_transfer,
+                service_request_details: info.service_request,
+                // A proposal nobody has confirmed is the likeliest one to
+                // retract, so the card needs its proposer as much as any other.
+                proposer: info.proposer,
+                created_at: info.created_at,
+            });
+        }
+    }
+
+    domain_actions
 }
 
 /// Fetch governance confirmations using WildcardFilter (for test mode)
@@ -855,7 +924,7 @@ async fn fetch_governance_with_wildcard(
             }
         } else {
             // Capture proposal info from GovernableAction contracts
-            extract_proposal_info(&created, proposal_infos);
+            extract_proposal_info(&created, party_id, proposal_infos);
         }
     })
     .await?;
@@ -1060,11 +1129,11 @@ fn extract_and_add_domain_confirmation(
         .push(confirmation);
 }
 
-/// Per-proposal info pulled out of a `GovernableAction` contract's
-/// `create_arguments`. `description` mirrors the `description` field on
-/// every proposal; `transfer` is populated only for `TransferProposal`
-/// templates so the notifications queue can render recipient/amount/
-/// instrument on the card without a follow-up fetch.
+/// Per-proposal info pulled out of a `GovernableAction` contract. `description`
+/// and `action_label` come from the interface view, which every proposal
+/// implements; `transfer` is populated only for `TransferProposal` templates so
+/// the notifications queue can render recipient/amount/instrument on the card
+/// without a follow-up fetch.
 ///
 /// `accept_transfer_instruction_cid` is captured for `AcceptTransferProposal`
 /// templates (they only carry the linked `TransferInstruction` cid, not the
@@ -1079,69 +1148,143 @@ pub struct ProposalInfo {
     pub accept_transfer: Option<AcceptTransferDetails>,
     /// Operator + user/provider parties, populated only for
     /// `Create{User,Provider}ServiceRequest` proposals so the notification card
-    /// can render the full summary.
+    /// can render the full summary. `extract_proposal_info` enforces that, so a
+    /// consumer renders this field without re-checking the label.
     pub service_request: Option<ServiceRequestDetails>,
+    /// `actionLabel` from the `GovernableActionView` interface view, falling
+    /// back to a same-named create-argument field and then to the template's
+    /// own name. `None` only when the event carries no template id either.
+    pub action_label: Option<String>,
     /// The member who created the proposal. Only that member controls
     /// `GovernableAction_ProposerCancel`, so the card offers the retract
     /// button on this field alone. `None` when the party id fails to parse.
     pub proposer: Option<CantonId>,
+    /// Seconds of the create event's ledger effective time. The feed sorts
+    /// cards on this, so a proposal keeps its place across refreshes even
+    /// before its first confirmation exists.
+    pub created_at: Option<i64>,
 }
 
-/// Extract proposal info from a GovernableAction contract's create_arguments.
+/// Pull the `GovernableAction` interface view off a created event. Canton
+/// only fills this in when the query asked for it with an `InterfaceFilter`,
+/// so a wildcard fetch (test mode) always gets `None`.
+fn governable_action_view(created: &CreatedEvent) -> Option<&Record> {
+    created
+        .interface_views
+        .iter()
+        .find(|v| {
+            v.interface_id.as_ref().is_some_and(|id| {
+                id.module_name == "Governance.Action" && id.entity_name == "GovernableAction"
+            })
+        })?
+        .view_value
+        .as_ref()
+}
+
+/// Whether a contract's create-arguments carry the two fields every
+/// in-repo proposal template declares. Used only when no interface view is
+/// available: a wildcard fetch returns every contract the party can see, so
+/// something has to keep unrelated templates out of the proposal map.
+fn looks_like_governable_action(record: &Record) -> bool {
+    let has = |label: &str| record.fields.iter().any(|f| f.label == label);
+    has("governanceParty") && has("proposer")
+}
+
+/// Extract proposal info from a `GovernableAction` contract.
 ///
-/// Looks for a `description` field (Text) and, for `TransferProposal`
-/// contracts, the nested `transfer` record. Only captures it if the
-/// contract has the `governanceParty` + `proposer` fields shared by every
-/// governable action (avoids matching unrelated contracts in wildcard
-/// mode).
+/// The interface view is the authoritative source: Canton only attaches one
+/// to a contract that really implements `GovernableAction`, and the view
+/// carries `actionLabel` and `description` even for templates that compute
+/// them rather than store them. Its presence is therefore enough to capture
+/// the contract, whatever package declared the template and however that
+/// template names its own fields.
+///
+/// A wildcard fetch (test mode) carries no view, so it falls back to the
+/// field-shape heuristic and to create-arguments for the same values.
+///
+/// `governance_party` is the decentralized party the caller is querying for.
+/// Being able to see a proposal does not mean governing it: another package
+/// may name our party as an observer on a proposal some other governance party
+/// controls. Our members hold no authority there, so Confirm would be rejected
+/// on-ledger. Such a proposal is dropped rather than shown.
 fn extract_proposal_info(
     created: &CreatedEvent,
+    governance_party: &CantonId,
     proposal_infos: &mut HashMap<String, ProposalInfo>,
 ) {
-    let Some(record) = &created.create_arguments else {
-        return;
-    };
+    let view = governable_action_view(created);
+    let record = created.create_arguments.as_ref();
 
-    // Only capture contracts that look like GovernableAction proposals
-    let has_governance_party = record.fields.iter().any(|f| f.label == "governanceParty");
-    let has_proposer = record.fields.iter().any(|f| f.label == "proposer");
-
-    if !has_governance_party || !has_proposer {
+    if view.is_none() && !record.is_some_and(looks_like_governable_action) {
         return;
     }
 
-    let description = record
-        .fields
-        .iter()
-        .find(|f| f.label == "description")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Text(t)) => Some(t.clone()),
-            _ => None,
+    // Absent rather than mismatched is not a rejection: a wildcard fetch of a
+    // template that computes the field in its view has nothing to compare.
+    let governs = view
+        .and_then(|v| field_party(v, "governanceParty"))
+        .or_else(|| record.and_then(|r| field_party(r, "governanceParty")));
+    if let Some(ref found) = governs
+        && found != &governance_party.to_string()
+    {
+        tracing::debug!(
+            "Skipping proposal {cid}: governed by {found}, not {governance_party}",
+            cid = created.contract_id
+        );
+        return;
+    }
+
+    let description = view
+        .and_then(|v| field_text(v, "description"))
+        .or_else(|| record.and_then(|r| field_text(r, "description")));
+
+    // Read from the view first for the same reason the label and description
+    // do: the interface declares `proposer`, so the view always carries it,
+    // while a template may compute it instead of storing a field.
+    let proposer = view
+        .and_then(|v| field_party(v, "proposer"))
+        .or_else(|| record.and_then(|r| field_party(r, "proposer")))
+        .and_then(|p| match CantonId::parse(&p) {
+            Ok(id) => Some(id),
+            Err(e) => {
+                tracing::warn!(
+                    "Proposal {cid} carries an unparseable proposer '{p}': {e}",
+                    cid = created.contract_id
+                );
+                None
+            }
         });
 
-    let proposer = field_party(record, "proposer").and_then(|p| match CantonId::parse(&p) {
-        Ok(id) => Some(id),
-        Err(e) => {
-            tracing::warn!(
-                "Proposal {cid} carries an unparseable proposer '{p}': {e}",
-                cid = created.contract_id
-            );
-            None
-        }
-    });
+    let transfer = record.and_then(extract_transfer_proposal_details);
+    // The template name is a poor label next to the view's `actionLabel`, but
+    // it beats a generic placeholder and it needs no per-package knowledge.
+    let action_label = view
+        .and_then(|v| field_text(v, "actionLabel"))
+        .or_else(|| record.and_then(|r| field_text(r, "actionLabel")))
+        .or_else(|| created.template_id.as_ref().map(|t| t.entity_name.clone()));
 
-    let transfer = extract_transfer_proposal_details(record);
-    let service_request = extract_service_request_details(record);
+    // `extract_service_request_details` matches on field shape — an `operator`
+    // plus a `user` or a `provider` — so an unrelated proposal carrying those
+    // names would yield a misleading party summary. Onboarding is only what
+    // these two actions do, so gate on the label here and let every consumer
+    // trust the field.
+    let service_request = match action_label.as_deref() {
+        Some("CreateUserServiceRequest") | Some("CreateProviderServiceRequest") => {
+            record.and_then(extract_service_request_details)
+        }
+        _ => None,
+    };
 
     // `AcceptTransferProposal`s carry `transferInstructionCid` instead of the
     // transfer fields. Capture it here; the post-pass in `fetch_proposal_infos`
     // resolves each cid to an `AcceptTransferDetails` via a per-cid event
     // query so the card can render sender/amount/instrument.
     let accept_transfer_instruction_cid = record
-        .fields
-        .iter()
-        .find(|f| f.label == "transferInstructionCid")
+        .and_then(|r| {
+            r.fields
+                .iter()
+                .find(|f| f.label == "transferInstructionCid")
+        })
         .and_then(|f| f.value.as_ref())
         .and_then(|v| match &v.sum {
             Some(value::Sum::ContractId(cid)) => Some(cid.clone()),
@@ -1159,7 +1302,9 @@ fn extract_proposal_info(
             accept_transfer_instruction_cid,
             accept_transfer: None,
             service_request,
+            action_label,
             proposer,
+            created_at: created.created_at.as_ref().map(|t| t.seconds),
         },
     );
 }
@@ -1368,7 +1513,7 @@ async fn fetch_proposal_infos(
     );
 
     for_each_active_contract(config, token.clone(), event_format, |created| {
-        extract_proposal_info(&created, proposal_infos);
+        extract_proposal_info(&created, party_id, proposal_infos);
     })
     .await?;
 
@@ -4192,6 +4337,34 @@ mod tests {
         }
     }
 
+    // ------------------------------------------------------------------------
+    // extract_proposal_info / build_domain_actions
+    //
+    // Covers the pending-approvals fix: every active GovernableAction should
+    // surface, confirmations or not, using only the interface view.
+    // ------------------------------------------------------------------------
+
+    fn bare_created_event(contract_id: &str) -> CreatedEvent {
+        CreatedEvent {
+            offset: 0,
+            node_id: 0,
+            contract_id: contract_id.to_string(),
+            template_id: None,
+            contract_key: None,
+            create_arguments: None,
+            created_event_blob: vec![],
+            interface_views: vec![],
+            witness_parties: vec![],
+            signatories: vec![],
+            observers: vec![],
+            created_at: None,
+            package_name: String::new(),
+            representative_package_id: String::new(),
+            acs_delta: false,
+            contract_key_hash: Vec::new(),
+        }
+    }
+
     #[test]
     fn extract_credential_info_reads_credential_with_claims() {
         let claims = list_value(vec![
@@ -4391,6 +4564,480 @@ mod tests {
             record.fields.retain(|f| f.label != "provider");
         }
         assert!(extract_provider_configuration_info(&event).is_none());
+    }
+
+    /// A created event as the production `InterfaceFilter` query returns it:
+    /// the `GovernableAction` view is present and nothing else is.
+    fn governable_action_view_event(action_label: &str, description: &str) -> CreatedEvent {
+        let view = InterfaceView {
+            interface_id: Some(Identifier {
+                package_id: "#governance-action-v1".to_string(),
+                module_name: "Governance.Action".to_string(),
+                entity_name: "GovernableAction".to_string(),
+            }),
+            view_status: None,
+            view_value: Some(Record {
+                record_id: None,
+                fields: vec![
+                    field("actionLabel", text_value(action_label)),
+                    field("description", text_value(description)),
+                    field("governanceParty", party_value(&format!("gov::{SR_FP}"))),
+                ],
+            }),
+            implementation_package_id: String::new(),
+        };
+        CreatedEvent {
+            interface_views: vec![view],
+            ..bare_created_event("proposal-cid")
+        }
+    }
+
+    #[test]
+    fn governable_action_view_reads_the_view_record() {
+        let event = governable_action_view_event("SetupCcPreapproval", "set up the preapproval");
+        let Some(view) = governable_action_view(&event) else {
+            panic!("the GovernableAction view should be found");
+        };
+        assert_eq!(
+            field_text(view, "actionLabel"),
+            Some("SetupCcPreapproval".to_string())
+        );
+    }
+
+    #[test]
+    fn governable_action_view_absent_when_no_matching_view() {
+        let mut event = governable_action_view_event("SetupCcPreapproval", "");
+        event.interface_views.clear();
+        assert!(governable_action_view(&event).is_none());
+    }
+
+    #[test]
+    fn extract_proposal_info_captures_a_proposal_from_its_view_alone() -> Result {
+        // An `InterfaceFilter` query populates `interface_views` and leaves
+        // `create_arguments` to the template filter, which this query has none
+        // of. The view alone must be enough.
+        let event = governable_action_view_event("CreateUserServiceRequest", "onboard the user");
+        let mut infos = HashMap::new();
+
+        extract_proposal_info(&event, &gov_party()?, &mut infos);
+
+        let Some(info) = infos.get("proposal-cid") else {
+            panic!("a view-only proposal should be captured");
+        };
+        assert_eq!(
+            info.action_label,
+            Some("CreateUserServiceRequest".to_string())
+        );
+        assert_eq!(info.description, Some("onboard the user".to_string()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn extract_proposal_info_prefers_the_view_description() -> Result {
+        // Templates such as CreateUserServiceRequest compute `description` in
+        // the view and hold no field of that name, so the view must win.
+        let mut event = governable_action_view_event("MintProposal", "computed in the view");
+        event.create_arguments = Some(Record {
+            record_id: None,
+            fields: vec![
+                field("governanceParty", party_value(&format!("gov::{SR_FP}"))),
+                field("proposer", party_value(&format!("proposer::{SR_FP}"))),
+                field("description", text_value("stored on the template")),
+            ],
+        });
+        let mut infos = HashMap::new();
+
+        extract_proposal_info(&event, &gov_party()?, &mut infos);
+
+        assert_eq!(
+            infos
+                .get("proposal-cid")
+                .and_then(|i| i.description.clone()),
+            Some("computed in the view".to_string())
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn extract_proposal_info_captures_a_proposal_from_an_unknown_package() -> Result {
+        // The visibility rule: a package decman has never heard of, whose
+        // template names its own fields differently, still gets a card. No
+        // allowlist of labels or templates may gate the pending path.
+        let event = governable_action_view_event("VaultPause", "pause the vault");
+        let mut infos = HashMap::new();
+        extract_proposal_info(&event, &gov_party()?, &mut infos);
+
+        let actions = build_domain_actions(HashMap::new(), infos, true, true, 2, 0);
+
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].action_label, "VaultPause");
+        assert_eq!(actions[0].confirmation_count, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn extract_proposal_info_labels_a_wildcard_proposal_with_its_template_name() -> Result {
+        // Test mode fetches with a wildcard filter, so no view arrives and the
+        // template name is the only name available.
+        let mut event = bare_created_event("proposal-cid");
+        event.template_id = Some(Identifier {
+            package_id: "#governance-utility-onboarding".to_string(),
+            module_name: "Governance.TokenIssuance.RegistrarDelegation".to_string(),
+            entity_name: "RegistrarDelegationProposal".to_string(),
+        });
+        event.create_arguments = Some(Record {
+            record_id: None,
+            fields: vec![
+                field("governanceParty", party_value(&format!("gov::{SR_FP}"))),
+                field("proposer", party_value(&format!("proposer::{SR_FP}"))),
+            ],
+        });
+        let mut infos = HashMap::new();
+
+        extract_proposal_info(&event, &gov_party()?, &mut infos);
+
+        assert_eq!(
+            infos
+                .get("proposal-cid")
+                .and_then(|i| i.action_label.clone()),
+            Some("RegistrarDelegationProposal".to_string())
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn extract_proposal_info_prefers_the_view_proposer() -> Result {
+        // The retract button keys on this field, and the interface declares
+        // `proposer`, so the view is the authoritative source.
+        let mut event = governable_action_view_event("MintProposal", "mint some tokens");
+        if let Some(view) = event
+            .interface_views
+            .first_mut()
+            .and_then(|v| v.view_value.as_mut())
+        {
+            view.fields.push(field(
+                "proposer",
+                party_value(&format!("from-view::{SR_FP}")),
+            ));
+        }
+        event.create_arguments = Some(Record {
+            record_id: None,
+            fields: vec![
+                field("governanceParty", party_value(&format!("gov::{SR_FP}"))),
+                field("proposer", party_value(&format!("from-args::{SR_FP}"))),
+            ],
+        });
+        let mut infos = HashMap::new();
+
+        extract_proposal_info(&event, &gov_party()?, &mut infos);
+
+        let Some(proposer) = infos.get("proposal-cid").and_then(|i| i.proposer.as_ref()) else {
+            panic!("the proposer should be captured");
+        };
+        assert_eq!(proposer.to_string(), format!("from-view::{SR_FP}"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn extract_proposal_info_falls_back_to_the_create_argument_proposer() -> Result {
+        // A wildcard fetch carries no view, so the raw field is all there is.
+        let mut event = bare_created_event("proposal-cid");
+        event.create_arguments = Some(Record {
+            record_id: None,
+            fields: vec![
+                field("governanceParty", party_value(&format!("gov::{SR_FP}"))),
+                field("proposer", party_value(&format!("from-args::{SR_FP}"))),
+            ],
+        });
+        let mut infos = HashMap::new();
+
+        extract_proposal_info(&event, &gov_party()?, &mut infos);
+
+        let Some(proposer) = infos.get("proposal-cid").and_then(|i| i.proposer.as_ref()) else {
+            panic!("the proposer should come from the create arguments");
+        };
+        assert_eq!(proposer.to_string(), format!("from-args::{SR_FP}"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn extract_proposal_info_skips_a_proposal_governed_by_another_party() -> Result {
+        // Seeing a proposal is not governing it. Another package may name our
+        // party as an observer while a different governance party controls the
+        // action, and Confirm there would be rejected on-ledger.
+        let mut event = governable_action_view_event("VaultPause", "pause the vault");
+        if let Some(view) = event
+            .interface_views
+            .first_mut()
+            .and_then(|v| v.view_value.as_mut())
+        {
+            view.fields.retain(|f| f.label != "governanceParty");
+            view.fields.push(field(
+                "governanceParty",
+                party_value(&format!("someone-else::{SR_FP}")),
+            ));
+        }
+        let mut infos = HashMap::new();
+
+        extract_proposal_info(&event, &gov_party()?, &mut infos);
+
+        assert!(infos.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn extract_proposal_info_captures_created_at() -> Result {
+        // The feed sorts on this, so an unconfirmed card holds its place
+        // between refreshes instead of shuffling.
+        let mut event = governable_action_view_event("MintProposal", "mint some tokens");
+        event.created_at = Some(prost_types::Timestamp {
+            seconds: 1_700_000_500,
+            nanos: 0,
+        });
+        let mut infos = HashMap::new();
+
+        extract_proposal_info(&event, &gov_party()?, &mut infos);
+
+        assert_eq!(
+            infos.get("proposal-cid").and_then(|i| i.created_at),
+            Some(1_700_000_500)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn extract_proposal_info_gates_service_request_details_on_the_label() -> Result {
+        // The party fields alone must not produce a service-request summary.
+        // Onboarding is only what the two Create*ServiceRequest actions do.
+        let mut event = governable_action_view_event("MintProposal", "mint some tokens");
+        event.create_arguments = Some(Record {
+            record_id: None,
+            fields: vec![
+                field("governanceParty", party_value(&format!("gov::{SR_FP}"))),
+                field("proposer", party_value(&format!("proposer::{SR_FP}"))),
+                field("operator", party_value(&format!("operator::{SR_FP}"))),
+                field("user", party_value(&format!("user::{SR_FP}"))),
+            ],
+        });
+        let mut infos = HashMap::new();
+
+        extract_proposal_info(&event, &gov_party()?, &mut infos);
+
+        let Some(info) = infos.get("proposal-cid") else {
+            panic!("the proposal should still be captured");
+        };
+        assert!(info.service_request.is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn extract_proposal_info_keeps_service_request_details_on_a_matching_label() -> Result {
+        let mut event =
+            governable_action_view_event("CreateUserServiceRequest", "onboard the user");
+        event.create_arguments = Some(Record {
+            record_id: None,
+            fields: vec![
+                field("governanceParty", party_value(&format!("gov::{SR_FP}"))),
+                field("proposer", party_value(&format!("proposer::{SR_FP}"))),
+                field("operator", party_value(&format!("operator::{SR_FP}"))),
+                field("user", party_value(&format!("user::{SR_FP}"))),
+            ],
+        });
+        let mut infos = HashMap::new();
+
+        extract_proposal_info(&event, &gov_party()?, &mut infos);
+
+        let Some(details) = infos
+            .get("proposal-cid")
+            .and_then(|i| i.service_request.as_ref())
+        else {
+            panic!("a user service request should carry its parties");
+        };
+        assert_eq!(details.operator.to_string(), format!("operator::{SR_FP}"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn extract_proposal_info_skips_an_unrelated_wildcard_contract() -> Result {
+        let mut event = bare_created_event("other-cid");
+        event.create_arguments = Some(Record {
+            record_id: None,
+            fields: vec![field("owner", party_value(&format!("owner::{SR_FP}")))],
+        });
+        let mut infos = HashMap::new();
+
+        extract_proposal_info(&event, &gov_party()?, &mut infos);
+
+        assert!(infos.is_empty());
+
+        Ok(())
+    }
+
+    fn proposal_info(action_label: Option<&str>) -> Result<ProposalInfo> {
+        Ok(ProposalInfo {
+            description: Some("a description".to_string()),
+            transfer: None,
+            accept_transfer_instruction_cid: None,
+            accept_transfer: None,
+            service_request: None,
+            action_label: action_label.map(str::to_string),
+            proposer: Some(CantonId::parse(&format!("proposer::{SR_FP}"))?),
+            created_at: Some(1_700_000_000),
+        })
+    }
+
+    /// The decentralized party the proposal tests query for. Every fixture
+    /// names this as its `governanceParty`, so nothing is dropped as foreign.
+    fn gov_party() -> Result<CantonId> {
+        CantonId::parse(&format!("gov::{SR_FP}"))
+    }
+
+    fn confirmation(confirming_party: &str) -> Result<GovernanceConfirmation> {
+        Ok(GovernanceConfirmation {
+            contract_id: format!("confirmation-{confirming_party}"),
+            action: ActionType::GovernanceSetThreshold { new_threshold: 0 },
+            confirming_party: CantonId::parse(&format!(
+                "{confirming_party}::1220aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ))?,
+            created_at: 0,
+            expires_at: 0,
+        })
+    }
+
+    #[test]
+    fn build_domain_actions_synthesizes_a_card_for_an_unconfirmed_proposal() -> Result {
+        let domain_confirmations = HashMap::new();
+        let mut proposal_infos = HashMap::new();
+        proposal_infos.insert(
+            "new-proposal-cid".to_string(),
+            proposal_info(Some("SetupCcPreapproval"))?,
+        );
+
+        let actions = build_domain_actions(domain_confirmations, proposal_infos, true, true, 2, 0);
+
+        assert_eq!(actions.len(), 1);
+        let action = &actions[0];
+        assert_eq!(action.proposal_cid, "new-proposal-cid");
+        assert_eq!(action.action_label, "SetupCcPreapproval");
+        assert_eq!(action.confirmation_count, 0);
+        assert!(action.confirmations.is_empty());
+        assert!(!action.can_execute);
+        assert!(!action.orphaned);
+        // The loop assigns every remaining field by hand, so each one is
+        // asserted. Without this a swapped assignment would still pass.
+        assert_eq!(action.description, Some("a description".to_string()));
+        assert_eq!(
+            action.proposer.as_ref().map(ToString::to_string),
+            Some(format!("proposer::{SR_FP}"))
+        );
+        assert_eq!(action.created_at, Some(1_700_000_000));
+        assert!(action.transfer_details.is_none());
+        assert!(action.accept_transfer_details.is_none());
+        assert!(action.service_request_details.is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn build_domain_actions_skips_synthesis_when_confirmations_are_incomplete() -> Result {
+        // A failed confirmation query leaves a confirmed proposal looking
+        // untouched. Synthesizing it would offer Confirm to a member who has
+        // already confirmed, so nothing is synthesized until a clean read.
+        let mut proposal_infos = HashMap::new();
+        proposal_infos.insert(
+            "new-proposal-cid".to_string(),
+            proposal_info(Some("SetupCcPreapproval"))?,
+        );
+
+        let actions = build_domain_actions(HashMap::new(), proposal_infos, true, false, 2, 0);
+
+        assert!(actions.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn build_domain_actions_leftover_label_falls_back_when_absent() -> Result {
+        let domain_confirmations = HashMap::new();
+        let mut proposal_infos = HashMap::new();
+        proposal_infos.insert("new-proposal-cid".to_string(), proposal_info(None)?);
+
+        let actions = build_domain_actions(domain_confirmations, proposal_infos, true, true, 2, 0);
+
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].action_label, FALLBACK_PROPOSAL_LABEL);
+
+        Ok(())
+    }
+
+    #[test]
+    fn build_domain_actions_does_not_duplicate_an_enriched_proposal() -> Result {
+        let mut domain_confirmations = HashMap::new();
+        domain_confirmations.insert(
+            "confirmed-cid".to_string(),
+            (
+                "SetupCcPreapproval".to_string(),
+                vec![confirmation("alice")?],
+            ),
+        );
+        let mut proposal_infos = HashMap::new();
+        proposal_infos.insert(
+            "confirmed-cid".to_string(),
+            proposal_info(Some("SetupCcPreapproval"))?,
+        );
+
+        let actions = build_domain_actions(domain_confirmations, proposal_infos, true, true, 2, 0);
+
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].confirmation_count, 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn build_domain_actions_skips_synthesis_on_incomplete_fetch() -> Result {
+        let domain_confirmations = HashMap::new();
+        let mut proposal_infos = HashMap::new();
+        proposal_infos.insert(
+            "new-proposal-cid".to_string(),
+            proposal_info(Some("SetupCcPreapproval"))?,
+        );
+
+        let actions = build_domain_actions(domain_confirmations, proposal_infos, false, true, 2, 0);
+
+        assert!(actions.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn build_domain_actions_does_not_orphan_confirmations_on_incomplete_fetch() -> Result {
+        let mut domain_confirmations = HashMap::new();
+        domain_confirmations.insert(
+            "missing-cid".to_string(),
+            (
+                "SetupCcPreapproval".to_string(),
+                vec![confirmation("alice")?],
+            ),
+        );
+        let proposal_infos = HashMap::new();
+
+        let actions = build_domain_actions(domain_confirmations, proposal_infos, false, true, 2, 0);
+
+        assert_eq!(actions.len(), 1);
+        assert!(!actions[0].orphaned);
+
+        Ok(())
     }
 
     // ====================================================================
