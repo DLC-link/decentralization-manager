@@ -13,7 +13,9 @@ pub(crate) use auth::{get_auth_config, get_auth_status, grant_rights, test_auth}
 // by the `gen-types` binary (a separate crate from this lib), so it must stay `pub`; the
 // handler functions beside it have no such consumer.
 pub use config::NodeConfigResponse;
-pub(crate) use config::{get_network_config, get_node_config, healthz, save_network_config};
+pub(crate) use config::{
+    get_network_config, get_node_config, healthz, metrics, save_network_config,
+};
 pub(crate) use governance::{
     cancel_confirmation, cancel_proposal, confirm_action, execute_action, expire_confirmation,
     get_burn_requests_handler, get_coupon_reassignment_delegation, get_credential_offers_handler,

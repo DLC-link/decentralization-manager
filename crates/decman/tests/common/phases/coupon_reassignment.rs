@@ -23,8 +23,8 @@
 //!      (`seed_reward_coupons`) and hard-fails instead of skipping if none are
 //!      visible after a short poll — there is no silent no-op path there.
 //!
-//! To actually observe reassignment on devnet, operational preconditions
-//! (design §13) must hold — none are reproducible from this harness:
+//! To actually observe reassignment on devnet, operational preconditions must
+//! hold — none are reproducible from this harness:
 //!   - The decparty (`f.party_id()`) must be an app-provider whose coupons
 //!     carry `provider == decparty` and are **unassigned** (`beneficiary =
 //!     null`). On devnet that is `cbtc-network`; a fresh harness-allocated
@@ -36,7 +36,8 @@
 //!   - The test nodes must run with a **short reward-automation interval** so
 //!     the loop reassigns within the poll deadline. The default is 300s; set
 //!     `DECPM_REWARD_AUTOMATION_INTERVAL_SECS` (or `--reward-automation-interval-secs`,
-//!     e.g. 15-30s) on the test nodes.
+//!     e.g. 15-30s) on the test nodes — the loop's own heartbeat timer scales
+//!     down to match, so a sub-60s interval genuinely beats at that rate.
 //!   - At least one of the delegation's `assigners` must be a member party this
 //!     node holds credentials for (else the loop skips the decparty). Here the
 //!     assigners are `[p1_member, p2_member]`; on the live `cbtc-network` run
@@ -49,7 +50,7 @@
 //! So this phase observes, at the HTTP layer: delegation **presence** (the
 //! keyless-singleton invariant: exactly one `CouponReassignmentDelegation`) and
 //! coupon **archival** (an originally-visible unassigned coupon cid is gone
-//! after a tick). It **cannot** assert, at the HTTP layer, that each resulting
+//! after a sweep). It **cannot** assert, at the HTTP layer, that each resulting
 //! coupon carries a specific `beneficiary` or the 0.8 / 0.2 `amount` shares.
 //!
 //! On **localnet**, the split IS asserted by value: each beneficiary party is
@@ -59,8 +60,8 @@
 //! per-beneficiary field checks still require decoded reads not exposed by
 //! `/contracts/query` and must be verified against devnet PQS `pqs_cbtc` on the
 //! real run (issue #271) — see the TODO on the final assertion. Beneficiary
-//! self-minting (design §4.3) is a separate precondition (the beneficiaries' own
-//! agents) and is likewise verified out-of-band.
+//! self-minting is a separate precondition (the beneficiaries' own agents) and
+//! is likewise verified out-of-band.
 //!
 //! ## Security property
 //!
@@ -100,8 +101,10 @@ const GOVERNANCE_REWARDS_PKG: &str = "%23governance-rewards-automation-v1";
 
 /// Generous ceiling for the reassignment step. Under a short
 /// `DECPM_REWARD_AUTOMATION_INTERVAL_SECS` (see the module doc) the loop
-/// reassigns within seconds; this only bites when the nodes are misconfigured
-/// (still on the 300s default) or paused Mode-B collection was not arranged.
+/// reassigns within seconds — the loop's heartbeat timer scales down to match
+/// rather than flooring at its own 60s cadence; this only bites when the
+/// nodes are misconfigured (still on the 300s default) or paused Mode-B
+/// collection was not arranged.
 const REASSIGN_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Devnet query: the `RewardCoupon` *interface* (matches any implementer; on
@@ -156,6 +159,25 @@ async fn probe_reward_coupons(f: &Fixture, party_id: &str) -> Option<HashSet<Str
         .probe_get_json(f.p1.http, &reward_coupon_path(f, party_id))
         .await?;
     Some(r.contracts.into_iter().map(|c| c.contract_id).collect())
+}
+
+/// Sums one metric family across the e2e nodes. A node serving no such line has
+/// never moved that counter, which sums as zero.
+async fn counter_total(f: &Fixture, ports: &[u16], name: &str) -> anyhow::Result<f64> {
+    let mut total = 0.0;
+    for port in ports {
+        let body = f.get_text(*port, "/metrics").await?;
+        for line in body.lines() {
+            if line.starts_with(name) {
+                total += line
+                    .split_whitespace()
+                    .last()
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .unwrap_or_default();
+            }
+        }
+    }
+    Ok(total)
 }
 
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
@@ -469,7 +491,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         // coupon at a time. What proves the fan-out worked is the pair of facts:
         // every healthy coupon was paid (asserted above, and by the split totals
         // which already reconcile to the full seeded amount), and this one is
-        // still sitting there unassigned rather than having wedged the tick.
+        // still sitting there unassigned rather than having wedged the sweep.
         Scenario::new("an unassignable coupon is isolated, not fatal")
             .then(
                 "exactly one coupon remains, unassigned, at the unassignable amount",
@@ -489,7 +511,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                             .filter(|(bene, _)| bene.is_none())
                             .map(|(_, amt)| amt)
                             .collect();
-                        // The drain may still be mid-tick; keep polling until the
+                        // The drain may still be mid-sweep; keep polling until the
                         // healthy set has drained away.
                         if unassigned.len() > 1 {
                             return None;
@@ -497,7 +519,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         let [amount] = unassigned.as_slice() else {
                             return Some(Err(anyhow::anyhow!(
                                 "no unassigned coupon left; the unassignable one should survive \
-                                 every tick, since nothing quarantines it"
+                                 every sweep, since nothing quarantines it"
                             )));
                         };
                         let wanted: f64 = UNASSIGNABLE_AMOUNT.parse().unwrap_or(f64::NAN);
@@ -511,6 +533,68 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                                  skipped instead"
                             ))
                         })
+                    })
+                },
+            )
+            .run(f)
+            .await?;
+
+        // The instruments the alerts read, proven end to end: a real sweep
+        // assigned real coupons and the counters moved.
+        let assigner_metrics = [f.p1.metrics, f.p2.metrics];
+        Scenario::new("the reward counters move")
+            .then(
+                "assigned counts every healthy coupon, and the refused one is counted skipped",
+                Duration::from_secs(120),
+                move |f, _| {
+                    Box::pin(async move {
+                        let assigned = match counter_total(
+                            f,
+                            &assigner_metrics,
+                            "decman_reward_coupons_assigned_total",
+                        )
+                        .await
+                        {
+                            Ok(v) => v,
+                            Err(e) => {
+                                warn!("counter assertion: reading /metrics failed: {e:#}");
+                                return None;
+                            }
+                        };
+                        // The tail of `drain_assignable` runs just after the
+                        // commit the split assertion already saw, so keep polling.
+                        if assigned < SEED_COUPON_COUNT as f64 {
+                            return None;
+                        }
+                        let skipped = match counter_total(
+                            f,
+                            &assigner_metrics,
+                            "decman_reward_coupons_skipped_total",
+                        )
+                        .await
+                        {
+                            Ok(v) => v,
+                            Err(e) => {
+                                warn!("counter assertion: reading /metrics failed: {e:#}");
+                                return None;
+                            }
+                        };
+                        if skipped >= 1.0 {
+                            Some(Ok(()))
+                        } else {
+                            // Reachable, not just theoretical: the drain's fan-out can
+                            // `break 'chunks` on a transient error, and if that lands on
+                            // the unassignable coupon's isolated submission after the
+                            // healthy coupons already committed, the sweep ends with
+                            // `assigned` complete and `skipped` still 0. Nothing
+                            // quarantines that coupon, so retry within the deadline
+                            // instead of failing the run — the next sweep re-finds it.
+                            warn!(
+                                "counter assertion: assigned reached {assigned} but skipped \
+                                 is still {skipped}; retrying"
+                            );
+                            None
+                        }
                     })
                 },
             )

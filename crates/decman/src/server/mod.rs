@@ -1030,24 +1030,32 @@ pub async fn start_server(
         workflows: workflows.clone(),
         peer_job_sender: peer_job_sender.clone(),
     };
-    tokio::spawn(async move {
-        run_heartbeat(
-            heartbeat_config,
-            heartbeat_db,
-            heartbeat_status,
-            heartbeat_last_seen,
-            heartbeat_triggers,
-        )
-        .await;
-    });
+    spawn_supervised(
+        "heartbeat",
+        "peer liveness stops updating until this node restarts",
+        async move {
+            run_heartbeat(
+                heartbeat_config,
+                heartbeat_db,
+                heartbeat_status,
+                heartbeat_last_seen,
+                heartbeat_triggers,
+            )
+            .await;
+        },
+    );
 
     // Background task: CIP-104 Mode A reward-assignment automation. Clone the
     // existing `web::Data<AppState>` (an Arc) so the loop shares the SAME state —
     // live party credentials, auth, config — never a fresh AppState.
     let reward_automation_state = app_state.clone();
-    tokio::spawn(async move {
-        reward_automation::run_reward_automation_loop(reward_automation_state).await;
-    });
+    spawn_supervised(
+        "reward automation",
+        "coupons will expire unassigned until this node restarts",
+        async move {
+            reward_automation::run_reward_automation_loop(reward_automation_state).await;
+        },
+    );
 
     // Single peer-job listener: drains the queue and spawns one
     // `workflow::start_peer` per accepted / retried / resumed invite, so this
@@ -1055,15 +1063,19 @@ pub async fn start_server(
     let peer_listener_config = config.clone();
     let peer_listener_db = db.clone();
     let peer_listener_auth = auth.clone();
-    tokio::spawn(async move {
-        run_peer_listener(
-            peer_listener_config,
-            peer_listener_db,
-            peer_listener_auth,
-            peer_job_receiver,
-        )
-        .await;
-    });
+    spawn_supervised(
+        "peer listener",
+        "this node accepts no further peer jobs until it restarts",
+        async move {
+            run_peer_listener(
+                peer_listener_config,
+                peer_listener_db,
+                peer_listener_auth,
+                peer_job_receiver,
+            )
+            .await;
+        },
+    );
 
     // Background task: sync decentralized parties from Canton on startup
     let sync_config = config.clone();
@@ -1108,6 +1120,43 @@ pub async fn start_server(
             }
         }
     });
+
+    reward_automation::register_metrics();
+
+    // Separate from the API server, whose ingress forwards every path. 0 disables it.
+    let metrics_port = config.metrics_port;
+    if metrics_port == 0 {
+        tracing::info!("Metrics endpoint disabled (metrics_port = 0)");
+    } else {
+        if metrics_port == port || metrics_port == config.node.port {
+            // The metrics listener binds first (below), so on a collision it
+            // wins and the API or noise server dies instead, reporting the
+            // wrong listener as the cause.
+            tracing::warn!(
+                metrics_port,
+                api_port = port,
+                noise_port = config.node.port,
+                "metrics_port collides with another listener; whichever binds first wins and \
+                 the other will fail to start"
+            );
+        }
+        let metrics_host = host.to_string();
+        match HttpServer::new(|| App::new().route("/metrics", web::get().to(handlers::metrics)))
+            // One worker: the default is one per logical CPU.
+            .workers(1)
+            .bind((metrics_host.clone(), metrics_port))
+        {
+            Ok(server) => {
+                tracing::info!("Serving metrics on {metrics_host}:{metrics_port}/metrics");
+                tokio::spawn(server.run());
+            }
+            Err(e) => tracing::error!(
+                error = %e,
+                port = metrics_port,
+                "binding the metrics port failed; this node reports no metrics"
+            ),
+        }
+    }
 
     tracing::info!("Starting HTTP server on {host}:{port}");
     tracing::info!("Frontend available at http://{host}:{port}/");
@@ -1233,6 +1282,25 @@ pub async fn start_server(
     .await?;
 
     Ok(())
+}
+
+/// Spawns a task that must live as long as the process, and reports its death at
+/// `error` with what the operator loses. `consequence` completes the sentence
+/// "… returned; " and "… died; ".
+///
+/// The outer task is what catches a clean return, which never panics and so never
+/// reaches the panic hook in `main`. Nothing respawns: a task that returned left
+/// state nobody has inspected, and restarting it would hide that.
+fn spawn_supervised<F>(name: &'static str, consequence: &'static str, task: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(async move {
+        match tokio::spawn(task).await {
+            Ok(()) => tracing::error!(task = name, "{name} loop returned; {consequence}"),
+            Err(e) => tracing::error!(task = name, error = %e, "{name} task died; {consequence}"),
+        }
+    });
 }
 
 /// Background task that runs a Noise server for handling pings and invites

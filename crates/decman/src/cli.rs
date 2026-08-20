@@ -249,6 +249,11 @@ pub enum Commands {
         /// this only controls cadence. Defaults to 300.
         #[arg(long, env = "DECPM_REWARD_AUTOMATION_INTERVAL_SECS")]
         reward_automation_interval_secs: Option<u64>,
+        /// How often to re-read the backlog purely to refresh the expiry gauge,
+        /// in seconds, when no sweep is due. The gauge refreshes at whichever of
+        /// this and the sweep interval is shorter. Defaults to 3600.
+        #[arg(long, env = "DECPM_REWARD_EXPIRY_READ_INTERVAL_SECS")]
+        reward_expiry_read_interval_secs: Option<u64>,
         /// Output contracts one Delegation_Assign may create, bounding the
         /// coupons per transaction. Raise stepwise to find the ledger's real
         /// ceiling; set too high, assigns fail and nothing is assigned.
@@ -260,5 +265,9 @@ pub enum Commands {
         /// the beneficiary. Defaults to 120.
         #[arg(long, env = "DECPM_REWARD_MIN_EXPIRY_MARGIN_SECS")]
         reward_min_expiry_margin_secs: Option<u64>,
+        /// Port serving Prometheus metrics at /metrics, on its own listener.
+        /// 0 disables the endpoint. Defaults to 9464.
+        #[arg(long, env = "DECPM_METRICS_PORT")]
+        metrics_port: Option<u16>,
     },
 }

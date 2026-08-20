@@ -24,7 +24,7 @@
 //!   are not read here — `Delegation_Assign` enforces them in DAML.
 //! * [`unassigned_coupons`] — reads the decparty's unassigned `RewardCoupon`
 //!   interface views.
-//! * [`run_reassign_once`] — one reassign tick: assigns every assignable
+//! * [`run_reassign_once`] — one reassign sweep: assigns every assignable
 //!   unassigned coupon via successive chunked `Delegation_Assign` transactions.
 //!
 //! The pure record decoders, selection and chunk sizing ([`select_assignable`],
@@ -38,6 +38,7 @@ use canton_proto_rs::com::daml::ledger::api::v2::{
     get_active_contracts_response::ContractEntry, value,
 };
 use chrono::{DateTime, Utc};
+use prometheus::{GaugeVec, IntCounter, IntCounterVec};
 
 use crate::{
     canton_id::CantonId,
@@ -45,6 +46,8 @@ use crate::{
     utils,
 };
 
+use std::collections::HashMap;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use super::AppState;
@@ -243,7 +246,7 @@ pub(crate) async fn active_created_records(
 /// of members authorized to execute `Delegation_Assign`, and how many
 /// beneficiaries its split names. The split's *contents* are **not** carried
 /// here — they live in the on-ledger contract and `Delegation_Assign` enforces
-/// them by construction (design §12), so the Rust side never needs to read them.
+/// them by construction, so the Rust side never needs to read them.
 /// Only the count is read, to size a chunk: one assign creates
 /// `coupons × beneficiaries` contracts (see [`chunk_size`]).
 pub(crate) struct ActiveDelegation {
@@ -280,7 +283,7 @@ fn parse_delegation_record(cid: &str, rec: &Record) -> anyhow::Result<ActiveDele
 ///
 /// A decparty is meant to have at most one. Canton cannot enforce that without
 /// a contract key, and it has no cross-participant key uniqueness, so the
-/// convention rests on the propose-time 409 guard (design §12). If more than
+/// convention rests on the propose-time 409 guard. If more than
 /// one is live anyway, take the newest by created-event offset — the one the
 /// most recent vote produced — and warn. Every node reads the same ledger, so
 /// they all pick the same contract.
@@ -426,7 +429,7 @@ pub(crate) struct CouponInfo {
 /// That restriction is load-bearing, not tidiness. `Delegation_Assign` fetches
 /// the primary as the concrete `RewardCouponV2`, so any other implementation of
 /// the interface would pass this reader and fail the exercise. Sorted
-/// most-urgent-first it would head the batch on every tick and stall the drain
+/// most-urgent-first it would head the batch on every sweep and stall the drain
 /// (see [`drain_assignable`]). The reader admitting exactly what the DAML
 /// accepts is what keeps the two in step; a second implementation shipping, or
 /// a package skew, must not wedge the engine.
@@ -491,6 +494,110 @@ fn parse_unassigned_coupon(
 }
 
 // ============================================================================
+// Metrics
+// ============================================================================
+
+// The reward automation's health signal.
+
+static HEARTBEAT: LazyLock<IntCounter> = LazyLock::new(|| {
+    prometheus::register_int_counter!(
+        "decman_reward_heartbeat_total",
+        "Heartbeats of the reward automation loop, one per wake while it lives — every 60s, or every sweep interval when that is shorter."
+    )
+    .expect("metric name is a unique literal")
+});
+
+static SWEEPS: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    prometheus::register_int_counter_vec!(
+        "decman_reward_sweep_total",
+        "Reward sweeps started for a decparty.",
+        &["decparty"]
+    )
+    .expect("metric name is a unique literal")
+});
+
+static ASSIGNED: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    prometheus::register_int_counter_vec!(
+        "decman_reward_coupons_assigned_total",
+        "Coupons successfully reassigned by this node.",
+        &["decparty"]
+    )
+    .expect("metric name is a unique literal")
+});
+
+static SKIPPED: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    prometheus::register_int_counter_vec!(
+        "decman_reward_coupons_skipped_total",
+        "Coupons the ledger rejected individually, to be retried next sweep.",
+        &["decparty"]
+    )
+    .expect("metric name is a unique literal")
+});
+
+static ZERO_ASSIGNED: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    prometheus::register_int_counter_vec!(
+        "decman_reward_sweep_zero_assigned_total",
+        "Reward sweeps that found unassigned coupons and assigned none of them.",
+        &["decparty"]
+    )
+    .expect("metric name is a unique literal")
+});
+
+static SWEEP_FAILED: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    prometheus::register_int_counter_vec!(
+        "decman_reward_sweep_failed_total",
+        "Reward sweeps that ended in an error.",
+        &["decparty"]
+    )
+    .expect("metric name is a unique literal")
+});
+
+static EXPIRY_READS: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    prometheus::register_int_counter_vec!(
+        "decman_reward_expiry_read_total",
+        "Backlog reads that refreshed the expiry gauge without assigning anything.",
+        &["decparty"]
+    )
+    .expect("metric name is a unique literal")
+});
+
+static OLDEST_EXPIRES_IN: LazyLock<GaugeVec> = LazyLock::new(|| {
+    prometheus::register_gauge_vec!(
+        "decman_reward_oldest_unassigned_expires_in_seconds",
+        "Seconds until the expiry of the oldest coupon this node saw unassigned at its last read.",
+        &["decparty"]
+    )
+    .expect("metric name is a unique literal")
+});
+
+/// Registers every family at startup, so a family exists before its first event.
+pub(crate) fn register_metrics() {
+    LazyLock::force(&HEARTBEAT);
+    LazyLock::force(&SWEEPS);
+    LazyLock::force(&ASSIGNED);
+    LazyLock::force(&SKIPPED);
+    LazyLock::force(&ZERO_ASSIGNED);
+    LazyLock::force(&SWEEP_FAILED);
+    LazyLock::force(&EXPIRY_READS);
+    LazyLock::force(&OLDEST_EXPIRES_IN);
+}
+
+/// Exports the per-decparty counters at zero for a decparty this node sweeps. A
+/// counter that only appears on its first event leaves a dashboard unable to tell
+/// a node that never failed from an instrument that is missing.
+fn ensure_outcome_series(label: &str) {
+    for counter in [
+        &*ASSIGNED,
+        &*SKIPPED,
+        &*ZERO_ASSIGNED,
+        &*SWEEP_FAILED,
+        &*EXPIRY_READS,
+    ] {
+        counter.with_label_values(&[label]).inc_by(0);
+    }
+}
+
+// ============================================================================
 // Coupon batch selection
 // ============================================================================
 
@@ -513,9 +620,9 @@ fn is_assignable(c: &CouponInfo, now: DateTime<Utc>, expiry_margin: chrono::Dura
 /// Every assignable coupon (pure), ordered most-urgent-first (ascending
 /// `expiresAt`) so that under any partial failure the coupons closest to expiry
 /// are assigned first. The whole set is returned — it is *not* truncated to a
-/// batch size, because a tick assigns all of it in successive chunked
+/// batch size, because a sweep assigns all of it in successive chunked
 /// transactions (see [`chunk_size`] and [`run_reassign_once`]); the chunk size
-/// bounds one transaction, not a tick's work.
+/// bounds one transaction, not a sweep's work.
 pub(crate) fn select_assignable(
     coupons: &[CouponInfo],
     now: DateTime<Utc>,
@@ -535,7 +642,7 @@ pub(crate) fn select_assignable(
 /// `coupons × beneficiaries` contracts — so the cap is expressed in *output
 /// creates* and the coupon count is derived from the delegation's beneficiary
 /// count. A fixed coupon count would be `beneficiary_count`-times looser for a
-/// wide split than a narrow one. Never returns 0, so a tick always makes
+/// wide split than a narrow one. Never returns 0, so a sweep always makes
 /// progress even with an implausibly wide split.
 pub(crate) fn chunk_size(max_creates: usize, beneficiary_count: usize) -> usize {
     (max_creates / beneficiary_count.max(1)).max(1)
@@ -589,7 +696,7 @@ fn delegation_template_id(package_id: String) -> Identifier {
 /// (`handlers/governance.rs:2107`); the differences are the target contract
 /// (the delegation cid), the choice (`Delegation_Assign`), the template
 /// (`Governance.Rewards.CouponReassignmentDelegation`), and `act_as =
-/// [assigner]` / `read_as = [decparty]` (co-hosting, design §4.6).
+/// [assigner]` / `read_as = [decparty]`, because the two are co-hosted.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn submit_delegation_assign(
     config: &NodeConfig,
@@ -669,16 +776,30 @@ pub(crate) async fn submit_delegation_assign(
     Ok(())
 }
 
-/// One reassign tick for a decparty under the delegation model: read the
+/// The earliest expiry among unassigned coupons still worth saving (pure): every
+/// coupon that has not yet expired counts, including ones inside the
+/// assignability margin. An already-expired coupon is
+/// excluded; the DSO's reaper does not archive it promptly (it can sit active
+/// for weeks), so including it would pin the gauge to a corpse instead of the
+/// backlog a responder can still act on.
+fn oldest_expiry(coupons: &[CouponInfo], now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    coupons
+        .iter()
+        .map(|c| c.expires_at)
+        .filter(|&expires_at| expires_at > now)
+        .min()
+}
+
+/// One reassign sweep for a decparty under the delegation model: read the
 /// unassigned coupons and assign **all** the assignable ones, in successive
 /// chunked `Delegation_Assign` transactions. Nothing assignable is a no-op.
 ///
-/// A tick drains the whole set rather than assigning one chunk and waiting for
-/// the next tick, so throughput does not depend on the tick interval: the
+/// A sweep drains the whole set rather than assigning one chunk and waiting for
+/// the next sweep, so throughput does not depend on the sweep interval: the
 /// interval is a latency/cost knob, not a safety-critical one. The chunk bounds
-/// one *transaction* (design §9/§11; see [`chunk_size`]).
+/// one *transaction* (see [`chunk_size`]).
 ///
-/// A transient failure ends the tick; a rejected command is isolated to the one
+/// A transient failure ends the sweep; a rejected command is isolated to the one
 /// coupon at fault and the drain continues (see [`drain_assignable`]).
 ///
 /// The create budget and the expiry margin come from [`NodeConfig`] so they can
@@ -691,7 +812,7 @@ pub(crate) async fn run_reassign_once(
     delegation: &ActiveDelegation,
     test_mode: bool,
     packages: &PackageConfig,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<DateTime<Utc>>> {
     let expiry_margin =
         chrono::Duration::seconds(config.reward_min_expiry_margin_secs.min(i64::MAX as u64) as i64);
 
@@ -704,7 +825,9 @@ pub(crate) async fn run_reassign_once(
         packages,
     )
     .await?;
-    let assignable = select_assignable(&coupons, Utc::now(), expiry_margin);
+    let now = Utc::now();
+    let oldest = oldest_expiry(&coupons, now);
+    let assignable = select_assignable(&coupons, now, expiry_margin);
     if assignable.is_empty() {
         // `visible` is what the ACS read returned, so it separates "coupons
         // present but none assignable yet" from "nothing visible at all".
@@ -718,7 +841,7 @@ pub(crate) async fn run_reassign_once(
             visible = coupons.len(),
             "no assignable coupons this tick"
         );
-        return Ok(());
+        return Ok(oldest);
     }
 
     let assigned = drain_assignable(
@@ -742,7 +865,7 @@ pub(crate) async fn run_reassign_once(
     if assigned > 0 {
         tracing::info!(%decparty, %assigner, count = assigned, "reassigned coupon batch");
     }
-    Ok(())
+    Ok(oldest)
 }
 
 /// Canton error ids that mean this node's view is stale, or the network
@@ -758,7 +881,10 @@ pub(crate) async fn run_reassign_once(
 /// while this automation re-reads, which does fix them.
 ///
 /// The timeouts come from the 2026-07-29 devnet outage, where five consecutive
-/// ticks each hit a different one and recovered unattended.
+/// sweeps each hit a different one and recovered unattended.
+/// `MEDIATOR_SAYS_TX_TIMED_OUT` was observed on devnet on 2026-08-20: the coupon
+/// it named assigned cleanly on the very next sweep, so the mediator's missing
+/// confirmations were the fault and the coupon was never bad.
 const TRANSIENT_ASSIGN_ERROR_IDS: &[&str] = &[
     "LOCAL_VERDICT_LOCKED_CONTRACTS",
     "LOCAL_VERDICT_INACTIVE_CONTRACTS",
@@ -768,6 +894,7 @@ const TRANSIENT_ASSIGN_ERROR_IDS: &[&str] = &[
     "NOT_SEQUENCED_TIMEOUT",
     "SEQUENCER_BACKPRESSURE",
     "REQUEST_TIME_OUT",
+    "MEDIATOR_SAYS_TX_TIMED_OUT",
 ];
 
 /// The Canton error id a failed submission carries, i.e. the message prefix
@@ -779,12 +906,12 @@ fn canton_error_id(e: &anyhow::Error) -> Option<String> {
         .then(|| id.to_string())
 }
 
-/// Whether the tick failed only because a package it reads by name is absent
+/// Whether the sweep failed only because a package it reads by name is absent
 /// from this participant.
 ///
 /// Both reads name their package by alias, so the ledger rejects the request
 /// before it reads a contract. A node in that state fails identically on every
-/// tick and no operator can act on the line, so the loop logs it at `trace`.
+/// sweep and no operator can act on the line, so the loop logs it at `trace`.
 ///
 /// One id covers both reads, because the delegation read runs first: a missing
 /// `governance-rewards-automation-v1` fails there, and a missing
@@ -793,7 +920,7 @@ fn package_absent(e: &anyhow::Error) -> bool {
     canton_error_id(e).as_deref() == Some("PACKAGE_NAMES_NOT_FOUND")
 }
 
-/// Whether a fresh read on the next tick is the cure.
+/// Whether a fresh read on the next sweep is the cure.
 ///
 /// A non-ledger failure (config, transport, auth) is transient here too: it is
 /// not attributable to any one coupon, so isolating one would be meaningless.
@@ -811,7 +938,7 @@ fn assign_failure_is_transient(e: &anyhow::Error) -> bool {
 /// **A transient failure ends the drain; a rejected command does not.**
 ///
 /// Contention is the overwhelmingly common failure — on a 3-assigner devnet two
-/// nodes lose every round — and there a fresh read is the only cure, so the tick
+/// nodes lose every round — and there a fresh read is the only cure, so the sweep
 /// ends and the coupons keep their full TTL. That is [`TRANSIENT_ASSIGN_ERROR_IDS`].
 ///
 /// Any other rejection is attributable to the batch's contents, so the drain
@@ -828,10 +955,10 @@ fn assign_failure_is_transient(e: &anyhow::Error) -> bool {
 /// splice refuses, a choice context a later coupon version requires. Most or all
 /// of a chunk then fails together, so the ERROR lines name every coupon at fault.
 ///
-/// The skip lasts **one tick only** — there is no cross-tick quarantine, so the
-/// drain stays stateless and a misclassified failure costs one tick rather than
+/// The skip lasts **one sweep only** — there is no cross-sweep quarantine, so the
+/// drain stays stateless and a misclassified failure costs one sweep rather than
 /// stranding a healthy coupon until restart. A genuinely un-exerciseable coupon
-/// is therefore re-found every tick, which is the point: it keeps producing an
+/// is therefore re-found every sweep, which is the point: it keeps producing an
 /// ERROR for alerting while every healthy coupon still gets paid.
 async fn drain_assignable<'a, F, Fut>(
     assignable: &'a [String],
@@ -867,7 +994,7 @@ where
                     coupon = %primary,
                     assigned,
                     remaining = assignable.len() - lo,
-                    "assign chunk failed; ending tick to re-read the ledger"
+                    "assign chunk failed; ending the sweep to re-read the ledger"
                 );
                 break;
             }
@@ -879,7 +1006,7 @@ where
                     error = %e,
                     coupon = %primary,
                     error_id = canton_error_id(&e).unwrap_or_default(),
-                    "coupon rejected on its own; skipping it for this tick"
+                    "coupon rejected on its own; skipping it for this sweep"
                 );
                 continue;
             }
@@ -904,7 +1031,7 @@ where
                         coupon = %coupon,
                         assigned,
                         remaining = assignable.len() - (lo + i),
-                        "assign failed mid fan-out; ending tick to re-read the ledger"
+                        "assign failed mid fan-out; ending the sweep to re-read the ledger"
                     );
                     break 'chunks;
                 }
@@ -915,20 +1042,30 @@ where
                         error = %e,
                         coupon = %coupon,
                         error_id = canton_error_id(&e).unwrap_or_default(),
-                        "coupon rejected on its own; skipping it for this tick"
+                        "coupon rejected on its own; skipping it for this sweep"
                     );
                 }
             }
         }
     }
 
+    let label = decparty.to_string();
+    if assigned > 0 {
+        ASSIGNED
+            .with_label_values(&[&label])
+            .inc_by(assigned as u64);
+    }
     if skipped > 0 {
+        SKIPPED.with_label_values(&[&label]).inc_by(skipped as u64);
         tracing::error!(
             %decparty,
             skipped,
             assigned,
-            "some coupons could not be assigned; they will be retried next tick"
+            "some coupons could not be assigned; they will be retried next sweep"
         );
+    }
+    if sweep_assigned_nothing(assignable.len(), assigned) {
+        ZERO_ASSIGNED.with_label_values(&[&label]).inc();
     }
     assigned
 }
@@ -937,22 +1074,62 @@ where
 // Background loop + registration
 // ============================================================================
 
-/// Per-node background loop: every `reward_automation_interval_secs`, read the
-/// active `CouponReassignmentDelegation` for each decparty this node holds
-/// credentials for, and — if this node's member party is a listed assigner —
-/// reassign its due coupons via [`run_reassign_once`]. Enablement is
-/// on-ledger — a decparty with no active delegation is skipped.
+/// The loop's wake interval, independent of the reward cadence.
+///
+/// The heartbeat and the sweep share this one task, so a sweep that blocks for N
+/// minutes costs N heartbeats, and one blocking past the stall rule's 10-minute
+/// window pages `decman-reward-automation-stalled` even though nothing crashed.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Per-node background loop. It records a heartbeat every [`HEARTBEAT_INTERVAL`] and
+/// sweeps each decparty it holds credentials for every
+/// `reward_automation_interval_secs`. Enablement is on-ledger: a decparty with no
+/// active delegation is skipped.
+///
+/// The heartbeat shares this task with the sweep deliberately, so a sweep that
+/// hangs stops the beat and becomes visible.
 pub(crate) async fn run_reward_automation_loop(data: actix_web::web::Data<AppState>) {
-    // `tokio::time::interval` panics on a zero period, which would silently kill
-    // this background task; clamp a misconfigured 0 to 1s and warn.
     let interval_secs = data.config.reward_automation_interval_secs;
     if interval_secs == 0 {
         tracing::warn!("reward_automation_interval_secs is 0; using 1s instead");
     }
-    let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs.max(1)));
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let sweep_interval = Duration::from_secs(interval_secs.max(1));
+    let read_interval = Duration::from_secs(data.config.reward_expiry_read_interval_secs.max(1));
+
+    // The shortest of the three: a configured interval below HEARTBEAT_INTERVAL must
+    // still beat at its own rate, or `is_due` only ever sees HEARTBEAT_INTERVAL-sized
+    // steps and a short interval is silently floored to it. Beating faster is
+    // safe for the stall alert, whose `increase < 1 over 10m` is a lower bound.
+    let mut heartbeat =
+        tokio::time::interval(HEARTBEAT_INTERVAL.min(sweep_interval).min(read_interval));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Records the wake time, not the tick's own deadline, so scheduling jitter can
+    // stretch an interval by up to one heartbeat — benign against a 36h coupon TTL.
+    let mut last_sweep: Option<tokio::time::Instant> = None;
+    let mut last_read: Option<tokio::time::Instant> = None;
+    // Recomputed into the gauge on every heartbeat.
+    let mut oldest: HashMap<CantonId, DateTime<Utc>> = HashMap::new();
+
     loop {
-        ticker.tick().await;
+        heartbeat.tick().await;
+        HEARTBEAT.inc();
+        report_oldest_expiry(&oldest, Utc::now());
+
+        let now = tokio::time::Instant::now();
+        let Some(pass) = due_pass(
+            last_sweep.map(|t| now.duration_since(t)),
+            sweep_interval,
+            last_read.map(|t| now.duration_since(t)),
+            read_interval,
+        ) else {
+            continue;
+        };
+        if pass == Pass::Sweep {
+            last_sweep = Some(now);
+        }
+        // A sweep reads the ledger too, so it satisfies the read clock.
+        last_read = Some(now);
+
         let parties: Vec<CantonId> = data
             .party_credentials
             .read()
@@ -960,55 +1137,299 @@ pub(crate) async fn run_reward_automation_loop(data: actix_web::web::Data<AppSta
             .iter()
             .map(|p| p.dec_party_id.clone())
             .collect();
+
+        prune_unserved(&mut oldest, &parties);
+
         for decparty in parties {
-            if let Err(e) = run_once_for_party(&data, &decparty).await {
-                if package_absent(&e) {
+            let label = decparty.to_string();
+            // Only a sweep moves the sweep counters. A read that fails is not a
+            // sweep that failed, and counting it would fire the sweep-failure
+            // alert on a signal-path problem.
+            match pass {
+                Pass::Sweep => {
+                    SWEEPS.with_label_values(&[&label]).inc();
+                    ensure_outcome_series(&label);
+                }
+                Pass::ExpiryRead => {
+                    EXPIRY_READS.with_label_values(&[&label]).inc();
+                }
+            }
+            let outcome = match run_once_for_party(&data, &decparty, pass).await {
+                Ok(outcome) => outcome,
+                Err(e) if package_absent(&e) => {
                     tracing::trace!(
                         %decparty,
                         error = %e,
-                        "reward automation tick failed: this participant does not hold the DAR"
+                        "reward automation is off: this participant holds no rewards DAR"
                     );
-                } else {
-                    tracing::warn!(%decparty, error = %e, "reward automation tick failed");
+                    SweepOutcome::Off
                 }
-            }
+                Err(e) => {
+                    if pass == Pass::Sweep {
+                        SWEEP_FAILED.with_label_values(&[&label]).inc();
+                    }
+                    match pass {
+                        Pass::Sweep => {
+                            tracing::warn!(%decparty, error = %e, "reward automation sweep failed");
+                        }
+                        Pass::ExpiryRead => {
+                            tracing::warn!(%decparty, error = %e, "reward expiry read failed");
+                        }
+                    }
+                    SweepOutcome::Failed
+                }
+            };
+            apply_sweep_outcome(&mut oldest, &decparty, outcome);
         }
     }
 }
 
-/// One reassign pass for a single decparty under the delegation model. No-op
-/// unless the decparty has an active `CouponReassignmentDelegation` (the
-/// enablement signal) naming this node's member party as an assigner.
+/// Whether an interval has elapsed (pure). `None` is always due: a fresh pod
+/// drains its backlog rather than waiting out an interval.
+fn is_due(since_last: Option<Duration>, interval: Duration) -> bool {
+    since_last.is_none_or(|elapsed| elapsed >= interval)
+}
+
+/// What this node may do for a decparty whose delegation it has just read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Role {
+    /// The delegation names this node, so it reads the backlog and assigns it.
+    Assign,
+    /// The delegation does not name this node. It reads the backlog anyway, so
+    /// the expiry gauge keeps reporting, and assigns nothing.
+    ReportOnly,
+}
+
+/// Whether the delegation lets this node assign (pure).
+///
+/// A delegation that exists and does not name this node is a governance mistake
+/// far more often than an intention, and the coupons expire either way. So the
+/// backlog still reaches the gauge, and only the assigning stops.
+fn role_for(delegation: &ActiveDelegation, member: &CantonId) -> Role {
+    if delegation.assigners.contains(member) {
+        Role::Assign
+    } else {
+        Role::ReportOnly
+    }
+}
+
+/// What a pass over the served decparties does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pass {
+    /// Read the backlog and assign every assignable coupon.
+    Sweep,
+    /// Read the backlog only, to refresh the expiry gauge between sweeps.
+    ExpiryRead,
+}
+
+/// Which pass this tick owes, if any (pure).
+///
+/// A sweep wins whenever both are due, because a sweep reads the ledger anyway
+/// and running both would pay for the same read twice.
+fn due_pass(
+    since_sweep: Option<Duration>,
+    sweep_interval: Duration,
+    since_read: Option<Duration>,
+    read_interval: Duration,
+) -> Option<Pass> {
+    if is_due(since_sweep, sweep_interval) {
+        Some(Pass::Sweep)
+    } else if is_due(since_read, read_interval) {
+        Some(Pass::ExpiryRead)
+    } else {
+        None
+    }
+}
+
+/// A sweep that found coupons to assign and assigned none of them (pure).
+///
+/// Keying on the backlog rather than on the refusal tally is what makes the
+/// contention `break` count: that path ends the sweep leaving both tallies at
+/// zero, so a refusal-only test reads it as a sweep with nothing to do.
+fn sweep_assigned_nothing(assignable: usize, assigned: usize) -> bool {
+    assignable > 0 && assigned == 0
+}
+
+/// Seconds from `now` until `expires_at` (pure). Negative once the moment has
+/// passed, and sub-second precise.
+fn seconds_until(expires_at: DateTime<Utc>, now: DateTime<Utc>) -> f64 {
+    (expires_at - now).num_milliseconds() as f64 / 1000.0
+}
+
+/// Publishes the expiry countdown for every remembered decparty.
+fn report_oldest_expiry(oldest: &HashMap<CantonId, DateTime<Utc>>, now: DateTime<Utc>) {
+    for (decparty, expires_at) in oldest {
+        OLDEST_EXPIRES_IN
+            .with_label_values(&[&decparty.to_string()])
+            .set(seconds_until(*expires_at, now));
+    }
+}
+
+/// What one sweep learned about a decparty's unassigned backlog.
+enum SweepOutcome {
+    /// The oldest unassigned coupon expires at this instant.
+    Backlog(DateTime<Utc>),
+    /// Nothing unassigned, or the automation is switched off for this decparty.
+    Empty,
+    /// The sweep errored before it could tell.
+    Failed,
+    /// Party credentials were not available this sweep — e.g. a Keycloak token
+    /// acquisition failure. Distinct from `Empty`: this decparty is still meant
+    /// to be served (it holds a row in `party_credentials`), so this is an
+    /// error condition rather than the automation being off for it.
+    CredentialsUnavailable,
+    /// This node cannot obtain credentials for this decparty at all, so it can
+    /// never refresh its backlog reading. Distinct from `CredentialsUnavailable`,
+    /// which is one sweep's token failure and cures itself: this one persists
+    /// until the auth registry is rebuilt, so a remembered expiry would count
+    /// down to zero on a reading nobody can refresh and fire both expiry rules
+    /// for a decparty no longer served.
+    Unserved,
+    /// This participant holds no rewards DAR, so it cannot host a delegation and
+    /// the automation is off for it. Distinct from `Empty`, which asserts that
+    /// nothing is left to save and drops the gauge series: this outcome asserts
+    /// nothing and changes nothing.
+    Off,
+}
+
+/// Applies one sweep's outcome to the remembered timestamps. The four arms are
+/// asymmetrical on purpose. `CredentialsUnavailable` is treated like `Failed`: a
+/// token failure must not read as "safely off".
+fn apply_sweep_outcome(
+    oldest: &mut HashMap<CantonId, DateTime<Utc>>,
+    decparty: &CantonId,
+    outcome: SweepOutcome,
+) {
+    match outcome {
+        SweepOutcome::Backlog(expires_at) => {
+            oldest.insert(decparty.clone(), expires_at);
+        }
+        // `Empty` asserts nothing is left to save. `Unserved` asserts only that
+        // this node cannot read the backlog, which is why it must not leave a
+        // countdown running either.
+        SweepOutcome::Empty | SweepOutcome::Unserved => {
+            oldest.remove(decparty);
+            let _ = OLDEST_EXPIRES_IN.remove_label_values(&[&decparty.to_string()]);
+        }
+        SweepOutcome::Failed | SweepOutcome::CredentialsUnavailable | SweepOutcome::Off => {}
+    }
+}
+
+/// Forgets every decparty this node no longer holds credentials for, dropping its
+/// gauge series with it. A series left behind would count down forever.
+fn prune_unserved(oldest: &mut HashMap<CantonId, DateTime<Utc>>, served: &[CantonId]) {
+    oldest.retain(|decparty, _| {
+        let still_served = served.contains(decparty);
+        if !still_served {
+            let _ = OLDEST_EXPIRES_IN.remove_label_values(&[&decparty.to_string()]);
+        }
+        still_served
+    });
+}
+
+/// One reassign pass for a single decparty under the delegation model. A no-op
+/// outcome (`SweepOutcome::Empty`) unless the decparty has an active
+/// `CouponReassignmentDelegation` (the enablement signal) naming this node's
+/// member party as an assigner. Credentials being unavailable is a distinct
+/// outcome (`SweepOutcome::CredentialsUnavailable`): unlike the two enablement
+/// no-ops, it is not this decparty's automation being switched off.
 async fn run_once_for_party(
     data: &actix_web::web::Data<AppState>,
     decparty: &CantonId,
-) -> anyhow::Result<()> {
+    pass: Pass,
+) -> anyhow::Result<SweepOutcome> {
     let pkgs = packages();
     let (token, member) = match get_party_credentials(data, decparty).await {
         Ok(Some(creds)) => creds,
-        Ok(None) | Err(_) => return Ok(()),
+        // A token fetch that failed is one sweep's problem and the callee logged
+        // the cause. The decparty is still served, so the countdown keeps falling.
+        Err(_) => {
+            tracing::warn!(%decparty, "party credentials unavailable for reward sweep");
+            return Ok(SweepOutcome::CredentialsUnavailable);
+        }
+        // No auth configured, or a party the registry does not know. The registry
+        // is rebuilt when party config changes, so a decparty that read a backlog
+        // earlier can land here and stay. Keeping its countdown would fire both
+        // expiry rules forever on a reading nothing can refresh.
+        Ok(None) => {
+            tracing::warn!(
+                %decparty,
+                "no auth registered for this decparty; dropping its expiry countdown"
+            );
+            return Ok(SweepOutcome::Unserved);
+        }
     };
     // Enablement: an active delegation. None => off (no-op).
     let Some(delegation) =
         active_delegation(&data.config, &pkgs, data.test_mode, decparty, &token).await?
     else {
-        return Ok(());
+        return Ok(SweepOutcome::Empty);
     };
-    // This node must be a listed assigner, else it cannot reassign.
-    if !delegation.assigners.contains(&member) {
-        tracing::debug!(%decparty, %member, "node not an assigner on the delegation — skipping");
-        return Ok(());
+    let role = role_for(&delegation, &member);
+    if role == Role::ReportOnly {
+        tracing::warn!(
+            %decparty,
+            %member,
+            assigners = ?delegation.assigners,
+            "the delegation does not name this node as an assigner; reporting the backlog without assigning"
+        );
     }
-    run_reassign_once(
-        &data.config,
+    let expires_at = match (role, pass) {
+        (Role::Assign, Pass::Sweep) => {
+            run_reassign_once(
+                &data.config,
+                decparty,
+                &member,
+                &token,
+                &delegation,
+                data.test_mode,
+                &pkgs,
+            )
+            .await?
+        }
+        (Role::Assign, Pass::ExpiryRead) | (Role::ReportOnly, _) => {
+            read_oldest_expiry(
+                &data.config,
+                decparty,
+                &delegation.dso,
+                &token,
+                data.test_mode,
+                &pkgs,
+            )
+            .await?
+        }
+    };
+    Ok(match expires_at {
+        Some(t) => SweepOutcome::Backlog(t),
+        None => SweepOutcome::Empty,
+    })
+}
+
+/// The expiry of the oldest coupon this decparty still has time to save, read
+/// without assigning anything.
+///
+/// This is the read half of [`run_reassign_once`]. It exists so the gauge can
+/// refresh faster than the sweep cadence: the sweep interval is sized to fill a
+/// `Delegation_Assign` chunk, which is a transaction-cost choice, and detection
+/// should not inherit it.
+async fn read_oldest_expiry(
+    config: &NodeConfig,
+    decparty: &CantonId,
+    dso: &CantonId,
+    token: &str,
+    test_mode: bool,
+    packages: &PackageConfig,
+) -> anyhow::Result<Option<DateTime<Utc>>> {
+    let coupons = unassigned_coupons(
+        config,
         decparty,
-        &member,
-        &token,
-        &delegation,
-        data.test_mode,
-        &pkgs,
+        dso,
+        Some(token.to_string()),
+        test_mode,
+        packages,
     )
-    .await
+    .await?;
+    Ok(oldest_expiry(&coupons, Utc::now()))
 }
 
 #[cfg(test)]
@@ -1082,6 +1503,10 @@ mod tests {
     const ALICE: &str =
         "alice::1220aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const BOB: &str = "bob::1220bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const CAROL: &str =
+        "carol::1220cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    const DAVE: &str = "dave::1220dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    const EVE: &str = "eve::1220eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
     #[test]
     fn parse_delegation_record_reads_assigners_and_split() {
@@ -1268,7 +1693,7 @@ mod tests {
         // naming itself dso and this decparty as provider. Letting it into a
         // batch is a denial of service: sorted most-urgent-first it becomes the
         // primary, splice fetches the genuine coupons with the primary's dso,
-        // the chunk is rejected, and the tick ends having assigned nothing.
+        // the chunk is rejected, and the sweep ends having assigned nothing.
         let alice = CantonId::parse(ALICE).unwrap();
         let real_dso = CantonId::parse(GOV).unwrap();
 
@@ -1333,7 +1758,7 @@ mod tests {
 
     #[test]
     fn select_assignable_does_not_truncate() {
-        // A tick drains the whole set in chunks, so selection returns all of it;
+        // A sweep drains the whole set in chunks, so selection returns all of it;
         // bounding a transaction is chunk_size's job, not selection's.
         let now = dt("2026-07-20T12:00:00Z");
         let coupons: Vec<CouponInfo> = (0..500)
@@ -1395,7 +1820,7 @@ mod tests {
     #[tokio::test]
     async fn drain_assigns_the_whole_set_in_one_pass() {
         // The point of draining: 120 coupons at a chunk of 50 is three
-        // transactions in ONE tick, not one transaction and a wait.
+        // transactions in ONE sweep, not one transaction and a wait.
         let all = cids(120);
         let (seen, submit) = recorder(vec![]);
         let assigned = drain_assignable(&all, 50, &alice(), submit).await;
@@ -1404,7 +1829,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drain_ends_the_tick_on_a_failed_chunk() {
+    async fn drain_ends_the_sweep_on_a_failed_chunk() {
         // A failure means the view is stale, and only a fresh read fixes that.
         // Exactly one attempt: no retry at a smaller size (a smaller chunk is
         // not a newer view) and no skip-and-continue (an assigner that took the
@@ -1413,13 +1838,13 @@ mod tests {
         let (seen, submit) = recorder(vec![false]);
         let assigned = drain_assignable(&all, 50, &alice(), submit).await;
         assert_eq!(assigned, 0);
-        assert_eq!(*seen.borrow(), vec![50], "one attempt, then end the tick");
+        assert_eq!(*seen.borrow(), vec![50], "one attempt, then end the sweep");
     }
 
     #[tokio::test]
     async fn drain_keeps_the_chunks_it_already_committed() {
-        // Ending the tick must not discard earlier successes: the first chunk is
-        // assigned, the second fails, and the remainder waits for the next tick
+        // Ending the sweep must not discard earlier successes: the first chunk is
+        // assigned, the second fails, and the remainder waits for the next sweep
         // with its full TTL intact.
         let all = cids(120);
         let (seen, submit) = recorder(vec![true, false]);
@@ -1492,10 +1917,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn contention_ends_the_tick_without_fanning_out() {
+    async fn contention_ends_the_sweep_without_fanning_out() {
         // The common case: two of three assigners lose every devnet round. A
         // fresh read is the only cure, so this must cost ONE submission —
-        // fanning out here would burn n failing transactions per tick.
+        // fanning out here would burn n failing transactions per sweep.
         for id in [
             "LOCAL_VERDICT_LOCKED_CONTRACTS",
             "LOCAL_VERDICT_INACTIVE_CONTRACTS",
@@ -1526,7 +1951,7 @@ mod tests {
     async fn a_rejected_coupon_is_found_wherever_it_sits() {
         // splice fetches and validates every additionalCoupon, so the culprit
         // need not be the primary. Dropping only the primary would advance one
-        // coupon per tick; submitting each on its own does not care where it sat.
+        // coupon per sweep; submitting each on its own does not care where it sat.
         let all = cids(16);
         let (_, submit) = poisoned("c11", "DAML_INTERPRETATION_ERROR");
         let assigned = drain_assignable(&all, 16, &alice(), submit).await;
@@ -1570,7 +1995,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn contention_during_the_fan_out_ends_the_tick() {
+    async fn contention_during_the_fan_out_ends_the_sweep() {
         // Another assigner took the rest of the chunk while we were fanning out.
         // A fresh read is the cure, so stop — and keep what already committed.
         let all = cids(4);
@@ -1598,7 +2023,7 @@ mod tests {
     async fn an_unrecognized_ledger_rejection_is_isolated_not_swallowed() {
         // An id we have never seen is treated as a bad command, so a coupon
         // that can never be exercised is still contained. The cost of being
-        // wrong is one tick: nothing is quarantined across ticks.
+        // wrong is one sweep: nothing is quarantined across sweeps.
         let all = cids(8);
         let (_, submit) = poisoned("c0", "SOME_FUTURE_CANTON_ERROR");
         let assigned = drain_assignable(&all, 8, &alice(), submit).await;
@@ -1606,7 +2031,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_non_ledger_failure_ends_the_tick() {
+    async fn a_non_ledger_failure_ends_the_sweep() {
         // A transport or config failure is not attributable to any one coupon,
         // so isolating one would be meaningless.
         let all = cids(8);
@@ -1633,6 +2058,26 @@ mod tests {
             "UNKNOWN_CONTRACT_SYNCHRONIZERS(9,6a504b42): The following contracts have been archived",
         ));
         assert!(assign_failure_is_transient(&fp));
+    }
+
+    #[test]
+    fn a_mediator_confirmation_timeout_is_transient() {
+        // Devnet, 2026-08-20: this arrived as ABORTED and was counted a coupon
+        // rejection, so it logged at ERROR and fired the coupon-rejected alert.
+        // The same coupon assigned on the next sweep, so nothing was wrong with
+        // it. Every other timeout in the list is classified the same way.
+        let e = anyhow::Error::new(tonic::Status::aborted(
+            "MEDIATOR_SAYS_TX_TIMED_OUT(2,0): Rejected transaction as the mediator did not \
+             receive sufficient confirmations within the expected timeframe.",
+        ));
+        assert_eq!(
+            canton_error_id(&e).as_deref(),
+            Some("MEDIATOR_SAYS_TX_TIMED_OUT")
+        );
+        assert!(
+            assign_failure_is_transient(&e),
+            "a mediator timeout is not attributable to the coupon"
+        );
     }
 
     #[test]
@@ -1672,7 +2117,7 @@ mod tests {
     }
 
     #[test]
-    fn chunk_size_never_stalls_a_tick() {
+    fn chunk_size_never_stalls_a_sweep() {
         // A split wider than the create budget still yields a 1-coupon chunk
         // rather than 0, which would loop forever making no progress.
         assert_eq!(chunk_size(100, 500), 1);
@@ -1711,5 +2156,415 @@ mod tests {
             "Governance.Rewards.CouponReassignmentDelegation"
         );
         assert_eq!(id.entity_name, "CouponReassignmentDelegation");
+    }
+
+    fn gathered_family_names() -> Vec<String> {
+        prometheus::gather()
+            .into_iter()
+            .map(|f| f.get_name().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn the_heartbeat_is_exposed_before_any_sweep_runs() {
+        // The stall alert watches this family, so it must exist from boot.
+        register_metrics();
+        assert!(
+            gathered_family_names()
+                .iter()
+                .any(|n| n == "decman_reward_heartbeat_total")
+        );
+    }
+
+    #[test]
+    fn a_labelled_family_appears_once_a_decparty_is_known() {
+        // `gather()` omits a labelled family with no series, so these appear only
+        // once a decparty is known.
+        register_metrics();
+        SWEEPS.with_label_values(&["cbtc-network::1220test"]).inc(); // any string is a valid label
+        assert!(
+            gathered_family_names()
+                .iter()
+                .any(|n| n == "decman_reward_sweep_total")
+        );
+    }
+
+    #[test]
+    fn the_outcome_counters_read_zero_before_their_first_event() {
+        // A dashboard cannot tell a missing family from a node that never failed,
+        // so a served decparty exports all five at zero from its first sweep.
+        // The read counter needs this most: a node whose sweep interval is
+        // shorter than its read interval never increments it at all.
+        register_metrics();
+        let label = "cbtc-network::1220outcomezero";
+        ensure_outcome_series(label);
+
+        let families = prometheus::gather();
+        for name in [
+            "decman_reward_coupons_assigned_total",
+            "decman_reward_coupons_skipped_total",
+            "decman_reward_sweep_zero_assigned_total",
+            "decman_reward_sweep_failed_total",
+            "decman_reward_expiry_read_total",
+        ] {
+            let family = families
+                .iter()
+                .find(|f| f.get_name() == name)
+                .unwrap_or_else(|| panic!("{name} is missing from the registry"));
+            let metric = family
+                .get_metric()
+                .iter()
+                .find(|m| m.get_label().iter().any(|l| l.get_value() == label))
+                .unwrap_or_else(|| panic!("{name} has no series for the decparty"));
+            assert_eq!(
+                metric.get_counter().get_value(),
+                0.0,
+                "{name} should read zero"
+            );
+        }
+    }
+
+    #[test]
+    fn the_expiry_countdown_falls_with_real_time_not_with_the_sweep() {
+        // Falls with real time, not with the sweep cadence.
+        let decparty = CantonId::parse(GOV).expect("GOV is a valid canton id");
+        let expires_at = dt("2026-07-20T18:00:00Z");
+        let mut oldest = HashMap::new();
+        oldest.insert(decparty.clone(), expires_at);
+
+        report_oldest_expiry(&oldest, dt("2026-07-20T12:00:00Z"));
+        let six_hours = OLDEST_EXPIRES_IN
+            .get_metric_with_label_values(&[&decparty.to_string()])
+            .expect("label values are valid")
+            .get();
+        assert_eq!(six_hours, 6.0 * 3600.0);
+
+        // Twenty minutes later, with no sweep in between.
+        report_oldest_expiry(&oldest, dt("2026-07-20T12:20:00Z"));
+        let after = OLDEST_EXPIRES_IN
+            .get_metric_with_label_values(&[&decparty.to_string()])
+            .expect("label values are valid")
+            .get();
+        assert_eq!(after, 6.0 * 3600.0 - 1200.0);
+    }
+
+    #[test]
+    fn a_failed_sweep_keeps_the_countdown_running() {
+        // A failure must leave the timestamp alone.
+        let decparty = CantonId::parse(ALICE).expect("ALICE is a valid canton id");
+        let expires_at = dt("2026-07-20T18:00:00Z");
+        let mut oldest = HashMap::new();
+
+        apply_sweep_outcome(&mut oldest, &decparty, SweepOutcome::Backlog(expires_at));
+        assert_eq!(oldest.get(&decparty), Some(&expires_at), "a backlog writes");
+
+        apply_sweep_outcome(&mut oldest, &decparty, SweepOutcome::Failed);
+        assert_eq!(
+            oldest.get(&decparty),
+            Some(&expires_at),
+            "a failure must leave the timestamp in place"
+        );
+
+        apply_sweep_outcome(&mut oldest, &decparty, SweepOutcome::Empty);
+        assert!(oldest.is_empty(), "an empty backlog removes");
+    }
+
+    #[test]
+    fn unavailable_credentials_keep_the_countdown_running() {
+        // A Keycloak token failure must not read as "safely off": the timestamp
+        // must survive exactly as it does on `Failed`.
+        // Its own decparty fixture, since these tests share a process-wide
+        // metrics registry and run in parallel.
+        let decparty = CantonId::parse(CAROL).expect("CAROL is a valid canton id");
+        let expires_at = dt("2026-07-20T18:00:00Z");
+        let mut oldest = HashMap::new();
+
+        apply_sweep_outcome(&mut oldest, &decparty, SweepOutcome::Backlog(expires_at));
+        assert_eq!(oldest.get(&decparty), Some(&expires_at), "a backlog writes");
+
+        apply_sweep_outcome(&mut oldest, &decparty, SweepOutcome::CredentialsUnavailable);
+        assert_eq!(
+            oldest.get(&decparty),
+            Some(&expires_at),
+            "unavailable credentials must leave the timestamp in place"
+        );
+
+        apply_sweep_outcome(&mut oldest, &decparty, SweepOutcome::Empty);
+        assert!(oldest.is_empty(), "an empty backlog removes");
+    }
+
+    #[test]
+    fn a_missing_dar_changes_nothing() {
+        // A participant with no rewards DAR is a no-op, not a failure and not an
+        // empty backlog. `Empty` would drop the gauge series, which asserts that
+        // nothing is left to save.
+        let decparty = CantonId::parse(EVE).expect("EVE is a valid canton id");
+        let expires_at = dt("2026-07-20T18:00:00Z");
+        let mut oldest = HashMap::new();
+
+        apply_sweep_outcome(&mut oldest, &decparty, SweepOutcome::Backlog(expires_at));
+        apply_sweep_outcome(&mut oldest, &decparty, SweepOutcome::Off);
+        assert_eq!(
+            oldest.get(&decparty),
+            Some(&expires_at),
+            "a missing DAR must leave the timestamp exactly as it was"
+        );
+
+        apply_sweep_outcome(&mut oldest, &decparty, SweepOutcome::Empty);
+        assert!(oldest.is_empty(), "an empty backlog still removes");
+    }
+
+    #[test]
+    fn losing_auth_for_a_decparty_drops_its_countdown() {
+        // The auth registry is rebuilt when party config changes, so a decparty
+        // that read a backlog earlier can stop resolving to credentials and stay
+        // that way. `prune_unserved` cannot catch it, because that keys on the
+        // party_credentials rows, which still exist. Left alone, the remembered
+        // expiry counts down to zero and fires both expiry rules on a reading
+        // nothing can refresh.
+        let decparty = CantonId::parse(BOB).expect("BOB is a valid canton id");
+        let mut oldest = HashMap::new();
+        oldest.insert(decparty.clone(), dt("2026-07-20T18:00:00Z"));
+
+        apply_sweep_outcome(&mut oldest, &decparty, SweepOutcome::CredentialsUnavailable);
+        assert!(
+            oldest.contains_key(&decparty),
+            "one sweep's token failure is transient, so the countdown keeps running"
+        );
+
+        apply_sweep_outcome(&mut oldest, &decparty, SweepOutcome::Unserved);
+        assert!(
+            !oldest.contains_key(&decparty),
+            "no auth at all means the backlog is unreadable, so the countdown must go"
+        );
+    }
+
+    #[test]
+    fn a_decparty_this_node_stopped_serving_is_forgotten() {
+        // Otherwise the countdown outlives the credentials.
+        let decparty = CantonId::parse(BOB).expect("BOB is a valid canton id");
+        let mut oldest = HashMap::new();
+        oldest.insert(decparty.clone(), dt("2026-07-20T18:00:00Z"));
+
+        prune_unserved(&mut oldest, std::slice::from_ref(&decparty));
+        assert!(
+            oldest.contains_key(&decparty),
+            "still served, so still tracked"
+        );
+
+        prune_unserved(&mut oldest, &[]);
+        assert!(oldest.is_empty(), "no longer served, so forgotten");
+    }
+
+    #[test]
+    fn the_first_sweep_of_a_process_is_always_due() {
+        assert!(is_due(None, Duration::from_secs(21_600)));
+    }
+
+    #[test]
+    fn a_sweep_is_due_once_the_interval_has_elapsed() {
+        let interval = Duration::from_secs(600);
+        assert!(!is_due(Some(Duration::from_secs(599)), interval));
+        assert!(is_due(Some(Duration::from_secs(600)), interval));
+        assert!(is_due(Some(Duration::from_secs(601)), interval));
+    }
+
+    // ---- the two clocks (due_pass) -------------------------------------------
+
+    /// Devnet's cadence: a 6h sweep against the default hourly read.
+    const SWEEP: Duration = Duration::from_secs(21_600);
+    const READ: Duration = Duration::from_secs(3_600);
+
+    fn secs(n: u64) -> Option<Duration> {
+        Some(Duration::from_secs(n))
+    }
+
+    // ---- the assigner role (role_for) ---------------------------------------
+
+    fn delegation_naming(assigners: &[&str]) -> ActiveDelegation {
+        ActiveDelegation {
+            cid: "00cid".to_string(),
+            dso: CantonId::parse(GOV).expect("GOV is a valid canton id"),
+            assigners: assigners
+                .iter()
+                .map(|a| CantonId::parse(a).expect("valid canton id"))
+                .collect(),
+            beneficiary_count: 2,
+        }
+    }
+
+    #[test]
+    fn a_listed_assigner_may_assign() {
+        let d = delegation_naming(&[ALICE, BOB]);
+        let me = CantonId::parse(ALICE).expect("ALICE is a valid canton id");
+        assert_eq!(role_for(&d, &me), Role::Assign);
+    }
+
+    #[test]
+    fn a_node_the_delegation_does_not_name_still_reports() {
+        // A vote naming the wrong party is a mistake, not an off switch, so the
+        // backlog must keep reaching the expiry gauge.
+        let d = delegation_naming(&[ALICE, BOB]);
+        let me = CantonId::parse(CAROL).expect("CAROL is a valid canton id");
+        assert_eq!(role_for(&d, &me), Role::ReportOnly);
+    }
+
+    #[test]
+    fn a_delegation_naming_nobody_reports() {
+        let d = delegation_naming(&[]);
+        let me = CantonId::parse(ALICE).expect("ALICE is a valid canton id");
+        assert_eq!(role_for(&d, &me), Role::ReportOnly);
+    }
+
+    #[test]
+    fn the_first_tick_sweeps_rather_than_only_reading() {
+        assert_eq!(due_pass(None, SWEEP, None, READ), Some(Pass::Sweep));
+    }
+
+    #[test]
+    fn a_due_sweep_wins_over_a_due_read() {
+        // A sweep reads the ledger anyway, so running both would pay for the
+        // same read twice.
+        assert_eq!(
+            due_pass(secs(21_600), SWEEP, secs(3_600), READ),
+            Some(Pass::Sweep)
+        );
+    }
+
+    #[test]
+    fn a_read_runs_between_sweeps() {
+        assert_eq!(
+            due_pass(secs(3_600), SWEEP, secs(3_600), READ),
+            Some(Pass::ExpiryRead)
+        );
+    }
+
+    #[test]
+    fn neither_clock_due_runs_nothing() {
+        assert_eq!(due_pass(secs(600), SWEEP, secs(600), READ), None);
+    }
+
+    #[test]
+    fn a_read_interval_longer_than_the_sweep_never_binds() {
+        // Mainnet's 300s default against an hourly read: every pass is a sweep,
+        // so the read clock costs nothing.
+        let sweep = Duration::from_secs(300);
+        assert_eq!(
+            due_pass(secs(300), sweep, secs(300), READ),
+            Some(Pass::Sweep)
+        );
+        assert_eq!(due_pass(secs(120), sweep, secs(120), READ), None);
+    }
+
+    #[test]
+    fn seconds_until_counts_down_to_the_expiry() {
+        let now = dt("2026-07-20T12:00:00Z");
+        assert_eq!(seconds_until(dt("2026-07-20T18:00:00Z"), now), 6.0 * 3600.0);
+    }
+
+    #[test]
+    fn seconds_until_is_negative_for_an_expired_coupon() {
+        // Negative rather than clamped: the value is lost, and by how long matters.
+        let now = dt("2026-07-20T12:00:00Z");
+        assert_eq!(seconds_until(dt("2026-07-20T11:00:00Z"), now), -3600.0);
+    }
+
+    #[test]
+    fn seconds_until_keeps_sub_second_precision() {
+        // The gauge is compared across samples minutes apart, so a truncated
+        // second would read as drift.
+        let now = dt("2026-07-20T12:00:00Z");
+        assert_eq!(seconds_until(dt("2026-07-20T12:00:00.500Z"), now), 0.5);
+    }
+
+    #[test]
+    fn oldest_expiry_takes_the_earliest_of_the_pile() {
+        // Not the first read, and not the most urgent assignable one.
+        let now = dt("2026-07-20T00:00:00Z");
+        let coupons = vec![
+            coupon("a", "2026-07-20T18:00:00Z"),
+            coupon("b", "2026-07-20T12:00:00Z"),
+            coupon("c", "2026-07-20T15:00:00Z"),
+        ];
+        assert_eq!(
+            oldest_expiry(&coupons, now),
+            Some(dt("2026-07-20T12:00:00Z"))
+        );
+    }
+
+    #[test]
+    fn oldest_expiry_is_none_for_an_empty_backlog() {
+        // The loop reads this as "drop the series", so it must not be a zero.
+        let now = dt("2026-07-20T00:00:00Z");
+        assert_eq!(oldest_expiry(&[], now), None);
+    }
+
+    #[test]
+    fn oldest_expiry_ignores_an_expired_coupon_in_favour_of_a_later_live_one() {
+        // The expired coupon has the numerically smallest `expires_at` in the
+        // pile — without the expiry filter it would win the minimum.
+        let now = dt("2026-07-20T12:00:00Z");
+        let coupons = vec![
+            coupon("dead", "2026-07-19T00:00:00Z"),
+            coupon("live", "2026-07-20T18:00:00Z"),
+        ];
+        assert_eq!(
+            oldest_expiry(&coupons, now),
+            Some(dt("2026-07-20T18:00:00Z"))
+        );
+    }
+
+    #[test]
+    fn oldest_expiry_is_none_when_every_coupon_has_expired() {
+        let now = dt("2026-07-20T12:00:00Z");
+        let coupons = vec![
+            coupon("dead-1", "2026-07-19T00:00:00Z"),
+            coupon("dead-2", "2026-07-18T00:00:00Z"),
+        ];
+        assert_eq!(oldest_expiry(&coupons, now), None);
+    }
+
+    #[test]
+    fn a_sweep_that_paid_nothing_while_every_coupon_was_refused_counts() {
+        assert!(sweep_assigned_nothing(3, 0));
+    }
+
+    #[test]
+    fn a_sweep_that_ended_before_it_paid_anything_counts() {
+        // The contention `break` ends a sweep with both tallies at zero while a
+        // backlog is still waiting.
+        assert!(sweep_assigned_nothing(9, 0));
+    }
+
+    #[test]
+    fn a_sweep_that_paid_something_does_not_count() {
+        assert!(!sweep_assigned_nothing(10, 7));
+    }
+
+    #[test]
+    fn a_sweep_with_nothing_to_do_does_not_count() {
+        assert!(!sweep_assigned_nothing(0, 0));
+    }
+
+    #[tokio::test]
+    async fn drain_counts_a_sweep_that_ended_before_assigning_anything() {
+        // Its own decparty fixture, since these tests share a process-wide
+        // metrics registry and run in parallel.
+        let decparty = CantonId::parse(DAVE).expect("DAVE is a valid canton id");
+        let label = decparty.to_string();
+        let read = || {
+            ZERO_ASSIGNED
+                .get_metric_with_label_values(&[&label])
+                .expect("label values are valid")
+                .get()
+        };
+        let before = read();
+
+        let all = cids(120);
+        let (_seen, submit) = recorder(vec![false]);
+        let assigned = drain_assignable(&all, 50, &decparty, submit).await;
+
+        assert_eq!(assigned, 0);
+        assert_eq!(read(), before + 1);
     }
 }

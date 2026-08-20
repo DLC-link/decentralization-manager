@@ -149,6 +149,7 @@ The database file path can be overridden with the `--db` CLI flag.
 | `DECPM_DIR` | Root directory for persistent data (`--dir`/`-d`) | `.` |
 | `DECPM_HOST` | Host address to bind the HTTP/UI server to | `0.0.0.0` |
 | `DECPM_PORT` | Port for the HTTP/UI server | `8080` |
+| `DECPM_METRICS_PORT` | Port serving Prometheus metrics at `/metrics`, separate from the HTTP/UI port (`0` disables it) | `9464` |
 | `DECPM_DB_PATH` | SQLite database path override (CLI flag `--db`) | _(defaults to `{dir}/data/decpm.db`)_ |
 | `DECPM_DB_ENCRYPTION_KEY` | Encryption key for secrets stored in the database | _(none)_ |
 | `DECPM_ADMIN_ROLE` | Role name that gates sensitive endpoints (unset skips the role check) | _(none)_ |
