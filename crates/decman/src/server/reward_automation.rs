@@ -1329,13 +1329,18 @@ async fn run_once_for_party(
     pass: Pass,
 ) -> anyhow::Result<SweepOutcome> {
     let pkgs = packages();
-    let Some((token, member)) = get_party_credentials(data, decparty).await else {
-        // `get_party_credentials` returns `None` both when this decparty holds no
-        // token manager and when a live one failed to acquire a token (its `?` on
-        // `get_token()`). Either way this decparty is still meant to be served, so
-        // the countdown must keep falling rather than clear as if switched off.
-        tracing::warn!(%decparty, "party credentials unavailable for reward sweep");
-        return Ok(SweepOutcome::CredentialsUnavailable);
+    let (token, member) = match get_party_credentials(data, decparty).await {
+        Ok(Some(creds)) => creds,
+        // `Ok(None)` is no auth configured, or a party the registry does not know.
+        // `Err` is a token fetch that failed, and the callee already logged the
+        // cause. Both leave this decparty still meant to be served but unswept, so
+        // the countdown must keep falling rather than clear as if the automation
+        // were switched off for it. Treating the two differently is a behaviour
+        // change, so this keeps them together.
+        Ok(None) | Err(_) => {
+            tracing::warn!(%decparty, "party credentials unavailable for reward sweep");
+            return Ok(SweepOutcome::CredentialsUnavailable);
+        }
     };
     // Enablement: an active delegation. None => off (no-op).
     let Some(delegation) =

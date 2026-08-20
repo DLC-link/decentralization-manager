@@ -434,8 +434,16 @@ pub enum NoiseError {
     #[error("JSON serialization error: {0}")]
     JsonSerialization(#[from] serde_json::Error),
 
-    #[error("Bad status code: {0}")]
-    BadStatusCode(StatusCode),
+    /// Non-2xx from the peer. The second field carries the peer's own reason
+    /// when it sent one (a `MessageType::Error` frame on its deny path), which
+    /// is the difference between "peer refused us" and "peer is down" — the
+    /// two used to be indistinguishable at the requester (see #332).
+    #[error(
+        "Bad status code: {status}{reason}",
+        status = .0,
+        reason = .1.as_deref().map(|r| format!(" — peer said: {r}")).unwrap_or_default(),
+    )]
+    BadStatusCode(StatusCode, Option<String>),
 
     #[error("Invalid URI: {0}")]
     InvalidUri(#[from] http::uri::InvalidUri),
@@ -563,7 +571,22 @@ async fn send_noise_message_with_timeout(
         hyper_noise::client::send_request(tcp_stream, initiator, request, Some(timeout)).await?;
 
     if response.status() != StatusCode::OK {
-        return Err(NoiseError::BadStatusCode(response.status()));
+        // Read the body before giving up. The listener's deny paths answer a
+        // non-2xx with a `MessageType::Error` frame naming the reason, and this
+        // is the path every peer-to-peer call takes (`send_noise_message`), so
+        // dropping it here would leave the fan-out exactly as blind as before
+        // (#332). Best-effort and bounded by the same timeout: a peer that
+        // sends no body, or an unparseable one, still yields the bare status.
+        let status = response.status();
+        let reason =
+            match tokio::time::timeout(timeout, hyper::body::to_bytes(response.body_mut())).await {
+                Ok(Ok(bytes)) if !bytes.is_empty() => Message::from_bytes(&bytes)
+                    .ok()
+                    .filter(|m| m.msg_type == MessageType::Error)
+                    .map(|m| String::from_utf8_lossy(&m.payload).into_owned()),
+                _ => None,
+            };
+        return Err(NoiseError::BadStatusCode(status, reason));
     }
 
     let resp_body_bytes = hyper::body::to_bytes(response.body_mut()).await?;
@@ -784,7 +807,7 @@ pub(crate) fn is_transient(err: &NoiseError) -> bool {
         | NoiseError::RequestTimeout
         | NoiseError::Io(_)
         | NoiseError::Hyper(_) => true,
-        NoiseError::BadStatusCode(code) => code.is_server_error(),
+        NoiseError::BadStatusCode(code, _) => code.is_server_error(),
         NoiseError::Noise(_)
         | NoiseError::HandshakeFailed
         | NoiseError::DecryptionError
@@ -1328,11 +1351,11 @@ mod tests {
             let calls = calls_clone.clone();
             async move {
                 calls.fetch_add(1, Ordering::SeqCst);
-                Err::<Bytes, _>(NoiseError::BadStatusCode(StatusCode::BAD_REQUEST))
+                Err::<Bytes, _>(NoiseError::BadStatusCode(StatusCode::BAD_REQUEST, None))
             }
         })
         .await;
-        assert!(matches!(result, Err(NoiseError::BadStatusCode(_))));
+        assert!(matches!(result, Err(NoiseError::BadStatusCode(..))));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
@@ -1345,11 +1368,14 @@ mod tests {
             let calls = calls_clone.clone();
             async move {
                 calls.fetch_add(1, Ordering::SeqCst);
-                Err::<Bytes, _>(NoiseError::BadStatusCode(StatusCode::INTERNAL_SERVER_ERROR))
+                Err::<Bytes, _>(NoiseError::BadStatusCode(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    None,
+                ))
             }
         })
         .await;
-        assert!(matches!(result, Err(NoiseError::BadStatusCode(_))));
+        assert!(matches!(result, Err(NoiseError::BadStatusCode(..))));
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
