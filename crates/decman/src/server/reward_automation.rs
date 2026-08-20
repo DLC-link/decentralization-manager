@@ -1278,6 +1278,13 @@ enum SweepOutcome {
     /// to be served (it holds a row in `party_credentials`), so this is an
     /// error condition rather than the automation being off for it.
     CredentialsUnavailable,
+    /// This node cannot obtain credentials for this decparty at all, so it can
+    /// never refresh its backlog reading. Distinct from `CredentialsUnavailable`,
+    /// which is one sweep's token failure and cures itself: this one persists
+    /// until the auth registry is rebuilt, so a remembered expiry would count
+    /// down to zero on a reading nobody can refresh and fire both expiry rules
+    /// for a decparty no longer served.
+    Unserved,
     /// This participant holds no rewards DAR, so it cannot host a delegation and
     /// the automation is off for it. Distinct from `Empty`, which asserts that
     /// nothing is left to save and drops the gauge series: this outcome asserts
@@ -1297,7 +1304,10 @@ fn apply_sweep_outcome(
         SweepOutcome::Backlog(expires_at) => {
             oldest.insert(decparty.clone(), expires_at);
         }
-        SweepOutcome::Empty => {
+        // `Empty` asserts nothing is left to save. `Unserved` asserts only that
+        // this node cannot read the backlog, which is why it must not leave a
+        // countdown running either.
+        SweepOutcome::Empty | SweepOutcome::Unserved => {
             oldest.remove(decparty);
             let _ = OLDEST_EXPIRES_IN.remove_label_values(&[&decparty.to_string()]);
         }
@@ -1331,15 +1341,22 @@ async fn run_once_for_party(
     let pkgs = packages();
     let (token, member) = match get_party_credentials(data, decparty).await {
         Ok(Some(creds)) => creds,
-        // `Ok(None)` is no auth configured, or a party the registry does not know.
-        // `Err` is a token fetch that failed, and the callee already logged the
-        // cause. Both leave this decparty still meant to be served but unswept, so
-        // the countdown must keep falling rather than clear as if the automation
-        // were switched off for it. Treating the two differently is a behaviour
-        // change, so this keeps them together.
-        Ok(None) | Err(_) => {
+        // A token fetch that failed is one sweep's problem and the callee logged
+        // the cause. The decparty is still served, so the countdown keeps falling.
+        Err(_) => {
             tracing::warn!(%decparty, "party credentials unavailable for reward sweep");
             return Ok(SweepOutcome::CredentialsUnavailable);
+        }
+        // No auth configured, or a party the registry does not know. The registry
+        // is rebuilt when party config changes, so a decparty that read a backlog
+        // earlier can land here and stay. Keeping its countdown would fire both
+        // expiry rules forever on a reading nothing can refresh.
+        Ok(None) => {
+            tracing::warn!(
+                %decparty,
+                "no auth registered for this decparty; dropping its expiry countdown"
+            );
+            return Ok(SweepOutcome::Unserved);
         }
     };
     // Enablement: an active delegation. None => off (no-op).
@@ -2295,6 +2312,31 @@ mod tests {
 
         apply_sweep_outcome(&mut oldest, &decparty, SweepOutcome::Empty);
         assert!(oldest.is_empty(), "an empty backlog still removes");
+    }
+
+    #[test]
+    fn losing_auth_for_a_decparty_drops_its_countdown() {
+        // The auth registry is rebuilt when party config changes, so a decparty
+        // that read a backlog earlier can stop resolving to credentials and stay
+        // that way. `prune_unserved` cannot catch it, because that keys on the
+        // party_credentials rows, which still exist. Left alone, the remembered
+        // expiry counts down to zero and fires both expiry rules on a reading
+        // nothing can refresh.
+        let decparty = CantonId::parse(BOB).expect("BOB is a valid canton id");
+        let mut oldest = HashMap::new();
+        oldest.insert(decparty.clone(), dt("2026-07-20T18:00:00Z"));
+
+        apply_sweep_outcome(&mut oldest, &decparty, SweepOutcome::CredentialsUnavailable);
+        assert!(
+            oldest.contains_key(&decparty),
+            "one sweep's token failure is transient, so the countdown keeps running"
+        );
+
+        apply_sweep_outcome(&mut oldest, &decparty, SweepOutcome::Unserved);
+        assert!(
+            !oldest.contains_key(&decparty),
+            "no auth at all means the backlog is unreadable, so the countdown must go"
+        );
     }
 
     #[test]
