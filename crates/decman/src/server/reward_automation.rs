@@ -882,6 +882,9 @@ pub(crate) async fn run_reassign_once(
 ///
 /// The timeouts come from the 2026-07-29 devnet outage, where five consecutive
 /// sweeps each hit a different one and recovered unattended.
+/// `MEDIATOR_SAYS_TX_TIMED_OUT` was observed on devnet on 2026-08-20: the coupon
+/// it named assigned cleanly on the very next sweep, so the mediator's missing
+/// confirmations were the fault and the coupon was never bad.
 const TRANSIENT_ASSIGN_ERROR_IDS: &[&str] = &[
     "LOCAL_VERDICT_LOCKED_CONTRACTS",
     "LOCAL_VERDICT_INACTIVE_CONTRACTS",
@@ -891,6 +894,7 @@ const TRANSIENT_ASSIGN_ERROR_IDS: &[&str] = &[
     "NOT_SEQUENCED_TIMEOUT",
     "SEQUENCER_BACKPRESSURE",
     "REQUEST_TIME_OUT",
+    "MEDIATOR_SAYS_TX_TIMED_OUT",
 ];
 
 /// The Canton error id a failed submission carries, i.e. the message prefix
@@ -2032,6 +2036,26 @@ mod tests {
             "UNKNOWN_CONTRACT_SYNCHRONIZERS(9,6a504b42): The following contracts have been archived",
         ));
         assert!(assign_failure_is_transient(&fp));
+    }
+
+    #[test]
+    fn a_mediator_confirmation_timeout_is_transient() {
+        // Devnet, 2026-08-20: this arrived as ABORTED and was counted a coupon
+        // rejection, so it logged at ERROR and fired the coupon-rejected alert.
+        // The same coupon assigned on the next sweep, so nothing was wrong with
+        // it. Every other timeout in the list is classified the same way.
+        let e = anyhow::Error::new(tonic::Status::aborted(
+            "MEDIATOR_SAYS_TX_TIMED_OUT(2,0): Rejected transaction as the mediator did not \
+             receive sufficient confirmations within the expected timeframe.",
+        ));
+        assert_eq!(
+            canton_error_id(&e).as_deref(),
+            Some("MEDIATOR_SAYS_TX_TIMED_OUT")
+        );
+        assert!(
+            assign_failure_is_transient(&e),
+            "a mediator timeout is not attributable to the coupon"
+        );
     }
 
     #[test]
