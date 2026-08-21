@@ -297,11 +297,12 @@ curl http://localhost:8081/network-config
 
 ### Party Credentials
 
-Per-party credentials (outbound OAuth for Canton, package IDs) are stored in the SQLite database and managed via the `/party-config` API endpoint. Either the Keycloak fields or the Auth0 fields are supplied — whichever matches the node's top-level provider:
+Per-party credentials (outbound OAuth for Canton, package IDs) are stored in the SQLite database and managed via the `/party-config` API endpoint. The first write is protected exactly like later updates: callers must authenticate and, when `DECPM_ADMIN_ROLE` is set, carry that role. Either the Keycloak fields or the Auth0 fields are supplied — whichever matches the node's top-level provider:
 
 ```bash
 # Keycloak (client_credentials)
 curl -X PUT http://localhost:8081/party-config \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "dec_party_id": "decparty::1220abc...",
@@ -315,6 +316,7 @@ curl -X PUT http://localhost:8081/party-config \
 
 # Auth0 M2M (client_credentials)
 curl -X PUT http://localhost:8081/party-config \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "dec_party_id": "decparty::1220abc...",

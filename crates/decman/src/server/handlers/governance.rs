@@ -3514,7 +3514,6 @@ mod get_party_credentials_tests {
             ))),
             admin_role: None,
             party_credentials: Arc::new(RwLock::new(Vec::new())),
-            bootstrap_mu: Arc::new(tokio::sync::Mutex::new(())),
             test_mode: true,
             refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
             http_client: reqwest::Client::new(),

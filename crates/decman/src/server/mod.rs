@@ -122,11 +122,6 @@ pub struct AppState {
     pub admin_role: Option<String>,
     /// Party credentials (mutable, hot-reloadable)
     pub party_credentials: Arc<RwLock<Vec<PartyCredentials>>>,
-    /// Serializes unauthenticated `PUT /party-config` bootstrap calls so two
-    /// concurrent first-run requests cannot both pass the empty-table auth
-    /// exemption and overwrite each other. Held by the auth middleware for
-    /// the lifetime of a bootstrap request.
-    pub bootstrap_mu: Arc<Mutex<()>>,
     /// Every in-flight workflow this node owns, keyed by `instance_name`.
     /// Replaces the single-tenant per-kind `HttpWorkflowState` singletons, the
     /// global in-flight gate, and the single `active_workflow` routing slot:
@@ -941,18 +936,17 @@ pub async fn start_server(
             admin_role.clone().unwrap_or_default(),
         )))
     } else {
-        let no_top_level_config = config.keycloak.is_none();
+        let no_top_level_config = config.keycloak.is_none() && config.auth0.is_none();
         let no_party_creds = party_credentials.read().await.is_empty();
         if no_top_level_config && no_party_creds {
             tracing::warn!(
-                "No top-level Keycloak config (--keycloak-url/realm/client-id) and no \
-                 party credentials yet. Inbound auth will reject every request except \
-                 the first-run PUT /party-config bootstrap. Configure the IdP and \
-                 provision a party to make the node usable."
+                "No top-level identity-provider config and no party credentials yet. \
+                 Inbound auth will reject every protected request. Configure the IdP \
+                 before provisioning a party."
             );
         } else if no_top_level_config {
             tracing::info!(
-                "No top-level Keycloak config; trusting only issuers from \
+                "No top-level identity-provider config; trusting only issuers from \
                  party_credentials ({} configured).",
                 party_credentials.read().await.len()
             );
@@ -992,7 +986,6 @@ pub async fn start_server(
         token_validator,
         admin_role,
         party_credentials: party_credentials.clone(),
-        bootstrap_mu: Arc::new(Mutex::new(())),
         workflows: workflows.clone(),
         // "test_mode" here means the permissive/wildcard-token mode; driven by
         // `--insecure` (or tests). See the `insecure` binding above.

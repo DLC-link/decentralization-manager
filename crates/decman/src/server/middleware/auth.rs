@@ -1,10 +1,8 @@
 //! Bearer-token auth middleware.
 //!
 //! Runs in front of every request. Public paths (SPA assets, `/auth-config`,
-//! swagger) pass through. `PUT /party-config` is special-cased for first-run
-//! bootstrap: if the `party_credentials` table is empty we let the call
-//! through unauthenticated so a fresh node can be configured; after the first
-//! row lands, normal auth applies and the handler enforces admin role.
+//! swagger) pass through. All other routes, including the first
+//! `PUT /party-config`, require authentication.
 //!
 //! Everything else requires a valid `Authorization: Bearer <token>` that the
 //! configured `TokenValidator` accepts. The resolved `Principal` is attached
@@ -80,41 +78,6 @@ where
                     .json(json!({"error": "application state missing"}));
                 return Ok(req.into_response(response).map_into_right_body());
             };
-
-            // Bootstrap: first `PUT /party-config` on a fresh node is allowed
-            // without a token. The operator typically has not provisioned an
-            // admin user in the IdP at this point, so requiring one would be
-            // a chicken-and-egg block.
-            //
-            // Concurrency: two unauthenticated requests racing while the table
-            // is empty must not both pass through (otherwise the second
-            // overwrites the first without ever authenticating). We serialize
-            // the bootstrap window with `bootstrap_mu` held across the entire
-            // request: only one bootstrap-shaped call is in flight at a time;
-            // any concurrent attempt is rejected with 409. After the holder
-            // writes credentials, subsequent calls fall through to normal auth.
-            if method == "PUT"
-                && path == "/party-config"
-                && app_state.party_credentials.read().await.is_empty()
-            {
-                let Ok(guard) = app_state.bootstrap_mu.clone().try_lock_owned() else {
-                    let response = HttpResponse::Conflict()
-                        .json(json!({"error": "bootstrap already in progress"}));
-                    return Ok(req.into_response(response).map_into_right_body());
-                };
-                // Recheck under the guard. A previous holder may have just
-                // finished writing; if so, drop the lock and require auth.
-                if app_state.party_credentials.read().await.is_empty() {
-                    tracing::info!(
-                        "PUT /party-config bootstrap: unauthenticated call allowed because \
-                         party_credentials is empty. Subsequent writes will require admin role."
-                    );
-                    let res = service.call(req).await?;
-                    drop(guard);
-                    return Ok(res.map_into_left_body());
-                }
-                drop(guard);
-            }
 
             let token = bearer_token(&req).unwrap_or_default();
             match app_state.token_validator.validate(&token).await {
@@ -346,7 +309,7 @@ mod tests {
         web::Data,
     };
     use sqlx::SqlitePool;
-    use tokio::sync::{Mutex, RwLock};
+    use tokio::sync::RwLock;
 
     use crate::{
         auth::{JwtValidator, MockValidator, TokenValidator},
@@ -386,7 +349,6 @@ mod tests {
             token_validator: validator,
             admin_role: Some("decman-admin".to_string()),
             party_credentials,
-            bootstrap_mu: Arc::new(Mutex::new(())),
             test_mode: true,
             refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
             http_client: reqwest::Client::new(),
@@ -423,8 +385,8 @@ mod tests {
     async fn jwt_validator_rejects_when_no_trusted_issuer() {
         // JwtValidator with no inbound config and no party_credentials
         // trusts no issuer. Empty / arbitrary tokens are rejected — the
-        // only way to reach the handler is the public allowlist or the
-        // bootstrap exemption (neither of which apply to /node-config).
+        // only way to reach the handler is the public allowlist (which does
+        // not apply to /node-config).
         let parties = Arc::new(RwLock::new(Vec::new()));
         let validator = TokenValidator::Jwt(Arc::new(JwtValidator::new(
             None,
@@ -486,8 +448,15 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn put_party_config_bootstrap_allowed_when_empty() {
-        let state = build_app_state(Vec::new()).await;
+    async fn put_party_config_bootstrap_requires_auth_when_empty() {
+        let parties = Arc::new(RwLock::new(Vec::new()));
+        let validator = TokenValidator::Jwt(Arc::new(JwtValidator::new(
+            None,
+            None,
+            parties,
+            reqwest::Client::new(),
+        )));
+        let state = build_app_state_with(Vec::new(), validator).await;
         let app = test::init_service(
             App::new()
                 .app_data(state)
@@ -498,6 +467,6 @@ mod tests {
 
         let req = TestRequest::put().uri("/party-config").to_request();
         let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }
