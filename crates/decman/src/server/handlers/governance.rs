@@ -30,11 +30,12 @@ use crate::{
         chain_audit,
         middleware::require_admin,
         queries::{
-            ContractQueryParams as QueryContractParams, get_credential_offers,
+            ContractQueryParams as QueryContractParams, get_credential_offers, get_credentials,
             get_governance_confirmations, get_governance_state as query_governance_state,
             get_holdings, get_instruments, get_open_burn_requests, get_open_mint_requests,
-            get_open_transfer_instructions, get_provider_services, get_registrar_services,
-            get_transfer_factories, get_user_services, get_vaults, query_contracts_by_template,
+            get_open_transfer_instructions, get_provider_configurations, get_provider_services,
+            get_registrar_service_requests, get_registrar_services, get_transfer_factories,
+            get_user_services, get_vaults, query_contracts_by_template,
             resolve_contract_package_ref, select_input_holdings,
         },
         transfer_context::{
@@ -47,13 +48,14 @@ use crate::{
             BurnRequestsResponse, CancelConfirmationRequest, CancelProposalRequest,
             ChainAuditEntry, ChainAuditQuery, ChainAuditResponse, ConfirmActionRequest,
             ContractQueryResponse, CouponReassignmentDelegationSummary, CredentialOffersResponse,
-            ErrorResponse, ExecuteActionRequest, ExpireConfirmationRequest, GovernanceResponse,
-            GovernanceStateResponse, GovernanceType, HoldingsResponse, InstrumentsResponse,
-            KnownMember, KnownMembersResponse, MessageResponse, MintRequestsResponse, NetworkInfo,
-            OperatorInfo, ProposalType, ProposeActionRequest, ProviderServicesResponse,
-            RegistrarServicesResponse, TransferFactoriesResponse, TransferFactoryInfo,
-            TransferInstructionsResponse, TransferPreapprovalsResponse, UserServicesResponse,
-            VaultsResponse, chain_audit_entry_from_row,
+            CredentialsResponse, ErrorResponse, ExecuteActionRequest, ExpireConfirmationRequest,
+            GovernanceResponse, GovernanceStateResponse, GovernanceType, HoldingsResponse,
+            InstrumentsResponse, KnownMember, KnownMembersResponse, MessageResponse,
+            MintRequestsResponse, NetworkInfo, OperatorInfo, ProposalType, ProposeActionRequest,
+            ProviderConfigurationsResponse, ProviderServicesResponse,
+            RegistrarServiceRequestsResponse, RegistrarServicesResponse, TransferFactoriesResponse,
+            TransferFactoryInfo, TransferInstructionsResponse, TransferPreapprovalsResponse,
+            UserServicesResponse, VaultsResponse, chain_audit_entry_from_row,
         },
     },
     utils,
@@ -108,7 +110,6 @@ pub async fn get_governance(
     let party_id = &query.party_id;
 
     let token = get_party_token(&data, party_id).await;
-    let test_mode = data.test_mode;
 
     let member_party_id = get_member_party_id(&data, party_id).await;
     let packages = packages();
@@ -121,9 +122,7 @@ pub async fn get_governance(
     // PartyToParticipant updates. Falling back to the DNS threshold for
     // historical compatibility only when the gov state isn't reachable.
     let (rules_contract_id, gov_state_threshold, gov_core_out_of_date, gov_core_package_ref) =
-        match query_governance_state(&data.config, party_id, token.clone(), test_mode, &packages)
-            .await
-        {
+        match query_governance_state(&data.config, party_id, token.clone(), &packages).await {
             Ok(Some(state)) => (
                 Some(state.contract_id),
                 Some(state.threshold as usize),
@@ -141,16 +140,7 @@ pub async fn get_governance(
         None => get_party_threshold(&data, party_id).await.unwrap_or(2),
     };
 
-    match get_governance_confirmations(
-        &data.config,
-        party_id,
-        threshold,
-        token,
-        test_mode,
-        &packages,
-    )
-    .await
-    {
+    match get_governance_confirmations(&data.config, party_id, threshold, token, &packages).await {
         Ok((actions, domain_actions)) => HttpResponse::Ok().json(GovernanceResponse {
             actions,
             domain_actions,
@@ -186,10 +176,9 @@ pub async fn get_governance_state(
     let party_id = &query.party_id;
 
     let token = get_party_token(&data, party_id).await;
-    let test_mode = data.test_mode;
     let packages = packages();
 
-    match query_governance_state(&data.config, party_id, token, test_mode, &packages).await {
+    match query_governance_state(&data.config, party_id, token, &packages).await {
         Ok(state) => HttpResponse::Ok().json(GovernanceStateResponse { state }),
         Err(e) => {
             tracing::error!("Failed to fetch governance state: {e}");
@@ -337,10 +326,9 @@ pub async fn get_vaults_handler(
     let party_id = &query.party_id;
 
     let token = get_party_token(&data, party_id).await;
-    let test_mode = data.test_mode;
     let packages = packages();
 
-    match get_vaults(&data.config, party_id, token, test_mode, &packages).await {
+    match get_vaults(&data.config, party_id, token, &packages).await {
         Ok(vaults) => HttpResponse::Ok().json(VaultsResponse { vaults }),
         Err(e) => {
             tracing::error!("Failed to fetch vaults: {e}");
@@ -368,10 +356,9 @@ pub async fn get_provider_services_handler(
     let party_id = &query.party_id;
 
     let token = get_party_token(&data, party_id).await;
-    let test_mode = data.test_mode;
     let packages = packages();
 
-    match get_provider_services(&data.config, party_id, token, test_mode, &packages).await {
+    match get_provider_services(&data.config, party_id, token, &packages).await {
         Ok(services) => HttpResponse::Ok().json(ProviderServicesResponse { services }),
         Err(e) => {
             tracing::error!("Failed to fetch provider services: {e}");
@@ -399,10 +386,9 @@ pub async fn get_user_services_handler(
     let party_id = &query.party_id;
 
     let token = get_party_token(&data, party_id).await;
-    let test_mode = data.test_mode;
     let packages = packages();
 
-    match get_user_services(&data.config, party_id, token, test_mode, &packages).await {
+    match get_user_services(&data.config, party_id, token, &packages).await {
         Ok(services) => HttpResponse::Ok().json(UserServicesResponse { services }),
         Err(e) => {
             tracing::error!("Failed to fetch user services: {e}");
@@ -430,10 +416,9 @@ pub async fn get_credential_offers_handler(
     let party_id = &query.party_id;
 
     let token = get_party_token(&data, party_id).await;
-    let test_mode = data.test_mode;
     let packages = packages();
 
-    match get_credential_offers(&data.config, party_id, token, test_mode, &packages).await {
+    match get_credential_offers(&data.config, party_id, token, &packages).await {
         Ok(credential_offers) => {
             HttpResponse::Ok().json(CredentialOffersResponse { credential_offers })
         }
@@ -441,6 +426,116 @@ pub async fn get_credential_offers_handler(
             tracing::error!("Failed to fetch credential offers: {e}");
             HttpResponse::InternalServerError().json(ErrorResponse {
                 error: format!("Failed to fetch credential offers: {e}"),
+            })
+        }
+    }
+}
+
+/// Get `Credential` contracts visible to the party. The accept mint/burn
+/// request forms list these so the issuer credentials backing the accept can
+/// be picked instead of pasted in by hand.
+#[utoipa::path(
+    tag = "Services",
+    params(GovernanceQuery),
+    responses(
+        (status = 200, description = "Credentials", body = CredentialsResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[get("/credentials")]
+pub async fn get_credentials_handler(
+    data: web::Data<AppState>,
+    query: web::Query<GovernanceQuery>,
+) -> impl Responder {
+    let party_id = &query.party_id;
+
+    let token = get_party_token(&data, party_id).await;
+    let packages = packages();
+
+    match get_credentials(&data.config, party_id, token, &packages).await {
+        Ok(credentials) => HttpResponse::Ok().json(CredentialsResponse { credentials }),
+        Err(e) => {
+            tracing::error!("Failed to fetch credentials: {e}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch credentials: {e}"),
+            })
+        }
+    }
+}
+
+/// Get `RegistrarServiceRequest` contracts visible to the party. The
+/// OnboardRegistrar form lists these so the request backing the onboard can
+/// be picked instead of pasted in by hand.
+#[utoipa::path(
+    tag = "Services",
+    params(GovernanceQuery),
+    responses(
+        (
+            status = 200,
+            description = "Registrar service requests",
+            body = RegistrarServiceRequestsResponse,
+        ),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[get("/registrar-service-requests")]
+pub async fn get_registrar_service_requests_handler(
+    data: web::Data<AppState>,
+    query: web::Query<GovernanceQuery>,
+) -> impl Responder {
+    let party_id = &query.party_id;
+
+    let token = get_party_token(&data, party_id).await;
+    let packages = packages();
+
+    match get_registrar_service_requests(&data.config, party_id, token, &packages).await {
+        Ok(registrar_service_requests) => {
+            HttpResponse::Ok().json(RegistrarServiceRequestsResponse {
+                registrar_service_requests,
+            })
+        }
+        Err(e) => {
+            tracing::error!("Failed to fetch registrar service requests: {e}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch registrar service requests: {e}"),
+            })
+        }
+    }
+}
+
+/// Get `ProviderConfiguration` contracts visible to the party. The
+/// OnboardRegistrar form lists these so the configuration backing the
+/// onboard can be picked instead of pasted in by hand.
+#[utoipa::path(
+    tag = "Services",
+    params(GovernanceQuery),
+    responses(
+        (
+            status = 200,
+            description = "Provider configurations",
+            body = ProviderConfigurationsResponse,
+        ),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[get("/provider-configurations")]
+pub async fn get_provider_configurations_handler(
+    data: web::Data<AppState>,
+    query: web::Query<GovernanceQuery>,
+) -> impl Responder {
+    let party_id = &query.party_id;
+
+    let token = get_party_token(&data, party_id).await;
+    let packages = packages();
+
+    match get_provider_configurations(&data.config, party_id, token, &packages).await {
+        Ok(provider_configurations) => HttpResponse::Ok().json(ProviderConfigurationsResponse {
+            provider_configurations,
+        }),
+        Err(e) => {
+            tracing::error!("Failed to fetch provider configurations: {e}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch provider configurations: {e}"),
             })
         }
     }
@@ -463,10 +558,9 @@ pub async fn get_registrar_services_handler(
     let party_id = &query.party_id;
 
     let token = get_party_token(&data, party_id).await;
-    let test_mode = data.test_mode;
     let packages = packages();
 
-    match get_registrar_services(&data.config, party_id, token, test_mode, &packages).await {
+    match get_registrar_services(&data.config, party_id, token, &packages).await {
         Ok(services) => HttpResponse::Ok().json(RegistrarServicesResponse { services }),
         Err(e) => {
             tracing::error!("Failed to fetch registrar services: {e}");
@@ -594,7 +688,6 @@ pub async fn get_transfer_preapprovals_handler(
 ) -> impl Responder {
     let party_id = &query.party_id;
     let token = get_party_token(&data, party_id).await;
-    let test_mode = data.test_mode;
 
     // Canton Coin: the actual `TransferPreapproval` template lives in
     // `Splice.AmuletRules` (signatories: receiver, provider, dso — gov party
@@ -628,11 +721,10 @@ pub async fn get_transfer_preapprovals_handler(
         config: &crate::config::NodeConfig,
         party: &CantonId,
         token: Option<String>,
-        test_mode: bool,
         params: &QueryContractParams,
         label: &str,
     ) -> usize {
-        match query_contracts_by_template(config, party, token, test_mode, params).await {
+        match query_contracts_by_template(config, party, token, params).await {
             Ok(c) => c.len(),
             Err(e) => {
                 // Template-not-uploaded means there are simply no such
@@ -656,7 +748,6 @@ pub async fn get_transfer_preapprovals_handler(
         &data.config,
         party_id,
         token.clone(),
-        test_mode,
         &cc_preapproval,
         "CC TransferPreapproval",
     )
@@ -665,7 +756,6 @@ pub async fn get_transfer_preapprovals_handler(
         &data.config,
         party_id,
         token.clone(),
-        test_mode,
         &cc_proposal,
         "CC TransferPreapprovalProposal",
     )
@@ -674,7 +764,6 @@ pub async fn get_transfer_preapprovals_handler(
         &data.config,
         party_id,
         token,
-        test_mode,
         &token_params,
         "utility TransferPreapproval",
     )
@@ -707,9 +796,8 @@ pub async fn get_instruments_handler(
     let party_id = &query.party_id;
 
     let token = get_party_token(&data, party_id).await;
-    let test_mode = data.test_mode;
 
-    match get_instruments(&data.config, party_id, token, test_mode).await {
+    match get_instruments(&data.config, party_id, token).await {
         Ok(instruments) => HttpResponse::Ok().json(InstrumentsResponse { instruments }),
         Err(e) => {
             tracing::error!("Failed to fetch instruments: {e}");
@@ -767,8 +855,7 @@ pub async fn get_transfer_factories_handler(
                 .map(|f| f.expected_admin.to_string())
                 .collect();
             existing_admins.insert(party_id.to_string());
-            if let Ok(holdings) = get_holdings(&data.config, party_id, token, data.test_mode).await
-            {
+            if let Ok(holdings) = get_holdings(&data.config, party_id, token).await {
                 for holding in holdings {
                     let admin_str = holding.instrument_admin.to_string();
                     if existing_admins.insert(admin_str) {
@@ -841,9 +928,8 @@ pub async fn get_holdings_handler(
 ) -> impl Responder {
     let party_id = &query.party_id;
     let token = get_party_token(&data, party_id).await;
-    let test_mode = data.test_mode;
 
-    match get_holdings(&data.config, party_id, token, test_mode).await {
+    match get_holdings(&data.config, party_id, token).await {
         Ok(holdings) => HttpResponse::Ok().json(HoldingsResponse { holdings }),
         Err(e) => {
             tracing::error!("Failed to fetch holdings: {e}");
@@ -871,7 +957,6 @@ pub async fn query_contracts_handler(
     let party_id = &query.party_id;
 
     let token = get_party_token(&data, party_id).await;
-    let test_mode = data.test_mode;
 
     let contract_params = QueryContractParams {
         package_id: query.package_id.clone(),
@@ -881,9 +966,7 @@ pub async fn query_contracts_handler(
         active_only: query.active_only,
     };
 
-    match query_contracts_by_template(&data.config, party_id, token, test_mode, &contract_params)
-        .await
-    {
+    match query_contracts_by_template(&data.config, party_id, token, &contract_params).await {
         Ok(contracts) => HttpResponse::Ok().json(ContractQueryResponse { contracts }),
         Err(e) => {
             tracing::error!("Failed to query contracts: {e}");
@@ -1134,17 +1217,22 @@ pub async fn propose_action(
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
     }
-    if let Err(msg) = body.proposal.validate() {
+    if let Err(msg) = body.proposal.validate(&body.party_id) {
         return HttpResponse::BadRequest().json(ErrorResponse {
             error: msg.to_string(),
         });
     }
     let party_id = &body.party_id;
     let (token, member_party_id) = match get_party_credentials(&data, party_id).await {
-        Some(creds) => creds,
-        None => {
+        Ok(Some(creds)) => creds,
+        Ok(None) => {
             return HttpResponse::Unauthorized().json(ErrorResponse {
                 error: "No credentials configured for party".to_string(),
+            });
+        }
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch auth token for party: {e}"),
             });
         }
     };
@@ -1656,10 +1744,15 @@ pub async fn confirm_action(
 
     // Get token and credentials for this party
     let (token, member_party_id) = match get_party_credentials(&data, party_id).await {
-        Some(creds) => creds,
-        None => {
+        Ok(Some(creds)) => creds,
+        Ok(None) => {
             return HttpResponse::Unauthorized().json(ErrorResponse {
                 error: "No credentials configured for party".to_string(),
+            });
+        }
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch auth token for party: {e}"),
             });
         }
     };
@@ -1740,10 +1833,15 @@ pub async fn execute_action(
 
     // Get token and credentials for this party
     let (token, member_party_id) = match get_party_credentials(&data, party_id).await {
-        Some(creds) => creds,
-        None => {
+        Ok(Some(creds)) => creds,
+        Ok(None) => {
             return HttpResponse::Unauthorized().json(ErrorResponse {
                 error: "No credentials configured for party".to_string(),
+            });
+        }
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch auth token for party: {e}"),
             });
         }
     };
@@ -1827,10 +1925,15 @@ pub async fn expire_confirmation(
 
     // Get token and credentials for this party
     let (token, member_party_id) = match get_party_credentials(&data, party_id).await {
-        Some(creds) => creds,
-        None => {
+        Ok(Some(creds)) => creds,
+        Ok(None) => {
             return HttpResponse::Unauthorized().json(ErrorResponse {
                 error: "No credentials configured for party".to_string(),
+            });
+        }
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch auth token for party: {e}"),
             });
         }
     };
@@ -1904,10 +2007,15 @@ pub async fn cancel_confirmation(
     let party_id = &body.party_id;
 
     let (token, member_party_id) = match get_party_credentials(&data, party_id).await {
-        Some(creds) => creds,
-        None => {
+        Ok(Some(creds)) => creds,
+        Ok(None) => {
             return HttpResponse::Unauthorized().json(ErrorResponse {
                 error: "No credentials configured for party".to_string(),
+            });
+        }
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch auth token for party: {e}"),
             });
         }
     };
@@ -1986,10 +2094,15 @@ pub async fn cancel_proposal(
     let party_id = &body.party_id;
 
     let (token, member_party_id) = match get_party_credentials(&data, party_id).await {
-        Some(creds) => creds,
-        None => {
+        Ok(Some(creds)) => creds,
+        Ok(None) => {
             return HttpResponse::Unauthorized().json(ErrorResponse {
                 error: "No credentials configured for party".to_string(),
+            });
+        }
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch auth token for party: {e}"),
             });
         }
     };
@@ -2070,6 +2183,7 @@ pub async fn get_packages() -> impl Responder {
             body = ActiveCouponReassignmentDelegation
         ),
         (status = 401, description = "No credentials for party", body = ErrorResponse),
+        (status = 500, description = "Failed to fetch an auth token for party", body = ErrorResponse),
         (status = 503, description = "The delegations could not be read", body = ErrorResponse)
     )
 )]
@@ -2079,10 +2193,18 @@ pub async fn get_coupon_reassignment_delegation(
     query: web::Query<GovernanceQuery>,
 ) -> impl Responder {
     let party_id = &query.party_id;
-    let Some((token, _member)) = get_party_credentials(&data, party_id).await else {
-        return HttpResponse::Unauthorized().json(ErrorResponse {
-            error: "No credentials configured for party".to_string(),
-        });
+    let (token, _member) = match get_party_credentials(&data, party_id).await {
+        Ok(Some(creds)) => creds,
+        Ok(None) => {
+            return HttpResponse::Unauthorized().json(ErrorResponse {
+                error: "No credentials configured for party".to_string(),
+            });
+        }
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch auth token for party: {e}"),
+            });
+        }
     };
 
     match crate::server::reward_automation::active_delegations(
@@ -2333,23 +2455,33 @@ async fn get_member_party_id(data: &web::Data<AppState>, party_id: &CantonId) ->
         .map(|p| p.member_party_id.clone())
 }
 
-/// Get token and member_party_id for a party
+/// Get token and member_party_id for a party.
+///
+/// `Ok(None)`: no auth configured, or the party is unknown to the registry.
+/// `Err`: the party is known, but the token fetch failed (logged here).
 pub(crate) async fn get_party_credentials(
     data: &web::Data<AppState>,
     party_id: &CantonId,
-) -> Option<(String, CantonId)> {
+) -> Result<Option<(String, CantonId)>> {
     let auth = data.auth.read().await;
     match &*auth {
         Some(WorkflowAuth::Keycloak(registry)) => {
-            let tm = registry.get(party_id)?;
-            let token = tm.get_token().await.ok()?;
-            Some((token, tm.member_party_id().clone()))
+            let Some(tm) = registry.get(party_id) else {
+                return Ok(None);
+            };
+            match tm.get_token().await {
+                Ok(token) => Ok(Some((token, tm.member_party_id().clone()))),
+                Err(e) => {
+                    tracing::warn!(%party_id, error = %e, "failed to fetch auth token for party");
+                    Err(e.into())
+                }
+            }
         }
         Some(WorkflowAuth::Mock(mock_registry)) => {
             let mm = mock_registry.get(party_id).await;
-            Some((mm.get_token(), mm.member_party_id().clone()))
+            Ok(Some((mm.get_token(), mm.member_party_id().clone())))
         }
-        None => None,
+        None => Ok(None),
     }
 }
 
@@ -3304,5 +3436,171 @@ mod tests {
         let response = cached_chain_audit_page(rows, 2).expect("non-empty rows are a hit");
         assert_eq!(response.total_returned, 3);
         assert_eq!(response.next_before_offset, Some(20));
+    }
+}
+
+#[cfg(test)]
+mod get_party_credentials_tests {
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex as StdMutex},
+    };
+
+    use actix_web::web::Data;
+    use sqlx::SqlitePool;
+    use tokio::sync::RwLock;
+    use tracing_subscriber::fmt::MakeWriter;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path_regex},
+    };
+
+    use super::*;
+    use crate::{
+        auth::{AuthRegistry, MockValidator, TokenValidator, WorkflowAuth},
+        config::{KeycloakConfig, PartyCredentials},
+    };
+
+    #[derive(Clone, Default)]
+    struct LogBuffer(Arc<StdMutex<Vec<u8>>>);
+
+    impl std::io::Write for LogBuffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let mut written = self
+                .0
+                .lock()
+                .map_err(|_| std::io::Error::other("log buffer lock poisoned"))?;
+            written.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for LogBuffer {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    impl LogBuffer {
+        fn captured(&self) -> Result<String> {
+            let written = self
+                .0
+                .lock()
+                .map_err(|_| anyhow::anyhow!("log buffer lock poisoned"))?
+                .clone();
+            Ok(String::from_utf8(written)?)
+        }
+    }
+
+    async fn app_state(auth: Option<WorkflowAuth>) -> Result<Data<AppState>> {
+        let db = SqlitePool::connect("sqlite::memory:").await?;
+        Ok(Data::new(AppState {
+            db,
+            config: NodeConfig::default(),
+            peer_status: Arc::new(RwLock::new(HashMap::new())),
+            last_seen: Arc::new(RwLock::new(HashMap::new())),
+            peer_job_sender: tokio::sync::mpsc::unbounded_channel().0,
+            workflows: crate::server::WorkflowRegistry::new(),
+            pending_invitations: Arc::new(RwLock::new(Vec::new())),
+            auth: Arc::new(RwLock::new(auth)),
+            token_validator: TokenValidator::Mock(Arc::new(MockValidator::new(
+                "decman-admin".to_string(),
+            ))),
+            admin_role: None,
+            party_credentials: Arc::new(RwLock::new(Vec::new())),
+            bootstrap_mu: Arc::new(tokio::sync::Mutex::new(())),
+            test_mode: true,
+            refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
+            http_client: reqwest::Client::new(),
+        }))
+    }
+
+    fn party_id() -> Result<CantonId> {
+        CantonId::parse(&format!("p::{}", "0".repeat(68)))
+    }
+
+    #[tokio::test]
+    async fn no_auth_configured_is_ok_none() -> Result<()> {
+        let data = app_state(None).await?;
+        assert!(get_party_credentials(&data, &party_id()?).await?.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unknown_party_is_ok_none() -> Result<()> {
+        let registry = AuthRegistry::new(&[]).await?;
+        let data = app_state(Some(WorkflowAuth::Keycloak(Arc::new(registry)))).await?;
+        assert!(get_party_credentials(&data, &party_id()?).await?.is_none());
+        Ok(())
+    }
+
+    /// The party authenticates fine at startup (`expires_in: 0` puts the token
+    /// on the refresh path immediately), then the Keycloak stand-in fails the
+    /// very next request — the one `get_party_credentials` makes.
+    #[tokio::test]
+    async fn token_fetch_failure_is_err_and_logged() -> Result<()> {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r".*/token$"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"access_token": "t", "expires_in": 0})),
+            )
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex(r".*/token$"))
+            .respond_with(
+                ResponseTemplate::new(500).set_body_json(serde_json::json!({"error": "down"})),
+            )
+            .mount(&server)
+            .await;
+
+        let id = party_id()?;
+        let credentials = PartyCredentials {
+            dec_party_id: id.clone(),
+            member_party_id: id.clone(),
+            user_id: "user".to_string(),
+            keycloak: KeycloakConfig {
+                url: server.uri(),
+                realm: "test-realm".to_string(),
+                client_id: "decman".to_string(),
+                client_secret: Some("secret".to_string()),
+                ..KeycloakConfig::default()
+            },
+            auth0: None,
+            packages: PackageConfig::default(),
+        };
+        let registry = AuthRegistry::new(&[credentials]).await?;
+        let data = app_state(Some(WorkflowAuth::Keycloak(Arc::new(registry)))).await?;
+
+        let buffer = LogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buffer.clone())
+            .with_ansi(false)
+            .finish();
+        let result = {
+            let _guard = tracing::subscriber::set_default(subscriber);
+            get_party_credentials(&data, &id).await
+        };
+
+        assert!(
+            result.is_err(),
+            "a failed token fetch must be an error, not a silent None"
+        );
+        let logs = buffer.captured()?;
+        assert!(logs.contains("WARN"), "no warning was logged: {logs}");
+        assert!(
+            logs.contains(&id.to_string()),
+            "the log omits the party id: {logs}"
+        );
+        Ok(())
     }
 }

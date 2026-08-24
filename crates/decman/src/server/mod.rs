@@ -17,12 +17,13 @@ mod ledger_paging;
 mod middleware;
 mod package_inventory;
 mod queries;
+mod record;
 mod reward_automation;
 mod transfer_context;
 mod types;
 
-pub mod health;
-pub mod peer_status;
+pub(crate) mod health;
+pub(crate) mod peer_status;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -71,8 +72,21 @@ use crate::{
     workflow::{self, WorkflowType},
 };
 
+// Reached externally as `dec_party_manager::server::NodeConfigResponse` by the
+// `gen-types` binary (a separate crate from this lib), so it must stay `pub`.
 pub use handlers::NodeConfigResponse;
-pub use types::*;
+pub(crate) use types::*;
+// These wire DTOs are likewise reached externally as `dec_party_manager::server::…`,
+// by `gen-types` (TS generation) and, for `GovernanceResponse`, by the integration
+// tests under `tests/` — both are separate crates that can only see `pub` items.
+pub use types::{
+    AcceptTransferDetails, ActionType, AppRewardBeneficiary, BillingParams, BurnRequestsResponse,
+    ConfirmActionRequest, DomainGovernanceAction, ExecuteActionRequest, FarConfig,
+    GovernanceAction, GovernanceConfirmation, GovernanceResponse, HoldingInfo, HoldingsResponse,
+    MintRequestsResponse, PendingAction, ProposalType, ProposeActionRequest, ServiceRequestDetails,
+    TokenRequestInfo, TransferInstructionInfo, TransferInstructionStatus,
+    TransferInstructionsResponse, TransferProposalDetails, VaultLimits,
+};
 
 /// TTL for cached chunked ListPackages payloads (per peer).
 const LIST_PACKAGES_CHUNK_CACHE_TTL: Duration = Duration::from_secs(30);
@@ -1177,6 +1191,9 @@ pub async fn start_server(
             .service(handlers::get_provider_services_handler)
             .service(handlers::get_user_services_handler)
             .service(handlers::get_credential_offers_handler)
+            .service(handlers::get_credentials_handler)
+            .service(handlers::get_registrar_service_requests_handler)
+            .service(handlers::get_provider_configurations_handler)
             .service(handlers::get_registrar_services_handler)
             .service(handlers::get_instruments_handler)
             .service(handlers::get_transfer_instructions_handler)
@@ -1438,7 +1455,19 @@ async fn handle_incoming_connection(
                             "Denied Noise request from {sender}: {e}",
                             sender = peer_id_str.as_deref().unwrap_or("<unidentified peer>")
                         );
-                        let mut resp = Response::new(Body::empty());
+                        // Answer WITH the reason rather than an empty body.
+                        // An empty 503 here is indistinguishable at the
+                        // requester from a proxy with no healthy backend, so
+                        // the operator on the other side saw only "message too
+                        // short" (#332). Status stays 503, so an older
+                        // requester behaves exactly as before.
+                        let mut resp = Response::new(Body::from(
+                            Message::new(
+                                MessageType::Error,
+                                format!("request rejected: {e}").into_bytes(),
+                            )
+                            .to_bytes(),
+                        ));
                         *resp.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
                         return Ok(resp);
                     }
@@ -1590,7 +1619,17 @@ async fn handle_incoming_connection(
                                     (None, _) => {
                                         // The named run is gone (cancelled/finished) —
                                         // 503 so the peer's bounded retry gives up.
-                                        let mut resp = Response::new(Body::empty());
+                                        // Says so in the body, so the requester
+                                        // reports the cause rather than an empty reply.
+                                        let mut resp = Response::new(Body::from(
+                                            Message::new(
+                                                MessageType::Error,
+                                                b"no such workflow run on this peer: it was \
+                                                  cancelled or already finished"
+                                                    .to_vec(),
+                                            )
+                                            .to_bytes(),
+                                        ));
                                         *resp.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
                                         return Ok(resp);
                                     }

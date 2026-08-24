@@ -1,0 +1,54 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | The registrar decparty credentials new instrument issuers against an
+-- existing InstrumentConfiguration.
+--
+-- The action reads the issuer requirements from the configuration. The
+-- registrar decparty runs it whenever an issuer joins after provisioning.
+module Governance.UtilityOnboarding.OnboardInstrumentIssuers where
+
+import DA.List (unique)
+
+import Splice.Util (require)
+import Utility.Registry.V0.Configuration.Instrument (InstrumentConfiguration)
+
+import Governance.Action
+import Governance.UtilityOnboarding.Utils (mintCredentialsMeetingRequirements, partyList)
+
+template OnboardInstrumentIssuers
+  with
+    governanceParty : Party
+      -- ^ The registrar decparty. Must equal the configuration's registrar.
+    proposer : Party
+    instrumentConfigurationCid : ContractId InstrumentConfiguration
+    instrumentIssuers : [Party]
+  where
+    signatory proposer
+    observer governanceParty
+    -- A duplicated issuer would mint two credentials sharing one id.
+    ensure not (null instrumentIssuers)
+        && unique instrumentIssuers
+
+    interface instance GovernableAction for OnboardInstrumentIssuers where
+      view = GovernableActionView with
+        governanceParty
+        proposer
+        actionLabel = "OnboardInstrumentIssuers"
+        -- Voters see only this text; name every party gaining minting rights.
+        description = "Onboard instrument issuers " <> partyList instrumentIssuers
+
+      executeImpl = do
+        instrumentConfiguration <- fetch instrumentConfigurationCid
+        require "OnboardInstrumentIssuers: instrument configuration registrar does not match the governance party"
+          (instrumentConfiguration.registrar == governanceParty)
+        -- The role tag carries the instrument symbol so a credential id
+        -- names the instrument it grants issuing rights for, matching what
+        -- ProvisionInstrument mints for initial issuers.
+        _ <- forA instrumentIssuers $ \instrumentIssuer ->
+          mintCredentialsMeetingRequirements
+            governanceParty instrumentIssuer
+            (instrumentConfiguration.defaultIdentifier.id
+               <> "-instrument-issuer-credential")
+            instrumentConfiguration.issuerRequirements
+        pure ()

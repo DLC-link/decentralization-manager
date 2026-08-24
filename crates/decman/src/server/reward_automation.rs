@@ -32,7 +32,6 @@
 //! are exercised by the localnet and devnet integration tests.
 
 use anyhow::{Context, anyhow};
-use canton_common::decimal::DamlDecimal;
 use canton_proto_rs::com::daml::ledger::api::v2::{
     Command, Commands, ExerciseCommand, GetActiveContractsRequest, GetLedgerEndRequest, Identifier,
     Record, SubmitAndWaitRequest, Value, command, command_service_client::CommandServiceClient,
@@ -57,60 +56,10 @@ use super::event_filters::{
 };
 use super::handlers::{get_party_credentials, packages};
 use super::queries::resolve_contract_package_ref;
-
-// ============================================================================
-// Record field extraction (mirrors queries.rs `field_*` helpers; the originals
-// are module-private, so we follow the same `value::Sum` matching pattern here
-// rather than widening their visibility).
-// ============================================================================
-
-/// Return the decoded `value::Sum` for `label`, if present.
-fn record_field<'a>(rec: &'a Record, label: &str) -> Option<&'a value::Sum> {
-    rec.fields
-        .iter()
-        .find(|f| f.label == label)
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| v.sum.as_ref())
-}
-
-/// Read a `Party` field and parse it into a [`CantonId`].
-fn field_party_id(rec: &Record, label: &str) -> anyhow::Result<CantonId> {
-    match record_field(rec, label) {
-        Some(value::Sum::Party(p)) => p
-            .parse::<CantonId>()
-            .with_context(|| format!("field `{label}`: invalid party id `{p}`")),
-        _ => Err(anyhow!("field `{label}`: expected a Party value")),
-    }
-}
-
-/// Read a `Numeric` field and parse it into a [`DamlDecimal`] (exact fixed-point).
-fn field_decimal(rec: &Record, label: &str) -> anyhow::Result<DamlDecimal> {
-    match record_field(rec, label) {
-        Some(value::Sum::Numeric(n)) => DamlDecimal::parse(n)
-            .map_err(|e| anyhow!("field `{label}`: invalid decimal `{n}`: {e}")),
-        _ => Err(anyhow!("field `{label}`: expected a Numeric value")),
-    }
-}
-
-/// Read a DAML `Time` field (encoded as microseconds since the epoch) into a
-/// UTC timestamp.
-fn field_time(rec: &Record, label: &str) -> anyhow::Result<DateTime<Utc>> {
-    let micros = match record_field(rec, label) {
-        Some(value::Sum::Timestamp(t)) => *t,
-        _ => return Err(anyhow!("field `{label}`: expected a Time value")),
-    };
-    DateTime::from_timestamp_micros(micros)
-        .ok_or_else(|| anyhow!("field `{label}`: timestamp {micros} micros is out of range"))
-}
-
-/// Return true iff `label` is an `Optional` field carrying `None`.
-///
-/// A missing field, or a non-optional value, returns false — the caller then
-/// treats the contract as *not* unassigned (fail-safe: never assign against a
-/// coupon we can't confirm is unassigned).
-fn field_optional_is_none(rec: &Record, label: &str) -> bool {
-    matches!(record_field(rec, label), Some(value::Sum::Optional(opt)) if opt.value.is_none())
-}
+use super::record::{
+    field_decimal, field_list_len, field_optional_is_none, field_party_id, field_party_list,
+    field_time,
+};
 
 // ============================================================================
 // Shared decoded ACS read
@@ -305,33 +254,6 @@ pub(crate) struct ActiveDelegation {
     pub dso: CantonId,
     pub assigners: Vec<CantonId>,
     pub beneficiary_count: usize,
-}
-
-/// Return the number of elements in a `List` field.
-fn field_list_len(rec: &Record, label: &str) -> anyhow::Result<usize> {
-    match record_field(rec, label) {
-        Some(value::Sum::List(l)) => Ok(l.elements.len()),
-        _ => Err(anyhow!("field `{label}`: expected a List value")),
-    }
-}
-
-/// Read a list-of-`Party` field, parsing each element into a [`CantonId`].
-/// Mirrors `field_contract_id_list`, decoding each element the same way
-/// `field_party_id` decodes a single `Party` value.
-fn field_party_list(rec: &Record, label: &str) -> anyhow::Result<Vec<CantonId>> {
-    let list = match record_field(rec, label) {
-        Some(value::Sum::List(l)) => l,
-        _ => return Err(anyhow!("field `{label}`: expected a List value")),
-    };
-    list.elements
-        .iter()
-        .map(|elem| match elem.sum.as_ref() {
-            Some(value::Sum::Party(p)) => p
-                .parse::<CantonId>()
-                .with_context(|| format!("field `{label}`: invalid party id `{p}`")),
-            _ => Err(anyhow!("field `{label}`: element is not a Party")),
-        })
-        .collect()
 }
 
 /// Decode a `CouponReassignmentDelegation` create-arguments `Record` into an
@@ -1062,8 +984,9 @@ async fn run_once_for_party(
     decparty: &CantonId,
 ) -> anyhow::Result<()> {
     let pkgs = packages();
-    let Some((token, member)) = get_party_credentials(data, decparty).await else {
-        return Ok(());
+    let (token, member) = match get_party_credentials(data, decparty).await {
+        Ok(Some(creds)) => creds,
+        Ok(None) | Err(_) => return Ok(()),
     };
     // Enablement: an active delegation. None => off (no-op).
     let Some(delegation) =

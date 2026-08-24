@@ -69,25 +69,6 @@ where
     Ok(())
 }
 
-/// The first event `extract` accepts, or `None` — stopping at the first match
-/// rather than walking the rest of the ACS.
-pub(crate) async fn fetch_first_matching<T, F>(
-    config: &NodeConfig,
-    token: Option<String>,
-    event_format: EventFormat,
-    extract: F,
-) -> Result<Option<T>>
-where
-    F: FnMut(CreatedEvent) -> Option<T>,
-{
-    Ok(
-        collect_active_contracts(config, token, event_format, Some(1), extract)
-            .await?
-            .into_iter()
-            .next(),
-    )
-}
-
 /// The first `CreatedEvent` matching `event_format`, or `None`.
 ///
 /// For "does this contract exist / read its state" lookups. Stops after one

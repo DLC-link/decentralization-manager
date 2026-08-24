@@ -35,16 +35,17 @@ use super::{
     event_filters::{interface_filter, party_event_format, template_filter, wildcard_filter},
     ledger_paging::{
         FETCH_CHUNK, fetch_active_contracts_filtered, fetch_first_active_contract,
-        fetch_first_matching, for_each_active_contract,
+        for_each_active_contract,
     },
     package_inventory::{
         fetch_package_id_to_name, fetch_package_names, newest_matching_names, package_name_prefix,
     },
     types::{
-        AcceptTransferDetails, ActionType, ContractInfo, ContractWithBlob, CredentialOfferInfo,
-        DomainGovernanceAction, GovernanceAction, GovernanceConfirmation, GovernanceState,
-        HoldingInfo, InstrumentInfo, PartyMetadata, PendingAction, ProviderServiceInfo,
-        RegistrarServiceInfo, ServiceRequestDetails, TokenRequestInfo, TransferFactoryInfo,
+        AcceptTransferDetails, ActionType, Claim, ContractInfo, ContractWithBlob, CredentialInfo,
+        CredentialOfferInfo, DomainGovernanceAction, GovernanceAction, GovernanceConfirmation,
+        GovernanceState, HoldingInfo, InstrumentInfo, PartyMetadata, PendingAction,
+        ProviderConfigurationInfo, ProviderServiceInfo, RegistrarServiceInfo,
+        RegistrarServiceRequestInfo, ServiceRequestDetails, TokenRequestInfo, TransferFactoryInfo,
         TransferInstructionInfo, TransferInstructionStatus, TransferProposalDetails,
         UserServiceInfo, VaultInfo,
     },
@@ -192,19 +193,36 @@ fn provider_service_template(packages: &PackageConfig) -> Option<TemplateId> {
 
 /// UserService template identifier
 fn user_service_template(packages: &PackageConfig) -> Option<TemplateId> {
-    packages.utility_credential.as_ref().map(|pkg| TemplateId {
-        package_id: pkg.clone(),
-        module_name: "Utility.Credential.App.V0.Service.User",
-        entity_name: "UserService",
-    })
+    packages
+        .utility_credential_app
+        .as_ref()
+        .map(|pkg| TemplateId {
+            package_id: pkg.clone(),
+            module_name: "Utility.Credential.App.V0.Service.User",
+            entity_name: "UserService",
+        })
 }
 
 /// CredentialOffer template identifier
 fn credential_offer_template(packages: &PackageConfig) -> Option<TemplateId> {
+    packages
+        .utility_credential_app
+        .as_ref()
+        .map(|pkg| TemplateId {
+            package_id: pkg.clone(),
+            module_name: "Utility.Credential.App.V0.Model.Offer",
+            entity_name: "CredentialOffer",
+        })
+}
+
+/// Credential template identifier. Uses the base `utility_credential`
+/// package, which defines the `Credential` template; the app package
+/// (`utility_credential_app`) only bundles it as a dependency.
+fn credential_template(packages: &PackageConfig) -> Option<TemplateId> {
     packages.utility_credential.as_ref().map(|pkg| TemplateId {
         package_id: pkg.clone(),
-        module_name: "Utility.Credential.App.V0.Model.Offer",
-        entity_name: "CredentialOffer",
+        module_name: "Utility.Credential.V0.Credential",
+        entity_name: "Credential",
     })
 }
 
@@ -217,47 +235,32 @@ fn registrar_service_template(packages: &PackageConfig) -> Option<TemplateId> {
     })
 }
 
-/// Module/entity names for contract templates (used for wildcard filtering)
-const CONTRACT_TEMPLATE_NAMES: &[(&str, &str)] = &[
-    ("BitsafeVault.VaultGovernance", "VaultGovernanceRules"),
-    ("CBTC.DepositAccount", "CBTCDepositAccount"),
-    ("CBTC.DepositAccount", "CBTCDepositAccountRules"),
-    ("CBTC.Governance", "CBTCGovernanceRules"),
-    ("CBTC.WithdrawAccount", "CBTCWithdrawAccount"),
-    ("CBTC.WithdrawAccount", "CBTCWithdrawAccountRules"),
-    ("Governance.Rules", "GovernanceRules"),
-];
-
-/// Check if a template matches any contract template we want to display
-fn is_contract_template(module_name: &str, entity_name: &str) -> bool {
-    CONTRACT_TEMPLATE_NAMES
-        .iter()
-        .any(|(m, e)| *m == module_name && *e == entity_name)
+/// RegistrarServiceRequest template identifier
+fn registrar_service_request_template(packages: &PackageConfig) -> Option<TemplateId> {
+    packages.utility_registry.as_ref().map(|pkg| TemplateId {
+        package_id: pkg.clone(),
+        module_name: "Utility.Registry.App.V0.Service.Registrar",
+        entity_name: "RegistrarServiceRequest",
+    })
 }
 
-/// Module/entity names for governance templates (used for wildcard filtering)
-const GOVERNANCE_TEMPLATE_NAMES: &[(&str, &str)] = &[
-    (
-        "BitsafeVault.VaultGovernance",
-        "VaultGovernanceConfirmation",
-    ),
-    ("CBTC.Governance", "Confirmation"),
-    ("Governance.Rules", "GovernanceSelfConfirmation"),
-    ("Governance.Confirmation", "GovernanceConfirmation"),
-];
-
+/// ProviderConfiguration template identifier
+fn provider_configuration_template(packages: &PackageConfig) -> Option<TemplateId> {
+    packages.utility_registry.as_ref().map(|pkg| TemplateId {
+        package_id: pkg.clone(),
+        module_name: "Utility.Registry.App.V0.Configuration.Provider",
+        entity_name: "ProviderConfiguration",
+    })
+}
 /// Get active contracts for a party
 ///
-/// When `test_mode` is true, uses WildcardFilter with in-memory filtering
-/// (mock auth doesn't have TemplateFilter permissions).
-///
-/// In production mode, queries each template separately to gracefully handle
-/// cases where some packages may not be deployed on the participant.
+/// Queries each template separately, so a package that is not deployed on this
+/// participant degrades to "no contracts of that type" rather than failing the
+/// whole read.
 pub async fn get_contracts(
     config: &NodeConfig,
     party_id: &CantonId,
     token: Option<String>,
-    test_mode: bool,
     packages: &PackageConfig,
 ) -> Result<Vec<ContractInfo>> {
     let mut contracts = Vec::new();
@@ -275,13 +278,9 @@ pub async fn get_contracts(
         }
     };
 
-    if test_mode {
-        // Test mode: use WildcardFilter with in-memory filtering
-        tracing::debug!("Using WildcardFilter for contracts query (test mode)");
-        fetch_contracts_with_wildcard(config, party_id, token, &package_versions, &mut contracts)
-            .await?;
-    } else {
-        // Production mode: query each template separately to handle missing packages
+    {
+        // One query per template, so a package missing from this participant
+        // degrades to "no contracts of that type" instead of failing the read.
         tracing::debug!("Using TemplateFilter for contracts query (per-template)");
         for t in &contract_templates(packages) {
             match fetch_contracts_for_template(
@@ -455,34 +454,6 @@ fn render_contract_info(
     }
 }
 
-/// Fetch contracts using WildcardFilter (for test mode)
-async fn fetch_contracts_with_wildcard(
-    config: &NodeConfig,
-    party_id: &CantonId,
-    token: Option<String>,
-    package_versions: &HashMap<String, String>,
-    contracts: &mut Vec<ContractInfo>,
-) -> Result {
-    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], false);
-
-    for_each_active_contract(config, token, event_format, |created| {
-        // Test mode reads the ACS wildcard, so the template narrowing happens
-        // here rather than Canton-side.
-        let is_wanted = created
-            .template_id
-            .as_ref()
-            .map(|t| is_contract_template(&t.module_name, &t.entity_name))
-            .unwrap_or(false);
-
-        if is_wanted {
-            contracts.push(render_contract_info(&created, package_versions));
-        }
-    })
-    .await?;
-
-    Ok(())
-}
-
 /// Fetch contracts for a specific template
 async fn fetch_contracts_for_template(
     config: &NodeConfig,
@@ -589,13 +560,6 @@ where
     }
 }
 
-/// Check if a template matches any governance confirmation template
-fn is_governance_template(module_name: &str, entity_name: &str) -> bool {
-    GOVERNANCE_TEMPLATE_NAMES
-        .iter()
-        .any(|(m, e)| *m == module_name && *e == entity_name)
-}
-
 // ============================================================================
 // Governance Queries (with parsed actions)
 // ============================================================================
@@ -609,7 +573,6 @@ pub async fn get_governance_confirmations(
     party_id: &CantonId,
     threshold: usize,
     token: Option<String>,
-    test_mode: bool,
     packages: &PackageConfig,
 ) -> Result<(Vec<GovernanceAction>, Vec<DomainGovernanceAction>)> {
     // Collect confirmations grouped by action hash (vault + core self-management)
@@ -632,60 +595,56 @@ pub async fn get_governance_confirmations(
     // we skip orphan-marking below to avoid surfacing a flood of false
     // orphans to the user.
     let mut proposal_infos_complete = true;
+    // Whether `domain_confirmations` reflects every active `GovernanceConfirmation`
+    // for this party. A confirmation query that fails leaves a confirmed
+    // proposal looking untouched, and synthesizing it as a zero-confirmation
+    // card would offer Confirm to a member who has already confirmed. Skip
+    // synthesis in that case and wait for a refresh that reads cleanly.
+    let mut domain_confirmations_complete = true;
 
-    if test_mode {
-        tracing::debug!("Using WildcardFilter for governance query (test mode)");
-        fetch_governance_with_wildcard(
+    tracing::debug!("Using TemplateFilter for governance query (per-template)");
+    for t in &governance_templates(packages) {
+        match fetch_governance_for_template(
             config,
             party_id,
-            token,
+            token.clone(),
+            t,
             &mut confirmations_by_hash,
             &mut domain_confirmations,
-            &mut proposal_infos,
         )
-        .await?;
-    } else {
-        tracing::debug!("Using TemplateFilter for governance query (per-template)");
-        for t in &governance_templates(packages) {
-            match fetch_governance_for_template(
-                config,
-                party_id,
-                token.clone(),
-                t,
-                &mut confirmations_by_hash,
-                &mut domain_confirmations,
-            )
-            .await
-            {
-                Ok(()) => {
-                    tracing::debug!("Successfully queried {}:{}", t.module_name, t.entity_name);
-                }
-                Err(e) => {
-                    let err_str = e.to_string();
-                    if err_str.contains("PACKAGE_NAMES_NOT_FOUND") {
-                        tracing::debug!(
-                            "Package {} not found, skipping {}:{}",
-                            t.package_id,
-                            t.module_name,
-                            t.entity_name
-                        );
-                    } else {
-                        tracing::warn!(
-                            "Failed to query {}:{}: {e}, continuing...",
-                            t.module_name,
-                            t.entity_name
-                        );
-                    }
+        .await
+        {
+            Ok(()) => {
+                tracing::debug!("Successfully queried {}:{}", t.module_name, t.entity_name);
+            }
+            Err(e) => {
+                let err_str = e.to_string();
+                if err_str.contains("PACKAGE_NAMES_NOT_FOUND") {
+                    tracing::debug!(
+                        "Package {} not found, skipping {}:{}",
+                        t.package_id,
+                        t.module_name,
+                        t.entity_name
+                    );
+                } else {
+                    tracing::warn!(
+                        "Failed to query {}:{}: {e}, continuing...",
+                        t.module_name,
+                        t.entity_name
+                    );
+                    domain_confirmations_complete = false;
                 }
             }
         }
-        // Fetch proposal infos via GovernableAction interface query
-        if let Err(e) =
-            fetch_proposal_infos(config, party_id, token, packages, &mut proposal_infos).await
-        {
-            tracing::debug!("Could not fetch proposal infos: {e}");
-            proposal_infos_complete = false;
-        }
+    }
+    // Fetch proposal infos via GovernableAction interface query
+    if let Err(e) =
+        fetch_proposal_infos(config, party_id, token, packages, &mut proposal_infos).await
+    {
+        // Warn, not debug: this drops every unconfirmed card from the page,
+        // and the operator needs to know why the queue looks empty.
+        tracing::warn!("Could not fetch proposal infos: {e}");
+        proposal_infos_complete = false;
     }
 
     let now_seconds = SystemTime::now()
@@ -726,12 +685,53 @@ pub async fn get_governance_confirmations(
         })
         .collect();
 
-    // Build domain actions from domain confirmations. Confirmations whose
-    // proposal isn't in this participant's active set are marked `orphaned`
-    // (rather than dropped) so the UI can offer a dismiss-only card — the
-    // underlying Confirmation contracts are still on-ledger and need to be
-    // expired explicitly to clear them.
-    let domain_actions: Vec<DomainGovernanceAction> = domain_confirmations
+    let domain_actions = build_domain_actions(
+        domain_confirmations,
+        proposal_infos,
+        proposal_infos_complete,
+        domain_confirmations_complete,
+        threshold,
+        now_seconds,
+    );
+
+    Ok((actions, domain_actions))
+}
+
+/// Label used for a proposal synthesized from a bare `GovernableAction` when
+/// nothing names it — no `actionLabel` in the interface view or the
+/// create-arguments, and no template id on the event either.
+const FALLBACK_PROPOSAL_LABEL: &str = "Proposal";
+
+/// Merge confirmed domain proposals with the full active-proposal set.
+///
+/// `domain_confirmations` covers only proposals that already have at least
+/// one `GovernanceConfirmation`; `proposal_infos` covers every active
+/// `GovernableAction` visible to the party, confirmed or not. Confirmations
+/// whose proposal isn't in `proposal_infos` are marked `orphaned` (rather
+/// than dropped) so the UI can offer a dismiss-only card — the underlying
+/// Confirmation contracts are still on-ledger and need to be expired
+/// explicitly to clear them.
+///
+/// Whatever remains in `proposal_infos` after the confirmed proposals are
+/// enriched and removed is a proposal nobody has confirmed yet. Those are
+/// synthesized into zero-confirmation cards so a freshly created proposal is
+/// visible and confirmable from the notifications queue, instead of staying
+/// invisible until its first confirmation lands.
+///
+/// Synthesis needs both fetches to have succeeded. Without the full proposal
+/// set we can't tell a genuinely new proposal from one we failed to enrich.
+/// Without the full confirmation set a confirmed proposal looks untouched, and
+/// its card would offer Confirm to a member who already confirmed. Either way,
+/// missing a card for one refresh beats showing a wrong one.
+fn build_domain_actions(
+    domain_confirmations: HashMap<String, (String, Vec<GovernanceConfirmation>)>,
+    mut proposal_infos: HashMap<String, ProposalInfo>,
+    proposal_infos_complete: bool,
+    domain_confirmations_complete: bool,
+    threshold: usize,
+    now_seconds: i64,
+) -> Vec<DomainGovernanceAction> {
+    let mut domain_actions: Vec<DomainGovernanceAction> = domain_confirmations
         .into_iter()
         .map(|(proposal_cid, (action_label, mut confirmations))| {
             confirmations.sort_by_key(|c| Reverse(c.created_at));
@@ -742,8 +742,9 @@ pub async fn get_governance_confirmations(
                 description,
                 transfer_details,
                 accept_transfer_details,
-                service_request_info,
+                service_request_details,
                 proposer,
+                created_at,
                 orphaned,
             ) = match proposal_infos.remove(&proposal_cid) {
                 Some(info) => (
@@ -752,17 +753,10 @@ pub async fn get_governance_confirmations(
                     info.accept_transfer,
                     info.service_request,
                     info.proposer,
+                    info.created_at,
                     false,
                 ),
-                None => (None, None, None, None, None, proposal_infos_complete),
-            };
-            // Service-request parties are only meaningful on the two
-            // service-request proposal kinds; clear them otherwise so an
-            // unrelated proposal that happens to carry operator/provider
-            // parties doesn't render a misleading summary.
-            let service_request_details = match action_label.as_str() {
-                "CreateUserServiceRequest" | "CreateProviderServiceRequest" => service_request_info,
-                _ => None,
+                None => (None, None, None, None, None, None, proposal_infos_complete),
             };
             let mut seen_parties = std::collections::HashSet::new();
             let unique_confirmations: Vec<GovernanceConfirmation> = confirmations
@@ -786,45 +780,36 @@ pub async fn get_governance_confirmations(
                 accept_transfer_details,
                 service_request_details,
                 proposer,
+                created_at,
             }
         })
         .collect();
 
-    Ok((actions, domain_actions))
-}
-
-/// Fetch governance confirmations using WildcardFilter (for test mode)
-async fn fetch_governance_with_wildcard(
-    config: &NodeConfig,
-    party_id: &CantonId,
-    token: Option<String>,
-    confirmations_by_hash: &mut HashMap<String, (ActionType, Vec<GovernanceConfirmation>)>,
-    domain_confirmations: &mut HashMap<String, (String, Vec<GovernanceConfirmation>)>,
-    proposal_infos: &mut HashMap<String, ProposalInfo>,
-) -> Result {
-    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], true);
-
-    for_each_active_contract(config, token, event_format, |created| {
-        let Some(ref template_id) = created.template_id else {
-            return;
-        };
-
-        if is_governance_template(&template_id.module_name, &template_id.entity_name) {
-            if template_id.module_name == "Governance.Confirmation"
-                && template_id.entity_name == "GovernanceConfirmation"
-            {
-                extract_and_add_domain_confirmation(&created, domain_confirmations);
-            } else {
-                extract_and_add_confirmation(&created, confirmations_by_hash);
-            }
-        } else {
-            // Capture proposal info from GovernableAction contracts
-            extract_proposal_info(&created, proposal_infos);
+    if proposal_infos_complete && domain_confirmations_complete {
+        for (proposal_cid, info) in proposal_infos {
+            let action_label = info
+                .action_label
+                .unwrap_or_else(|| FALLBACK_PROPOSAL_LABEL.to_string());
+            domain_actions.push(DomainGovernanceAction {
+                proposal_cid,
+                action_label,
+                description: info.description,
+                confirmations: Vec::new(),
+                confirmation_count: 0,
+                can_execute: false,
+                orphaned: false,
+                transfer_details: info.transfer,
+                accept_transfer_details: info.accept_transfer,
+                service_request_details: info.service_request,
+                // A proposal nobody has confirmed is the likeliest one to
+                // retract, so the card needs its proposer as much as any other.
+                proposer: info.proposer,
+                created_at: info.created_at,
+            });
         }
-    })
-    .await?;
+    }
 
-    Ok(())
+    domain_actions
 }
 
 /// Fetch governance confirmations for a specific template
@@ -1024,11 +1009,11 @@ fn extract_and_add_domain_confirmation(
         .push(confirmation);
 }
 
-/// Per-proposal info pulled out of a `GovernableAction` contract's
-/// `create_arguments`. `description` mirrors the `description` field on
-/// every proposal; `transfer` is populated only for `TransferProposal`
-/// templates so the notifications queue can render recipient/amount/
-/// instrument on the card without a follow-up fetch.
+/// Per-proposal info pulled out of a `GovernableAction` contract. `description`
+/// and `action_label` come from the interface view, which every proposal
+/// implements; `transfer` is populated only for `TransferProposal` templates so
+/// the notifications queue can render recipient/amount/instrument on the card
+/// without a follow-up fetch.
 ///
 /// `accept_transfer_instruction_cid` is captured for `AcceptTransferProposal`
 /// templates (they only carry the linked `TransferInstruction` cid, not the
@@ -1043,69 +1028,143 @@ pub struct ProposalInfo {
     pub accept_transfer: Option<AcceptTransferDetails>,
     /// Operator + user/provider parties, populated only for
     /// `Create{User,Provider}ServiceRequest` proposals so the notification card
-    /// can render the full summary.
+    /// can render the full summary. `extract_proposal_info` enforces that, so a
+    /// consumer renders this field without re-checking the label.
     pub service_request: Option<ServiceRequestDetails>,
+    /// `actionLabel` from the `GovernableActionView` interface view, falling
+    /// back to a same-named create-argument field and then to the template's
+    /// own name. `None` only when the event carries no template id either.
+    pub action_label: Option<String>,
     /// The member who created the proposal. Only that member controls
     /// `GovernableAction_ProposerCancel`, so the card offers the retract
     /// button on this field alone. `None` when the party id fails to parse.
     pub proposer: Option<CantonId>,
+    /// Seconds of the create event's ledger effective time. The feed sorts
+    /// cards on this, so a proposal keeps its place across refreshes even
+    /// before its first confirmation exists.
+    pub created_at: Option<i64>,
 }
 
-/// Extract proposal info from a GovernableAction contract's create_arguments.
+/// Pull the `GovernableAction` interface view off a created event. Canton
+/// only fills this in when the query asked for it with an `InterfaceFilter`,
+/// so a wildcard fetch (test mode) always gets `None`.
+fn governable_action_view(created: &CreatedEvent) -> Option<&Record> {
+    created
+        .interface_views
+        .iter()
+        .find(|v| {
+            v.interface_id.as_ref().is_some_and(|id| {
+                id.module_name == "Governance.Action" && id.entity_name == "GovernableAction"
+            })
+        })?
+        .view_value
+        .as_ref()
+}
+
+/// Whether a contract's create-arguments carry the two fields every
+/// in-repo proposal template declares. Used only when no interface view is
+/// available: a wildcard fetch returns every contract the party can see, so
+/// something has to keep unrelated templates out of the proposal map.
+fn looks_like_governable_action(record: &Record) -> bool {
+    let has = |label: &str| record.fields.iter().any(|f| f.label == label);
+    has("governanceParty") && has("proposer")
+}
+
+/// Extract proposal info from a `GovernableAction` contract.
 ///
-/// Looks for a `description` field (Text) and, for `TransferProposal`
-/// contracts, the nested `transfer` record. Only captures it if the
-/// contract has the `governanceParty` + `proposer` fields shared by every
-/// governable action (avoids matching unrelated contracts in wildcard
-/// mode).
+/// The interface view is the authoritative source: Canton only attaches one
+/// to a contract that really implements `GovernableAction`, and the view
+/// carries `actionLabel` and `description` even for templates that compute
+/// them rather than store them. Its presence is therefore enough to capture
+/// the contract, whatever package declared the template and however that
+/// template names its own fields.
+///
+/// A wildcard fetch (test mode) carries no view, so it falls back to the
+/// field-shape heuristic and to create-arguments for the same values.
+///
+/// `governance_party` is the decentralized party the caller is querying for.
+/// Being able to see a proposal does not mean governing it: another package
+/// may name our party as an observer on a proposal some other governance party
+/// controls. Our members hold no authority there, so Confirm would be rejected
+/// on-ledger. Such a proposal is dropped rather than shown.
 fn extract_proposal_info(
     created: &CreatedEvent,
+    governance_party: &CantonId,
     proposal_infos: &mut HashMap<String, ProposalInfo>,
 ) {
-    let Some(record) = &created.create_arguments else {
-        return;
-    };
+    let view = governable_action_view(created);
+    let record = created.create_arguments.as_ref();
 
-    // Only capture contracts that look like GovernableAction proposals
-    let has_governance_party = record.fields.iter().any(|f| f.label == "governanceParty");
-    let has_proposer = record.fields.iter().any(|f| f.label == "proposer");
-
-    if !has_governance_party || !has_proposer {
+    if view.is_none() && !record.is_some_and(looks_like_governable_action) {
         return;
     }
 
-    let description = record
-        .fields
-        .iter()
-        .find(|f| f.label == "description")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Text(t)) => Some(t.clone()),
-            _ => None,
+    // Absent rather than mismatched is not a rejection: a wildcard fetch of a
+    // template that computes the field in its view has nothing to compare.
+    let governs = view
+        .and_then(|v| field_party(v, "governanceParty"))
+        .or_else(|| record.and_then(|r| field_party(r, "governanceParty")));
+    if let Some(ref found) = governs
+        && found != &governance_party.to_string()
+    {
+        tracing::debug!(
+            "Skipping proposal {cid}: governed by {found}, not {governance_party}",
+            cid = created.contract_id
+        );
+        return;
+    }
+
+    let description = view
+        .and_then(|v| field_text(v, "description"))
+        .or_else(|| record.and_then(|r| field_text(r, "description")));
+
+    // Read from the view first for the same reason the label and description
+    // do: the interface declares `proposer`, so the view always carries it,
+    // while a template may compute it instead of storing a field.
+    let proposer = view
+        .and_then(|v| field_party(v, "proposer"))
+        .or_else(|| record.and_then(|r| field_party(r, "proposer")))
+        .and_then(|p| match CantonId::parse(&p) {
+            Ok(id) => Some(id),
+            Err(e) => {
+                tracing::warn!(
+                    "Proposal {cid} carries an unparseable proposer '{p}': {e}",
+                    cid = created.contract_id
+                );
+                None
+            }
         });
 
-    let proposer = field_party(record, "proposer").and_then(|p| match CantonId::parse(&p) {
-        Ok(id) => Some(id),
-        Err(e) => {
-            tracing::warn!(
-                "Proposal {cid} carries an unparseable proposer '{p}': {e}",
-                cid = created.contract_id
-            );
-            None
-        }
-    });
+    let transfer = record.and_then(extract_transfer_proposal_details);
+    // The template name is a poor label next to the view's `actionLabel`, but
+    // it beats a generic placeholder and it needs no per-package knowledge.
+    let action_label = view
+        .and_then(|v| field_text(v, "actionLabel"))
+        .or_else(|| record.and_then(|r| field_text(r, "actionLabel")))
+        .or_else(|| created.template_id.as_ref().map(|t| t.entity_name.clone()));
 
-    let transfer = extract_transfer_proposal_details(record);
-    let service_request = extract_service_request_details(record);
+    // `extract_service_request_details` matches on field shape — an `operator`
+    // plus a `user` or a `provider` — so an unrelated proposal carrying those
+    // names would yield a misleading party summary. Onboarding is only what
+    // these two actions do, so gate on the label here and let every consumer
+    // trust the field.
+    let service_request = match action_label.as_deref() {
+        Some("CreateUserServiceRequest") | Some("CreateProviderServiceRequest") => {
+            record.and_then(extract_service_request_details)
+        }
+        _ => None,
+    };
 
     // `AcceptTransferProposal`s carry `transferInstructionCid` instead of the
     // transfer fields. Capture it here; the post-pass in `fetch_proposal_infos`
     // resolves each cid to an `AcceptTransferDetails` via a per-cid event
     // query so the card can render sender/amount/instrument.
     let accept_transfer_instruction_cid = record
-        .fields
-        .iter()
-        .find(|f| f.label == "transferInstructionCid")
+        .and_then(|r| {
+            r.fields
+                .iter()
+                .find(|f| f.label == "transferInstructionCid")
+        })
         .and_then(|f| f.value.as_ref())
         .and_then(|v| match &v.sum {
             Some(value::Sum::ContractId(cid)) => Some(cid.clone()),
@@ -1123,7 +1182,9 @@ fn extract_proposal_info(
             accept_transfer_instruction_cid,
             accept_transfer: None,
             service_request,
+            action_label,
             proposer,
+            created_at: created.created_at.as_ref().map(|t| t.seconds),
         },
     );
 }
@@ -1332,7 +1393,7 @@ async fn fetch_proposal_infos(
     );
 
     for_each_active_contract(config, token.clone(), event_format, |created| {
-        extract_proposal_info(&created, proposal_infos);
+        extract_proposal_info(&created, party_id, proposal_infos);
     })
     .await?;
 
@@ -1368,42 +1429,36 @@ pub async fn get_governance_state(
     config: &NodeConfig,
     party_id: &CantonId,
     token: Option<String>,
-    test_mode: bool,
     packages: &PackageConfig,
 ) -> Result<Option<GovernanceState>> {
-    if test_mode {
-        fetch_governance_state_with_wildcard(config, party_id, token).await
-    } else {
-        // Try each governance template (vault, core) until we find a match
-        for template in governance_state_templates(packages) {
-            match fetch_governance_state_for_template(config, party_id, token.clone(), &template)
-                .await
-            {
-                Ok(Some(mut state)) => {
-                    // Found under the configured package — not out of date.
-                    state.package_ref = Some(template.package_id.clone());
-                    state.out_of_date = false;
-                    return Ok(Some(state));
+    // Try each governance template (vault, core) until we find a match
+    for template in governance_state_templates(packages) {
+        match fetch_governance_state_for_template(config, party_id, token.clone(), &template).await
+        {
+            Ok(Some(mut state)) => {
+                // Found under the configured package — not out of date.
+                state.package_ref = Some(template.package_id.clone());
+                state.out_of_date = false;
+                return Ok(Some(state));
+            }
+            Ok(None) => continue,
+            Err(e) => {
+                let err_str = e.to_string();
+                if err_str.contains("PACKAGE_NAMES_NOT_FOUND") {
+                    continue;
                 }
-                Ok(None) => continue,
-                Err(e) => {
-                    let err_str = e.to_string();
-                    if err_str.contains("PACKAGE_NAMES_NOT_FOUND") {
-                        continue;
-                    }
-                    tracing::warn!(
-                        "Failed to query governance state for {}:{}: {e}",
-                        template.module_name,
-                        template.entity_name
-                    );
-                }
+                tracing::warn!(
+                    "Failed to query governance state for {}:{}: {e}",
+                    template.module_name,
+                    template.entity_name
+                );
             }
         }
-        // Nothing under the configured packages — look for a GovernanceRules
-        // contract under an older governance-core package version still
-        // uploaded to the participant.
-        fetch_governance_state_fallback(config, party_id, token, packages).await
     }
+    // Nothing under the configured packages — look for a GovernanceRules
+    // contract under an older governance-core package version still
+    // uploaded to the participant.
+    fetch_governance_state_fallback(config, party_id, token, packages).await
 }
 
 /// Look for a GovernanceRules contract under any OLDER governance-core
@@ -1459,29 +1514,6 @@ async fn fetch_governance_state_fallback(
         }
     }
     Ok(None)
-}
-
-/// Fetch governance state using WildcardFilter (for test mode)
-async fn fetch_governance_state_with_wildcard(
-    config: &NodeConfig,
-    party_id: &CantonId,
-    token: Option<String>,
-) -> Result<Option<GovernanceState>> {
-    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], true);
-
-    // Test mode reads the ACS wildcard, so the governance-rules templates are
-    // matched here; stops at the first one rather than draining the ACS.
-    fetch_first_matching(config, token, event_format, |created| {
-        let template_id = created.template_id.as_ref()?;
-        let is_rules = (template_id.module_name == "BitsafeVault.VaultGovernance"
-            && template_id.entity_name == "VaultGovernanceRules")
-            || (template_id.module_name == "Governance.Rules"
-                && template_id.entity_name == "GovernanceRules");
-        is_rules
-            .then(|| extract_governance_state(&created))
-            .flatten()
-    })
-    .await
 }
 
 /// Fetch governance state for a specific template
@@ -1723,40 +1755,12 @@ pub async fn get_vaults(
     config: &NodeConfig,
     party_id: &CantonId,
     token: Option<String>,
-    test_mode: bool,
     packages: &PackageConfig,
 ) -> Result<Vec<VaultInfo>> {
-    if test_mode {
-        fetch_vaults_with_wildcard(config, party_id, token).await
-    } else {
-        match vault_template(packages) {
-            Some(template) => fetch_vaults_for_template(config, party_id, token, &template).await,
-            None => Ok(Vec::new()),
-        }
+    match vault_template(packages) {
+        Some(template) => fetch_vaults_for_template(config, party_id, token, &template).await,
+        None => Ok(Vec::new()),
     }
-}
-
-/// Fetch vaults using WildcardFilter (for test mode)
-async fn fetch_vaults_with_wildcard(
-    config: &NodeConfig,
-    party_id: &CantonId,
-    token: Option<String>,
-) -> Result<Vec<VaultInfo>> {
-    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], true);
-
-    let mut vaults = Vec::new();
-    for_each_active_contract(config, token, event_format, |created| {
-        if let Some(template_id) = &created.template_id
-            && template_id.module_name == "BitsafeVault.Vault"
-            && template_id.entity_name == "Vault"
-            && let Some(vault_info) = extract_vault_info(&created)
-        {
-            vaults.push(vault_info);
-        }
-    })
-    .await?;
-
-    Ok(vaults)
 }
 
 /// Fetch vaults using TemplateFilter
@@ -1869,39 +1873,14 @@ pub async fn get_provider_services(
     config: &NodeConfig,
     party_id: &CantonId,
     token: Option<String>,
-    test_mode: bool,
     packages: &PackageConfig,
 ) -> Result<Vec<ProviderServiceInfo>> {
-    if test_mode {
-        fetch_provider_services_with_wildcard(config, party_id, token).await
-    } else {
-        match provider_service_template(packages) {
-            Some(template) => {
-                fetch_provider_services_for_template(config, party_id, token, &template).await
-            }
-            None => Ok(Vec::new()),
+    match provider_service_template(packages) {
+        Some(template) => {
+            fetch_provider_services_for_template(config, party_id, token, &template).await
         }
+        None => Ok(Vec::new()),
     }
-}
-
-/// Fetch provider services using WildcardFilter (for test mode)
-async fn fetch_provider_services_with_wildcard(
-    config: &NodeConfig,
-    party_id: &CantonId,
-    token: Option<String>,
-) -> Result<Vec<ProviderServiceInfo>> {
-    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], true);
-
-    fetch_active_contracts_filtered(config, token, event_format, |created| {
-        let template_id = created.template_id.as_ref()?;
-        if template_id.module_name != "Utility.Registry.App.V0.Service.Provider"
-            || template_id.entity_name != "ProviderService"
-        {
-            return None;
-        }
-        extract_provider_service_info(&created)
-    })
-    .await
 }
 
 /// Fetch provider services using TemplateFilter
@@ -1966,39 +1945,14 @@ pub async fn get_user_services(
     config: &NodeConfig,
     party_id: &CantonId,
     token: Option<String>,
-    test_mode: bool,
     packages: &PackageConfig,
 ) -> Result<Vec<UserServiceInfo>> {
-    if test_mode {
-        fetch_user_services_with_wildcard(config, party_id, token).await
-    } else {
-        match user_service_template(packages) {
-            Some(template) => {
-                fetch_user_services_for_template(config, party_id, token, &template).await
-            }
-            None => Ok(Vec::new()),
+    match user_service_template(packages) {
+        Some(template) => {
+            fetch_user_services_for_template(config, party_id, token, &template).await
         }
+        None => Ok(Vec::new()),
     }
-}
-
-/// Fetch user services using WildcardFilter (for test mode)
-async fn fetch_user_services_with_wildcard(
-    config: &NodeConfig,
-    party_id: &CantonId,
-    token: Option<String>,
-) -> Result<Vec<UserServiceInfo>> {
-    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], true);
-
-    fetch_active_contracts_filtered(config, token, event_format, |created| {
-        let template_id = created.template_id.as_ref()?;
-        if template_id.module_name != "Utility.Credential.App.V0.Service.User"
-            || template_id.entity_name != "UserService"
-        {
-            return None;
-        }
-        extract_user_service_info(&created)
-    })
-    .await
 }
 
 /// Fetch user services using TemplateFilter
@@ -2069,39 +2023,14 @@ pub async fn get_credential_offers(
     config: &NodeConfig,
     party_id: &CantonId,
     token: Option<String>,
-    test_mode: bool,
     packages: &PackageConfig,
 ) -> Result<Vec<CredentialOfferInfo>> {
-    if test_mode {
-        fetch_credential_offers_with_wildcard(config, party_id, token).await
-    } else {
-        match credential_offer_template(packages) {
-            Some(template) => {
-                fetch_credential_offers_for_template(config, party_id, token, &template).await
-            }
-            None => Ok(Vec::new()),
+    match credential_offer_template(packages) {
+        Some(template) => {
+            fetch_credential_offers_for_template(config, party_id, token, &template).await
         }
+        None => Ok(Vec::new()),
     }
-}
-
-/// Fetch credential offers using WildcardFilter (for test mode)
-async fn fetch_credential_offers_with_wildcard(
-    config: &NodeConfig,
-    party_id: &CantonId,
-    token: Option<String>,
-) -> Result<Vec<CredentialOfferInfo>> {
-    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], true);
-
-    fetch_active_contracts_filtered(config, token, event_format, |created| {
-        let template_id = created.template_id.as_ref()?;
-        if template_id.module_name != "Utility.Credential.App.V0.Model.Offer"
-            || template_id.entity_name != "CredentialOffer"
-        {
-            return None;
-        }
-        extract_credential_offer_info(&created)
-    })
-    .await
 }
 
 /// Fetch credential offers using TemplateFilter
@@ -2163,6 +2092,88 @@ fn extract_credential_offer_info(created: &CreatedEvent) -> Option<CredentialOff
     })
 }
 
+/// Get all Credential contracts visible to a party
+pub async fn get_credentials(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    packages: &PackageConfig,
+) -> Result<Vec<CredentialInfo>> {
+    match credential_template(packages) {
+        Some(template) => fetch_credentials_for_template(config, party_id, token, &template).await,
+        None => Ok(Vec::new()),
+    }
+}
+
+/// Fetch credentials using TemplateFilter
+async fn fetch_credentials_for_template(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    template: &TemplateId,
+) -> Result<Vec<CredentialInfo>> {
+    let event_format = party_event_format(
+        party_id,
+        vec![template_filter(
+            Identifier {
+                package_id: template.package_id.clone(),
+                module_name: template.module_name.to_string(),
+                entity_name: template.entity_name.to_string(),
+            },
+            false,
+        )],
+        true,
+    );
+
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        extract_credential_info(&created)
+    })
+    .await
+}
+
+/// Extract CredentialInfo from a Credential created event.
+fn extract_credential_info(created: &CreatedEvent) -> Option<CredentialInfo> {
+    let record = created.create_arguments.as_ref()?;
+
+    let issuer: CantonId = field_party(record, "issuer")?.parse().ok()?;
+    let holder: CantonId = field_party(record, "holder")?.parse().ok()?;
+    let credential_id = field_text(record, "id")?;
+    let description = field_text(record, "description").unwrap_or_default();
+
+    let claims = record
+        .fields
+        .iter()
+        .find(|f| f.label == "claims")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::List(l)) => Some(&l.elements),
+            _ => None,
+        })
+        .map(|elements| {
+            elements
+                .iter()
+                .filter_map(|v| match &v.sum {
+                    Some(value::Sum::Record(r)) => Some(Claim {
+                        subject: field_text(r, "subject")?,
+                        property: field_text(r, "property")?,
+                        value: field_text(r, "value")?,
+                    }),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Some(CredentialInfo {
+        contract_id: created.contract_id.clone(),
+        issuer,
+        holder,
+        credential_id,
+        description,
+        claims,
+    })
+}
+
 // ============================================================================
 // Registrar Service Queries
 // ============================================================================
@@ -2172,39 +2183,14 @@ pub async fn get_registrar_services(
     config: &NodeConfig,
     party_id: &CantonId,
     token: Option<String>,
-    test_mode: bool,
     packages: &PackageConfig,
 ) -> Result<Vec<RegistrarServiceInfo>> {
-    if test_mode {
-        fetch_registrar_services_with_wildcard(config, party_id, token).await
-    } else {
-        match registrar_service_template(packages) {
-            Some(template) => {
-                fetch_registrar_services_for_template(config, party_id, token, &template).await
-            }
-            None => Ok(Vec::new()),
+    match registrar_service_template(packages) {
+        Some(template) => {
+            fetch_registrar_services_for_template(config, party_id, token, &template).await
         }
+        None => Ok(Vec::new()),
     }
-}
-
-/// Fetch registrar services using WildcardFilter (for test mode)
-async fn fetch_registrar_services_with_wildcard(
-    config: &NodeConfig,
-    party_id: &CantonId,
-    token: Option<String>,
-) -> Result<Vec<RegistrarServiceInfo>> {
-    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], true);
-
-    fetch_active_contracts_filtered(config, token, event_format, |created| {
-        let template_id = created.template_id.as_ref()?;
-        if template_id.module_name != "Utility.Registry.App.V0.Service.Registrar"
-            || template_id.entity_name != "RegistrarService"
-        {
-            return None;
-        }
-        extract_registrar_service_info(&created)
-    })
-    .await
 }
 
 /// Fetch registrar services using TemplateFilter
@@ -2265,6 +2251,159 @@ fn extract_registrar_service_info(created: &CreatedEvent) -> Option<RegistrarSer
 }
 
 // ============================================================================
+// Registrar Service Request Queries
+// ============================================================================
+
+/// Get all RegistrarServiceRequest contracts visible to a party. The
+/// OnboardRegistrar form lists these so the request backing the onboard can
+/// be picked instead of pasted in by hand.
+pub async fn get_registrar_service_requests(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    packages: &PackageConfig,
+) -> Result<Vec<RegistrarServiceRequestInfo>> {
+    match registrar_service_request_template(packages) {
+        Some(template) => {
+            fetch_registrar_service_requests_for_template(config, party_id, token, &template).await
+        }
+        None => Ok(Vec::new()),
+    }
+}
+
+/// Fetch registrar service requests using TemplateFilter
+async fn fetch_registrar_service_requests_for_template(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    template: &TemplateId,
+) -> Result<Vec<RegistrarServiceRequestInfo>> {
+    let event_format = party_event_format(
+        party_id,
+        vec![template_filter(
+            Identifier {
+                package_id: template.package_id.clone(),
+                module_name: template.module_name.to_string(),
+                entity_name: template.entity_name.to_string(),
+            },
+            false,
+        )],
+        true,
+    );
+
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        extract_registrar_service_request_info(&created)
+    })
+    .await
+}
+
+/// Read an `Optional Bool` field. An absent field or a `None` value reads as
+/// `false`, matching the SDK's treatment of the request's flags.
+fn field_optional_bool_or_false(record: &Record, label: &str) -> bool {
+    record
+        .fields
+        .iter()
+        .find(|f| f.label == label)
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Optional(opt)) => {
+                opt.value.as_deref().and_then(|inner| match &inner.sum {
+                    Some(value::Sum::Bool(b)) => Some(*b),
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .unwrap_or(false)
+}
+
+/// Extract RegistrarServiceRequestInfo from a RegistrarServiceRequest
+/// created event.
+fn extract_registrar_service_request_info(
+    created: &CreatedEvent,
+) -> Option<RegistrarServiceRequestInfo> {
+    let record = created.create_arguments.as_ref()?;
+
+    let operator: CantonId = field_party(record, "operator")?.parse().ok()?;
+    let provider: CantonId = field_party(record, "provider")?.parse().ok()?;
+    let registrar: CantonId = field_party(record, "registrar")?.parse().ok()?;
+
+    Some(RegistrarServiceRequestInfo {
+        contract_id: created.contract_id.clone(),
+        operator,
+        provider,
+        registrar,
+        create_transfer_rule: field_optional_bool_or_false(record, "createTransferRule"),
+        create_allocation_factory: field_optional_bool_or_false(record, "createAllocationFactory"),
+    })
+}
+
+// ============================================================================
+// Provider Configuration Queries
+// ============================================================================
+
+/// Get all ProviderConfiguration contracts visible to a party. The
+/// OnboardRegistrar form lists these so the configuration backing the
+/// onboard can be picked instead of pasted in by hand.
+pub async fn get_provider_configurations(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    packages: &PackageConfig,
+) -> Result<Vec<ProviderConfigurationInfo>> {
+    match provider_configuration_template(packages) {
+        Some(template) => {
+            fetch_provider_configurations_for_template(config, party_id, token, &template).await
+        }
+        None => Ok(Vec::new()),
+    }
+}
+
+/// Fetch provider configurations using TemplateFilter
+async fn fetch_provider_configurations_for_template(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    template: &TemplateId,
+) -> Result<Vec<ProviderConfigurationInfo>> {
+    let event_format = party_event_format(
+        party_id,
+        vec![template_filter(
+            Identifier {
+                package_id: template.package_id.clone(),
+                module_name: template.module_name.to_string(),
+                entity_name: template.entity_name.to_string(),
+            },
+            false,
+        )],
+        true,
+    );
+
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        extract_provider_configuration_info(&created)
+    })
+    .await
+}
+
+/// Extract ProviderConfigurationInfo from a ProviderConfiguration created
+/// event. The requirement lists stay behind: the picker labels
+/// configurations by contract id alone.
+fn extract_provider_configuration_info(
+    created: &CreatedEvent,
+) -> Option<ProviderConfigurationInfo> {
+    let record = created.create_arguments.as_ref()?;
+
+    let operator: CantonId = field_party(record, "operator")?.parse().ok()?;
+    let provider: CantonId = field_party(record, "provider")?.parse().ok()?;
+
+    Some(ProviderConfigurationInfo {
+        contract_id: created.contract_id.clone(),
+        operator,
+        provider,
+    })
+}
+
+// ============================================================================
 // InstrumentConfiguration Queries
 // ============================================================================
 
@@ -2286,37 +2425,13 @@ pub async fn get_instruments(
     config: &NodeConfig,
     party_id: &CantonId,
     token: Option<String>,
-    test_mode: bool,
 ) -> Result<Vec<InstrumentInfo>> {
-    if test_mode {
-        fetch_instruments_with_wildcard(config, party_id, token).await
-    } else {
-        fetch_instruments_for_template(
-            config,
-            party_id,
-            token,
-            &instrument_configuration_template(),
-        )
-        .await
-    }
-}
-
-async fn fetch_instruments_with_wildcard(
-    config: &NodeConfig,
-    party_id: &CantonId,
-    token: Option<String>,
-) -> Result<Vec<InstrumentInfo>> {
-    let event_format = party_event_format(party_id, vec![wildcard_filter(false)], true);
-
-    fetch_active_contracts_filtered(config, token, event_format, |created| {
-        let template_id = created.template_id.as_ref()?;
-        if template_id.module_name != "Utility.Registry.V0.Configuration.Instrument"
-            || template_id.entity_name != "InstrumentConfiguration"
-        {
-            return None;
-        }
-        extract_instrument_info(&created)
-    })
+    fetch_instruments_for_template(
+        config,
+        party_id,
+        token,
+        &instrument_configuration_template(),
+    )
     .await
 }
 
@@ -2412,7 +2527,6 @@ pub async fn query_contracts_by_template(
     config: &NodeConfig,
     party_id: &CantonId,
     token: Option<String>,
-    test_mode: bool,
     params: &ContractQueryParams,
 ) -> Result<Vec<ContractWithBlob>> {
     use base64::Engine;
@@ -2423,9 +2537,7 @@ pub async fn query_contracts_by_template(
         entity_name: params.entity_name.clone(),
     };
 
-    let filter = if test_mode {
-        wildcard_filter(true)
-    } else if params.use_interface_filter {
+    let filter = if params.use_interface_filter {
         interface_filter(identifier, true)
     } else {
         template_filter(identifier, true)
@@ -2434,16 +2546,6 @@ pub async fn query_contracts_by_template(
     let event_format = party_event_format(party_id, vec![filter], true);
 
     fetch_active_contracts_filtered(config, token, event_format, |created| {
-        // Test mode reads the ACS wildcard, so the template narrowing Canton
-        // would otherwise have done has to happen here.
-        if test_mode
-            && !created.template_id.as_ref().is_some_and(|t| {
-                t.module_name == params.module_name && t.entity_name == params.entity_name
-            })
-        {
-            return None;
-        }
-
         // QA flagged the Accept Mint Request dropdown for surfacing contracts
         // whose `executeBefore` has already passed — accepting them would fail
         // at interpretation with deadline-exceeded. Drop them here when the
@@ -2946,7 +3048,6 @@ pub async fn get_holdings(
     config: &NodeConfig,
     party_id: &CantonId,
     token: Option<String>,
-    test_mode: bool,
 ) -> Result<Vec<HoldingInfo>> {
     let raw = fetch_holding_views(config, party_id, token.clone()).await?;
 
@@ -2986,7 +3087,7 @@ pub async fn get_holdings(
     }
 
     // Look up preapprovals once and join.
-    let preapprovals = fetch_preapproved_instruments(config, party_id, token, test_mode).await?;
+    let preapprovals = fetch_preapproved_instruments(config, party_id, token).await?;
 
     let mut holdings: Vec<HoldingInfo> = totals
         .into_values()
@@ -3165,7 +3266,6 @@ async fn fetch_preapproved_instruments(
     config: &NodeConfig,
     party_id: &CantonId,
     token: Option<String>,
-    test_mode: bool,
 ) -> Result<PartyPreapprovals> {
     let amulet_params = ContractQueryParams {
         package_id: "#splice-amulet".to_string(),
@@ -3174,21 +3274,14 @@ async fn fetch_preapproved_instruments(
         use_interface_filter: false,
         active_only: false,
     };
-    let has_amulet = match query_contracts_by_template(
-        config,
-        party_id,
-        token.clone(),
-        test_mode,
-        &amulet_params,
-    )
-    .await
-    {
-        Ok(rows) => !rows.is_empty(),
-        Err(e) => {
-            log_preapproval_lookup_error("Amulet TransferPreapproval", &e);
-            false
-        }
-    };
+    let has_amulet =
+        match query_contracts_by_template(config, party_id, token.clone(), &amulet_params).await {
+            Ok(rows) => !rows.is_empty(),
+            Err(e) => {
+                log_preapproval_lookup_error("Amulet TransferPreapproval", &e);
+                false
+            }
+        };
 
     // Utility preapprovals carry their instrument on the create-arguments
     // payload, so re-fetch with a TemplateFilter to get create_arguments and
@@ -3283,6 +3376,19 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn credential_template_names_the_defining_package() {
+        // The `Credential` template is defined in `utility-credential-v0`;
+        // `utility-credential-app-v0` only bundles that dalf as a dependency.
+        // Canton resolves a `#name` filter against the defining package's
+        // name, so naming the app package matches no contracts.
+        let template = credential_template(&crate::config::default_package_config())
+            .expect("default package config sets utility_credential");
+        assert_eq!(template.package_id, "#utility-credential-v0");
+        assert_eq!(template.module_name, "Utility.Credential.V0.Credential");
+        assert_eq!(template.entity_name, "Credential");
+    }
+
     fn ci(name: &str, version: &str, created_at: &str, contract_id: &str) -> ContractInfo {
         ContractInfo {
             contract_id: contract_id.to_string(),
@@ -3358,7 +3464,7 @@ mod tests {
     // ------------------------------------------------------------------------
 
     use canton_proto_rs::com::daml::ledger::api::v2::{
-        InterfaceView, Optional, RecordField, Variant,
+        InterfaceView, List, Optional, RecordField, Variant,
     };
 
     fn field(label: &str, value: Value) -> RecordField {
@@ -3760,6 +3866,771 @@ mod tests {
             record.fields.retain(|f| f.label != "holder");
         }
         assert!(extract_credential_offer_info(&event).is_none());
+    }
+
+    // ------------------------------------------------------------------------
+    // extract_credential_info
+    //
+    // `Utility.Credential.V0.Credential:Credential` carries issuer/holder,
+    // the credential id/description, and a `claims` list whose `subject`
+    // names the party each claim attests for. The extractor feeds the
+    // issuer-credential picker on the accept mint/burn request forms.
+    // ------------------------------------------------------------------------
+
+    fn list_value(elements: Vec<Value>) -> Value {
+        Value {
+            sum: Some(value::Sum::List(List { elements })),
+        }
+    }
+
+    fn claim_value(subject: &str, property: &str, value: &str) -> Value {
+        record_value(vec![
+            field("subject", text_value(subject)),
+            field("property", text_value(property)),
+            field("value", text_value(value)),
+        ])
+    }
+
+    /// A Credential created event; `claims` is the raw value of the
+    /// template's `claims : [Claim]` field.
+    fn credential_event(claims: Value) -> CreatedEvent {
+        let record = Record {
+            record_id: None,
+            fields: vec![
+                field("issuer", party_value(&format!("issuer::{SR_FP}"))),
+                field("holder", party_value(&format!("holder::{SR_FP}"))),
+                field(
+                    "id",
+                    text_value("LAUNCH-TOKEN-instrument-issuer-credential/subject/0-0"),
+                ),
+                field("description", text_value("Governance-minted credential")),
+                field("validFrom", optional_value(None)),
+                field("validUntil", optional_value(None)),
+                field("claims", claims),
+                field("observers", list_value(vec![])),
+            ],
+        };
+        CreatedEvent {
+            offset: 0,
+            node_id: 0,
+            contract_id: "credential-cid-1".to_string(),
+            template_id: None,
+            contract_key: None,
+            create_arguments: Some(record),
+            created_event_blob: vec![],
+            interface_views: vec![],
+            witness_parties: vec![],
+            signatories: vec![],
+            observers: vec![],
+            created_at: None,
+            package_name: String::new(),
+            representative_package_id: String::new(),
+            acs_delta: false,
+            contract_key_hash: Vec::new(),
+        }
+    }
+
+    // ------------------------------------------------------------------------
+    // extract_proposal_info / build_domain_actions
+    //
+    // Covers the pending-approvals fix: every active GovernableAction should
+    // surface, confirmations or not, using only the interface view.
+    // ------------------------------------------------------------------------
+
+    fn bare_created_event(contract_id: &str) -> CreatedEvent {
+        CreatedEvent {
+            offset: 0,
+            node_id: 0,
+            contract_id: contract_id.to_string(),
+            template_id: None,
+            contract_key: None,
+            create_arguments: None,
+            created_event_blob: vec![],
+            interface_views: vec![],
+            witness_parties: vec![],
+            signatories: vec![],
+            observers: vec![],
+            created_at: None,
+            package_name: String::new(),
+            representative_package_id: String::new(),
+            acs_delta: false,
+            contract_key_hash: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn extract_credential_info_reads_credential_with_claims() {
+        let claims = list_value(vec![
+            claim_value("subject-party", "role", "instrument-issuer"),
+            claim_value("subject-party", "kyc", "passed"),
+        ]);
+        let Some(info) = extract_credential_info(&credential_event(claims)) else {
+            panic!("credential should yield info");
+        };
+        assert_eq!(info.contract_id, "credential-cid-1");
+        assert_eq!(info.issuer.to_string(), format!("issuer::{SR_FP}"));
+        assert_eq!(info.holder.to_string(), format!("holder::{SR_FP}"));
+        assert_eq!(
+            info.credential_id,
+            "LAUNCH-TOKEN-instrument-issuer-credential/subject/0-0"
+        );
+        assert_eq!(info.description, "Governance-minted credential");
+        assert_eq!(info.claims.len(), 2);
+        assert_eq!(info.claims[0].subject, "subject-party");
+        assert_eq!(info.claims[0].property, "role");
+        assert_eq!(info.claims[0].value, "instrument-issuer");
+    }
+
+    #[test]
+    fn extract_credential_info_defaults_missing_description_and_empty_claims() {
+        let mut event = credential_event(list_value(vec![]));
+        if let Some(record) = event.create_arguments.as_mut() {
+            record.fields.retain(|f| f.label != "description");
+        }
+        let Some(info) = extract_credential_info(&event) else {
+            panic!("claimless credential should still yield info");
+        };
+        assert!(info.claims.is_empty());
+        assert_eq!(info.description, "");
+    }
+
+    #[test]
+    fn extract_credential_info_skips_event_without_holder() {
+        let mut event = credential_event(list_value(vec![]));
+        if let Some(record) = event.create_arguments.as_mut() {
+            record.fields.retain(|f| f.label != "holder");
+        }
+        assert!(extract_credential_info(&event).is_none());
+    }
+
+    // ------------------------------------------------------------------------
+    // extract_registrar_service_request_info
+    //
+    // `Utility.Registry.App.V0.Service.Registrar:RegistrarServiceRequest`
+    // carries the operator/provider/registrar parties plus two
+    // `Optional Bool` flags the SDK reads as `false` when absent. The
+    // extractor feeds the request picker on the OnboardRegistrar form.
+    // ------------------------------------------------------------------------
+
+    fn bool_value(b: bool) -> Value {
+        Value {
+            sum: Some(value::Sum::Bool(b)),
+        }
+    }
+
+    /// A RegistrarServiceRequest created event; the two arguments are the
+    /// raw values of the template's `Optional Bool` flag fields.
+    fn registrar_service_request_event(
+        create_transfer_rule: Value,
+        create_allocation_factory: Value,
+    ) -> CreatedEvent {
+        let record = Record {
+            record_id: None,
+            fields: vec![
+                field("operator", party_value(&format!("operator::{SR_FP}"))),
+                field("provider", party_value(&format!("provider::{SR_FP}"))),
+                field("registrar", party_value(&format!("registrar::{SR_FP}"))),
+                field("createTransferRule", create_transfer_rule),
+                field("createAllocationFactory", create_allocation_factory),
+            ],
+        };
+        CreatedEvent {
+            offset: 0,
+            node_id: 0,
+            contract_id: "rsr-cid-1".to_string(),
+            template_id: None,
+            contract_key: None,
+            create_arguments: Some(record),
+            created_event_blob: vec![],
+            interface_views: vec![],
+            witness_parties: vec![],
+            signatories: vec![],
+            observers: vec![],
+            created_at: None,
+            package_name: String::new(),
+            representative_package_id: String::new(),
+            acs_delta: false,
+            contract_key_hash: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn extract_registrar_service_request_info_reads_request_with_flags() {
+        let event = registrar_service_request_event(
+            optional_value(Some(bool_value(true))),
+            optional_value(Some(bool_value(false))),
+        );
+        let Some(info) = extract_registrar_service_request_info(&event) else {
+            panic!("request should yield info");
+        };
+        assert_eq!(info.contract_id, "rsr-cid-1");
+        assert_eq!(info.operator.to_string(), format!("operator::{SR_FP}"));
+        assert_eq!(info.provider.to_string(), format!("provider::{SR_FP}"));
+        assert_eq!(info.registrar.to_string(), format!("registrar::{SR_FP}"));
+        assert!(info.create_transfer_rule);
+        assert!(!info.create_allocation_factory);
+    }
+
+    #[test]
+    fn extract_registrar_service_request_info_defaults_absent_flags_to_false() {
+        // `None` flags — and fields missing outright — read as `false`,
+        // matching the SDK's treatment.
+        let mut event = registrar_service_request_event(optional_value(None), optional_value(None));
+        if let Some(record) = event.create_arguments.as_mut() {
+            record
+                .fields
+                .retain(|f| f.label != "createAllocationFactory");
+        }
+        let Some(info) = extract_registrar_service_request_info(&event) else {
+            panic!("flagless request should still yield info");
+        };
+        assert!(!info.create_transfer_rule);
+        assert!(!info.create_allocation_factory);
+    }
+
+    #[test]
+    fn extract_registrar_service_request_info_skips_event_without_registrar() {
+        let mut event = registrar_service_request_event(optional_value(None), optional_value(None));
+        if let Some(record) = event.create_arguments.as_mut() {
+            record.fields.retain(|f| f.label != "registrar");
+        }
+        assert!(extract_registrar_service_request_info(&event).is_none());
+    }
+
+    // ------------------------------------------------------------------------
+    // extract_provider_configuration_info
+    //
+    // `Utility.Registry.App.V0.Configuration.Provider:ProviderConfiguration`
+    // carries the operator/provider parties plus the registrar and holder
+    // requirement lists. The extractor reads the parties only — the picker
+    // labels configurations by contract id — and must tolerate the
+    // requirement lists it ignores. It feeds the configuration picker on the
+    // OnboardRegistrar form.
+    // ------------------------------------------------------------------------
+
+    /// A ProviderConfiguration created event, with empty requirement lists.
+    fn provider_configuration_event() -> CreatedEvent {
+        let record = Record {
+            record_id: None,
+            fields: vec![
+                field("operator", party_value(&format!("operator::{SR_FP}"))),
+                field("provider", party_value(&format!("provider::{SR_FP}"))),
+                field("registrarRequirements", list_value(vec![])),
+                field("holderRequirements", list_value(vec![])),
+            ],
+        };
+        CreatedEvent {
+            offset: 0,
+            node_id: 0,
+            contract_id: "pc-cid-1".to_string(),
+            template_id: None,
+            contract_key: None,
+            create_arguments: Some(record),
+            created_event_blob: vec![],
+            interface_views: vec![],
+            witness_parties: vec![],
+            signatories: vec![],
+            observers: vec![],
+            created_at: None,
+            package_name: String::new(),
+            representative_package_id: String::new(),
+            acs_delta: false,
+            contract_key_hash: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn extract_provider_configuration_info_reads_parties() {
+        let Some(info) = extract_provider_configuration_info(&provider_configuration_event())
+        else {
+            panic!("configuration should yield info");
+        };
+        assert_eq!(info.contract_id, "pc-cid-1");
+        assert_eq!(info.operator.to_string(), format!("operator::{SR_FP}"));
+        assert_eq!(info.provider.to_string(), format!("provider::{SR_FP}"));
+    }
+
+    #[test]
+    fn extract_provider_configuration_info_skips_event_without_provider() {
+        let mut event = provider_configuration_event();
+        if let Some(record) = event.create_arguments.as_mut() {
+            record.fields.retain(|f| f.label != "provider");
+        }
+        assert!(extract_provider_configuration_info(&event).is_none());
+    }
+
+    /// A created event as the production `InterfaceFilter` query returns it:
+    /// the `GovernableAction` view is present and nothing else is.
+    fn governable_action_view_event(action_label: &str, description: &str) -> CreatedEvent {
+        let view = InterfaceView {
+            interface_id: Some(Identifier {
+                package_id: "#governance-action-v1".to_string(),
+                module_name: "Governance.Action".to_string(),
+                entity_name: "GovernableAction".to_string(),
+            }),
+            view_status: None,
+            view_value: Some(Record {
+                record_id: None,
+                fields: vec![
+                    field("actionLabel", text_value(action_label)),
+                    field("description", text_value(description)),
+                    field("governanceParty", party_value(&format!("gov::{SR_FP}"))),
+                ],
+            }),
+            implementation_package_id: String::new(),
+        };
+        CreatedEvent {
+            interface_views: vec![view],
+            ..bare_created_event("proposal-cid")
+        }
+    }
+
+    #[test]
+    fn governable_action_view_reads_the_view_record() {
+        let event = governable_action_view_event("SetupCcPreapproval", "set up the preapproval");
+        let Some(view) = governable_action_view(&event) else {
+            panic!("the GovernableAction view should be found");
+        };
+        assert_eq!(
+            field_text(view, "actionLabel"),
+            Some("SetupCcPreapproval".to_string())
+        );
+    }
+
+    #[test]
+    fn governable_action_view_absent_when_no_matching_view() {
+        let mut event = governable_action_view_event("SetupCcPreapproval", "");
+        event.interface_views.clear();
+        assert!(governable_action_view(&event).is_none());
+    }
+
+    #[test]
+    fn extract_proposal_info_captures_a_proposal_from_its_view_alone() -> Result {
+        // An `InterfaceFilter` query populates `interface_views` and leaves
+        // `create_arguments` to the template filter, which this query has none
+        // of. The view alone must be enough.
+        let event = governable_action_view_event("CreateUserServiceRequest", "onboard the user");
+        let mut infos = HashMap::new();
+
+        extract_proposal_info(&event, &gov_party()?, &mut infos);
+
+        let Some(info) = infos.get("proposal-cid") else {
+            panic!("a view-only proposal should be captured");
+        };
+        assert_eq!(
+            info.action_label,
+            Some("CreateUserServiceRequest".to_string())
+        );
+        assert_eq!(info.description, Some("onboard the user".to_string()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn extract_proposal_info_prefers_the_view_description() -> Result {
+        // Templates such as CreateUserServiceRequest compute `description` in
+        // the view and hold no field of that name, so the view must win.
+        let mut event = governable_action_view_event("MintProposal", "computed in the view");
+        event.create_arguments = Some(Record {
+            record_id: None,
+            fields: vec![
+                field("governanceParty", party_value(&format!("gov::{SR_FP}"))),
+                field("proposer", party_value(&format!("proposer::{SR_FP}"))),
+                field("description", text_value("stored on the template")),
+            ],
+        });
+        let mut infos = HashMap::new();
+
+        extract_proposal_info(&event, &gov_party()?, &mut infos);
+
+        assert_eq!(
+            infos
+                .get("proposal-cid")
+                .and_then(|i| i.description.clone()),
+            Some("computed in the view".to_string())
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn extract_proposal_info_captures_a_proposal_from_an_unknown_package() -> Result {
+        // The visibility rule: a package decman has never heard of, whose
+        // template names its own fields differently, still gets a card. No
+        // allowlist of labels or templates may gate the pending path.
+        let event = governable_action_view_event("VaultPause", "pause the vault");
+        let mut infos = HashMap::new();
+        extract_proposal_info(&event, &gov_party()?, &mut infos);
+
+        let actions = build_domain_actions(HashMap::new(), infos, true, true, 2, 0);
+
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].action_label, "VaultPause");
+        assert_eq!(actions[0].confirmation_count, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn extract_proposal_info_labels_a_wildcard_proposal_with_its_template_name() -> Result {
+        // Test mode fetches with a wildcard filter, so no view arrives and the
+        // template name is the only name available.
+        let mut event = bare_created_event("proposal-cid");
+        event.template_id = Some(Identifier {
+            package_id: "#governance-utility-onboarding".to_string(),
+            module_name: "Governance.TokenIssuance.RegistrarDelegation".to_string(),
+            entity_name: "RegistrarDelegationProposal".to_string(),
+        });
+        event.create_arguments = Some(Record {
+            record_id: None,
+            fields: vec![
+                field("governanceParty", party_value(&format!("gov::{SR_FP}"))),
+                field("proposer", party_value(&format!("proposer::{SR_FP}"))),
+            ],
+        });
+        let mut infos = HashMap::new();
+
+        extract_proposal_info(&event, &gov_party()?, &mut infos);
+
+        assert_eq!(
+            infos
+                .get("proposal-cid")
+                .and_then(|i| i.action_label.clone()),
+            Some("RegistrarDelegationProposal".to_string())
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn extract_proposal_info_prefers_the_view_proposer() -> Result {
+        // The retract button keys on this field, and the interface declares
+        // `proposer`, so the view is the authoritative source.
+        let mut event = governable_action_view_event("MintProposal", "mint some tokens");
+        if let Some(view) = event
+            .interface_views
+            .first_mut()
+            .and_then(|v| v.view_value.as_mut())
+        {
+            view.fields.push(field(
+                "proposer",
+                party_value(&format!("from-view::{SR_FP}")),
+            ));
+        }
+        event.create_arguments = Some(Record {
+            record_id: None,
+            fields: vec![
+                field("governanceParty", party_value(&format!("gov::{SR_FP}"))),
+                field("proposer", party_value(&format!("from-args::{SR_FP}"))),
+            ],
+        });
+        let mut infos = HashMap::new();
+
+        extract_proposal_info(&event, &gov_party()?, &mut infos);
+
+        let Some(proposer) = infos.get("proposal-cid").and_then(|i| i.proposer.as_ref()) else {
+            panic!("the proposer should be captured");
+        };
+        assert_eq!(proposer.to_string(), format!("from-view::{SR_FP}"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn extract_proposal_info_falls_back_to_the_create_argument_proposer() -> Result {
+        // A wildcard fetch carries no view, so the raw field is all there is.
+        let mut event = bare_created_event("proposal-cid");
+        event.create_arguments = Some(Record {
+            record_id: None,
+            fields: vec![
+                field("governanceParty", party_value(&format!("gov::{SR_FP}"))),
+                field("proposer", party_value(&format!("from-args::{SR_FP}"))),
+            ],
+        });
+        let mut infos = HashMap::new();
+
+        extract_proposal_info(&event, &gov_party()?, &mut infos);
+
+        let Some(proposer) = infos.get("proposal-cid").and_then(|i| i.proposer.as_ref()) else {
+            panic!("the proposer should come from the create arguments");
+        };
+        assert_eq!(proposer.to_string(), format!("from-args::{SR_FP}"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn extract_proposal_info_skips_a_proposal_governed_by_another_party() -> Result {
+        // Seeing a proposal is not governing it. Another package may name our
+        // party as an observer while a different governance party controls the
+        // action, and Confirm there would be rejected on-ledger.
+        let mut event = governable_action_view_event("VaultPause", "pause the vault");
+        if let Some(view) = event
+            .interface_views
+            .first_mut()
+            .and_then(|v| v.view_value.as_mut())
+        {
+            view.fields.retain(|f| f.label != "governanceParty");
+            view.fields.push(field(
+                "governanceParty",
+                party_value(&format!("someone-else::{SR_FP}")),
+            ));
+        }
+        let mut infos = HashMap::new();
+
+        extract_proposal_info(&event, &gov_party()?, &mut infos);
+
+        assert!(infos.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn extract_proposal_info_captures_created_at() -> Result {
+        // The feed sorts on this, so an unconfirmed card holds its place
+        // between refreshes instead of shuffling.
+        let mut event = governable_action_view_event("MintProposal", "mint some tokens");
+        event.created_at = Some(prost_types::Timestamp {
+            seconds: 1_700_000_500,
+            nanos: 0,
+        });
+        let mut infos = HashMap::new();
+
+        extract_proposal_info(&event, &gov_party()?, &mut infos);
+
+        assert_eq!(
+            infos.get("proposal-cid").and_then(|i| i.created_at),
+            Some(1_700_000_500)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn extract_proposal_info_gates_service_request_details_on_the_label() -> Result {
+        // The party fields alone must not produce a service-request summary.
+        // Onboarding is only what the two Create*ServiceRequest actions do.
+        let mut event = governable_action_view_event("MintProposal", "mint some tokens");
+        event.create_arguments = Some(Record {
+            record_id: None,
+            fields: vec![
+                field("governanceParty", party_value(&format!("gov::{SR_FP}"))),
+                field("proposer", party_value(&format!("proposer::{SR_FP}"))),
+                field("operator", party_value(&format!("operator::{SR_FP}"))),
+                field("user", party_value(&format!("user::{SR_FP}"))),
+            ],
+        });
+        let mut infos = HashMap::new();
+
+        extract_proposal_info(&event, &gov_party()?, &mut infos);
+
+        let Some(info) = infos.get("proposal-cid") else {
+            panic!("the proposal should still be captured");
+        };
+        assert!(info.service_request.is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn extract_proposal_info_keeps_service_request_details_on_a_matching_label() -> Result {
+        let mut event =
+            governable_action_view_event("CreateUserServiceRequest", "onboard the user");
+        event.create_arguments = Some(Record {
+            record_id: None,
+            fields: vec![
+                field("governanceParty", party_value(&format!("gov::{SR_FP}"))),
+                field("proposer", party_value(&format!("proposer::{SR_FP}"))),
+                field("operator", party_value(&format!("operator::{SR_FP}"))),
+                field("user", party_value(&format!("user::{SR_FP}"))),
+            ],
+        });
+        let mut infos = HashMap::new();
+
+        extract_proposal_info(&event, &gov_party()?, &mut infos);
+
+        let Some(details) = infos
+            .get("proposal-cid")
+            .and_then(|i| i.service_request.as_ref())
+        else {
+            panic!("a user service request should carry its parties");
+        };
+        assert_eq!(details.operator.to_string(), format!("operator::{SR_FP}"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn extract_proposal_info_skips_an_unrelated_wildcard_contract() -> Result {
+        let mut event = bare_created_event("other-cid");
+        event.create_arguments = Some(Record {
+            record_id: None,
+            fields: vec![field("owner", party_value(&format!("owner::{SR_FP}")))],
+        });
+        let mut infos = HashMap::new();
+
+        extract_proposal_info(&event, &gov_party()?, &mut infos);
+
+        assert!(infos.is_empty());
+
+        Ok(())
+    }
+
+    fn proposal_info(action_label: Option<&str>) -> Result<ProposalInfo> {
+        Ok(ProposalInfo {
+            description: Some("a description".to_string()),
+            transfer: None,
+            accept_transfer_instruction_cid: None,
+            accept_transfer: None,
+            service_request: None,
+            action_label: action_label.map(str::to_string),
+            proposer: Some(CantonId::parse(&format!("proposer::{SR_FP}"))?),
+            created_at: Some(1_700_000_000),
+        })
+    }
+
+    /// The decentralized party the proposal tests query for. Every fixture
+    /// names this as its `governanceParty`, so nothing is dropped as foreign.
+    fn gov_party() -> Result<CantonId> {
+        CantonId::parse(&format!("gov::{SR_FP}"))
+    }
+
+    fn confirmation(confirming_party: &str) -> Result<GovernanceConfirmation> {
+        Ok(GovernanceConfirmation {
+            contract_id: format!("confirmation-{confirming_party}"),
+            action: ActionType::GovernanceSetThreshold { new_threshold: 0 },
+            confirming_party: CantonId::parse(&format!(
+                "{confirming_party}::1220aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ))?,
+            created_at: 0,
+            expires_at: 0,
+        })
+    }
+
+    #[test]
+    fn build_domain_actions_synthesizes_a_card_for_an_unconfirmed_proposal() -> Result {
+        let domain_confirmations = HashMap::new();
+        let mut proposal_infos = HashMap::new();
+        proposal_infos.insert(
+            "new-proposal-cid".to_string(),
+            proposal_info(Some("SetupCcPreapproval"))?,
+        );
+
+        let actions = build_domain_actions(domain_confirmations, proposal_infos, true, true, 2, 0);
+
+        assert_eq!(actions.len(), 1);
+        let action = &actions[0];
+        assert_eq!(action.proposal_cid, "new-proposal-cid");
+        assert_eq!(action.action_label, "SetupCcPreapproval");
+        assert_eq!(action.confirmation_count, 0);
+        assert!(action.confirmations.is_empty());
+        assert!(!action.can_execute);
+        assert!(!action.orphaned);
+        // The loop assigns every remaining field by hand, so each one is
+        // asserted. Without this a swapped assignment would still pass.
+        assert_eq!(action.description, Some("a description".to_string()));
+        assert_eq!(
+            action.proposer.as_ref().map(ToString::to_string),
+            Some(format!("proposer::{SR_FP}"))
+        );
+        assert_eq!(action.created_at, Some(1_700_000_000));
+        assert!(action.transfer_details.is_none());
+        assert!(action.accept_transfer_details.is_none());
+        assert!(action.service_request_details.is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn build_domain_actions_skips_synthesis_when_confirmations_are_incomplete() -> Result {
+        // A failed confirmation query leaves a confirmed proposal looking
+        // untouched. Synthesizing it would offer Confirm to a member who has
+        // already confirmed, so nothing is synthesized until a clean read.
+        let mut proposal_infos = HashMap::new();
+        proposal_infos.insert(
+            "new-proposal-cid".to_string(),
+            proposal_info(Some("SetupCcPreapproval"))?,
+        );
+
+        let actions = build_domain_actions(HashMap::new(), proposal_infos, true, false, 2, 0);
+
+        assert!(actions.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn build_domain_actions_leftover_label_falls_back_when_absent() -> Result {
+        let domain_confirmations = HashMap::new();
+        let mut proposal_infos = HashMap::new();
+        proposal_infos.insert("new-proposal-cid".to_string(), proposal_info(None)?);
+
+        let actions = build_domain_actions(domain_confirmations, proposal_infos, true, true, 2, 0);
+
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].action_label, FALLBACK_PROPOSAL_LABEL);
+
+        Ok(())
+    }
+
+    #[test]
+    fn build_domain_actions_does_not_duplicate_an_enriched_proposal() -> Result {
+        let mut domain_confirmations = HashMap::new();
+        domain_confirmations.insert(
+            "confirmed-cid".to_string(),
+            (
+                "SetupCcPreapproval".to_string(),
+                vec![confirmation("alice")?],
+            ),
+        );
+        let mut proposal_infos = HashMap::new();
+        proposal_infos.insert(
+            "confirmed-cid".to_string(),
+            proposal_info(Some("SetupCcPreapproval"))?,
+        );
+
+        let actions = build_domain_actions(domain_confirmations, proposal_infos, true, true, 2, 0);
+
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].confirmation_count, 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn build_domain_actions_skips_synthesis_on_incomplete_fetch() -> Result {
+        let domain_confirmations = HashMap::new();
+        let mut proposal_infos = HashMap::new();
+        proposal_infos.insert(
+            "new-proposal-cid".to_string(),
+            proposal_info(Some("SetupCcPreapproval"))?,
+        );
+
+        let actions = build_domain_actions(domain_confirmations, proposal_infos, false, true, 2, 0);
+
+        assert!(actions.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn build_domain_actions_does_not_orphan_confirmations_on_incomplete_fetch() -> Result {
+        let mut domain_confirmations = HashMap::new();
+        domain_confirmations.insert(
+            "missing-cid".to_string(),
+            (
+                "SetupCcPreapproval".to_string(),
+                vec![confirmation("alice")?],
+            ),
+        );
+        let proposal_infos = HashMap::new();
+
+        let actions = build_domain_actions(domain_confirmations, proposal_infos, false, true, 2, 0);
+
+        assert_eq!(actions.len(), 1);
+        assert!(!actions[0].orphaned);
+
+        Ok(())
     }
 
     // ====================================================================

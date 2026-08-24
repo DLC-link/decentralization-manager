@@ -280,23 +280,76 @@ pub async fn resolve_owner_keys_from_peers(
         {
             Ok(Ok(bytes)) => bytes,
             Ok(Err(e)) => {
-                tracing::warn!("Noise request to {peer_uid} failed: {e}");
+                tracing::warn!(
+                    peer = %peer_uid,
+                    endpoint = %format!("{}:{}", peer.address, peer.port),
+                    "RequestOwnerKeys failed: {e} — {hint}",
+                    hint = peer_failure_hint(&e)
+                );
                 continue;
             }
             Err(_) => {
-                tracing::warn!("Noise request to {peer_uid} timed out");
+                tracing::warn!(
+                    peer = %peer_uid,
+                    endpoint = %format!("{}:{}", peer.address, peer.port),
+                    "RequestOwnerKeys timed out after 10s — {hint}",
+                    hint = peer_failure_hint(&NoiseError::RequestTimeout)
+                );
                 continue;
             }
         };
 
+        // A 200 with an empty body. The peer accepted the request and then
+        // said nothing, which used to surface as "message too short: got 0" and
+        // read like a protocol bug in the peer.
+        //
+        // A denied request is NOT this case: it arrives as a 503, so
+        // `send_noise_message` returns `BadStatusCode` above and never reaches
+        // here. This arm is a peer that answered 200 with no frame at all, or a
+        // proxy that terminated the request and returned an empty 200.
+        if response.is_empty() {
+            tracing::warn!(
+                peer = %peer_uid,
+                endpoint = %format!("{}:{}", peer.address, peer.port),
+                "RequestOwnerKeys got an empty reply — {hint}",
+                hint = peer_failure_hint(&NoiseError::InvalidMessage)
+            );
+            continue;
+        }
+
         let response_msg = match Message::from_bytes(&response) {
             Ok(m) if m.msg_type == MessageType::OwnerKeys => m,
+            Ok(m) if m.msg_type == MessageType::Error => {
+                // An Error frame under 200 OK. The listener's own deny paths
+                // send that frame with a 503, so those surface as
+                // `BadStatusCode(_, Some(reason))` above rather than here. This
+                // arm catches a peer that reports the error in the body while
+                // still answering 200. Either way, prefer its words to a guess.
+                tracing::warn!(
+                    peer = %peer_uid,
+                    endpoint = %format!("{}:{}", peer.address, peer.port),
+                    "RequestOwnerKeys refused by the peer: {reason}",
+                    reason = String::from_utf8_lossy(&m.payload)
+                );
+                continue;
+            }
             Ok(m) => {
-                tracing::warn!("Unexpected response type from {peer_uid}: {:?}", m.msg_type);
+                tracing::warn!(
+                    peer = %peer_uid,
+                    endpoint = %format!("{}:{}", peer.address, peer.port),
+                    "RequestOwnerKeys got an unexpected response type {:?} — the peer may be on a \
+                     different wire format",
+                    m.msg_type
+                );
                 continue;
             }
             Err(e) => {
-                tracing::warn!("Failed to parse response from {peer_uid}: {e}");
+                tracing::warn!(
+                    peer = %peer_uid,
+                    endpoint = %format!("{}:{}", peer.address, peer.port),
+                    "RequestOwnerKeys reply did not parse: {e} — {hint}",
+                    hint = peer_failure_hint(&NoiseError::InvalidMessage)
+                );
                 continue;
             }
         };
@@ -794,7 +847,7 @@ pub async fn fetch_decentralized_parties(
                 let (contracts, local_metadata) = if token.is_some() || test_mode {
                     tokio::join!(
                         async {
-                            get_contracts(&config, &party_id, token, test_mode, &packages)
+                            get_contracts(&config, &party_id, token, &packages)
                                 .await
                                 .unwrap_or_else(|e| {
                                     tracing::warn!(
@@ -1028,6 +1081,53 @@ pub async fn compare_peer_packages(data: web::Data<AppState>) -> impl Responder 
 
 /// Pure mapping from `NoiseError` to the wire-stable `PeerErrorKind`.
 ///
+/// What an operator should check, for a peer request that failed.
+///
+/// The raw error names a symptom — `snow error: input error`,
+/// `Message too short: got 0` — and an operator reading it has no way to get
+/// from there to an action. Each arm below names the thing to go and look at.
+///
+/// Exhaustive for the same reason as [`peer_error_kind_from_noise_err`]: a new
+/// `NoiseError` variant must be given a hint rather than silently inheriting a
+/// vague one.
+fn peer_failure_hint(err: &NoiseError) -> &'static str {
+    match err {
+        NoiseError::TcpConnectionTimeout(_) | NoiseError::TcpConnectionFailed(_) => {
+            "nothing is accepting connections on that address — check the peer is up and that \
+             its advertised host/port reach it from here"
+        }
+        NoiseError::RequestTimeout => {
+            "connected, but the peer never answered — it may be overloaded, or wedged mid-request"
+        }
+        NoiseError::Noise(_) | NoiseError::HandshakeFailed | NoiseError::DecryptionError => {
+            "the Noise handshake failed — this node's key or the derived PSK does not match what \
+             the peer expects, so check each side has the other's current public key"
+        }
+        NoiseError::BadStatusCode(..) => {
+            "the peer answered but refused the request — it may not have this node registered as \
+             a peer, or a load balancer in front of it has no healthy backend"
+        }
+        NoiseError::InvalidMessage => {
+            "the peer answered with something this build cannot parse — most often an empty body \
+             from a denied request or an unhealthy proxy, or a peer on an older wire format"
+        }
+        NoiseError::JsonSerialization(_) => {
+            "the peer's payload did not deserialize — likely a version skew between the two builds"
+        }
+        NoiseError::Io(_) | NoiseError::Hyper(_) => {
+            "the connection broke mid-request — check for a proxy or firewall closing idle \
+             connections between the two nodes"
+        }
+        NoiseError::Http(_)
+        | NoiseError::InvalidUri(_)
+        | NoiseError::UriParsingError(_)
+        | NoiseError::UnknownPeer(_)
+        | NoiseError::Anyhow(_) => {
+            "check this peer's address, port and public key in the peers table"
+        }
+    }
+}
+
 /// Exhaustive match (no wildcard) — adding a new `NoiseError` variant will
 /// fail to compile here until it's explicitly classified.
 fn peer_error_kind_from_noise_err(err: &NoiseError) -> PeerErrorKind {
@@ -1039,7 +1139,7 @@ fn peer_error_kind_from_noise_err(err: &NoiseError) -> PeerErrorKind {
         NoiseError::Noise(_) | NoiseError::HandshakeFailed | NoiseError::DecryptionError => {
             PeerErrorKind::HandshakeFailed
         }
-        NoiseError::BadStatusCode(_) => PeerErrorKind::BadStatus,
+        NoiseError::BadStatusCode(..) => PeerErrorKind::BadStatus,
         NoiseError::InvalidMessage | NoiseError::JsonSerialization(_) => {
             PeerErrorKind::DecodeFailed
         }
@@ -1224,7 +1324,7 @@ mod tests {
             (NoiseError::HandshakeFailed, PeerErrorKind::HandshakeFailed),
             (NoiseError::DecryptionError, PeerErrorKind::HandshakeFailed),
             (
-                NoiseError::BadStatusCode(StatusCode::INTERNAL_SERVER_ERROR),
+                NoiseError::BadStatusCode(StatusCode::INTERNAL_SERVER_ERROR, None),
                 PeerErrorKind::BadStatus,
             ),
             (NoiseError::InvalidMessage, PeerErrorKind::DecodeFailed),
@@ -1273,5 +1373,60 @@ mod tests {
 
         assert_eq!(request.filter_participant, "participant::abc123");
         assert_eq!(request.filter_party, "alice");
+    }
+
+    /// Every hint must name something to go and look at. The failure this
+    /// guards is a new `NoiseError` variant being handed a vague catch-all,
+    /// which is how the logs got unactionable in the first place (#332).
+    #[test]
+    fn every_peer_failure_hint_is_actionable() {
+        let cases = [
+            NoiseError::TcpConnectionFailed("x".into()),
+            NoiseError::TcpConnectionTimeout("x".into()),
+            NoiseError::RequestTimeout,
+            NoiseError::HandshakeFailed,
+            NoiseError::DecryptionError,
+            NoiseError::BadStatusCode(StatusCode::SERVICE_UNAVAILABLE, None),
+            NoiseError::InvalidMessage,
+            NoiseError::UnknownPeer("x".into()),
+        ];
+        for e in &cases {
+            let hint = peer_failure_hint(e);
+            assert!(!hint.is_empty(), "no hint for {e:?}");
+            // "check", "the peer", an instruction of some kind — not a restatement.
+            assert!(
+                hint.len() > 30,
+                "hint for {e:?} is too terse to act on: {hint}"
+            );
+        }
+
+        // The two that used to be indistinguishable must not read alike.
+        assert_ne!(
+            peer_failure_hint(&NoiseError::InvalidMessage),
+            peer_failure_hint(&NoiseError::TcpConnectionFailed("x".into())),
+        );
+    }
+
+    /// The peer's own reason reaches the operator through Display, which is
+    /// what `{e}` in the fan-out warnings renders.
+    #[test]
+    fn bad_status_code_surfaces_the_peers_reason() {
+        let bare = NoiseError::BadStatusCode(StatusCode::SERVICE_UNAVAILABLE, None);
+        let bare_rendered = format!("{bare}");
+        assert!(
+            bare_rendered.starts_with("Bad status code: 503"),
+            "unexpected Display: {bare_rendered}"
+        );
+        assert!(!bare_rendered.contains("peer said"));
+
+        let with_reason = NoiseError::BadStatusCode(
+            StatusCode::SERVICE_UNAVAILABLE,
+            Some("request rejected: unknown sender".to_string()),
+        );
+        let rendered = format!("{with_reason}");
+        assert!(
+            rendered.contains("unknown sender"),
+            "reason missing from Display: {rendered}"
+        );
     }
 }
