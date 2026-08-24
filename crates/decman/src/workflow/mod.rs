@@ -282,7 +282,7 @@ pub async fn start_peer(
                 // (re-)register before giving up, so a resumed run doesn't poll
                 // a dead coordinator forever. The counter resets on any real
                 // reply above, so a slow resume rides through.
-                if matches!(&e, NoiseError::BadStatusCode(code) if code.as_u16() == 503) {
+                if matches!(&e, NoiseError::BadStatusCode(code, _) if code.as_u16() == 503) {
                     consecutive_errors = 0;
                     consecutive_no_workflow += 1;
                     if consecutive_no_workflow >= MAX_CONSECUTIVE_NO_WORKFLOW_POLLS {
