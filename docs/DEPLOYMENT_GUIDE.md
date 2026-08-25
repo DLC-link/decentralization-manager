@@ -42,6 +42,14 @@ anything that needs `sh` — init containers, `kubectl exec` debugging, exec
 probes — on a utility image such as `busybox`, not on this image. The
 Deployment example below shows the pattern.
 
+It runs as **uid 65532** and needs no root: it binds 8080 and 9000, both above
+1024, and writes only under its data directory. Give the data volume an
+`fsGroup` so that uid can write to it — the Deployment example does.
+
+> Releases up to and including **v1.6.2** ran as uid 0. To harden one of those
+> without upgrading, set `runAsUser: 65532` and the same `fsGroup` on the pod;
+> the binary never needed the privileges it had.
+
 To check the version of a running pod:
 
 ```bash
@@ -235,10 +243,21 @@ spec:
       labels:
         app.kubernetes.io/name: dec-party-manager
     spec:
+      # The image runs as uid 65532 and needs no root. fsGroup makes the
+      # mounted PVC group-writable by that uid, which is what lets both the
+      # init container and the app create files under /app.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
       initContainers:
         - name: init-data
           image: busybox:latest
           command: ["sh", "-c", "mkdir -p /app/data"]
+          # Inherits the pod securityContext above, so it runs as 65532 too.
+          # busybox defaults to root, and with runAsNonRoot set the pod would
+          # refuse to start if this container were left to that default.
           volumeMounts:
             - name: data
               mountPath: /app
@@ -246,6 +265,15 @@ spec:
         - name: dec-party-manager
           image: public.ecr.aws/dlc-link/decentralization-manager:<tag>
           imagePullPolicy: Always
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            # The server writes only under its data directory, so a read-only
+            # root filesystem should hold. Left commented because it has not
+            # been proven against a live deploy: a dependency writing to /tmp
+            # would surface only at runtime. Enable it, then watch one restart.
+            # readOnlyRootFilesystem: true
           command:
             - dec-party-manager
             - -d
