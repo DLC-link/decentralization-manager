@@ -4,8 +4,8 @@ use anyhow::{Context, Result};
 use canton_proto_rs::com::digitalasset::canton::{
     admin::participant::v30::{ListPackagesRequest, package_service_client::PackageServiceClient},
     topology::admin::v30::{
-        BaseQuery, ListVettedPackagesRequest, StoreId, base_query, store_id,
-        topology_manager_read_service_client::TopologyManagerReadServiceClient,
+        BaseQuery, ListVettedPackagesRequest, StoreId, Synchronizer, base_query, store_id,
+        synchronizer, topology_manager_read_service_client::TopologyManagerReadServiceClient,
     },
 };
 
@@ -127,10 +127,16 @@ pub(crate) async fn fetch_package_id_to_name(
 /// without being vetted. The topology entries carry only package ids, so
 /// name/version are joined in from the Admin PackageService.
 ///
+/// Queries the synchronizer store, like every other topology read: a connected
+/// participant's vetting transactions land there, while the Authorized store
+/// only collects transactions issued while disconnected — on a live node it is
+/// empty or stale (#376).
+///
 /// Deliberately on the admin channel: the Ledger API has a paginated
 /// `ListVettedPackages`, but it needs a bearer token and tokens here are
 /// per-party — a participant-level endpoint has no party to borrow one from.
 pub(crate) async fn fetch_vetted_packages(config: &NodeConfig) -> Result<Vec<VettedPackageInfo>> {
+    let synchronizer_id = utils::get_synchronizer_id(config).await?;
     let channel = config
         .admin_channel()
         .await
@@ -142,7 +148,9 @@ pub(crate) async fn fetch_vetted_packages(config: &NodeConfig) -> Result<Vec<Vet
         .list_vetted_packages(tonic::Request::new(ListVettedPackagesRequest {
             base_query: Some(BaseQuery {
                 store: Some(StoreId {
-                    store: Some(store_id::Store::Authorized(store_id::Authorized {})),
+                    store: Some(store_id::Store::Synchronizer(Synchronizer {
+                        kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id)),
+                    })),
                 }),
                 proposals: false,
                 operation: 0,

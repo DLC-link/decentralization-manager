@@ -229,6 +229,31 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 })
             },
         )
+        .then(
+            "governance-core vetted per /packages/vetted on all participants",
+            Duration::from_secs(60),
+            |f, _| {
+                Box::pin(async move {
+                    for port in [f.p1.http, f.p2.http, f.p3.http] {
+                        let vetted = match f.get_json::<Value>(port, "/packages/vetted").await {
+                            Ok(v) => v,
+                            Err(_) => return None,
+                        };
+                        let found = vetted.as_array().is_some_and(|packages| {
+                            packages.iter().any(|p| {
+                                p["package_name"]
+                                    .as_str()
+                                    .is_some_and(|name| name.contains("governance-core"))
+                            })
+                        });
+                        if !found {
+                            return None;
+                        }
+                    }
+                    Some(Ok(()))
+                })
+            },
+        )
         .run(f)
         .await
 }
