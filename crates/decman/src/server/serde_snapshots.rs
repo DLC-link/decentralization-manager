@@ -7,6 +7,11 @@ use common::api::{
     Claim, InstrumentAllowance, InstrumentId, InstrumentIdentifier, InstrumentIssuerCredentials,
     PartyCredentialRequirement, RequiredClaim,
 };
+use decman_lib::catalog::proposals::core::GenericVote;
+use decman_lib::catalog::proposals::utility::{
+    CreateDelegatedBatchedMarkersProxy, CreateProviderServiceRequest, CreateUserServiceRequest,
+    ProvisionProviderService,
+};
 
 use crate::canton_id::CantonId;
 use crate::server::types::{
@@ -192,10 +197,10 @@ fn all_proposal_fixtures() -> Vec<ProposalType> {
         ProposalType::AcceptTransfer {
             transfer_instruction_cid: "00ti".into(),
         },
-        ProposalType::GenericVote {
+        ProposalType::GenericVote(GenericVote {
             description: "a vote".into(),
-        },
-        ProposalType::ProvisionProviderService,
+        }),
+        ProposalType::ProvisionProviderService(ProvisionProviderService {}),
         ProposalType::SetupUtility {
             provider_service_cid: "00psc".into(),
             operator: cid("op"),
@@ -208,14 +213,14 @@ fn all_proposal_fixtures() -> Vec<ProposalType> {
             create_transfer_rule: true,
             create_allocation_factory: true,
         },
-        ProposalType::CreateProviderServiceRequest {
+        ProposalType::CreateProviderServiceRequest(CreateProviderServiceRequest {
             operator: cid("op"),
             provider: cid("prov"),
-        },
-        ProposalType::CreateUserServiceRequest {
+        }),
+        ProposalType::CreateUserServiceRequest(CreateUserServiceRequest {
             operator: cid("op"),
             user: cid("user"),
-        },
+        }),
         ProposalType::SetProviderAppRewardBeneficiaries {
             instrument_configuration_cid: "00icc".into(),
             provider_app_reward_beneficiaries: Some(vec![AppRewardBeneficiary {
@@ -245,9 +250,9 @@ fn all_proposal_fixtures() -> Vec<ProposalType> {
             registrar_service_cid: "00rsc".into(),
             enable_result_contracts: Some(true),
         },
-        ProposalType::CreateDelegatedBatchedMarkersProxy {
+        ProposalType::CreateDelegatedBatchedMarkersProxy(CreateDelegatedBatchedMarkersProxy {
             operator: cid("op"),
-        },
+        }),
         ProposalType::SetupMintingDelegation {
             delegate: cid("delegate"),
             dso: cid("dso"),

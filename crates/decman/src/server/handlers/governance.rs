@@ -1435,8 +1435,8 @@ pub async fn propose_action(
 
     let (package_source, module_name, entity_name, create_args) =
         match action_serializer::build_proposal_create_args(
-            &party_id.to_string(),
-            &member_party_id.to_string(),
+            party_id,
+            &member_party_id,
             &resolved_proposal,
             transfer_choice_context.as_ref().map(|r| &r.context),
             Some(transfer_validity),
@@ -3299,6 +3299,8 @@ mod cancel_proposal_tests {
 
 #[cfg(test)]
 mod propose_guard_tests {
+    use decman_lib::catalog::proposals::core::GenericVote;
+
     use super::*;
 
     fn party() -> CantonId {
@@ -3327,9 +3329,9 @@ mod propose_guard_tests {
             new_beneficiaries: vec![],
             prior_delegation: Some("00abc".to_string()),
         };
-        let unrelated = ProposalType::GenericVote {
+        let unrelated = ProposalType::GenericVote(GenericVote {
             description: "unrelated".to_string(),
-        };
+        });
 
         // the accident: creating one without naming what it replaces
         assert!(may_create_second_delegation(&setup_without_prior));

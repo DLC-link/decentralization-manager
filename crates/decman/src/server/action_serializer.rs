@@ -10,12 +10,17 @@ use canton_common::transfer_factory::Context as ChoiceContext;
 #[cfg(test)]
 use canton_common::{decimal::DamlDecimal, transfer_factory::ContextValue};
 use canton_proto_rs::com::daml::ledger::api::v2::{Optional, Record, Value, value};
+use decman_lib::catalog::proposals::core::GenericVote;
+use decman_lib::catalog::proposals::utility::{
+    CreateDelegatedBatchedMarkersProxy, CreateProviderServiceRequest, CreateUserServiceRequest,
+    ProvisionProviderService,
+};
 pub(crate) use decman_lib::catalog::types::{
     make_optional_beneficiaries, serialize_billing_params, serialize_reward_beneficiary,
 };
+use decman_lib::framework::commands::proposal_create_arguments;
 pub(crate) use decman_lib::framework::encode::*;
 
-#[cfg(test)]
 use crate::canton_id::CantonId;
 use crate::error::Result;
 
@@ -144,8 +149,8 @@ pub enum ProposalPackage {
 ///
 /// Returns (package, module_name, entity_name, record_fields) for the CreateCommand.
 pub fn build_proposal_create_args(
-    governance_party: &str,
-    proposer: &str,
+    governance_party: &CantonId,
+    proposer: &CantonId,
     proposal: &ProposalType,
     transfer_choice_context: Option<&ChoiceContext>,
     transfer_validity: Option<TransferValidity>,
@@ -303,30 +308,19 @@ pub fn build_proposal_create_args(
                 },
             )
         }
-        ProposalType::GenericVote { description } => (
+        ProposalType::GenericVote(p) => (
             ProposalPackage::GovernanceCore,
-            "Governance.GenericVote",
-            "GenericVoteProposal",
-            Record {
-                record_id: None,
-                fields: vec![
-                    field("governanceParty", make_party(governance_party)),
-                    field("proposer", make_party(proposer)),
-                    field("description", make_text(description)),
-                ],
-            },
+            GenericVote::MODULE,
+            GenericVote::ENTITY,
+            proposal_create_arguments(p, governance_party, proposer)
+                .map_err(anyhow::Error::from)?,
         ),
-        ProposalType::ProvisionProviderService => (
+        ProposalType::ProvisionProviderService(p) => (
             ProposalPackage::GovernanceUtilityOnboarding,
-            "Governance.UtilityOnboarding.ProvisionProviderService",
-            "ProvisionProviderService",
-            Record {
-                record_id: None,
-                fields: vec![
-                    field("governanceParty", make_party(governance_party)),
-                    field("proposer", make_party(proposer)),
-                ],
-            },
+            ProvisionProviderService::MODULE,
+            ProvisionProviderService::ENTITY,
+            proposal_create_arguments(p, governance_party, proposer)
+                .map_err(anyhow::Error::from)?,
         ),
         ProposalType::SetupUtility {
             provider_service_cid,
@@ -364,33 +358,19 @@ pub fn build_proposal_create_args(
                 ],
             },
         ),
-        ProposalType::CreateProviderServiceRequest { operator, provider } => (
+        ProposalType::CreateProviderServiceRequest(p) => (
             ProposalPackage::GovernanceUtilityOnboarding,
-            "Governance.UtilityOnboarding.CreateProviderServiceRequest",
-            "CreateProviderServiceRequest",
-            Record {
-                record_id: None,
-                fields: vec![
-                    field("governanceParty", make_party(governance_party)),
-                    field("proposer", make_party(proposer)),
-                    field("operator", make_party(operator)),
-                    field("provider", make_party(provider)),
-                ],
-            },
+            CreateProviderServiceRequest::MODULE,
+            CreateProviderServiceRequest::ENTITY,
+            proposal_create_arguments(p, governance_party, proposer)
+                .map_err(anyhow::Error::from)?,
         ),
-        ProposalType::CreateUserServiceRequest { operator, user } => (
+        ProposalType::CreateUserServiceRequest(p) => (
             ProposalPackage::GovernanceUtilityOnboarding,
-            "Governance.UtilityOnboarding.CreateUserServiceRequest",
-            "CreateUserServiceRequest",
-            Record {
-                record_id: None,
-                fields: vec![
-                    field("governanceParty", make_party(governance_party)),
-                    field("proposer", make_party(proposer)),
-                    field("operator", make_party(operator)),
-                    field("user", make_party(user)),
-                ],
-            },
+            CreateUserServiceRequest::MODULE,
+            CreateUserServiceRequest::ENTITY,
+            proposal_create_arguments(p, governance_party, proposer)
+                .map_err(anyhow::Error::from)?,
         ),
         ProposalType::SetProviderAppRewardBeneficiaries {
             instrument_configuration_cid,
@@ -486,18 +466,12 @@ pub fn build_proposal_create_args(
                 ],
             },
         ),
-        ProposalType::CreateDelegatedBatchedMarkersProxy { operator } => (
+        ProposalType::CreateDelegatedBatchedMarkersProxy(p) => (
             ProposalPackage::GovernanceUtilityOnboarding,
-            "Governance.UtilityOnboarding.CreateDelegatedBatchedMarkersProxy",
-            "CreateDelegatedBatchedMarkersProxy",
-            Record {
-                record_id: None,
-                fields: vec![
-                    field("governanceParty", make_party(governance_party)),
-                    field("proposer", make_party(proposer)),
-                    field("operator", make_party(operator)),
-                ],
-            },
+            CreateDelegatedBatchedMarkersProxy::MODULE,
+            CreateDelegatedBatchedMarkersProxy::ENTITY,
+            proposal_create_arguments(p, governance_party, proposer)
+                .map_err(anyhow::Error::from)?,
         ),
         ProposalType::SetupMintingDelegation {
             delegate,
@@ -1040,6 +1014,20 @@ mod tests {
         CantonId::new("p".to_string(), Namespace::new([0u8; NAMESPACE_LENGTH]))
     }
 
+    /// The `governanceParty` / `proposer` CantonIds `build_proposal_create_args`
+    /// injects. Neither value is asserted on below (only field labels /
+    /// payload-carried parties are), so a fixed pair suffices everywhere.
+    fn gov_id() -> CantonId {
+        CantonId::new("gov".to_string(), Namespace::new([0u8; NAMESPACE_LENGTH]))
+    }
+
+    fn proposer_id() -> CantonId {
+        CantonId::new(
+            "proposer".to_string(),
+            Namespace::new([0u8; NAMESPACE_LENGTH]),
+        )
+    }
+
     /// Parse a decimal literal in test fixtures, panicking on invalid input.
     fn dec(s: &str) -> DamlDecimal {
         DamlDecimal::parse(s).expect("valid decimal literal")
@@ -1063,7 +1051,7 @@ mod tests {
             expected_dso: party_id(),
         };
         let (package, module, entity, record) =
-            build_proposal_create_args("gov", "proposer", &proposal, None, None)?;
+            build_proposal_create_args(&gov_id(), &proposer_id(), &proposal, None, None)?;
 
         assert_eq!(package, ProposalPackage::GovernanceTokenCustody);
         assert_eq!(module, "Governance.TokenCustody.SetupCcPreapproval");
@@ -1135,7 +1123,7 @@ mod tests {
             validity_window_hours: None,
         };
         let (package, module, entity, record) =
-            build_proposal_create_args("gov", "proposer", &proposal, None, None)?;
+            build_proposal_create_args(&gov_id(), &proposer_id(), &proposal, None, None)?;
 
         assert_eq!(package, ProposalPackage::GovernanceTokenCustody);
         assert_eq!(module, "Governance.TokenCustody.TransferProposal");
@@ -1204,7 +1192,7 @@ mod tests {
             description: "mint it".to_string(),
         };
         let (mint_package, mint_module, mint_entity, mint_record) =
-            build_proposal_create_args("gov", "proposer", &mint, None, None)?;
+            build_proposal_create_args(&gov_id(), &proposer_id(), &mint, None, None)?;
 
         // Package enum is GovernanceUtilityOnboarding even though the module
         // lives under `Governance.TokenIssuance`.
@@ -1241,7 +1229,7 @@ mod tests {
             description: "burn it".to_string(),
         };
         let (burn_package, burn_module, burn_entity, burn_record) =
-            build_proposal_create_args("gov", "proposer", &burn, None, None)?;
+            build_proposal_create_args(&gov_id(), &proposer_id(), &burn, None, None)?;
 
         assert_eq!(burn_package, ProposalPackage::GovernanceUtilityOnboarding);
         assert_eq!(burn_module, "Governance.TokenIssuance.BurnProposal");
@@ -1290,7 +1278,7 @@ mod tests {
             description: "collect CIP-104 rewards".to_string(),
         };
         let (package, module, entity, record) =
-            build_proposal_create_args("gov", "proposer", &proposal, None, None)?;
+            build_proposal_create_args(&gov_id(), &proposer_id(), &proposal, None, None)?;
 
         assert_eq!(package, ProposalPackage::GovernanceRewards);
         assert_eq!(module, "Governance.Rewards.SetupMintingDelegation");
@@ -1324,7 +1312,7 @@ mod tests {
             proposal_cid: "00abc123".to_string(),
         };
         let (package, module, entity, record) =
-            build_proposal_create_args("gov", "proposer", &proposal, None, None)?;
+            build_proposal_create_args(&gov_id(), &proposer_id(), &proposal, None, None)?;
         assert_eq!(package, ProposalPackage::GovernanceRewards);
         assert_eq!(module, "Governance.Rewards.AcceptExternalPartySetup");
         assert_eq!(entity, "AcceptExternalPartySetup");
@@ -1353,7 +1341,7 @@ mod tests {
             prior_delegation: Some("00old".to_string()),
         };
         let (package, module, entity, record) =
-            build_proposal_create_args("gov", "proposer", &proposal, None, None)?;
+            build_proposal_create_args(&gov_id(), &proposer_id(), &proposal, None, None)?;
         assert_eq!(package, ProposalPackage::GovernanceRewards);
         assert_eq!(
             module,
@@ -1424,7 +1412,7 @@ mod tests {
             delegation: "00abc".to_string(),
         };
         let (package, module, entity, record) =
-            build_proposal_create_args("gov", "proposer", &proposal, None, None)?;
+            build_proposal_create_args(&gov_id(), &proposer_id(), &proposal, None, None)?;
         assert_eq!(package, ProposalPackage::GovernanceRewards);
         assert_eq!(
             module,
@@ -1452,7 +1440,7 @@ mod tests {
 
         // ---- No choice context: context.values is an EMPTY TextMap ----
         let (package, module, entity, record) =
-            build_proposal_create_args("gov", "proposer", &proposal, None, None)?;
+            build_proposal_create_args(&gov_id(), &proposer_id(), &proposal, None, None)?;
         assert_eq!(package, ProposalPackage::GovernanceTokenCustody);
         assert_eq!(module, "Governance.TokenCustody.AcceptTransfer");
         assert_eq!(entity, "AcceptTransferProposal");
@@ -1488,7 +1476,7 @@ mod tests {
             )]),
         };
         let (_, _, _, record) =
-            build_proposal_create_args("gov", "proposer", &proposal, Some(&ctx), None)?;
+            build_proposal_create_args(&gov_id(), &proposer_id(), &proposal, Some(&ctx), None)?;
         let extra_args = as_record(field_value(&record, "extraArgs"));
         let context = as_record(field_value(extra_args, "context"));
         let values = field_value(context, "values");
@@ -1530,7 +1518,7 @@ mod tests {
             deposit_initial_amount_usd: Some(DamlDecimal::parse("5.0")?),
         };
         let (package, module, entity, record) =
-            build_proposal_create_args("gov", "proposer", &proposal, None, None)?;
+            build_proposal_create_args(&gov_id(), &proposer_id(), &proposal, None, None)?;
 
         assert_eq!(package, ProposalPackage::GovernanceUtilityCredential);
         assert_eq!(module, "Governance.UtilityCredential.OfferPaidCredential");
@@ -1583,7 +1571,7 @@ mod tests {
             create_allocation_factory: false,
         };
         let (package, module, entity, record) =
-            build_proposal_create_args("gov", "proposer", &proposal, None, None)?;
+            build_proposal_create_args(&gov_id(), &proposer_id(), &proposal, None, None)?;
 
         assert_eq!(package, ProposalPackage::GovernanceUtilityOnboarding);
         assert_eq!(module, "Governance.UtilityOnboarding.SetupUtility");
@@ -1649,20 +1637,22 @@ mod tests {
                 ],
             },
             Case {
-                proposal: ProposalType::CreateProviderServiceRequest {
-                    operator: party_id(),
-                    provider: party_id(),
-                },
+                proposal: ProposalType::CreateProviderServiceRequest(
+                    CreateProviderServiceRequest {
+                        operator: party_id(),
+                        provider: party_id(),
+                    },
+                ),
                 package: ProposalPackage::GovernanceUtilityOnboarding,
                 module: "Governance.UtilityOnboarding.CreateProviderServiceRequest",
                 entity: "CreateProviderServiceRequest",
                 labels: &["governanceParty", "proposer", "operator", "provider"],
             },
             Case {
-                proposal: ProposalType::CreateUserServiceRequest {
+                proposal: ProposalType::CreateUserServiceRequest(CreateUserServiceRequest {
                     operator: party_id(),
                     user: party_id(),
-                },
+                }),
                 package: ProposalPackage::GovernanceUtilityOnboarding,
                 module: "Governance.UtilityOnboarding.CreateUserServiceRequest",
                 entity: "CreateUserServiceRequest",
@@ -1830,7 +1820,7 @@ mod tests {
 
         for case in cases {
             let (package, module, entity, record) =
-                build_proposal_create_args("gov", "proposer", &case.proposal, None, None)?;
+                build_proposal_create_args(&gov_id(), &proposer_id(), &case.proposal, None, None)?;
             assert_eq!(package, case.package, "package for {module}");
             assert_eq!(module, case.module);
             assert_eq!(entity, case.entity, "entity for {module}");
@@ -1860,7 +1850,7 @@ mod tests {
         ];
         for proposal in proposals {
             let (_, module, _, record) =
-                build_proposal_create_args("gov", "proposer", &proposal, None, None)?;
+                build_proposal_create_args(&gov_id(), &proposer_id(), &proposal, None, None)?;
             let credentials = field_value(&record, "issuerCredentialCids");
             let inner = match &credentials.sum {
                 Some(value::Sum::Optional(o)) => o.value.as_deref(),
@@ -1908,7 +1898,7 @@ mod tests {
         ];
         for proposal in proposals {
             let (_, module, _, record) =
-                build_proposal_create_args("gov", "proposer", &proposal, None, None)?;
+                build_proposal_create_args(&gov_id(), &proposer_id(), &proposal, None, None)?;
             match &field_value(&record, "issuerCredentialCids").sum {
                 Some(value::Sum::Optional(opt)) => {
                     assert!(opt.value.is_none(), "expected None for {module}");
@@ -1937,7 +1927,7 @@ mod tests {
             instrument_issuers: vec![issuer.clone()],
         };
         let (_, _, _, record) =
-            build_proposal_create_args("gov", "proposer", &proposal, None, None)?;
+            build_proposal_create_args(&gov_id(), &proposer_id(), &proposal, None, None)?;
         let issuers = field_value(&record, "instrumentIssuers");
         let parties: Vec<_> = as_list_elements(issuers, "instrumentIssuers")
             .iter()
@@ -1962,7 +1952,7 @@ mod tests {
             }],
         };
         let (_, _, _, record) =
-            build_proposal_create_args("gov", "proposer", &proposal, None, None)?;
+            build_proposal_create_args(&gov_id(), &proposer_id(), &proposal, None, None)?;
         let rows = as_list_elements(
             field_value(&record, "instrumentIssuers"),
             "instrumentIssuers",
@@ -2052,7 +2042,7 @@ mod tests {
             holder_requirements: vec![requirement(&issuer, &[("role", "holder")])],
         };
         let (_, _, _, record) =
-            build_proposal_create_args("gov", "proposer", &proposal, None, None)?;
+            build_proposal_create_args(&gov_id(), &proposer_id(), &proposal, None, None)?;
 
         let registrar = requirement_tuples(&record, "registrarRequirements");
         assert_eq!(
@@ -2092,7 +2082,7 @@ mod tests {
             initial_instrument_issuers: vec![issuer.clone()],
         };
         let (_, _, _, record) =
-            build_proposal_create_args("gov", "proposer", &proposal, None, None)?;
+            build_proposal_create_args(&gov_id(), &proposer_id(), &proposal, None, None)?;
 
         // The identifier nesting mirrors the SetupUtility precedent.
         let identifiers = field_value(&record, "additionalIdentifiers");

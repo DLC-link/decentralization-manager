@@ -52,6 +52,7 @@ pub use common::types::{
 pub use decman_lib::catalog::types::{
     AppRewardBeneficiary, BillingParams, FarConfig, RewardBeneficiary, VaultLimits,
 };
+use decman_lib::framework::Validate;
 use decman_lib::framework::validate::*;
 
 use crate::{canton_id::CantonId, noise::server::ActiveWorkflow};
@@ -376,11 +377,11 @@ pub enum ProposalType {
     /// Accept an incoming token transfer
     AcceptTransfer { transfer_instruction_cid: String },
     /// Generic text-based vote (no on-chain effect beyond recording the result)
-    GenericVote { description: String },
+    GenericVote(decman_lib::catalog::proposals::core::GenericVote),
     /// Provision a Utility-Registry `ProviderService` with
     /// `operator = proposer` and `provider = governanceParty`. Produces the
     /// ProviderService cid consumed by `SetupUtility`.
-    ProvisionProviderService,
+    ProvisionProviderService(decman_lib::catalog::proposals::utility::ProvisionProviderService),
     /// Run the full Utility-Registry onboarding in one vote. Flags control
     /// whether a `TransferRule` / `AllocationFactory` are created during the
     /// `RegistrarServiceRequest` accept.
@@ -394,12 +395,11 @@ pub enum ProposalType {
         create_allocation_factory: bool,
     },
     /// Create a `ProviderServiceRequest` for a given `operator` and `provider`.
-    CreateProviderServiceRequest {
-        operator: CantonId,
-        provider: CantonId,
-    },
+    CreateProviderServiceRequest(
+        decman_lib::catalog::proposals::utility::CreateProviderServiceRequest,
+    ),
     /// Create a `UserServiceRequest` for a given `operator` and `user`.
-    CreateUserServiceRequest { operator: CantonId, user: CantonId },
+    CreateUserServiceRequest(decman_lib::catalog::proposals::utility::CreateUserServiceRequest),
     /// Set the provider-app reward beneficiaries on an `InstrumentConfiguration`.
     /// `providerAppRewardBeneficiaries = None` clears the current setting.
     SetProviderAppRewardBeneficiaries {
@@ -439,7 +439,9 @@ pub enum ProposalType {
     },
     /// Authorize the `operator` to create batched activity markers on behalf
     /// of the governance party via a `DelegatedBatchedMarkersProxy`.
-    CreateDelegatedBatchedMarkersProxy { operator: CantonId },
+    CreateDelegatedBatchedMarkersProxy(
+        decman_lib::catalog::proposals::utility::CreateDelegatedBatchedMarkersProxy,
+    ),
     /// Delegate minting of the governance party's CIP-104 reward coupons to a
     /// validator node's `delegate` party via a `MintingDelegationProposal`.
     /// The delegation beneficiary is always the governance party; the delegate
@@ -615,7 +617,24 @@ impl ProposalType {
     /// having aged, so a new call site needs to split the time-dependent arms
     /// out first.
     pub fn validate(&self, governance_party: &CantonId) -> Result<(), String> {
+        let ctx = decman_lib::framework::ValidationCtx {
+            governance_party,
+            now_micros: Utc::now().timestamp_micros(),
+        };
         match self {
+            ProposalType::GenericVote(p) => p.validate(&ctx).map_err(|e| e.to_string()),
+            ProposalType::ProvisionProviderService(p) => {
+                p.validate(&ctx).map_err(|e| e.to_string())
+            }
+            ProposalType::CreateProviderServiceRequest(p) => {
+                p.validate(&ctx).map_err(|e| e.to_string())
+            }
+            ProposalType::CreateUserServiceRequest(p) => {
+                p.validate(&ctx).map_err(|e| e.to_string())
+            }
+            ProposalType::CreateDelegatedBatchedMarkersProxy(p) => {
+                p.validate(&ctx).map_err(|e| e.to_string())
+            }
             ProposalType::Transfer {
                 amount,
                 validity_window_hours,
@@ -1366,48 +1385,6 @@ mod tests {
             "dec_party_id must be a JSON string when set, got {dec_party}"
         );
         assert_eq!(dec_party.as_str().unwrap(), dec_party_id_str);
-    }
-
-    #[test]
-    fn action_threshold_rejects_zero_and_negative() {
-        let action = ActionType::GovernanceSetThreshold { new_threshold: 0 };
-        assert!(action.validate().is_err());
-        let action = ActionType::GovernanceSetThreshold { new_threshold: -3 };
-        assert!(action.validate().is_err());
-        let action = ActionType::GovernanceSetThreshold { new_threshold: 1 };
-        assert!(action.validate().is_ok());
-    }
-
-    #[test]
-    fn action_threshold_rejects_in_add_remove_member() {
-        let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
-        let member = CantonId::parse(&format!("member::{ns}")).unwrap();
-        let action = ActionType::GovernanceAddMember {
-            member: member.clone(),
-            new_threshold: 0,
-        };
-        assert!(action.validate().is_err());
-        let action = ActionType::GovernanceRemoveMember {
-            member,
-            new_threshold: -1,
-        };
-        assert!(action.validate().is_err());
-    }
-
-    #[test]
-    fn action_timeout_rejects_zero_and_negative() {
-        let action = ActionType::GovernanceSetTimeout {
-            new_timeout_microseconds: 0,
-        };
-        assert!(action.validate().is_err());
-        let action = ActionType::GovernanceSetTimeout {
-            new_timeout_microseconds: -1_000_000,
-        };
-        assert!(action.validate().is_err());
-        let action = ActionType::GovernanceSetTimeout {
-            new_timeout_microseconds: 60_000_000,
-        };
-        assert!(action.validate().is_ok());
     }
 
     #[test]

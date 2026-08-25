@@ -1,0 +1,14 @@
+---
+source: crates/decman-lib/src/catalog/proposals/utility.rs
+expression: "ProvisionProviderService {}.to_daml_proto().unwrap()"
+---
+Value {
+    sum: Some(
+        Record(
+            Record {
+                record_id: None,
+                fields: [],
+            },
+        ),
+    ),
+}
