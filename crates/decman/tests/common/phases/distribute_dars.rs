@@ -235,10 +235,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             |f, _| {
                 Box::pin(async move {
                     for port in [f.p1.http, f.p2.http, f.p3.http] {
-                        let vetted = match f.get_json::<Value>(port, "/packages/vetted").await {
-                            Ok(v) => v,
-                            Err(_) => return None,
-                        };
+                        let vetted = f.probe_get_json::<Value>(port, "/packages/vetted").await?;
                         let found = vetted.as_array().is_some_and(|packages| {
                             packages.iter().any(|p| {
                                 p["package_name"]
