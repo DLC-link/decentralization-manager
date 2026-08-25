@@ -1127,19 +1127,17 @@ pub async fn start_server(
     let metrics_port = config.metrics_port;
     if metrics_port == 0 {
         tracing::info!("Metrics endpoint disabled (metrics_port = 0)");
+    } else if metrics_port == port || metrics_port == config.node.port {
+        // The metrics listener binds first, so racing it against the API or the
+        // noise server would let a signal take down governance. It yields the
+        // port instead, which is the same rule the bind-failure arm below keeps.
+        tracing::error!(
+            metrics_port,
+            api_port = port,
+            noise_port = config.node.port,
+            "metrics_port collides with another listener; this node reports no metrics"
+        );
     } else {
-        if metrics_port == port || metrics_port == config.node.port {
-            // The metrics listener binds first (below), so on a collision it
-            // wins and the API or noise server dies instead, reporting the
-            // wrong listener as the cause.
-            tracing::warn!(
-                metrics_port,
-                api_port = port,
-                noise_port = config.node.port,
-                "metrics_port collides with another listener; whichever binds first wins and \
-                 the other will fail to start"
-            );
-        }
         let metrics_host = host.to_string();
         match HttpServer::new(|| App::new().route("/metrics", web::get().to(handlers::metrics)))
             // One worker: the default is one per logical CPU.
@@ -1148,7 +1146,18 @@ pub async fn start_server(
         {
             Ok(server) => {
                 tracing::info!("Serving metrics on {metrics_host}:{metrics_port}/metrics");
-                tokio::spawn(server.run());
+                // `run()` before the async block: `HttpServer` holds an `Rc` and is
+                // not `Send`, while the `Server` it returns is.
+                let running = server.run();
+                spawn_supervised(
+                    "metrics server",
+                    "every alert rule reads an empty series while this node looks healthy",
+                    async move {
+                        if let Err(e) = running.await {
+                            tracing::error!(error = %e, "the metrics server stopped");
+                        }
+                    },
+                );
             }
             Err(e) => tracing::error!(
                 error = %e,
@@ -1351,50 +1360,54 @@ async fn run_heartbeat(
     let self_id_spawn = self_id.clone();
     let triggers_spawn = triggers.clone();
 
-    tokio::spawn(async move {
-        loop {
-            match TcpListener::bind(&listen_addr).await {
-                Ok(listener) => {
-                    tracing::info!("Noise listener started on {listen_addr}");
+    spawn_supervised(
+        "noise listener",
+        "this node accepts no inbound peer connections until it restarts",
+        async move {
+            loop {
+                match TcpListener::bind(&listen_addr).await {
+                    Ok(listener) => {
+                        tracing::info!("Noise listener started on {listen_addr}");
 
-                    loop {
-                        match listener.accept().await {
-                            Ok((socket, peer_addr)) => {
-                                let keypair = keypair_spawn.clone();
-                                let last_seen = last_seen_spawn.clone();
-                                let db = db_spawn.clone();
-                                let self_id = self_id_spawn.clone();
-                                let triggers = triggers_spawn.clone();
+                        loop {
+                            match listener.accept().await {
+                                Ok((socket, peer_addr)) => {
+                                    let keypair = keypair_spawn.clone();
+                                    let last_seen = last_seen_spawn.clone();
+                                    let db = db_spawn.clone();
+                                    let self_id = self_id_spawn.clone();
+                                    let triggers = triggers_spawn.clone();
 
-                                tokio::spawn(async move {
-                                    handle_incoming_connection(
-                                        socket, peer_addr, keypair, db, self_id, triggers,
-                                        last_seen,
-                                    )
-                                    .await;
-                                });
-                            }
-                            Err(e) => {
-                                // Don't tight-loop on persistent accept errors (e.g. FD
-                                // exhaustion): log and back off briefly before retrying.
-                                tracing::warn!(
-                                    "Noise listener accept error on {listen_addr}: {e}; \
-                                     backing off 100ms"
-                                );
-                                tokio::time::sleep(Duration::from_millis(100)).await;
+                                    tokio::spawn(async move {
+                                        handle_incoming_connection(
+                                            socket, peer_addr, keypair, db, self_id, triggers,
+                                            last_seen,
+                                        )
+                                        .await;
+                                    });
+                                }
+                                Err(e) => {
+                                    // Don't tight-loop on persistent accept errors (e.g. FD
+                                    // exhaustion): log and back off briefly before retrying.
+                                    tracing::warn!(
+                                        "Noise listener accept error on {listen_addr}: {e}; \
+                                         backing off 100ms"
+                                    );
+                                    tokio::time::sleep(Duration::from_millis(100)).await;
+                                }
                             }
                         }
                     }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to bind Noise listener on {listen_addr}: {e}, retrying in 5s"
-                    );
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to bind Noise listener on {listen_addr}: {e}, retrying in 5s"
+                        );
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
                 }
             }
-        }
-    });
+        },
+    );
 
     // Ping peers every 5 seconds
     run_peer_ping_loop(config, db, peer_status, last_seen, keypair).await;
