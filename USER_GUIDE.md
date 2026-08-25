@@ -20,7 +20,10 @@ public, so no special repository access is needed):
 docker build --ssh default=$HOME/.ssh/id_ed25519 -t dec-party-manager .
 
 # Run
-docker run -p 8080:8080 -p 9000:9000 -v ./data:/data \
+# The image runs as uid 65532, so the host directory must be writable by it.
+mkdir -p ./data && sudo chown 65532:65532 ./data
+
+docker run -p 8080:8080 -p 9000:9000 -v ./data:/home/nonroot/data \
   -e DECPM_PORT=8080 \
   -e DECPM_NOISE_PORT=9000 \
   -e DECPM_CANTON_ADMIN_HOST=canton-node \
@@ -34,8 +37,16 @@ docker run -p 8080:8080 -p 9000:9000 -v ./data:/data \
 
 Then open the web UI at `http://localhost:8080`.
 
-The `-v ./data:/data` mount persists the SQLite database (peers, party
-credentials) and the auto-generated Noise keypair across restarts.
+The `-v ./data:/home/nonroot/data` mount persists the SQLite database (peers,
+party credentials) and the auto-generated Noise keypair across restarts.
+
+`/home/nonroot` is the image's default `DECPM_DIR`, and the app writes
+`$DECPM_DIR/data` — so that is the directory to mount. Point the mount
+somewhere else and pass `-e DECPM_DIR=<parent>` to match, or the container
+writes inside its own filesystem and the data disappears with it.
+
+The `chown` is needed because the image runs as uid 65532 rather than root. A
+bind mount keeps the host's ownership, so without it the first write fails.
 
 ## Configuration
 
