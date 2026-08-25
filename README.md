@@ -192,6 +192,10 @@ The database file path can be overridden with the `--db` CLI flag.
 | `DECPM_NOISE_RETRY_TIMEOUT_SEC` | Per-attempt timeout for the bounded peer-Noise retry wrapper, in seconds | `5` |
 | `DECPM_NOISE_RETRY_MAX_ATTEMPTS` | Total attempts (initial + retries) for the bounded peer-Noise retry wrapper | `2` |
 | `DECPM_NOISE_RETRY_BACKOFF_MS` | Backoff between attempts of the bounded peer-Noise retry wrapper, in milliseconds | `250` |
+| `DECPM_REWARD_AUTOMATION_INTERVAL_SECS` | How often the CIP-104 reward automation sweeps each decparty for unassigned coupons, in seconds. Enablement is on-ledger, so this sets cadence only | `300` |
+| `DECPM_REWARD_EXPIRY_READ_INTERVAL_SECS` | How often the automation re-reads the backlog purely to refresh `decman_reward_oldest_unassigned_expires_in_seconds`, in seconds, when no sweep is due. Both expiry alert rules read that gauge, so this bounds how stale their input can get. A sweep reads the ledger too, so the gauge refreshes at whichever interval is shorter | `3600` |
+| `DECPM_REWARD_MAX_CREATES` | Output contracts one `Delegation_Assign` may create, which bounds the coupons per transaction. Lower it if assigns start failing | `100` |
+| `DECPM_REWARD_MIN_EXPIRY_MARGIN_SECS` | Time a coupon must have left before expiry to be assigned, in seconds. Guards against a coupon expiring mid-submission | `120` |
 
 All environment variables can also be passed as CLI arguments (e.g., `--canton-admin-host`).
 
