@@ -97,8 +97,11 @@ Open http://localhost:8081 in your browser.
 # replace the key path with your own)
 docker build --ssh default=$HOME/.ssh/id_ed25519 -t dec-party-manager .
 
-# Run a single instance
-docker run -p 8080:8080 -v ./data:/data \
+# Run a single instance. The image runs as uid 65532, so the host directory
+# must be writable by it, and the mount goes at the image's DECPM_DIR/data.
+mkdir -p ./data && sudo chown 65532:65532 ./data
+
+docker run -p 8080:8080 -v ./data:/home/nonroot/data \
   -e DECPM_CANTON_ADMIN_HOST=canton-node \
   -e DECPM_CANTON_ADMIN_PORT=5002 \
   -e DECPM_CANTON_LEDGER_HOST=canton-node \
