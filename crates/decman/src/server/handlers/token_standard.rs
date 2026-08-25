@@ -729,10 +729,14 @@ pub async fn query_contracts_handler(
     }
 }
 
-/// Get package configuration for a party
+/// Get the node's package configuration.
+///
+/// Node-wide, not per party: the handler takes no arguments and the package
+/// ids are constants. The annotation used to declare `params(GovernanceQuery)`
+/// and say "for a party", which put a `party_id` query parameter in the
+/// generated OpenAPI spec that the handler never reads.
 #[utoipa::path(
     tag = "Configuration",
-    params(GovernanceQuery),
     responses(
         (status = 200, description = "Package configuration", body = PackageConfig)
     )
