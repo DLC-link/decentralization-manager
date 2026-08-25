@@ -22,6 +22,10 @@ use canton_proto_rs::com::{
         ListPackagesRequest, package_service_client::PackageServiceClient,
     },
 };
+use decman_lib::framework::record::{
+    extract_optional_reltime, extract_party_set, extract_reltime, field_numeric, field_party,
+    field_text, field_timestamp,
+};
 
 use crate::{
     canton_id::CantonId,
@@ -1669,83 +1673,6 @@ async fn fetch_contract_package_ref(
     Ok(id_to_name.get(&package_id).map(|name| format!("#{name}")))
 }
 
-/// Extract a Set Party (DA.Set.Types:Set) which is stored as Record { map: GenMap<Party, Unit> }
-fn extract_party_set(value: &Value) -> Option<Vec<String>> {
-    // Set Party is represented as a Record containing a GenMap
-    match &value.sum {
-        Some(value::Sum::Record(record)) => {
-            // The record should have a "map" field containing the GenMap
-            record
-                .fields
-                .iter()
-                .find(|f| f.label == "map")
-                .and_then(|f| f.value.as_ref())
-                .and_then(extract_genmap_parties)
-        }
-        // Fallback: try as GenMap directly
-        Some(value::Sum::GenMap(gen_map)) => Some(
-            gen_map
-                .entries
-                .iter()
-                .filter_map(|entry| {
-                    entry.key.as_ref().and_then(|k| match &k.sum {
-                        Some(value::Sum::Party(p)) => Some(p.clone()),
-                        _ => None,
-                    })
-                })
-                .collect(),
-        ),
-        _ => None,
-    }
-}
-
-/// Extract parties from a GenMap<Party, Unit>
-fn extract_genmap_parties(value: &Value) -> Option<Vec<String>> {
-    match &value.sum {
-        Some(value::Sum::GenMap(gen_map)) => Some(
-            gen_map
-                .entries
-                .iter()
-                .filter_map(|entry| {
-                    entry.key.as_ref().and_then(|k| match &k.sum {
-                        Some(value::Sum::Party(p)) => Some(p.clone()),
-                        _ => None,
-                    })
-                })
-                .collect(),
-        ),
-        _ => None,
-    }
-}
-
-/// Extract Optional RelTime (DA.Time.Types:RelTime is Record { microseconds: Int64 })
-fn extract_optional_reltime(value: &Value) -> Option<i64> {
-    match &value.sum {
-        Some(value::Sum::Optional(opt)) => {
-            opt.value.as_ref().and_then(|v| extract_reltime(v.as_ref()))
-        }
-        _ => None,
-    }
-}
-
-/// Extract RelTime (stored as Record { microseconds: Int64 })
-fn extract_reltime(value: &Value) -> Option<i64> {
-    match &value.sum {
-        Some(value::Sum::Record(record)) => record
-            .fields
-            .iter()
-            .find(|f| f.label == "microseconds")
-            .and_then(|f| f.value.as_ref())
-            .and_then(|v| match &v.sum {
-                Some(value::Sum::Int64(i)) => Some(*i),
-                _ => None,
-            }),
-        // Fallback: try as Int64 directly
-        Some(value::Sum::Int64(i)) => Some(*i),
-        _ => None,
-    }
-}
-
 // ============================================================================
 // Vault Contracts Query
 // ============================================================================
@@ -2910,42 +2837,6 @@ fn extract_pending_actions(value: &Value) -> Vec<PendingAction> {
         .collect()
 }
 
-fn field_party(record: &Record, label: &str) -> Option<String> {
-    record
-        .fields
-        .iter()
-        .find(|f| f.label == label)
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Party(p)) => Some(p.clone()),
-            _ => None,
-        })
-}
-
-fn field_text(record: &Record, label: &str) -> Option<String> {
-    record
-        .fields
-        .iter()
-        .find(|f| f.label == label)
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Text(t)) => Some(t.clone()),
-            _ => None,
-        })
-}
-
-fn field_numeric(record: &Record, label: &str) -> Option<String> {
-    record
-        .fields
-        .iter()
-        .find(|f| f.label == label)
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Numeric(n)) => Some(n.clone()),
-            _ => None,
-        })
-}
-
 /// Returns true if the contract's create-arguments carry an `executeBefore`
 /// Time field whose value is in the past. Returns false when no such field
 /// exists, so templates without a deadline are kept as-is.
@@ -2961,18 +2852,6 @@ fn is_execute_before_expired(created: &CreatedEvent) -> bool {
         .map(|d| d.as_micros() as i64)
         .unwrap_or(0);
     execute_before_micros <= now_micros
-}
-
-fn field_timestamp(record: &Record, label: &str) -> Option<i64> {
-    record
-        .fields
-        .iter()
-        .find(|f| f.label == label)
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Timestamp(t)) => Some(*t),
-            _ => None,
-        })
 }
 
 // ============================================================================

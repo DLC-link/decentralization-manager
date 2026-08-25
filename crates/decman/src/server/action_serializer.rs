@@ -7,10 +7,16 @@ use anyhow::Context;
 #[cfg(test)]
 use canton_common::transfer_factory::ContextValue;
 use canton_common::{decimal::DamlDecimal, transfer_factory::Context as ChoiceContext};
-use canton_proto_rs::com::daml::ledger::api::v2::{List, Optional, Record, Value, value};
+use canton_proto_rs::com::daml::ledger::api::v2::{Optional, Record, Value, value};
 pub(crate) use decman_lib::framework::encode::*;
+use decman_lib::framework::record::{
+    extract_contract_id, extract_int64, extract_list, extract_numeric, extract_party,
+    extract_party_id, extract_record, extract_text, get_field,
+};
 
-use crate::{canton_id::CantonId, error::Result};
+#[cfg(test)]
+use crate::canton_id::CantonId;
+use crate::error::Result;
 
 use super::types::{
     ActionType, AppRewardBeneficiary, BillingParams, Claim, FarConfig, InstrumentAllowance,
@@ -1517,71 +1523,6 @@ pub fn build_execute_domain_action_arg(
 // Deserialization Helpers
 // ============================================================================
 
-fn extract_party(value: &Value) -> Result<String> {
-    match &value.sum {
-        Some(value::Sum::Party(p)) => Ok(p.clone()),
-        _ => anyhow::bail!("Expected Party value"),
-    }
-}
-
-fn extract_party_id(value: &Value) -> Result<CantonId> {
-    let party_str = extract_party(value)?;
-    party_str
-        .parse()
-        .context("Failed to parse party as CantonId")
-}
-
-fn extract_text(value: &Value) -> Result<String> {
-    match &value.sum {
-        Some(value::Sum::Text(t)) => Ok(t.clone()),
-        _ => anyhow::bail!("Expected Text value"),
-    }
-}
-
-fn extract_int64(value: &Value) -> Result<i64> {
-    match &value.sum {
-        Some(value::Sum::Int64(n)) => Ok(*n),
-        _ => anyhow::bail!("Expected Int64 value"),
-    }
-}
-
-fn extract_numeric(value: &Value) -> Result<String> {
-    match &value.sum {
-        Some(value::Sum::Numeric(n)) => Ok(n.clone()),
-        _ => anyhow::bail!("Expected Numeric value"),
-    }
-}
-
-fn extract_contract_id(value: &Value) -> Result<String> {
-    match &value.sum {
-        Some(value::Sum::ContractId(c)) => Ok(c.clone()),
-        _ => anyhow::bail!("Expected ContractId value"),
-    }
-}
-
-fn extract_record(value: &Value) -> Result<&Record> {
-    match &value.sum {
-        Some(value::Sum::Record(r)) => Ok(r),
-        _ => anyhow::bail!("Expected Record value"),
-    }
-}
-
-fn extract_list(value: &Value) -> Result<&List> {
-    match &value.sum {
-        Some(value::Sum::List(l)) => Ok(l),
-        _ => anyhow::bail!("Expected List value"),
-    }
-}
-
-fn get_field<'a>(record: &'a Record, label: &str) -> Result<&'a Value> {
-    record
-        .fields
-        .iter()
-        .find(|f| f.label == label)
-        .and_then(|f| f.value.as_ref())
-        .with_context(|| format!("Missing field: {label}"))
-}
-
 fn deserialize_instrument_id(value: &Value) -> Result<InstrumentId> {
     let record = extract_record(value)?;
     Ok(InstrumentId {
@@ -1660,7 +1601,7 @@ fn deserialize_optional_far_config(value: &Value) -> Result<Option<FarConfig>> {
 /// Deserialize RelTime (record with microseconds field) to i64
 fn deserialize_reltime(value: &Value) -> Result<i64> {
     let record = extract_record(value)?;
-    extract_int64(get_field(record, "microseconds")?)
+    Ok(extract_int64(get_field(record, "microseconds")?)?)
 }
 
 // ============================================================================
@@ -1916,7 +1857,7 @@ pub fn deserialize_action(value: &Value) -> Result<ActionType> {
             let initial_supported_vaults = vaults_list
                 .elements
                 .iter()
-                .map(extract_contract_id)
+                .map(|v| extract_contract_id(v).map_err(anyhow::Error::from))
                 .collect::<Result<Vec<_>>>()?;
 
             Ok(ActionType::ProcessorDeploymentRequest {
