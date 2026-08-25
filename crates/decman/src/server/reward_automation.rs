@@ -1478,8 +1478,13 @@ async fn read_oldest_expiry(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::super::types::RewardBeneficiary;
     use super::*;
+    use crate::auth::{AuthRegistry, WorkflowAuth};
+    use crate::config::{KeycloakConfig, PartyCredentials};
+    use crate::server::AppState;
     use canton_proto_rs::com::daml::ledger::api::v2::{List, Optional, RecordField, Value};
 
     fn value(sum: value::Sum) -> Value {
@@ -2358,6 +2363,105 @@ mod tests {
 
         apply_sweep_outcome(&mut oldest, &decparty, SweepOutcome::Empty);
         assert!(oldest.is_empty(), "an empty backlog still removes");
+    }
+
+    /// Reads one counter's value for one decparty out of the live registry.
+    /// `None` means the series does not exist, which for a counter that has never
+    /// fired is a different fact from a series reading zero.
+    fn counter_for(name: &str, label: &str) -> Option<f64> {
+        prometheus::gather().iter().find_map(|f| {
+            if f.get_name() != name {
+                return None;
+            }
+            f.get_metric()
+                .iter()
+                .find(|m| m.get_label().iter().any(|l| l.get_value() == label))
+                .map(|m| m.get_counter().get_value())
+        })
+    }
+
+    /// Both counters sit on their own arm of `run_once_for_party`, so each needs
+    /// its own case: one passing test would leave the other arm counting nothing.
+    #[tokio::test]
+    async fn a_missing_registry_entry_counts_and_keeps_the_decparty() -> anyhow::Result<()> {
+        // `auth: None` is the same `Ok(None)` a decparty gets when
+        // `AuthRegistry::new` skipped it, which is the case this counter exists for.
+        register_metrics();
+        let data = AppState::for_test(None).await?;
+        let decparty = CantonId::parse(DAVE)?;
+        let label = decparty.to_string();
+        let before = counter_for("decman_reward_auth_unregistered_total", &label).unwrap_or(0.0);
+
+        let outcome = run_once_for_party(&data, &decparty, Pass::Sweep).await?;
+
+        assert!(matches!(outcome, SweepOutcome::AuthUnregistered));
+        let after = counter_for("decman_reward_auth_unregistered_total", &label)
+            .expect("the pass must export a series for this decparty");
+        assert_eq!(
+            after - before,
+            1.0,
+            "the pass must count, because this decparty has no gauge series to fall"
+        );
+        Ok(())
+    }
+
+    /// The party authenticates at startup (`expires_in: 0` puts its token on the
+    /// refresh path at once), then the Keycloak stand-in fails the next request —
+    /// the one this pass makes.
+    #[tokio::test]
+    async fn a_failed_token_fetch_counts_and_keeps_the_decparty() -> anyhow::Result<()> {
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        register_metrics();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r".*/token$"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"access_token": "t", "expires_in": 0})),
+            )
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex(r".*/token$"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+
+        let decparty = CantonId::parse(EVE)?;
+        let label = decparty.to_string();
+        let registry = AuthRegistry::new(&[PartyCredentials {
+            dec_party_id: decparty.clone(),
+            member_party_id: CantonId::parse(BOB)?,
+            user_id: "user".to_string(),
+            keycloak: KeycloakConfig {
+                url: server.uri(),
+                realm: "test-realm".to_string(),
+                client_id: "decman".to_string(),
+                client_secret: Some("secret".to_string()),
+                ..KeycloakConfig::default()
+            },
+            auth0: None,
+            packages: PackageConfig::default(),
+        }])
+        .await?;
+        let data = AppState::for_test(Some(WorkflowAuth::Keycloak(Arc::new(registry)))).await?;
+        let before =
+            counter_for("decman_reward_credentials_unavailable_total", &label).unwrap_or(0.0);
+
+        let outcome = run_once_for_party(&data, &decparty, Pass::Sweep).await?;
+
+        assert!(matches!(outcome, SweepOutcome::CredentialsUnavailable));
+        let after = counter_for("decman_reward_credentials_unavailable_total", &label)
+            .expect("the pass must export a series for this decparty");
+        assert_eq!(
+            after - before,
+            1.0,
+            "every pass failing must be countable, not only visible in the log"
+        );
+        Ok(())
     }
 
     #[test]

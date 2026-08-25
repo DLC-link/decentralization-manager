@@ -148,6 +148,36 @@ pub struct AppState {
     pub http_client: reqwest::Client,
 }
 
+#[cfg(test)]
+impl AppState {
+    /// An `AppState` on an in-memory database, for tests that need one to reach
+    /// the code under test. Every field a test cares about is `auth`; the rest
+    /// are the cheapest value that satisfies the type.
+    pub(crate) async fn for_test(
+        auth: Option<crate::auth::WorkflowAuth>,
+    ) -> anyhow::Result<actix_web::web::Data<Self>> {
+        Ok(actix_web::web::Data::new(Self {
+            db: SqlitePool::connect("sqlite::memory:").await?,
+            config: NodeConfig::default(),
+            peer_status: Arc::new(RwLock::new(HashMap::new())),
+            last_seen: Arc::new(RwLock::new(HashMap::new())),
+            peer_job_sender: mpsc::unbounded_channel().0,
+            workflows: WorkflowRegistry::new(),
+            pending_invitations: Arc::new(RwLock::new(Vec::new())),
+            auth: Arc::new(RwLock::new(auth)),
+            token_validator: crate::auth::TokenValidator::Mock(Arc::new(
+                crate::auth::MockValidator::new("decman-admin".to_string()),
+            )),
+            admin_role: None,
+            party_credentials: Arc::new(RwLock::new(Vec::new())),
+            bootstrap_mu: Arc::new(Mutex::new(())),
+            test_mode: true,
+            refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
+            http_client: reqwest::Client::new(),
+        }))
+    }
+}
+
 // The previous `ListenerControl` struct collapsed to a single `Arc<AtomicBool>`
 // (see `noise_listener_pause_flag` below). Atomic so `ListenerPauseGuard::Drop`
 // can reset it synchronously when a spawned workflow task is aborted or panics.

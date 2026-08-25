@@ -3441,14 +3441,8 @@ mod tests {
 
 #[cfg(test)]
 mod get_party_credentials_tests {
-    use std::{
-        collections::HashMap,
-        sync::{Arc, Mutex as StdMutex},
-    };
+    use std::sync::{Arc, Mutex as StdMutex};
 
-    use actix_web::web::Data;
-    use sqlx::SqlitePool;
-    use tokio::sync::RwLock;
     use tracing_subscriber::fmt::MakeWriter;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
@@ -3457,7 +3451,7 @@ mod get_party_credentials_tests {
 
     use super::*;
     use crate::{
-        auth::{AuthRegistry, MockValidator, TokenValidator, WorkflowAuth},
+        auth::{AuthRegistry, WorkflowAuth},
         config::{KeycloakConfig, PartyCredentials},
     };
 
@@ -3498,36 +3492,13 @@ mod get_party_credentials_tests {
         }
     }
 
-    async fn app_state(auth: Option<WorkflowAuth>) -> Result<Data<AppState>> {
-        let db = SqlitePool::connect("sqlite::memory:").await?;
-        Ok(Data::new(AppState {
-            db,
-            config: NodeConfig::default(),
-            peer_status: Arc::new(RwLock::new(HashMap::new())),
-            last_seen: Arc::new(RwLock::new(HashMap::new())),
-            peer_job_sender: tokio::sync::mpsc::unbounded_channel().0,
-            workflows: crate::server::WorkflowRegistry::new(),
-            pending_invitations: Arc::new(RwLock::new(Vec::new())),
-            auth: Arc::new(RwLock::new(auth)),
-            token_validator: TokenValidator::Mock(Arc::new(MockValidator::new(
-                "decman-admin".to_string(),
-            ))),
-            admin_role: None,
-            party_credentials: Arc::new(RwLock::new(Vec::new())),
-            bootstrap_mu: Arc::new(tokio::sync::Mutex::new(())),
-            test_mode: true,
-            refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
-            http_client: reqwest::Client::new(),
-        }))
-    }
-
     fn party_id() -> Result<CantonId> {
         CantonId::parse(&format!("p::{}", "0".repeat(68)))
     }
 
     #[tokio::test]
     async fn no_auth_configured_is_ok_none() -> Result<()> {
-        let data = app_state(None).await?;
+        let data = AppState::for_test(None).await?;
         assert!(get_party_credentials(&data, &party_id()?).await?.is_none());
         Ok(())
     }
@@ -3535,7 +3506,7 @@ mod get_party_credentials_tests {
     #[tokio::test]
     async fn unknown_party_is_ok_none() -> Result<()> {
         let registry = AuthRegistry::new(&[]).await?;
-        let data = app_state(Some(WorkflowAuth::Keycloak(Arc::new(registry)))).await?;
+        let data = AppState::for_test(Some(WorkflowAuth::Keycloak(Arc::new(registry)))).await?;
         assert!(get_party_credentials(&data, &party_id()?).await?.is_none());
         Ok(())
     }
@@ -3579,7 +3550,7 @@ mod get_party_credentials_tests {
             packages: PackageConfig::default(),
         };
         let registry = AuthRegistry::new(&[credentials]).await?;
-        let data = app_state(Some(WorkflowAuth::Keycloak(Arc::new(registry)))).await?;
+        let data = AppState::for_test(Some(WorkflowAuth::Keycloak(Arc::new(registry)))).await?;
 
         let buffer = LogBuffer::default();
         let subscriber = tracing_subscriber::fmt()
