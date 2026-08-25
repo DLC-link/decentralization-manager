@@ -125,57 +125,6 @@ fn contract_templates(packages: &PackageConfig) -> Vec<TemplateId> {
     templates
 }
 
-/// Governance confirmation template identifiers
-/// Each template is queried separately to handle cases where packages may not exist
-fn governance_templates(packages: &PackageConfig) -> Vec<TemplateId> {
-    let mut templates = Vec::new();
-    if let Some(ref pkg) = packages.vault_governance {
-        templates.push(TemplateId {
-            package_id: pkg.clone(),
-            module_name: "BitsafeVault.VaultGovernance",
-            entity_name: "VaultGovernanceConfirmation",
-        });
-    }
-    templates.push(TemplateId {
-        package_id: "#cbtc-governance".to_string(),
-        module_name: "CBTC.Governance",
-        entity_name: "Confirmation",
-    });
-    if let Some(ref pkg) = packages.governance_core {
-        templates.push(TemplateId {
-            package_id: pkg.clone(),
-            module_name: "Governance.Rules",
-            entity_name: "GovernanceSelfConfirmation",
-        });
-        templates.push(TemplateId {
-            package_id: pkg.clone(),
-            module_name: "Governance.Confirmation",
-            entity_name: "GovernanceConfirmation",
-        });
-    }
-    templates
-}
-
-/// Governance state template identifiers (tries both vault and core)
-fn governance_state_templates(packages: &PackageConfig) -> Vec<TemplateId> {
-    let mut templates = Vec::new();
-    if let Some(ref pkg) = packages.vault_governance {
-        templates.push(TemplateId {
-            package_id: pkg.clone(),
-            module_name: "BitsafeVault.VaultGovernance",
-            entity_name: "VaultGovernanceRules",
-        });
-    }
-    if let Some(ref pkg) = packages.governance_core {
-        templates.push(TemplateId {
-            package_id: pkg.clone(),
-            module_name: "Governance.Rules",
-            entity_name: "GovernanceRules",
-        });
-    }
-    templates
-}
-
 /// Vault template identifier
 fn vault_template(packages: &PackageConfig) -> Option<TemplateId> {
     packages.vault.as_ref().map(|pkg| TemplateId {
@@ -606,7 +555,7 @@ pub async fn get_governance_confirmations(
     let mut domain_confirmations_complete = true;
 
     tracing::debug!("Using TemplateFilter for governance query (per-template)");
-    for t in &governance_templates(packages) {
+    for t in &decman_lib::catalog::templates::governance_templates(packages) {
         match fetch_governance_for_template(
             config,
             party_id,
@@ -618,22 +567,22 @@ pub async fn get_governance_confirmations(
         .await
         {
             Ok(()) => {
-                tracing::debug!("Successfully queried {}:{}", t.module_name, t.entity_name);
+                tracing::debug!("Successfully queried {}:{}", t.module, t.entity);
             }
             Err(e) => {
                 let err_str = e.to_string();
                 if err_str.contains("PACKAGE_NAMES_NOT_FOUND") {
                     tracing::debug!(
                         "Package {} not found, skipping {}:{}",
-                        t.package_id,
-                        t.module_name,
-                        t.entity_name
+                        t.package_ref,
+                        t.module,
+                        t.entity
                     );
                 } else {
                     tracing::warn!(
                         "Failed to query {}:{}: {e}, continuing...",
-                        t.module_name,
-                        t.entity_name
+                        t.module,
+                        t.entity
                     );
                     domain_confirmations_complete = false;
                 }
@@ -820,20 +769,13 @@ async fn fetch_governance_for_template(
     config: &NodeConfig,
     party_id: &CantonId,
     token: Option<String>,
-    template: &TemplateId,
+    template: &decman_lib::framework::TemplateId,
     confirmations_by_hash: &mut HashMap<String, (ActionType, Vec<GovernanceConfirmation>)>,
     domain_confirmations: &mut HashMap<String, (String, Vec<GovernanceConfirmation>)>,
 ) -> Result {
     let event_format = party_event_format(
         party_id,
-        vec![template_filter(
-            Identifier {
-                package_id: template.package_id.to_string(),
-                module_name: template.module_name.to_string(),
-                entity_name: template.entity_name.to_string(),
-            },
-            false,
-        )],
+        vec![template_filter(template.into(), false)],
         true,
     );
 
@@ -1378,20 +1320,13 @@ async fn fetch_proposal_infos(
     packages: &PackageConfig,
     proposal_infos: &mut HashMap<String, ProposalInfo>,
 ) -> Result {
-    let Some(ref pkg) = packages.governance_action else {
+    let Ok(template) = decman_lib::catalog::templates::governable_action_interface(packages) else {
         return Ok(());
     };
 
     let event_format = party_event_format(
         party_id,
-        vec![interface_filter(
-            Identifier {
-                package_id: pkg.clone(),
-                module_name: "Governance.Action".to_string(),
-                entity_name: "GovernableAction".to_string(),
-            },
-            false,
-        )],
+        vec![interface_filter((&template).into(), false)],
         true,
     );
 
@@ -1435,12 +1370,12 @@ pub async fn get_governance_state(
     packages: &PackageConfig,
 ) -> Result<Option<GovernanceState>> {
     // Try each governance template (vault, core) until we find a match
-    for template in governance_state_templates(packages) {
+    for template in decman_lib::catalog::templates::governance_state_templates(packages) {
         match fetch_governance_state_for_template(config, party_id, token.clone(), &template).await
         {
             Ok(Some(mut state)) => {
                 // Found under the configured package — not out of date.
-                state.package_ref = Some(template.package_id.clone());
+                state.package_ref = Some(template.package_ref.clone());
                 state.out_of_date = false;
                 return Ok(Some(state));
             }
@@ -1452,8 +1387,8 @@ pub async fn get_governance_state(
                 }
                 tracing::warn!(
                     "Failed to query governance state for {}:{}: {e}",
-                    template.module_name,
-                    template.entity_name
+                    template.module,
+                    template.entity
                 );
             }
         }
@@ -1491,11 +1426,11 @@ async fn fetch_governance_state_fallback(
         if name == configured_name {
             continue;
         }
-        let template = TemplateId {
-            package_id: format!("#{name}"),
-            module_name: "Governance.Rules",
-            entity_name: "GovernanceRules",
-        };
+        let template = decman_lib::framework::TemplateId::new(
+            format!("#{name}"),
+            "Governance.Rules",
+            "GovernanceRules",
+        );
         match fetch_governance_state_for_template(config, party_id, token.clone(), &template).await
         {
             Ok(Some(mut state)) => {
@@ -1503,7 +1438,7 @@ async fn fetch_governance_state_fallback(
                     "GovernanceRules contract for {party_id} found under fallback package \
                      #{name} (configured {configured}); flagging as out of date"
                 );
-                state.package_ref = Some(template.package_id);
+                state.package_ref = Some(template.package_ref);
                 state.out_of_date = true;
                 return Ok(Some(state));
             }
@@ -1524,18 +1459,11 @@ async fn fetch_governance_state_for_template(
     config: &NodeConfig,
     party_id: &CantonId,
     token: Option<String>,
-    template: &TemplateId,
+    template: &decman_lib::framework::TemplateId,
 ) -> Result<Option<GovernanceState>> {
     let event_format = party_event_format(
         party_id,
-        vec![template_filter(
-            Identifier {
-                package_id: template.package_id.clone(),
-                module_name: template.module_name.to_string(),
-                entity_name: template.entity_name.to_string(),
-            },
-            false,
-        )],
+        vec![template_filter(template.into(), false)],
         true,
     );
 

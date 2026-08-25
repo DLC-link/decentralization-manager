@@ -469,7 +469,8 @@ impl ProposalType {
     ///
     /// **Propose-path only.** The single production caller is
     /// `handlers::governance::propose_action`, and one arm
-    /// ([`validate_future_micros`]) reads the clock. Re-using this to
+    /// (`decman_lib::framework::validate::validate_future_micros`) reads the
+    /// clock. Re-using this to
     /// re-validate an already-stored proposal would reject it for nothing but
     /// having aged, so a new call site needs to split the time-dependent arms
     /// out first.
