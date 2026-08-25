@@ -5,6 +5,7 @@ pub mod encode;
 pub mod filters;
 pub mod record;
 mod template_id;
+pub mod validate;
 pub use template_id::TemplateId;
 
 mod traits;

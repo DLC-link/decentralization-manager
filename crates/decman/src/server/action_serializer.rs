@@ -8,6 +8,10 @@ use anyhow::Context;
 use canton_common::transfer_factory::ContextValue;
 use canton_common::{decimal::DamlDecimal, transfer_factory::Context as ChoiceContext};
 use canton_proto_rs::com::daml::ledger::api::v2::{Optional, Record, Value, value};
+pub(crate) use decman_lib::catalog::types::{
+    make_optional_beneficiaries, serialize_app_reward_beneficiary, serialize_billing_params,
+    serialize_optional_far_config, serialize_reward_beneficiary, serialize_vault_limits,
+};
 pub(crate) use decman_lib::framework::encode::*;
 use decman_lib::framework::record::{
     extract_contract_id, extract_int64, extract_list, extract_numeric, extract_party,
@@ -19,112 +23,13 @@ use crate::canton_id::CantonId;
 use crate::error::Result;
 
 use super::types::{
-    ActionType, AppRewardBeneficiary, BillingParams, Claim, FarConfig, InstrumentAllowance,
-    InstrumentId, ProposalType, RewardBeneficiary, VaultLimits,
+    ActionType, AppRewardBeneficiary, Claim, FarConfig, InstrumentAllowance, InstrumentId,
+    ProposalType, VaultLimits,
 };
 #[cfg(test)]
-use super::types::{InstrumentIdentifier, PartyCredentialRequirement};
-
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
-fn make_optional_beneficiaries(opt: &Option<Vec<AppRewardBeneficiary>>) -> Value {
-    Value {
-        sum: Some(value::Sum::Optional(Box::new(Optional {
-            value: opt.as_ref().map(|beneficiaries| {
-                Box::new(make_list(
-                    beneficiaries
-                        .iter()
-                        .map(serialize_app_reward_beneficiary)
-                        .collect(),
-                ))
-            }),
-        }))),
-    }
-}
-
-fn serialize_vault_limits(limits: &VaultLimits) -> Value {
-    make_record(vec![
-        field(
-            "maxTotalDeposit",
-            make_optional_numeric(&limits.max_total_deposit),
-        ),
-        field(
-            "minDepositAmount",
-            make_optional_numeric(&limits.min_deposit_amount),
-        ),
-        field(
-            "minWithdrawalAmount",
-            make_optional_numeric(&limits.min_withdrawal_amount),
-        ),
-    ])
-}
-
-fn serialize_billing_params(params: &BillingParams) -> Value {
-    make_record(vec![
-        field(
-            "feePerDayUsd",
-            make_record(vec![field(
-                "rate",
-                make_numeric(&params.fee_per_day_usd.to_string()),
-            )]),
-        ),
-        field(
-            "billingPeriodMinutes",
-            make_int64(params.billing_period_minutes),
-        ),
-        field(
-            "depositTargetAmountUsd",
-            make_numeric(&params.deposit_target_amount_usd.to_string()),
-        ),
-        field(
-            "holderActivityWeight",
-            make_optional_numeric(&params.holder_activity_weight),
-        ),
-    ])
-}
-
-fn serialize_app_reward_beneficiary(b: &AppRewardBeneficiary) -> Value {
-    make_record(vec![
-        field("beneficiary", make_party(&b.beneficiary)),
-        field("weight", make_numeric(&b.weight.to_string())),
-    ])
-}
-
-fn serialize_reward_beneficiary(b: &RewardBeneficiary) -> Value {
-    make_record(vec![
-        field("beneficiary", make_party(&b.beneficiary)),
-        field("percentage", make_numeric(&b.percentage.to_string())),
-    ])
-}
-
-fn serialize_far_config(config: &FarConfig) -> Value {
-    make_record(vec![
-        field(
-            "featuredAppRightCid",
-            make_contract_id(&config.featured_app_right_cid),
-        ),
-        field(
-            "beneficiaries",
-            make_list(
-                config
-                    .beneficiaries
-                    .iter()
-                    .map(serialize_app_reward_beneficiary)
-                    .collect(),
-            ),
-        ),
-    ])
-}
-
-fn serialize_optional_far_config(config: &Option<FarConfig>) -> Value {
-    Value {
-        sum: Some(value::Sum::Optional(Box::new(Optional {
-            value: config.as_ref().map(|c| Box::new(serialize_far_config(c))),
-        }))),
-    }
-}
+use super::types::{
+    BillingParams, InstrumentIdentifier, PartyCredentialRequirement, RewardBeneficiary,
+};
 
 // ============================================================================
 // Action Serialization
