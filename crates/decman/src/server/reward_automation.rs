@@ -1088,7 +1088,7 @@ where
 /// The loop's wake interval, independent of the reward cadence.
 ///
 /// The heartbeat and the sweep share this one task, so a sweep that blocks for N
-/// minutes costs N heartbeats, and one blocking past the stall rule's 10-minute
+/// minutes costs N heartbeats, and one blocking past the stall rule's 15-minute
 /// window pages `decman-reward-automation-stalled` even though nothing crashed.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -1105,12 +1105,16 @@ pub(crate) async fn run_reward_automation_loop(data: actix_web::web::Data<AppSta
         tracing::warn!("reward_automation_interval_secs is 0; using 1s instead");
     }
     let sweep_interval = Duration::from_secs(interval_secs.max(1));
-    let read_interval = Duration::from_secs(data.config.reward_expiry_read_interval_secs.max(1));
+    let read_secs = data.config.reward_expiry_read_interval_secs;
+    if read_secs == 0 {
+        tracing::warn!("reward_expiry_read_interval_secs is 0; using 1s instead");
+    }
+    let read_interval = Duration::from_secs(read_secs.max(1));
 
     // The shortest of the three: a configured interval below HEARTBEAT_INTERVAL must
     // still beat at its own rate, or `is_due` only ever sees HEARTBEAT_INTERVAL-sized
     // steps and a short interval is silently floored to it. Beating faster is
-    // safe for the stall alert, whose `increase < 1 over 10m` is a lower bound.
+    // safe for the stall alert, whose `increase < 1 over 15m` is a lower bound.
     let mut heartbeat =
         tokio::time::interval(HEARTBEAT_INTERVAL.min(sweep_interval).min(read_interval));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
