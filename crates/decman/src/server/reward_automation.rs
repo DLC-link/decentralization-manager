@@ -46,7 +46,7 @@ use crate::{
     utils,
 };
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 use std::time::Duration;
 
@@ -359,6 +359,45 @@ pub(crate) async fn active_delegations(
         .collect()
 }
 
+/// Every decparty whose active delegation names `member` as an assigner.
+///
+/// Read as `member`, not as the decparty. `CouponReassignmentDelegation` makes
+/// its `assigners` observers, so this node sees exactly the delegations it is
+/// named on, under a token it already holds for some other decparty. That is
+/// what lets the loop tell a decparty whose credentials matter from one that was
+/// never enabled: the enablement signal lives behind the decparty's own
+/// credentials, and those are what failed.
+async fn delegated_decparties(
+    config: &NodeConfig,
+    packages: &PackageConfig,
+    test_mode: bool,
+    member: &CantonId,
+    token: &str,
+) -> anyhow::Result<HashSet<CantonId>> {
+    let Some(package_id) = packages.governance_rewards.as_deref() else {
+        return Ok(HashSet::new());
+    };
+    let records = active_created_records(
+        config,
+        member,
+        Some(token.to_string()),
+        test_mode,
+        ContractFilter::template(
+            package_id,
+            Module("Governance.Rewards.CouponReassignmentDelegation"),
+            Entity("CouponReassignmentDelegation"),
+        ),
+    )
+    .await?;
+    // A delegation that names no decparty we can decode is not enablement for
+    // anyone, so it is skipped rather than failing the whole read: one bad
+    // contract must not silence every good one.
+    Ok(records
+        .iter()
+        .filter_map(|(_, _, rec)| field_party_id(rec, "decparty").ok())
+        .collect())
+}
+
 /// Pick the delegation a decparty should act on (pure): of those naming
 /// `decparty`, the one created last.
 ///
@@ -564,7 +603,7 @@ static EXPIRY_READS: LazyLock<IntCounterVec> = LazyLock::new(|| {
 static CREDENTIALS_UNAVAILABLE: LazyLock<IntCounterVec> = LazyLock::new(|| {
     prometheus::register_int_counter_vec!(
         "decman_reward_credentials_unavailable_total",
-        "Passes whose token fetch failed for a decparty this node holds credentials for.",
+        "Passes whose token fetch failed for a decparty whose delegation names this node as an assigner.",
         &["decparty"]
     )
     .expect("metric name is a unique literal")
@@ -573,7 +612,7 @@ static CREDENTIALS_UNAVAILABLE: LazyLock<IntCounterVec> = LazyLock::new(|| {
 static AUTH_UNREGISTERED: LazyLock<IntCounterVec> = LazyLock::new(|| {
     prometheus::register_int_counter_vec!(
         "decman_reward_auth_unregistered_total",
-        "Passes that found no auth registry entry for a decparty this node holds credentials for.",
+        "Passes that found no auth registry entry for a decparty whose delegation names this node as an assigner.",
         &["decparty"]
     )
     .expect("metric name is a unique literal")
@@ -1103,6 +1142,51 @@ where
 /// window pages `decman-reward-automation-stalled` even though nothing crashed.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
 
+/// Whether an auth failure for this decparty is worth counting (pure).
+///
+/// Only a decparty this node is a named assigner for can lose value when its
+/// credentials fail. One that was never enabled loses nothing, so counting it
+/// would alert on every decparty a participant happens to hold credentials for.
+/// `enabled` of `None` means no delegation read has succeeded, and an unread set
+/// counts nothing rather than guessing either way.
+fn counts_as_auth_fault(
+    outcome: &SweepOutcome,
+    decparty: &CantonId,
+    enabled: Option<&HashSet<CantonId>>,
+) -> bool {
+    matches!(
+        outcome,
+        SweepOutcome::CredentialsUnavailable | SweepOutcome::AuthUnregistered
+    ) && enabled.is_some_and(|set| set.contains(decparty))
+}
+
+/// The decparties this node is a named assigner for, or `None` when no token
+/// could be obtained to ask with.
+///
+/// Tries each served decparty in turn: the read needs any one working token, not
+/// that decparty's own. A node whose every credential fails cannot ask, and
+/// `None` says so rather than claiming an empty set — an empty set would read as
+/// "nothing is enabled" and silence a real fault.
+async fn read_enablement(
+    data: &actix_web::web::Data<AppState>,
+    parties: &[CantonId],
+) -> Option<HashSet<CantonId>> {
+    let pkgs = packages();
+    for decparty in parties {
+        let Ok(Some((token, member))) = get_party_credentials(data, decparty).await else {
+            continue;
+        };
+        match delegated_decparties(&data.config, &pkgs, data.test_mode, &member, &token).await {
+            Ok(set) => return Some(set),
+            Err(e) => {
+                // Another decparty's token may still work, so try the rest.
+                tracing::warn!(%member, error = %e, "reading the delegated decparties failed");
+            }
+        }
+    }
+    None
+}
+
 /// Per-node background loop. It records a heartbeat every [`HEARTBEAT_INTERVAL`] and
 /// sweeps each decparty it holds credentials for every
 /// `reward_automation_interval_secs`. Enablement is on-ledger: a decparty with no
@@ -1135,6 +1219,10 @@ pub(crate) async fn run_reward_automation_loop(data: actix_web::web::Data<AppSta
     let mut last_read: Option<tokio::time::Instant> = None;
     // Recomputed into the gauge on every heartbeat.
     let mut oldest: HashMap<CantonId, DateTime<Utc>> = HashMap::new();
+    // The decparties whose delegations name this node, from the last pass that
+    // could read them. Kept across passes so a later credentials outage does not
+    // stop the loop classifying: a set read once stays truer than no set at all.
+    let mut enabled: Option<HashSet<CantonId>> = None;
 
     loop {
         heartbeat.tick().await;
@@ -1165,6 +1253,10 @@ pub(crate) async fn run_reward_automation_loop(data: actix_web::web::Data<AppSta
             .collect();
 
         prune_unserved(&mut oldest, &parties);
+
+        if let Some(set) = read_enablement(&data, &parties).await {
+            enabled = Some(set);
+        }
 
         for decparty in parties {
             let label = decparty.to_string();
@@ -1205,6 +1297,17 @@ pub(crate) async fn run_reward_automation_loop(data: actix_web::web::Data<AppSta
                     SweepOutcome::Failed
                 }
             };
+            if counts_as_auth_fault(&outcome, &decparty, enabled.as_ref()) {
+                match outcome {
+                    SweepOutcome::CredentialsUnavailable => {
+                        CREDENTIALS_UNAVAILABLE.with_label_values(&[&label]).inc();
+                    }
+                    SweepOutcome::AuthUnregistered => {
+                        AUTH_UNREGISTERED.with_label_values(&[&label]).inc();
+                    }
+                    _ => unreachable!("counts_as_auth_fault admits only the two auth arms"),
+                }
+            }
             apply_sweep_outcome(&mut oldest, &decparty, outcome);
         }
     }
@@ -1302,7 +1405,8 @@ enum SweepOutcome {
     /// Party credentials were not available this sweep — e.g. a Keycloak token
     /// acquisition failure. Distinct from `Empty`: this decparty is still meant
     /// to be served (it holds a row in `party_credentials`), so this is an
-    /// error condition rather than the automation being off for it.
+    /// error condition rather than the automation being off for it. Whether it
+    /// moves a counter depends on enablement — see [`counts_as_auth_fault`].
     CredentialsUnavailable,
     /// The auth registry holds no entry for this decparty, so this node cannot
     /// read its backlog at all. `AuthRegistry::new` skips a party whose token
@@ -1380,22 +1484,16 @@ async fn run_once_for_party(
         // separates them, and it is the only signal for a decparty broken from
         // boot, which never read a backlog and so has no gauge series.
         Err(_) => {
-            CREDENTIALS_UNAVAILABLE
-                .with_label_values(&[&decparty.to_string()])
-                .inc();
             tracing::warn!(%decparty, "party credentials unavailable for reward sweep");
             return Ok(SweepOutcome::CredentialsUnavailable);
         }
         // This node holds a `party_credentials` row for the decparty and the auth
         // registry has no entry for it, so every pass lands here until the
         // registry is rebuilt. The coupons keep expiring meanwhile, so the
-        // countdown stays and a counter carries the fault: a decparty whose auth
-        // failed at boot never read a backlog, so it has no gauge series for a
-        // rule to fire on.
+        // countdown stays, and the caller counts the fault when a delegation
+        // names this node for the decparty: one whose auth failed at boot never
+        // read a backlog, so it has no gauge series for a rule to fire on.
         Ok(None) => {
-            AUTH_UNREGISTERED
-                .with_label_values(&[&decparty.to_string()])
-                .inc();
             tracing::warn!(
                 %decparty,
                 "no auth registered for this decparty; its coupons will expire unassigned"
@@ -2365,43 +2463,18 @@ mod tests {
         assert!(oldest.is_empty(), "an empty backlog still removes");
     }
 
-    /// Reads one counter's value for one decparty out of the live registry.
-    /// `None` means the series does not exist, which for a counter that has never
-    /// fired is a different fact from a series reading zero.
-    fn counter_for(name: &str, label: &str) -> Option<f64> {
-        prometheus::gather().iter().find_map(|f| {
-            if f.get_name() != name {
-                return None;
-            }
-            f.get_metric()
-                .iter()
-                .find(|m| m.get_label().iter().any(|l| l.get_value() == label))
-                .map(|m| m.get_counter().get_value())
-        })
-    }
-
-    /// Both counters sit on their own arm of `run_once_for_party`, so each needs
-    /// its own case: one passing test would leave the other arm counting nothing.
+    /// Both auth arms are reachable and each is reached its own way, so each gets
+    /// its own case: one passing test would leave the other arm unexercised.
     #[tokio::test]
-    async fn a_missing_registry_entry_counts_and_keeps_the_decparty() -> anyhow::Result<()> {
+    async fn a_missing_registry_entry_is_its_own_outcome() -> anyhow::Result<()> {
         // `auth: None` is the same `Ok(None)` a decparty gets when
-        // `AuthRegistry::new` skipped it, which is the case this counter exists for.
-        register_metrics();
+        // `AuthRegistry::new` skipped it, which is the case this arm exists for.
         let data = AppState::for_test(None).await?;
         let decparty = CantonId::parse(DAVE)?;
-        let label = decparty.to_string();
-        let before = counter_for("decman_reward_auth_unregistered_total", &label).unwrap_or(0.0);
 
         let outcome = run_once_for_party(&data, &decparty, Pass::Sweep).await?;
 
         assert!(matches!(outcome, SweepOutcome::AuthUnregistered));
-        let after = counter_for("decman_reward_auth_unregistered_total", &label)
-            .expect("the pass must export a series for this decparty");
-        assert_eq!(
-            after - before,
-            1.0,
-            "the pass must count, because this decparty has no gauge series to fall"
-        );
         Ok(())
     }
 
@@ -2409,11 +2482,10 @@ mod tests {
     /// refresh path at once), then the Keycloak stand-in fails the next request —
     /// the one this pass makes.
     #[tokio::test]
-    async fn a_failed_token_fetch_counts_and_keeps_the_decparty() -> anyhow::Result<()> {
+    async fn a_failed_token_fetch_is_its_own_outcome() -> anyhow::Result<()> {
         use wiremock::matchers::{method, path_regex};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        register_metrics();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path_regex(r".*/token$"))
@@ -2431,7 +2503,6 @@ mod tests {
             .await;
 
         let decparty = CantonId::parse(EVE)?;
-        let label = decparty.to_string();
         let registry = AuthRegistry::new(&[PartyCredentials {
             dec_party_id: decparty.clone(),
             member_party_id: CantonId::parse(BOB)?,
@@ -2448,20 +2519,72 @@ mod tests {
         }])
         .await?;
         let data = AppState::for_test(Some(WorkflowAuth::Keycloak(Arc::new(registry)))).await?;
-        let before =
-            counter_for("decman_reward_credentials_unavailable_total", &label).unwrap_or(0.0);
 
         let outcome = run_once_for_party(&data, &decparty, Pass::Sweep).await?;
 
         assert!(matches!(outcome, SweepOutcome::CredentialsUnavailable));
-        let after = counter_for("decman_reward_credentials_unavailable_total", &label)
-            .expect("the pass must export a series for this decparty");
-        assert_eq!(
-            after - before,
-            1.0,
-            "every pass failing must be countable, not only visible in the log"
-        );
         Ok(())
+    }
+
+    #[test]
+    fn an_auth_failure_counts_only_for_a_decparty_this_node_assigns_for() {
+        // A decparty nobody enabled loses nothing when its credentials fail, and
+        // devnet held 28 such pairs against one real delegation. Counting them
+        // made every alert a false positive.
+        let enabled_party = CantonId::parse(GOV).expect("GOV is a valid canton id");
+        let stranger = CantonId::parse(DAVE).expect("DAVE is a valid canton id");
+        let enabled: HashSet<CantonId> = std::iter::once(enabled_party.clone()).collect();
+
+        for outcome in [
+            SweepOutcome::CredentialsUnavailable,
+            SweepOutcome::AuthUnregistered,
+        ] {
+            assert!(
+                counts_as_auth_fault(&outcome, &enabled_party, Some(&enabled)),
+                "a delegation names this node for it, so its coupons are at risk"
+            );
+            assert!(
+                !counts_as_auth_fault(&outcome, &stranger, Some(&enabled)),
+                "no delegation names this node for it, so nothing is at risk"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unread_enablement_set_counts_nothing() {
+        // `None` is "we could not ask", not "nothing is enabled". Counting on it
+        // would alert for every decparty on a node whose first read has not
+        // landed yet.
+        let decparty = CantonId::parse(GOV).expect("GOV is a valid canton id");
+        assert!(!counts_as_auth_fault(
+            &SweepOutcome::AuthUnregistered,
+            &decparty,
+            None
+        ));
+        assert!(!counts_as_auth_fault(
+            &SweepOutcome::CredentialsUnavailable,
+            &decparty,
+            None
+        ));
+    }
+
+    #[test]
+    fn no_other_outcome_counts_as_an_auth_fault() {
+        // The two auth arms are the only ones these counters may move on. A
+        // failed sweep has its own counter and an empty backlog is not a fault.
+        let decparty = CantonId::parse(GOV).expect("GOV is a valid canton id");
+        let enabled: HashSet<CantonId> = std::iter::once(decparty.clone()).collect();
+        for outcome in [
+            SweepOutcome::Empty,
+            SweepOutcome::Failed,
+            SweepOutcome::Off,
+            SweepOutcome::Backlog(dt("2026-07-20T18:00:00Z")),
+        ] {
+            assert!(
+                !counts_as_auth_fault(&outcome, &decparty, Some(&enabled)),
+                "only the two auth arms may move these counters"
+            );
+        }
     }
 
     #[test]
