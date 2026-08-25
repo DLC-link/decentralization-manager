@@ -389,6 +389,27 @@ mod tests {
     }
 
     #[test]
+    fn transfer_validity_from_now_bounds_the_window() {
+        let now = 1_700_000_000_000_000;
+        let v = TransferValidity::from_now(now);
+        assert_eq!(v.requested_at_micros, now);
+        assert_eq!(
+            v.execute_before_micros,
+            now + TRANSFER_VALIDITY_WINDOW_MICROS
+        );
+        // The window is finite (24h), not the old effectively-infinite deadline.
+        assert!(v.execute_before_micros < TRANSFER_EXECUTE_BEFORE_MICROS);
+    }
+
+    #[test]
+    fn transfer_validity_from_now_clamps_to_max_daml_time() {
+        // A near-max `now` must neither panic on overflow nor serialize past the
+        // module's max Daml `Time`; it clamps to TRANSFER_EXECUTE_BEFORE_MICROS.
+        let v = TransferValidity::from_now(i64::MAX - 5);
+        assert_eq!(v.execute_before_micros, TRANSFER_EXECUTE_BEFORE_MICROS);
+    }
+
+    #[test]
     fn make_any_value_rejects_unsupported_time_variants() {
         for unsupported in [
             ContextValue::Date("2026-05-19".to_string()),

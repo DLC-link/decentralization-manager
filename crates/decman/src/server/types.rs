@@ -25,13 +25,12 @@ pub use common::api::{
     DecentralizedPartiesResponse, DeclineInvitationPayload, DisclosedContractInput,
     DiscoverMemberPartyRequest, DiscoverMemberPartyResponse, ErrorResponse,
     ExpireConfirmationRequest, ExternalPartiesResponse, ExternalPartyInfo, GovernanceState,
-    GovernanceStateResponse, GovernanceType, GrantRightsRequest, GrantRightsResponse,
-    InstrumentAllowance, InstrumentId, InstrumentIdentifier, InstrumentInfo,
-    InstrumentIssuerCredentials, InstrumentsResponse, InvitationActionRequest, KeyStatusResponse,
-    KickInvitePayload, KickRequest, KnownMember, KnownMembersResponse, MessageResponse,
-    MissingEdgeKind, MissingPeerEdge, NetworkInfo, OnboardingInvitePayload,
-    OnboardingMeshErrorResponse, OnboardingRequest, OperatorInfo, PartyAuthStatus,
-    PartyConfigRequest, PartyConfigResponse, PartyCredentialRequirement,
+    GovernanceStateResponse, GovernanceType, GrantRightsRequest, GrantRightsResponse, InstrumentId,
+    InstrumentIdentifier, InstrumentInfo, InstrumentIssuerCredentials, InstrumentsResponse,
+    InvitationActionRequest, KeyStatusResponse, KickInvitePayload, KickRequest, KnownMember,
+    KnownMembersResponse, MessageResponse, MissingEdgeKind, MissingPeerEdge, NetworkInfo,
+    OnboardingInvitePayload, OnboardingMeshErrorResponse, OnboardingRequest, OperatorInfo,
+    PartyAuthStatus, PartyConfigRequest, PartyConfigResponse, PartyCredentialRequirement,
     PendingInvitationsResponse, ProviderConfigurationInfo, ProviderConfigurationsResponse,
     ProviderServiceInfo, ProviderServicesResponse, RegistrarServiceInfo,
     RegistrarServiceRequestInfo, RegistrarServiceRequestsResponse, RegistrarServicesResponse,
@@ -46,6 +45,14 @@ pub use common::types::{
     PartyMetadata, PeerErrorKind, PeerPackageComparison, PeerPackageResult, PendingInvitation,
     Permission, VettedPackageInfo, WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun,
 };
+// `InstrumentAllowance` no longer has a non-test consumer here: since Task 12,
+// `ProposalType::SetupTokenPreapproval`'s field lives on
+// `decman_lib::catalog::proposals::custody::SetupTokenPreapproval`, which
+// references `common::api::InstrumentAllowance` directly. The re-export stays,
+// test-gated, so `crate::server::types::InstrumentAllowance` keeps resolving
+// for test fixtures (`action_serializer.rs`, `serde_snapshots.rs`).
+#[cfg(test)]
+pub(crate) use common::api::InstrumentAllowance;
 // The payload support types and their protocol validators now live in
 // `decman-lib`, re-exported here so existing `crate::server::types::X`
 // paths keep resolving unchanged.
@@ -346,36 +353,13 @@ pub use decman_lib::catalog::action::ActionType;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ProposalType {
     /// Set up Canton Coin TransferPreapproval
-    SetupCcPreapproval {
-        provider: CantonId,
-        expected_dso: CantonId,
-    },
+    SetupCcPreapproval(decman_lib::catalog::proposals::custody::SetupCcPreapproval),
     /// Set up utility token TransferPreapproval
-    SetupTokenPreapproval {
-        operator: CantonId,
-        instrument_admin: CantonId,
-        #[serde(default)]
-        instrument_allowances: Vec<InstrumentAllowance>,
-    },
+    SetupTokenPreapproval(decman_lib::catalog::proposals::custody::SetupTokenPreapproval),
     /// Transfer tokens via a TransferFactory
-    Transfer {
-        transfer_factory_cid: String,
-        expected_admin: CantonId,
-        receiver: CantonId,
-        #[schema(value_type = String)]
-        #[cfg_attr(feature = "typegen", ts(type = "string"))]
-        amount: DamlDecimal,
-        instrument_id: InstrumentId,
-        #[serde(default)]
-        input_holding_cids: Vec<String>,
-        /// How long the transfer (and, for two-step transfers, the resulting
-        /// offer) stays valid, in hours. `None` uses the default window. A
-        /// bounded window lets an unaccepted offer expire and release escrow.
-        #[serde(default)]
-        validity_window_hours: Option<u32>,
-    },
+    Transfer(decman_lib::catalog::proposals::custody::Transfer),
     /// Accept an incoming token transfer
-    AcceptTransfer { transfer_instruction_cid: String },
+    AcceptTransfer(decman_lib::catalog::proposals::custody::AcceptTransfer),
     /// Generic text-based vote (no on-chain effect beyond recording the result)
     GenericVote(decman_lib::catalog::proposals::core::GenericVote),
     /// Provision a Utility-Registry `ProviderService` with
@@ -635,17 +619,10 @@ impl ProposalType {
             ProposalType::CreateDelegatedBatchedMarkersProxy(p) => {
                 p.validate(&ctx).map_err(|e| e.to_string())
             }
-            ProposalType::Transfer {
-                amount,
-                validity_window_hours,
-                ..
-            } => {
-                validate_positive_amount(amount, "amount").map_err(|e| e.to_string())?;
-                if *validity_window_hours == Some(0) {
-                    return Err("validity_window_hours must be greater than 0".to_string());
-                }
-                Ok(())
-            }
+            ProposalType::SetupCcPreapproval(p) => p.validate(&ctx).map_err(|e| e.to_string()),
+            ProposalType::SetupTokenPreapproval(p) => p.validate(&ctx).map_err(|e| e.to_string()),
+            ProposalType::Transfer(p) => p.validate(&ctx).map_err(|e| e.to_string()),
+            ProposalType::AcceptTransfer(p) => p.validate(&ctx).map_err(|e| e.to_string()),
             ProposalType::Mint { amount, .. } | ProposalType::Burn { amount, .. } => {
                 validate_positive_amount(amount, "amount").map_err(|e| e.to_string())
             }
@@ -1387,30 +1364,10 @@ mod tests {
         assert_eq!(dec_party.as_str().unwrap(), dec_party_id_str);
     }
 
-    #[test]
-    fn proposal_transfer_rejects_non_positive_amount() {
-        let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
-        let to = CantonId::parse(&format!("recv::{ns}")).unwrap();
-        let admin = CantonId::parse(&format!("admin::{ns}")).unwrap();
-        let mk = |amount: &str, window: Option<u32>| ProposalType::Transfer {
-            transfer_factory_cid: "tf".to_string(),
-            expected_admin: admin.clone(),
-            receiver: to.clone(),
-            amount: amount.parse().expect("valid decimal"),
-            instrument_id: InstrumentId {
-                admin: "a".into(),
-                id: "i".into(),
-            },
-            input_holding_cids: Vec::new(),
-            validity_window_hours: window,
-        };
-        assert!(mk("0", None).validate(&cid("gov")).is_err());
-        assert!(mk("-1.5", None).validate(&cid("gov")).is_err());
-        assert!(mk("0.0001", None).validate(&cid("gov")).is_ok());
-        // A custom (positive) window is accepted; a zero-hour window is rejected.
-        assert!(mk("1.0", Some(48)).validate(&cid("gov")).is_ok());
-        assert!(mk("1.0", Some(0)).validate(&cid("gov")).is_err());
-    }
+    // `proposal_transfer_rejects_non_positive_amount` moved to
+    // `decman_lib::catalog::proposals::custody::tests` as
+    // `transfer_rejects_non_positive_amount_and_zero_window`, testing
+    // `Transfer::validate` directly.
 
     #[test]
     fn proposal_onboard_instrument_issuers_rejects_empty_issuer_list() {

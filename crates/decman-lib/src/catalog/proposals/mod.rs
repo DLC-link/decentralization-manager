@@ -3,7 +3,9 @@
 //! `DamlProtoEncode` / `Validate`) `framework::traits` defines.
 //!
 //! Split by the package the proposal's template lives in: `core` for
-//! `governance-core`, `utility` for `governance-utility-onboarding`.
+//! `governance-core`, `custody` for `governance-token-custody`, `utility`
+//! for `governance-utility-onboarding`.
 
 pub mod core;
+pub mod custody;
 pub mod utility;

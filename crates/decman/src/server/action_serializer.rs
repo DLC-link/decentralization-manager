@@ -6,11 +6,15 @@
 //! `decman_lib::catalog::action`; the four `build_*_action*` functions below
 //! are thin fallible wrappers around it.
 
-use canton_common::transfer_factory::Context as ChoiceContext;
 #[cfg(test)]
-use canton_common::{decimal::DamlDecimal, transfer_factory::ContextValue};
+use canton_common::decimal::DamlDecimal;
+use canton_common::transfer_factory::Context as ChoiceContext;
 use canton_proto_rs::com::daml::ledger::api::v2::{Optional, Record, Value, value};
 use decman_lib::catalog::proposals::core::GenericVote;
+use decman_lib::catalog::proposals::custody::{
+    AcceptTransfer, AcceptTransferWithContext, SetupCcPreapproval, SetupTokenPreapproval, Transfer,
+    TransferWithContext,
+};
 use decman_lib::catalog::proposals::utility::{
     CreateDelegatedBatchedMarkersProxy, CreateProviderServiceRequest, CreateUserServiceRequest,
     ProvisionProviderService,
@@ -24,11 +28,11 @@ pub(crate) use decman_lib::framework::encode::*;
 use crate::canton_id::CantonId;
 use crate::error::Result;
 
-use super::types::{ActionType, InstrumentAllowance, ProposalType};
+use super::types::{ActionType, ProposalType};
 #[cfg(test)]
 use super::types::{
-    BillingParams, Claim, InstrumentId, InstrumentIdentifier, PartyCredentialRequirement,
-    RewardBeneficiary,
+    BillingParams, Claim, InstrumentAllowance, InstrumentId, InstrumentIdentifier,
+    PartyCredentialRequirement, RewardBeneficiary,
 };
 
 // ============================================================================
@@ -125,15 +129,6 @@ pub fn build_execute_governance_action_arg(
 // Governance-Core Domain Action Proposal Serialization
 // ============================================================================
 
-fn serialize_instrument_allowances(allowances: &[InstrumentAllowance]) -> Value {
-    make_list(
-        allowances
-            .iter()
-            .map(|a| make_record(vec![field("id", make_text(&a.id))]))
-            .collect(),
-    )
-}
-
 /// Which package a proposal template belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(clippy::enum_variant_names)]
@@ -162,152 +157,59 @@ pub fn build_proposal_create_args(
         execute_before_micros: TRANSFER_EXECUTE_BEFORE_MICROS,
     });
     Ok(match proposal {
-        ProposalType::SetupCcPreapproval {
-            provider,
-            expected_dso,
-        } => (
+        ProposalType::SetupCcPreapproval(p) => (
             ProposalPackage::GovernanceTokenCustody,
-            "Governance.TokenCustody.SetupCcPreapproval",
-            "SetupCcPreapprovalProposal",
-            Record {
-                record_id: None,
-                fields: vec![
-                    field("governanceParty", make_party(governance_party)),
-                    field("proposer", make_party(proposer)),
-                    field("provider", make_party(provider)),
-                    field(
-                        "expectedDso",
-                        Value {
-                            sum: Some(value::Sum::Optional(Box::new(Optional {
-                                value: Some(Box::new(make_party(expected_dso))),
-                            }))),
-                        },
-                    ),
-                ],
-            },
+            SetupCcPreapproval::MODULE,
+            SetupCcPreapproval::ENTITY,
+            proposal_create_arguments(p, governance_party, proposer)
+                .map_err(anyhow::Error::from)?,
         ),
-        ProposalType::SetupTokenPreapproval {
-            operator,
-            instrument_admin,
-            instrument_allowances,
-        } => (
+        ProposalType::SetupTokenPreapproval(p) => (
             ProposalPackage::GovernanceTokenCustody,
-            "Governance.TokenCustody.SetupTokenPreapproval",
-            "SetupTokenPreapprovalProposal",
-            Record {
-                record_id: None,
-                fields: vec![
-                    field("governanceParty", make_party(governance_party)),
-                    field("proposer", make_party(proposer)),
-                    field("operator", make_party(operator)),
-                    field("instrumentAdmin", make_party(instrument_admin)),
-                    field(
-                        "instrumentAllowances",
-                        serialize_instrument_allowances(instrument_allowances),
-                    ),
-                ],
-            },
+            SetupTokenPreapproval::MODULE,
+            SetupTokenPreapproval::ENTITY,
+            proposal_create_arguments(p, governance_party, proposer)
+                .map_err(anyhow::Error::from)?,
         ),
-        ProposalType::Transfer {
-            transfer_factory_cid,
-            expected_admin,
-            receiver,
-            amount,
-            instrument_id,
-            input_holding_cids,
-            // The validity window is applied via `transfer_validity` (the
-            // timestamps below), not serialized as its own field.
-            validity_window_hours: _,
-        } => {
-            let transfer_record = make_record(vec![
-                field("sender", make_party(governance_party)),
-                field("receiver", make_party(receiver)),
-                field("amount", make_numeric(&amount.to_string())),
-                field(
-                    "instrumentId",
-                    make_record(vec![
-                        field("admin", make_party(&instrument_id.admin)),
-                        field("id", make_text(&instrument_id.id)),
-                    ]),
-                ),
-                field(
-                    "requestedAt",
-                    Value {
-                        sum: Some(value::Sum::Timestamp(validity.requested_at_micros)),
-                    },
-                ),
-                field(
-                    "executeBefore",
-                    Value {
-                        sum: Some(value::Sum::Timestamp(validity.execute_before_micros)),
-                    },
-                ),
-                field(
-                    "inputHoldingCids",
-                    make_list(
-                        input_holding_cids
-                            .iter()
-                            .map(|cid| make_contract_id(cid))
-                            .collect(),
-                    ),
-                ),
-                field("meta", make_empty_metadata()),
-            ]);
-            let extra_args = match transfer_choice_context {
-                Some(ctx) => make_extra_args_from_context(ctx)?,
-                None => make_empty_extra_args(),
-            };
-            (
-                ProposalPackage::GovernanceTokenCustody,
-                "Governance.TokenCustody.TransferProposal",
-                "TransferProposal",
-                Record {
-                    record_id: None,
-                    fields: vec![
-                        field("governanceParty", make_party(governance_party)),
-                        field("proposer", make_party(proposer)),
-                        field("transferFactoryCid", make_contract_id(transfer_factory_cid)),
-                        field("expectedAdmin", make_party(expected_admin)),
-                        field("transfer", transfer_record),
-                        field("extraArgs", extra_args),
-                    ],
+        // The Daml `TransferFactory_Transfer` choice (invoked through
+        // `TransferProposal`) and, for `AcceptTransfer`, the
+        // `TransferInstruction_Accept` choice look up registry-published
+        // entries (e.g. `utility.digitalasset.com/transfer-rule`) in
+        // `extraArgs.context.values` at execution time. An empty context
+        // would fail with `Missing context entry for ...`. The handler is
+        // expected to fetch the choice context from the token-standard
+        // registry and pass it in; if it didn't, the wrapper falls back to
+        // an empty record (legacy callers, e.g. tests).
+        ProposalType::Transfer(t) => (
+            ProposalPackage::GovernanceTokenCustody,
+            Transfer::MODULE,
+            Transfer::ENTITY,
+            proposal_create_arguments(
+                &TransferWithContext {
+                    transfer: t,
+                    sender: governance_party,
+                    context: transfer_choice_context,
+                    validity,
                 },
+                governance_party,
+                proposer,
             )
-        }
-        ProposalType::AcceptTransfer {
-            transfer_instruction_cid,
-        } => {
-            // The Daml `TransferInstruction_Accept` choice (invoked through
-            // `AcceptTransferProposal`) looks up
-            // `utility.digitalasset.com/transfer-rule` (and friends) in
-            // `extraArgs.context.values` at execution time. An empty context
-            // would fail with `Missing context entry for
-            // utility.digitalasset.com/transfer-rule`. The handler is
-            // expected to fetch the choice context from the token-standard
-            // registry and pass it in; if it didn't, fall back to an empty
-            // record (legacy callers, e.g. tests).
-            let extra_args = match transfer_choice_context {
-                Some(ctx) => make_extra_args_from_context(ctx)?,
-                None => make_empty_extra_args(),
-            };
-            (
-                ProposalPackage::GovernanceTokenCustody,
-                "Governance.TokenCustody.AcceptTransfer",
-                "AcceptTransferProposal",
-                Record {
-                    record_id: None,
-                    fields: vec![
-                        field("governanceParty", make_party(governance_party)),
-                        field("proposer", make_party(proposer)),
-                        field(
-                            "transferInstructionCid",
-                            make_contract_id(transfer_instruction_cid),
-                        ),
-                        field("extraArgs", extra_args),
-                    ],
+            .map_err(anyhow::Error::from)?,
+        ),
+        ProposalType::AcceptTransfer(a) => (
+            ProposalPackage::GovernanceTokenCustody,
+            AcceptTransfer::MODULE,
+            AcceptTransfer::ENTITY,
+            proposal_create_arguments(
+                &AcceptTransferWithContext {
+                    accept: a,
+                    context: transfer_choice_context,
                 },
+                governance_party,
+                proposer,
             )
-        }
+            .map_err(anyhow::Error::from)?,
+        ),
         ProposalType::GenericVote(p) => (
             ProposalPackage::GovernanceCore,
             GenericVote::MODULE,
@@ -968,8 +870,6 @@ pub fn build_execute_domain_action_arg(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use super::*;
     use common::api::RequiredClaim;
 
@@ -978,26 +878,9 @@ mod tests {
         server::types::InstrumentIssuerCredentials,
     };
 
-    #[test]
-    fn transfer_validity_from_now_bounds_the_window() {
-        let now = 1_700_000_000_000_000;
-        let v = TransferValidity::from_now(now);
-        assert_eq!(v.requested_at_micros, now);
-        assert_eq!(
-            v.execute_before_micros,
-            now + TRANSFER_VALIDITY_WINDOW_MICROS
-        );
-        // The window is finite (24h), not the old effectively-infinite deadline.
-        assert!(v.execute_before_micros < TRANSFER_EXECUTE_BEFORE_MICROS);
-    }
-
-    #[test]
-    fn transfer_validity_from_now_clamps_to_max_daml_time() {
-        // A near-max `now` must neither panic on overflow nor serialize past the
-        // module's max Daml `Time`; it clamps to TRANSFER_EXECUTE_BEFORE_MICROS.
-        let v = TransferValidity::from_now(i64::MAX - 5);
-        assert_eq!(v.execute_before_micros, TRANSFER_EXECUTE_BEFORE_MICROS);
-    }
+    // `transfer_validity_from_now_bounds_the_window` and
+    // `transfer_validity_from_now_clamps_to_max_daml_time` moved to
+    // `decman_lib::framework::encode::tests` with `TransferValidity` itself.
 
     // ---- ProposalType wire-shape assertions ----
     //
@@ -1033,23 +916,12 @@ mod tests {
         DamlDecimal::parse(s).expect("valid decimal literal")
     }
 
-    /// Unwrap a `Variant` value into `(constructor, inner)`.
-    fn as_variant(value: &Value) -> (&str, &Value) {
-        match &value.sum {
-            Some(value::Sum::Variant(v)) => match v.value.as_deref() {
-                Some(inner) => (v.constructor.as_str(), inner),
-                None => panic!("variant {} has no inner value", v.constructor),
-            },
-            other => panic!("expected Variant, got {other:?}"),
-        }
-    }
-
     #[test]
     fn build_proposal_setup_cc_preapproval_shape() -> Result {
-        let proposal = ProposalType::SetupCcPreapproval {
+        let proposal = ProposalType::SetupCcPreapproval(SetupCcPreapproval {
             provider: party_id(),
             expected_dso: party_id(),
-        };
+        });
         let (package, module, entity, record) =
             build_proposal_create_args(&gov_id(), &proposer_id(), &proposal, None, None)?;
 
@@ -1108,75 +980,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn build_proposal_transfer_shape_and_nested_records() -> Result {
-        let proposal = ProposalType::Transfer {
-            transfer_factory_cid: "tfc".to_string(),
-            expected_admin: party_id(),
-            receiver: party_id(),
-            amount: DamlDecimal::parse("1.5")?,
-            instrument_id: InstrumentId {
-                admin: "admin::ns".to_string(),
-                id: "instr-1".to_string(),
-            },
-            input_holding_cids: vec!["hc-1".to_string()],
-            validity_window_hours: None,
-        };
-        let (package, module, entity, record) =
-            build_proposal_create_args(&gov_id(), &proposer_id(), &proposal, None, None)?;
-
-        assert_eq!(package, ProposalPackage::GovernanceTokenCustody);
-        assert_eq!(module, "Governance.TokenCustody.TransferProposal");
-        assert_eq!(entity, "TransferProposal");
-        assert_eq!(
-            owned_labels(&record),
-            [
-                "governanceParty",
-                "proposer",
-                "transferFactoryCid",
-                "expectedAdmin",
-                "transfer",
-                "extraArgs",
-            ]
-        );
-
-        // Descend into the nested `transfer` record.
-        let transfer = as_record(field_value(&record, "transfer"));
-        assert_eq!(
-            owned_labels(transfer),
-            [
-                "sender",
-                "receiver",
-                "amount",
-                "instrumentId",
-                "requestedAt",
-                "executeBefore",
-                "inputHoldingCids",
-                "meta",
-            ]
-        );
-
-        // Nested `instrumentId` record.
-        let instrument_id = as_record(field_value(transfer, "instrumentId"));
-        assert_eq!(owned_labels(instrument_id), ["admin", "id"]);
-
-        // Placeholder timestamps must be the exposed constants so propose-time
-        // and execute-time payloads match (registrar resolves the context for
-        // these exact choice arguments).
-        assert!(matches!(
-            field_value(transfer, "requestedAt").sum,
-            Some(value::Sum::Timestamp(TRANSFER_REQUESTED_AT_MICROS)),
-        ));
-        assert!(matches!(
-            field_value(transfer, "executeBefore").sum,
-            Some(value::Sum::Timestamp(TRANSFER_EXECUTE_BEFORE_MICROS)),
-        ));
-        assert!(matches!(
-            field_value(transfer, "amount").sum,
-            Some(value::Sum::Numeric(_)),
-        ));
-        Ok(())
-    }
+    // `build_proposal_transfer_shape_and_nested_records` moved to
+    // `decman_lib::catalog::proposals::custody::tests`, driven through
+    // `TransferWithContext` directly — `Transfer` no longer implements
+    // `DamlProtoEncode` on its own.
 
     #[test]
     fn build_proposal_mint_and_burn_shapes_differ_only_in_party_label() -> Result {
@@ -1432,70 +1239,10 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn build_proposal_accept_transfer_shape_and_context_branches() -> Result {
-        let proposal = ProposalType::AcceptTransfer {
-            transfer_instruction_cid: "tic".to_string(),
-        };
-
-        // ---- No choice context: context.values is an EMPTY TextMap ----
-        let (package, module, entity, record) =
-            build_proposal_create_args(&gov_id(), &proposer_id(), &proposal, None, None)?;
-        assert_eq!(package, ProposalPackage::GovernanceTokenCustody);
-        assert_eq!(module, "Governance.TokenCustody.AcceptTransfer");
-        assert_eq!(entity, "AcceptTransferProposal");
-        assert_eq!(
-            owned_labels(&record),
-            [
-                "governanceParty",
-                "proposer",
-                "transferInstructionCid",
-                "extraArgs",
-            ]
-        );
-
-        // extraArgs -> context -> values must be a TextMap (NOT a GenMap),
-        // empty, when no context was supplied.
-        let extra_args = as_record(field_value(&record, "extraArgs"));
-        let context = as_record(field_value(extra_args, "context"));
-        let values = field_value(context, "values");
-        match &values.sum {
-            Some(value::Sum::TextMap(tm)) => assert!(
-                tm.entries.is_empty(),
-                "empty-context branch must yield an empty TextMap",
-            ),
-            other => panic!("expected empty TextMap for context.values, got {other:?}"),
-        }
-
-        // ---- With a choice context: one keyed AV_ContractId entry ----
-        let key = "utility.digitalasset.com/transfer-rule".to_string();
-        let ctx = ChoiceContext {
-            values: HashMap::from([(
-                key.clone(),
-                ContextValue::ContractId("rule-cid".to_string()),
-            )]),
-        };
-        let (_, _, _, record) =
-            build_proposal_create_args(&gov_id(), &proposer_id(), &proposal, Some(&ctx), None)?;
-        let extra_args = as_record(field_value(&record, "extraArgs"));
-        let context = as_record(field_value(extra_args, "context"));
-        let values = field_value(context, "values");
-        match &values.sum {
-            Some(value::Sum::TextMap(tm)) => {
-                assert_eq!(tm.entries.len(), 1, "exactly one context entry");
-                let entry = &tm.entries[0];
-                assert_eq!(entry.key, key);
-                let entry_value = entry
-                    .value
-                    .as_ref()
-                    .unwrap_or_else(|| panic!("context entry has no value"));
-                let (ctor, _) = as_variant(entry_value);
-                assert_eq!(ctor, "AV_ContractId");
-            }
-            other => panic!("expected populated TextMap for context.values, got {other:?}"),
-        }
-        Ok(())
-    }
+    // `build_proposal_accept_transfer_shape_and_context_branches` moved to
+    // `decman_lib::catalog::proposals::custody::tests`, driven through
+    // `AcceptTransferWithContext` directly — `AcceptTransfer` no longer
+    // implements `DamlProtoEncode` on its own.
 
     #[test]
     fn build_proposal_offer_paid_credential_shape_and_billing_params() -> Result {
@@ -1618,13 +1365,13 @@ mod tests {
 
         let cases = vec![
             Case {
-                proposal: ProposalType::SetupTokenPreapproval {
+                proposal: ProposalType::SetupTokenPreapproval(SetupTokenPreapproval {
                     operator: party_id(),
                     instrument_admin: party_id(),
                     instrument_allowances: vec![InstrumentAllowance {
                         id: "allow-1".to_string(),
                     }],
-                },
+                }),
                 package: ProposalPackage::GovernanceTokenCustody,
                 module: "Governance.TokenCustody.SetupTokenPreapproval",
                 entity: "SetupTokenPreapprovalProposal",

@@ -15,6 +15,7 @@ use canton_proto_rs::com::{
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
     },
 };
+use decman_lib::catalog::proposals::custody::{AcceptTransfer, Transfer};
 use serde::Deserialize;
 
 use crate::{
@@ -1309,10 +1310,10 @@ pub async fn propose_action(
     // window defaults to 24h but the caller may override it per-transfer.
     let now_micros = chrono::Utc::now().timestamp_micros();
     let transfer_validity = match &body.proposal {
-        ProposalType::Transfer {
+        ProposalType::Transfer(Transfer {
             validity_window_hours: Some(hours),
             ..
-        } => action_serializer::TransferValidity::from_now_with_window(
+        }) => action_serializer::TransferValidity::from_now_with_window(
             now_micros,
             i64::from(*hours).saturating_mul(60 * 60 * 1_000_000),
         ),
@@ -1321,9 +1322,9 @@ pub async fn propose_action(
 
     let mut resolved_proposal = body.proposal.clone();
     let transfer_choice_context = match &mut resolved_proposal {
-        ProposalType::AcceptTransfer {
+        ProposalType::AcceptTransfer(AcceptTransfer {
             transfer_instruction_cid,
-        } => match fetch_accept_transfer_context(
+        }) => match fetch_accept_transfer_context(
             &data.config,
             Some(token.clone()),
             data.config.canton.network,
@@ -1342,14 +1343,14 @@ pub async fn propose_action(
                 });
             }
         },
-        ProposalType::Transfer {
+        ProposalType::Transfer(Transfer {
             transfer_factory_cid,
             receiver,
             amount,
             instrument_id,
             input_holding_cids,
             ..
-        } if needs_registry_context(
+        }) if needs_registry_context(
             transfer_factory_cid,
             &instrument_id.admin,
             &party_id.to_string(),

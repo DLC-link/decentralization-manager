@@ -1,0 +1,103 @@
+---
+source: crates/decman-lib/src/catalog/proposals/custody.rs
+expression: "AcceptTransferWithContext\n{ accept: &accept, context: None, }.to_daml_proto().unwrap()"
+---
+Value {
+    sum: Some(
+        Record(
+            Record {
+                record_id: None,
+                fields: [
+                    RecordField {
+                        label: "transferInstructionCid",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    ContractId(
+                                        "ti-1",
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "extraArgs",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    Record(
+                                        Record {
+                                            record_id: None,
+                                            fields: [
+                                                RecordField {
+                                                    label: "context",
+                                                    value: Some(
+                                                        Value {
+                                                            sum: Some(
+                                                                Record(
+                                                                    Record {
+                                                                        record_id: None,
+                                                                        fields: [
+                                                                            RecordField {
+                                                                                label: "values",
+                                                                                value: Some(
+                                                                                    Value {
+                                                                                        sum: Some(
+                                                                                            TextMap(
+                                                                                                TextMap {
+                                                                                                    entries: [],
+                                                                                                },
+                                                                                            ),
+                                                                                        ),
+                                                                                    },
+                                                                                ),
+                                                                            },
+                                                                        ],
+                                                                    },
+                                                                ),
+                                                            ),
+                                                        },
+                                                    ),
+                                                },
+                                                RecordField {
+                                                    label: "meta",
+                                                    value: Some(
+                                                        Value {
+                                                            sum: Some(
+                                                                Record(
+                                                                    Record {
+                                                                        record_id: None,
+                                                                        fields: [
+                                                                            RecordField {
+                                                                                label: "values",
+                                                                                value: Some(
+                                                                                    Value {
+                                                                                        sum: Some(
+                                                                                            TextMap(
+                                                                                                TextMap {
+                                                                                                    entries: [],
+                                                                                                },
+                                                                                            ),
+                                                                                        ),
+                                                                                    },
+                                                                                ),
+                                                                            },
+                                                                        ],
+                                                                    },
+                                                                ),
+                                                            ),
+                                                        },
+                                                    ),
+                                                },
+                                            ],
+                                        },
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                ],
+            },
+        ),
+    ),
+}

@@ -8,6 +8,9 @@ use common::api::{
     PartyCredentialRequirement, RequiredClaim,
 };
 use decman_lib::catalog::proposals::core::GenericVote;
+use decman_lib::catalog::proposals::custody::{
+    AcceptTransfer, SetupCcPreapproval, SetupTokenPreapproval, Transfer,
+};
 use decman_lib::catalog::proposals::utility::{
     CreateDelegatedBatchedMarkersProxy, CreateProviderServiceRequest, CreateUserServiceRequest,
     ProvisionProviderService,
@@ -176,16 +179,16 @@ fn all_action_fixtures() -> Vec<ActionType> {
 /// One populated instance per `ProposalType` variant (29), every Option Some.
 fn all_proposal_fixtures() -> Vec<ProposalType> {
     vec![
-        ProposalType::SetupCcPreapproval {
+        ProposalType::SetupCcPreapproval(SetupCcPreapproval {
             provider: cid("prov"),
             expected_dso: cid("dso"),
-        },
-        ProposalType::SetupTokenPreapproval {
+        }),
+        ProposalType::SetupTokenPreapproval(SetupTokenPreapproval {
             operator: cid("op"),
             instrument_admin: cid("iadmin"),
             instrument_allowances: vec![InstrumentAllowance { id: "TOK".into() }],
-        },
-        ProposalType::Transfer {
+        }),
+        ProposalType::Transfer(Transfer {
             transfer_factory_cid: "00tf".into(),
             expected_admin: cid("iadmin"),
             receiver: cid("recv"),
@@ -193,10 +196,10 @@ fn all_proposal_fixtures() -> Vec<ProposalType> {
             instrument_id: instrument(),
             input_holding_cids: vec!["00hold".into()],
             validity_window_hours: Some(48),
-        },
-        ProposalType::AcceptTransfer {
+        }),
+        ProposalType::AcceptTransfer(AcceptTransfer {
             transfer_instruction_cid: "00ti".into(),
-        },
+        }),
         ProposalType::GenericVote(GenericVote {
             description: "a vote".into(),
         }),
@@ -361,12 +364,12 @@ fn all_proposal_fixtures() -> Vec<ProposalType> {
 /// fields None/empty — pins the `skip_serializing_if` behavior.
 fn minimal_option_fixtures() -> Vec<ProposalType> {
     vec![
-        ProposalType::SetupTokenPreapproval {
+        ProposalType::SetupTokenPreapproval(SetupTokenPreapproval {
             operator: cid("op"),
             instrument_admin: cid("iadmin"),
             instrument_allowances: vec![],
-        },
-        ProposalType::Transfer {
+        }),
+        ProposalType::Transfer(Transfer {
             transfer_factory_cid: "".into(),
             expected_admin: cid("iadmin"),
             receiver: cid("recv"),
@@ -374,7 +377,7 @@ fn minimal_option_fixtures() -> Vec<ProposalType> {
             instrument_id: instrument(),
             input_holding_cids: vec![],
             validity_window_hours: None,
-        },
+        }),
         ProposalType::SetProviderAppRewardBeneficiaries {
             instrument_configuration_cid: "00icc".into(),
             provider_app_reward_beneficiaries: None,
