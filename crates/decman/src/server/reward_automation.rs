@@ -561,6 +561,15 @@ static EXPIRY_READS: LazyLock<IntCounterVec> = LazyLock::new(|| {
     .expect("metric name is a unique literal")
 });
 
+static AUTH_UNREGISTERED: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    prometheus::register_int_counter_vec!(
+        "decman_reward_auth_unregistered_total",
+        "Passes that found no auth registry entry for a decparty this node holds credentials for.",
+        &["decparty"]
+    )
+    .expect("metric name is a unique literal")
+});
+
 static OLDEST_EXPIRES_IN: LazyLock<GaugeVec> = LazyLock::new(|| {
     prometheus::register_gauge_vec!(
         "decman_reward_oldest_unassigned_expires_in_seconds",
@@ -579,6 +588,7 @@ pub(crate) fn register_metrics() {
     LazyLock::force(&ZERO_ASSIGNED);
     LazyLock::force(&SWEEP_FAILED);
     LazyLock::force(&EXPIRY_READS);
+    LazyLock::force(&AUTH_UNREGISTERED);
     LazyLock::force(&OLDEST_EXPIRES_IN);
 }
 
@@ -592,6 +602,7 @@ fn ensure_outcome_series(label: &str) {
         &*ZERO_ASSIGNED,
         &*SWEEP_FAILED,
         &*EXPIRY_READS,
+        &*AUTH_UNREGISTERED,
     ] {
         counter.with_label_values(&[label]).inc_by(0);
     }
@@ -1278,13 +1289,15 @@ enum SweepOutcome {
     /// to be served (it holds a row in `party_credentials`), so this is an
     /// error condition rather than the automation being off for it.
     CredentialsUnavailable,
-    /// This node cannot obtain credentials for this decparty at all, so it can
-    /// never refresh its backlog reading. Distinct from `CredentialsUnavailable`,
-    /// which is one sweep's token failure and cures itself: this one persists
-    /// until the auth registry is rebuilt, so a remembered expiry would count
-    /// down to zero on a reading nobody can refresh and fire both expiry rules
-    /// for a decparty no longer served.
-    Unserved,
+    /// The auth registry holds no entry for this decparty, so this node cannot
+    /// read its backlog at all. `AuthRegistry::new` skips a party whose token
+    /// manager fails to initialise and leaves its `party_credentials` row in
+    /// place, so a bad Keycloak secret lands here on every pass until the
+    /// registry is rebuilt. Distinct from `CredentialsUnavailable`, which is one
+    /// pass's token failure and cures itself. A decparty this node genuinely
+    /// stopped serving loses its `party_credentials` row and `prune_unserved`
+    /// drops it, so this outcome is always a fault.
+    AuthUnregistered,
     /// This participant holds no rewards DAR, so it cannot host a delegation and
     /// the automation is off for it. Distinct from `Empty`, which asserts that
     /// nothing is left to save and drops the gauge series: this outcome asserts
@@ -1292,9 +1305,10 @@ enum SweepOutcome {
     Off,
 }
 
-/// Applies one sweep's outcome to the remembered timestamps. The four arms are
-/// asymmetrical on purpose. `CredentialsUnavailable` is treated like `Failed`: a
-/// token failure must not read as "safely off".
+/// Applies one sweep's outcome to the remembered timestamps. The arms are
+/// asymmetrical on purpose: dropping the series stops both expiry rules, so only
+/// an outcome that asserts the backlog is empty may do it. Every failure keeps
+/// the countdown falling, because a coupon nobody can read still expires.
 fn apply_sweep_outcome(
     oldest: &mut HashMap<CantonId, DateTime<Utc>>,
     decparty: &CantonId,
@@ -1304,14 +1318,16 @@ fn apply_sweep_outcome(
         SweepOutcome::Backlog(expires_at) => {
             oldest.insert(decparty.clone(), expires_at);
         }
-        // `Empty` asserts nothing is left to save. `Unserved` asserts only that
-        // this node cannot read the backlog, which is why it must not leave a
-        // countdown running either.
-        SweepOutcome::Empty | SweepOutcome::Unserved => {
+        // Only `Empty` asserts nothing is left to save, so only `Empty` may drop
+        // the series.
+        SweepOutcome::Empty => {
             oldest.remove(decparty);
             let _ = OLDEST_EXPIRES_IN.remove_label_values(&[&decparty.to_string()]);
         }
-        SweepOutcome::Failed | SweepOutcome::CredentialsUnavailable | SweepOutcome::Off => {}
+        SweepOutcome::Failed
+        | SweepOutcome::CredentialsUnavailable
+        | SweepOutcome::AuthUnregistered
+        | SweepOutcome::Off => {}
     }
 }
 
@@ -1332,7 +1348,9 @@ fn prune_unserved(oldest: &mut HashMap<CantonId, DateTime<Utc>>, served: &[Canto
 /// `CouponReassignmentDelegation` (the enablement signal) naming this node's
 /// member party as an assigner. Credentials being unavailable is a distinct
 /// outcome (`SweepOutcome::CredentialsUnavailable`): unlike the two enablement
-/// no-ops, it is not this decparty's automation being switched off.
+/// no-ops, it is not this decparty's automation being switched off. A missing
+/// registry entry is a third (`SweepOutcome::AuthUnregistered`), and it persists
+/// where a token failure cures itself.
 async fn run_once_for_party(
     data: &actix_web::web::Data<AppState>,
     decparty: &CantonId,
@@ -1347,16 +1365,21 @@ async fn run_once_for_party(
             tracing::warn!(%decparty, "party credentials unavailable for reward sweep");
             return Ok(SweepOutcome::CredentialsUnavailable);
         }
-        // No auth configured, or a party the registry does not know. The registry
-        // is rebuilt when party config changes, so a decparty that read a backlog
-        // earlier can land here and stay. Keeping its countdown would fire both
-        // expiry rules forever on a reading nothing can refresh.
+        // This node holds a `party_credentials` row for the decparty and the auth
+        // registry has no entry for it, so every pass lands here until the
+        // registry is rebuilt. The coupons keep expiring meanwhile, so the
+        // countdown stays and a counter carries the fault: a decparty whose auth
+        // failed at boot never read a backlog, so it has no gauge series for a
+        // rule to fire on.
         Ok(None) => {
+            AUTH_UNREGISTERED
+                .with_label_values(&[&decparty.to_string()])
+                .inc();
             tracing::warn!(
                 %decparty,
-                "no auth registered for this decparty; dropping its expiry countdown"
+                "no auth registered for this decparty; its coupons will expire unassigned"
             );
-            return Ok(SweepOutcome::Unserved);
+            return Ok(SweepOutcome::AuthUnregistered);
         }
     };
     // Enablement: an active delegation. None => off (no-op).
@@ -2192,7 +2215,7 @@ mod tests {
     #[test]
     fn the_outcome_counters_read_zero_before_their_first_event() {
         // A dashboard cannot tell a missing family from a node that never failed,
-        // so a served decparty exports all five at zero from its first sweep.
+        // so a served decparty exports all six at zero from its first sweep.
         // The read counter needs this most: a node whose sweep interval is
         // shorter than its read interval never increments it at all.
         register_metrics();
@@ -2206,6 +2229,7 @@ mod tests {
             "decman_reward_sweep_zero_assigned_total",
             "decman_reward_sweep_failed_total",
             "decman_reward_expiry_read_total",
+            "decman_reward_auth_unregistered_total",
         ] {
             let family = families
                 .iter()
@@ -2315,13 +2339,13 @@ mod tests {
     }
 
     #[test]
-    fn losing_auth_for_a_decparty_drops_its_countdown() {
-        // The auth registry is rebuilt when party config changes, so a decparty
-        // that read a backlog earlier can stop resolving to credentials and stay
-        // that way. `prune_unserved` cannot catch it, because that keys on the
-        // party_credentials rows, which still exist. Left alone, the remembered
-        // expiry counts down to zero and fires both expiry rules on a reading
-        // nothing can refresh.
+    fn losing_auth_for_a_decparty_keeps_its_countdown() {
+        // `AuthRegistry::new` skips a party whose token manager fails to
+        // initialise and leaves its `party_credentials` row alone, so a bad
+        // Keycloak secret puts a decparty in the loop's party list and out of the
+        // registry until a restart. `prune_unserved` cannot catch it, because that
+        // keys on the rows, which still exist. The coupons expire meanwhile, so
+        // both failures have to keep the countdown falling.
         let decparty = CantonId::parse(BOB).expect("BOB is a valid canton id");
         let mut oldest = HashMap::new();
         oldest.insert(decparty.clone(), dt("2026-07-20T18:00:00Z"));
@@ -2329,13 +2353,13 @@ mod tests {
         apply_sweep_outcome(&mut oldest, &decparty, SweepOutcome::CredentialsUnavailable);
         assert!(
             oldest.contains_key(&decparty),
-            "one sweep's token failure is transient, so the countdown keeps running"
+            "one pass's token failure is transient, so the countdown keeps running"
         );
 
-        apply_sweep_outcome(&mut oldest, &decparty, SweepOutcome::Unserved);
+        apply_sweep_outcome(&mut oldest, &decparty, SweepOutcome::AuthUnregistered);
         assert!(
-            !oldest.contains_key(&decparty),
-            "no auth at all means the backlog is unreadable, so the countdown must go"
+            oldest.contains_key(&decparty),
+            "a missing registry entry does not empty the backlog, so the countdown stays"
         );
     }
 
