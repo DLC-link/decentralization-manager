@@ -712,12 +712,59 @@ fn build_party_to_participant_request(
     }
 }
 
+/// Build a decentralized-namespace query for one exact namespace.
+///
+/// An empty namespace enumerates the entire synchronizer. That is prohibitively
+/// expensive on mainnet, so callers must first discover the locally relevant
+/// party IDs and query their namespaces individually.
+fn build_decentralized_namespace_request(
+    synchronizer_id: &str,
+    namespace: &str,
+) -> ListDecentralizedNamespaceDefinitionRequest {
+    debug_assert!(!namespace.is_empty());
+    ListDecentralizedNamespaceDefinitionRequest {
+        base_query: Some(BaseQuery {
+            store: Some(StoreId {
+                store: Some(store_id::Store::Synchronizer(Synchronizer {
+                    kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.to_string())),
+                })),
+            }),
+            proposals: false,
+            operation: 0,
+            time_query: Some(base_query::TimeQuery::HeadState(())),
+            filter_signed_key: String::new(),
+            protocol_version: None,
+            client_version: None,
+        }),
+        filter_namespace: namespace.to_string(),
+    }
+}
+
+/// Return the configured decentralized party IDs matching the optional prefix.
+///
+/// Party credentials are authoritative for an initialized node and let us use
+/// exact party filters instead of asking Canton to scan every party hosted by
+/// this participant.
+fn configured_party_filters(
+    party_credentials: &[PartyCredentials],
+    prefix_filter: Option<&str>,
+) -> Vec<String> {
+    let mut parties: Vec<_> = party_credentials
+        .iter()
+        .map(|credentials| credentials.dec_party_id.to_string())
+        .filter(|party_id| prefix_filter.is_none_or(|prefix| party_id.starts_with(prefix)))
+        .collect();
+    parties.sort();
+    parties.dedup();
+    parties
+}
+
 /// Fetch decentralized parties from Canton topology and ledger APIs
 pub async fn fetch_decentralized_parties(
     config: &NodeConfig,
     prefix_filter: Option<&str>,
     auth: Option<WorkflowAuth>,
-    _party_credentials: &[PartyCredentials], // TODO: remove this parameter, packages are now hardcoded
+    party_credentials: &[PartyCredentials],
 ) -> Result<DecentralizedPartiesResponse> {
     let channel = config.admin_channel().await?;
 
@@ -728,7 +775,59 @@ pub async fn fetch_decentralized_parties(
 
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
 
-    // Get all namespace keys from this participant
+    // Prefer exact configured party IDs. On an uninitialized node there are no
+    // credentials yet, so fall back to participant-scoped discovery.
+    let party_filters: Vec<Option<String>> = if party_credentials.is_empty() {
+        vec![prefix_filter.map(str::to_string)]
+    } else {
+        configured_party_filters(party_credentials, prefix_filter)
+            .into_iter()
+            .map(Some)
+            .collect()
+    };
+
+    let participant_id = config.participant_id().to_string();
+    let mut p2p_by_namespace = HashMap::new();
+    for party_filter in party_filters {
+        let response = topology_client
+            .list_party_to_participant(tonic::Request::new(build_party_to_participant_request(
+                &synchronizer_id,
+                party_filter.as_deref(),
+                &participant_id,
+            )))
+            .await?
+            .into_inner();
+
+        for result in response.results {
+            let Some(P2pItem::V30(party_mapping)) = result.item else {
+                continue;
+            };
+            let Some((_, namespace)) = party_mapping.party.rsplit_once("::") else {
+                continue;
+            };
+            if namespace.is_empty() {
+                continue;
+            }
+            p2p_by_namespace.insert(namespace.to_string(), party_mapping);
+        }
+    }
+
+    // Query only the exact decentralized namespaces belonging to locally
+    // hosted parties. Never issue an empty namespace filter on this path.
+    let mut namespaces: Vec<_> = p2p_by_namespace.keys().cloned().collect();
+    namespaces.sort();
+    let mut dns_results = Vec::new();
+    for namespace in namespaces {
+        let response = topology_client
+            .list_decentralized_namespace_definition(tonic::Request::new(
+                build_decentralized_namespace_request(&synchronizer_id, &namespace),
+            ))
+            .await?
+            .into_inner();
+        dns_results.extend(response.results);
+    }
+
+    // Get namespace keys only after completing the scoped topology lookup.
     let keys_response = vault_client
         .list_my_keys(tonic::Request::new(ListMyKeysRequest {
             filters: None,
@@ -751,56 +850,8 @@ pub async fn fetch_decentralized_parties(
         }
     }
 
-    // List all decentralized namespaces
-    let dns_response = topology_client
-        .list_decentralized_namespace_definition(tonic::Request::new(
-            ListDecentralizedNamespaceDefinitionRequest {
-                base_query: Some(BaseQuery {
-                    store: Some(StoreId {
-                        store: Some(store_id::Store::Synchronizer(Synchronizer {
-                            kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.clone())),
-                        })),
-                    }),
-                    proposals: false,
-                    operation: 0,
-                    time_query: Some(base_query::TimeQuery::HeadState(())),
-                    filter_signed_key: String::new(),
-                    protocol_version: None,
-                    client_version: None,
-                }),
-                filter_namespace: String::new(),
-            },
-        ))
-        .await?
-        .into_inner();
-
-    // Query P2P mappings, scoped to parties hosted on this participant — see
-    // `build_party_to_participant_request` for why the participant filter matters.
-    let p2p_response = topology_client
-        .list_party_to_participant(tonic::Request::new(build_party_to_participant_request(
-            &synchronizer_id,
-            prefix_filter,
-            &config.participant_id().to_string(),
-        )))
-        .await?
-        .into_inner();
-
-    // Build a map of namespace -> P2P item for quick lookup
-    let p2p_by_namespace: HashMap<String, _> = p2p_response
-        .results
-        .into_iter()
-        .filter_map(|r| {
-            let Some(P2pItem::V30(p)) = r.item else {
-                return None;
-            };
-            let ns = p.party.rsplit_once("::")?.1.to_string();
-            Some((ns, p))
-        })
-        .collect();
-
     // Filter to parties where this participant is a member
-    let my_parties: Vec<_> = dns_response
-        .results
+    let my_parties: Vec<_> = dns_results
         .into_iter()
         .filter_map(|result| {
             let item = result.item?;
@@ -1373,6 +1424,46 @@ mod tests {
 
         assert_eq!(request.filter_participant, "participant::abc123");
         assert_eq!(request.filter_party, "alice");
+    }
+
+    #[test]
+    fn decentralized_namespace_request_uses_exact_namespace_filter() {
+        let namespace = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
+        let request = build_decentralized_namespace_request("sync::physical", namespace);
+
+        assert_eq!(request.filter_namespace, namespace);
+    }
+
+    #[test]
+    fn configured_party_filters_are_exact_deduplicated_and_prefix_scoped() -> anyhow::Result<()> {
+        let namespace_a = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
+        let namespace_b = "1220d5010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5893";
+        let credentials = |party: &str, namespace: &str| -> anyhow::Result<PartyCredentials> {
+            Ok(PartyCredentials {
+                dec_party_id: CantonId::parse(&format!("{party}::{namespace}"))?,
+                member_party_id: CantonId::parse(&format!("member::{namespace}"))?,
+                user_id: "user".to_string(),
+                keycloak: Default::default(),
+                auth0: None,
+                packages: Default::default(),
+            })
+        };
+        let cbtc = credentials("cbtc-network", namespace_a)?;
+        let parties = vec![
+            credentials("other-network", namespace_b)?,
+            cbtc.clone(),
+            cbtc,
+        ];
+
+        assert_eq!(
+            configured_party_filters(&parties, Some("cbtc-network")),
+            vec![format!("cbtc-network::{namespace_a}")]
+        );
+        assert_eq!(
+            configured_party_filters(&parties, Some("missing")),
+            Vec::<String>::new()
+        );
+        Ok(())
     }
 
     /// Every hint must name something to go and look at. The failure this
