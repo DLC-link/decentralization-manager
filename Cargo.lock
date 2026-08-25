@@ -1891,6 +1891,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "decman-lib"
+version = "0.1.0"
+dependencies = [
+ "canton-proto-rs",
+ "chrono",
+ "common 0.1.0",
+ "common 0.6.1",
+ "insta",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tracing",
+ "ts-rs",
+ "utoipa",
+]
+
+[[package]]
 name = "decman-wallet"
 version = "0.1.0"
 dependencies = [

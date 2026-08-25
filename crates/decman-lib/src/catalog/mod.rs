@@ -1,0 +1,1 @@
+//! DecMan's protocol content.
