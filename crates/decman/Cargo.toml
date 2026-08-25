@@ -35,7 +35,7 @@ test-mode = []
 # Derives `ts_rs::TS` on the server-only wire DTOs (governance/decimal cluster,
 # node config) and pulls in `common/typegen`, so the `gen-types` binary can emit
 # the frontend's TypeScript. Off by default; only the generation build enables it.
-typegen = ["dep:ts-rs", "common/typegen"]
+typegen = ["dep:ts-rs", "common/typegen", "decman-lib/typegen"]
 
 [dependencies]
 actix-cors = { workspace = true }
@@ -87,6 +87,7 @@ canton-common = { workspace = true }
 canton-proto-rs = { workspace = true }
 canton-registry = { workspace = true }
 common = { workspace = true, features = ["openapi"] }
+decman-lib = { workspace = true, features = ["openapi"] }
 keycloak = { workspace = true }
 
 [dev-dependencies]

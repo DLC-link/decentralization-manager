@@ -1827,6 +1827,7 @@ dependencies = [
  "clap",
  "common 0.1.0",
  "common 0.6.1",
+ "decman-lib",
  "decman-wallet",
  "dotenvy",
  "ed25519-dalek",
