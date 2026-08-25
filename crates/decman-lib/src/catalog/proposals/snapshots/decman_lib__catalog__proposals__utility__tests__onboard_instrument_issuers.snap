@@ -1,0 +1,56 @@
+---
+source: crates/decman-lib/src/catalog/proposals/utility.rs
+expression: "OnboardInstrumentIssuers\n{\n    instrument_configuration_cid: \"00icc\".to_string(), instrument_issuers:\n    vec![cid(\"iss1\"), cid(\"iss2\")],\n}.to_daml_proto().unwrap()"
+---
+Value {
+    sum: Some(
+        Record(
+            Record {
+                record_id: None,
+                fields: [
+                    RecordField {
+                        label: "instrumentConfigurationCid",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    ContractId(
+                                        "00icc",
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "instrumentIssuers",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    List(
+                                        List {
+                                            elements: [
+                                                Value {
+                                                    sum: Some(
+                                                        Party(
+                                                            "iss1::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+                                                        ),
+                                                    ),
+                                                },
+                                                Value {
+                                                    sum: Some(
+                                                        Party(
+                                                            "iss2::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+                                                        ),
+                                                    ),
+                                                },
+                                            ],
+                                        },
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                ],
+            },
+        ),
+    ),
+}

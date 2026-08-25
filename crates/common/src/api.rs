@@ -784,7 +784,7 @@ pub struct Claim {
 /// One claim a `PartyCredentialRequirement` demands: a credential's claims
 /// must contain this `(property, value)` pair. The Daml side is a
 /// `DA.Types:Tuple2 Text Text`; the wire shape names the halves instead.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct RequiredClaim {
@@ -794,7 +794,7 @@ pub struct RequiredClaim {
 
 /// A credential requirement on a party: `issuer` must have issued the party
 /// a credential whose claims contain every entry of `required_claims`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct PartyCredentialRequirement {
@@ -805,7 +805,7 @@ pub struct PartyCredentialRequirement {
 
 /// One offboarded instrument issuer and the credentials to revoke for it. The
 /// Daml side checks that every claim on each credential names this issuer.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct InstrumentIssuerCredentials {
@@ -841,7 +841,7 @@ pub struct InstrumentAllowance {
 /// Mirrors `Utility.Registry.Holding.V0.Types.InstrumentIdentifier` — used to
 /// record standard market symbols (e.g. Ticker, ISIN) alongside the primary
 /// `instrument_id_text` UUID.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct InstrumentIdentifier {

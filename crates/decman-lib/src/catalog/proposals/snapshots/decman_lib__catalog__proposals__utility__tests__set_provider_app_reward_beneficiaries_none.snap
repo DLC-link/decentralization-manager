@@ -1,0 +1,41 @@
+---
+source: crates/decman-lib/src/catalog/proposals/utility.rs
+expression: "SetProviderAppRewardBeneficiaries\n{\n    instrument_configuration_cid: \"00icc\".to_string(),\n    provider_app_reward_beneficiaries: None,\n}.to_daml_proto().unwrap()"
+---
+Value {
+    sum: Some(
+        Record(
+            Record {
+                record_id: None,
+                fields: [
+                    RecordField {
+                        label: "instrumentConfigurationCid",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    ContractId(
+                                        "00icc",
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "providerAppRewardBeneficiaries",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    Optional(
+                                        Optional {
+                                            value: None,
+                                        },
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                ],
+            },
+        ),
+    ),
+}

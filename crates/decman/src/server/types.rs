@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     sync::{Arc, RwLock as StdRwLock},
 };
 
@@ -25,19 +25,18 @@ pub use common::api::{
     DecentralizedPartiesResponse, DeclineInvitationPayload, DisclosedContractInput,
     DiscoverMemberPartyRequest, DiscoverMemberPartyResponse, ErrorResponse,
     ExpireConfirmationRequest, ExternalPartiesResponse, ExternalPartyInfo, GovernanceState,
-    GovernanceStateResponse, GovernanceType, GrantRightsRequest, GrantRightsResponse, InstrumentId,
-    InstrumentIdentifier, InstrumentInfo, InstrumentIssuerCredentials, InstrumentsResponse,
-    InvitationActionRequest, KeyStatusResponse, KickInvitePayload, KickRequest, KnownMember,
-    KnownMembersResponse, MessageResponse, MissingEdgeKind, MissingPeerEdge, NetworkInfo,
-    OnboardingInvitePayload, OnboardingMeshErrorResponse, OnboardingRequest, OperatorInfo,
-    PartyAuthStatus, PartyConfigRequest, PartyConfigResponse, PartyCredentialRequirement,
-    PendingInvitationsResponse, ProviderConfigurationInfo, ProviderConfigurationsResponse,
-    ProviderServiceInfo, ProviderServicesResponse, RegistrarServiceInfo,
-    RegistrarServiceRequestInfo, RegistrarServiceRequestsResponse, RegistrarServicesResponse,
-    ResponseSource, RightsStatus, SuccessResponse, TenantOnboardRequest, TenantOnboardResponse,
-    TenantPrepareRequest, TenantPrepareResponse, TransferFactoriesResponse, TransferFactoryInfo,
-    TransferPreapprovalsResponse, UserServiceInfo, UserServicesResponse, VaultInfo, VaultsResponse,
-    WorkflowResponse, WorkflowRunsResponse, WorkflowStatusResponse,
+    GovernanceStateResponse, GovernanceType, GrantRightsRequest, GrantRightsResponse,
+    InstrumentInfo, InstrumentsResponse, InvitationActionRequest, KeyStatusResponse,
+    KickInvitePayload, KickRequest, KnownMember, KnownMembersResponse, MessageResponse,
+    MissingEdgeKind, MissingPeerEdge, NetworkInfo, OnboardingInvitePayload,
+    OnboardingMeshErrorResponse, OnboardingRequest, OperatorInfo, PartyAuthStatus,
+    PartyConfigRequest, PartyConfigResponse, PendingInvitationsResponse, ProviderConfigurationInfo,
+    ProviderConfigurationsResponse, ProviderServiceInfo, ProviderServicesResponse,
+    RegistrarServiceInfo, RegistrarServiceRequestInfo, RegistrarServiceRequestsResponse,
+    RegistrarServicesResponse, ResponseSource, RightsStatus, SuccessResponse, TenantOnboardRequest,
+    TenantOnboardResponse, TenantPrepareRequest, TenantPrepareResponse, TransferFactoriesResponse,
+    TransferFactoryInfo, TransferPreapprovalsResponse, UserServiceInfo, UserServicesResponse,
+    VaultInfo, VaultsResponse, WorkflowResponse, WorkflowRunsResponse, WorkflowStatusResponse,
 };
 pub use common::types::{
     AuditLogEntry, AuthConfigResponse, ConnectionStatus, ContractInfo, DecentralizedParty,
@@ -50,7 +49,6 @@ pub use common::types::{
 // paths keep resolving unchanged.
 pub use decman_lib::catalog::types::{AppRewardBeneficiary, BillingParams, FarConfig, VaultLimits};
 use decman_lib::framework::Validate;
-use decman_lib::framework::validate::*;
 
 use crate::{canton_id::CantonId, noise::server::ActiveWorkflow};
 
@@ -339,9 +337,12 @@ pub use decman_lib::catalog::action::ActionType;
 // The protocol validators (`validate_threshold`, `validate_timeout`,
 // `validate_unique_issuers`, `validate_self_issued_requirements_have_claims`,
 // `validate_future_micros`, `validate_positive_amount`,
-// `validate_beneficiary_weights`, `validate_reward_beneficiaries`) and
-// `BillingParams` now live in `decman-lib` (`framework::validate` /
-// `catalog::types`), imported and re-exported above.
+// `validate_beneficiary_weights`, `validate_reward_beneficiaries`) now live
+// only in `decman-lib` (`framework::validate`), called from each payload's
+// own `Validate` impl — every `ProposalType::validate` arm below just
+// delegates to `p.validate(&ctx)`, so this module no longer imports them
+// directly. `BillingParams` lives in `decman-lib` (`catalog::types`),
+// imported and re-exported above.
 
 /// Types of governance domain action proposals
 #[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
@@ -365,15 +366,7 @@ pub enum ProposalType {
     /// Run the full Utility-Registry onboarding in one vote. Flags control
     /// whether a `TransferRule` / `AllocationFactory` are created during the
     /// `RegistrarServiceRequest` accept.
-    SetupUtility {
-        provider_service_cid: String,
-        operator: CantonId,
-        instrument_id_text: String,
-        #[serde(default)]
-        additional_identifiers: Vec<InstrumentIdentifier>,
-        create_transfer_rule: bool,
-        create_allocation_factory: bool,
-    },
+    SetupUtility(decman_lib::catalog::proposals::utility::SetupUtility),
     /// Create a `ProviderServiceRequest` for a given `operator` and `provider`.
     CreateProviderServiceRequest(
         decman_lib::catalog::proposals::utility::CreateProviderServiceRequest,
@@ -382,11 +375,9 @@ pub enum ProposalType {
     CreateUserServiceRequest(decman_lib::catalog::proposals::utility::CreateUserServiceRequest),
     /// Set the provider-app reward beneficiaries on an `InstrumentConfiguration`.
     /// `providerAppRewardBeneficiaries = None` clears the current setting.
-    SetProviderAppRewardBeneficiaries {
-        instrument_configuration_cid: String,
-        #[serde(default)]
-        provider_app_reward_beneficiaries: Option<Vec<AppRewardBeneficiary>>,
-    },
+    SetProviderAppRewardBeneficiaries(
+        decman_lib::catalog::proposals::utility::SetProviderAppRewardBeneficiaries,
+    ),
     /// Create (or replace) the decparty's on-ledger CouponReassignmentDelegation.
     /// `prior_delegation` is the cid of the delegation being replaced (None for the first).
     SetupCouponReassignmentDelegation(
@@ -397,11 +388,7 @@ pub enum ProposalType {
         decman_lib::catalog::proposals::rewards::RevokeCouponReassignmentDelegation,
     ),
     /// Toggle result-contract emission on a `RegistrarService`.
-    SetEnableResultContracts {
-        registrar_service_cid: String,
-        #[serde(default)]
-        enable_result_contracts: Option<bool>,
-    },
+    SetEnableResultContracts(decman_lib::catalog::proposals::utility::SetEnableResultContracts),
     /// Authorize the `operator` to create batched activity markers on behalf
     /// of the governance party via a `DelegatedBatchedMarkersProxy`.
     CreateDelegatedBatchedMarkersProxy(
@@ -421,16 +408,7 @@ pub enum ProposalType {
     /// Offer a mint of `amount` tokens to `recipient` via
     /// `AllocationFactory_OfferMint`. The resulting `MintOffer` is accepted
     /// later by the recipient, outside this plugin.
-    Mint {
-        allocation_factory_cid: String,
-        instrument_id: InstrumentId,
-        instrument_configuration_cid: String,
-        recipient: CantonId,
-        #[schema(value_type = String)]
-        #[cfg_attr(feature = "typegen", ts(type = "string"))]
-        amount: DamlDecimal,
-        description: String,
-    },
+    Mint(decman_lib::catalog::proposals::utility::Mint),
     /// Offer a free credential to a holder via the governance party's
     /// `UserService`. Wraps `UserService_OfferFreeCredential` from the
     /// Utility Credential App.
@@ -444,97 +422,43 @@ pub enum ProposalType {
     /// Offer a burn of `amount` tokens held by `holder` via
     /// `AllocationFactory_OfferBurn`. Holdings are supplied by the holder at
     /// `BurnOffer_Accept` time, not here.
-    Burn {
-        allocation_factory_cid: String,
-        instrument_id: InstrumentId,
-        instrument_configuration_cid: String,
-        holder: CantonId,
-        #[schema(value_type = String)]
-        #[cfg_attr(feature = "typegen", ts(type = "string"))]
-        amount: DamlDecimal,
-        description: String,
-    },
+    Burn(decman_lib::catalog::proposals::utility::Burn),
     /// Accept a holder-initiated `MintRequest` via `MintRequest_Accept`. The
     /// `MintRequest` must already exist on-ledger (typically created by the
     /// holder by exercising `AllocationFactory_RequestMint`).
-    AcceptMintRequest {
-        mint_request_cid: String,
-        instrument_configuration_cid: String,
-        /// Credential contract ids proving the mint holder meets the
-        /// instrument's issuer requirements. Empty for instruments without
-        /// issuer requirements.
-        #[serde(default)]
-        issuer_credential_cids: Vec<String>,
-        description: String,
-    },
+    AcceptMintRequest(decman_lib::catalog::proposals::utility::AcceptMintRequest),
     /// Accept a holder-initiated `BurnRequest` via `BurnRequest_Accept`. The
     /// `BurnRequest` must already exist on-ledger (typically created by the
     /// holder by exercising `AllocationFactory_RequestBurn`).
-    AcceptBurnRequest {
-        burn_request_cid: String,
-        instrument_configuration_cid: String,
-        /// Credential contract ids proving the burn holder meets the
-        /// instrument's issuer requirements. Empty for instruments without
-        /// issuer requirements.
-        #[serde(default)]
-        issuer_credential_cids: Vec<String>,
-        description: String,
-    },
+    AcceptBurnRequest(decman_lib::catalog::proposals::utility::AcceptBurnRequest),
     /// Create the provider decparty's `ProviderConfiguration` with
     /// credential requirements for registrars and holders. Executed once by
     /// the provider decparty at platform setup.
-    CreateProviderConfiguration {
-        provider_service_cid: String,
-        #[serde(default)]
-        registrar_requirements: Vec<PartyCredentialRequirement>,
-        #[serde(default)]
-        holder_requirements: Vec<PartyCredentialRequirement>,
-    },
+    CreateProviderConfiguration(
+        decman_lib::catalog::proposals::utility::CreateProviderConfiguration,
+    ),
     /// Create a `RegistrarServiceRequest` asking `provider` for registrar
     /// service, with the governance party as the registrar. The provider
     /// accepts later via `OnboardRegistrar` on its own decparty.
-    CreateRegistrarServiceRequest {
-        operator: CantonId,
-        provider: CantonId,
-        create_transfer_rule: bool,
-        create_allocation_factory: bool,
-    },
+    CreateRegistrarServiceRequest(
+        decman_lib::catalog::proposals::utility::CreateRegistrarServiceRequest,
+    ),
     /// Accept a `RegistrarServiceRequest` on the provider decparty: mint the
     /// registrar credentials the governance party can self-issue against the
     /// `ProviderConfiguration`'s registrar requirements, then accept the
     /// request in the same vote.
-    OnboardRegistrar {
-        provider_service_cid: String,
-        registrar_service_request_cid: String,
-        provider_configuration_cid: String,
-    },
+    OnboardRegistrar(decman_lib::catalog::proposals::utility::OnboardRegistrar),
     /// Create an `InstrumentConfiguration` on the registrar decparty and
     /// credential the initial instrument issuers against its issuer
     /// requirements. Executed once per instrument.
-    ProvisionInstrument {
-        registrar_service_cid: String,
-        instrument_id_text: String,
-        #[serde(default)]
-        additional_identifiers: Vec<InstrumentIdentifier>,
-        #[serde(default)]
-        issuer_requirements: Vec<PartyCredentialRequirement>,
-        #[serde(default)]
-        holder_requirements: Vec<PartyCredentialRequirement>,
-        #[serde(default)]
-        initial_instrument_issuers: Vec<CantonId>,
-    },
+    ProvisionInstrument(decman_lib::catalog::proposals::utility::ProvisionInstrument),
     /// Credential new instrument issuers against an existing
     /// `InstrumentConfiguration`'s issuer requirements.
-    OnboardInstrumentIssuers {
-        instrument_configuration_cid: String,
-        instrument_issuers: Vec<CantonId>,
-    },
+    OnboardInstrumentIssuers(decman_lib::catalog::proposals::utility::OnboardInstrumentIssuers),
     /// Revoke the credentials the governance party issued for instrument
     /// issuers, removing their issuing privileges. Each row names one issuer
     /// and lists that issuer's credentials.
-    OffboardInstrumentIssuers {
-        instrument_issuers: Vec<InstrumentIssuerCredentials>,
-    },
+    OffboardInstrumentIssuers(decman_lib::catalog::proposals::utility::OffboardInstrumentIssuers),
 }
 
 impl ProposalType {
@@ -582,78 +506,34 @@ impl ProposalType {
             ProposalType::AcceptExternalPartySetup(p) => {
                 p.validate(&ctx).map_err(|e| e.to_string())
             }
-            ProposalType::Mint { amount, .. } | ProposalType::Burn { amount, .. } => {
-                validate_positive_amount(amount, "amount").map_err(|e| e.to_string())
-            }
+            ProposalType::Mint(p) => p.validate(&ctx).map_err(|e| e.to_string()),
+            ProposalType::Burn(p) => p.validate(&ctx).map_err(|e| e.to_string()),
+            ProposalType::OfferFreeCredential(p) => p.validate(&ctx).map_err(|e| e.to_string()),
             ProposalType::OfferPaidCredential(p) => p.validate(&ctx).map_err(|e| e.to_string()),
-            ProposalType::SetProviderAppRewardBeneficiaries {
-                provider_app_reward_beneficiaries: Some(beneficiaries),
-                ..
-            } => validate_beneficiary_weights(beneficiaries).map_err(|e| e.to_string()),
-            // Mirrors the template's `ensure` guard: onboarding zero issuers
-            // does no work, and a duplicated issuer would mint two
-            // credentials sharing one id. Reject both with a 400 before the
-            // ledger sees the proposal.
-            ProposalType::OnboardInstrumentIssuers {
-                instrument_issuers, ..
-            } => {
-                if instrument_issuers.is_empty() {
-                    return Err("instrument_issuers must not be empty".to_string());
-                }
-                validate_unique_issuers(instrument_issuers, "instrument_issuers")
-                    .map_err(|e| e.to_string())
+            ProposalType::AcceptFreeCredential(p) => p.validate(&ctx).map_err(|e| e.to_string()),
+            ProposalType::SetupUtility(p) => p.validate(&ctx).map_err(|e| e.to_string()),
+            ProposalType::SetProviderAppRewardBeneficiaries(p) => {
+                p.validate(&ctx).map_err(|e| e.to_string())
             }
-            ProposalType::ProvisionInstrument {
-                initial_instrument_issuers,
-                issuer_requirements,
-                ..
-            } => {
-                validate_self_issued_requirements_have_claims(
-                    issuer_requirements,
-                    governance_party,
-                    "issuer_requirements",
-                )
-                .map_err(|e| e.to_string())?;
-                validate_unique_issuers(initial_instrument_issuers, "initial_instrument_issuers")
-                    .map_err(|e| e.to_string())
+            ProposalType::SetEnableResultContracts(p) => {
+                p.validate(&ctx).map_err(|e| e.to_string())
             }
-            ProposalType::CreateProviderConfiguration {
-                registrar_requirements,
-                ..
-            } => validate_self_issued_requirements_have_claims(
-                registrar_requirements,
-                governance_party,
-                "registrar_requirements",
-            )
-            .map_err(|e| e.to_string()),
-            ProposalType::OffboardInstrumentIssuers { instrument_issuers } => {
-                if instrument_issuers.is_empty() {
-                    return Err("instrument_issuers must not be empty".to_string());
-                }
-                let mut seen_parties = HashSet::new();
-                let mut seen_cids = HashSet::new();
-                for row in instrument_issuers {
-                    if row.credential_cids.is_empty() {
-                        return Err(format!(
-                            "credential_cids must not be empty for issuer {}",
-                            row.instrument_issuer
-                        ));
-                    }
-                    if !seen_parties.insert(&row.instrument_issuer) {
-                        return Err(format!(
-                            "duplicate instrument issuer not allowed: {}",
-                            row.instrument_issuer
-                        ));
-                    }
-                    for cid in &row.credential_cids {
-                        if !seen_cids.insert(cid) {
-                            return Err(format!("duplicate credential cid not allowed: {cid}"));
-                        }
-                    }
-                }
-                Ok(())
+            ProposalType::AcceptMintRequest(p) => p.validate(&ctx).map_err(|e| e.to_string()),
+            ProposalType::AcceptBurnRequest(p) => p.validate(&ctx).map_err(|e| e.to_string()),
+            ProposalType::CreateProviderConfiguration(p) => {
+                p.validate(&ctx).map_err(|e| e.to_string())
             }
-            _ => Ok(()),
+            ProposalType::CreateRegistrarServiceRequest(p) => {
+                p.validate(&ctx).map_err(|e| e.to_string())
+            }
+            ProposalType::OnboardRegistrar(p) => p.validate(&ctx).map_err(|e| e.to_string()),
+            ProposalType::ProvisionInstrument(p) => p.validate(&ctx).map_err(|e| e.to_string()),
+            ProposalType::OnboardInstrumentIssuers(p) => {
+                p.validate(&ctx).map_err(|e| e.to_string())
+            }
+            ProposalType::OffboardInstrumentIssuers(p) => {
+                p.validate(&ctx).map_err(|e| e.to_string())
+            }
         }
     }
 }
@@ -1079,7 +959,6 @@ pub fn chain_audit_entry_from_row(row: crate::db::rows::ChainAuditCacheRow) -> C
 
 #[cfg(test)]
 mod tests {
-    use common::api::RequiredClaim;
     use serde_json::Value;
     use sqlx::SqlitePool;
 
@@ -1280,179 +1159,22 @@ mod tests {
     // `transfer_rejects_non_positive_amount_and_zero_window`, testing
     // `Transfer::validate` directly.
 
-    #[test]
-    fn proposal_onboard_instrument_issuers_rejects_empty_issuer_list() {
-        // Mirrors the template's `ensure not (null instrumentIssuers)` so the
-        // rejection surfaces as a 400 before the ledger sees the proposal.
-        let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
-        let issuer = CantonId::parse(&format!("issuer::{ns}")).unwrap();
-        let mk = |issuers: Vec<CantonId>| ProposalType::OnboardInstrumentIssuers {
-            instrument_configuration_cid: "icc".to_string(),
-            instrument_issuers: issuers,
-        };
-        assert!(mk(Vec::new()).validate(&cid("gov")).is_err());
-        assert!(mk(vec![issuer]).validate(&cid("gov")).is_ok());
-    }
-
-    #[test]
-    fn proposal_offboard_instrument_issuers_validates_rows() {
-        // Mirrors the template's four ensure guards.
-        let gov = cid("gov");
-        let issuer_a = cid("issuer-a");
-        let issuer_b = cid("issuer-b");
-        let row = |issuer: CantonId, cids: Vec<&str>| InstrumentIssuerCredentials {
-            instrument_issuer: issuer,
-            credential_cids: cids.into_iter().map(str::to_string).collect(),
-        };
-        let mk = |rows: Vec<InstrumentIssuerCredentials>| ProposalType::OffboardInstrumentIssuers {
-            instrument_issuers: rows,
-        };
-
-        // No rows: revokes nothing.
-        assert!(mk(vec![]).validate(&gov).is_err());
-        // A row with no cids: revokes nothing.
-        assert!(
-            mk(vec![row(issuer_a.clone(), vec![])])
-                .validate(&gov)
-                .is_err()
-        );
-        // The same party in two rows.
-        assert!(
-            mk(vec![
-                row(issuer_a.clone(), vec!["cred-1"]),
-                row(issuer_a.clone(), vec!["cred-2"]),
-            ])
-            .validate(&gov)
-            .is_err()
-        );
-        // The same cid in two rows.
-        assert!(
-            mk(vec![
-                row(issuer_a.clone(), vec!["cred-1"]),
-                row(issuer_b.clone(), vec!["cred-1"]),
-            ])
-            .validate(&gov)
-            .is_err()
-        );
-        // The same cid twice inside one row.
-        assert!(
-            mk(vec![row(issuer_a.clone(), vec!["cred-1", "cred-1"])])
-                .validate(&gov)
-                .is_err()
-        );
-        // Two issuers, distinct cids.
-        assert!(
-            mk(vec![
-                row(issuer_a, vec!["cred-1", "cred-2"]),
-                row(issuer_b, vec!["cred-3"]),
-            ])
-            .validate(&gov)
-            .is_ok()
-        );
-    }
-
-    #[test]
-    fn proposal_onboard_instrument_issuers_rejects_duplicate_issuers() {
-        // Mirrors the template's `ensure unique instrumentIssuers`: a
-        // duplicated issuer would mint two credentials sharing one id, so
-        // the rejection surfaces as a 400 before the ledger sees it.
-        let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
-        let issuer_a = CantonId::parse(&format!("issuer-a::{ns}")).unwrap();
-        let issuer_b = CantonId::parse(&format!("issuer-b::{ns}")).unwrap();
-        let mk = |issuers: Vec<CantonId>| ProposalType::OnboardInstrumentIssuers {
-            instrument_configuration_cid: "icc".to_string(),
-            instrument_issuers: issuers,
-        };
-        assert!(
-            mk(vec![issuer_a.clone(), issuer_a.clone()])
-                .validate(&cid("gov"))
-                .is_err()
-        );
-        assert!(mk(vec![issuer_a, issuer_b]).validate(&cid("gov")).is_ok());
-    }
-
-    #[test]
-    fn proposal_provision_instrument_rejects_duplicate_initial_issuers() {
-        // Mirrors the template's `ensure unique initialInstrumentIssuers`.
-        // An empty list stays legal: issuers can be onboarded later.
-        let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
-        let issuer_a = CantonId::parse(&format!("issuer-a::{ns}")).unwrap();
-        let issuer_b = CantonId::parse(&format!("issuer-b::{ns}")).unwrap();
-        let mk = |issuers: Vec<CantonId>| ProposalType::ProvisionInstrument {
-            registrar_service_cid: "rsc".to_string(),
-            instrument_id_text: "uuid-1".to_string(),
-            additional_identifiers: vec![],
-            issuer_requirements: vec![],
-            holder_requirements: vec![],
-            initial_instrument_issuers: issuers,
-        };
-        assert!(
-            mk(vec![issuer_a.clone(), issuer_a.clone()])
-                .validate(&cid("gov"))
-                .is_err()
-        );
-        assert!(mk(vec![issuer_a, issuer_b]).validate(&cid("gov")).is_ok());
-        assert!(mk(Vec::new()).validate(&cid("gov")).is_ok());
-    }
-
-    #[test]
-    fn proposal_create_provider_configuration_rejects_claimless_self_issued_requirement() {
-        // Mirrors the template's `selfIssuedRequirementsHaveClaims`. The frontend
-        // prefills a new requirement row as the governance party with no claims,
-        // so the default UI path trips this.
-        let gov = cid("gov");
-        let mk = |issuer: CantonId, claims: Vec<RequiredClaim>| {
-            ProposalType::CreateProviderConfiguration {
-                provider_service_cid: "psc".to_string(),
-                registrar_requirements: vec![PartyCredentialRequirement {
-                    issuer,
-                    required_claims: claims,
-                }],
-                holder_requirements: vec![],
-            }
-        };
-        let claim = RequiredClaim {
-            property: "role".to_string(),
-            value: "registrar".to_string(),
-        };
-        // Self-issued and claimless: rejected.
-        assert!(mk(gov.clone(), vec![]).validate(&gov).is_err());
-        // Self-issued with a claim: accepted.
-        assert!(mk(gov.clone(), vec![claim]).validate(&gov).is_ok());
-        // Issued by another party and claimless: accepted, matching the Daml.
-        assert!(mk(cid("other"), vec![]).validate(&gov).is_ok());
-    }
-
-    #[test]
-    fn proposal_provision_instrument_rejects_claimless_self_issued_requirement() {
-        // The same guard on the other template that carries it in Daml.
-        let gov = cid("gov");
-        let mk = |issuer: CantonId, claims: Vec<RequiredClaim>| ProposalType::ProvisionInstrument {
-            registrar_service_cid: "rsc".to_string(),
-            instrument_id_text: "uuid-1".to_string(),
-            additional_identifiers: vec![],
-            issuer_requirements: vec![PartyCredentialRequirement {
-                issuer,
-                required_claims: claims,
-            }],
-            holder_requirements: vec![],
-            initial_instrument_issuers: vec![],
-        };
-        let claim = RequiredClaim {
-            property: "role".to_string(),
-            value: "instrument-issuer".to_string(),
-        };
-        assert!(mk(gov.clone(), vec![]).validate(&gov).is_err());
-        assert!(mk(gov.clone(), vec![claim]).validate(&gov).is_ok());
-        assert!(mk(cid("other"), vec![]).validate(&gov).is_ok());
-    }
-
-    /// Test-only helper: builds a `CantonId` with a fixed valid namespace so
-    /// tests can vary just the prefix.
-    fn cid(prefix: &str) -> CantonId {
-        let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
-        CantonId::parse(&format!("{prefix}::{ns}")).unwrap()
-    }
+    // `proposal_onboard_instrument_issuers_rejects_empty_issuer_list`,
+    // `proposal_offboard_instrument_issuers_validates_rows`,
+    // `proposal_onboard_instrument_issuers_rejects_duplicate_issuers`,
+    // `proposal_provision_instrument_rejects_duplicate_initial_issuers`,
+    // `proposal_create_provider_configuration_rejects_claimless_self_issued_requirement`,
+    // and `proposal_provision_instrument_rejects_claimless_self_issued_requirement`
+    // moved to `decman_lib::catalog::proposals::utility::tests` as
+    // `onboard_instrument_issuers_rejects_empty_issuer_list`,
+    // `offboard_instrument_issuers_validates_rows`,
+    // `onboard_instrument_issuers_rejects_duplicate_issuers`,
+    // `provision_instrument_rejects_duplicate_initial_issuers`,
+    // `create_provider_configuration_rejects_claimless_self_issued_requirement`,
+    // and `provision_instrument_rejects_claimless_self_issued_requirement`,
+    // testing `OnboardInstrumentIssuers::validate` /
+    // `OffboardInstrumentIssuers::validate` / `ProvisionInstrument::validate` /
+    // `CreateProviderConfiguration::validate` directly.
 
     // `setup_delegation_validate` moved to
     // `decman_lib::catalog::proposals::rewards::tests`, testing

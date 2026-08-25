@@ -1,0 +1,63 @@
+---
+source: crates/decman-lib/src/catalog/proposals/utility.rs
+expression: "CreateRegistrarServiceRequest\n{\n    operator: cid(\"op\"), provider: cid(\"prov\"), create_transfer_rule: true,\n    create_allocation_factory: false,\n}.to_daml_proto().unwrap()"
+---
+Value {
+    sum: Some(
+        Record(
+            Record {
+                record_id: None,
+                fields: [
+                    RecordField {
+                        label: "operator",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    Party(
+                                        "op::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "provider",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    Party(
+                                        "prov::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "createTransferRule",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    Bool(
+                                        true,
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "createAllocationFactory",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    Bool(
+                                        false,
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                ],
+            },
+        ),
+    ),
+}

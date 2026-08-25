@@ -1,0 +1,82 @@
+---
+source: crates/decman-lib/src/catalog/proposals/utility.rs
+expression: "OffboardInstrumentIssuers\n{\n    instrument_issuers:\n    vec![InstrumentIssuerCredentials\n    {\n        instrument_issuer: cid(\"iss1\"), credential_cids:\n        vec![\"00cred1\".to_string(), \"00cred2\".to_string()],\n    }],\n}.to_daml_proto().unwrap()"
+---
+Value {
+    sum: Some(
+        Record(
+            Record {
+                record_id: None,
+                fields: [
+                    RecordField {
+                        label: "instrumentIssuers",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    List(
+                                        List {
+                                            elements: [
+                                                Value {
+                                                    sum: Some(
+                                                        Record(
+                                                            Record {
+                                                                record_id: None,
+                                                                fields: [
+                                                                    RecordField {
+                                                                        label: "instrumentIssuer",
+                                                                        value: Some(
+                                                                            Value {
+                                                                                sum: Some(
+                                                                                    Party(
+                                                                                        "iss1::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+                                                                                    ),
+                                                                                ),
+                                                                            },
+                                                                        ),
+                                                                    },
+                                                                    RecordField {
+                                                                        label: "credentialCids",
+                                                                        value: Some(
+                                                                            Value {
+                                                                                sum: Some(
+                                                                                    List(
+                                                                                        List {
+                                                                                            elements: [
+                                                                                                Value {
+                                                                                                    sum: Some(
+                                                                                                        ContractId(
+                                                                                                            "00cred1",
+                                                                                                        ),
+                                                                                                    ),
+                                                                                                },
+                                                                                                Value {
+                                                                                                    sum: Some(
+                                                                                                        ContractId(
+                                                                                                            "00cred2",
+                                                                                                        ),
+                                                                                                    ),
+                                                                                                },
+                                                                                            ],
+                                                                                        },
+                                                                                    ),
+                                                                                ),
+                                                                            },
+                                                                        ),
+                                                                    },
+                                                                ],
+                                                            },
+                                                        ),
+                                                    ),
+                                                },
+                                            ],
+                                        },
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                ],
+            },
+        ),
+    ),
+}

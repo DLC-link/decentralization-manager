@@ -19,8 +19,11 @@ use decman_lib::catalog::proposals::rewards::{
     SetupCouponReassignmentDelegation, SetupMintingDelegation,
 };
 use decman_lib::catalog::proposals::utility::{
-    CreateDelegatedBatchedMarkersProxy, CreateProviderServiceRequest, CreateUserServiceRequest,
-    ProvisionProviderService,
+    AcceptBurnRequest, AcceptMintRequest, Burn, CreateDelegatedBatchedMarkersProxy,
+    CreateProviderConfiguration, CreateProviderServiceRequest, CreateRegistrarServiceRequest,
+    CreateUserServiceRequest, Mint, OffboardInstrumentIssuers, OnboardInstrumentIssuers,
+    OnboardRegistrar, ProvisionInstrument, ProvisionProviderService, SetEnableResultContracts,
+    SetProviderAppRewardBeneficiaries, SetupUtility,
 };
 use decman_lib::catalog::types::RewardBeneficiary;
 
@@ -211,7 +214,7 @@ fn all_proposal_fixtures() -> Vec<ProposalType> {
             description: "a vote".into(),
         }),
         ProposalType::ProvisionProviderService(ProvisionProviderService {}),
-        ProposalType::SetupUtility {
+        ProposalType::SetupUtility(SetupUtility {
             provider_service_cid: "00psc".into(),
             operator: cid("op"),
             instrument_id_text: "uuid-1".into(),
@@ -222,7 +225,7 @@ fn all_proposal_fixtures() -> Vec<ProposalType> {
             }],
             create_transfer_rule: true,
             create_allocation_factory: true,
-        },
+        }),
         ProposalType::CreateProviderServiceRequest(CreateProviderServiceRequest {
             operator: cid("op"),
             provider: cid("prov"),
@@ -231,13 +234,13 @@ fn all_proposal_fixtures() -> Vec<ProposalType> {
             operator: cid("op"),
             user: cid("user"),
         }),
-        ProposalType::SetProviderAppRewardBeneficiaries {
+        ProposalType::SetProviderAppRewardBeneficiaries(SetProviderAppRewardBeneficiaries {
             instrument_configuration_cid: "00icc".into(),
             provider_app_reward_beneficiaries: Some(vec![AppRewardBeneficiary {
                 beneficiary: cid("b1"),
                 weight: dec("1.0"),
             }]),
-        },
+        }),
         ProposalType::SetupCouponReassignmentDelegation(SetupCouponReassignmentDelegation {
             dso: cid("dso"),
             assigners: vec![cid("m1"), cid("m2")],
@@ -256,10 +259,10 @@ fn all_proposal_fixtures() -> Vec<ProposalType> {
         ProposalType::RevokeCouponReassignmentDelegation(RevokeCouponReassignmentDelegation {
             delegation: "00deleg".into(),
         }),
-        ProposalType::SetEnableResultContracts {
+        ProposalType::SetEnableResultContracts(SetEnableResultContracts {
             registrar_service_cid: "00rsc".into(),
             enable_result_contracts: Some(true),
-        },
+        }),
         ProposalType::CreateDelegatedBatchedMarkersProxy(CreateDelegatedBatchedMarkersProxy {
             operator: cid("op"),
         }),
@@ -273,14 +276,14 @@ fn all_proposal_fixtures() -> Vec<ProposalType> {
         ProposalType::AcceptExternalPartySetup(AcceptExternalPartySetup {
             proposal_cid: "00eps".into(),
         }),
-        ProposalType::Mint {
+        ProposalType::Mint(Mint {
             allocation_factory_cid: "00alloc".into(),
             instrument_id: instrument(),
             instrument_configuration_cid: "00icc".into(),
             recipient: cid("recv"),
             amount: dec("5"),
             description: "mint".into(),
-        },
+        }),
         ProposalType::OfferFreeCredential(OfferFreeCredential {
             user_service_cid: "00usc".into(),
             holder: cid("holder"),
@@ -306,43 +309,43 @@ fn all_proposal_fixtures() -> Vec<ProposalType> {
             user_service_cid: "00usc".into(),
             credential_offer_cid: "00offer".into(),
         }),
-        ProposalType::Burn {
+        ProposalType::Burn(Burn {
             allocation_factory_cid: "00alloc".into(),
             instrument_id: instrument(),
             instrument_configuration_cid: "00icc".into(),
             holder: cid("holder"),
             amount: dec("3"),
             description: "burn".into(),
-        },
-        ProposalType::AcceptMintRequest {
+        }),
+        ProposalType::AcceptMintRequest(AcceptMintRequest {
             mint_request_cid: "00mr".into(),
             instrument_configuration_cid: "00icc".into(),
             issuer_credential_cids: vec!["00cred".into()],
             description: "accept mint".into(),
-        },
-        ProposalType::AcceptBurnRequest {
+        }),
+        ProposalType::AcceptBurnRequest(AcceptBurnRequest {
             burn_request_cid: "00br".into(),
             instrument_configuration_cid: "00icc".into(),
             issuer_credential_cids: vec!["00cred".into()],
             description: "accept burn".into(),
-        },
-        ProposalType::CreateProviderConfiguration {
+        }),
+        ProposalType::CreateProviderConfiguration(CreateProviderConfiguration {
             provider_service_cid: "00psc".into(),
             registrar_requirements: vec![requirement("gov")],
             holder_requirements: vec![requirement("other")],
-        },
-        ProposalType::CreateRegistrarServiceRequest {
+        }),
+        ProposalType::CreateRegistrarServiceRequest(CreateRegistrarServiceRequest {
             operator: cid("op"),
             provider: cid("prov"),
             create_transfer_rule: false,
             create_allocation_factory: true,
-        },
-        ProposalType::OnboardRegistrar {
+        }),
+        ProposalType::OnboardRegistrar(OnboardRegistrar {
             provider_service_cid: "00psc".into(),
             registrar_service_request_cid: "00rsr".into(),
             provider_configuration_cid: "00pcc".into(),
-        },
-        ProposalType::ProvisionInstrument {
+        }),
+        ProposalType::ProvisionInstrument(ProvisionInstrument {
             registrar_service_cid: "00rsc".into(),
             instrument_id_text: "uuid-2".into(),
             additional_identifiers: vec![InstrumentIdentifier {
@@ -353,17 +356,17 @@ fn all_proposal_fixtures() -> Vec<ProposalType> {
             issuer_requirements: vec![requirement("gov")],
             holder_requirements: vec![],
             initial_instrument_issuers: vec![cid("iss1")],
-        },
-        ProposalType::OnboardInstrumentIssuers {
+        }),
+        ProposalType::OnboardInstrumentIssuers(OnboardInstrumentIssuers {
             instrument_configuration_cid: "00icc".into(),
             instrument_issuers: vec![cid("iss1"), cid("iss2")],
-        },
-        ProposalType::OffboardInstrumentIssuers {
+        }),
+        ProposalType::OffboardInstrumentIssuers(OffboardInstrumentIssuers {
             instrument_issuers: vec![InstrumentIssuerCredentials {
                 instrument_issuer: cid("iss1"),
                 credential_cids: vec!["00cred".into()],
             }],
-        },
+        }),
     ]
 }
 
@@ -385,10 +388,10 @@ fn minimal_option_fixtures() -> Vec<ProposalType> {
             input_holding_cids: vec![],
             validity_window_hours: None,
         }),
-        ProposalType::SetProviderAppRewardBeneficiaries {
+        ProposalType::SetProviderAppRewardBeneficiaries(SetProviderAppRewardBeneficiaries {
             instrument_configuration_cid: "00icc".into(),
             provider_app_reward_beneficiaries: None,
-        },
+        }),
         ProposalType::SetupCouponReassignmentDelegation(SetupCouponReassignmentDelegation {
             dso: cid("dso"),
             assigners: vec![cid("m1")],
@@ -398,10 +401,10 @@ fn minimal_option_fixtures() -> Vec<ProposalType> {
             }],
             prior_delegation: None,
         }),
-        ProposalType::SetEnableResultContracts {
+        ProposalType::SetEnableResultContracts(SetEnableResultContracts {
             registrar_service_cid: "00rsc".into(),
             enable_result_contracts: None,
-        },
+        }),
         ProposalType::OfferPaidCredential(OfferPaidCredential {
             user_service_cid: "00usc".into(),
             holder: cid("holder"),
@@ -416,20 +419,20 @@ fn minimal_option_fixtures() -> Vec<ProposalType> {
             },
             deposit_initial_amount_usd: None,
         }),
-        ProposalType::AcceptMintRequest {
+        ProposalType::AcceptMintRequest(AcceptMintRequest {
             mint_request_cid: "00mr".into(),
             instrument_configuration_cid: "00icc".into(),
             issuer_credential_cids: vec![],
             description: "accept mint".into(),
-        },
-        ProposalType::ProvisionInstrument {
+        }),
+        ProposalType::ProvisionInstrument(ProvisionInstrument {
             registrar_service_cid: "00rsc".into(),
             instrument_id_text: "uuid-2".into(),
             additional_identifiers: vec![],
             issuer_requirements: vec![],
             holder_requirements: vec![],
             initial_instrument_issuers: vec![],
-        },
+        }),
     ]
 }
 

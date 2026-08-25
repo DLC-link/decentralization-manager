@@ -6,8 +6,6 @@
 //! `decman_lib::catalog::action`; the four `build_*_action*` functions below
 //! are thin fallible wrappers around it.
 
-#[cfg(test)]
-use canton_common::decimal::DamlDecimal;
 use canton_common::transfer_factory::Context as ChoiceContext;
 use canton_proto_rs::com::daml::ledger::api::v2::{Optional, Record, Value, value};
 use decman_lib::catalog::proposals::core::GenericVote;
@@ -23,10 +21,12 @@ use decman_lib::catalog::proposals::rewards::{
     SetupCouponReassignmentDelegation, SetupMintingDelegation,
 };
 use decman_lib::catalog::proposals::utility::{
-    CreateDelegatedBatchedMarkersProxy, CreateProviderServiceRequest, CreateUserServiceRequest,
-    ProvisionProviderService,
+    AcceptBurnRequest, AcceptMintRequest, Burn, CreateDelegatedBatchedMarkersProxy,
+    CreateProviderConfiguration, CreateProviderServiceRequest, CreateRegistrarServiceRequest,
+    CreateUserServiceRequest, Mint, OffboardInstrumentIssuers, OnboardInstrumentIssuers,
+    OnboardRegistrar, ProvisionInstrument, ProvisionProviderService, SetEnableResultContracts,
+    SetProviderAppRewardBeneficiaries, SetupUtility,
 };
-pub(crate) use decman_lib::catalog::types::make_optional_beneficiaries;
 use decman_lib::framework::commands::proposal_create_arguments;
 pub(crate) use decman_lib::framework::encode::*;
 
@@ -34,8 +34,6 @@ use crate::canton_id::CantonId;
 use crate::error::Result;
 
 use super::types::{ActionType, ProposalType};
-#[cfg(test)]
-use super::types::{InstrumentId, InstrumentIdentifier, PartyCredentialRequirement};
 #[cfg(test)]
 use common::api::InstrumentAllowance;
 
@@ -228,41 +226,12 @@ pub fn build_proposal_create_args(
             proposal_create_arguments(p, governance_party, proposer)
                 .map_err(anyhow::Error::from)?,
         ),
-        ProposalType::SetupUtility {
-            provider_service_cid,
-            operator,
-            instrument_id_text,
-            additional_identifiers,
-            create_transfer_rule,
-            create_allocation_factory,
-        } => (
+        ProposalType::SetupUtility(p) => (
             ProposalPackage::GovernanceUtilityOnboarding,
-            "Governance.UtilityOnboarding.SetupUtility",
-            "SetupUtility",
-            Record {
-                record_id: None,
-                fields: vec![
-                    field("governanceParty", make_party(governance_party)),
-                    field("proposer", make_party(proposer)),
-                    field("providerServiceCid", make_contract_id(provider_service_cid)),
-                    field("operator", make_party(operator)),
-                    field("instrumentIdText", make_text(instrument_id_text)),
-                    field(
-                        "additionalIdentifiers",
-                        make_list(
-                            additional_identifiers
-                                .iter()
-                                .map(serialize_instrument_identifier)
-                                .collect(),
-                        ),
-                    ),
-                    field("createTransferRule", make_bool(*create_transfer_rule)),
-                    field(
-                        "createAllocationFactory",
-                        make_bool(*create_allocation_factory),
-                    ),
-                ],
-            },
+            SetupUtility::MODULE,
+            SetupUtility::ENTITY,
+            proposal_create_arguments(p, governance_party, proposer)
+                .map_err(anyhow::Error::from)?,
         ),
         ProposalType::CreateProviderServiceRequest(p) => (
             ProposalPackage::GovernanceUtilityOnboarding,
@@ -278,28 +247,12 @@ pub fn build_proposal_create_args(
             proposal_create_arguments(p, governance_party, proposer)
                 .map_err(anyhow::Error::from)?,
         ),
-        ProposalType::SetProviderAppRewardBeneficiaries {
-            instrument_configuration_cid,
-            provider_app_reward_beneficiaries,
-        } => (
+        ProposalType::SetProviderAppRewardBeneficiaries(p) => (
             ProposalPackage::GovernanceUtilityOnboarding,
-            "Governance.UtilityOnboarding.SetProviderAppRewardBeneficiaries",
-            "SetProviderAppRewardBeneficiaries",
-            Record {
-                record_id: None,
-                fields: vec![
-                    field("governanceParty", make_party(governance_party)),
-                    field("proposer", make_party(proposer)),
-                    field(
-                        "instrumentConfigurationCid",
-                        make_contract_id(instrument_configuration_cid),
-                    ),
-                    field(
-                        "providerAppRewardBeneficiaries",
-                        make_optional_beneficiaries(provider_app_reward_beneficiaries),
-                    ),
-                ],
-            },
+            SetProviderAppRewardBeneficiaries::MODULE,
+            SetProviderAppRewardBeneficiaries::ENTITY,
+            proposal_create_arguments(p, governance_party, proposer)
+                .map_err(anyhow::Error::from)?,
         ),
         ProposalType::SetupCouponReassignmentDelegation(p) => (
             ProposalPackage::GovernanceRewards,
@@ -315,28 +268,12 @@ pub fn build_proposal_create_args(
             proposal_create_arguments(p, governance_party, proposer)
                 .map_err(anyhow::Error::from)?,
         ),
-        ProposalType::SetEnableResultContracts {
-            registrar_service_cid,
-            enable_result_contracts,
-        } => (
+        ProposalType::SetEnableResultContracts(p) => (
             ProposalPackage::GovernanceUtilityOnboarding,
-            "Governance.UtilityOnboarding.SetEnableResultContracts",
-            "SetEnableResultContracts",
-            Record {
-                record_id: None,
-                fields: vec![
-                    field("governanceParty", make_party(governance_party)),
-                    field("proposer", make_party(proposer)),
-                    field(
-                        "registrarServiceCid",
-                        make_contract_id(registrar_service_cid),
-                    ),
-                    field(
-                        "enableResultContracts",
-                        make_optional_bool(enable_result_contracts),
-                    ),
-                ],
-            },
+            SetEnableResultContracts::MODULE,
+            SetEnableResultContracts::ENTITY,
+            proposal_create_arguments(p, governance_party, proposer)
+                .map_err(anyhow::Error::from)?,
         ),
         ProposalType::CreateDelegatedBatchedMarkersProxy(p) => (
             ProposalPackage::GovernanceUtilityOnboarding,
@@ -359,50 +296,12 @@ pub fn build_proposal_create_args(
             proposal_create_arguments(p, governance_party, proposer)
                 .map_err(anyhow::Error::from)?,
         ),
-        ProposalType::Mint {
-            allocation_factory_cid,
-            instrument_id,
-            instrument_configuration_cid,
-            recipient,
-            amount,
-            description,
-        } => (
+        ProposalType::Mint(p) => (
             ProposalPackage::GovernanceUtilityOnboarding,
-            "Governance.TokenIssuance.MintProposal",
-            "MintProposal",
-            Record {
-                record_id: None,
-                fields: vec![
-                    field("governanceParty", make_party(governance_party)),
-                    field("proposer", make_party(proposer)),
-                    field(
-                        "allocationFactoryCid",
-                        make_contract_id(allocation_factory_cid),
-                    ),
-                    field("instrumentId", serialize_instrument_id(instrument_id)),
-                    field(
-                        "instrumentConfigurationCid",
-                        make_contract_id(instrument_configuration_cid),
-                    ),
-                    field("recipient", make_party(recipient)),
-                    field("amount", make_numeric(&amount.to_string())),
-                    field("description", make_text(description)),
-                    field(
-                        "requestedAt",
-                        Value {
-                            sum: Some(value::Sum::Timestamp(0)),
-                        },
-                    ),
-                    field(
-                        "executeBefore",
-                        Value {
-                            sum: Some(value::Sum::Timestamp(i64::MAX / 1000)),
-                        },
-                    ),
-                    field("meta", make_empty_metadata()),
-                    field("extraArgsMeta", make_empty_metadata()),
-                ],
-            },
+            Mint::MODULE,
+            Mint::ENTITY,
+            proposal_create_arguments(p, governance_party, proposer)
+                .map_err(anyhow::Error::from)?,
         ),
         ProposalType::OfferFreeCredential(p) => (
             ProposalPackage::GovernanceUtilityCredential,
@@ -425,295 +324,68 @@ pub fn build_proposal_create_args(
             proposal_create_arguments(p, governance_party, proposer)
                 .map_err(anyhow::Error::from)?,
         ),
-        ProposalType::Burn {
-            allocation_factory_cid,
-            instrument_id,
-            instrument_configuration_cid,
-            holder,
-            amount,
-            description,
-        } => (
+        ProposalType::Burn(p) => (
             ProposalPackage::GovernanceUtilityOnboarding,
-            "Governance.TokenIssuance.BurnProposal",
-            "BurnProposal",
-            Record {
-                record_id: None,
-                fields: vec![
-                    field("governanceParty", make_party(governance_party)),
-                    field("proposer", make_party(proposer)),
-                    field(
-                        "allocationFactoryCid",
-                        make_contract_id(allocation_factory_cid),
-                    ),
-                    field("instrumentId", serialize_instrument_id(instrument_id)),
-                    field(
-                        "instrumentConfigurationCid",
-                        make_contract_id(instrument_configuration_cid),
-                    ),
-                    field("holder", make_party(holder)),
-                    field("amount", make_numeric(&amount.to_string())),
-                    field("description", make_text(description)),
-                    field(
-                        "requestedAt",
-                        Value {
-                            sum: Some(value::Sum::Timestamp(0)),
-                        },
-                    ),
-                    field(
-                        "executeBefore",
-                        Value {
-                            sum: Some(value::Sum::Timestamp(i64::MAX / 1000)),
-                        },
-                    ),
-                    field("meta", make_empty_metadata()),
-                    field("extraArgsMeta", make_empty_metadata()),
-                ],
-            },
+            Burn::MODULE,
+            Burn::ENTITY,
+            proposal_create_arguments(p, governance_party, proposer)
+                .map_err(anyhow::Error::from)?,
         ),
-        ProposalType::AcceptMintRequest {
-            mint_request_cid,
-            instrument_configuration_cid,
-            issuer_credential_cids,
-            description,
-        } => (
+        ProposalType::AcceptMintRequest(p) => (
             ProposalPackage::GovernanceUtilityOnboarding,
-            "Governance.TokenIssuance.AcceptMintRequest",
-            "AcceptMintRequest",
-            Record {
-                record_id: None,
-                fields: vec![
-                    field("governanceParty", make_party(governance_party)),
-                    field("proposer", make_party(proposer)),
-                    field("mintRequestCid", make_contract_id(mint_request_cid)),
-                    field(
-                        "instrumentConfigurationCid",
-                        make_contract_id(instrument_configuration_cid),
-                    ),
-                    field("description", make_text(description)),
-                    field("extraArgsMeta", make_empty_metadata()),
-                    field(
-                        "issuerCredentialCids",
-                        make_optional_list(
-                            issuer_credential_cids
-                                .iter()
-                                .map(|cid| make_contract_id(cid))
-                                .collect(),
-                        ),
-                    ),
-                ],
-            },
+            AcceptMintRequest::MODULE,
+            AcceptMintRequest::ENTITY,
+            proposal_create_arguments(p, governance_party, proposer)
+                .map_err(anyhow::Error::from)?,
         ),
-        ProposalType::AcceptBurnRequest {
-            burn_request_cid,
-            instrument_configuration_cid,
-            issuer_credential_cids,
-            description,
-        } => (
+        ProposalType::AcceptBurnRequest(p) => (
             ProposalPackage::GovernanceUtilityOnboarding,
-            "Governance.TokenIssuance.AcceptBurnRequest",
-            "AcceptBurnRequest",
-            Record {
-                record_id: None,
-                fields: vec![
-                    field("governanceParty", make_party(governance_party)),
-                    field("proposer", make_party(proposer)),
-                    field("burnRequestCid", make_contract_id(burn_request_cid)),
-                    field(
-                        "instrumentConfigurationCid",
-                        make_contract_id(instrument_configuration_cid),
-                    ),
-                    field("description", make_text(description)),
-                    field("extraArgsMeta", make_empty_metadata()),
-                    field(
-                        "issuerCredentialCids",
-                        make_optional_list(
-                            issuer_credential_cids
-                                .iter()
-                                .map(|cid| make_contract_id(cid))
-                                .collect(),
-                        ),
-                    ),
-                ],
-            },
+            AcceptBurnRequest::MODULE,
+            AcceptBurnRequest::ENTITY,
+            proposal_create_arguments(p, governance_party, proposer)
+                .map_err(anyhow::Error::from)?,
         ),
-        ProposalType::CreateProviderConfiguration {
-            provider_service_cid,
-            registrar_requirements,
-            holder_requirements,
-        } => (
+        ProposalType::CreateProviderConfiguration(p) => (
             ProposalPackage::GovernanceUtilityOnboarding,
-            "Governance.UtilityOnboarding.CreateProviderConfiguration",
-            "CreateProviderConfiguration",
-            Record {
-                record_id: None,
-                fields: vec![
-                    field("governanceParty", make_party(governance_party)),
-                    field("proposer", make_party(proposer)),
-                    field("providerServiceCid", make_contract_id(provider_service_cid)),
-                    field(
-                        "registrarRequirements",
-                        serialize_party_credential_requirements(registrar_requirements),
-                    ),
-                    field(
-                        "holderRequirements",
-                        serialize_party_credential_requirements(holder_requirements),
-                    ),
-                ],
-            },
+            CreateProviderConfiguration::MODULE,
+            CreateProviderConfiguration::ENTITY,
+            proposal_create_arguments(p, governance_party, proposer)
+                .map_err(anyhow::Error::from)?,
         ),
-        ProposalType::CreateRegistrarServiceRequest {
-            operator,
-            provider,
-            create_transfer_rule,
-            create_allocation_factory,
-        } => (
+        ProposalType::CreateRegistrarServiceRequest(p) => (
             ProposalPackage::GovernanceUtilityOnboarding,
-            "Governance.UtilityOnboarding.CreateRegistrarServiceRequest",
-            "CreateRegistrarServiceRequest",
-            Record {
-                record_id: None,
-                fields: vec![
-                    field("governanceParty", make_party(governance_party)),
-                    field("proposer", make_party(proposer)),
-                    field("operator", make_party(operator)),
-                    field("provider", make_party(provider)),
-                    field("createTransferRule", make_bool(*create_transfer_rule)),
-                    field(
-                        "createAllocationFactory",
-                        make_bool(*create_allocation_factory),
-                    ),
-                ],
-            },
+            CreateRegistrarServiceRequest::MODULE,
+            CreateRegistrarServiceRequest::ENTITY,
+            proposal_create_arguments(p, governance_party, proposer)
+                .map_err(anyhow::Error::from)?,
         ),
-        ProposalType::OnboardRegistrar {
-            provider_service_cid,
-            registrar_service_request_cid,
-            provider_configuration_cid,
-        } => (
+        ProposalType::OnboardRegistrar(p) => (
             ProposalPackage::GovernanceUtilityOnboarding,
-            "Governance.UtilityOnboarding.OnboardRegistrar",
-            "OnboardRegistrar",
-            Record {
-                record_id: None,
-                fields: vec![
-                    field("governanceParty", make_party(governance_party)),
-                    field("proposer", make_party(proposer)),
-                    field("providerServiceCid", make_contract_id(provider_service_cid)),
-                    field(
-                        "registrarServiceRequestCid",
-                        make_contract_id(registrar_service_request_cid),
-                    ),
-                    field(
-                        "providerConfigurationCid",
-                        make_contract_id(provider_configuration_cid),
-                    ),
-                ],
-            },
+            OnboardRegistrar::MODULE,
+            OnboardRegistrar::ENTITY,
+            proposal_create_arguments(p, governance_party, proposer)
+                .map_err(anyhow::Error::from)?,
         ),
-        ProposalType::ProvisionInstrument {
-            registrar_service_cid,
-            instrument_id_text,
-            additional_identifiers,
-            issuer_requirements,
-            holder_requirements,
-            initial_instrument_issuers,
-        } => (
+        ProposalType::ProvisionInstrument(p) => (
             ProposalPackage::GovernanceUtilityOnboarding,
-            "Governance.UtilityOnboarding.ProvisionInstrument",
-            "ProvisionInstrument",
-            Record {
-                record_id: None,
-                fields: vec![
-                    field("governanceParty", make_party(governance_party)),
-                    field("proposer", make_party(proposer)),
-                    field(
-                        "registrarServiceCid",
-                        make_contract_id(registrar_service_cid),
-                    ),
-                    field("instrumentIdText", make_text(instrument_id_text)),
-                    field(
-                        "additionalIdentifiers",
-                        make_list(
-                            additional_identifiers
-                                .iter()
-                                .map(serialize_instrument_identifier)
-                                .collect(),
-                        ),
-                    ),
-                    field(
-                        "issuerRequirements",
-                        serialize_party_credential_requirements(issuer_requirements),
-                    ),
-                    field(
-                        "holderRequirements",
-                        serialize_party_credential_requirements(holder_requirements),
-                    ),
-                    field(
-                        "initialInstrumentIssuers",
-                        make_list(initial_instrument_issuers.iter().map(make_party).collect()),
-                    ),
-                ],
-            },
+            ProvisionInstrument::MODULE,
+            ProvisionInstrument::ENTITY,
+            proposal_create_arguments(p, governance_party, proposer)
+                .map_err(anyhow::Error::from)?,
         ),
-        ProposalType::OnboardInstrumentIssuers {
-            instrument_configuration_cid,
-            instrument_issuers,
-        } => (
+        ProposalType::OnboardInstrumentIssuers(p) => (
             ProposalPackage::GovernanceUtilityOnboarding,
-            "Governance.UtilityOnboarding.OnboardInstrumentIssuers",
-            "OnboardInstrumentIssuers",
-            Record {
-                record_id: None,
-                fields: vec![
-                    field("governanceParty", make_party(governance_party)),
-                    field("proposer", make_party(proposer)),
-                    field(
-                        "instrumentConfigurationCid",
-                        make_contract_id(instrument_configuration_cid),
-                    ),
-                    field(
-                        "instrumentIssuers",
-                        make_list(instrument_issuers.iter().map(make_party).collect()),
-                    ),
-                ],
-            },
+            OnboardInstrumentIssuers::MODULE,
+            OnboardInstrumentIssuers::ENTITY,
+            proposal_create_arguments(p, governance_party, proposer)
+                .map_err(anyhow::Error::from)?,
         ),
-        ProposalType::OffboardInstrumentIssuers { instrument_issuers } => (
+        ProposalType::OffboardInstrumentIssuers(p) => (
             ProposalPackage::GovernanceUtilityOnboarding,
-            "Governance.UtilityOnboarding.OffboardInstrumentIssuers",
-            "OffboardInstrumentIssuers",
-            Record {
-                record_id: None,
-                fields: vec![
-                    field("governanceParty", make_party(governance_party)),
-                    field("proposer", make_party(proposer)),
-                    field(
-                        "instrumentIssuers",
-                        make_list(
-                            instrument_issuers
-                                .iter()
-                                .map(|row| {
-                                    make_record(vec![
-                                        field(
-                                            "instrumentIssuer",
-                                            make_party(&row.instrument_issuer),
-                                        ),
-                                        field(
-                                            "credentialCids",
-                                            make_list(
-                                                row.credential_cids
-                                                    .iter()
-                                                    .map(|cid| make_contract_id(cid))
-                                                    .collect(),
-                                            ),
-                                        ),
-                                    ])
-                                })
-                                .collect(),
-                        ),
-                    ),
-                ],
-            },
+            OffboardInstrumentIssuers::MODULE,
+            OffboardInstrumentIssuers::ENTITY,
+            proposal_create_arguments(p, governance_party, proposer)
+                .map_err(anyhow::Error::from)?,
         ),
     })
 }
@@ -753,12 +425,9 @@ pub fn build_execute_domain_action_arg(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common::api::RequiredClaim;
+    use common::api::InstrumentIssuerCredentials;
 
-    use crate::{
-        canton_id::{NAMESPACE_LENGTH, Namespace},
-        server::types::InstrumentIssuerCredentials,
-    };
+    use crate::canton_id::{NAMESPACE_LENGTH, Namespace};
 
     // `transfer_validity_from_now_bounds_the_window` and
     // `transfer_validity_from_now_clamps_to_max_daml_time` moved to
@@ -822,30 +491,9 @@ mod tests {
     // preprocessor — a typo or reordering surfaces only as a runtime
     // interpretation failure, so each is pinned explicitly here.
 
-    /// Fetch a nested field's `Value` by label from an owned `Record`. Mirrors
-    /// the production `get_field` but panics (these are assertions, not
-    /// recoverable paths) so call sites stay terse.
-    fn field_value<'a>(record: &'a Record, label: &str) -> &'a Value {
-        record
-            .fields
-            .iter()
-            .find(|f| f.label == label)
-            .and_then(|f| f.value.as_ref())
-            .unwrap_or_else(|| panic!("missing field {label}"))
-    }
-
     /// The ordered field labels of an owned `Record`.
     fn owned_labels(record: &Record) -> Vec<&str> {
         record.fields.iter().map(|f| f.label.as_str()).collect()
-    }
-
-    /// Unwrap a `value::Sum::Record` reference (for descending into a nested
-    /// record `Value` returned by `field_value`).
-    fn as_record(value: &Value) -> &Record {
-        match &value.sum {
-            Some(value::Sum::Record(r)) => r,
-            other => panic!("expected Record, got {other:?}"),
-        }
     }
 
     // `build_proposal_transfer_shape_and_nested_records` moved to
@@ -853,94 +501,13 @@ mod tests {
     // `TransferWithContext` directly — `Transfer` no longer implements
     // `DamlProtoEncode` on its own.
 
-    #[test]
-    fn build_proposal_mint_and_burn_shapes_differ_only_in_party_label() -> Result {
-        let mint = ProposalType::Mint {
-            allocation_factory_cid: "afc".to_string(),
-            instrument_id: InstrumentId {
-                admin: "admin::ns".to_string(),
-                id: "instr-1".to_string(),
-            },
-            instrument_configuration_cid: "icc".to_string(),
-            recipient: party_id(),
-            amount: DamlDecimal::parse("1.5")?,
-            description: "mint it".to_string(),
-        };
-        let (mint_package, mint_module, mint_entity, mint_record) =
-            build_proposal_create_args(&gov_id(), &proposer_id(), &mint, None, None)?;
-
-        // Package enum is GovernanceUtilityOnboarding even though the module
-        // lives under `Governance.TokenIssuance`.
-        assert_eq!(mint_package, ProposalPackage::GovernanceUtilityOnboarding);
-        assert_eq!(mint_module, "Governance.TokenIssuance.MintProposal");
-        assert_eq!(mint_entity, "MintProposal");
-        assert_eq!(
-            owned_labels(&mint_record),
-            [
-                "governanceParty",
-                "proposer",
-                "allocationFactoryCid",
-                "instrumentId",
-                "instrumentConfigurationCid",
-                "recipient",
-                "amount",
-                "description",
-                "requestedAt",
-                "executeBefore",
-                "meta",
-                "extraArgsMeta",
-            ]
-        );
-
-        let burn = ProposalType::Burn {
-            allocation_factory_cid: "afc".to_string(),
-            instrument_id: InstrumentId {
-                admin: "admin::ns".to_string(),
-                id: "instr-1".to_string(),
-            },
-            instrument_configuration_cid: "icc".to_string(),
-            holder: party_id(),
-            amount: DamlDecimal::parse("1.5")?,
-            description: "burn it".to_string(),
-        };
-        let (burn_package, burn_module, burn_entity, burn_record) =
-            build_proposal_create_args(&gov_id(), &proposer_id(), &burn, None, None)?;
-
-        assert_eq!(burn_package, ProposalPackage::GovernanceUtilityOnboarding);
-        assert_eq!(burn_module, "Governance.TokenIssuance.BurnProposal");
-        assert_eq!(burn_entity, "BurnProposal");
-        assert_eq!(
-            owned_labels(&burn_record),
-            [
-                "governanceParty",
-                "proposer",
-                "allocationFactoryCid",
-                "instrumentId",
-                "instrumentConfigurationCid",
-                "holder",
-                "amount",
-                "description",
-                "requestedAt",
-                "executeBefore",
-                "meta",
-                "extraArgsMeta",
-            ]
-        );
-
-        // The ONLY structural difference between the two arms is the party
-        // label: Mint carries `recipient`, Burn carries `holder`.
-        assert!(owned_labels(&mint_record).contains(&"recipient"));
-        assert!(!owned_labels(&mint_record).contains(&"holder"));
-        assert!(owned_labels(&burn_record).contains(&"holder"));
-        assert!(!owned_labels(&burn_record).contains(&"recipient"));
-
-        // Both carry the two trailing metadata fields.
-        assert!(owned_labels(&mint_record).contains(&"meta"));
-        assert!(owned_labels(&mint_record).contains(&"extraArgsMeta"));
-        assert!(owned_labels(&burn_record).contains(&"meta"));
-        assert!(owned_labels(&burn_record).contains(&"extraArgsMeta"));
-        Ok(())
-    }
+    // `build_proposal_mint_and_burn_shapes_differ_only_in_party_label` moved to
+    // `decman_lib::catalog::proposals::utility::tests` as `encode_snapshots`
+    // (`mint` / `burn`), driven through `Mint::to_daml_proto` /
+    // `Burn::to_daml_proto` directly — same coverage (the nested
+    // `instrumentId` record and the `recipient`/`holder` party-label
+    // difference included), pinned by insta instead of by hand-written label
+    // asserts.
 
     // `build_proposal_setup_minting_delegation_shape`,
     // `build_proposal_accept_external_party_setup_shape`,
@@ -961,52 +528,11 @@ mod tests {
     // directly — same coverage (billingParams' nested `feePerDayUsd` record
     // included), pinned by insta instead of by hand-written label asserts.
 
-    #[test]
-    fn build_proposal_setup_utility_shape_and_nested_identifier() -> Result {
-        let proposal = ProposalType::SetupUtility {
-            provider_service_cid: "psc".to_string(),
-            operator: party_id(),
-            instrument_id_text: "uuid-1".to_string(),
-            additional_identifiers: vec![InstrumentIdentifier {
-                source: party_id(),
-                id: "TICK".to_string(),
-                scheme: "Ticker".to_string(),
-            }],
-            create_transfer_rule: true,
-            create_allocation_factory: false,
-        };
-        let (package, module, entity, record) =
-            build_proposal_create_args(&gov_id(), &proposer_id(), &proposal, None, None)?;
-
-        assert_eq!(package, ProposalPackage::GovernanceUtilityOnboarding);
-        assert_eq!(module, "Governance.UtilityOnboarding.SetupUtility");
-        assert_eq!(entity, "SetupUtility");
-        assert_eq!(
-            owned_labels(&record),
-            [
-                "governanceParty",
-                "proposer",
-                "providerServiceCid",
-                "operator",
-                "instrumentIdText",
-                "additionalIdentifiers",
-                "createTransferRule",
-                "createAllocationFactory",
-            ]
-        );
-
-        // Descend into the first element of the `additionalIdentifiers` list.
-        let identifiers = field_value(&record, "additionalIdentifiers");
-        let first = match &identifiers.sum {
-            Some(value::Sum::List(l)) => l
-                .elements
-                .first()
-                .unwrap_or_else(|| panic!("additionalIdentifiers list is empty")),
-            other => panic!("expected List for additionalIdentifiers, got {other:?}"),
-        };
-        assert_eq!(owned_labels(as_record(first)), ["source", "id", "scheme"]);
-        Ok(())
-    }
+    // `build_proposal_setup_utility_shape_and_nested_identifier` moved to
+    // `decman_lib::catalog::proposals::utility::tests` as `encode_snapshots`
+    // (`setup_utility`), driven through `SetupUtility::to_daml_proto`
+    // directly — same coverage (the nested `additionalIdentifiers` record
+    // included), pinned by insta instead of by hand-written label asserts.
 
     #[test]
     fn build_proposal_flat_record_arms_route_and_label_correctly() -> Result {
@@ -1079,12 +605,12 @@ mod tests {
                 ],
             },
             Case {
-                proposal: ProposalType::AcceptMintRequest {
+                proposal: ProposalType::AcceptMintRequest(AcceptMintRequest {
                     mint_request_cid: "mrc".to_string(),
                     instrument_configuration_cid: "icc".to_string(),
                     issuer_credential_cids: vec!["cred-1".to_string(), "cred-2".to_string()],
                     description: "accept mint".to_string(),
-                },
+                }),
                 package: ProposalPackage::GovernanceUtilityOnboarding,
                 module: "Governance.TokenIssuance.AcceptMintRequest",
                 entity: "AcceptMintRequest",
@@ -1099,12 +625,12 @@ mod tests {
                 ],
             },
             Case {
-                proposal: ProposalType::AcceptBurnRequest {
+                proposal: ProposalType::AcceptBurnRequest(AcceptBurnRequest {
                     burn_request_cid: "brc".to_string(),
                     instrument_configuration_cid: "icc".to_string(),
                     issuer_credential_cids: vec!["cred-1".to_string()],
                     description: "accept burn".to_string(),
-                },
+                }),
                 package: ProposalPackage::GovernanceUtilityOnboarding,
                 module: "Governance.TokenIssuance.AcceptBurnRequest",
                 entity: "AcceptBurnRequest",
@@ -1119,11 +645,11 @@ mod tests {
                 ],
             },
             Case {
-                proposal: ProposalType::CreateProviderConfiguration {
+                proposal: ProposalType::CreateProviderConfiguration(CreateProviderConfiguration {
                     provider_service_cid: "psc".to_string(),
                     registrar_requirements: vec![],
                     holder_requirements: vec![],
-                },
+                }),
                 package: ProposalPackage::GovernanceUtilityOnboarding,
                 module: "Governance.UtilityOnboarding.CreateProviderConfiguration",
                 entity: "CreateProviderConfiguration",
@@ -1136,14 +662,14 @@ mod tests {
                 ],
             },
             Case {
-                proposal: ProposalType::ProvisionInstrument {
+                proposal: ProposalType::ProvisionInstrument(ProvisionInstrument {
                     registrar_service_cid: "rsc".to_string(),
                     instrument_id_text: "uuid-1".to_string(),
                     additional_identifiers: vec![],
                     issuer_requirements: vec![],
                     holder_requirements: vec![],
                     initial_instrument_issuers: vec![party_id()],
-                },
+                }),
                 package: ProposalPackage::GovernanceUtilityOnboarding,
                 module: "Governance.UtilityOnboarding.ProvisionInstrument",
                 entity: "ProvisionInstrument",
@@ -1159,12 +685,14 @@ mod tests {
                 ],
             },
             Case {
-                proposal: ProposalType::CreateRegistrarServiceRequest {
-                    operator: party_id(),
-                    provider: party_id(),
-                    create_transfer_rule: true,
-                    create_allocation_factory: false,
-                },
+                proposal: ProposalType::CreateRegistrarServiceRequest(
+                    CreateRegistrarServiceRequest {
+                        operator: party_id(),
+                        provider: party_id(),
+                        create_transfer_rule: true,
+                        create_allocation_factory: false,
+                    },
+                ),
                 package: ProposalPackage::GovernanceUtilityOnboarding,
                 module: "Governance.UtilityOnboarding.CreateRegistrarServiceRequest",
                 entity: "CreateRegistrarServiceRequest",
@@ -1178,11 +706,11 @@ mod tests {
                 ],
             },
             Case {
-                proposal: ProposalType::OnboardRegistrar {
+                proposal: ProposalType::OnboardRegistrar(OnboardRegistrar {
                     provider_service_cid: "psc".to_string(),
                     registrar_service_request_cid: "rsrc".to_string(),
                     provider_configuration_cid: "pcc".to_string(),
-                },
+                }),
                 package: ProposalPackage::GovernanceUtilityOnboarding,
                 module: "Governance.UtilityOnboarding.OnboardRegistrar",
                 entity: "OnboardRegistrar",
@@ -1195,10 +723,10 @@ mod tests {
                 ],
             },
             Case {
-                proposal: ProposalType::OnboardInstrumentIssuers {
+                proposal: ProposalType::OnboardInstrumentIssuers(OnboardInstrumentIssuers {
                     instrument_configuration_cid: "icc".to_string(),
                     instrument_issuers: vec![party_id()],
-                },
+                }),
                 package: ProposalPackage::GovernanceUtilityOnboarding,
                 module: "Governance.UtilityOnboarding.OnboardInstrumentIssuers",
                 entity: "OnboardInstrumentIssuers",
@@ -1210,12 +738,12 @@ mod tests {
                 ],
             },
             Case {
-                proposal: ProposalType::OffboardInstrumentIssuers {
+                proposal: ProposalType::OffboardInstrumentIssuers(OffboardInstrumentIssuers {
                     instrument_issuers: vec![InstrumentIssuerCredentials {
                         instrument_issuer: party_id(),
                         credential_cids: vec!["cred-1".to_string()],
                     }],
-                },
+                }),
                 package: ProposalPackage::GovernanceUtilityOnboarding,
                 module: "Governance.UtilityOnboarding.OffboardInstrumentIssuers",
                 entity: "OffboardInstrumentIssuers",
@@ -1234,295 +762,28 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn build_proposal_accept_requests_serialize_issuer_credentials() -> Result {
-        // The accept arms forward the supplied credential cids into the
-        // `issuerCredentialCids` field as Some(list of ContractId). Labels
-        // alone cannot catch a regression to the old hardcoded empty list.
-        let proposals = [
-            ProposalType::AcceptMintRequest {
-                mint_request_cid: "mrc".to_string(),
-                instrument_configuration_cid: "icc".to_string(),
-                issuer_credential_cids: vec!["cred-1".to_string(), "cred-2".to_string()],
-                description: "accept mint".to_string(),
-            },
-            ProposalType::AcceptBurnRequest {
-                burn_request_cid: "brc".to_string(),
-                instrument_configuration_cid: "icc".to_string(),
-                issuer_credential_cids: vec!["cred-1".to_string(), "cred-2".to_string()],
-                description: "accept burn".to_string(),
-            },
-        ];
-        for proposal in proposals {
-            let (_, module, _, record) =
-                build_proposal_create_args(&gov_id(), &proposer_id(), &proposal, None, None)?;
-            let credentials = field_value(&record, "issuerCredentialCids");
-            let inner = match &credentials.sum {
-                Some(value::Sum::Optional(o)) => o.value.as_deref(),
-                other => {
-                    panic!("expected Optional for issuerCredentialCids in {module}, got {other:?}")
-                }
-            };
-            let inner = inner.unwrap_or_else(|| panic!("expected Some list in {module}, got None"));
-            let elements = match &inner.sum {
-                Some(value::Sum::List(l)) => &l.elements,
-                other => {
-                    panic!("expected List inside Optional in {module}, got {other:?}")
-                }
-            };
-            let cids: Vec<_> = elements
-                .iter()
-                .map(|v| match &v.sum {
-                    Some(value::Sum::ContractId(cid)) => cid.as_str(),
-                    other => panic!("expected ContractId element in {module}, got {other:?}"),
-                })
-                .collect();
-            assert_eq!(cids, ["cred-1", "cred-2"], "cids for {module}");
-        }
-        Ok(())
-    }
+    // `build_proposal_accept_requests_serialize_issuer_credentials` and
+    // `build_proposal_accept_requests_empty_issuer_credentials_serialize_none`
+    // moved to `decman_lib::catalog::proposals::utility::tests` as
+    // `encode_snapshots` (`accept_mint_request_some` / `_none`,
+    // `accept_burn_request_some` / `_none`), driven through
+    // `AcceptMintRequest::to_daml_proto` / `AcceptBurnRequest::to_daml_proto`
+    // directly — same coverage (the `issuerCredentialCids` Some/None
+    // distinction included), pinned by insta instead of by hand-written
+    // asserts.
 
-    #[test]
-    fn build_proposal_accept_requests_empty_issuer_credentials_serialize_none() -> Result {
-        // An empty list must serialize as Optional None, not Some []. Daml drops a
-        // trailing added Optional field on downgrade only when it is None, so
-        // Some [] would break every accept on a participant still running 0.2.0.
-        let proposals = [
-            ProposalType::AcceptMintRequest {
-                mint_request_cid: "mrc".to_string(),
-                instrument_configuration_cid: "icc".to_string(),
-                issuer_credential_cids: vec![],
-                description: "d".to_string(),
-            },
-            ProposalType::AcceptBurnRequest {
-                burn_request_cid: "brc".to_string(),
-                instrument_configuration_cid: "icc".to_string(),
-                issuer_credential_cids: vec![],
-                description: "d".to_string(),
-            },
-        ];
-        for proposal in proposals {
-            let (_, module, _, record) =
-                build_proposal_create_args(&gov_id(), &proposer_id(), &proposal, None, None)?;
-            match &field_value(&record, "issuerCredentialCids").sum {
-                Some(value::Sum::Optional(opt)) => {
-                    assert!(opt.value.is_none(), "expected None for {module}");
-                }
-                other => panic!("expected Optional for {module}, got {other:?}"),
-            }
-        }
-        Ok(())
-    }
+    // `build_proposal_onboard_instrument_issuers_serializes_parties` and
+    // `build_proposal_offboard_instrument_issuers_serializes_rows` moved to
+    // `decman_lib::catalog::proposals::utility::tests` as `encode_snapshots`
+    // (`onboard_instrument_issuers`, `offboard_instrument_issuers`), driven
+    // through the structs' own `DamlProtoEncode` directly.
 
-    /// Unwrap a `value::Sum::List` reference into its elements.
-    fn as_list_elements<'a>(value: &'a Value, label: &str) -> &'a Vec<Value> {
-        match &value.sum {
-            Some(value::Sum::List(l)) => &l.elements,
-            other => panic!("expected List for {label}, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn build_proposal_onboard_instrument_issuers_serializes_parties() -> Result {
-        // The arm forwards the issuer parties into the `instrumentIssuers`
-        // list as Party values.
-        let issuer = party_id();
-        let proposal = ProposalType::OnboardInstrumentIssuers {
-            instrument_configuration_cid: "icc".to_string(),
-            instrument_issuers: vec![issuer.clone()],
-        };
-        let (_, _, _, record) =
-            build_proposal_create_args(&gov_id(), &proposer_id(), &proposal, None, None)?;
-        let issuers = field_value(&record, "instrumentIssuers");
-        let parties: Vec<_> = as_list_elements(issuers, "instrumentIssuers")
-            .iter()
-            .map(|v| match &v.sum {
-                Some(value::Sum::Party(p)) => p.as_str(),
-                other => panic!("expected Party element, got {other:?}"),
-            })
-            .collect();
-        assert_eq!(parties, [issuer.to_string().as_str()]);
-        Ok(())
-    }
-
-    #[test]
-    fn build_proposal_offboard_instrument_issuers_serializes_rows() -> Result {
-        // The arm forwards each row as a record of a Party and a list of
-        // ContractId. Labels alone cannot catch a regression to a flat list.
-        let issuer = party_id();
-        let proposal = ProposalType::OffboardInstrumentIssuers {
-            instrument_issuers: vec![InstrumentIssuerCredentials {
-                instrument_issuer: issuer.clone(),
-                credential_cids: vec!["cred-1".to_string(), "cred-2".to_string()],
-            }],
-        };
-        let (_, _, _, record) =
-            build_proposal_create_args(&gov_id(), &proposer_id(), &proposal, None, None)?;
-        let rows = as_list_elements(
-            field_value(&record, "instrumentIssuers"),
-            "instrumentIssuers",
-        );
-        assert_eq!(rows.len(), 1);
-        let row = match &rows[0].sum {
-            Some(value::Sum::Record(r)) => r,
-            other => panic!("expected Record element, got {other:?}"),
-        };
-        let party = match &field_value(row, "instrumentIssuer").sum {
-            Some(value::Sum::Party(p)) => p.as_str(),
-            other => panic!("expected Party, got {other:?}"),
-        };
-        assert_eq!(party, issuer.to_string().as_str());
-        let cids: Vec<_> = as_list_elements(field_value(row, "credentialCids"), "credentialCids")
-            .iter()
-            .map(|v| match &v.sum {
-                Some(value::Sum::ContractId(cid)) => cid.as_str(),
-                other => panic!("expected ContractId element, got {other:?}"),
-            })
-            .collect();
-        assert_eq!(cids, ["cred-1", "cred-2"]);
-        Ok(())
-    }
-
-    /// Decode a serialized `[PartyCredentialRequirement]` field into
-    /// `(issuer, [(property, value)])` tuples for terse assertions. Panics on
-    /// any shape mismatch, including tuple fields not labeled `_1`/`_2`.
-    fn requirement_tuples(record: &Record, label: &str) -> Vec<(String, Vec<(String, String)>)> {
-        as_list_elements(field_value(record, label), label)
-            .iter()
-            .map(|element| {
-                let requirement = as_record(element);
-                assert_eq!(
-                    owned_labels(requirement),
-                    ["issuer", "requiredClaims"],
-                    "requirement labels in {label}"
-                );
-                let issuer = match &field_value(requirement, "issuer").sum {
-                    Some(value::Sum::Party(p)) => p.clone(),
-                    other => panic!("expected Party for issuer in {label}, got {other:?}"),
-                };
-                let claims =
-                    as_list_elements(field_value(requirement, "requiredClaims"), "requiredClaims")
-                        .iter()
-                        .map(|claim| {
-                            let pair = as_record(claim);
-                            assert_eq!(owned_labels(pair), ["_1", "_2"], "tuple labels in {label}");
-                            let text = |l: &str| match &field_value(pair, l).sum {
-                                Some(value::Sum::Text(t)) => t.clone(),
-                                other => panic!("expected Text for {l} in {label}, got {other:?}"),
-                            };
-                            (text("_1"), text("_2"))
-                        })
-                        .collect();
-                (issuer, claims)
-            })
-            .collect()
-    }
-
-    fn requirement(issuer: &CantonId, claims: &[(&str, &str)]) -> PartyCredentialRequirement {
-        PartyCredentialRequirement {
-            issuer: issuer.clone(),
-            required_claims: claims
-                .iter()
-                .map(|(property, value)| RequiredClaim {
-                    property: property.to_string(),
-                    value: value.to_string(),
-                })
-                .collect(),
-        }
-    }
-
-    #[test]
-    fn build_proposal_create_provider_configuration_serializes_requirements() -> Result {
-        // Each requirement is a nested record whose `requiredClaims` list
-        // holds `DA.Types:Tuple2 Text Text` records (fields `_1`/`_2`). The
-        // registrar and holder lists carry distinct content, so a swap of
-        // the two fields cannot pass.
-        let issuer = party_id();
-        let proposal = ProposalType::CreateProviderConfiguration {
-            provider_service_cid: "psc".to_string(),
-            registrar_requirements: vec![requirement(
-                &issuer,
-                &[("role", "registrar"), ("kyc", "passed")],
-            )],
-            holder_requirements: vec![requirement(&issuer, &[("role", "holder")])],
-        };
-        let (_, _, _, record) =
-            build_proposal_create_args(&gov_id(), &proposer_id(), &proposal, None, None)?;
-
-        let registrar = requirement_tuples(&record, "registrarRequirements");
-        assert_eq!(
-            registrar,
-            [(
-                issuer.to_string(),
-                vec![
-                    ("role".to_string(), "registrar".to_string()),
-                    ("kyc".to_string(), "passed".to_string()),
-                ],
-            )]
-        );
-        let holder = requirement_tuples(&record, "holderRequirements");
-        assert_eq!(
-            holder,
-            [(
-                issuer.to_string(),
-                vec![("role".to_string(), "holder".to_string())],
-            )]
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn build_proposal_provision_instrument_shape_and_nested_values() -> Result {
-        let issuer = party_id();
-        let proposal = ProposalType::ProvisionInstrument {
-            registrar_service_cid: "rsc".to_string(),
-            instrument_id_text: "uuid-1".to_string(),
-            additional_identifiers: vec![InstrumentIdentifier {
-                source: party_id(),
-                id: "TICK".to_string(),
-                scheme: "Ticker".to_string(),
-            }],
-            issuer_requirements: vec![requirement(&issuer, &[("role", "instrument-issuer")])],
-            holder_requirements: vec![requirement(&issuer, &[("role", "holder")])],
-            initial_instrument_issuers: vec![issuer.clone()],
-        };
-        let (_, _, _, record) =
-            build_proposal_create_args(&gov_id(), &proposer_id(), &proposal, None, None)?;
-
-        // The identifier nesting mirrors the SetupUtility precedent.
-        let identifiers = field_value(&record, "additionalIdentifiers");
-        let first = as_list_elements(identifiers, "additionalIdentifiers")
-            .first()
-            .unwrap_or_else(|| panic!("additionalIdentifiers list is empty"));
-        assert_eq!(owned_labels(as_record(first)), ["source", "id", "scheme"]);
-
-        // Distinct issuer/holder requirement content, so a swap cannot pass.
-        let issuer_reqs = requirement_tuples(&record, "issuerRequirements");
-        assert_eq!(
-            issuer_reqs,
-            [(
-                issuer.to_string(),
-                vec![("role".to_string(), "instrument-issuer".to_string())],
-            )]
-        );
-        let holder_reqs = requirement_tuples(&record, "holderRequirements");
-        assert_eq!(
-            holder_reqs,
-            [(
-                issuer.to_string(),
-                vec![("role".to_string(), "holder".to_string())],
-            )]
-        );
-
-        let issuers: Vec<_> =
-            as_list_elements(field_value(&record, "initialInstrumentIssuers"), "issuers")
-                .iter()
-                .map(|v| match &v.sum {
-                    Some(value::Sum::Party(p)) => p.as_str(),
-                    other => panic!("expected Party element, got {other:?}"),
-                })
-                .collect();
-        assert_eq!(issuers, [issuer.to_string().as_str()]);
-        Ok(())
-    }
+    // `build_proposal_create_provider_configuration_serializes_requirements`
+    // and `build_proposal_provision_instrument_shape_and_nested_values` moved
+    // to `decman_lib::catalog::proposals::utility::tests` as
+    // `encode_snapshots` (`create_provider_configuration`,
+    // `provision_instrument_populated` / `_empty`), driven through the
+    // structs' own `DamlProtoEncode` directly — same coverage (the nested
+    // `requiredClaims` tuples and `additionalIdentifiers` record included),
+    // pinned by insta instead of by hand-written label asserts.
 }
