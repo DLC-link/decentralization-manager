@@ -11,6 +11,9 @@ use canton_common::decimal::DamlDecimal;
 use canton_common::transfer_factory::Context as ChoiceContext;
 use canton_proto_rs::com::daml::ledger::api::v2::{Optional, Record, Value, value};
 use decman_lib::catalog::proposals::core::GenericVote;
+use decman_lib::catalog::proposals::credential::{
+    AcceptFreeCredential, OfferFreeCredential, OfferPaidCredential,
+};
 use decman_lib::catalog::proposals::custody::{
     AcceptTransfer, AcceptTransferWithContext, SetupCcPreapproval, SetupTokenPreapproval, Transfer,
     TransferWithContext,
@@ -23,9 +26,7 @@ use decman_lib::catalog::proposals::utility::{
     CreateDelegatedBatchedMarkersProxy, CreateProviderServiceRequest, CreateUserServiceRequest,
     ProvisionProviderService,
 };
-pub(crate) use decman_lib::catalog::types::{
-    make_optional_beneficiaries, serialize_billing_params,
-};
+pub(crate) use decman_lib::catalog::types::make_optional_beneficiaries;
 use decman_lib::framework::commands::proposal_create_arguments;
 pub(crate) use decman_lib::framework::encode::*;
 
@@ -34,9 +35,7 @@ use crate::error::Result;
 
 use super::types::{ActionType, ProposalType};
 #[cfg(test)]
-use super::types::{
-    BillingParams, Claim, InstrumentId, InstrumentIdentifier, PartyCredentialRequirement,
-};
+use super::types::{InstrumentId, InstrumentIdentifier, PartyCredentialRequirement};
 #[cfg(test)]
 use common::api::InstrumentAllowance;
 
@@ -405,81 +404,26 @@ pub fn build_proposal_create_args(
                 ],
             },
         ),
-        ProposalType::OfferFreeCredential {
-            user_service_cid,
-            holder,
-            id,
-            description,
-            claims,
-        } => (
+        ProposalType::OfferFreeCredential(p) => (
             ProposalPackage::GovernanceUtilityCredential,
-            "Governance.UtilityCredential.OfferFreeCredential",
-            "OfferFreeCredential",
-            Record {
-                record_id: None,
-                fields: vec![
-                    field("governanceParty", make_party(governance_party)),
-                    field("proposer", make_party(proposer)),
-                    field("userServiceCid", make_contract_id(user_service_cid)),
-                    field("holder", make_party(holder)),
-                    field("id", make_text(id)),
-                    field("description", make_text(description)),
-                    field(
-                        "claims",
-                        make_list(claims.iter().map(serialize_claim).collect()),
-                    ),
-                ],
-            },
+            OfferFreeCredential::MODULE,
+            OfferFreeCredential::ENTITY,
+            proposal_create_arguments(p, governance_party, proposer)
+                .map_err(anyhow::Error::from)?,
         ),
-        ProposalType::OfferPaidCredential {
-            user_service_cid,
-            holder,
-            id,
-            description,
-            claims,
-            billing_params,
-            deposit_initial_amount_usd,
-        } => (
+        ProposalType::OfferPaidCredential(p) => (
             ProposalPackage::GovernanceUtilityCredential,
-            "Governance.UtilityCredential.OfferPaidCredential",
-            "OfferPaidCredential",
-            Record {
-                record_id: None,
-                fields: vec![
-                    field("governanceParty", make_party(governance_party)),
-                    field("proposer", make_party(proposer)),
-                    field("userServiceCid", make_contract_id(user_service_cid)),
-                    field("holder", make_party(holder)),
-                    field("id", make_text(id)),
-                    field("description", make_text(description)),
-                    field(
-                        "claims",
-                        make_list(claims.iter().map(serialize_claim).collect()),
-                    ),
-                    field("billingParams", serialize_billing_params(billing_params)),
-                    field(
-                        "depositInitialAmountUsd",
-                        make_optional_numeric(deposit_initial_amount_usd),
-                    ),
-                ],
-            },
+            OfferPaidCredential::MODULE,
+            OfferPaidCredential::ENTITY,
+            proposal_create_arguments(p, governance_party, proposer)
+                .map_err(anyhow::Error::from)?,
         ),
-        ProposalType::AcceptFreeCredential {
-            user_service_cid,
-            credential_offer_cid,
-        } => (
+        ProposalType::AcceptFreeCredential(p) => (
             ProposalPackage::GovernanceUtilityCredential,
-            "Governance.UtilityCredential.AcceptFreeCredential",
-            "AcceptFreeCredential",
-            Record {
-                record_id: None,
-                fields: vec![
-                    field("governanceParty", make_party(governance_party)),
-                    field("proposer", make_party(proposer)),
-                    field("userServiceCid", make_contract_id(user_service_cid)),
-                    field("credentialOfferCid", make_contract_id(credential_offer_cid)),
-                ],
-            },
+            AcceptFreeCredential::MODULE,
+            AcceptFreeCredential::ENTITY,
+            proposal_create_arguments(p, governance_party, proposer)
+                .map_err(anyhow::Error::from)?,
         ),
         ProposalType::Burn {
             allocation_factory_cid,
@@ -1010,64 +954,12 @@ mod tests {
     // `AcceptTransferWithContext` directly — `AcceptTransfer` no longer
     // implements `DamlProtoEncode` on its own.
 
-    #[test]
-    fn build_proposal_offer_paid_credential_shape_and_billing_params() -> Result {
-        let proposal = ProposalType::OfferPaidCredential {
-            user_service_cid: "usc".to_string(),
-            holder: party_id(),
-            id: "cred-1".to_string(),
-            description: "paid".to_string(),
-            claims: vec![Claim {
-                subject: "s".to_string(),
-                property: "p".to_string(),
-                value: "v".to_string(),
-            }],
-            billing_params: BillingParams {
-                fee_per_day_usd: DamlDecimal::parse("1.5")?,
-                billing_period_minutes: 60,
-                deposit_target_amount_usd: DamlDecimal::parse("10.0")?,
-                holder_activity_weight: Some(DamlDecimal::parse("0.5")?),
-            },
-            deposit_initial_amount_usd: Some(DamlDecimal::parse("5.0")?),
-        };
-        let (package, module, entity, record) =
-            build_proposal_create_args(&gov_id(), &proposer_id(), &proposal, None, None)?;
-
-        assert_eq!(package, ProposalPackage::GovernanceUtilityCredential);
-        assert_eq!(module, "Governance.UtilityCredential.OfferPaidCredential");
-        assert_eq!(entity, "OfferPaidCredential");
-        assert_eq!(
-            owned_labels(&record),
-            [
-                "governanceParty",
-                "proposer",
-                "userServiceCid",
-                "holder",
-                "id",
-                "description",
-                "claims",
-                "billingParams",
-                "depositInitialAmountUsd",
-            ]
-        );
-
-        // Descend into `billingParams`.
-        let billing = as_record(field_value(&record, "billingParams"));
-        assert_eq!(
-            owned_labels(billing),
-            [
-                "feePerDayUsd",
-                "billingPeriodMinutes",
-                "depositTargetAmountUsd",
-                "holderActivityWeight",
-            ]
-        );
-
-        // `feePerDayUsd` is itself a record wrapping a single `rate` field.
-        let fee = as_record(field_value(billing, "feePerDayUsd"));
-        assert_eq!(owned_labels(fee), ["rate"]);
-        Ok(())
-    }
+    // `build_proposal_offer_paid_credential_shape_and_billing_params` moved to
+    // `decman_lib::catalog::proposals::credential::tests` as `encode_snapshots`
+    // (`offer_paid_credential_deposit_and_weight_some` /
+    // `..._none`), driven through `OfferPaidCredential::to_daml_proto`
+    // directly — same coverage (billingParams' nested `feePerDayUsd` record
+    // included), pinned by insta instead of by hand-written label asserts.
 
     #[test]
     fn build_proposal_setup_utility_shape_and_nested_identifier() -> Result {
@@ -1172,10 +1064,10 @@ mod tests {
                 labels: &["governanceParty", "proposer", "operator", "user"],
             },
             Case {
-                proposal: ProposalType::AcceptFreeCredential {
+                proposal: ProposalType::AcceptFreeCredential(AcceptFreeCredential {
                     user_service_cid: "usc".to_string(),
                     credential_offer_cid: "coc".to_string(),
-                },
+                }),
                 package: ProposalPackage::GovernanceUtilityCredential,
                 module: "Governance.UtilityCredential.AcceptFreeCredential",
                 entity: "AcceptFreeCredential",

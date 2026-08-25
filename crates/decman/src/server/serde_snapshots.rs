@@ -8,6 +8,9 @@ use common::api::{
     PartyCredentialRequirement, RequiredClaim,
 };
 use decman_lib::catalog::proposals::core::GenericVote;
+use decman_lib::catalog::proposals::credential::{
+    AcceptFreeCredential, OfferFreeCredential, OfferPaidCredential,
+};
 use decman_lib::catalog::proposals::custody::{
     AcceptTransfer, SetupCcPreapproval, SetupTokenPreapproval, Transfer,
 };
@@ -278,14 +281,14 @@ fn all_proposal_fixtures() -> Vec<ProposalType> {
             amount: dec("5"),
             description: "mint".into(),
         },
-        ProposalType::OfferFreeCredential {
+        ProposalType::OfferFreeCredential(OfferFreeCredential {
             user_service_cid: "00usc".into(),
             holder: cid("holder"),
             id: "cred-1".into(),
             description: "free cred".into(),
             claims: vec![claim()],
-        },
-        ProposalType::OfferPaidCredential {
+        }),
+        ProposalType::OfferPaidCredential(OfferPaidCredential {
             user_service_cid: "00usc".into(),
             holder: cid("holder"),
             id: "cred-2".into(),
@@ -298,11 +301,11 @@ fn all_proposal_fixtures() -> Vec<ProposalType> {
                 holder_activity_weight: Some(dec("0.5")),
             },
             deposit_initial_amount_usd: Some(dec("10")),
-        },
-        ProposalType::AcceptFreeCredential {
+        }),
+        ProposalType::AcceptFreeCredential(AcceptFreeCredential {
             user_service_cid: "00usc".into(),
             credential_offer_cid: "00offer".into(),
-        },
+        }),
         ProposalType::Burn {
             allocation_factory_cid: "00alloc".into(),
             instrument_id: instrument(),
@@ -399,7 +402,7 @@ fn minimal_option_fixtures() -> Vec<ProposalType> {
             registrar_service_cid: "00rsc".into(),
             enable_result_contracts: None,
         },
-        ProposalType::OfferPaidCredential {
+        ProposalType::OfferPaidCredential(OfferPaidCredential {
             user_service_cid: "00usc".into(),
             holder: cid("holder"),
             id: "cred-2".into(),
@@ -412,7 +415,7 @@ fn minimal_option_fixtures() -> Vec<ProposalType> {
                 holder_activity_weight: None,
             },
             deposit_initial_amount_usd: None,
-        },
+        }),
         ProposalType::AcceptMintRequest {
             mint_request_cid: "00mr".into(),
             instrument_configuration_cid: "00icc".into(),

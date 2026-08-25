@@ -434,33 +434,13 @@ pub enum ProposalType {
     /// Offer a free credential to a holder via the governance party's
     /// `UserService`. Wraps `UserService_OfferFreeCredential` from the
     /// Utility Credential App.
-    OfferFreeCredential {
-        user_service_cid: String,
-        holder: CantonId,
-        id: String,
-        description: String,
-        claims: Vec<Claim>,
-    },
+    OfferFreeCredential(decman_lib::catalog::proposals::credential::OfferFreeCredential),
     /// Offer a paid credential to a holder via the governance party's
     /// `UserService`. Wraps `UserService_OfferPaidCredential`.
-    OfferPaidCredential {
-        user_service_cid: String,
-        holder: CantonId,
-        id: String,
-        description: String,
-        claims: Vec<Claim>,
-        billing_params: BillingParams,
-        #[serde(default)]
-        #[schema(value_type = Option<String>)]
-        #[cfg_attr(feature = "typegen", ts(type = "string"))]
-        deposit_initial_amount_usd: Option<DamlDecimal>,
-    },
+    OfferPaidCredential(decman_lib::catalog::proposals::credential::OfferPaidCredential),
     /// Accept a free credential offered to the governance party. Wraps
     /// `UserService_AcceptFreeCredentialOffer`.
-    AcceptFreeCredential {
-        user_service_cid: String,
-        credential_offer_cid: String,
-    },
+    AcceptFreeCredential(decman_lib::catalog::proposals::credential::AcceptFreeCredential),
     /// Offer a burn of `amount` tokens held by `holder` via
     /// `AllocationFactory_OfferBurn`. Holdings are supplied by the holder at
     /// `BurnOffer_Accept` time, not here.
@@ -605,12 +585,7 @@ impl ProposalType {
             ProposalType::Mint { amount, .. } | ProposalType::Burn { amount, .. } => {
                 validate_positive_amount(amount, "amount").map_err(|e| e.to_string())
             }
-            ProposalType::OfferPaidCredential {
-                deposit_initial_amount_usd: Some(d),
-                ..
-            } => {
-                validate_positive_amount(d, "deposit_initial_amount_usd").map_err(|e| e.to_string())
-            }
+            ProposalType::OfferPaidCredential(p) => p.validate(&ctx).map_err(|e| e.to_string()),
             ProposalType::SetProviderAppRewardBeneficiaries {
                 provider_app_reward_beneficiaries: Some(beneficiaries),
                 ..
