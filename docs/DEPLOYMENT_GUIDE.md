@@ -115,6 +115,7 @@ In the application's **APIs** tab, **authorize** it against the API you just cre
 - `DECPM_AUTH0_DOMAIN` = the tenant domain shown on the application page (for example `your-tenant.us.auth0.com` — no scheme).
 - `DECPM_AUTH0_CLIENT_ID` = the application's **Client ID**.
 - `DECPM_AUTH0_AUDIENCE` = the API **Identifier** from step 1.
+- `DECPM_JWT_ROLE_CLAIM` = a URI-namespaced claim owned by your deployment (for example `https://example.com/decman/roles`) when using the admin-role gate.
 
 **Allowed Web Origins** plays the same role as Keycloak's Web Origins — without it the browser blocks the SPA's token requests with CORS errors. Set it to your UI host; do not rely on Auth0 deriving it from callback URLs.
 
@@ -123,11 +124,15 @@ In the application's **APIs** tab, **authorize** it against the API you just cre
 ```js
 exports.onExecutePostLogin = async (event, api) => {
   const roles = event.authorization?.roles || [];
-  api.accessToken.setCustomClaim("roles", roles);
+  api.accessToken.setCustomClaim("https://example.com/decman/roles", roles);
 };
 ```
 
-Attach the Action to the Login flow, then create the matching role under **User Management → Roles** and assign it to the appropriate users.
+Set `DECPM_JWT_ROLE_CLAIM=https://example.com/decman/roles`, replacing the
+example namespace with one controlled by your deployment. Attach the Action to
+the Login flow, then create the matching role under **User Management → Roles**
+and assign it to the appropriate users. DecMan also supports the standard flat
+`roles`, `realm_access.roles`, and `scope` carriers without this setting.
 
 ## 3 — Apply the manifests
 
@@ -408,6 +413,7 @@ Most variables have a default that's only useful for local development (loopback
 | `DECPM_AUTH0_DOMAIN` | unset | **yes**¹ | Auth0 tenant domain for frontend auth (mutually exclusive with `DECPM_KEYCLOAK_*`) |
 | `DECPM_AUTH0_CLIENT_ID` | unset | **yes**¹ | Auth0 SPA client ID |
 | `DECPM_AUTH0_AUDIENCE` | unset | **yes**¹ | Auth0 API audience targeted by SPA tokens |
+| `DECPM_JWT_ROLE_CLAIM` | unset | optional | Provider-specific JWT claim containing a role-name array; typically required for Auth0's namespaced custom claim |
 | `DECPM_ADMIN_ROLE` | unset | recommended | IdP role required for privileged endpoints. If unset, every authenticated caller is treated as admin. |
 | `DECPM_ALLOWED_ORIGIN` | same-origin | optional | CORS origin if UI host ≠ API host |
 | `DECPM_DB_ENCRYPTION_KEY` | unset | recommended | Random passphrase (hashed via SHA-256) protecting party secrets at rest. If unset, secrets are stored in plaintext in the SQLite DB. |
@@ -464,4 +470,4 @@ or dismiss them first).
 - **UI loads but login fails**: confirm `<your-ui-host>` is registered as a valid redirect URI on your IdP client, and that the `DECPM_KEYCLOAK_*` (or `DECPM_AUTH0_*`) env vars match the IdP. For Auth0, the SPA application must also have the configured audience listed in its Allowed Callback / API Authorization.
 - **Peers shown as unreachable**: check that the Noise port (9000) is exposed publicly, that `DECPM_PUBLIC_ADDRESS` resolves to that endpoint, and that the peer has your current public key.
 - **Every Canton call fails with `transport error` / `BrokenPipe`, immediately and permanently**: the channel's TLS setting does not match what the endpoint speaks. A plaintext client against a TLS listener has its connection closed on the first bytes, which looks identical to the participant being down. Confirm with `grpcurl -plaintext <host>:<port> list` — if that fails but `grpcurl <host>:<port> list` succeeds, the endpoint is TLS: set `DECPM_CANTON_ADMIN_TLS=true` (and `DECPM_CANTON_LEDGER_TLS=true` for the ledger API), plus `..._TLS_CA_CERT` when a private CA issued the certificate. The connect error message names the variable to change in either direction.
-- **Privileged endpoints return 403**: you have `DECPM_ADMIN_ROLE` set but the calling user doesn't have that role assigned in the IdP. Either grant the role or unset the variable.
+- **Privileged endpoints return 403**: you have `DECPM_ADMIN_ROLE` set but the calling user doesn't have that role assigned in the IdP, or `DECPM_JWT_ROLE_CLAIM` does not match the claim emitted by the IdP. Correct the claim configuration, grant the role, or unset the admin-role gate.

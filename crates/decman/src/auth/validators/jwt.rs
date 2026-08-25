@@ -37,6 +37,10 @@ const JWKS_TTL: Duration = Duration::from_secs(3600);
 pub struct JwtValidator {
     inbound: Option<KeycloakConfig>,
     auth0: Option<Auth0Config>,
+    /// Optional provider-specific claim that carries an array of role names.
+    /// Standard `realm_access.roles`, `roles`, and `scope` carriers remain
+    /// supported without configuration.
+    role_claim: Option<String>,
     party_credentials: Arc<RwLock<Vec<PartyCredentials>>>,
     /// JWKS cache keyed by issuer.
     jwks_cache: RwLock<HashMap<String, CachedJwks>>,
@@ -127,18 +131,24 @@ struct Claims {
     scope: Option<String>,
     #[serde(default)]
     roles: Option<Vec<String>>,
+    /// Preserve provider-specific claims so an operator-configured role claim
+    /// can be read without baking an IdP or deployment namespace into DecMan.
+    #[serde(flatten)]
+    additional: HashMap<String, serde_json::Value>,
 }
 
 impl JwtValidator {
     pub fn new(
         inbound: Option<KeycloakConfig>,
         auth0: Option<Auth0Config>,
+        role_claim: Option<String>,
         party_credentials: Arc<RwLock<Vec<PartyCredentials>>>,
         http: reqwest::Client,
     ) -> Self {
         Self {
             inbound,
             auth0,
+            role_claim: role_claim.filter(|claim| !claim.is_empty()),
             party_credentials,
             jwks_cache: RwLock::new(HashMap::new()),
             http,
@@ -227,9 +237,28 @@ impl JwtValidator {
             }
         }
 
+        let mut flat_roles = claims.roles.unwrap_or_default();
+        if let Some(claim_name) = self.role_claim.as_deref()
+            && claim_name != "roles"
+            && let Some(value) = claims.additional.get(claim_name)
+        {
+            match serde_json::from_value::<Vec<String>>(value.clone()) {
+                Ok(roles) => {
+                    for role in roles {
+                        if !flat_roles.contains(&role) {
+                            flat_roles.push(role);
+                        }
+                    }
+                }
+                Err(_) => tracing::warn!(
+                    "configured JWT role claim '{claim_name}' is not an array of strings; \
+                     ignoring it"
+                ),
+            }
+        }
         let roles = collect_roles(
             claims.realm_access.as_ref(),
-            claims.roles.as_deref(),
+            Some(&flat_roles),
             claims.scope.as_deref(),
         );
         Ok(Principal {
@@ -541,6 +570,10 @@ mod tests {
     /// `JwtValidator` that trusts it. Returns `(server, validator, issuer)`;
     /// keep `server` alive for the duration of the call.
     async fn setup() -> (MockServer, JwtValidator, String) {
+        setup_with_role_claim(None).await
+    }
+
+    async fn setup_with_role_claim(role_claim: Option<&str>) -> (MockServer, JwtValidator, String) {
         let server = MockServer::start().await;
         let issuer = format!("{}/realms/test", server.uri());
 
@@ -578,6 +611,7 @@ mod tests {
         let validator = JwtValidator::new(
             Some(inbound),
             None,
+            role_claim.map(str::to_string),
             std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new())),
             reqwest::Client::new(),
         );
@@ -629,6 +663,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn accepts_configured_role_claim() -> anyhow::Result<()> {
+        let role_claim = "https://idp.example/roles";
+        let (_server, validator, issuer) = setup_with_role_claim(Some(role_claim)).await;
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(TEST_KID.to_string());
+        let token = sign(
+            &header,
+            &json!({
+                "iss": issuer,
+                "sub": "auth0|operator",
+                "azp": "decman",
+                "exp": unix_now()? + 3600,
+                "https://idp.example/roles": [
+                    "decentralization-manager-admin",
+                    "viewer"
+                ],
+            }),
+        )?;
+
+        let principal = validator
+            .validate(&token)
+            .await
+            .map_err(|e| anyhow::anyhow!("expected Auth0 token to verify: {e:?}"))?;
+        assert!(principal.has_role("decentralization-manager-admin"));
+        assert!(principal.has_role("viewer"));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn fetches_metadata_from_internal_url_while_trusting_public_issuer() -> anyhow::Result<()>
     {
         // The server cannot reach the public `url` (an unreachable host), but
@@ -675,6 +738,7 @@ mod tests {
         };
         let validator = JwtValidator::new(
             Some(inbound),
+            None,
             None,
             std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new())),
             reqwest::Client::new(),
