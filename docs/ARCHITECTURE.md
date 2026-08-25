@@ -114,7 +114,7 @@ The application communicates with Canton via gRPC using the following services:
 | `IdentityInitializationService` | Query participant ID |
 | `SynchronizerConnectivityService` | Discover synchronizer IDs, disconnect and reconnect during ACS import |
 | `PackageService` | Upload DAR files, list vetted packages |
-| `PartyManagementService` (`canton.admin.participant.v30`) | Offline party replication: `ExportPartyAcs`, `ImportPartyAcs`, `GetHighestOffsetByTimestamp`, `ClearPartyOnboardingFlag` |
+| `PartyManagementService` (`com.digitalasset.canton.admin.participant.v30`) | Offline party replication: `ExportPartyAcs`, `ImportPartyAcs`, `GetHighestOffsetByTimestamp`, `ClearPartyOnboardingFlag` |
 
 **Ledger API services:**
 | Service | Purpose |
@@ -122,7 +122,7 @@ The application communicates with Canton via gRPC using the following services:
 | `CommandService` | Submit and execute Daml commands |
 | `StateService` | Query active contracts |
 | `UserManagementService` | Query user rights |
-| `PartyManagementService` (`ledger.api.v2.admin`) | Query party metadata and annotations |
+| `PartyManagementService` (`com.daml.ledger.api.v2.admin`) | Query party metadata and annotations |
 | `InteractiveSubmissionService` | Prepare and execute multi-party interactive submissions |
 | `UpdateService` | Read transaction updates by offset |
 | `EventQueryService` | Look up create/archive events for a contract |
@@ -193,7 +193,7 @@ Minimum message size: 6 bytes (type + length with zero payload).
 
 ### Message Categories
 
-**Commands (0x0001 - 0x000F, 0x0020 - 0x002F):** Sent by coordinator to peers.
+**Commands (0x0001 - 0x000F, 0x0020 - 0x0025):** Sent by coordinator to peers.
 
 | Code | Name | Payload | Description |
 |------|------|---------|-------------|
