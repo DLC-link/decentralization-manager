@@ -561,6 +561,15 @@ static EXPIRY_READS: LazyLock<IntCounterVec> = LazyLock::new(|| {
     .expect("metric name is a unique literal")
 });
 
+static CREDENTIALS_UNAVAILABLE: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    prometheus::register_int_counter_vec!(
+        "decman_reward_credentials_unavailable_total",
+        "Passes whose token fetch failed for a decparty this node holds credentials for.",
+        &["decparty"]
+    )
+    .expect("metric name is a unique literal")
+});
+
 static AUTH_UNREGISTERED: LazyLock<IntCounterVec> = LazyLock::new(|| {
     prometheus::register_int_counter_vec!(
         "decman_reward_auth_unregistered_total",
@@ -588,6 +597,7 @@ pub(crate) fn register_metrics() {
     LazyLock::force(&ZERO_ASSIGNED);
     LazyLock::force(&SWEEP_FAILED);
     LazyLock::force(&EXPIRY_READS);
+    LazyLock::force(&CREDENTIALS_UNAVAILABLE);
     LazyLock::force(&AUTH_UNREGISTERED);
     LazyLock::force(&OLDEST_EXPIRES_IN);
 }
@@ -602,6 +612,7 @@ fn ensure_outcome_series(label: &str) {
         &*ZERO_ASSIGNED,
         &*SWEEP_FAILED,
         &*EXPIRY_READS,
+        &*CREDENTIALS_UNAVAILABLE,
         &*AUTH_UNREGISTERED,
     ] {
         counter.with_label_values(&[label]).inc_by(0);
@@ -1363,9 +1374,15 @@ async fn run_once_for_party(
     let pkgs = packages();
     let (token, member) = match get_party_credentials(data, decparty).await {
         Ok(Some(creds)) => creds,
-        // A token fetch that failed is one sweep's problem and the callee logged
-        // the cause. The decparty is still served, so the countdown keeps falling.
+        // The callee logged the cause. One failed fetch is one pass's problem and
+        // the decparty is still served, so the countdown keeps falling. Every pass
+        // failing is not, and it looks the same in the log: the counter is what
+        // separates them, and it is the only signal for a decparty broken from
+        // boot, which never read a backlog and so has no gauge series.
         Err(_) => {
+            CREDENTIALS_UNAVAILABLE
+                .with_label_values(&[&decparty.to_string()])
+                .inc();
             tracing::warn!(%decparty, "party credentials unavailable for reward sweep");
             return Ok(SweepOutcome::CredentialsUnavailable);
         }
@@ -2219,7 +2236,7 @@ mod tests {
     #[test]
     fn the_outcome_counters_read_zero_before_their_first_event() {
         // A dashboard cannot tell a missing family from a node that never failed,
-        // so a served decparty exports all six at zero from its first sweep.
+        // so a served decparty exports all seven at zero from its first sweep.
         // The read counter needs this most: a node whose sweep interval is
         // shorter than its read interval never increments it at all.
         register_metrics();
@@ -2233,6 +2250,7 @@ mod tests {
             "decman_reward_sweep_zero_assigned_total",
             "decman_reward_sweep_failed_total",
             "decman_reward_expiry_read_total",
+            "decman_reward_credentials_unavailable_total",
             "decman_reward_auth_unregistered_total",
         ] {
             let family = families
