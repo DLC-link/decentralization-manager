@@ -1,5 +1,6 @@
 //! Per-event parses over a Ledger API `CreatedEvent`: governance
-//! confirmations and governance-rules state.
+//! confirmations, governance-rules state, and `GovernableAction` proposal
+//! info.
 //!
 //! Each function here is a pure, single-event parse — no grouping, no map
 //! insertion, no I/O. DecMan's `queries.rs` currently owns its own copies
@@ -7,12 +8,17 @@
 //! action hash) call `compute_action_hash`, which stays a decman concern.
 //! Task 20 switches `queries.rs` onto these.
 
-use canton_proto_rs::com::daml::ledger::api::v2::{CreatedEvent, value};
+use canton_common::decimal::DamlDecimal;
+use canton_proto_rs::com::daml::ledger::api::v2::{CreatedEvent, Record, value};
 use common::canton_id::CantonId;
 
 use crate::catalog::action::ActionType;
+use crate::catalog::types::{
+    AcceptTransferDetails, ServiceRequestDetails, TransferProposalDetails,
+};
 use crate::framework::record::{
-    extract_optional_reltime, extract_party_set, extract_reltime, field_timestamp,
+    extract_optional_reltime, extract_party_set, extract_reltime, field_numeric, field_party,
+    field_text, field_timestamp,
 };
 
 /// A parsed vault-governance or governance-core self-action confirmation.
@@ -250,10 +256,296 @@ pub fn extract_governance_state(created: &CreatedEvent) -> Option<RulesState> {
     })
 }
 
+/// Per-proposal info pulled out of a `GovernableAction` contract. `description`
+/// and `action_label` come from the interface view, which every proposal
+/// implements; `transfer` is populated only for `TransferProposal` templates so
+/// the notifications queue can render recipient/amount/instrument on the card
+/// without a follow-up fetch.
+///
+/// `accept_transfer_instruction_cid` is captured for `AcceptTransferProposal`
+/// templates (they only carry the linked `TransferInstruction` cid, not the
+/// transfer fields themselves). `accept_transfer` is then populated by a
+/// follow-up `GetEventsByContractId` per cid against the
+/// `Splice.Api.Token.TransferInstructionV1:TransferInstruction` interface so
+/// the pending-approval card can render sender/amount/instrument.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProposalInfo {
+    pub description: Option<String>,
+    pub transfer: Option<TransferProposalDetails>,
+    pub accept_transfer_instruction_cid: Option<String>,
+    pub accept_transfer: Option<AcceptTransferDetails>,
+    /// Operator + user/provider parties, populated only for
+    /// `Create{User,Provider}ServiceRequest` proposals so the notification card
+    /// can render the full summary. `extract_proposal_info` enforces that, so a
+    /// consumer renders this field without re-checking the label.
+    pub service_request: Option<ServiceRequestDetails>,
+    /// `actionLabel` from the `GovernableActionView` interface view, falling
+    /// back to a same-named create-argument field and then to the template's
+    /// own name. `None` only when the event carries no template id either.
+    pub action_label: Option<String>,
+    /// The member who created the proposal. Only that member controls
+    /// `GovernableAction_ProposerCancel`, so the card offers the retract
+    /// button on this field alone. `None` when the party id fails to parse.
+    pub proposer: Option<CantonId>,
+    /// Seconds of the create event's ledger effective time. The feed sorts
+    /// cards on this, so a proposal keeps its place across refreshes even
+    /// before its first confirmation exists.
+    pub created_at: Option<i64>,
+}
+
+/// Pull the `GovernableAction` interface view off a created event. Canton
+/// only fills this in when the query asked for it with an `InterfaceFilter`,
+/// so a wildcard fetch (test mode) always gets `None`.
+fn governable_action_view(created: &CreatedEvent) -> Option<&Record> {
+    created
+        .interface_views
+        .iter()
+        .find(|v| {
+            v.interface_id.as_ref().is_some_and(|id| {
+                id.module_name == "Governance.Action" && id.entity_name == "GovernableAction"
+            })
+        })?
+        .view_value
+        .as_ref()
+}
+
+/// Whether a contract's create-arguments carry the two fields every
+/// in-repo proposal template declares. Used only when no interface view is
+/// available: a wildcard fetch returns every contract the party can see, so
+/// something has to keep unrelated templates out of the proposal map.
+fn looks_like_governable_action(record: &Record) -> bool {
+    let has = |label: &str| record.fields.iter().any(|f| f.label == label);
+    has("governanceParty") && has("proposer")
+}
+
+/// Extract proposal info from a `GovernableAction` contract.
+///
+/// The interface view is the authoritative source: Canton only attaches one
+/// to a contract that really implements `GovernableAction`, and the view
+/// carries `actionLabel` and `description` even for templates that compute
+/// them rather than store them. Its presence is therefore enough to capture
+/// the contract, whatever package declared the template and however that
+/// template names its own fields.
+///
+/// A wildcard fetch (test mode) carries no view, so it falls back to the
+/// field-shape heuristic and to create-arguments for the same values.
+///
+/// `governance_party` is the decentralized party the caller is querying for.
+/// Being able to see a proposal does not mean governing it: another package
+/// may name our party as an observer on a proposal some other governance party
+/// controls. Our members hold no authority there, so Confirm would be rejected
+/// on-ledger. Such a proposal is dropped rather than shown.
+///
+/// Returns the proposal's contract id paired with its `ProposalInfo`. Unlike
+/// decman's `queries.rs` copy, this is a pure single-event parse — the caller
+/// owns the grouping map.
+pub fn extract_proposal_info(
+    created: &CreatedEvent,
+    governance_party: &CantonId,
+) -> Option<(String, ProposalInfo)> {
+    let view = governable_action_view(created);
+    let record = created.create_arguments.as_ref();
+
+    if view.is_none() && !record.is_some_and(looks_like_governable_action) {
+        return None;
+    }
+
+    // Absent rather than mismatched is not a rejection: a wildcard fetch of a
+    // template that computes the field in its view has nothing to compare.
+    let governs = view
+        .and_then(|v| field_party(v, "governanceParty"))
+        .or_else(|| record.and_then(|r| field_party(r, "governanceParty")));
+    if let Some(ref found) = governs
+        && found != &governance_party.to_string()
+    {
+        tracing::debug!(
+            "Skipping proposal {cid}: governed by {found}, not {governance_party}",
+            cid = created.contract_id
+        );
+        return None;
+    }
+
+    let description = view
+        .and_then(|v| field_text(v, "description"))
+        .or_else(|| record.and_then(|r| field_text(r, "description")));
+
+    // Read from the view first for the same reason the label and description
+    // do: the interface declares `proposer`, so the view always carries it,
+    // while a template may compute it instead of storing a field.
+    let proposer = view
+        .and_then(|v| field_party(v, "proposer"))
+        .or_else(|| record.and_then(|r| field_party(r, "proposer")))
+        .and_then(|p| match CantonId::parse(&p) {
+            Ok(id) => Some(id),
+            Err(e) => {
+                tracing::warn!(
+                    "Proposal {cid} carries an unparseable proposer '{p}': {e}",
+                    cid = created.contract_id
+                );
+                None
+            }
+        });
+
+    let transfer = record.and_then(extract_transfer_proposal_details);
+    // The template name is a poor label next to the view's `actionLabel`, but
+    // it beats a generic placeholder and it needs no per-package knowledge.
+    let action_label = view
+        .and_then(|v| field_text(v, "actionLabel"))
+        .or_else(|| record.and_then(|r| field_text(r, "actionLabel")))
+        .or_else(|| created.template_id.as_ref().map(|t| t.entity_name.clone()));
+
+    // `extract_service_request_details` matches on field shape — an `operator`
+    // plus a `user` or a `provider` — so an unrelated proposal carrying those
+    // names would yield a misleading party summary. Onboarding is only what
+    // these two actions do, so gate on the label here and let every consumer
+    // trust the field.
+    let service_request = match action_label.as_deref() {
+        Some("CreateUserServiceRequest") | Some("CreateProviderServiceRequest") => {
+            record.and_then(extract_service_request_details)
+        }
+        _ => None,
+    };
+
+    // `AcceptTransferProposal`s carry `transferInstructionCid` instead of the
+    // transfer fields. Capture it here; a caller-side post-pass resolves each
+    // cid to an `AcceptTransferDetails` via a per-cid event query so the card
+    // can render sender/amount/instrument.
+    let accept_transfer_instruction_cid = record
+        .and_then(|r| {
+            r.fields
+                .iter()
+                .find(|f| f.label == "transferInstructionCid")
+        })
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::ContractId(cid)) => Some(cid.clone()),
+            _ => None,
+        });
+
+    Some((
+        created.contract_id.clone(),
+        ProposalInfo {
+            description,
+            transfer,
+            accept_transfer_instruction_cid,
+            accept_transfer: None,
+            service_request,
+            action_label,
+            proposer,
+            created_at: created.created_at.as_ref().map(|t| t.seconds),
+        },
+    ))
+}
+
+/// Pull sender/receiver/amount/instrument out of a `TransferInstruction`
+/// interface view, *without* the status / deadline filters that
+/// `extract_transfer_instruction_info` (used for the Accept dropdown) applies.
+/// Pending-approval cards must render regardless of where the instruction is
+/// in its lifecycle — the proposal is still being voted on, and the operator
+/// needs to see what they're approving even if the underlying instruction has
+/// already advanced or expired.
+pub fn extract_accept_transfer_details_from_view(
+    created: &CreatedEvent,
+) -> Option<AcceptTransferDetails> {
+    let view = created.interface_views.iter().find(|v| {
+        v.interface_id.as_ref().is_some_and(|id| {
+            id.module_name == "Splice.Api.Token.TransferInstructionV1"
+                && id.entity_name == "TransferInstruction"
+        })
+    })?;
+    let view_record = view.view_value.as_ref()?;
+    let transfer_record = view_record
+        .fields
+        .iter()
+        .find(|f| f.label == "transfer")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Record(r)) => Some(r),
+            _ => None,
+        })?;
+    let sender: CantonId = field_party(transfer_record, "sender")?.parse().ok()?;
+    let receiver: CantonId = field_party(transfer_record, "receiver")?.parse().ok()?;
+    let amount =
+        field_numeric(transfer_record, "amount").and_then(|s| DamlDecimal::parse(&s).ok())?;
+    let instrument_record = transfer_record
+        .fields
+        .iter()
+        .find(|f| f.label == "instrumentId")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Record(r)) => Some(r),
+            _ => None,
+        })?;
+    let instrument_admin: CantonId = field_party(instrument_record, "admin")?.parse().ok()?;
+    let instrument_id = field_text(instrument_record, "id")?;
+    Some(AcceptTransferDetails {
+        sender,
+        receiver,
+        amount,
+        instrument_admin,
+        instrument_id,
+    })
+}
+
+/// Pull `receiver`, `amount`, and the nested `instrumentId` out of a
+/// `TransferProposal`'s `transfer` field. Returns `None` for any proposal
+/// that doesn't have a `transfer` record (every non-transfer template).
+pub fn extract_transfer_proposal_details(record: &Record) -> Option<TransferProposalDetails> {
+    let transfer_record = record
+        .fields
+        .iter()
+        .find(|f| f.label == "transfer")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Record(r)) => Some(r),
+            _ => None,
+        })?;
+    let receiver: CantonId = field_party(transfer_record, "receiver")?.parse().ok()?;
+    let amount =
+        field_numeric(transfer_record, "amount").and_then(|s| DamlDecimal::parse(&s).ok())?;
+    let instrument_record = transfer_record
+        .fields
+        .iter()
+        .find(|f| f.label == "instrumentId")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Record(r)) => Some(r),
+            _ => None,
+        })?;
+    let instrument_admin: CantonId = field_party(instrument_record, "admin")?.parse().ok()?;
+    let instrument_id = field_text(instrument_record, "id")?;
+    Some(TransferProposalDetails {
+        receiver,
+        amount,
+        instrument_admin,
+        instrument_id,
+    })
+}
+
+/// Pull `operator` plus the counterparty (`user` for a
+/// `CreateUserServiceRequest`, `provider` for a `CreateProviderServiceRequest`)
+/// out of a service-request proposal's create-arguments. Returns `None` when
+/// neither counterparty field is present, so non-service-request proposals are
+/// left untouched. Both templates carry the parties as top-level `Party`
+/// fields (unlike `TransferProposal`, which nests them under `transfer`).
+pub fn extract_service_request_details(record: &Record) -> Option<ServiceRequestDetails> {
+    let operator: CantonId = field_party(record, "operator")?.parse().ok()?;
+    let user: Option<CantonId> = field_party(record, "user").and_then(|p| p.parse().ok());
+    let provider: Option<CantonId> = field_party(record, "provider").and_then(|p| p.parse().ok());
+    if user.is_none() && provider.is_none() {
+        return None;
+    }
+    Some(ServiceRequestDetails {
+        operator,
+        user,
+        provider,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use canton_proto_rs::com::daml::ledger::api::v2::{
-        GenMap, Optional, Record, RecordField, Value, gen_map,
+        GenMap, Identifier, InterfaceView, Optional, Record, RecordField, Value, gen_map,
     };
     use prost_types::Timestamp;
 
@@ -290,6 +582,48 @@ mod tests {
         Record {
             record_id: None,
             fields,
+        }
+    }
+
+    /// A `GovernableAction` interface view carrying `view_fields`, shaped the
+    /// way Canton attaches it when the query asked for it with an
+    /// `InterfaceFilter`.
+    fn governable_action_interface_view(view_fields: Vec<RecordField>) -> InterfaceView {
+        InterfaceView {
+            interface_id: Some(Identifier {
+                package_id: "#governance-core".to_string(),
+                module_name: "Governance.Action".to_string(),
+                entity_name: "GovernableAction".to_string(),
+            }),
+            view_status: None,
+            view_value: Some(record_of(view_fields)),
+            ..Default::default()
+        }
+    }
+
+    /// A created event for a `GovernableAction`-implementing proposal
+    /// contract, with an optional interface view, create-arguments, and
+    /// template entity name.
+    fn proposal_created_event(
+        contract_id: &str,
+        interface_views: Vec<InterfaceView>,
+        create_arguments: Option<Record>,
+        template_entity_name: Option<&str>,
+    ) -> CreatedEvent {
+        CreatedEvent {
+            contract_id: contract_id.to_string(),
+            template_id: template_entity_name.map(|name| Identifier {
+                package_id: "#governance-core".to_string(),
+                module_name: "Governance.Action".to_string(),
+                entity_name: name.to_string(),
+            }),
+            create_arguments,
+            created_at: Some(Timestamp {
+                seconds: 1_700_001_000,
+                nanos: 0,
+            }),
+            interface_views,
+            ..Default::default()
         }
     }
 
@@ -529,5 +863,101 @@ mod tests {
         let created3 = created_event("rules-5", record3, 1_700_000_900);
         let parsed3 = extract_governance_state(&created3).expect("parses");
         assert_eq!(parsed3.timeout_micros, None);
+    }
+
+    #[test]
+    fn interface_view_proposal_parses_label_description_and_proposer() {
+        let view = governable_action_interface_view(vec![
+            field("actionLabel", make_text("SetupCcPreapproval")),
+            field("description", make_text("Set up a CC TransferPreapproval")),
+            field("proposer", make_party(ALICE)),
+            field("governanceParty", make_party(GOV)),
+        ]);
+        let created = proposal_created_event("proposal-1", vec![view], None, None);
+
+        let (cid_out, info) =
+            extract_proposal_info(&created, &cid(GOV)).expect("view-shaped proposal parses");
+
+        assert_eq!(cid_out, "proposal-1");
+        assert_eq!(info.action_label, Some("SetupCcPreapproval".to_string()));
+        assert_eq!(
+            info.description,
+            Some("Set up a CC TransferPreapproval".to_string())
+        );
+        assert_eq!(info.proposer, Some(cid(ALICE)));
+    }
+
+    #[test]
+    fn mismatched_governance_party_is_dropped() {
+        let view = governable_action_interface_view(vec![
+            field("actionLabel", make_text("SetupCcPreapproval")),
+            field("proposer", make_party(ALICE)),
+            field("governanceParty", make_party(GOV)),
+        ]);
+        let created = proposal_created_event("proposal-2", vec![view], None, None);
+
+        // Querying for BOB's governance while the view says the proposal is
+        // governed by GOV must not surface it — BOB's members hold no
+        // authority over a proposal they merely observe.
+        assert_eq!(extract_proposal_info(&created, &cid(BOB)), None);
+    }
+
+    #[test]
+    fn record_only_fixture_passes_the_governable_action_heuristic() {
+        let record = record_of(vec![
+            field("governanceParty", make_party(GOV)),
+            field("proposer", make_party(ALICE)),
+        ]);
+        assert!(looks_like_governable_action(&record));
+
+        // Missing either of the two fields fails the heuristic.
+        let missing_proposer = record_of(vec![field("governanceParty", make_party(GOV))]);
+        assert!(!looks_like_governable_action(&missing_proposer));
+    }
+
+    #[test]
+    fn action_label_falls_back_view_then_record_then_template_entity_name() {
+        // View carries actionLabel directly: used as-is.
+        let view = governable_action_interface_view(vec![
+            field("actionLabel", make_text("FromView")),
+            field("proposer", make_party(ALICE)),
+            field("governanceParty", make_party(GOV)),
+        ]);
+        let created = proposal_created_event("proposal-3", vec![view], None, None);
+        let (_, info) = extract_proposal_info(&created, &cid(GOV)).expect("parses");
+        assert_eq!(info.action_label, Some("FromView".to_string()));
+
+        // View carries no actionLabel field, but create-arguments do.
+        let view_no_label = governable_action_interface_view(vec![
+            field("proposer", make_party(ALICE)),
+            field("governanceParty", make_party(GOV)),
+        ]);
+        let record = record_of(vec![
+            field("governanceParty", make_party(GOV)),
+            field("proposer", make_party(ALICE)),
+            field("actionLabel", make_text("FromRecord")),
+        ]);
+        let created = proposal_created_event("proposal-4", vec![view_no_label], Some(record), None);
+        let (_, info) = extract_proposal_info(&created, &cid(GOV)).expect("parses");
+        assert_eq!(info.action_label, Some("FromRecord".to_string()));
+
+        // Neither view nor record carry actionLabel: falls back to the
+        // template's own entity name.
+        let view_bare = governable_action_interface_view(vec![
+            field("proposer", make_party(ALICE)),
+            field("governanceParty", make_party(GOV)),
+        ]);
+        let record_bare = record_of(vec![
+            field("governanceParty", make_party(GOV)),
+            field("proposer", make_party(ALICE)),
+        ]);
+        let created = proposal_created_event(
+            "proposal-5",
+            vec![view_bare],
+            Some(record_bare),
+            Some("SetupTokenPreapproval"),
+        );
+        let (_, info) = extract_proposal_info(&created, &cid(GOV)).expect("parses");
+        assert_eq!(info.action_label, Some("SetupTokenPreapproval".to_string()));
     }
 }

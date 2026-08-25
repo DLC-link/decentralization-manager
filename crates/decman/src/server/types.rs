@@ -47,7 +47,10 @@ pub use common::types::{
 // The payload support types and their protocol validators now live in
 // `decman-lib`, re-exported here so existing `crate::server::types::X`
 // paths keep resolving unchanged.
-pub use decman_lib::catalog::types::{AppRewardBeneficiary, BillingParams, FarConfig, VaultLimits};
+pub use decman_lib::catalog::types::{
+    AcceptTransferDetails, AppRewardBeneficiary, BillingParams, FarConfig, ServiceRequestDetails,
+    TransferProposalDetails, VaultLimits,
+};
 use decman_lib::framework::Validate;
 
 use crate::{canton_id::CantonId, noise::server::ActiveWorkflow};
@@ -612,54 +615,12 @@ pub struct DomainGovernanceAction {
     pub created_at: Option<i64>,
 }
 
-/// Operator + counterparty parties extracted from a service-request proposal
-/// (`CreateUserServiceRequest` / `CreateProviderServiceRequest`). Surfaced
-/// inside `DomainGovernanceAction` so the pending-approval card can render who
-/// the request onboards. Exactly one of `user` / `provider` is set, matching
-/// the proposal kind.
-#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct ServiceRequestDetails {
-    /// Operator party — present on both request kinds.
-    pub operator: CantonId,
-    /// User party — present for `CreateUserServiceRequest`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub user: Option<CantonId>,
-    /// Provider party — present for `CreateProviderServiceRequest`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<CantonId>,
-}
-
-/// Recipient/amount/instrument extracted from a `TransferProposal`'s
-/// `transfer` field. Surfaced inside `DomainGovernanceAction` so the
-/// notification queue card shows the meaningful parameters of the proposal.
-#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct TransferProposalDetails {
-    pub receiver: CantonId,
-    #[schema(value_type = String)]
-    #[cfg_attr(feature = "typegen", ts(type = "string"))]
-    pub amount: DamlDecimal,
-    pub instrument_admin: CantonId,
-    pub instrument_id: String,
-}
-
-/// Sender/receiver/amount/instrument extracted from the `TransferInstruction`
-/// referenced by an `AcceptTransferProposal`. Surfaced inside
-/// `DomainGovernanceAction` so the pending-approval card for an Accept can
-/// render who's transferring what to whom — the proposal contract itself
-/// only carries the `TransferInstruction` cid, not these fields.
-#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct AcceptTransferDetails {
-    pub sender: CantonId,
-    pub receiver: CantonId,
-    #[schema(value_type = String)]
-    #[cfg_attr(feature = "typegen", ts(type = "string"))]
-    pub amount: DamlDecimal,
-    pub instrument_admin: CantonId,
-    pub instrument_id: String,
-}
+// `ServiceRequestDetails`, `TransferProposalDetails`, and
+// `AcceptTransferDetails` now live in `decman_lib::catalog::types` (parsed by
+// `decman_lib::catalog::interpret::extract_proposal_info` and its detail
+// extractors) and are re-exported above so existing `crate::server::types::X`
+// paths — and the generated TypeScript names, which key off the Rust struct
+// name — keep resolving unchanged.
 
 /// Request to submit a confirmation for an action with structured type
 #[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]

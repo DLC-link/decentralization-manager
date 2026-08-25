@@ -1,7 +1,10 @@
 //! Payload support types shared across several `ActionType` / `ProposalType`
 //! variants — vault limits, Featured-App-Right beneficiaries/config, and
 //! paid-credential billing parameters — plus the encoders and decoders that
-//! move them to and from the Daml Ledger API `Value` wire format.
+//! move them to and from the Daml Ledger API `Value` wire format. Also holds
+//! the `GovernableAction` proposal detail DTOs (`ServiceRequestDetails`,
+//! `TransferProposalDetails`, `AcceptTransferDetails`) that `catalog::interpret`
+//! parses off a `CreatedEvent`.
 //!
 //! The OpenAPI (`utoipa`) and TypeScript (`ts_rs`) derives are gated behind
 //! the `openapi` / `typegen` features so dependency-light consumers of this
@@ -93,6 +96,58 @@ pub struct BillingParams {
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     #[cfg_attr(feature = "typegen", ts(type = "string"))]
     pub holder_activity_weight: Option<DamlDecimal>,
+}
+
+/// Operator + counterparty parties extracted from a service-request proposal
+/// (`CreateUserServiceRequest` / `CreateProviderServiceRequest`). Surfaced
+/// inside `DomainGovernanceAction` so the pending-approval card can render who
+/// the request onboards. Exactly one of `user` / `provider` is set, matching
+/// the proposal kind.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct ServiceRequestDetails {
+    /// Operator party — present on both request kinds.
+    pub operator: CantonId,
+    /// User party — present for `CreateUserServiceRequest`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<CantonId>,
+    /// Provider party — present for `CreateProviderServiceRequest`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<CantonId>,
+}
+
+/// Recipient/amount/instrument extracted from a `TransferProposal`'s
+/// `transfer` field. Surfaced inside `DomainGovernanceAction` so the
+/// notification queue card shows the meaningful parameters of the proposal.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TransferProposalDetails {
+    pub receiver: CantonId,
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cfg_attr(feature = "typegen", ts(type = "string"))]
+    pub amount: DamlDecimal,
+    pub instrument_admin: CantonId,
+    pub instrument_id: String,
+}
+
+/// Sender/receiver/amount/instrument extracted from the `TransferInstruction`
+/// referenced by an `AcceptTransferProposal`. Surfaced inside
+/// `DomainGovernanceAction` so the pending-approval card for an Accept can
+/// render who's transferring what to whom — the proposal contract itself
+/// only carries the `TransferInstruction` cid, not these fields.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct AcceptTransferDetails {
+    pub sender: CantonId,
+    pub receiver: CantonId,
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cfg_attr(feature = "typegen", ts(type = "string"))]
+    pub amount: DamlDecimal,
+    pub instrument_admin: CantonId,
+    pub instrument_id: String,
 }
 
 // ============================================================================
