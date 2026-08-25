@@ -34,6 +34,7 @@ hex = { version = "0.4" }
 http = { version = "0.2" }
 hyper = { version = "0.14", features = ["full"] }
 hyper-noise = { version = "0.0.3" }
+insta = { version = "1", features = ["json"] }
 jsonwebtoken = { version = "11.0", features = ["aws_lc_rs"] }
 mime_guess = { version = "2.0" }
 p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pkcs8", "std"] }

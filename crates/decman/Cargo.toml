@@ -94,6 +94,7 @@ keycloak = { workspace = true }
 # exercises is the same code a wallet provider runs. Test-only: production DPM
 # never holds a party key.
 decman-wallet = { workspace = true }
+insta = { workspace = true }
 # rcgen + tokio-rustls back the e2e suite's TLS terminator
 # (tests/common/tls_proxy.rs), which puts a Canton admin API behind TLS so the
 # TLS client path has coverage on a plaintext localnet. Test-only.

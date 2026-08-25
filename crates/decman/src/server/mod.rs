@@ -22,6 +22,9 @@ mod reward_automation;
 mod transfer_context;
 mod types;
 
+#[cfg(test)]
+mod serde_snapshots;
+
 pub(crate) mod health;
 pub(crate) mod peer_status;
 

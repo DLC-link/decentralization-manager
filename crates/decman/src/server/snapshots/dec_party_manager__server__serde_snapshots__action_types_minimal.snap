@@ -1,0 +1,29 @@
+---
+source: crates/decman/src/server/serde_snapshots.rs
+expression: fixtures
+---
+[
+  {
+    "type": "vault_deployment",
+    "vault_rules_cid": "00vaultrules",
+    "vault_name": "Vault One",
+    "share_symbol": "V1",
+    "asset_instrument_id": {
+      "admin": "admin-party",
+      "id": "TOK"
+    },
+    "limits": {},
+    "vault_backend_signatory": "backend::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+    "vault_far_config": null,
+    "allocation_factory_cid": "00alloc",
+    "registrar_service_cid": "00reg"
+  },
+  {
+    "type": "processor_deployment_request",
+    "vault_processor_rules_cid": "00proc",
+    "vault_backend_signatory": "backend::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+    "allocation_factory_cid": "00alloc",
+    "processor_far_config": null,
+    "initial_supported_vaults": []
+  }
+]
