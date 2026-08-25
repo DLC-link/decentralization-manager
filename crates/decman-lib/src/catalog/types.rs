@@ -1,7 +1,7 @@
 //! Payload support types shared across several `ActionType` / `ProposalType`
 //! variants — vault limits, Featured-App-Right beneficiaries/config, and
-//! paid-credential billing parameters — plus the encoders that lower them
-//! into the Daml Ledger API `Value` wire format.
+//! paid-credential billing parameters — plus the encoders and decoders that
+//! move them to and from the Daml Ledger API `Value` wire format.
 //!
 //! The OpenAPI (`utoipa`) and TypeScript (`ts_rs`) derives are gated behind
 //! the `openapi` / `typegen` features so dependency-light consumers of this
@@ -9,11 +9,17 @@
 
 use canton_common::decimal::DamlDecimal;
 use canton_proto_rs::com::daml::ledger::api::v2::{Optional, Value, value};
+use common::api::{Claim, InstrumentId};
 use common::canton_id::CantonId;
 
+use crate::error::Error;
 use crate::framework::encode::{
     field, make_contract_id, make_int64, make_list, make_numeric, make_optional_numeric,
     make_party, make_record,
+};
+use crate::framework::record::{
+    extract_contract_id, extract_int64, extract_list, extract_numeric, extract_party,
+    extract_party_id, extract_record, extract_text, get_field,
 };
 
 /// Vault limits configuration (all fields are optional in Daml)
@@ -188,4 +194,99 @@ pub fn serialize_optional_far_config(config: &Option<FarConfig>) -> Value {
             value: config.as_ref().map(|c| Box::new(serialize_far_config(c))),
         }))),
     }
+}
+
+// ============================================================================
+// Decoders
+// ============================================================================
+//
+// Shared by `catalog::action::ActionType::from_vault_proto` and any
+// integrator decoding these payload shapes out of a custom `Value`.
+
+pub fn deserialize_instrument_id(value: &Value) -> Result<InstrumentId, Error> {
+    let record = extract_record(value)?;
+    Ok(InstrumentId {
+        admin: extract_party(get_field(record, "admin")?)?,
+        id: extract_text(get_field(record, "id")?)?,
+    })
+}
+
+pub fn deserialize_optional_numeric(value: &Value) -> Result<Option<DamlDecimal>, Error> {
+    match &value.sum {
+        Some(value::Sum::Optional(opt)) => match opt.value.as_ref() {
+            Some(inner) => {
+                let s = extract_numeric(inner)?;
+                Ok(Some(
+                    DamlDecimal::parse(&s).map_err(|e| Error::Decode(e.to_string()))?,
+                ))
+            }
+            None => Ok(None),
+        },
+        _ => Err(Error::Decode(
+            "Expected Optional value for numeric".to_string(),
+        )),
+    }
+}
+
+pub fn deserialize_vault_limits(value: &Value) -> Result<VaultLimits, Error> {
+    let record = extract_record(value)?;
+    Ok(VaultLimits {
+        max_total_deposit: deserialize_optional_numeric(get_field(record, "maxTotalDeposit")?)?,
+        min_deposit_amount: deserialize_optional_numeric(get_field(record, "minDepositAmount")?)?,
+        min_withdrawal_amount: deserialize_optional_numeric(get_field(
+            record,
+            "minWithdrawalAmount",
+        )?)?,
+    })
+}
+
+pub fn deserialize_claim(value: &Value) -> Result<Claim, Error> {
+    let record = extract_record(value)?;
+    Ok(Claim {
+        subject: extract_text(get_field(record, "subject")?)?,
+        property: extract_text(get_field(record, "property")?)?,
+        value: extract_text(get_field(record, "value")?)?,
+    })
+}
+
+pub fn deserialize_app_reward_beneficiary(value: &Value) -> Result<AppRewardBeneficiary, Error> {
+    let record = extract_record(value)?;
+    Ok(AppRewardBeneficiary {
+        beneficiary: extract_party_id(get_field(record, "beneficiary")?)?,
+        weight: DamlDecimal::parse(&extract_numeric(get_field(record, "weight")?)?)
+            .map_err(|e| Error::Decode(e.to_string()))?,
+    })
+}
+
+pub fn deserialize_far_config(value: &Value) -> Result<FarConfig, Error> {
+    let record = extract_record(value)?;
+    let beneficiaries_list = extract_list(get_field(record, "beneficiaries")?)?;
+    let beneficiaries = beneficiaries_list
+        .elements
+        .iter()
+        .map(deserialize_app_reward_beneficiary)
+        .collect::<Result<Vec<_>, Error>>()?;
+
+    Ok(FarConfig {
+        featured_app_right_cid: extract_contract_id(get_field(record, "featuredAppRightCid")?)?,
+        beneficiaries,
+    })
+}
+
+pub fn deserialize_optional_far_config(value: &Value) -> Result<Option<FarConfig>, Error> {
+    match &value.sum {
+        Some(value::Sum::Optional(opt)) => match opt.value.as_ref() {
+            Some(inner) => Ok(Some(deserialize_far_config(inner)?)),
+            None => Ok(None),
+        },
+        _ => Err(Error::Decode(
+            "Expected Optional value for FarConfig".to_string(),
+        )),
+    }
+}
+
+/// Deserialize RelTime (record with microseconds field) to i64
+pub fn deserialize_reltime(value: &Value) -> Result<i64, Error> {
+    let record = extract_record(value)?;
+    extract_int64(get_field(record, "microseconds")?)
 }

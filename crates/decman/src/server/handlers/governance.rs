@@ -2517,7 +2517,7 @@ async fn execute_confirm_action(
                     entity_name: "VaultGovernanceRules".to_string(),
                 },
                 "VaultGovernanceRules_ConfirmAction".to_string(),
-                action_serializer::build_confirm_action_argument(member_party_id, &request.action),
+                action_serializer::build_confirm_action_argument(member_party_id, &request.action)?,
             )
         }
         GovernanceType::CoreSelf => {
@@ -2535,7 +2535,7 @@ async fn execute_confirm_action(
                 action_serializer::build_confirm_governance_action_arg(
                     member_party_id,
                     &request.action,
-                ),
+                )?,
             )
         }
         GovernanceType::CoreDomain => {
@@ -2646,7 +2646,7 @@ async fn execute_confirmed_action(
                     &request.action,
                     &request.confirmation_cids,
                     None,
-                ),
+                )?,
             )
         }
         GovernanceType::CoreSelf => {
@@ -2665,7 +2665,7 @@ async fn execute_confirmed_action(
                     member_party_id,
                     &request.action,
                     &request.confirmation_cids,
-                ),
+                )?,
             )
         }
         GovernanceType::CoreDomain => {

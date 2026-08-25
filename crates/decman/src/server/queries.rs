@@ -35,7 +35,6 @@ use crate::{
 };
 
 use super::{
-    action_serializer,
     event_filters::{interface_filter, party_event_format, template_filter, wildcard_filter},
     ledger_paging::{
         FETCH_CHUNK, fetch_active_contracts_filtered, fetch_first_active_contract,
@@ -869,9 +868,9 @@ fn extract_and_add_confirmation(
     };
 
     // Try to parse the action (vault ActionRequiringConfirmation or core GovernanceSelfAction)
-    let action = match action_serializer::deserialize_action(action_field) {
+    let action = match ActionType::from_vault_proto(action_field) {
         Ok(a) => a,
-        Err(_) => match action_serializer::deserialize_self_action(action_field) {
+        Err(_) => match ActionType::from_self_proto(action_field) {
             Ok(a) => a,
             Err(e) => {
                 tracing::debug!("Skipping confirmation with unrecognized action shape: {e}");
