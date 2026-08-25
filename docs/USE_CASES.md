@@ -280,7 +280,23 @@ Adding a 4th custodian involves both governance and topology:
     }
     ```
 
-2. **Topology**: Run the onboarding workflow to add the new participant to the `PartyToParticipant` mapping. If the party has active contracts, ACS sync (export/import) will be required.
+2. **Topology**: Run the add-party workflow to add the new participant to the
+   `DecentralizedNamespaceDefinition` and `PartyToParticipant` mappings:
+
+    ```bash
+    curl -X POST http://custodian-a:8080/add-party \
+      -H "Content-Type: application/json" \
+      -d '{
+        "decentralized_party_id": "joint-vault::1220...",
+        "new_participant_id": "custodian-d::1220...",
+        "new_threshold": 3,
+        "previous_threshold": 2
+      }'
+    ```
+
+   If the party has active contracts, the workflow replicates them to the new
+   custodian itself (ACS export/import around a brief synchronizer disconnect on
+   the joining node only). No participant restart is needed.
 
 #### Remove a Custodian
 
