@@ -163,12 +163,18 @@ async fn probe_reward_coupons(f: &Fixture, party_id: &str) -> Option<HashSet<Str
 
 /// Sums one metric family across the e2e nodes. A node serving no such line has
 /// never moved that counter, which sums as zero.
+///
+/// Matches the family exactly. A bare prefix test would also sum a longer family
+/// name that happens to start with this one.
 async fn counter_total(f: &Fixture, ports: &[u16], name: &str) -> anyhow::Result<f64> {
     let mut total = 0.0;
     for port in ports {
         let body = f.get_text(*port, "/metrics").await?;
         for line in body.lines() {
-            if line.starts_with(name) {
+            let is_family = line
+                .strip_prefix(name)
+                .is_some_and(|rest| rest.starts_with('{') || rest.starts_with(' '));
+            if is_family {
                 total += line
                     .split_whitespace()
                     .last()
