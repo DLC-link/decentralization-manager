@@ -881,6 +881,12 @@ fn extract_and_add_confirmation(
     // is missing or the party string isn't a valid CantonId — propagating
     // garbage upstream (the old code used "unknown") makes the consumer
     // fragile.
+    // Two names for one field across templates: governance-core's
+    // `GovernanceConfirmation` calls it `confirmer`, the vault path
+    // `confirmingParty`. No template declares both, so the fallback only ever
+    // picks the one that is there. It differs from a single find-either-label
+    // only for a record carrying both with the first malformed, which the
+    // fixed template schemas do not produce.
     let Some(confirming_party_str) =
         field_party(record, "confirmingParty").or_else(|| field_party(record, "confirmer"))
     else {
@@ -1479,7 +1485,9 @@ async fn fetch_governance_state_for_template(
 fn extract_governance_state(created: &CreatedEvent) -> Option<GovernanceState> {
     let record = created.create_arguments.as_ref()?;
 
-    // Extract governance party (vaultManager for vault, governanceParty for core)
+    // Extract governance party (vaultManager for vault, governanceParty for
+    // core). Same one-field-two-names case as `confirmingParty`/`confirmer`
+    // above: a record carries one or the other, never both.
     let vault_manager: CantonId = field_party(record, "vaultManager")
         .or_else(|| field_party(record, "governanceParty"))
         .and_then(|p| p.parse().ok())?;
