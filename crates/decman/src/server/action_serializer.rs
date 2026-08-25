@@ -15,12 +15,16 @@ use decman_lib::catalog::proposals::custody::{
     AcceptTransfer, AcceptTransferWithContext, SetupCcPreapproval, SetupTokenPreapproval, Transfer,
     TransferWithContext,
 };
+use decman_lib::catalog::proposals::rewards::{
+    AcceptExternalPartySetup, RevokeCouponReassignmentDelegation,
+    SetupCouponReassignmentDelegation, SetupMintingDelegation,
+};
 use decman_lib::catalog::proposals::utility::{
     CreateDelegatedBatchedMarkersProxy, CreateProviderServiceRequest, CreateUserServiceRequest,
     ProvisionProviderService,
 };
 pub(crate) use decman_lib::catalog::types::{
-    make_optional_beneficiaries, serialize_billing_params, serialize_reward_beneficiary,
+    make_optional_beneficiaries, serialize_billing_params,
 };
 use decman_lib::framework::commands::proposal_create_arguments;
 pub(crate) use decman_lib::framework::encode::*;
@@ -31,9 +35,10 @@ use crate::error::Result;
 use super::types::{ActionType, ProposalType};
 #[cfg(test)]
 use super::types::{
-    BillingParams, Claim, InstrumentAllowance, InstrumentId, InstrumentIdentifier,
-    PartyCredentialRequirement, RewardBeneficiary,
+    BillingParams, Claim, InstrumentId, InstrumentIdentifier, PartyCredentialRequirement,
 };
+#[cfg(test)]
+use common::api::InstrumentAllowance;
 
 // ============================================================================
 // Action Serialization
@@ -297,53 +302,19 @@ pub fn build_proposal_create_args(
                 ],
             },
         ),
-        ProposalType::SetupCouponReassignmentDelegation {
-            dso,
-            assigners,
-            new_beneficiaries,
-            prior_delegation,
-        } => (
+        ProposalType::SetupCouponReassignmentDelegation(p) => (
             ProposalPackage::GovernanceRewards,
-            "Governance.Rewards.SetupCouponReassignmentDelegation",
-            "SetupCouponReassignmentDelegation",
-            Record {
-                record_id: None,
-                fields: vec![
-                    field("governanceParty", make_party(governance_party)),
-                    field("proposer", make_party(proposer)),
-                    field(
-                        "priorDelegation",
-                        make_optional_contract_id(prior_delegation),
-                    ),
-                    field("dso", make_party(dso)),
-                    field(
-                        "assigners",
-                        make_list(assigners.iter().map(make_party).collect()),
-                    ),
-                    field(
-                        "beneficiaries",
-                        make_list(
-                            new_beneficiaries
-                                .iter()
-                                .map(serialize_reward_beneficiary)
-                                .collect(),
-                        ),
-                    ),
-                ],
-            },
+            SetupCouponReassignmentDelegation::MODULE,
+            SetupCouponReassignmentDelegation::ENTITY,
+            proposal_create_arguments(p, governance_party, proposer)
+                .map_err(anyhow::Error::from)?,
         ),
-        ProposalType::RevokeCouponReassignmentDelegation { delegation } => (
+        ProposalType::RevokeCouponReassignmentDelegation(p) => (
             ProposalPackage::GovernanceRewards,
-            "Governance.Rewards.RevokeCouponReassignmentDelegation",
-            "RevokeCouponReassignmentDelegation",
-            Record {
-                record_id: None,
-                fields: vec![
-                    field("governanceParty", make_party(governance_party)),
-                    field("proposer", make_party(proposer)),
-                    field("delegation", make_contract_id(delegation)),
-                ],
-            },
+            RevokeCouponReassignmentDelegation::MODULE,
+            RevokeCouponReassignmentDelegation::ENTITY,
+            proposal_create_arguments(p, governance_party, proposer)
+                .map_err(anyhow::Error::from)?,
         ),
         ProposalType::SetEnableResultContracts {
             registrar_service_cid,
@@ -375,52 +346,19 @@ pub fn build_proposal_create_args(
             proposal_create_arguments(p, governance_party, proposer)
                 .map_err(anyhow::Error::from)?,
         ),
-        ProposalType::SetupMintingDelegation {
-            delegate,
-            dso,
-            expires_at_micros,
-            amulet_merge_limit,
-            description,
-        } => (
+        ProposalType::SetupMintingDelegation(p) => (
             ProposalPackage::GovernanceRewards,
-            "Governance.Rewards.SetupMintingDelegation",
-            "SetupMintingDelegation",
-            Record {
-                record_id: None,
-                fields: vec![
-                    field("governanceParty", make_party(governance_party)),
-                    field("proposer", make_party(proposer)),
-                    field("delegate", make_party(delegate)),
-                    field("dso", make_party(dso)),
-                    field(
-                        "expiresAt",
-                        Value {
-                            sum: Some(value::Sum::Timestamp(*expires_at_micros)),
-                        },
-                    ),
-                    field("amuletMergeLimit", make_int64(*amulet_merge_limit)),
-                    field("description", make_text(description)),
-                ],
-            },
+            SetupMintingDelegation::MODULE,
+            SetupMintingDelegation::ENTITY,
+            proposal_create_arguments(p, governance_party, proposer)
+                .map_err(anyhow::Error::from)?,
         ),
-        ProposalType::AcceptExternalPartySetup { proposal_cid } => (
+        ProposalType::AcceptExternalPartySetup(p) => (
             ProposalPackage::GovernanceRewards,
-            "Governance.Rewards.AcceptExternalPartySetup",
-            "AcceptExternalPartySetup",
-            Record {
-                record_id: None,
-                fields: vec![
-                    field("governanceParty", make_party(governance_party)),
-                    field("proposer", make_party(proposer)),
-                    field("proposalCid", make_contract_id(proposal_cid)),
-                    field(
-                        "description",
-                        make_text(&format!(
-                            "Accept external party setup (ValidatorRight + TransferPreapproval) for proposal {proposal_cid}"
-                        )),
-                    ),
-                ],
-            },
+            AcceptExternalPartySetup::MODULE,
+            AcceptExternalPartySetup::ENTITY,
+            proposal_create_arguments(p, governance_party, proposer)
+                .map_err(anyhow::Error::from)?,
         ),
         ProposalType::Mint {
             allocation_factory_cid,
@@ -911,11 +849,6 @@ mod tests {
         )
     }
 
-    /// Parse a decimal literal in test fixtures, panicking on invalid input.
-    fn dec(s: &str) -> DamlDecimal {
-        DamlDecimal::parse(s).expect("valid decimal literal")
-    }
-
     #[test]
     fn build_proposal_setup_cc_preapproval_shape() -> Result {
         let proposal = ProposalType::SetupCcPreapproval(SetupCcPreapproval {
@@ -968,15 +901,6 @@ mod tests {
         match &value.sum {
             Some(value::Sum::Record(r)) => r,
             other => panic!("expected Record, got {other:?}"),
-        }
-    }
-
-    /// Unwrap a `value::Sum::List` reference (for descending into a list `Value`
-    /// returned by `field_value`).
-    fn as_list(value: &Value) -> &[Value] {
-        match &value.sum {
-            Some(value::Sum::List(l)) => &l.elements,
-            other => panic!("expected List, got {other:?}"),
         }
     }
 
@@ -1074,170 +998,12 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn build_proposal_setup_minting_delegation_shape() -> Result {
-        let expires_at_micros = 1_800_000_000_000_000;
-        let proposal = ProposalType::SetupMintingDelegation {
-            delegate: party_id(),
-            dso: party_id(),
-            expires_at_micros,
-            amulet_merge_limit: 10,
-            description: "collect CIP-104 rewards".to_string(),
-        };
-        let (package, module, entity, record) =
-            build_proposal_create_args(&gov_id(), &proposer_id(), &proposal, None, None)?;
-
-        assert_eq!(package, ProposalPackage::GovernanceRewards);
-        assert_eq!(module, "Governance.Rewards.SetupMintingDelegation");
-        assert_eq!(entity, "SetupMintingDelegation");
-        assert_eq!(
-            owned_labels(&record),
-            [
-                "governanceParty",
-                "proposer",
-                "delegate",
-                "dso",
-                "expiresAt",
-                "amuletMergeLimit",
-                "description",
-            ]
-        );
-        assert!(matches!(
-            field_value(&record, "expiresAt").sum,
-            Some(value::Sum::Timestamp(micros)) if micros == expires_at_micros,
-        ));
-        assert!(matches!(
-            field_value(&record, "amuletMergeLimit").sum,
-            Some(value::Sum::Int64(10)),
-        ));
-        Ok(())
-    }
-
-    #[test]
-    fn build_proposal_accept_external_party_setup_shape() -> Result {
-        let proposal = ProposalType::AcceptExternalPartySetup {
-            proposal_cid: "00abc123".to_string(),
-        };
-        let (package, module, entity, record) =
-            build_proposal_create_args(&gov_id(), &proposer_id(), &proposal, None, None)?;
-        assert_eq!(package, ProposalPackage::GovernanceRewards);
-        assert_eq!(module, "Governance.Rewards.AcceptExternalPartySetup");
-        assert_eq!(entity, "AcceptExternalPartySetup");
-        assert_eq!(
-            owned_labels(&record),
-            ["governanceParty", "proposer", "proposalCid", "description"]
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn build_proposal_setup_delegation_shape() -> Result {
-        let proposal = ProposalType::SetupCouponReassignmentDelegation {
-            dso: party_id(),
-            assigners: vec![party_id(), party_id()],
-            new_beneficiaries: vec![
-                RewardBeneficiary {
-                    beneficiary: party_id(),
-                    percentage: dec("0.8"),
-                },
-                RewardBeneficiary {
-                    beneficiary: party_id(),
-                    percentage: dec("0.2"),
-                },
-            ],
-            prior_delegation: Some("00old".to_string()),
-        };
-        let (package, module, entity, record) =
-            build_proposal_create_args(&gov_id(), &proposer_id(), &proposal, None, None)?;
-        assert_eq!(package, ProposalPackage::GovernanceRewards);
-        assert_eq!(
-            module,
-            "Governance.Rewards.SetupCouponReassignmentDelegation"
-        );
-        assert_eq!(entity, "SetupCouponReassignmentDelegation");
-        assert_eq!(
-            owned_labels(&record),
-            [
-                "governanceParty",
-                "proposer",
-                "priorDelegation",
-                "dso",
-                "assigners",
-                "beneficiaries"
-            ]
-        );
-
-        // priorDelegation: Some -> Optional(Some(ContractId "00old")).
-        match &field_value(&record, "priorDelegation").sum {
-            Some(value::Sum::Optional(opt)) => {
-                let inner = opt.value.as_ref().expect("priorDelegation should be Some");
-                assert!(
-                    matches!(&inner.sum, Some(value::Sum::ContractId(c)) if c == "00old"),
-                    "priorDelegation inner must be ContractId(\"00old\"), got {:?}",
-                    inner.sum
-                );
-            }
-            other => panic!("priorDelegation must be Optional, got {other:?}"),
-        }
-
-        // assigners: a list of two Party values.
-        let assigners = as_list(field_value(&record, "assigners"));
-        assert_eq!(assigners.len(), 2);
-        assert!(
-            assigners
-                .iter()
-                .all(|v| matches!(v.sum, Some(value::Sum::Party(_)))),
-            "assigners elements must be Party"
-        );
-
-        // beneficiaries: a list of {beneficiary: Party, percentage: Numeric},
-        // carrying the 0.8 / 0.2 split in order. A regression swapping
-        // make_party <-> make_contract_id, or renaming `percentage`, fails here.
-        let benes = as_list(field_value(&record, "beneficiaries"));
-        assert_eq!(benes.len(), 2);
-        for (bene, expected_pct) in benes.iter().zip(["0.8", "0.2"]) {
-            let rec = as_record(bene);
-            assert_eq!(owned_labels(rec), ["beneficiary", "percentage"]);
-            assert!(
-                matches!(
-                    field_value(rec, "beneficiary").sum,
-                    Some(value::Sum::Party(_))
-                ),
-                "beneficiary must be a Party"
-            );
-            match &field_value(rec, "percentage").sum {
-                Some(value::Sum::Numeric(n)) => assert_eq!(n, expected_pct),
-                other => panic!("percentage must be Numeric, got {other:?}"),
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn build_proposal_revoke_delegation_shape() -> Result {
-        let proposal = ProposalType::RevokeCouponReassignmentDelegation {
-            delegation: "00abc".to_string(),
-        };
-        let (package, module, entity, record) =
-            build_proposal_create_args(&gov_id(), &proposer_id(), &proposal, None, None)?;
-        assert_eq!(package, ProposalPackage::GovernanceRewards);
-        assert_eq!(
-            module,
-            "Governance.Rewards.RevokeCouponReassignmentDelegation"
-        );
-        assert_eq!(entity, "RevokeCouponReassignmentDelegation");
-        assert_eq!(
-            owned_labels(&record),
-            ["governanceParty", "proposer", "delegation"]
-        );
-        // delegation: a ContractId carrying the passed cid.
-        assert!(
-            matches!(&field_value(&record, "delegation").sum, Some(value::Sum::ContractId(c)) if c == "00abc"),
-            "delegation must be ContractId(\"00abc\"), got {:?}",
-            field_value(&record, "delegation").sum
-        );
-        Ok(())
-    }
+    // `build_proposal_setup_minting_delegation_shape`,
+    // `build_proposal_accept_external_party_setup_shape`,
+    // `build_proposal_setup_delegation_shape`, and
+    // `build_proposal_revoke_delegation_shape` moved to
+    // `decman_lib::catalog::proposals::rewards::tests` as `encode_snapshots`,
+    // driven through the structs' own `DamlProtoEncode` directly.
 
     // `build_proposal_accept_transfer_shape_and_context_branches` moved to
     // `decman_lib::catalog::proposals::custody::tests`, driven through

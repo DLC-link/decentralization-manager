@@ -1,0 +1,163 @@
+---
+source: crates/decman-lib/src/catalog/proposals/rewards.rs
+expression: "SetupCouponReassignmentDelegation\n{\n    dso: cid(\"dso\"), assigners: vec![cid(\"m1\"), cid(\"m2\")], new_beneficiaries:\n    vec![RewardBeneficiary\n    {\n        beneficiary: cid(\"a\"), percentage:\n        \"0.8\".parse().expect(\"valid decimal\"),\n    }, RewardBeneficiary\n    {\n        beneficiary: cid(\"b\"), percentage:\n        \"0.2\".parse().expect(\"valid decimal\"),\n    },], prior_delegation: Some(\"00old\".to_string()),\n}.to_daml_proto().unwrap()"
+---
+Value {
+    sum: Some(
+        Record(
+            Record {
+                record_id: None,
+                fields: [
+                    RecordField {
+                        label: "priorDelegation",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    Optional(
+                                        Optional {
+                                            value: Some(
+                                                Value {
+                                                    sum: Some(
+                                                        ContractId(
+                                                            "00old",
+                                                        ),
+                                                    ),
+                                                },
+                                            ),
+                                        },
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "dso",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    Party(
+                                        "dso::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "assigners",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    List(
+                                        List {
+                                            elements: [
+                                                Value {
+                                                    sum: Some(
+                                                        Party(
+                                                            "m1::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+                                                        ),
+                                                    ),
+                                                },
+                                                Value {
+                                                    sum: Some(
+                                                        Party(
+                                                            "m2::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+                                                        ),
+                                                    ),
+                                                },
+                                            ],
+                                        },
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "beneficiaries",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    List(
+                                        List {
+                                            elements: [
+                                                Value {
+                                                    sum: Some(
+                                                        Record(
+                                                            Record {
+                                                                record_id: None,
+                                                                fields: [
+                                                                    RecordField {
+                                                                        label: "beneficiary",
+                                                                        value: Some(
+                                                                            Value {
+                                                                                sum: Some(
+                                                                                    Party(
+                                                                                        "a::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+                                                                                    ),
+                                                                                ),
+                                                                            },
+                                                                        ),
+                                                                    },
+                                                                    RecordField {
+                                                                        label: "percentage",
+                                                                        value: Some(
+                                                                            Value {
+                                                                                sum: Some(
+                                                                                    Numeric(
+                                                                                        "0.8",
+                                                                                    ),
+                                                                                ),
+                                                                            },
+                                                                        ),
+                                                                    },
+                                                                ],
+                                                            },
+                                                        ),
+                                                    ),
+                                                },
+                                                Value {
+                                                    sum: Some(
+                                                        Record(
+                                                            Record {
+                                                                record_id: None,
+                                                                fields: [
+                                                                    RecordField {
+                                                                        label: "beneficiary",
+                                                                        value: Some(
+                                                                            Value {
+                                                                                sum: Some(
+                                                                                    Party(
+                                                                                        "b::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+                                                                                    ),
+                                                                                ),
+                                                                            },
+                                                                        ),
+                                                                    },
+                                                                    RecordField {
+                                                                        label: "percentage",
+                                                                        value: Some(
+                                                                            Value {
+                                                                                sum: Some(
+                                                                                    Numeric(
+                                                                                        "0.2",
+                                                                                    ),
+                                                                                ),
+                                                                            },
+                                                                        ),
+                                                                    },
+                                                                ],
+                                                            },
+                                                        ),
+                                                    ),
+                                                },
+                                            ],
+                                        },
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                ],
+            },
+        ),
+    ),
+}

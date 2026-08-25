@@ -4,8 +4,9 @@
 //!
 //! Split by the package the proposal's template lives in: `core` for
 //! `governance-core`, `custody` for `governance-token-custody`, `utility`
-//! for `governance-utility-onboarding`.
+//! for `governance-utility-onboarding`, `rewards` for `governance-rewards`.
 
 pub mod core;
 pub mod custody;
+pub mod rewards;
 pub mod utility;

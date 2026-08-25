@@ -11,15 +11,19 @@ use decman_lib::catalog::proposals::core::GenericVote;
 use decman_lib::catalog::proposals::custody::{
     AcceptTransfer, SetupCcPreapproval, SetupTokenPreapproval, Transfer,
 };
+use decman_lib::catalog::proposals::rewards::{
+    AcceptExternalPartySetup, RevokeCouponReassignmentDelegation,
+    SetupCouponReassignmentDelegation, SetupMintingDelegation,
+};
 use decman_lib::catalog::proposals::utility::{
     CreateDelegatedBatchedMarkersProxy, CreateProviderServiceRequest, CreateUserServiceRequest,
     ProvisionProviderService,
 };
+use decman_lib::catalog::types::RewardBeneficiary;
 
 use crate::canton_id::CantonId;
 use crate::server::types::{
-    ActionType, AppRewardBeneficiary, BillingParams, FarConfig, ProposalType, RewardBeneficiary,
-    VaultLimits,
+    ActionType, AppRewardBeneficiary, BillingParams, FarConfig, ProposalType, VaultLimits,
 };
 
 fn cid(prefix: &str) -> CantonId {
@@ -231,7 +235,7 @@ fn all_proposal_fixtures() -> Vec<ProposalType> {
                 weight: dec("1.0"),
             }]),
         },
-        ProposalType::SetupCouponReassignmentDelegation {
+        ProposalType::SetupCouponReassignmentDelegation(SetupCouponReassignmentDelegation {
             dso: cid("dso"),
             assigners: vec![cid("m1"), cid("m2")],
             new_beneficiaries: vec![
@@ -245,10 +249,10 @@ fn all_proposal_fixtures() -> Vec<ProposalType> {
                 },
             ],
             prior_delegation: Some("00prior".into()),
-        },
-        ProposalType::RevokeCouponReassignmentDelegation {
+        }),
+        ProposalType::RevokeCouponReassignmentDelegation(RevokeCouponReassignmentDelegation {
             delegation: "00deleg".into(),
-        },
+        }),
         ProposalType::SetEnableResultContracts {
             registrar_service_cid: "00rsc".into(),
             enable_result_contracts: Some(true),
@@ -256,16 +260,16 @@ fn all_proposal_fixtures() -> Vec<ProposalType> {
         ProposalType::CreateDelegatedBatchedMarkersProxy(CreateDelegatedBatchedMarkersProxy {
             operator: cid("op"),
         }),
-        ProposalType::SetupMintingDelegation {
+        ProposalType::SetupMintingDelegation(SetupMintingDelegation {
             delegate: cid("delegate"),
             dso: cid("dso"),
             expires_at_micros: 4_000_000_000_000_000,
             amulet_merge_limit: 10,
             description: "delegate minting".into(),
-        },
-        ProposalType::AcceptExternalPartySetup {
+        }),
+        ProposalType::AcceptExternalPartySetup(AcceptExternalPartySetup {
             proposal_cid: "00eps".into(),
-        },
+        }),
         ProposalType::Mint {
             allocation_factory_cid: "00alloc".into(),
             instrument_id: instrument(),
@@ -382,7 +386,7 @@ fn minimal_option_fixtures() -> Vec<ProposalType> {
             instrument_configuration_cid: "00icc".into(),
             provider_app_reward_beneficiaries: None,
         },
-        ProposalType::SetupCouponReassignmentDelegation {
+        ProposalType::SetupCouponReassignmentDelegation(SetupCouponReassignmentDelegation {
             dso: cid("dso"),
             assigners: vec![cid("m1")],
             new_beneficiaries: vec![RewardBeneficiary {
@@ -390,7 +394,7 @@ fn minimal_option_fixtures() -> Vec<ProposalType> {
                 percentage: dec("1.0"),
             }],
             prior_delegation: None,
-        },
+        }),
         ProposalType::SetEnableResultContracts {
             registrar_service_cid: "00rsc".into(),
             enable_result_contracts: None,

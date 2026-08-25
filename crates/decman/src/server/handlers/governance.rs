@@ -16,6 +16,7 @@ use canton_proto_rs::com::{
     },
 };
 use decman_lib::catalog::proposals::custody::{AcceptTransfer, Transfer};
+use decman_lib::catalog::proposals::rewards::SetupCouponReassignmentDelegation;
 use serde::Deserialize;
 
 use crate::{
@@ -1188,10 +1189,10 @@ pub async fn get_governance_chain_audit(
 fn may_create_second_delegation(proposal: &ProposalType) -> bool {
     matches!(
         proposal,
-        ProposalType::SetupCouponReassignmentDelegation {
+        ProposalType::SetupCouponReassignmentDelegation(SetupCouponReassignmentDelegation {
             prior_delegation: None,
             ..
-        }
+        })
     )
 }
 
@@ -3318,18 +3319,20 @@ mod propose_guard_tests {
     /// touches the ledger, so a false positive would tax every propose.
     #[test]
     fn only_an_unnamed_replacement_can_create_a_second_delegation() {
-        let setup_without_prior = ProposalType::SetupCouponReassignmentDelegation {
-            dso: party(),
-            assigners: vec![party()],
-            new_beneficiaries: vec![],
-            prior_delegation: None,
-        };
-        let setup_with_prior = ProposalType::SetupCouponReassignmentDelegation {
-            dso: party(),
-            assigners: vec![party()],
-            new_beneficiaries: vec![],
-            prior_delegation: Some("00abc".to_string()),
-        };
+        let setup_without_prior =
+            ProposalType::SetupCouponReassignmentDelegation(SetupCouponReassignmentDelegation {
+                dso: party(),
+                assigners: vec![party()],
+                new_beneficiaries: vec![],
+                prior_delegation: None,
+            });
+        let setup_with_prior =
+            ProposalType::SetupCouponReassignmentDelegation(SetupCouponReassignmentDelegation {
+                dso: party(),
+                assigners: vec![party()],
+                new_beneficiaries: vec![],
+                prior_delegation: Some("00abc".to_string()),
+            });
         let unrelated = ProposalType::GenericVote(GenericVote {
             description: "unrelated".to_string(),
         });

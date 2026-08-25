@@ -45,20 +45,10 @@ pub use common::types::{
     PartyMetadata, PeerErrorKind, PeerPackageComparison, PeerPackageResult, PendingInvitation,
     Permission, VettedPackageInfo, WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun,
 };
-// `InstrumentAllowance` no longer has a non-test consumer here: since Task 12,
-// `ProposalType::SetupTokenPreapproval`'s field lives on
-// `decman_lib::catalog::proposals::custody::SetupTokenPreapproval`, which
-// references `common::api::InstrumentAllowance` directly. The re-export stays,
-// test-gated, so `crate::server::types::InstrumentAllowance` keeps resolving
-// for test fixtures (`action_serializer.rs`, `serde_snapshots.rs`).
-#[cfg(test)]
-pub(crate) use common::api::InstrumentAllowance;
 // The payload support types and their protocol validators now live in
 // `decman-lib`, re-exported here so existing `crate::server::types::X`
 // paths keep resolving unchanged.
-pub use decman_lib::catalog::types::{
-    AppRewardBeneficiary, BillingParams, FarConfig, RewardBeneficiary, VaultLimits,
-};
+pub use decman_lib::catalog::types::{AppRewardBeneficiary, BillingParams, FarConfig, VaultLimits};
 use decman_lib::framework::Validate;
 use decman_lib::framework::validate::*;
 
@@ -330,9 +320,15 @@ pub type OnboardingResponse = WorkflowResponse;
 // Governance Types (Structured Actions)
 // ============================================================================
 
-// `VaultLimits`, `AppRewardBeneficiary`, `RewardBeneficiary`, and
-// `FarConfig` now live in `decman_lib::catalog::types` and are re-exported
-// above so existing `crate::server::types::X` paths keep resolving.
+// `VaultLimits`, `AppRewardBeneficiary`, and `FarConfig` now live in
+// `decman_lib::catalog::types` and are re-exported above so existing
+// `crate::server::types::X` paths keep resolving. `RewardBeneficiary` moved
+// there too, but since Task 13 has no non-test consumer under
+// `crate::server::types::X` — `SetupCouponReassignmentDelegation`'s field
+// lives on `decman_lib::catalog::proposals::rewards::SetupCouponReassignmentDelegation`,
+// which references `decman_lib::catalog::types::RewardBeneficiary` directly
+// — so the re-export was dropped; test fixtures import it straight from
+// `decman_lib::catalog::types` instead.
 
 /// `ActionType` — including its Daml `Value` codec (`to_vault_proto` /
 /// `from_vault_proto` / `to_self_proto` / `from_self_proto`) and `validate`
@@ -393,28 +389,13 @@ pub enum ProposalType {
     },
     /// Create (or replace) the decparty's on-ledger CouponReassignmentDelegation.
     /// `prior_delegation` is the cid of the delegation being replaced (None for the first).
-    SetupCouponReassignmentDelegation {
-        /// The DSO whose coupons the delegation may assign. Fixed by this vote
-        /// so the automation can tell the decparty's real coupons from ones a
-        /// stranger minted naming itself `dso`.
-        dso: CantonId,
-        assigners: Vec<CantonId>,
-        /// The split, baked into the delegation and enforced in DAML. Two
-        /// things surprise proposers, and both reject the vote at execute:
-        ///
-        /// 1. The percentages must sum to **exactly** 1.0, compared as exact
-        ///    Decimal. An even 3-way split is therefore not expressible —
-        ///    `0.3333333333` three times is not 1.0. Balance the last entry by
-        ///    hand (`0.3333333333`, `0.3333333333`, `0.3333333334`).
-        /// 2. Nothing is implicitly left to the decparty. To keep a remainder
-        ///    for itself, the decparty must appear here as its own beneficiary
-        ///    with an explicit percentage.
-        new_beneficiaries: Vec<RewardBeneficiary>,
-        #[serde(default)]
-        prior_delegation: Option<String>,
-    },
+    SetupCouponReassignmentDelegation(
+        decman_lib::catalog::proposals::rewards::SetupCouponReassignmentDelegation,
+    ),
     /// Revoke (archive) the decparty's CouponReassignmentDelegation.
-    RevokeCouponReassignmentDelegation { delegation: String },
+    RevokeCouponReassignmentDelegation(
+        decman_lib::catalog::proposals::rewards::RevokeCouponReassignmentDelegation,
+    ),
     /// Toggle result-contract emission on a `RegistrarService`.
     SetEnableResultContracts {
         registrar_service_cid: String,
@@ -430,25 +411,13 @@ pub enum ProposalType {
     /// validator node's `delegate` party via a `MintingDelegationProposal`.
     /// The delegation beneficiary is always the governance party; the delegate
     /// accepts the proposal out-of-band via the wallet API.
-    SetupMintingDelegation {
-        delegate: CantonId,
-        dso: CantonId,
-        /// Delegation expiry as microseconds since epoch.
-        expires_at_micros: i64,
-        /// Auto-merge target for the beneficiary's amulets. Must be positive.
-        amulet_merge_limit: i64,
-        description: String,
-    },
+    SetupMintingDelegation(decman_lib::catalog::proposals::rewards::SetupMintingDelegation),
     /// Accept a validator-created `ExternalPartySetupProposal` on behalf of the
     /// governance party, creating its `ValidatorRight` + `TransferPreapproval`.
     /// This is the missing prerequisite that makes the validator's built-in
     /// `MintingDelegationCollectRewardsTrigger` start collecting the party's
     /// CIP-104 reward coupons via the established `MintingDelegation`.
-    AcceptExternalPartySetup {
-        /// Contract id of the ExternalPartySetupProposal to accept (from the
-        /// validator's POST /v0/admin/external-party/setup-proposal).
-        proposal_cid: String,
-    },
+    AcceptExternalPartySetup(decman_lib::catalog::proposals::rewards::AcceptExternalPartySetup),
     /// Offer a mint of `amount` tokens to `recipient` via
     /// `AllocationFactory_OfferMint`. The resulting `MintOffer` is accepted
     /// later by the recipient, outside this plugin.
@@ -623,6 +592,16 @@ impl ProposalType {
             ProposalType::SetupTokenPreapproval(p) => p.validate(&ctx).map_err(|e| e.to_string()),
             ProposalType::Transfer(p) => p.validate(&ctx).map_err(|e| e.to_string()),
             ProposalType::AcceptTransfer(p) => p.validate(&ctx).map_err(|e| e.to_string()),
+            ProposalType::SetupCouponReassignmentDelegation(p) => {
+                p.validate(&ctx).map_err(|e| e.to_string())
+            }
+            ProposalType::RevokeCouponReassignmentDelegation(p) => {
+                p.validate(&ctx).map_err(|e| e.to_string())
+            }
+            ProposalType::SetupMintingDelegation(p) => p.validate(&ctx).map_err(|e| e.to_string()),
+            ProposalType::AcceptExternalPartySetup(p) => {
+                p.validate(&ctx).map_err(|e| e.to_string())
+            }
             ProposalType::Mint { amount, .. } | ProposalType::Burn { amount, .. } => {
                 validate_positive_amount(amount, "amount").map_err(|e| e.to_string())
             }
@@ -631,27 +610,6 @@ impl ProposalType {
                 ..
             } => {
                 validate_positive_amount(d, "deposit_initial_amount_usd").map_err(|e| e.to_string())
-            }
-            ProposalType::SetupMintingDelegation {
-                expires_at_micros,
-                amulet_merge_limit,
-                ..
-            } => {
-                if *amulet_merge_limit <= 0 {
-                    return Err("amulet_merge_limit must be greater than 0".to_string());
-                }
-                validate_future_micros(
-                    *expires_at_micros,
-                    Utc::now().timestamp_micros(),
-                    "expires_at_micros",
-                )
-                .map_err(|e| e.to_string())
-            }
-            ProposalType::AcceptExternalPartySetup { proposal_cid } => {
-                if proposal_cid.trim().is_empty() {
-                    return Err("proposal_cid must not be empty".to_string());
-                }
-                Ok(())
             }
             ProposalType::SetProviderAppRewardBeneficiaries {
                 provider_app_reward_beneficiaries: Some(beneficiaries),
@@ -717,28 +675,6 @@ impl ProposalType {
                             return Err(format!("duplicate credential cid not allowed: {cid}"));
                         }
                     }
-                }
-                Ok(())
-            }
-            ProposalType::SetupCouponReassignmentDelegation {
-                assigners,
-                new_beneficiaries,
-                ..
-            } => {
-                if assigners.is_empty() {
-                    return Err("assigners must not be empty".to_string());
-                }
-                let mut seen = std::collections::HashSet::new();
-                for a in assigners {
-                    if !seen.insert(a) {
-                        return Err(format!("duplicate assigner not allowed: {a}"));
-                    }
-                }
-                validate_reward_beneficiaries(new_beneficiaries).map_err(|e| e.to_string())
-            }
-            ProposalType::RevokeCouponReassignmentDelegation { delegation } => {
-                if delegation.trim().is_empty() {
-                    return Err("delegation must not be empty".to_string());
                 }
                 Ok(())
             }
@@ -1543,55 +1479,10 @@ mod tests {
         CantonId::parse(&format!("{prefix}::{ns}")).unwrap()
     }
 
-    /// Test-only helper: builds a `RewardBeneficiary` from a Canton-ID prefix
-    /// and a decimal percentage string.
-    fn rb(prefix: &str, pct: &str) -> RewardBeneficiary {
-        RewardBeneficiary {
-            beneficiary: cid(prefix),
-            percentage: pct.parse().expect("valid decimal"),
-        }
-    }
-
-    #[test]
-    fn setup_delegation_validate() {
-        // Reuse the `rb` helper from the neighboring set_reward_split_validate
-        // test; `rb(..).beneficiary` yields a CantonId (there is no dedicated
-        // party-id helper). Note: `rb`'s prefix is combined with a fixed
-        // namespace via `cid()`, so the prefix must be a plain string (no
-        // embedded "::") -- unlike the brief's example.
-        let execs = vec![rb("m1", "1.0").beneficiary, rb("m2", "1.0").beneficiary];
-        let ok = ProposalType::SetupCouponReassignmentDelegation {
-            dso: rb("dso", "1.0").beneficiary,
-            assigners: execs.clone(),
-            new_beneficiaries: vec![rb("a", "0.8"), rb("b", "0.2")],
-            prior_delegation: None,
-        };
-        assert!(ok.validate(&cid("gov")).is_ok());
-        let no_exec = ProposalType::SetupCouponReassignmentDelegation {
-            dso: rb("dso", "1.0").beneficiary,
-            assigners: vec![],
-            new_beneficiaries: vec![rb("a", "1.0")],
-            prior_delegation: None,
-        };
-        assert!(no_exec.validate(&cid("gov")).is_err());
-        let bad_sum = ProposalType::SetupCouponReassignmentDelegation {
-            dso: rb("dso", "1.0").beneficiary,
-            assigners: execs,
-            new_beneficiaries: vec![rb("a", "0.5")],
-            prior_delegation: None,
-        };
-        assert!(bad_sum.validate(&cid("gov")).is_err());
-        let revoke = ProposalType::RevokeCouponReassignmentDelegation {
-            delegation: "00abc".into(),
-        };
-        assert!(revoke.validate(&cid("gov")).is_ok());
-        // An empty delegation cid is rejected at the boundary (not left to fail
-        // only at ledger submission).
-        let revoke_empty = ProposalType::RevokeCouponReassignmentDelegation {
-            delegation: "  ".into(),
-        };
-        assert!(revoke_empty.validate(&cid("gov")).is_err());
-    }
+    // `setup_delegation_validate` moved to
+    // `decman_lib::catalog::proposals::rewards::tests`, testing
+    // `SetupCouponReassignmentDelegation::validate` /
+    // `RevokeCouponReassignmentDelegation::validate` directly.
 
     // `validate_reward_beneficiaries_edge_cases` moved to
     // `decman_lib::framework::validate::tests` with the validator itself.
@@ -1681,51 +1572,8 @@ mod tests {
         Ok(())
     }
 
-    fn minting_delegation(
-        expires_at_micros: i64,
-        amulet_merge_limit: i64,
-    ) -> anyhow::Result<ProposalType> {
-        Ok(ProposalType::SetupMintingDelegation {
-            delegate: test_party("delegate")?,
-            dso: test_party("dso")?,
-            expires_at_micros,
-            amulet_merge_limit,
-            description: "test".to_string(),
-        })
-    }
-
-    #[test]
-    fn setup_minting_delegation_rejects_a_non_future_expiry() -> anyhow::Result<()> {
-        let hour_micros = 3_600_000_000i64;
-        let now = Utc::now().timestamp_micros();
-
-        // An expiry in the future is the only accepted shape.
-        assert!(
-            minting_delegation(now + hour_micros, 10)?
-                .validate(&cid("gov"))
-                .is_ok()
-        );
-
-        // Zero and negative are the raw-caller mistakes the DAML assert would
-        // otherwise catch only at execute time, after a full governance round.
-        assert!(minting_delegation(0, 10)?.validate(&cid("gov")).is_err());
-        assert!(minting_delegation(-1, 10)?.validate(&cid("gov")).is_err());
-
-        // Positive but already past is the same waste, and `> 0` alone misses it.
-        assert!(
-            minting_delegation(now - hour_micros, 10)?
-                .validate(&cid("gov"))
-                .is_err()
-        );
-
-        // The pre-existing amulet_merge_limit guard still fires when the expiry
-        // is valid, so the new arm did not displace it.
-        assert!(
-            minting_delegation(now + hour_micros, 0)?
-                .validate(&cid("gov"))
-                .is_err()
-        );
-
-        Ok(())
-    }
+    // `setup_minting_delegation_rejects_a_non_future_expiry` moved to
+    // `decman_lib::catalog::proposals::rewards::tests`, testing
+    // `SetupMintingDelegation::validate` directly with a fixed `now_micros`
+    // in the `ValidationCtx` instead of the wall clock.
 }

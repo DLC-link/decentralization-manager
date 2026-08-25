@@ -1013,7 +1013,8 @@ async fn run_once_for_party(
 
 #[cfg(test)]
 mod tests {
-    use super::super::types::RewardBeneficiary;
+    use decman_lib::catalog::types::RewardBeneficiary;
+
     use super::*;
     use canton_proto_rs::com::daml::ledger::api::v2::{List, Optional, RecordField, Value};
 
