@@ -1,5 +1,6 @@
 //! Integrator-facing, template-agnostic pieces.
 
+pub mod commands;
 pub mod encode;
 pub mod filters;
 pub mod record;
