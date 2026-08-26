@@ -275,6 +275,24 @@ jobs:
           fi
           echo "compared $compared DAR(s)"
           exit $rc
+      # Canton runs this same validator when a participant uploads a DAR, so a
+      # broken lineage otherwise fails at deploy time on a real network and the
+      # PR that introduced it gets no signal. #320 bumped
+      # governance-utility-onboarding-v1 to 0.3.0 and someone ran this by hand;
+      # this makes the next bump automatic.
+      #
+      # Takes both sets of DARs:
+      #   */.daml/dist  — what `dpm build --all` just produced, so a version
+      #                   bumped in daml.yaml is checked before its DAR is
+      #                   ever committed. That is exactly when a reviewer
+      #                   wants to hear about a broken upgrade.
+      #   ../releases/v1 — the shipped history, so a package with three
+      #                   releases has its whole chain validated rather than
+      #                   only the newest pair.
+      # A package present in both appears once: the validator keys on package
+      # id, and the DAR-verification step above already pins those identical.
+      - name: Verify Daml upgrade lineage
+        run: ~/.dpm/bin/dpm upgrade-check --both */.daml/dist/*.dar ../releases/v1/*.dar
       - name: Test governance-core
         run: cd governance-core-test && ~/.dpm/bin/dpm test
       - name: Test governance-token-custody
