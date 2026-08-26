@@ -2,7 +2,7 @@
 
 use canton_common::decimal::DamlDecimal;
 use canton_proto_rs::com::daml::ledger::api::v2::Value;
-use common::api::{Claim, PackageConfig};
+use common::api::Claim;
 use common::canton_id::CantonId;
 
 use crate::catalog::types::{BillingParams, serialize_billing_params};
@@ -12,7 +12,9 @@ use crate::framework::encode::{
     serialize_claim,
 };
 use crate::framework::validate::validate_positive_amount;
-use crate::framework::{DamlProtoEncode, TemplateId, TemplateInfo, Validate, ValidationCtx};
+use crate::framework::{
+    DamlProtoEncode, PackageResolver, TemplateId, TemplateInfo, Validate, ValidationCtx,
+};
 
 /// Offer a free credential to a holder via the governance party's
 /// `UserService`. Wraps `UserService_OfferFreeCredential` from the
@@ -34,10 +36,9 @@ impl OfferFreeCredential {
 }
 
 impl TemplateInfo for OfferFreeCredential {
-    fn template_id(&self, pkgs: &PackageConfig) -> Result<TemplateId, Error> {
+    fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
         let pkg = pkgs
-            .governance_utility_credential
-            .as_deref()
+            .package_ref("governance_utility_credential")
             .ok_or(Error::PackageNotConfigured("governance_utility_credential"))?;
         Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
     }
@@ -84,10 +85,9 @@ impl OfferPaidCredential {
 }
 
 impl TemplateInfo for OfferPaidCredential {
-    fn template_id(&self, pkgs: &PackageConfig) -> Result<TemplateId, Error> {
+    fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
         let pkg = pkgs
-            .governance_utility_credential
-            .as_deref()
+            .package_ref("governance_utility_credential")
             .ok_or(Error::PackageNotConfigured("governance_utility_credential"))?;
         Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
     }
@@ -141,10 +141,9 @@ impl AcceptFreeCredential {
 }
 
 impl TemplateInfo for AcceptFreeCredential {
-    fn template_id(&self, pkgs: &PackageConfig) -> Result<TemplateId, Error> {
+    fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
         let pkg = pkgs
-            .governance_utility_credential
-            .as_deref()
+            .package_ref("governance_utility_credential")
             .ok_or(Error::PackageNotConfigured("governance_utility_credential"))?;
         Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
     }

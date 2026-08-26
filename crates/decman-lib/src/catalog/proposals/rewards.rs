@@ -1,7 +1,6 @@
 //! `governance-rewards` proposal payloads.
 
 use canton_proto_rs::com::daml::ledger::api::v2::{Value, value};
-use common::api::PackageConfig;
 use common::canton_id::CantonId;
 
 use crate::catalog::types::{RewardBeneficiary, serialize_reward_beneficiary};
@@ -11,7 +10,9 @@ use crate::framework::encode::{
     make_record, make_text,
 };
 use crate::framework::validate::{validate_future_micros, validate_reward_beneficiaries};
-use crate::framework::{DamlProtoEncode, TemplateId, TemplateInfo, Validate, ValidationCtx};
+use crate::framework::{
+    DamlProtoEncode, PackageResolver, TemplateId, TemplateInfo, Validate, ValidationCtx,
+};
 
 /// Create (or replace) the decparty's on-ledger CouponReassignmentDelegation.
 /// `prior_delegation` is the cid of the delegation being replaced (None for the first).
@@ -45,10 +46,9 @@ impl SetupCouponReassignmentDelegation {
 }
 
 impl TemplateInfo for SetupCouponReassignmentDelegation {
-    fn template_id(&self, pkgs: &PackageConfig) -> Result<TemplateId, Error> {
+    fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
         let pkg = pkgs
-            .governance_rewards
-            .as_deref()
+            .package_ref("governance_rewards")
             .ok_or(Error::PackageNotConfigured("governance_rewards"))?;
         Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
     }
@@ -110,10 +110,9 @@ impl RevokeCouponReassignmentDelegation {
 }
 
 impl TemplateInfo for RevokeCouponReassignmentDelegation {
-    fn template_id(&self, pkgs: &PackageConfig) -> Result<TemplateId, Error> {
+    fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
         let pkg = pkgs
-            .governance_rewards
-            .as_deref()
+            .package_ref("governance_rewards")
             .ok_or(Error::PackageNotConfigured("governance_rewards"))?;
         Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
     }
@@ -162,10 +161,9 @@ impl SetupMintingDelegation {
 }
 
 impl TemplateInfo for SetupMintingDelegation {
-    fn template_id(&self, pkgs: &PackageConfig) -> Result<TemplateId, Error> {
+    fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
         let pkg = pkgs
-            .governance_rewards
-            .as_deref()
+            .package_ref("governance_rewards")
             .ok_or(Error::PackageNotConfigured("governance_rewards"))?;
         Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
     }
@@ -219,10 +217,9 @@ impl AcceptExternalPartySetup {
 }
 
 impl TemplateInfo for AcceptExternalPartySetup {
-    fn template_id(&self, pkgs: &PackageConfig) -> Result<TemplateId, Error> {
+    fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
         let pkg = pkgs
-            .governance_rewards
-            .as_deref()
+            .package_ref("governance_rewards")
             .ok_or(Error::PackageNotConfigured("governance_rewards"))?;
         Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
     }

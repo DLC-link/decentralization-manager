@@ -5,8 +5,7 @@ use std::collections::HashSet;
 use canton_common::decimal::DamlDecimal;
 use canton_proto_rs::com::daml::ledger::api::v2::{Value, value};
 use common::api::{
-    InstrumentId, InstrumentIdentifier, InstrumentIssuerCredentials, PackageConfig,
-    PartyCredentialRequirement,
+    InstrumentId, InstrumentIdentifier, InstrumentIssuerCredentials, PartyCredentialRequirement,
 };
 use common::canton_id::CantonId;
 
@@ -22,7 +21,9 @@ use crate::framework::validate::{
     validate_beneficiary_weights, validate_positive_amount,
     validate_self_issued_requirements_have_claims, validate_unique_issuers,
 };
-use crate::framework::{DamlProtoEncode, TemplateId, TemplateInfo, Validate, ValidationCtx};
+use crate::framework::{
+    DamlProtoEncode, PackageResolver, TemplateId, TemplateInfo, Validate, ValidationCtx,
+};
 
 /// Provision a Utility-Registry `ProviderService` with `operator = proposer`
 /// and `provider = governanceParty`. Produces the ProviderService cid
@@ -44,10 +45,9 @@ impl ProvisionProviderService {
 }
 
 impl TemplateInfo for ProvisionProviderService {
-    fn template_id(&self, pkgs: &PackageConfig) -> Result<TemplateId, Error> {
+    fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
         let pkg = pkgs
-            .governance_utility_onboarding
-            .as_deref()
+            .package_ref("governance_utility_onboarding")
             .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
         Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
     }
@@ -76,10 +76,9 @@ impl CreateProviderServiceRequest {
 }
 
 impl TemplateInfo for CreateProviderServiceRequest {
-    fn template_id(&self, pkgs: &PackageConfig) -> Result<TemplateId, Error> {
+    fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
         let pkg = pkgs
-            .governance_utility_onboarding
-            .as_deref()
+            .package_ref("governance_utility_onboarding")
             .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
         Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
     }
@@ -111,10 +110,9 @@ impl CreateUserServiceRequest {
 }
 
 impl TemplateInfo for CreateUserServiceRequest {
-    fn template_id(&self, pkgs: &PackageConfig) -> Result<TemplateId, Error> {
+    fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
         let pkg = pkgs
-            .governance_utility_onboarding
-            .as_deref()
+            .package_ref("governance_utility_onboarding")
             .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
         Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
     }
@@ -147,10 +145,9 @@ impl CreateDelegatedBatchedMarkersProxy {
 }
 
 impl TemplateInfo for CreateDelegatedBatchedMarkersProxy {
-    fn template_id(&self, pkgs: &PackageConfig) -> Result<TemplateId, Error> {
+    fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
         let pkg = pkgs
-            .governance_utility_onboarding
-            .as_deref()
+            .package_ref("governance_utility_onboarding")
             .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
         Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
     }
@@ -189,10 +186,9 @@ impl SetupUtility {
 }
 
 impl TemplateInfo for SetupUtility {
-    fn template_id(&self, pkgs: &PackageConfig) -> Result<TemplateId, Error> {
+    fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
         let pkg = pkgs
-            .governance_utility_onboarding
-            .as_deref()
+            .package_ref("governance_utility_onboarding")
             .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
         Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
     }
@@ -245,10 +241,9 @@ impl SetProviderAppRewardBeneficiaries {
 }
 
 impl TemplateInfo for SetProviderAppRewardBeneficiaries {
-    fn template_id(&self, pkgs: &PackageConfig) -> Result<TemplateId, Error> {
+    fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
         let pkg = pkgs
-            .governance_utility_onboarding
-            .as_deref()
+            .package_ref("governance_utility_onboarding")
             .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
         Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
     }
@@ -294,10 +289,9 @@ impl SetEnableResultContracts {
 }
 
 impl TemplateInfo for SetEnableResultContracts {
-    fn template_id(&self, pkgs: &PackageConfig) -> Result<TemplateId, Error> {
+    fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
         let pkg = pkgs
-            .governance_utility_onboarding
-            .as_deref()
+            .package_ref("governance_utility_onboarding")
             .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
         Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
     }
@@ -343,10 +337,9 @@ impl Mint {
 }
 
 impl TemplateInfo for Mint {
-    fn template_id(&self, pkgs: &PackageConfig) -> Result<TemplateId, Error> {
+    fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
         let pkg = pkgs
-            .governance_utility_onboarding
-            .as_deref()
+            .package_ref("governance_utility_onboarding")
             .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
         Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
     }
@@ -414,10 +407,9 @@ impl Burn {
 }
 
 impl TemplateInfo for Burn {
-    fn template_id(&self, pkgs: &PackageConfig) -> Result<TemplateId, Error> {
+    fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
         let pkg = pkgs
-            .governance_utility_onboarding
-            .as_deref()
+            .package_ref("governance_utility_onboarding")
             .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
         Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
     }
@@ -485,10 +477,9 @@ impl AcceptMintRequest {
 }
 
 impl TemplateInfo for AcceptMintRequest {
-    fn template_id(&self, pkgs: &PackageConfig) -> Result<TemplateId, Error> {
+    fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
         let pkg = pkgs
-            .governance_utility_onboarding
-            .as_deref()
+            .package_ref("governance_utility_onboarding")
             .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
         Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
     }
@@ -542,10 +533,9 @@ impl AcceptBurnRequest {
 }
 
 impl TemplateInfo for AcceptBurnRequest {
-    fn template_id(&self, pkgs: &PackageConfig) -> Result<TemplateId, Error> {
+    fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
         let pkg = pkgs
-            .governance_utility_onboarding
-            .as_deref()
+            .package_ref("governance_utility_onboarding")
             .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
         Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
     }
@@ -596,10 +586,9 @@ impl CreateProviderConfiguration {
 }
 
 impl TemplateInfo for CreateProviderConfiguration {
-    fn template_id(&self, pkgs: &PackageConfig) -> Result<TemplateId, Error> {
+    fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
         let pkg = pkgs
-            .governance_utility_onboarding
-            .as_deref()
+            .package_ref("governance_utility_onboarding")
             .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
         Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
     }
@@ -653,10 +642,9 @@ impl CreateRegistrarServiceRequest {
 }
 
 impl TemplateInfo for CreateRegistrarServiceRequest {
-    fn template_id(&self, pkgs: &PackageConfig) -> Result<TemplateId, Error> {
+    fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
         let pkg = pkgs
-            .governance_utility_onboarding
-            .as_deref()
+            .package_ref("governance_utility_onboarding")
             .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
         Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
     }
@@ -697,10 +685,9 @@ impl OnboardRegistrar {
 }
 
 impl TemplateInfo for OnboardRegistrar {
-    fn template_id(&self, pkgs: &PackageConfig) -> Result<TemplateId, Error> {
+    fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
         let pkg = pkgs
-            .governance_utility_onboarding
-            .as_deref()
+            .package_ref("governance_utility_onboarding")
             .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
         Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
     }
@@ -752,10 +739,9 @@ impl ProvisionInstrument {
 }
 
 impl TemplateInfo for ProvisionInstrument {
-    fn template_id(&self, pkgs: &PackageConfig) -> Result<TemplateId, Error> {
+    fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
         let pkg = pkgs
-            .governance_utility_onboarding
-            .as_deref()
+            .package_ref("governance_utility_onboarding")
             .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
         Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
     }
@@ -829,10 +815,9 @@ impl OnboardInstrumentIssuers {
 }
 
 impl TemplateInfo for OnboardInstrumentIssuers {
-    fn template_id(&self, pkgs: &PackageConfig) -> Result<TemplateId, Error> {
+    fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
         let pkg = pkgs
-            .governance_utility_onboarding
-            .as_deref()
+            .package_ref("governance_utility_onboarding")
             .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
         Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
     }
@@ -882,10 +867,9 @@ impl OffboardInstrumentIssuers {
 }
 
 impl TemplateInfo for OffboardInstrumentIssuers {
-    fn template_id(&self, pkgs: &PackageConfig) -> Result<TemplateId, Error> {
+    fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
         let pkg = pkgs
-            .governance_utility_onboarding
-            .as_deref()
+            .package_ref("governance_utility_onboarding")
             .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
         Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
     }

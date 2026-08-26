@@ -1,11 +1,10 @@
 //! `governance-core` proposal payloads.
 
 use canton_proto_rs::com::daml::ledger::api::v2::Value;
-use common::api::PackageConfig;
 
 use crate::error::Error;
 use crate::framework::encode::{field, make_record, make_text};
-use crate::framework::{DamlProtoEncode, TemplateId, TemplateInfo, Validate};
+use crate::framework::{DamlProtoEncode, PackageResolver, TemplateId, TemplateInfo, Validate};
 
 /// Generic text-based vote (no on-chain effect beyond recording the result).
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -21,10 +20,9 @@ impl GenericVote {
 }
 
 impl TemplateInfo for GenericVote {
-    fn template_id(&self, pkgs: &PackageConfig) -> Result<TemplateId, Error> {
+    fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
         let pkg = pkgs
-            .governance_core
-            .as_deref()
+            .package_ref("governance_core")
             .ok_or(Error::PackageNotConfigured("governance_core"))?;
         Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
     }

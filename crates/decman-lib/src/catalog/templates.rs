@@ -5,17 +5,14 @@
 //! `catalog::proposals`) — this module covers only the ids decman needs
 //! independent of any specific proposal payload.
 
-use common::api::PackageConfig;
-
 use crate::error::Error;
-use crate::framework::TemplateId;
+use crate::framework::{PackageResolver, TemplateId};
 
 /// The `VaultGovernanceRules` template — the vault's governance-state
 /// contract.
-pub fn vault_rules_template(pkgs: &PackageConfig) -> Result<TemplateId, Error> {
+pub fn vault_rules_template(pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
     let pkg = pkgs
-        .vault_governance
-        .as_deref()
+        .package_ref("vault_governance")
         .ok_or(Error::PackageNotConfigured("vault_governance"))?;
     Ok(TemplateId::new(
         pkg,
@@ -26,19 +23,17 @@ pub fn vault_rules_template(pkgs: &PackageConfig) -> Result<TemplateId, Error> {
 
 /// The `GovernanceRules` template — governance-core's governance-state
 /// contract.
-pub fn governance_rules_template(pkgs: &PackageConfig) -> Result<TemplateId, Error> {
+pub fn governance_rules_template(pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
     let pkg = pkgs
-        .governance_core
-        .as_deref()
+        .package_ref("governance_core")
         .ok_or(Error::PackageNotConfigured("governance_core"))?;
     Ok(TemplateId::new(pkg, "Governance.Rules", "GovernanceRules"))
 }
 
 /// The `VaultGovernanceConfirmation` template.
-pub fn vault_confirmation_template(pkgs: &PackageConfig) -> Result<TemplateId, Error> {
+pub fn vault_confirmation_template(pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
     let pkg = pkgs
-        .vault_governance
-        .as_deref()
+        .package_ref("vault_governance")
         .ok_or(Error::PackageNotConfigured("vault_governance"))?;
     Ok(TemplateId::new(
         pkg,
@@ -49,10 +44,9 @@ pub fn vault_confirmation_template(pkgs: &PackageConfig) -> Result<TemplateId, E
 
 /// The `GovernanceSelfConfirmation` template — governance-core's
 /// vault-style self-management confirmations.
-pub fn self_confirmation_template(pkgs: &PackageConfig) -> Result<TemplateId, Error> {
+pub fn self_confirmation_template(pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
     let pkg = pkgs
-        .governance_core
-        .as_deref()
+        .package_ref("governance_core")
         .ok_or(Error::PackageNotConfigured("governance_core"))?;
     Ok(TemplateId::new(
         pkg,
@@ -63,10 +57,9 @@ pub fn self_confirmation_template(pkgs: &PackageConfig) -> Result<TemplateId, Er
 
 /// The `GovernanceConfirmation` template — governance-core's domain-action
 /// confirmations.
-pub fn domain_confirmation_template(pkgs: &PackageConfig) -> Result<TemplateId, Error> {
+pub fn domain_confirmation_template(pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
     let pkg = pkgs
-        .governance_core
-        .as_deref()
+        .package_ref("governance_core")
         .ok_or(Error::PackageNotConfigured("governance_core"))?;
     Ok(TemplateId::new(
         pkg,
@@ -76,10 +69,9 @@ pub fn domain_confirmation_template(pkgs: &PackageConfig) -> Result<TemplateId, 
 }
 
 /// The `GovernableAction` interface every catalog proposal implements.
-pub fn governable_action_interface(pkgs: &PackageConfig) -> Result<TemplateId, Error> {
+pub fn governable_action_interface(pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
     let pkg = pkgs
-        .governance_action
-        .as_deref()
+        .package_ref("governance_action")
         .ok_or(Error::PackageNotConfigured("governance_action"))?;
     Ok(TemplateId::new(
         pkg,
@@ -91,15 +83,14 @@ pub fn governable_action_interface(pkgs: &PackageConfig) -> Result<TemplateId, E
 /// Governance confirmation template identifiers.
 ///
 /// Each template is queried separately to handle cases where packages may
-/// not exist. Port of the pre-extraction `queries.rs::governance_templates`,
-/// verbatim — including the hardcoded `#cbtc-governance`
+/// not exist — including the hardcoded `#cbtc-governance`
 /// `CBTC.Governance:Confirmation` entry, which has no configurable package
-/// ref in `PackageConfig`.
-pub fn governance_templates(packages: &PackageConfig) -> Vec<TemplateId> {
+/// ref.
+pub fn governance_templates(packages: &dyn PackageResolver) -> Vec<TemplateId> {
     let mut templates = Vec::new();
-    if let Some(ref pkg) = packages.vault_governance {
+    if let Some(pkg) = packages.package_ref("vault_governance") {
         templates.push(TemplateId::new(
-            pkg.clone(),
+            pkg,
             "BitsafeVault.VaultGovernance",
             "VaultGovernanceConfirmation",
         ));
@@ -109,14 +100,14 @@ pub fn governance_templates(packages: &PackageConfig) -> Vec<TemplateId> {
         "CBTC.Governance",
         "Confirmation",
     ));
-    if let Some(ref pkg) = packages.governance_core {
+    if let Some(pkg) = packages.package_ref("governance_core") {
         templates.push(TemplateId::new(
-            pkg.clone(),
+            pkg,
             "Governance.Rules",
             "GovernanceSelfConfirmation",
         ));
         templates.push(TemplateId::new(
-            pkg.clone(),
+            pkg,
             "Governance.Confirmation",
             "GovernanceConfirmation",
         ));
@@ -124,23 +115,18 @@ pub fn governance_templates(packages: &PackageConfig) -> Vec<TemplateId> {
     templates
 }
 
-/// Governance state template identifiers (tries both vault and core). Port
-/// of the pre-extraction `queries.rs::governance_state_templates`, verbatim.
-pub fn governance_state_templates(packages: &PackageConfig) -> Vec<TemplateId> {
+/// Governance state template identifiers (tries both vault and core).
+pub fn governance_state_templates(packages: &dyn PackageResolver) -> Vec<TemplateId> {
     let mut templates = Vec::new();
-    if let Some(ref pkg) = packages.vault_governance {
+    if let Some(pkg) = packages.package_ref("vault_governance") {
         templates.push(TemplateId::new(
-            pkg.clone(),
+            pkg,
             "BitsafeVault.VaultGovernance",
             "VaultGovernanceRules",
         ));
     }
-    if let Some(ref pkg) = packages.governance_core {
-        templates.push(TemplateId::new(
-            pkg.clone(),
-            "Governance.Rules",
-            "GovernanceRules",
-        ));
+    if let Some(pkg) = packages.package_ref("governance_core") {
+        templates.push(TemplateId::new(pkg, "Governance.Rules", "GovernanceRules"));
     }
     templates
 }
@@ -148,7 +134,7 @@ pub fn governance_state_templates(packages: &PackageConfig) -> Vec<TemplateId> {
 #[cfg(test)]
 mod tests {
     use canton_common::decimal::DamlDecimal;
-    use common::api::InstrumentId;
+    use common::api::{InstrumentId, PackageConfig};
     use common::canton_id::CantonId;
 
     use super::*;

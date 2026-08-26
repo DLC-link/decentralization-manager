@@ -12,7 +12,7 @@
 use canton_common::decimal::DamlDecimal;
 use canton_common::transfer_factory::Context as ChoiceContext;
 use canton_proto_rs::com::daml::ledger::api::v2::{Optional, Value, value};
-use common::api::{InstrumentAllowance, InstrumentId, PackageConfig};
+use common::api::{InstrumentAllowance, InstrumentId};
 use common::canton_id::CantonId;
 
 use crate::error::Error;
@@ -22,7 +22,9 @@ use crate::framework::encode::{
     serialize_instrument_id,
 };
 use crate::framework::validate::validate_positive_amount;
-use crate::framework::{DamlProtoEncode, TemplateId, TemplateInfo, Validate, ValidationCtx};
+use crate::framework::{
+    DamlProtoEncode, PackageResolver, TemplateId, TemplateInfo, Validate, ValidationCtx,
+};
 
 /// Set up a Canton Coin `TransferPreapproval` for the governance party.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -39,10 +41,9 @@ impl SetupCcPreapproval {
 }
 
 impl TemplateInfo for SetupCcPreapproval {
-    fn template_id(&self, pkgs: &PackageConfig) -> Result<TemplateId, Error> {
+    fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
         let pkg = pkgs
-            .governance_token_custody
-            .as_deref()
+            .package_ref("governance_token_custody")
             .ok_or(Error::PackageNotConfigured("governance_token_custody"))?;
         Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
     }
@@ -83,10 +84,9 @@ impl SetupTokenPreapproval {
 }
 
 impl TemplateInfo for SetupTokenPreapproval {
-    fn template_id(&self, pkgs: &PackageConfig) -> Result<TemplateId, Error> {
+    fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
         let pkg = pkgs
-            .governance_token_custody
-            .as_deref()
+            .package_ref("governance_token_custody")
             .ok_or(Error::PackageNotConfigured("governance_token_custody"))?;
         Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
     }
@@ -145,10 +145,9 @@ impl Transfer {
 }
 
 impl TemplateInfo for Transfer {
-    fn template_id(&self, pkgs: &PackageConfig) -> Result<TemplateId, Error> {
+    fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
         let pkg = pkgs
-            .governance_token_custody
-            .as_deref()
+            .package_ref("governance_token_custody")
             .ok_or(Error::PackageNotConfigured("governance_token_custody"))?;
         Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
     }
@@ -181,10 +180,9 @@ impl AcceptTransfer {
 }
 
 impl TemplateInfo for AcceptTransfer {
-    fn template_id(&self, pkgs: &PackageConfig) -> Result<TemplateId, Error> {
+    fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
         let pkg = pkgs
-            .governance_token_custody
-            .as_deref()
+            .package_ref("governance_token_custody")
             .ok_or(Error::PackageNotConfigured("governance_token_custody"))?;
         Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
     }
@@ -256,7 +254,7 @@ impl DamlProtoEncode for TransferWithContext<'_> {
 }
 
 impl TemplateInfo for TransferWithContext<'_> {
-    fn template_id(&self, pkgs: &PackageConfig) -> Result<TemplateId, Error> {
+    fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
         self.transfer.template_id(pkgs)
     }
 }
@@ -292,7 +290,7 @@ impl DamlProtoEncode for AcceptTransferWithContext<'_> {
 }
 
 impl TemplateInfo for AcceptTransferWithContext<'_> {
-    fn template_id(&self, pkgs: &PackageConfig) -> Result<TemplateId, Error> {
+    fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
         self.accept.template_id(pkgs)
     }
 }

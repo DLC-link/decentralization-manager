@@ -5,11 +5,11 @@
 use canton_proto_rs::com::daml::ledger::api::v2::{
     Command, Commands, CreateCommand, DisclosedContract, Record, Transaction, command, event, value,
 };
-use common::{api::PackageConfig, canton_id::CantonId};
+use common::canton_id::CantonId;
 
 use crate::error::Error;
 use crate::framework::encode::{field, make_party};
-use crate::framework::{DamlProtoEncode, TemplateInfo};
+use crate::framework::{DamlProtoEncode, PackageResolver, TemplateInfo};
 
 /// The one `Commands` envelope every governance submission uses.
 /// `member` acts (`act_as`); the decentralized party reads (`read_as`).
@@ -74,7 +74,7 @@ pub fn build_propose(
     payload: &(impl TemplateInfo + DamlProtoEncode + ?Sized),
     governance_party: &CantonId,
     proposer: &CantonId,
-    packages: &PackageConfig,
+    packages: &dyn PackageResolver,
     command_id: String,
 ) -> Result<Commands, Error> {
     let template = payload.template_id(packages)?;
@@ -109,6 +109,7 @@ pub fn first_created_contract_id(transaction: &Transaction) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use canton_proto_rs::com::daml::ledger::api::v2::{ArchivedEvent, CreatedEvent, Event, Value};
+    use common::api::PackageConfig;
 
     use super::*;
     use crate::framework::encode::make_text;

@@ -17,14 +17,15 @@
 //!
 //! ```
 //! use canton_proto_rs::com::daml::ledger::api::v2::Value;
-//! use common::api::PackageConfig;
 //! use common::canton_id::CantonId;
 //! use decman_lib::Error;
 //! use decman_lib::catalog::commands::build_confirm_proposal;
 //! use decman_lib::catalog::interpret::parse_confirmation;
 //! use decman_lib::framework::commands::build_propose;
 //! use decman_lib::framework::encode::{field, make_record, make_text};
-//! use decman_lib::framework::{DamlProtoEncode, TemplateId, TemplateInfo, Validate};
+//! use decman_lib::framework::{
+//!     DamlProtoEncode, PackageResolver, TemplateId, TemplateInfo, Validate,
+//! };
 //!
 //! /// A custom proposal payload, defined outside the crate.
 //! struct SetNote {
@@ -32,7 +33,7 @@
 //! }
 //!
 //! impl TemplateInfo for SetNote {
-//!     fn template_id(&self, _pkgs: &PackageConfig) -> Result<TemplateId, Error> {
+//!     fn template_id(&self, _pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
 //!         Ok(TemplateId::new("#my-pkg", "My.Module", "SetNote"))
 //!     }
 //! }
@@ -49,11 +50,12 @@
 //! let member: CantonId = format!("member::{ns}").parse().unwrap();
 //! let governance: CantonId = format!("gov::{ns}").parse().unwrap();
 //!
-//! // Propose: any GrpcPayload flows through the one builder.
+//! // Propose: any GrpcPayload flows through the one builder. A bare `&str`
+//! // is a `PackageResolver` too — every key resolves to it, which is enough
+//! // when an integrator's templates all live in one package.
 //! let payload = SetNote { note: "hi".into() };
-//! let commands =
-//!     build_propose(&payload, &governance, &member, &PackageConfig::default(), "cmd-1".into())
-//!         .unwrap();
+//! let commands = build_propose(&payload, &governance, &member, &"#fake-pkg", "cmd-1".into())
+//!     .unwrap();
 //! assert_eq!(commands.act_as, vec![member.to_string()]);
 //!
 //! // Read side: a Ledger API `CreatedEvent` decodes to a typed

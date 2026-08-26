@@ -1,9 +1,8 @@
 use canton_proto_rs::com::daml::ledger::api::v2::Value;
-use common::api::PackageConfig;
 use common::canton_id::CantonId;
 
 use crate::error::Error;
-use crate::framework::TemplateId;
+use crate::framework::{PackageResolver, TemplateId};
 
 /// Context a payload's protocol checks may need. Time enters as a
 /// parameter so validation is deterministic and testable.
@@ -31,8 +30,13 @@ pub trait DamlProtoEncode {
 }
 
 /// Which template this payload creates.
+///
+/// `pkgs` resolves a catalog package key to a `#package-name` ref via
+/// [`PackageResolver`]. Two impls ship with this crate: `PackageConfig`
+/// (decman's own per-party config) and a bare `&str`, for an integrator
+/// whose templates all live in one package.
 pub trait TemplateInfo {
-    fn template_id(&self, pkgs: &PackageConfig) -> Result<TemplateId, Error>;
+    fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error>;
 }
 
 /// Convenience combination. Frozen once published — phase 2 adds NEW
@@ -50,7 +54,7 @@ pub(crate) mod tests {
     }
 
     impl TemplateInfo for FakeProposal {
-        fn template_id(&self, _p: &PackageConfig) -> Result<TemplateId, Error> {
+        fn template_id(&self, _p: &dyn PackageResolver) -> Result<TemplateId, Error> {
             Ok(TemplateId::new("#fake-pkg", "Fake.Module", "FakeProposal"))
         }
     }
