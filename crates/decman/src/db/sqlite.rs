@@ -1205,6 +1205,7 @@ mod tests {
             InvitationType, PendingInvitation, WorkflowKind, WorkflowProgress, WorkflowRole,
             WorkflowRun,
         },
+        workflow::storage::WorkflowStorage,
     };
 
     use super::{MIGRATION_CHECKSUM_REPAIRS, MIGRATOR, repair_migration_checksums};
@@ -2296,6 +2297,13 @@ mod tests {
         assert_eq!(loaded.step_index, 3);
         assert_eq!(loaded.completed_peers, completed);
 
+        // Onboarding resolves its party ID during the workflow. Persisting it
+        // on the run must survive the terminal cleanup below so exact topology
+        // discovery can still include the newly-created party.
+        let dec_party_id = CantonId::parse(&format!("party-a::{TEST_NS}")).unwrap();
+        pool.write_run_party_id(&run.instance_name, &dec_party_id)
+            .await?;
+
         // Seed an artefact so we can verify the terminal-state cleanup wipes it.
         let mut tx = pool.begin_transaction().await?;
         tx.write_workflow_artifact(&run.instance_name, "dns_proto", None, b"some-bytes")
@@ -2320,6 +2328,7 @@ mod tests {
         let visible = pool.get_visible_workflow_runs().await?;
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].status, WorkflowProgress::Completed);
+        assert_eq!(visible[0].dec_party_id.as_ref(), Some(&dec_party_id));
 
         // Dismiss → vanishes from feed.
         let mut tx = pool.begin_transaction().await?;

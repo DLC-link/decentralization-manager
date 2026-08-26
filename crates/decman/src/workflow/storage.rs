@@ -155,6 +155,11 @@ pub mod identity_kinds {
 /// code stays linear and doesn't have to thread a transaction through.
 #[allow(async_fn_in_trait)]
 pub trait WorkflowStorage: Send + Sync {
+    /// Persist the decentralized party resolved during onboarding on the
+    /// workflow run itself. Unlike runtime artefacts, this survives terminal
+    /// cleanup and lets topology refreshes discover newly-created parties.
+    async fn write_run_party_id(&self, instance_name: &str, dec_party_id: &CantonId) -> Result;
+
     /// Read a single artefact. Returns `None` if it doesn't exist (the step
     /// caller decides whether that's an error or a "haven't generated yet"
     /// signal).
@@ -215,6 +220,13 @@ pub trait WorkflowStorage: Send + Sync {
 }
 
 impl WorkflowStorage for SqlitePool {
+    async fn write_run_party_id(&self, instance_name: &str, dec_party_id: &CantonId) -> Result {
+        let mut tx = self.begin_transaction().await?;
+        tx.set_workflow_run_dec_party_id(instance_name, dec_party_id)
+            .await?;
+        Commitable::commit(tx).await
+    }
+
     async fn read_artifact(
         &self,
         instance_name: &str,
