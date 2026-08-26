@@ -1119,6 +1119,183 @@ mod tests {
         assert_eq!(info.action_label, Some("SetupTokenPreapproval".to_string()));
     }
 
+    #[test]
+    fn view_description_wins_over_the_create_argument_description() {
+        // Templates such as CreateUserServiceRequest compute `description` in
+        // the view and hold no field of that name, so the view must win.
+        let view = governable_action_interface_view(vec![
+            field("actionLabel", make_text("MintProposal")),
+            field("description", make_text("computed in the view")),
+            field("proposer", make_party(ALICE)),
+            field("governanceParty", make_party(GOV)),
+        ]);
+        let record = record_of(vec![
+            field("governanceParty", make_party(GOV)),
+            field("proposer", make_party(ALICE)),
+            field("description", make_text("stored on the template")),
+        ]);
+        let created = proposal_created_event("proposal-6", vec![view], Some(record), None);
+
+        let (_, info) = extract_proposal_info(&created, &cid(GOV)).expect("parses");
+        assert_eq!(info.description, Some("computed in the view".to_string()));
+    }
+
+    #[test]
+    fn view_proposer_wins_over_the_create_argument_proposer() {
+        // The retract button keys on this field, and the interface declares
+        // `proposer`, so the view is the authoritative source.
+        let view = governable_action_interface_view(vec![
+            field("actionLabel", make_text("MintProposal")),
+            field("proposer", make_party(ALICE)),
+            field("governanceParty", make_party(GOV)),
+        ]);
+        let record = record_of(vec![
+            field("governanceParty", make_party(GOV)),
+            field("proposer", make_party(BOB)),
+        ]);
+        let created = proposal_created_event("proposal-7", vec![view], Some(record), None);
+
+        let (_, info) = extract_proposal_info(&created, &cid(GOV)).expect("parses");
+        assert_eq!(info.proposer, Some(cid(ALICE)));
+    }
+
+    #[test]
+    fn record_only_proposal_falls_back_to_the_create_argument_proposer() {
+        // A wildcard fetch carries no view, so the raw fields are all there is
+        // — the heuristic captures the contract and the record names the
+        // proposer.
+        let record = record_of(vec![
+            field("governanceParty", make_party(GOV)),
+            field("proposer", make_party(BOB)),
+        ]);
+        let created = created_event("proposal-8", record, 1_700_000_700);
+
+        let (cid_out, info) = extract_proposal_info(&created, &cid(GOV)).expect("parses");
+        assert_eq!(cid_out, "proposal-8");
+        assert_eq!(info.proposer, Some(cid(BOB)));
+    }
+
+    #[test]
+    fn proposal_captures_created_at() {
+        // The feed sorts on this, so an unconfirmed card holds its place
+        // between refreshes instead of shuffling.
+        let record = record_of(vec![
+            field("governanceParty", make_party(GOV)),
+            field("proposer", make_party(ALICE)),
+        ]);
+        let created = created_event("proposal-9", record, 1_700_000_500);
+
+        let (_, info) = extract_proposal_info(&created, &cid(GOV)).expect("parses");
+        assert_eq!(info.created_at, Some(1_700_000_500));
+    }
+
+    #[test]
+    fn unrelated_wildcard_contract_is_skipped() {
+        // No interface view and neither heuristic field: not a proposal.
+        let record = record_of(vec![field("owner", make_party(ALICE))]);
+        let created = created_event("other-cid", record, 1_700_000_000);
+
+        assert_eq!(extract_proposal_info(&created, &cid(GOV)), None);
+    }
+
+    // -- extract_service_request_details --
+    //
+    // CreateUserServiceRequest / CreateProviderServiceRequest carry operator +
+    // user/provider as top-level Party fields on the proposal contract. The
+    // notification card renders operator + the present counterparty so the
+    // operator sees the full summary alongside the action_label.
+
+    #[test]
+    fn service_request_details_reads_a_user_request() {
+        let record = record_of(vec![
+            field("governanceParty", make_party(GOV)),
+            field("proposer", make_party(ALICE)),
+            field("operator", make_party(ALICE)),
+            field("user", make_party(BOB)),
+        ]);
+        let details = extract_service_request_details(&record)
+            .expect("user service request should yield details");
+        assert_eq!(details.operator, cid(ALICE));
+        assert_eq!(details.user, Some(cid(BOB)));
+        assert!(details.provider.is_none());
+    }
+
+    #[test]
+    fn service_request_details_reads_a_provider_request() {
+        let record = record_of(vec![
+            field("governanceParty", make_party(GOV)),
+            field("proposer", make_party(ALICE)),
+            field("operator", make_party(ALICE)),
+            field("provider", make_party(BOB)),
+        ]);
+        let details = extract_service_request_details(&record)
+            .expect("provider service request should yield details");
+        assert_eq!(details.operator, cid(ALICE));
+        assert_eq!(details.provider, Some(cid(BOB)));
+        assert!(details.user.is_none());
+    }
+
+    #[test]
+    fn service_request_details_skips_a_proposal_without_a_counterparty() {
+        // operator present but no user/provider counterparty → not a service
+        // request, so no details (keeps unrelated operator-bearing proposals
+        // from rendering a half-empty summary).
+        let record = record_of(vec![
+            field("governanceParty", make_party(GOV)),
+            field("proposer", make_party(ALICE)),
+            field("operator", make_party(ALICE)),
+        ]);
+        assert_eq!(extract_service_request_details(&record), None);
+    }
+
+    #[test]
+    fn service_request_details_are_gated_on_the_action_label() {
+        // The party fields alone must not produce a service-request summary.
+        // Onboarding is only what the two Create*ServiceRequest actions do.
+        let service_request_fields = || {
+            record_of(vec![
+                field("governanceParty", make_party(GOV)),
+                field("proposer", make_party(ALICE)),
+                field("operator", make_party(ALICE)),
+                field("user", make_party(BOB)),
+            ])
+        };
+
+        let non_matching = governable_action_interface_view(vec![
+            field("actionLabel", make_text("MintProposal")),
+            field("proposer", make_party(ALICE)),
+            field("governanceParty", make_party(GOV)),
+        ]);
+        let created = proposal_created_event(
+            "proposal-10",
+            vec![non_matching],
+            Some(service_request_fields()),
+            None,
+        );
+        let (_, info) = extract_proposal_info(&created, &cid(GOV))
+            .expect("the proposal should still be captured");
+        assert!(info.service_request.is_none());
+
+        // The same create-arguments under a matching label do carry the parties.
+        let matching = governable_action_interface_view(vec![
+            field("actionLabel", make_text("CreateUserServiceRequest")),
+            field("proposer", make_party(ALICE)),
+            field("governanceParty", make_party(GOV)),
+        ]);
+        let created = proposal_created_event(
+            "proposal-11",
+            vec![matching],
+            Some(service_request_fields()),
+            None,
+        );
+        let (_, info) = extract_proposal_info(&created, &cid(GOV)).expect("parses");
+        let details = info
+            .service_request
+            .expect("a user service request should carry its parties");
+        assert_eq!(details.operator, cid(ALICE));
+        assert_eq!(details.user, Some(cid(BOB)));
+    }
+
     // -- dedupe_newest_per_party / live_count / assemble_domain_actions --
 
     fn domain_confirmation(
@@ -1345,6 +1522,53 @@ mod tests {
         assert!(actions[0].confirmations.is_empty());
         assert!(!actions[0].can_execute);
         assert!(!actions[0].orphaned);
+    }
+
+    #[test]
+    fn a_proposal_from_an_unknown_package_still_gets_a_card() {
+        // The visibility rule: a package decman has never heard of, whose
+        // template names its own fields differently, still gets a card. No
+        // allowlist of labels or templates may gate the pending path.
+        let view = governable_action_interface_view(vec![
+            field("actionLabel", make_text("VaultPause")),
+            field("description", make_text("pause the vault")),
+            field("proposer", make_party(ALICE)),
+            field("governanceParty", make_party(GOV)),
+        ]);
+        let created = proposal_created_event("unknown-pkg-cid", vec![view], None, None);
+        let (proposal_cid, info) = extract_proposal_info(&created, &cid(GOV)).expect("parses");
+
+        let mut infos = HashMap::new();
+        infos.insert(proposal_cid, info);
+        let actions = assemble_domain_actions(HashMap::new(), infos, true, true, 2, 0);
+
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].action_label, "VaultPause");
+        assert_eq!(actions[0].confirmation_count, 0);
+    }
+
+    #[test]
+    fn a_synthesized_card_carries_every_proposal_field() {
+        // The synthesis loop assigns each remaining field by hand, so each one
+        // is asserted. Without this a swapped assignment would still pass.
+        let mut infos = HashMap::new();
+        infos.insert(
+            "new-proposal-cid".to_string(),
+            proposal_info_fixture(Some("SetupCcPreapproval")),
+        );
+
+        let actions = assemble_domain_actions(HashMap::new(), infos, true, true, 2, 0);
+
+        assert_eq!(actions.len(), 1);
+        let action = &actions[0];
+        assert_eq!(action.proposal_cid, "new-proposal-cid");
+        assert_eq!(action.action_label, "SetupCcPreapproval");
+        assert_eq!(action.description, Some("a description".to_string()));
+        assert_eq!(action.proposer, Some(cid(GOV)));
+        assert_eq!(action.created_at, Some(1_700_000_000));
+        assert!(action.transfer_details.is_none());
+        assert!(action.accept_transfer_details.is_none());
+        assert!(action.service_request_details.is_none());
     }
 
     #[test]
