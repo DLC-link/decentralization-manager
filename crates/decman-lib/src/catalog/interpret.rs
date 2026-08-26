@@ -297,7 +297,7 @@ pub struct ProposalInfo {
 
 /// Pull the `GovernableAction` interface view off a created event. Canton
 /// only fills this in when the query asked for it with an `InterfaceFilter`,
-/// so a wildcard fetch (test mode) always gets `None`.
+/// so a caller that fetches without one always gets `None`.
 fn governable_action_view(created: &CreatedEvent) -> Option<&Record> {
     created
         .interface_views
@@ -313,8 +313,8 @@ fn governable_action_view(created: &CreatedEvent) -> Option<&Record> {
 
 /// Whether a contract's create-arguments carry the two fields every
 /// in-repo proposal template declares. Used only when no interface view is
-/// available: a wildcard fetch returns every contract the party can see, so
-/// something has to keep unrelated templates out of the proposal map.
+/// available: a fetch without an interface filter can return contracts of any
+/// template, so something has to keep unrelated ones out of the proposal map.
 fn looks_like_governable_action(record: &Record) -> bool {
     let has = |label: &str| record.fields.iter().any(|f| f.label == label);
     has("governanceParty") && has("proposer")
@@ -329,8 +329,9 @@ fn looks_like_governable_action(record: &Record) -> bool {
 /// the contract, whatever package declared the template and however that
 /// template names its own fields.
 ///
-/// A wildcard fetch (test mode) carries no view, so it falls back to the
-/// field-shape heuristic and to create-arguments for the same values.
+/// A caller that fetches without an interface filter gets no view, so it
+/// falls back to the field-shape heuristic and to create-arguments for the
+/// same values.
 ///
 /// `governance_party` is the decentralized party the caller is querying for.
 /// Being able to see a proposal does not mean governing it: another package
@@ -352,8 +353,8 @@ pub fn extract_proposal_info(
         return None;
     }
 
-    // Absent rather than mismatched is not a rejection: a wildcard fetch of a
-    // template that computes the field in its view has nothing to compare.
+    // Absent rather than mismatched is not a rejection: without a view, a
+    // template that computes the field there has nothing to compare.
     let governs = view
         .and_then(|v| field_party(v, "governanceParty"))
         .or_else(|| record.and_then(|r| field_party(r, "governanceParty")));
@@ -1160,9 +1161,9 @@ mod tests {
 
     #[test]
     fn record_only_proposal_falls_back_to_the_create_argument_proposer() {
-        // A wildcard fetch carries no view, so the raw fields are all there is
-        // — the heuristic captures the contract and the record names the
-        // proposer.
+        // A fetch without an interface filter carries no view, so the raw
+        // fields are all there is — the heuristic captures the contract and
+        // the record names the proposer.
         let record = record_of(vec![
             field("governanceParty", make_party(GOV)),
             field("proposer", make_party(BOB)),

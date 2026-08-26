@@ -11,18 +11,33 @@ pub trait PackageResolver {
 
 impl PackageResolver for PackageConfig {
     fn package_ref(&self, key: &str) -> Option<&str> {
+        // No `..`: a new PackageConfig field fails this destructure, so the
+        // resolver cannot silently fall behind the config type.
+        let PackageConfig {
+            governance_action,
+            governance_core,
+            governance_rewards,
+            governance_token_custody,
+            governance_utility_credential,
+            governance_utility_onboarding,
+            utility_credential,
+            utility_credential_app,
+            utility_registry,
+            vault,
+            vault_governance,
+        } = self;
         match key {
-            "governance_action" => self.governance_action.as_deref(),
-            "governance_core" => self.governance_core.as_deref(),
-            "governance_rewards" => self.governance_rewards.as_deref(),
-            "governance_token_custody" => self.governance_token_custody.as_deref(),
-            "governance_utility_credential" => self.governance_utility_credential.as_deref(),
-            "governance_utility_onboarding" => self.governance_utility_onboarding.as_deref(),
-            "utility_credential" => self.utility_credential.as_deref(),
-            "utility_credential_app" => self.utility_credential_app.as_deref(),
-            "utility_registry" => self.utility_registry.as_deref(),
-            "vault" => self.vault.as_deref(),
-            "vault_governance" => self.vault_governance.as_deref(),
+            "governance_action" => governance_action.as_deref(),
+            "governance_core" => governance_core.as_deref(),
+            "governance_rewards" => governance_rewards.as_deref(),
+            "governance_token_custody" => governance_token_custody.as_deref(),
+            "governance_utility_credential" => governance_utility_credential.as_deref(),
+            "governance_utility_onboarding" => governance_utility_onboarding.as_deref(),
+            "utility_credential" => utility_credential.as_deref(),
+            "utility_credential_app" => utility_credential_app.as_deref(),
+            "utility_registry" => utility_registry.as_deref(),
+            "vault" => vault.as_deref(),
+            "vault_governance" => vault_governance.as_deref(),
             _ => None,
         }
     }

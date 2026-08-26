@@ -436,84 +436,96 @@ pub enum ProposalType {
     OffboardInstrumentIssuers(decman_lib::catalog::proposals::utility::OffboardInstrumentIssuers),
 }
 
-/// Generates the payload projections from one list of ProposalType's
-/// variants. `plain` variants implement `GrpcPayload`; the two transfer
-/// variants encode through wrapper structs and implement only
-/// `Validate` + `TemplateInfo`, so they project to no `GrpcPayload`.
-macro_rules! payload_projections {
-    (plain: [$($p:ident),* $(,)?], transfer: [$($t:ident),* $(,)?] $(,)?) => {
-        impl ProposalType {
-            /// Validate the proposal's fields against the governance party the
-            /// proposal targets. Mirrors `ActionType::validate` — catches bad input
-            /// before it reaches Canton's Daml checks so a 400 surfaces a precise
-            /// reason rather than a generic submission error.
-            ///
-            /// **Propose-path only.** The single production caller is
-            /// `handlers::governance::propose_action`, and one arm
-            /// (`decman_lib::framework::validate::validate_future_micros`) reads the
-            /// clock. Re-using this to
-            /// re-validate an already-stored proposal would reject it for nothing but
-            /// having aged, so a new call site needs to split the time-dependent arms
-            /// out first.
-            pub fn validate(&self, governance_party: &CantonId) -> Result<(), String> {
-                let ctx = decman_lib::framework::ValidationCtx {
-                    governance_party,
-                    now_micros: Utc::now().timestamp_micros(),
-                };
-                let payload: &dyn decman_lib::framework::Validate = match self {
-                    $(Self::$p(x) => x,)*
-                    $(Self::$t(x) => x,)*
-                };
-                payload.validate(&ctx).map_err(|e| e.to_string())
-            }
+impl ProposalType {
+    /// Validate the proposal's fields against the governance party the
+    /// proposal targets. Mirrors `ActionType::validate` — catches bad input
+    /// before it reaches Canton's Daml checks so a 400 surfaces a precise
+    /// reason rather than a generic submission error.
+    ///
+    /// **Propose-path only.** The single production caller is
+    /// `handlers::governance::propose_action`, and one arm
+    /// (`decman_lib::framework::validate::validate_future_micros`) reads the
+    /// clock. Re-using this to
+    /// re-validate an already-stored proposal would reject it for nothing but
+    /// having aged, so a new call site needs to split the time-dependent arms
+    /// out first.
+    pub fn validate(&self, governance_party: &CantonId) -> Result<(), String> {
+        let ctx = decman_lib::framework::ValidationCtx {
+            governance_party,
+            now_micros: Utc::now().timestamp_micros(),
+        };
+        let payload: &dyn decman_lib::framework::Validate = match self {
+            Self::SetupCcPreapproval(p) => p,
+            Self::SetupTokenPreapproval(p) => p,
+            Self::Transfer(p) => p,
+            Self::AcceptTransfer(p) => p,
+            Self::GenericVote(p) => p,
+            Self::ProvisionProviderService(p) => p,
+            Self::SetupUtility(p) => p,
+            Self::CreateProviderServiceRequest(p) => p,
+            Self::CreateUserServiceRequest(p) => p,
+            Self::SetProviderAppRewardBeneficiaries(p) => p,
+            Self::SetupCouponReassignmentDelegation(p) => p,
+            Self::RevokeCouponReassignmentDelegation(p) => p,
+            Self::SetEnableResultContracts(p) => p,
+            Self::CreateDelegatedBatchedMarkersProxy(p) => p,
+            Self::SetupMintingDelegation(p) => p,
+            Self::AcceptExternalPartySetup(p) => p,
+            Self::Mint(p) => p,
+            Self::OfferFreeCredential(p) => p,
+            Self::OfferPaidCredential(p) => p,
+            Self::AcceptFreeCredential(p) => p,
+            Self::Burn(p) => p,
+            Self::AcceptMintRequest(p) => p,
+            Self::AcceptBurnRequest(p) => p,
+            Self::CreateProviderConfiguration(p) => p,
+            Self::CreateRegistrarServiceRequest(p) => p,
+            Self::OnboardRegistrar(p) => p,
+            Self::ProvisionInstrument(p) => p,
+            Self::OnboardInstrumentIssuers(p) => p,
+            Self::OffboardInstrumentIssuers(p) => p,
+        };
+        payload.validate(&ctx).map_err(|e| e.to_string())
+    }
 
-            /// The generic propose payload — `None` for the two transfer variants,
-            /// which need runtime context (the registry choice context, the validity
-            /// window, and the on-chain sender party) and so go through their
-            /// wrapper structs (`TransferWithContext` /
-            /// `AcceptTransferWithContext`) rather than the payload itself.
-            pub fn grpc_payload(&self) -> Option<&dyn decman_lib::framework::GrpcPayload> {
-                match self {
-                    $(Self::$p(x) => Some(x),)*
-                    $(Self::$t(_) => None,)*
-                }
-            }
+    /// The generic propose payload — `None` for the two transfer variants,
+    /// which need runtime context (the registry choice context, the validity
+    /// window, and the on-chain sender party) and so go through their
+    /// wrapper structs (`TransferWithContext` /
+    /// `AcceptTransferWithContext`) rather than the payload itself.
+    pub fn grpc_payload(&self) -> Option<&dyn decman_lib::framework::GrpcPayload> {
+        match self {
+            Self::Transfer(_) | Self::AcceptTransfer(_) => None,
+            Self::SetupCcPreapproval(p) => Some(p),
+            Self::SetupTokenPreapproval(p) => Some(p),
+            Self::GenericVote(p) => Some(p),
+            Self::ProvisionProviderService(p) => Some(p),
+            Self::SetupUtility(p) => Some(p),
+            Self::CreateProviderServiceRequest(p) => Some(p),
+            Self::CreateUserServiceRequest(p) => Some(p),
+            Self::SetProviderAppRewardBeneficiaries(p) => Some(p),
+            Self::SetupCouponReassignmentDelegation(p) => Some(p),
+            Self::RevokeCouponReassignmentDelegation(p) => Some(p),
+            Self::SetEnableResultContracts(p) => Some(p),
+            Self::CreateDelegatedBatchedMarkersProxy(p) => Some(p),
+            Self::SetupMintingDelegation(p) => Some(p),
+            Self::AcceptExternalPartySetup(p) => Some(p),
+            Self::Mint(p) => Some(p),
+            Self::OfferFreeCredential(p) => Some(p),
+            Self::OfferPaidCredential(p) => Some(p),
+            Self::AcceptFreeCredential(p) => Some(p),
+            Self::Burn(p) => Some(p),
+            Self::AcceptMintRequest(p) => Some(p),
+            Self::AcceptBurnRequest(p) => Some(p),
+            Self::CreateProviderConfiguration(p) => Some(p),
+            Self::CreateRegistrarServiceRequest(p) => Some(p),
+            Self::OnboardRegistrar(p) => Some(p),
+            Self::ProvisionInstrument(p) => Some(p),
+            Self::OnboardInstrumentIssuers(p) => Some(p),
+            Self::OffboardInstrumentIssuers(p) => Some(p),
         }
-    };
+    }
 }
-
-payload_projections!(
-    plain: [
-        SetupCcPreapproval,
-        SetupTokenPreapproval,
-        GenericVote,
-        ProvisionProviderService,
-        SetupUtility,
-        CreateProviderServiceRequest,
-        CreateUserServiceRequest,
-        SetProviderAppRewardBeneficiaries,
-        SetupCouponReassignmentDelegation,
-        RevokeCouponReassignmentDelegation,
-        SetEnableResultContracts,
-        CreateDelegatedBatchedMarkersProxy,
-        SetupMintingDelegation,
-        AcceptExternalPartySetup,
-        Mint,
-        OfferFreeCredential,
-        OfferPaidCredential,
-        AcceptFreeCredential,
-        Burn,
-        AcceptMintRequest,
-        AcceptBurnRequest,
-        CreateProviderConfiguration,
-        CreateRegistrarServiceRequest,
-        OnboardRegistrar,
-        ProvisionInstrument,
-        OnboardInstrumentIssuers,
-        OffboardInstrumentIssuers,
-    ],
-    transfer: [Transfer, AcceptTransfer],
-);
 
 /// Request to propose a governance domain action (creates proposal contract)
 #[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
@@ -887,6 +899,25 @@ pub fn chain_audit_entry_from_row(row: crate::db::rows::ChainAuditCacheRow) -> C
 
 #[cfg(test)]
 mod tests {
+    use common::api::InstrumentId;
+    use decman_lib::catalog::proposals::core::GenericVote;
+    use decman_lib::catalog::proposals::credential::{
+        AcceptFreeCredential, OfferFreeCredential, OfferPaidCredential,
+    };
+    use decman_lib::catalog::proposals::custody::{
+        AcceptTransfer, SetupCcPreapproval, SetupTokenPreapproval, Transfer,
+    };
+    use decman_lib::catalog::proposals::rewards::{
+        AcceptExternalPartySetup, RevokeCouponReassignmentDelegation,
+        SetupCouponReassignmentDelegation, SetupMintingDelegation,
+    };
+    use decman_lib::catalog::proposals::utility::{
+        AcceptBurnRequest, AcceptMintRequest, Burn, CreateDelegatedBatchedMarkersProxy,
+        CreateProviderConfiguration, CreateProviderServiceRequest, CreateRegistrarServiceRequest,
+        CreateUserServiceRequest, Mint, OffboardInstrumentIssuers, OnboardInstrumentIssuers,
+        OnboardRegistrar, ProvisionInstrument, ProvisionProviderService, SetEnableResultContracts,
+        SetProviderAppRewardBeneficiaries, SetupUtility,
+    };
     use serde_json::Value;
     use sqlx::SqlitePool;
 
@@ -1165,5 +1196,195 @@ mod tests {
         assert_eq!(back.user, None);
         assert_eq!(back.provider, Some(test_party("prov")?));
         Ok(())
+    }
+
+    /// One minimal instance per `ProposalType` variant, in declaration order.
+    /// Field values are placeholders — this only exercises which variants
+    /// `grpc_payload` treats as `Some`/`None`, not the payload contents (see
+    /// `serde_snapshots.rs` for the fully-populated wire-shape fixtures).
+    fn one_of_each_proposal_type() -> Vec<ProposalType> {
+        let instrument_id = || InstrumentId {
+            admin: "admin-party".into(),
+            id: "TOK".into(),
+        };
+        vec![
+            ProposalType::SetupCcPreapproval(SetupCcPreapproval {
+                provider: test_party("prov").unwrap(),
+                expected_dso: test_party("dso").unwrap(),
+            }),
+            ProposalType::SetupTokenPreapproval(SetupTokenPreapproval {
+                operator: test_party("op").unwrap(),
+                instrument_admin: test_party("iadmin").unwrap(),
+                instrument_allowances: vec![],
+            }),
+            ProposalType::Transfer(Transfer {
+                transfer_factory_cid: "00tf".into(),
+                expected_admin: test_party("iadmin").unwrap(),
+                receiver: test_party("recv").unwrap(),
+                amount: "1".parse().unwrap(),
+                instrument_id: instrument_id(),
+                input_holding_cids: vec![],
+                validity_window_hours: None,
+            }),
+            ProposalType::AcceptTransfer(AcceptTransfer {
+                transfer_instruction_cid: "00ti".into(),
+            }),
+            ProposalType::GenericVote(GenericVote {
+                description: "a vote".into(),
+            }),
+            ProposalType::ProvisionProviderService(ProvisionProviderService {}),
+            ProposalType::SetupUtility(SetupUtility {
+                provider_service_cid: "00psc".into(),
+                operator: test_party("op").unwrap(),
+                instrument_id_text: "uuid-1".into(),
+                additional_identifiers: vec![],
+                create_transfer_rule: true,
+                create_allocation_factory: true,
+            }),
+            ProposalType::CreateProviderServiceRequest(CreateProviderServiceRequest {
+                operator: test_party("op").unwrap(),
+                provider: test_party("prov").unwrap(),
+            }),
+            ProposalType::CreateUserServiceRequest(CreateUserServiceRequest {
+                operator: test_party("op").unwrap(),
+                user: test_party("user").unwrap(),
+            }),
+            ProposalType::SetProviderAppRewardBeneficiaries(SetProviderAppRewardBeneficiaries {
+                instrument_configuration_cid: "00icc".into(),
+                provider_app_reward_beneficiaries: None,
+            }),
+            ProposalType::SetupCouponReassignmentDelegation(SetupCouponReassignmentDelegation {
+                dso: test_party("dso").unwrap(),
+                assigners: vec![],
+                new_beneficiaries: vec![],
+                prior_delegation: None,
+            }),
+            ProposalType::RevokeCouponReassignmentDelegation(RevokeCouponReassignmentDelegation {
+                delegation: "00deleg".into(),
+            }),
+            ProposalType::SetEnableResultContracts(SetEnableResultContracts {
+                registrar_service_cid: "00rsc".into(),
+                enable_result_contracts: None,
+            }),
+            ProposalType::CreateDelegatedBatchedMarkersProxy(CreateDelegatedBatchedMarkersProxy {
+                operator: test_party("op").unwrap(),
+            }),
+            ProposalType::SetupMintingDelegation(SetupMintingDelegation {
+                delegate: test_party("delegate").unwrap(),
+                dso: test_party("dso").unwrap(),
+                expires_at_micros: 4_000_000_000_000_000,
+                amulet_merge_limit: 10,
+                description: "delegate minting".into(),
+            }),
+            ProposalType::AcceptExternalPartySetup(AcceptExternalPartySetup {
+                proposal_cid: "00eps".into(),
+            }),
+            ProposalType::Mint(Mint {
+                allocation_factory_cid: "00alloc".into(),
+                instrument_id: instrument_id(),
+                instrument_configuration_cid: "00icc".into(),
+                recipient: test_party("recv").unwrap(),
+                amount: "5".parse().unwrap(),
+                description: "mint".into(),
+            }),
+            ProposalType::OfferFreeCredential(OfferFreeCredential {
+                user_service_cid: "00usc".into(),
+                holder: test_party("holder").unwrap(),
+                id: "cred-1".into(),
+                description: "free cred".into(),
+                claims: vec![],
+            }),
+            ProposalType::OfferPaidCredential(OfferPaidCredential {
+                user_service_cid: "00usc".into(),
+                holder: test_party("holder").unwrap(),
+                id: "cred-2".into(),
+                description: "paid cred".into(),
+                claims: vec![],
+                billing_params: BillingParams {
+                    fee_per_day_usd: "1.5".parse().unwrap(),
+                    billing_period_minutes: 60,
+                    deposit_target_amount_usd: "30".parse().unwrap(),
+                    holder_activity_weight: None,
+                },
+                deposit_initial_amount_usd: None,
+            }),
+            ProposalType::AcceptFreeCredential(AcceptFreeCredential {
+                user_service_cid: "00usc".into(),
+                credential_offer_cid: "00offer".into(),
+            }),
+            ProposalType::Burn(Burn {
+                allocation_factory_cid: "00alloc".into(),
+                instrument_id: instrument_id(),
+                instrument_configuration_cid: "00icc".into(),
+                holder: test_party("holder").unwrap(),
+                amount: "3".parse().unwrap(),
+                description: "burn".into(),
+            }),
+            ProposalType::AcceptMintRequest(AcceptMintRequest {
+                mint_request_cid: "00mr".into(),
+                instrument_configuration_cid: "00icc".into(),
+                issuer_credential_cids: vec![],
+                description: "accept mint".into(),
+            }),
+            ProposalType::AcceptBurnRequest(AcceptBurnRequest {
+                burn_request_cid: "00br".into(),
+                instrument_configuration_cid: "00icc".into(),
+                issuer_credential_cids: vec![],
+                description: "accept burn".into(),
+            }),
+            ProposalType::CreateProviderConfiguration(CreateProviderConfiguration {
+                provider_service_cid: "00psc".into(),
+                registrar_requirements: vec![],
+                holder_requirements: vec![],
+            }),
+            ProposalType::CreateRegistrarServiceRequest(CreateRegistrarServiceRequest {
+                operator: test_party("op").unwrap(),
+                provider: test_party("prov").unwrap(),
+                create_transfer_rule: false,
+                create_allocation_factory: true,
+            }),
+            ProposalType::OnboardRegistrar(OnboardRegistrar {
+                provider_service_cid: "00psc".into(),
+                registrar_service_request_cid: "00rsr".into(),
+                provider_configuration_cid: "00pcc".into(),
+            }),
+            ProposalType::ProvisionInstrument(ProvisionInstrument {
+                registrar_service_cid: "00rsc".into(),
+                instrument_id_text: "uuid-2".into(),
+                additional_identifiers: vec![],
+                issuer_requirements: vec![],
+                holder_requirements: vec![],
+                initial_instrument_issuers: vec![],
+            }),
+            ProposalType::OnboardInstrumentIssuers(OnboardInstrumentIssuers {
+                instrument_configuration_cid: "00icc".into(),
+                instrument_issuers: vec![],
+            }),
+            ProposalType::OffboardInstrumentIssuers(OffboardInstrumentIssuers {
+                instrument_issuers: vec![],
+            }),
+        ]
+    }
+
+    /// Guards the split the payload-projection macro used to generate: every
+    /// `ProposalType` variant carries a `GrpcPayload` except `Transfer` and
+    /// `AcceptTransfer`, which need runtime context and go through wrapper
+    /// structs instead (see `grpc_payload`'s doc comment). A variant landing
+    /// in the wrong match arm — Transfer wrongly returning `Some`, or a
+    /// plain variant wrongly returning `None` — fails this test instead of
+    /// surfacing as a silent gap deep in `propose_action`.
+    #[test]
+    fn grpc_payload_is_none_only_for_transfer_and_accept_transfer() {
+        for proposal in one_of_each_proposal_type() {
+            let is_transfer_variant = matches!(
+                proposal,
+                ProposalType::Transfer(_) | ProposalType::AcceptTransfer(_)
+            );
+            assert_eq!(
+                proposal.grpc_payload().is_none(),
+                is_transfer_variant,
+                "{proposal:?}: grpc_payload() Some/None must match transfer-variant status"
+            );
+        }
     }
 }

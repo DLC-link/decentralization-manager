@@ -805,7 +805,7 @@ async fn resolve_accept_transfer_details(
     Ok(())
 }
 
-/// Fetch proposal infos via GovernableAction interface query (production mode).
+/// Fetch proposal infos via GovernableAction interface query.
 ///
 /// Queries active contracts implementing GovernableAction and extracts the
 /// `description` field plus, where applicable, the `TransferProposal`'s
@@ -1827,7 +1827,7 @@ pub struct ContractQueryParams {
     pub active_only: bool,
 }
 
-/// Uses WildcardFilter in test mode, TemplateFilter or InterfaceFilter in production.
+/// Uses TemplateFilter or InterfaceFilter, chosen by `params.use_interface_filter`.
 pub async fn query_contracts_by_template(
     config: &NodeConfig,
     party_id: &CantonId,
