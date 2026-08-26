@@ -238,22 +238,21 @@ impl JwtValidator {
         }
 
         let mut flat_roles = claims.roles.unwrap_or_default();
-        if let Some(claim_name) = self.role_claim.as_deref()
-            && claim_name != "roles"
-            && let Some(value) = claims.additional.get(claim_name)
-        {
-            match serde_json::from_value::<Vec<String>>(value.clone()) {
-                Ok(roles) => {
-                    for role in roles {
-                        if !flat_roles.contains(&role) {
-                            flat_roles.push(role);
-                        }
-                    }
+        if let Some(claim_name) = self.role_claim.as_deref() {
+            match claims.additional.get(claim_name) {
+                Some(value) => match serde_json::from_value::<Vec<String>>(value.clone()) {
+                    Ok(roles) => flat_roles.extend(roles),
+                    Err(_) => tracing::warn!(
+                        "configured JWT role claim '{claim_name}' is not an array of strings; \
+                         ignoring it"
+                    ),
+                },
+                None => {
+                    tracing::warn!(
+                        "configured JWT role claim '{claim_name}' is absent from token; \
+                         ignoring it"
+                    );
                 }
-                Err(_) => tracing::warn!(
-                    "configured JWT role claim '{claim_name}' is not an array of strings; \
-                     ignoring it"
-                ),
             }
         }
         let roles = collect_roles(
@@ -688,6 +687,56 @@ mod tests {
             .map_err(|e| anyhow::anyhow!("expected Auth0 token to verify: {e:?}"))?;
         assert!(principal.has_role("decentralization-manager-admin"));
         assert!(principal.has_role("viewer"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn malformed_configured_role_claim_contributes_no_roles() -> anyhow::Result<()> {
+        let role_claim = "https://idp.example/roles";
+        let (_server, validator, issuer) = setup_with_role_claim(Some(role_claim)).await;
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(TEST_KID.to_string());
+        let token = sign(
+            &header,
+            &json!({
+                "iss": issuer,
+                "sub": "auth0|operator",
+                "azp": "decman",
+                "exp": unix_now()? + 3600,
+                "https://idp.example/roles": "decentralization-manager-admin",
+            }),
+        )?;
+
+        let principal = validator
+            .validate(&token)
+            .await
+            .map_err(|e| anyhow::anyhow!("expected token with malformed roles to verify: {e:?}"))?;
+        assert!(!principal.has_role("decentralization-manager-admin"));
+        assert!(principal.roles.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn absent_configured_role_claim_contributes_no_roles() -> anyhow::Result<()> {
+        let role_claim = "https://idp.example/roles";
+        let (_server, validator, issuer) = setup_with_role_claim(Some(role_claim)).await;
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(TEST_KID.to_string());
+        let token = sign(
+            &header,
+            &json!({
+                "iss": issuer,
+                "sub": "auth0|operator",
+                "azp": "decman",
+                "exp": unix_now()? + 3600,
+            }),
+        )?;
+
+        let principal = validator.validate(&token).await.map_err(|e| {
+            anyhow::anyhow!("expected token without configured roles to verify: {e:?}")
+        })?;
+        assert!(!principal.has_role("decentralization-manager-admin"));
+        assert!(principal.roles.is_empty());
         Ok(())
     }
 
