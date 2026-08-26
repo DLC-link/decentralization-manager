@@ -5,8 +5,7 @@ use anyhow::Context;
 use base64::Engine;
 use canton_proto_rs::com::{
     daml::ledger::api::v2::{
-        Command, Commands, CreateCommand, DisclosedContract, ExerciseCommand, Identifier,
-        SubmitAndWaitForTransactionRequest, SubmitAndWaitRequest, command,
+        DisclosedContract, SubmitAndWaitForTransactionRequest, SubmitAndWaitRequest,
         command_service_client::CommandServiceClient,
     },
     digitalasset::canton::topology::admin::v30::{
@@ -22,12 +21,16 @@ use decman_lib::catalog::commands::{
     build_execute_vault_action, build_expire_domain_confirmation, build_expire_self_confirmation,
     build_expire_vault_confirmation,
 };
-use decman_lib::catalog::proposals::custody::{AcceptTransfer, Transfer};
+use decman_lib::catalog::proposals::custody::{
+    AcceptTransfer, AcceptTransferWithContext, Transfer, TransferWithContext,
+};
 use decman_lib::catalog::proposals::rewards::SetupCouponReassignmentDelegation;
 use decman_lib::catalog::templates::{
     domain_confirmation_template, governable_action_interface, governance_rules_template,
     self_confirmation_template, vault_confirmation_template, vault_rules_template,
 };
+use decman_lib::framework::commands::{build_propose, first_created_contract_id};
+use decman_lib::framework::encode::TransferValidity;
 use serde::Deserialize;
 
 use crate::{
@@ -38,7 +41,7 @@ use crate::{
     error::Result,
     noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
     server::{
-        AppState, action_serializer,
+        AppState,
         audit::{AuditEvent, AuditParams, spawn_audit_log},
         chain_audit,
         middleware::require_admin,
@@ -1325,11 +1328,11 @@ pub async fn propose_action(
         ProposalType::Transfer(Transfer {
             validity_window_hours: Some(hours),
             ..
-        }) => action_serializer::TransferValidity::from_now_with_window(
+        }) => TransferValidity::from_now_with_window(
             now_micros,
             i64::from(*hours).saturating_mul(60 * 60 * 1_000_000),
         ),
-        _ => action_serializer::TransferValidity::from_now(now_micros),
+        _ => TransferValidity::from_now(now_micros),
     };
 
     let mut resolved_proposal = body.proposal.clone();
@@ -1446,104 +1449,55 @@ pub async fn propose_action(
         _ => None,
     };
 
-    let (package_source, module_name, entity_name, create_args) =
-        match action_serializer::build_proposal_create_args(
+    // The two transfer variants carry runtime data that is not a payload
+    // field — the registry choice context, the validity window, and the
+    // on-chain `sender` (the governance party) — so they submit through
+    // their wrapper structs. Every other variant is its own complete
+    // payload, reached through `grpc_payload()` without re-listing 29 arms.
+    let command_id = uuid::Uuid::new_v4().to_string();
+    let commands = match &resolved_proposal {
+        ProposalType::Transfer(t) => build_propose(
+            &TransferWithContext {
+                transfer: t,
+                sender: party_id,
+                context: transfer_choice_context.as_ref().map(|r| &r.context),
+                validity: transfer_validity,
+            },
             party_id,
             &member_party_id,
-            &resolved_proposal,
-            transfer_choice_context.as_ref().map(|r| &r.context),
-            Some(transfer_validity),
-        ) {
-            Ok(args) => args,
-            Err(e) => {
-                return HttpResponse::BadRequest().json(ErrorResponse {
-                    error: format!("Failed to build proposal create arguments: {e}"),
-                });
-            }
-        };
-
-    let package_id = match package_source {
-        action_serializer::ProposalPackage::GovernanceCore => {
-            match packages.governance_core.as_deref() {
-                Some(pkg) => pkg,
-                None => {
-                    return HttpResponse::ServiceUnavailable().json(ErrorResponse {
-                        error: "governance_core package not configured".to_string(),
-                    });
-                }
-            }
-        }
-        action_serializer::ProposalPackage::GovernanceRewards => {
-            match packages.governance_rewards.as_deref() {
-                Some(pkg) => pkg,
-                None => {
-                    return HttpResponse::ServiceUnavailable().json(ErrorResponse {
-                        error: "governance_rewards package not configured".to_string(),
-                    });
-                }
-            }
-        }
-        action_serializer::ProposalPackage::GovernanceTokenCustody => {
-            match packages.governance_token_custody.as_deref() {
-                Some(pkg) => pkg,
-                None => {
-                    return HttpResponse::ServiceUnavailable().json(ErrorResponse {
-                        error: "governance_token_custody package not configured".to_string(),
-                    });
-                }
-            }
-        }
-        action_serializer::ProposalPackage::GovernanceUtilityCredential => {
-            match packages.governance_utility_credential.as_deref() {
-                Some(pkg) => pkg,
-                None => {
-                    return HttpResponse::ServiceUnavailable().json(ErrorResponse {
-                        error: "governance_utility_credential package not configured".to_string(),
-                    });
-                }
-            }
-        }
-        action_serializer::ProposalPackage::GovernanceUtilityOnboarding => {
-            match packages.governance_utility_onboarding.as_deref() {
-                Some(pkg) => pkg,
-                None => {
-                    return HttpResponse::ServiceUnavailable().json(ErrorResponse {
-                        error: "governance_utility_onboarding package not configured".to_string(),
-                    });
-                }
-            }
-        }
+            &packages,
+            command_id,
+        ),
+        ProposalType::AcceptTransfer(a) => build_propose(
+            &AcceptTransferWithContext {
+                accept: a,
+                context: transfer_choice_context.as_ref().map(|r| &r.context),
+            },
+            party_id,
+            &member_party_id,
+            &packages,
+            command_id,
+        ),
+        other => match other.grpc_payload() {
+            Some(p) => build_propose(p, party_id, &member_party_id, &packages, command_id),
+            None => unreachable!("transfer variants matched above"),
+        },
     };
-
-    let template_id = Identifier {
-        package_id: package_id.to_string(),
-        module_name: module_name.to_string(),
-        entity_name: entity_name.to_string(),
-    };
-
-    let cmd = Command {
-        command: Some(command::Command::Create(CreateCommand {
-            template_id: Some(template_id),
-            create_arguments: Some(create_args),
-        })),
-    };
-
-    let commands = Commands {
-        workflow_id: String::new(),
-        user_id: String::new(),
-        command_id: uuid::Uuid::new_v4().to_string(),
-        commands: vec![cmd],
-        deduplication_period: None,
-        min_ledger_time_abs: None,
-        min_ledger_time_rel: None,
-        act_as: vec![member_party_id.to_string()],
-        read_as: vec![party_id.to_string()],
-        submission_id: String::new(),
-        disclosed_contracts: vec![],
-        synchronizer_id: String::new(),
-        package_id_selection_preference: vec![],
-        prefetch_contract_keys: vec![],
-        taps_max_passes: None,
+    // An unconfigured package is a provisioning gap, not bad input: 503 with
+    // the lib's own `"<pkg> package not configured"` text, byte-identical to
+    // what the hand-written package match returned.
+    let commands = match commands {
+        Ok(c) => c,
+        Err(e @ decman_lib::Error::PackageNotConfigured(_)) => {
+            return HttpResponse::ServiceUnavailable().json(ErrorResponse {
+                error: e.to_string(),
+            });
+        }
+        Err(e) => {
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                error: format!("Failed to build proposal create arguments: {e}"),
+            });
+        }
     };
 
     let channel = match data.config.ledger_channel().await {
@@ -1570,16 +1524,12 @@ pub async fn propose_action(
     let proposal_cid = match client.submit_and_wait_for_transaction(create_req).await {
         Ok(response) => {
             // Extract created contract ID from the transaction events
-            match response.into_inner().transaction.and_then(|tx| {
-                tx.events.iter().find_map(|event| {
-                    event.event.as_ref().and_then(|e| match e {
-                        canton_proto_rs::com::daml::ledger::api::v2::event::Event::Created(
-                            created,
-                        ) => Some(created.contract_id.clone()),
-                        _ => None,
-                    })
-                })
-            }) {
+            match response
+                .into_inner()
+                .transaction
+                .as_ref()
+                .and_then(first_created_contract_id)
+            {
                 Some(cid) => cid,
                 None => {
                     return HttpResponse::InternalServerError().json(ErrorResponse {
@@ -1618,9 +1568,9 @@ pub async fn propose_action(
     // utility proposal reaches here on a node with no governance_core. The
     // proposal is already on the ledger by this point, so the body has to say
     // so — the caller must not retry into a second proposal.
-    let governance_core_pkg = match packages.governance_core.as_deref() {
-        Some(pkg) => pkg,
-        None => {
+    let mut rules = match governance_rules_template(&packages) {
+        Ok(rules) => rules,
+        Err(_) => {
             return HttpResponse::ServiceUnavailable().json(ErrorResponse {
                 error: format!(
                     "Proposal {proposal_cid} was created but could not be confirmed: \
@@ -1633,52 +1583,23 @@ pub async fn propose_action(
 
     // The rules contract may be an out-of-date fallback living under an older
     // governance-core package — exercise it under its actual package ref.
-    let rules_package_ref = resolve_contract_package_ref(
+    rules.package_ref = resolve_contract_package_ref(
         &data.config,
         party_id,
         Some(token.clone()),
         &body.rules_contract_id,
-        governance_core_pkg,
+        &rules.package_ref,
     )
     .await;
 
-    let confirm_template = Identifier {
-        package_id: rules_package_ref,
-        module_name: "Governance.Rules".to_string(),
-        entity_name: "GovernanceRules".to_string(),
-    };
-
-    let confirm_arg = action_serializer::build_confirm_domain_action_arg(
-        &member_party_id.to_string(),
+    let confirm_commands = build_confirm_proposal(
+        &rules,
+        &body.rules_contract_id,
+        &member_party_id,
+        party_id,
         &proposal_cid,
+        uuid::Uuid::new_v4().to_string(),
     );
-
-    let confirm_cmd = Command {
-        command: Some(command::Command::Exercise(ExerciseCommand {
-            template_id: Some(confirm_template),
-            contract_id: body.rules_contract_id.clone(),
-            choice: "GovernanceRules_ConfirmAction".to_string(),
-            choice_argument: Some(confirm_arg),
-        })),
-    };
-
-    let confirm_commands = Commands {
-        workflow_id: String::new(),
-        user_id: String::new(),
-        command_id: uuid::Uuid::new_v4().to_string(),
-        commands: vec![confirm_cmd],
-        deduplication_period: None,
-        min_ledger_time_abs: None,
-        min_ledger_time_rel: None,
-        act_as: vec![member_party_id.to_string()],
-        read_as: vec![party_id.to_string()],
-        submission_id: String::new(),
-        disclosed_contracts: vec![],
-        synchronizer_id: String::new(),
-        package_id_selection_preference: vec![],
-        prefetch_contract_keys: vec![],
-        taps_max_passes: None,
-    };
 
     let mut confirm_req = tonic::Request::new(SubmitAndWaitRequest {
         commands: Some(confirm_commands),

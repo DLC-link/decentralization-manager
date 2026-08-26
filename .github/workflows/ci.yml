@@ -101,6 +101,18 @@ jobs:
       # silently weakened by an unrelated RUSTFLAGS change.
       - name: cargo clippy
         run: cargo clippy --all-targets --all-features --no-deps -- -D warnings
+      # decman-lib is the pure codec layer: it does no I/O and must not grow a
+      # transport, a web framework, a database driver, or a nondeterminism
+      # source (uuid/rand belong to the caller, which passes command ids in).
+      # The second line is the full transitive tree; `reqwest` is checked at
+      # depth 1 only because it already arrives transitively through
+      # canton-lib's `common` (-> canton-api-client, a non-optional dep of it),
+      # which decman-lib needs for `DamlDecimal` / `transfer_factory::Context`.
+      # A direct `reqwest` dependency on decman-lib still fails the gate.
+      - name: decman-lib forbidden dependencies
+        run: |
+          ! cargo tree -p decman-lib -e normal --depth 1 | grep -E '\b(reqwest|actix-web|sqlx|uuid|rand)\b'
+          ! cargo tree -p decman-lib -e normal | grep -E '\b(actix-web|sqlx|uuid|rand)\b'
       - name: Install coverage tooling
         if: steps.cache-grcov.outputs.cache-hit != 'true'
         # --force because rust-cache runs with cache-bin: true and its restore

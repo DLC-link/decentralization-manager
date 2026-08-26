@@ -39,6 +39,9 @@ use canton_proto_rs::com::daml::ledger::api::v2::{
 };
 use chrono::{DateTime, Utc};
 use decman_lib::framework::commands::commands_envelope;
+use decman_lib::framework::encode::{
+    field, make_contract_id, make_extra_args, make_list, make_party, make_text_map,
+};
 
 use crate::{
     canton_id::CantonId,
@@ -49,9 +52,6 @@ use crate::{
 use std::time::Duration;
 
 use super::AppState;
-use super::action_serializer::{
-    field, make_contract_id, make_extra_args, make_list, make_party, make_text_map,
-};
 use super::event_filters::{
     interface_filter, party_event_format, template_filter, wildcard_filter,
 };

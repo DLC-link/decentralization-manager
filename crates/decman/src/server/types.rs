@@ -540,6 +540,44 @@ impl ProposalType {
             }
         }
     }
+
+    /// The generic propose payload — `None` for the two transfer variants,
+    /// which need runtime context (the registry choice context, the validity
+    /// window, and the on-chain sender party) and so go through their
+    /// wrapper structs (`TransferWithContext` /
+    /// `AcceptTransferWithContext`) rather than the payload itself.
+    pub fn grpc_payload(&self) -> Option<&dyn decman_lib::framework::GrpcPayload> {
+        match self {
+            ProposalType::Transfer(_) | ProposalType::AcceptTransfer(_) => None,
+            ProposalType::SetupCcPreapproval(p) => Some(p),
+            ProposalType::SetupTokenPreapproval(p) => Some(p),
+            ProposalType::GenericVote(p) => Some(p),
+            ProposalType::ProvisionProviderService(p) => Some(p),
+            ProposalType::SetupUtility(p) => Some(p),
+            ProposalType::CreateProviderServiceRequest(p) => Some(p),
+            ProposalType::CreateUserServiceRequest(p) => Some(p),
+            ProposalType::SetProviderAppRewardBeneficiaries(p) => Some(p),
+            ProposalType::SetupCouponReassignmentDelegation(p) => Some(p),
+            ProposalType::RevokeCouponReassignmentDelegation(p) => Some(p),
+            ProposalType::SetEnableResultContracts(p) => Some(p),
+            ProposalType::CreateDelegatedBatchedMarkersProxy(p) => Some(p),
+            ProposalType::SetupMintingDelegation(p) => Some(p),
+            ProposalType::AcceptExternalPartySetup(p) => Some(p),
+            ProposalType::Mint(p) => Some(p),
+            ProposalType::OfferFreeCredential(p) => Some(p),
+            ProposalType::OfferPaidCredential(p) => Some(p),
+            ProposalType::AcceptFreeCredential(p) => Some(p),
+            ProposalType::Burn(p) => Some(p),
+            ProposalType::AcceptMintRequest(p) => Some(p),
+            ProposalType::AcceptBurnRequest(p) => Some(p),
+            ProposalType::CreateProviderConfiguration(p) => Some(p),
+            ProposalType::CreateRegistrarServiceRequest(p) => Some(p),
+            ProposalType::OnboardRegistrar(p) => Some(p),
+            ProposalType::ProvisionInstrument(p) => Some(p),
+            ProposalType::OnboardInstrumentIssuers(p) => Some(p),
+            ProposalType::OffboardInstrumentIssuers(p) => Some(p),
+        }
+    }
 }
 
 /// Request to propose a governance domain action (creates proposal contract)

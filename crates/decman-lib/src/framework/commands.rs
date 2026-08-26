@@ -42,7 +42,7 @@ pub fn commands_envelope(
 /// The create-arguments record for a proposal: the payload's own fields,
 /// with `governanceParty` and `proposer` injected first.
 pub fn proposal_create_arguments(
-    payload: &impl DamlProtoEncode,
+    payload: &(impl DamlProtoEncode + ?Sized),
     governance_party: &CantonId,
     proposer: &CantonId,
 ) -> Result<Record, Error> {
@@ -64,8 +64,14 @@ pub fn proposal_create_arguments(
 }
 
 /// A complete propose submission for any `GovernableAction` payload.
+///
+/// `?Sized` so a caller holding an erased payload — decman's
+/// `ProposalType::grpc_payload`, which hands back a
+/// `&dyn GrpcPayload` rather than re-matching 29 variants — can submit
+/// through the same entry point as a concrete struct. `dyn GrpcPayload`
+/// implements its supertraits automatically, so nothing else is needed.
 pub fn build_propose(
-    payload: &(impl TemplateInfo + DamlProtoEncode),
+    payload: &(impl TemplateInfo + DamlProtoEncode + ?Sized),
     governance_party: &CantonId,
     proposer: &CantonId,
     packages: &PackageConfig,

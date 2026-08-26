@@ -7,7 +7,6 @@
 //! handles inbound peer messages (invites, signing, health, cancellation)
 //! independently of any coordinator-driven workflow.
 
-mod action_serializer;
 mod assets;
 mod audit;
 mod chain_audit;
