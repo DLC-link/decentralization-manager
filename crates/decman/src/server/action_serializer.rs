@@ -1,13 +1,15 @@
-//! Daml `Value` argument builders for governance choices, plus
-//! serialization of `ProposalType` domain-governance proposals.
+//! Serialization of `ProposalType` domain-governance proposals.
 //!
 //! `ActionType`'s own codec (`to_vault_proto` / `from_vault_proto` /
-//! `to_self_proto` / `from_self_proto`) now lives in
-//! `decman_lib::catalog::action`; the four `build_*_action*` functions below
-//! are thin fallible wrappers around it.
+//! `to_self_proto` / `from_self_proto`) lives in
+//! `decman_lib::catalog::action`, and the confirm/execute/expire/cancel
+//! choice arguments are built by `decman_lib::catalog::commands`. What is
+//! left here is the `ProposalType` create-arguments dispatch, plus the one
+//! confirm argument `propose_action`'s step-2 self-confirm still builds by
+//! hand.
 
 use canton_common::transfer_factory::Context as ChoiceContext;
-use canton_proto_rs::com::daml::ledger::api::v2::{Optional, Record, Value, value};
+use canton_proto_rs::com::daml::ledger::api::v2::{Record, Value};
 use decman_lib::catalog::proposals::core::GenericVote;
 use decman_lib::catalog::proposals::credential::{
     AcceptFreeCredential, OfferFreeCredential, OfferPaidCredential,
@@ -33,99 +35,9 @@ pub(crate) use decman_lib::framework::encode::*;
 use crate::canton_id::CantonId;
 use crate::error::Result;
 
-use super::types::{ActionType, ProposalType};
+use super::types::ProposalType;
 #[cfg(test)]
 use common::api::InstrumentAllowance;
-
-// ============================================================================
-// Action Serialization
-// ============================================================================
-//
-// `ActionType::to_vault_proto` / `to_self_proto` (decman_lib::catalog::action)
-// do the actual encoding; the builders below just wrap them into the choice
-// argument shapes each Daml choice expects. Interim until Task 21/22 move the
-// argument-envelope construction itself into the lib.
-
-/// Build the ConfirmAction choice argument
-///
-/// The Daml structure is: { confirmer: Party, action: ActionRequiringConfirmation }
-pub fn build_confirm_action_argument(confirmer: &str, action: &ActionType) -> Result<Value> {
-    Ok(make_record(vec![
-        field("confirmer", make_party(confirmer)),
-        field("action", action.to_vault_proto()?),
-    ]))
-}
-
-/// Build the ExecuteConfirmedAction choice argument
-///
-/// The Daml structure is:
-/// { executor: Party, action: ActionRequiringConfirmation, confirmations: [ContractId], contractCid: Optional ContractId }
-pub fn build_execute_action_argument(
-    executor: &str,
-    action: &ActionType,
-    confirmation_cids: &[String],
-    contract_cid: Option<&str>,
-) -> Result<Value> {
-    let confirmations = make_list(
-        confirmation_cids
-            .iter()
-            .map(|cid| make_contract_id(cid))
-            .collect(),
-    );
-
-    let contract_cid_value = Value {
-        sum: Some(value::Sum::Optional(Box::new(Optional {
-            value: contract_cid.map(|cid| Box::new(make_contract_id(cid))),
-        }))),
-    };
-
-    Ok(make_record(vec![
-        field("executor", make_party(executor)),
-        field("action", action.to_vault_proto()?),
-        field("confirmations", confirmations),
-        field("contractCid", contract_cid_value),
-    ]))
-}
-
-// ============================================================================
-// Governance-Core Self-Management Serialization
-// ============================================================================
-//
-// `ActionType::to_self_proto` (decman_lib::catalog::action) does the actual
-// encoding; the builders below just wrap it into the choice argument shapes
-// each Daml choice expects.
-
-/// Build the GovernanceRules_ConfirmGovernanceAction choice argument
-///
-/// Daml structure: { confirmer: Party, action: GovernanceSelfAction }
-pub fn build_confirm_governance_action_arg(confirmer: &str, action: &ActionType) -> Result<Value> {
-    Ok(make_record(vec![
-        field("confirmer", make_party(confirmer)),
-        field("action", action.to_self_proto()?),
-    ]))
-}
-
-/// Build the GovernanceRules_ExecuteGovernanceAction choice argument
-///
-/// Daml structure: { executor: Party, action: GovernanceSelfAction, confirmations: [ContractId GovernanceSelfConfirmation] }
-pub fn build_execute_governance_action_arg(
-    executor: &str,
-    action: &ActionType,
-    confirmation_cids: &[String],
-) -> Result<Value> {
-    let confirmations = make_list(
-        confirmation_cids
-            .iter()
-            .map(|cid| make_contract_id(cid))
-            .collect(),
-    );
-
-    Ok(make_record(vec![
-        field("executor", make_party(executor)),
-        field("action", action.to_self_proto()?),
-        field("confirmations", confirmations),
-    ]))
-}
 
 // ============================================================================
 // Governance-Core Domain Action Proposal Serialization
@@ -397,28 +309,6 @@ pub fn build_confirm_domain_action_arg(confirmer: &str, proposal_cid: &str) -> V
     make_record(vec![
         field("confirmer", make_party(confirmer)),
         field("actionProposalCid", make_contract_id(proposal_cid)),
-    ])
-}
-
-/// Build the GovernanceRules_ExecuteConfirmedAction choice argument for domain actions
-///
-/// Daml structure: { executor: Party, actionProposalCid: ContractId GovernableAction, confirmations: [ContractId GovernanceConfirmation] }
-pub fn build_execute_domain_action_arg(
-    executor: &str,
-    proposal_cid: &str,
-    confirmation_cids: &[String],
-) -> Value {
-    let confirmations = make_list(
-        confirmation_cids
-            .iter()
-            .map(|cid| make_contract_id(cid))
-            .collect(),
-    );
-
-    make_record(vec![
-        field("executor", make_party(executor)),
-        field("actionProposalCid", make_contract_id(proposal_cid)),
-        field("confirmations", confirmations),
     ])
 }
 

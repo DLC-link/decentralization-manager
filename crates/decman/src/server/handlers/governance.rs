@@ -5,9 +5,9 @@ use anyhow::Context;
 use base64::Engine;
 use canton_proto_rs::com::{
     daml::ledger::api::v2::{
-        Command, Commands, CreateCommand, DisclosedContract, ExerciseCommand, Identifier, Record,
-        RecordField, SubmitAndWaitForTransactionRequest, SubmitAndWaitRequest, Value, command,
-        command_service_client::CommandServiceClient, value,
+        Command, Commands, CreateCommand, DisclosedContract, ExerciseCommand, Identifier,
+        SubmitAndWaitForTransactionRequest, SubmitAndWaitRequest, command,
+        command_service_client::CommandServiceClient,
     },
     digitalasset::canton::topology::admin::v30::{
         BaseQuery, ListDecentralizedNamespaceDefinitionRequest, StoreId, Synchronizer, base_query,
@@ -15,8 +15,19 @@ use canton_proto_rs::com::{
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
     },
 };
+use decman_lib::catalog::commands::{
+    build_cancel_domain_confirmation, build_cancel_proposal, build_cancel_self_confirmation,
+    build_cancel_vault_confirmation, build_confirm_proposal, build_confirm_self_action,
+    build_confirm_vault_action, build_execute_proposal, build_execute_self_action,
+    build_execute_vault_action, build_expire_domain_confirmation, build_expire_self_confirmation,
+    build_expire_vault_confirmation,
+};
 use decman_lib::catalog::proposals::custody::{AcceptTransfer, Transfer};
 use decman_lib::catalog::proposals::rewards::SetupCouponReassignmentDelegation;
+use decman_lib::catalog::templates::{
+    domain_confirmation_template, governable_action_interface, governance_rules_template,
+    self_confirmation_template, vault_confirmation_template, vault_rules_template,
+};
 use serde::Deserialize;
 
 use crate::{
@@ -2504,110 +2515,70 @@ async fn execute_confirm_action(
     member_party_id: &CantonId,
     packages: &PackageConfig,
 ) -> Result {
-    let member_party_id_str = member_party_id.to_string();
-    let member_party_id = member_party_id_str.as_str();
-    let (mut template_id, choice, choice_argument) = match request.governance_type {
+    let command_id = uuid::Uuid::new_v4().to_string();
+    let commands = match request.governance_type {
         GovernanceType::Vault => {
-            let pkg = packages
-                .vault_governance
-                .as_deref()
-                .context("vault_governance package not configured")?;
-            (
-                Identifier {
-                    package_id: pkg.to_string(),
-                    module_name: "BitsafeVault.VaultGovernance".to_string(),
-                    entity_name: "VaultGovernanceRules".to_string(),
-                },
-                "VaultGovernanceRules_ConfirmAction".to_string(),
-                action_serializer::build_confirm_action_argument(member_party_id, &request.action)?,
-            )
+            let rules = vault_rules_template(packages)?;
+            build_confirm_vault_action(
+                &rules,
+                &request.rules_contract_id,
+                member_party_id,
+                &request.party_id,
+                &request.action,
+                command_id,
+            )?
         }
         GovernanceType::CoreSelf => {
-            let pkg = packages
-                .governance_core
-                .as_deref()
-                .context("governance_core package not configured")?;
-            (
-                Identifier {
-                    package_id: pkg.to_string(),
-                    module_name: "Governance.Rules".to_string(),
-                    entity_name: "GovernanceRules".to_string(),
-                },
-                "GovernanceRules_ConfirmGovernanceAction".to_string(),
-                action_serializer::build_confirm_governance_action_arg(
-                    member_party_id,
-                    &request.action,
-                )?,
+            let mut rules = governance_rules_template(packages)?;
+            // The rules contract may be an out-of-date fallback living under an
+            // older governance-core package — exercise it under its actual
+            // package ref.
+            rules.package_ref = resolve_contract_package_ref(
+                config,
+                &request.party_id,
+                Some(token.to_string()),
+                &request.rules_contract_id,
+                &rules.package_ref,
             )
+            .await;
+            build_confirm_self_action(
+                &rules,
+                &request.rules_contract_id,
+                member_party_id,
+                &request.party_id,
+                &request.action,
+                command_id,
+            )?
         }
         GovernanceType::CoreDomain => {
-            let pkg = packages
-                .governance_core
-                .as_deref()
-                .context("governance_core package not configured")?;
+            let mut rules = governance_rules_template(packages)?;
             let proposal_cid = request
                 .proposal_cid
                 .as_deref()
                 .context("proposal_cid required for core_domain confirm")?;
-            (
-                Identifier {
-                    package_id: pkg.to_string(),
-                    module_name: "Governance.Rules".to_string(),
-                    entity_name: "GovernanceRules".to_string(),
-                },
-                "GovernanceRules_ConfirmAction".to_string(),
-                action_serializer::build_confirm_domain_action_arg(member_party_id, proposal_cid),
+            rules.package_ref = resolve_contract_package_ref(
+                config,
+                &request.party_id,
+                Some(token.to_string()),
+                &request.rules_contract_id,
+                &rules.package_ref,
+            )
+            .await;
+            build_confirm_proposal(
+                &rules,
+                &request.rules_contract_id,
+                member_party_id,
+                &request.party_id,
+                proposal_cid,
+                command_id,
             )
         }
     };
-
-    // The rules contract may be an out-of-date fallback living under an older
-    // governance-core package — exercise it under its actual package ref.
-    if matches!(
-        request.governance_type,
-        GovernanceType::CoreSelf | GovernanceType::CoreDomain
-    ) {
-        template_id.package_id = resolve_contract_package_ref(
-            config,
-            &request.party_id,
-            Some(token.to_string()),
-            &request.rules_contract_id,
-            &template_id.package_id,
-        )
-        .await;
-    }
 
     let channel = config.ledger_channel().await?;
 
     let mut client =
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
-
-    let cmd = Command {
-        command: Some(command::Command::Exercise(ExerciseCommand {
-            template_id: Some(template_id),
-            contract_id: request.rules_contract_id.clone(),
-            choice,
-            choice_argument: Some(choice_argument),
-        })),
-    };
-
-    let commands = Commands {
-        workflow_id: String::new(),
-        user_id: String::new(),
-        command_id: uuid::Uuid::new_v4().to_string(),
-        commands: vec![cmd],
-        deduplication_period: None,
-        min_ledger_time_abs: None,
-        min_ledger_time_rel: None,
-        act_as: vec![member_party_id.to_string()],
-        read_as: vec![request.party_id.to_string()],
-        submission_id: String::new(),
-        disclosed_contracts: vec![],
-        synchronizer_id: String::new(),
-        package_id_selection_preference: vec![],
-        prefetch_contract_keys: vec![],
-        taps_max_passes: None,
-    };
 
     let mut req = tonic::Request::new(SubmitAndWaitRequest {
         commands: Some(commands),
@@ -2628,89 +2599,6 @@ async fn execute_confirmed_action(
     member_party_id: &CantonId,
     packages: &PackageConfig,
 ) -> Result {
-    let member_party_id_str = member_party_id.to_string();
-    let member_party_id = member_party_id_str.as_str();
-    let (mut template_id, choice, choice_argument) = match request.governance_type {
-        GovernanceType::Vault => {
-            let pkg = packages
-                .vault_governance
-                .as_deref()
-                .context("vault_governance package not configured")?;
-            (
-                Identifier {
-                    package_id: pkg.to_string(),
-                    module_name: "BitsafeVault.VaultGovernance".to_string(),
-                    entity_name: "VaultGovernanceRules".to_string(),
-                },
-                "VaultGovernanceRules_ExecuteConfirmedAction".to_string(),
-                action_serializer::build_execute_action_argument(
-                    member_party_id,
-                    &request.action,
-                    &request.confirmation_cids,
-                    None,
-                )?,
-            )
-        }
-        GovernanceType::CoreSelf => {
-            let pkg = packages
-                .governance_core
-                .as_deref()
-                .context("governance_core package not configured")?;
-            (
-                Identifier {
-                    package_id: pkg.to_string(),
-                    module_name: "Governance.Rules".to_string(),
-                    entity_name: "GovernanceRules".to_string(),
-                },
-                "GovernanceRules_ExecuteGovernanceAction".to_string(),
-                action_serializer::build_execute_governance_action_arg(
-                    member_party_id,
-                    &request.action,
-                    &request.confirmation_cids,
-                )?,
-            )
-        }
-        GovernanceType::CoreDomain => {
-            let pkg = packages
-                .governance_core
-                .as_deref()
-                .context("governance_core package not configured")?;
-            let proposal_cid = request
-                .proposal_cid
-                .as_deref()
-                .context("proposal_cid required for core_domain execute")?;
-            (
-                Identifier {
-                    package_id: pkg.to_string(),
-                    module_name: "Governance.Rules".to_string(),
-                    entity_name: "GovernanceRules".to_string(),
-                },
-                "GovernanceRules_ExecuteConfirmedAction".to_string(),
-                action_serializer::build_execute_domain_action_arg(
-                    member_party_id,
-                    proposal_cid,
-                    &request.confirmation_cids,
-                ),
-            )
-        }
-    };
-
-    // The rules contract may be an out-of-date fallback living under an older
-    // governance-core package — exercise it under its actual package ref.
-    if matches!(
-        request.governance_type,
-        GovernanceType::CoreSelf | GovernanceType::CoreDomain
-    ) {
-        template_id.package_id = resolve_contract_package_ref(
-            config,
-            &request.party_id,
-            Some(token.to_string()),
-            &request.rules_contract_id,
-            &template_id.package_id,
-        )
-        .await;
-    }
-
     // For `AcceptTransferProposal` execution the executor's submission must
     // include the registry-supplied disclosed contracts (transfer rule + its
     // dependencies). `maybe_fetch_for_proposal` template-id-checks the
@@ -2749,20 +2637,6 @@ async fn execute_confirmed_action(
         }
     }
 
-    let channel = config.ledger_channel().await?;
-
-    let mut client =
-        CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
-
-    let cmd = Command {
-        command: Some(command::Command::Exercise(ExerciseCommand {
-            template_id: Some(template_id),
-            contract_id: request.rules_contract_id.clone(),
-            choice,
-            choice_argument: Some(choice_argument),
-        })),
-    };
-
     let mut disclosed_contracts: Vec<DisclosedContract> = request
         .disclosed_contracts
         .iter()
@@ -2789,23 +2663,77 @@ async fn execute_confirmed_action(
             .filter(|d| !seen.contains(&d.contract_id)),
     );
 
-    let commands = Commands {
-        workflow_id: String::new(),
-        user_id: String::new(),
-        command_id: uuid::Uuid::new_v4().to_string(),
-        commands: vec![cmd],
-        deduplication_period: None,
-        min_ledger_time_abs: None,
-        min_ledger_time_rel: None,
-        act_as: vec![member_party_id.to_string()],
-        read_as: vec![request.party_id.to_string()],
-        submission_id: String::new(),
-        disclosed_contracts,
-        synchronizer_id: String::new(),
-        package_id_selection_preference: vec![],
-        prefetch_contract_keys: vec![],
-        taps_max_passes: None,
+    let command_id = uuid::Uuid::new_v4().to_string();
+    let commands = match request.governance_type {
+        GovernanceType::Vault => {
+            let rules = vault_rules_template(packages)?;
+            build_execute_vault_action(
+                &rules,
+                &request.rules_contract_id,
+                member_party_id,
+                &request.party_id,
+                &request.action,
+                &request.confirmation_cids,
+                None,
+                disclosed_contracts,
+                command_id,
+            )?
+        }
+        GovernanceType::CoreSelf => {
+            let mut rules = governance_rules_template(packages)?;
+            // The rules contract may be an out-of-date fallback living under an
+            // older governance-core package — exercise it under its actual
+            // package ref.
+            rules.package_ref = resolve_contract_package_ref(
+                config,
+                &request.party_id,
+                Some(token.to_string()),
+                &request.rules_contract_id,
+                &rules.package_ref,
+            )
+            .await;
+            build_execute_self_action(
+                &rules,
+                &request.rules_contract_id,
+                member_party_id,
+                &request.party_id,
+                &request.action,
+                &request.confirmation_cids,
+                disclosed_contracts,
+                command_id,
+            )?
+        }
+        GovernanceType::CoreDomain => {
+            let mut rules = governance_rules_template(packages)?;
+            let proposal_cid = request
+                .proposal_cid
+                .as_deref()
+                .context("proposal_cid required for core_domain execute")?;
+            rules.package_ref = resolve_contract_package_ref(
+                config,
+                &request.party_id,
+                Some(token.to_string()),
+                &request.rules_contract_id,
+                &rules.package_ref,
+            )
+            .await;
+            build_execute_proposal(
+                &rules,
+                &request.rules_contract_id,
+                member_party_id,
+                &request.party_id,
+                proposal_cid,
+                &request.confirmation_cids,
+                disclosed_contracts,
+                command_id,
+            )
+        }
     };
+
+    let channel = config.ledger_channel().await?;
+
+    let mut client =
+        CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
 
     let mut req = tonic::Request::new(SubmitAndWaitRequest {
         commands: Some(commands),
@@ -2826,127 +2754,72 @@ async fn execute_expire_confirmation(
     member_party_id: &CantonId,
     packages: &PackageConfig,
 ) -> Result {
-    let member_party_id_str = member_party_id.to_string();
-    let member_party_id = member_party_id_str.as_str();
-    // Both vault and core use the same argument shape: { member, staleConfirmationCid }
-    let choice_argument = Value {
-        sum: Some(value::Sum::Record(Record {
-            record_id: None,
-            fields: vec![
-                RecordField {
-                    label: "member".to_string(),
-                    value: Some(Value {
-                        sum: Some(value::Sum::Party(member_party_id.to_string())),
-                    }),
-                },
-                RecordField {
-                    label: "staleConfirmationCid".to_string(),
-                    value: Some(Value {
-                        sum: Some(value::Sum::ContractId(request.confirmation_cid.clone())),
-                    }),
-                },
-            ],
-        })),
-    };
-
-    let (mut template_id, choice) = match request.governance_type {
+    // All three flows take the same argument shape ({ member,
+    // staleConfirmationCid }); only the template and the choice differ.
+    let command_id = uuid::Uuid::new_v4().to_string();
+    let commands = match request.governance_type {
         GovernanceType::Vault => {
-            let pkg = packages
-                .vault_governance
-                .as_deref()
-                .context("vault_governance package not configured")?;
-            (
-                Identifier {
-                    package_id: pkg.to_string(),
-                    module_name: "BitsafeVault.VaultGovernance".to_string(),
-                    entity_name: "VaultGovernanceRules".to_string(),
-                },
-                "VaultGovernanceRules_ExpireConfirmation".to_string(),
+            let rules = vault_rules_template(packages)?;
+            build_expire_vault_confirmation(
+                &rules,
+                &request.rules_contract_id,
+                member_party_id,
+                &request.party_id,
+                &request.confirmation_cid,
+                command_id,
             )
         }
         GovernanceType::CoreSelf => {
-            let pkg = packages
-                .governance_core
-                .as_deref()
-                .context("governance_core package not configured")?;
-            (
-                Identifier {
-                    package_id: pkg.to_string(),
-                    module_name: "Governance.Rules".to_string(),
-                    entity_name: "GovernanceRules".to_string(),
-                },
-                "GovernanceRules_ExpireGovernanceSelfConfirmation".to_string(),
+            let mut rules = governance_rules_template(packages)?;
+            // The rules contract may be an out-of-date fallback living under an
+            // older governance-core package — exercise it under its actual
+            // package ref.
+            rules.package_ref = resolve_contract_package_ref(
+                config,
+                &request.party_id,
+                Some(token.to_string()),
+                &request.rules_contract_id,
+                &rules.package_ref,
+            )
+            .await;
+            build_expire_self_confirmation(
+                &rules,
+                &request.rules_contract_id,
+                member_party_id,
+                &request.party_id,
+                &request.confirmation_cid,
+                command_id,
             )
         }
         GovernanceType::CoreDomain => {
             // Same `GovernanceRules` template as CoreSelf but a different choice:
             // `GovernanceRules_ExpireConfirmation` operates on the
             // `GovernanceConfirmation` template (domain action confirmations)
-            // rather than `GovernanceSelfConfirmation`. Same argument shape
-            // ({ member, staleConfirmationCid }) so the choice_argument above
-            // is reused as-is.
-            let pkg = packages
-                .governance_core
-                .as_deref()
-                .context("governance_core package not configured")?;
-            (
-                Identifier {
-                    package_id: pkg.to_string(),
-                    module_name: "Governance.Rules".to_string(),
-                    entity_name: "GovernanceRules".to_string(),
-                },
-                "GovernanceRules_ExpireConfirmation".to_string(),
+            // rather than `GovernanceSelfConfirmation`.
+            let mut rules = governance_rules_template(packages)?;
+            rules.package_ref = resolve_contract_package_ref(
+                config,
+                &request.party_id,
+                Some(token.to_string()),
+                &request.rules_contract_id,
+                &rules.package_ref,
+            )
+            .await;
+            build_expire_domain_confirmation(
+                &rules,
+                &request.rules_contract_id,
+                member_party_id,
+                &request.party_id,
+                &request.confirmation_cid,
+                command_id,
             )
         }
     };
-
-    // The rules contract may be an out-of-date fallback living under an older
-    // governance-core package — exercise it under its actual package ref.
-    if matches!(
-        request.governance_type,
-        GovernanceType::CoreSelf | GovernanceType::CoreDomain
-    ) {
-        template_id.package_id = resolve_contract_package_ref(
-            config,
-            &request.party_id,
-            Some(token.to_string()),
-            &request.rules_contract_id,
-            &template_id.package_id,
-        )
-        .await;
-    }
 
     let channel = config.ledger_channel().await?;
 
     let mut client =
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
-
-    let cmd = Command {
-        command: Some(command::Command::Exercise(ExerciseCommand {
-            template_id: Some(template_id),
-            contract_id: request.rules_contract_id.clone(),
-            choice,
-            choice_argument: Some(choice_argument),
-        })),
-    };
-
-    let commands = Commands {
-        workflow_id: String::new(),
-        user_id: String::new(),
-        command_id: uuid::Uuid::new_v4().to_string(),
-        commands: vec![cmd],
-        deduplication_period: None,
-        min_ledger_time_abs: None,
-        min_ledger_time_rel: None,
-        act_as: vec![member_party_id.to_string()],
-        read_as: vec![request.party_id.to_string()],
-        submission_id: String::new(),
-        disclosed_contracts: vec![],
-        synchronizer_id: String::new(),
-        package_id_selection_preference: vec![],
-        prefetch_contract_keys: vec![],
-        taps_max_passes: None,
-    };
 
     let mut req = tonic::Request::new(SubmitAndWaitRequest {
         commands: Some(commands),
@@ -2967,112 +2840,67 @@ async fn execute_cancel_confirmation(
     member_party_id: &CantonId,
     packages: &PackageConfig,
 ) -> Result {
-    let member_party_id_str = member_party_id.to_string();
-    let member_party_id = member_party_id_str.as_str();
-    let (mut template_id, choice) = match request.governance_type {
+    // Every `_Cancel` choice is controller=confirmer and takes no arguments;
+    // only the confirmation template differs.
+    let command_id = uuid::Uuid::new_v4().to_string();
+    let commands = match request.governance_type {
         GovernanceType::Vault => {
-            let pkg = packages
-                .vault_governance
-                .as_deref()
-                .context("vault_governance package not configured")?;
-            (
-                Identifier {
-                    package_id: pkg.to_string(),
-                    module_name: "BitsafeVault.VaultGovernance".to_string(),
-                    entity_name: "VaultGovernanceConfirmation".to_string(),
-                },
-                "VaultGovernanceConfirmation_Cancel".to_string(),
+            let confirmation = vault_confirmation_template(packages)?;
+            build_cancel_vault_confirmation(
+                &confirmation,
+                &request.confirmation_cid,
+                member_party_id,
+                &request.party_id,
+                command_id,
             )
         }
         GovernanceType::CoreSelf => {
-            let pkg = packages
-                .governance_core
-                .as_deref()
-                .context("governance_core package not configured")?;
-            (
-                Identifier {
-                    package_id: pkg.to_string(),
-                    module_name: "Governance.Rules".to_string(),
-                    entity_name: "GovernanceSelfConfirmation".to_string(),
-                },
-                "GovernanceSelfConfirmation_Cancel".to_string(),
+            let mut confirmation = self_confirmation_template(packages)?;
+            // The confirmation contract is created by the rules contract's
+            // choice, so it shares the rules contract's (possibly out-of-date)
+            // package — exercise it under its actual package ref.
+            confirmation.package_ref = resolve_contract_package_ref(
+                config,
+                &request.party_id,
+                Some(token.to_string()),
+                &request.confirmation_cid,
+                &confirmation.package_ref,
+            )
+            .await;
+            build_cancel_self_confirmation(
+                &confirmation,
+                &request.confirmation_cid,
+                member_party_id,
+                &request.party_id,
+                command_id,
             )
         }
         GovernanceType::CoreDomain => {
             // Domain confirmations live in their own template
             // `GovernanceConfirmation` (module `Governance.Confirmation`).
-            // The `Cancel` choice is controller=confirmer with no arguments.
-            let pkg = packages
-                .governance_core
-                .as_deref()
-                .context("governance_core package not configured")?;
-            (
-                Identifier {
-                    package_id: pkg.to_string(),
-                    module_name: "Governance.Confirmation".to_string(),
-                    entity_name: "GovernanceConfirmation".to_string(),
-                },
-                "GovernanceConfirmation_Cancel".to_string(),
+            let mut confirmation = domain_confirmation_template(packages)?;
+            confirmation.package_ref = resolve_contract_package_ref(
+                config,
+                &request.party_id,
+                Some(token.to_string()),
+                &request.confirmation_cid,
+                &confirmation.package_ref,
+            )
+            .await;
+            build_cancel_domain_confirmation(
+                &confirmation,
+                &request.confirmation_cid,
+                member_party_id,
+                &request.party_id,
+                command_id,
             )
         }
     };
-
-    // The confirmation contract is created by the rules contract's choice, so
-    // it shares the rules contract's (possibly out-of-date) package —
-    // exercise it under its actual package ref.
-    if matches!(
-        request.governance_type,
-        GovernanceType::CoreSelf | GovernanceType::CoreDomain
-    ) {
-        template_id.package_id = resolve_contract_package_ref(
-            config,
-            &request.party_id,
-            Some(token.to_string()),
-            &request.confirmation_cid,
-            &template_id.package_id,
-        )
-        .await;
-    }
 
     let channel = config.ledger_channel().await?;
 
     let mut client =
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
-
-    // Cancel takes no arguments
-    let choice_argument = Value {
-        sum: Some(value::Sum::Record(Record {
-            record_id: None,
-            fields: vec![],
-        })),
-    };
-
-    let cmd = Command {
-        command: Some(command::Command::Exercise(ExerciseCommand {
-            template_id: Some(template_id),
-            contract_id: request.confirmation_cid.clone(),
-            choice,
-            choice_argument: Some(choice_argument),
-        })),
-    };
-
-    let commands = Commands {
-        workflow_id: String::new(),
-        user_id: String::new(),
-        command_id: uuid::Uuid::new_v4().to_string(),
-        commands: vec![cmd],
-        deduplication_period: None,
-        min_ledger_time_abs: None,
-        min_ledger_time_rel: None,
-        act_as: vec![member_party_id.to_string()],
-        read_as: vec![request.party_id.to_string()],
-        submission_id: String::new(),
-        disclosed_contracts: vec![],
-        synchronizer_id: String::new(),
-        package_id_selection_preference: vec![],
-        prefetch_contract_keys: vec![],
-        taps_max_passes: None,
-    };
 
     let mut req = tonic::Request::new(SubmitAndWaitRequest {
         commands: Some(commands),
@@ -3083,64 +2911,6 @@ async fn execute_cancel_confirmation(
     client.submit_and_wait(req).await?;
 
     Ok(())
-}
-
-/// Build the exercise commands that retract a proposal.
-///
-/// The first command archives the proposal itself. `GovernableAction_ProposerCancel`
-/// is declared on the interface rather than on any one template, so the
-/// exercise carries the `GovernableAction` interface id and never the id of
-/// the template that actually created the contract. That also rules out
-/// [`resolve_contract_package_ref`]: it reports the package of the contract,
-/// which here is the proposal's own package, not the interface's.
-///
-/// The second command archives the caller's confirmation on that proposal,
-/// which `/governance/propose` creates for every proposal. Both choices take
-/// no arguments, and the caller controls both — `proposer` on one, `confirmer`
-/// on the other — so one submission covers them.
-fn build_cancel_proposal_commands(
-    proposal_cid: &str,
-    action_package_ref: &str,
-    confirmation: Option<(&str, &str)>,
-) -> Vec<Command> {
-    let no_arguments = || {
-        Some(Value {
-            sum: Some(value::Sum::Record(Record {
-                record_id: None,
-                fields: vec![],
-            })),
-        })
-    };
-
-    let mut commands = vec![Command {
-        command: Some(command::Command::Exercise(ExerciseCommand {
-            template_id: Some(Identifier {
-                package_id: action_package_ref.to_string(),
-                module_name: "Governance.Action".to_string(),
-                entity_name: "GovernableAction".to_string(),
-            }),
-            contract_id: proposal_cid.to_string(),
-            choice: "GovernableAction_ProposerCancel".to_string(),
-            choice_argument: no_arguments(),
-        })),
-    }];
-
-    if let Some((confirmation_cid, confirmation_package_ref)) = confirmation {
-        commands.push(Command {
-            command: Some(command::Command::Exercise(ExerciseCommand {
-                template_id: Some(Identifier {
-                    package_id: confirmation_package_ref.to_string(),
-                    module_name: "Governance.Confirmation".to_string(),
-                    entity_name: "GovernanceConfirmation".to_string(),
-                }),
-                contract_id: confirmation_cid.to_string(),
-                choice: "GovernanceConfirmation_Cancel".to_string(),
-                choice_argument: no_arguments(),
-            })),
-        });
-    }
-
-    commands
 }
 
 /// Exercise `GovernableAction_ProposerCancel` on a proposal, and archive the
@@ -3157,64 +2927,48 @@ async fn execute_cancel_proposal(
     member_party_id: &CantonId,
     packages: &PackageConfig,
 ) -> Result {
-    let action_package_ref = packages
-        .governance_action
-        .as_deref()
-        .context("governance_action package not configured")?;
+    // `GovernableAction_ProposerCancel` is declared on the interface rather
+    // than on any one template, so the exercise carries the `GovernableAction`
+    // interface id and never the id of the template that actually created the
+    // contract. That also rules out `resolve_contract_package_ref` here: it
+    // reports the package of the contract, which is the proposal's own
+    // package, not the interface's.
+    let interface = governable_action_interface(packages)?;
 
-    let confirmation_package_ref = match request.confirmation_cid.as_deref() {
+    let own_confirmation = match request.confirmation_cid.as_deref() {
         Some(cid) => {
-            let core = packages
-                .governance_core
-                .as_deref()
-                .context("governance_core package not configured")?;
+            let mut confirmation = domain_confirmation_template(packages)?;
             // The confirmation is created by the rules contract's choice, so it
             // shares that contract's possibly out-of-date package.
-            Some(
-                resolve_contract_package_ref(
-                    config,
-                    &request.party_id,
-                    Some(token.to_string()),
-                    cid,
-                    core,
-                )
-                .await,
+            confirmation.package_ref = resolve_contract_package_ref(
+                config,
+                &request.party_id,
+                Some(token.to_string()),
+                cid,
+                &confirmation.package_ref,
             )
+            .await;
+            Some(confirmation)
         }
         None => None,
     };
 
-    let commands = build_cancel_proposal_commands(
+    let commands = build_cancel_proposal(
+        &interface,
         &request.proposal_cid,
-        action_package_ref,
         request
             .confirmation_cid
             .as_deref()
-            .zip(confirmation_package_ref.as_deref()),
+            .zip(own_confirmation.as_ref()),
+        member_party_id,
+        &request.party_id,
+        uuid::Uuid::new_v4().to_string(),
     );
 
     let channel = config.ledger_channel().await?;
 
     let mut client =
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
-
-    let commands = Commands {
-        workflow_id: String::new(),
-        user_id: String::new(),
-        command_id: uuid::Uuid::new_v4().to_string(),
-        commands,
-        deduplication_period: None,
-        min_ledger_time_abs: None,
-        min_ledger_time_rel: None,
-        act_as: vec![member_party_id.to_string()],
-        read_as: vec![request.party_id.to_string()],
-        submission_id: String::new(),
-        disclosed_contracts: vec![],
-        synchronizer_id: String::new(),
-        package_id_selection_preference: vec![],
-        prefetch_contract_keys: vec![],
-        taps_max_passes: None,
-    };
 
     let mut req = tonic::Request::new(SubmitAndWaitRequest {
         commands: Some(commands),
@@ -3225,78 +2979,6 @@ async fn execute_cancel_proposal(
     client.submit_and_wait(req).await?;
 
     Ok(())
-}
-
-#[cfg(test)]
-mod cancel_proposal_tests {
-    use super::*;
-
-    fn exercise(command: &Command) -> &ExerciseCommand {
-        match command.command.as_ref() {
-            Some(command::Command::Exercise(e)) => e,
-            _ => panic!("the builder only emits exercise commands"),
-        }
-    }
-
-    #[test]
-    fn cancels_the_proposal_through_the_interface() {
-        let commands = build_cancel_proposal_commands("proposal-1", "action-pkg", None);
-
-        assert_eq!(commands.len(), 1);
-        let exercised = exercise(&commands[0]);
-        assert_eq!(exercised.contract_id, "proposal-1");
-        assert_eq!(exercised.choice, "GovernableAction_ProposerCancel");
-
-        let template_id = exercised
-            .template_id
-            .as_ref()
-            .expect("exercise carries a template id");
-        assert_eq!(template_id.package_id, "action-pkg");
-        assert_eq!(template_id.module_name, "Governance.Action");
-        assert_eq!(template_id.entity_name, "GovernableAction");
-    }
-
-    #[test]
-    fn archives_the_own_confirmation_in_the_same_batch() {
-        let commands = build_cancel_proposal_commands(
-            "proposal-1",
-            "action-pkg",
-            Some(("confirmation-1", "core-pkg")),
-        );
-
-        assert_eq!(commands.len(), 2);
-        let exercised = exercise(&commands[1]);
-        assert_eq!(exercised.contract_id, "confirmation-1");
-        assert_eq!(exercised.choice, "GovernanceConfirmation_Cancel");
-
-        let template_id = exercised
-            .template_id
-            .as_ref()
-            .expect("exercise carries a template id");
-        assert_eq!(template_id.package_id, "core-pkg");
-        assert_eq!(template_id.module_name, "Governance.Confirmation");
-        assert_eq!(template_id.entity_name, "GovernanceConfirmation");
-    }
-
-    #[test]
-    fn neither_choice_takes_arguments() {
-        let commands = build_cancel_proposal_commands(
-            "proposal-1",
-            "action-pkg",
-            Some(("confirmation-1", "core-pkg")),
-        );
-
-        for command in &commands {
-            let argument = exercise(command)
-                .choice_argument
-                .as_ref()
-                .and_then(|v| v.sum.as_ref());
-            match argument {
-                Some(value::Sum::Record(record)) => assert!(record.fields.is_empty()),
-                _ => panic!("choice argument is an empty record"),
-            }
-        }
-    }
 }
 
 #[cfg(test)]
