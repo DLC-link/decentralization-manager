@@ -3,10 +3,9 @@
 //! info.
 //!
 //! Each function here is a pure, single-event parse — no grouping, no map
-//! insertion, no I/O. DecMan's `queries.rs` currently owns its own copies
-//! that additionally group results into `HashMap`s and (for the on-chain
-//! action hash) call `compute_action_hash`, which stays a decman concern.
-//! Task 20 switches `queries.rs` onto these.
+//! insertion, no I/O. DecMan's `queries.rs` owns its own copies that
+//! additionally group results into `HashMap`s and (for the on-chain action
+//! hash) call `compute_action_hash`, which stays a decman concern.
 
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};

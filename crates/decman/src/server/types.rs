@@ -44,14 +44,10 @@ pub use common::types::{
     PartyMetadata, PeerErrorKind, PeerPackageComparison, PeerPackageResult, PendingInvitation,
     Permission, VettedPackageInfo, WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun,
 };
-// The payload support types and their protocol validators now live in
-// `decman-lib`, re-exported here so existing `crate::server::types::X`
-// paths keep resolving unchanged.
 pub use decman_lib::catalog::types::{
     AcceptTransferDetails, AppRewardBeneficiary, BillingParams, FarConfig, ServiceRequestDetails,
     TransferProposalDetails, VaultLimits,
 };
-use decman_lib::framework::Validate;
 
 use crate::{canton_id::CantonId, noise::server::ActiveWorkflow};
 
@@ -321,31 +317,7 @@ pub type OnboardingResponse = WorkflowResponse;
 // Governance Types (Structured Actions)
 // ============================================================================
 
-// `VaultLimits`, `AppRewardBeneficiary`, and `FarConfig` now live in
-// `decman_lib::catalog::types` and are re-exported above so existing
-// `crate::server::types::X` paths keep resolving. `RewardBeneficiary` moved
-// there too, but since Task 13 has no non-test consumer under
-// `crate::server::types::X` — `SetupCouponReassignmentDelegation`'s field
-// lives on `decman_lib::catalog::proposals::rewards::SetupCouponReassignmentDelegation`,
-// which references `decman_lib::catalog::types::RewardBeneficiary` directly
-// — so the re-export was dropped; test fixtures import it straight from
-// `decman_lib::catalog::types` instead.
-
-/// `ActionType` — including its Daml `Value` codec (`to_vault_proto` /
-/// `from_vault_proto` / `to_self_proto` / `from_self_proto`) and `validate`
-/// — now lives in `decman_lib::catalog::action`, re-exported here so
-/// existing `crate::server::types::ActionType` paths keep resolving.
 pub use decman_lib::catalog::action::ActionType;
-
-// The protocol validators (`validate_threshold`, `validate_timeout`,
-// `validate_unique_issuers`, `validate_self_issued_requirements_have_claims`,
-// `validate_future_micros`, `validate_positive_amount`,
-// `validate_beneficiary_weights`, `validate_reward_beneficiaries`) now live
-// only in `decman-lib` (`framework::validate`), called from each payload's
-// own `Validate` impl — every `ProposalType::validate` arm below just
-// delegates to `p.validate(&ctx)`, so this module no longer imports them
-// directly. `BillingParams` lives in `decman-lib` (`catalog::types`),
-// imported and re-exported above.
 
 /// Types of governance domain action proposals
 #[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
@@ -464,121 +436,84 @@ pub enum ProposalType {
     OffboardInstrumentIssuers(decman_lib::catalog::proposals::utility::OffboardInstrumentIssuers),
 }
 
-impl ProposalType {
-    /// Validate the proposal's fields against the governance party the
-    /// proposal targets. Mirrors `ActionType::validate` — catches bad input
-    /// before it reaches Canton's Daml checks so a 400 surfaces a precise
-    /// reason rather than a generic submission error.
-    ///
-    /// **Propose-path only.** The single production caller is
-    /// `handlers::governance::propose_action`, and one arm
-    /// (`decman_lib::framework::validate::validate_future_micros`) reads the
-    /// clock. Re-using this to
-    /// re-validate an already-stored proposal would reject it for nothing but
-    /// having aged, so a new call site needs to split the time-dependent arms
-    /// out first.
-    pub fn validate(&self, governance_party: &CantonId) -> Result<(), String> {
-        let ctx = decman_lib::framework::ValidationCtx {
-            governance_party,
-            now_micros: Utc::now().timestamp_micros(),
-        };
-        match self {
-            ProposalType::GenericVote(p) => p.validate(&ctx).map_err(|e| e.to_string()),
-            ProposalType::ProvisionProviderService(p) => {
-                p.validate(&ctx).map_err(|e| e.to_string())
+/// Generates the payload projections from one list of ProposalType's
+/// variants. `plain` variants implement `GrpcPayload`; the two transfer
+/// variants encode through wrapper structs and implement only
+/// `Validate` + `TemplateInfo`, so they project to no `GrpcPayload`.
+macro_rules! payload_projections {
+    (plain: [$($p:ident),* $(,)?], transfer: [$($t:ident),* $(,)?] $(,)?) => {
+        impl ProposalType {
+            /// Validate the proposal's fields against the governance party the
+            /// proposal targets. Mirrors `ActionType::validate` — catches bad input
+            /// before it reaches Canton's Daml checks so a 400 surfaces a precise
+            /// reason rather than a generic submission error.
+            ///
+            /// **Propose-path only.** The single production caller is
+            /// `handlers::governance::propose_action`, and one arm
+            /// (`decman_lib::framework::validate::validate_future_micros`) reads the
+            /// clock. Re-using this to
+            /// re-validate an already-stored proposal would reject it for nothing but
+            /// having aged, so a new call site needs to split the time-dependent arms
+            /// out first.
+            pub fn validate(&self, governance_party: &CantonId) -> Result<(), String> {
+                let ctx = decman_lib::framework::ValidationCtx {
+                    governance_party,
+                    now_micros: Utc::now().timestamp_micros(),
+                };
+                let payload: &dyn decman_lib::framework::Validate = match self {
+                    $(Self::$p(x) => x,)*
+                    $(Self::$t(x) => x,)*
+                };
+                payload.validate(&ctx).map_err(|e| e.to_string())
             }
-            ProposalType::CreateProviderServiceRequest(p) => {
-                p.validate(&ctx).map_err(|e| e.to_string())
-            }
-            ProposalType::CreateUserServiceRequest(p) => {
-                p.validate(&ctx).map_err(|e| e.to_string())
-            }
-            ProposalType::CreateDelegatedBatchedMarkersProxy(p) => {
-                p.validate(&ctx).map_err(|e| e.to_string())
-            }
-            ProposalType::SetupCcPreapproval(p) => p.validate(&ctx).map_err(|e| e.to_string()),
-            ProposalType::SetupTokenPreapproval(p) => p.validate(&ctx).map_err(|e| e.to_string()),
-            ProposalType::Transfer(p) => p.validate(&ctx).map_err(|e| e.to_string()),
-            ProposalType::AcceptTransfer(p) => p.validate(&ctx).map_err(|e| e.to_string()),
-            ProposalType::SetupCouponReassignmentDelegation(p) => {
-                p.validate(&ctx).map_err(|e| e.to_string())
-            }
-            ProposalType::RevokeCouponReassignmentDelegation(p) => {
-                p.validate(&ctx).map_err(|e| e.to_string())
-            }
-            ProposalType::SetupMintingDelegation(p) => p.validate(&ctx).map_err(|e| e.to_string()),
-            ProposalType::AcceptExternalPartySetup(p) => {
-                p.validate(&ctx).map_err(|e| e.to_string())
-            }
-            ProposalType::Mint(p) => p.validate(&ctx).map_err(|e| e.to_string()),
-            ProposalType::Burn(p) => p.validate(&ctx).map_err(|e| e.to_string()),
-            ProposalType::OfferFreeCredential(p) => p.validate(&ctx).map_err(|e| e.to_string()),
-            ProposalType::OfferPaidCredential(p) => p.validate(&ctx).map_err(|e| e.to_string()),
-            ProposalType::AcceptFreeCredential(p) => p.validate(&ctx).map_err(|e| e.to_string()),
-            ProposalType::SetupUtility(p) => p.validate(&ctx).map_err(|e| e.to_string()),
-            ProposalType::SetProviderAppRewardBeneficiaries(p) => {
-                p.validate(&ctx).map_err(|e| e.to_string())
-            }
-            ProposalType::SetEnableResultContracts(p) => {
-                p.validate(&ctx).map_err(|e| e.to_string())
-            }
-            ProposalType::AcceptMintRequest(p) => p.validate(&ctx).map_err(|e| e.to_string()),
-            ProposalType::AcceptBurnRequest(p) => p.validate(&ctx).map_err(|e| e.to_string()),
-            ProposalType::CreateProviderConfiguration(p) => {
-                p.validate(&ctx).map_err(|e| e.to_string())
-            }
-            ProposalType::CreateRegistrarServiceRequest(p) => {
-                p.validate(&ctx).map_err(|e| e.to_string())
-            }
-            ProposalType::OnboardRegistrar(p) => p.validate(&ctx).map_err(|e| e.to_string()),
-            ProposalType::ProvisionInstrument(p) => p.validate(&ctx).map_err(|e| e.to_string()),
-            ProposalType::OnboardInstrumentIssuers(p) => {
-                p.validate(&ctx).map_err(|e| e.to_string())
-            }
-            ProposalType::OffboardInstrumentIssuers(p) => {
-                p.validate(&ctx).map_err(|e| e.to_string())
-            }
-        }
-    }
 
-    /// The generic propose payload — `None` for the two transfer variants,
-    /// which need runtime context (the registry choice context, the validity
-    /// window, and the on-chain sender party) and so go through their
-    /// wrapper structs (`TransferWithContext` /
-    /// `AcceptTransferWithContext`) rather than the payload itself.
-    pub fn grpc_payload(&self) -> Option<&dyn decman_lib::framework::GrpcPayload> {
-        match self {
-            ProposalType::Transfer(_) | ProposalType::AcceptTransfer(_) => None,
-            ProposalType::SetupCcPreapproval(p) => Some(p),
-            ProposalType::SetupTokenPreapproval(p) => Some(p),
-            ProposalType::GenericVote(p) => Some(p),
-            ProposalType::ProvisionProviderService(p) => Some(p),
-            ProposalType::SetupUtility(p) => Some(p),
-            ProposalType::CreateProviderServiceRequest(p) => Some(p),
-            ProposalType::CreateUserServiceRequest(p) => Some(p),
-            ProposalType::SetProviderAppRewardBeneficiaries(p) => Some(p),
-            ProposalType::SetupCouponReassignmentDelegation(p) => Some(p),
-            ProposalType::RevokeCouponReassignmentDelegation(p) => Some(p),
-            ProposalType::SetEnableResultContracts(p) => Some(p),
-            ProposalType::CreateDelegatedBatchedMarkersProxy(p) => Some(p),
-            ProposalType::SetupMintingDelegation(p) => Some(p),
-            ProposalType::AcceptExternalPartySetup(p) => Some(p),
-            ProposalType::Mint(p) => Some(p),
-            ProposalType::OfferFreeCredential(p) => Some(p),
-            ProposalType::OfferPaidCredential(p) => Some(p),
-            ProposalType::AcceptFreeCredential(p) => Some(p),
-            ProposalType::Burn(p) => Some(p),
-            ProposalType::AcceptMintRequest(p) => Some(p),
-            ProposalType::AcceptBurnRequest(p) => Some(p),
-            ProposalType::CreateProviderConfiguration(p) => Some(p),
-            ProposalType::CreateRegistrarServiceRequest(p) => Some(p),
-            ProposalType::OnboardRegistrar(p) => Some(p),
-            ProposalType::ProvisionInstrument(p) => Some(p),
-            ProposalType::OnboardInstrumentIssuers(p) => Some(p),
-            ProposalType::OffboardInstrumentIssuers(p) => Some(p),
+            /// The generic propose payload — `None` for the two transfer variants,
+            /// which need runtime context (the registry choice context, the validity
+            /// window, and the on-chain sender party) and so go through their
+            /// wrapper structs (`TransferWithContext` /
+            /// `AcceptTransferWithContext`) rather than the payload itself.
+            pub fn grpc_payload(&self) -> Option<&dyn decman_lib::framework::GrpcPayload> {
+                match self {
+                    $(Self::$p(x) => Some(x),)*
+                    $(Self::$t(_) => None,)*
+                }
+            }
         }
-    }
+    };
 }
+
+payload_projections!(
+    plain: [
+        SetupCcPreapproval,
+        SetupTokenPreapproval,
+        GenericVote,
+        ProvisionProviderService,
+        SetupUtility,
+        CreateProviderServiceRequest,
+        CreateUserServiceRequest,
+        SetProviderAppRewardBeneficiaries,
+        SetupCouponReassignmentDelegation,
+        RevokeCouponReassignmentDelegation,
+        SetEnableResultContracts,
+        CreateDelegatedBatchedMarkersProxy,
+        SetupMintingDelegation,
+        AcceptExternalPartySetup,
+        Mint,
+        OfferFreeCredential,
+        OfferPaidCredential,
+        AcceptFreeCredential,
+        Burn,
+        AcceptMintRequest,
+        AcceptBurnRequest,
+        CreateProviderConfiguration,
+        CreateRegistrarServiceRequest,
+        OnboardRegistrar,
+        ProvisionInstrument,
+        OnboardInstrumentIssuers,
+        OffboardInstrumentIssuers,
+    ],
+    transfer: [Transfer, AcceptTransfer],
+);
 
 /// Request to propose a governance domain action (creates proposal contract)
 #[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
@@ -652,13 +587,6 @@ pub struct DomainGovernanceAction {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<i64>,
 }
-
-// `ServiceRequestDetails`, `TransferProposalDetails`, and
-// `AcceptTransferDetails` now live in `decman_lib::catalog::types` (parsed by
-// `decman_lib::catalog::interpret::extract_proposal_info` and its detail
-// extractors) and are re-exported above so existing `crate::server::types::X`
-// paths — and the generated TypeScript names, which key off the Rust struct
-// name — keep resolving unchanged.
 
 /// Request to submit a confirmation for an action with structured type
 #[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
@@ -1154,36 +1082,6 @@ mod tests {
         assert_eq!(dec_party.as_str().unwrap(), dec_party_id_str);
     }
 
-    // `proposal_transfer_rejects_non_positive_amount` moved to
-    // `decman_lib::catalog::proposals::custody::tests` as
-    // `transfer_rejects_non_positive_amount_and_zero_window`, testing
-    // `Transfer::validate` directly.
-
-    // `proposal_onboard_instrument_issuers_rejects_empty_issuer_list`,
-    // `proposal_offboard_instrument_issuers_validates_rows`,
-    // `proposal_onboard_instrument_issuers_rejects_duplicate_issuers`,
-    // `proposal_provision_instrument_rejects_duplicate_initial_issuers`,
-    // `proposal_create_provider_configuration_rejects_claimless_self_issued_requirement`,
-    // and `proposal_provision_instrument_rejects_claimless_self_issued_requirement`
-    // moved to `decman_lib::catalog::proposals::utility::tests` as
-    // `onboard_instrument_issuers_rejects_empty_issuer_list`,
-    // `offboard_instrument_issuers_validates_rows`,
-    // `onboard_instrument_issuers_rejects_duplicate_issuers`,
-    // `provision_instrument_rejects_duplicate_initial_issuers`,
-    // `create_provider_configuration_rejects_claimless_self_issued_requirement`,
-    // and `provision_instrument_rejects_claimless_self_issued_requirement`,
-    // testing `OnboardInstrumentIssuers::validate` /
-    // `OffboardInstrumentIssuers::validate` / `ProvisionInstrument::validate` /
-    // `CreateProviderConfiguration::validate` directly.
-
-    // `setup_delegation_validate` moved to
-    // `decman_lib::catalog::proposals::rewards::tests`, testing
-    // `SetupCouponReassignmentDelegation::validate` /
-    // `RevokeCouponReassignmentDelegation::validate` directly.
-
-    // `validate_reward_beneficiaries_edge_cases` moved to
-    // `decman_lib::framework::validate::tests` with the validator itself.
-
     fn test_party(prefix: &str) -> anyhow::Result<CantonId> {
         CantonId::parse(&format!("{prefix}::1220{}", "ab".repeat(32)))
     }
@@ -1268,9 +1166,4 @@ mod tests {
         assert_eq!(back.provider, Some(test_party("prov")?));
         Ok(())
     }
-
-    // `setup_minting_delegation_rejects_a_non_future_expiry` moved to
-    // `decman_lib::catalog::proposals::rewards::tests`, testing
-    // `SetupMintingDelegation::validate` directly with a fixed `now_micros`
-    // in the `ValidationCtx` instead of the wall clock.
 }

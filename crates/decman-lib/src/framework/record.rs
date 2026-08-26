@@ -12,26 +12,25 @@
 //!
 //! * The **strict** family returns `Result<_, Error>` and is for callers that
 //!   want a decode failure to propagate: `field_party_id`, `field_decimal`,
-//!   `field_time`, `field_list_len`, and `field_party_list` (formerly
-//!   decman's `reward_automation.rs`), plus `extract_party`, `extract_party_id`,
-//!   `extract_text`, `extract_int64`, `extract_numeric`, `extract_contract_id`,
-//!   `extract_record`, `extract_list`, and `get_field` (formerly decman's
-//!   `action_serializer.rs`, which decoded a Ledger API `Value` rather than a
-//!   `Record`). Every error is `Error::Decode`, carrying the same message text
-//!   the decman `anyhow` versions produced.
+//!   `field_time`, `field_list_len`, `field_party_list`, `extract_party`,
+//!   `extract_party_id`, `extract_text`, `extract_int64`, `extract_numeric`,
+//!   `extract_contract_id`, `extract_record`, `extract_list`, and `get_field`.
+//!   Every error is `Error::Decode`.
 //! * The **lenient** family returns `Option` (or, for `field_optional_is_none`,
 //!   a fail-safe `bool`) and is for callers that treat a missing or
 //!   wrong-shaped field as "not present" rather than an error:
-//!   `field_optional_is_none` (formerly decman's `reward_automation.rs`);
-//!   `field_party`, `field_text`, `field_numeric`, and `field_timestamp`
-//!   (formerly decman's `queries.rs`); and the Set `Party`, `GenMap`, and
-//!   `RelTime` extractors `extract_party_set`, `extract_genmap_parties`,
-//!   `extract_optional_reltime`, and `extract_reltime` (formerly decman's
-//!   `queries.rs`, too).
+//!   `field_optional_is_none`, `field_party`, `field_text`, `field_numeric`,
+//!   `field_timestamp`, and the Set `Party`, `GenMap`, and `RelTime`
+//!   extractors `extract_party_set`, `extract_genmap_parties`,
+//!   `extract_optional_reltime`, and `extract_reltime`.
 //!
-//! Both families' internal traversal goes through [`record_field`] where the
-//! original did; the lenient accessors ported from `queries.rs` keep their own
-//! inline traversal unchanged, since they were not written against it.
+//! [`record_field`] is the shared label-lookup; `field_party_id`,
+//! `field_decimal`, `field_time`, `field_optional_is_none`,
+//! `field_list_len`, and `field_party_list` traverse through it, while
+//! `get_field` and the lenient `field_party`/`field_text`/`field_numeric`/
+//! `field_timestamp` keep their own inline traversal, and the `extract_*`
+//! helpers operate on a `&Value` directly (they never see the enclosing
+//! `Record`).
 
 use canton_common::decimal::DamlDecimal;
 use canton_proto_rs::com::daml::ledger::api::v2::{List, Record, Value, value};

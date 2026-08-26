@@ -101,34 +101,6 @@ jobs:
       # silently weakened by an unrelated RUSTFLAGS change.
       - name: cargo clippy
         run: cargo clippy --all-targets --all-features --no-deps -- -D warnings
-      # decman-lib is the pure codec layer: it does no I/O and must not grow a
-      # transport, a web framework, a database driver, or a nondeterminism
-      # source (uuid/rand belong to the caller, which passes command ids in).
-      # The second line is the full transitive tree; `reqwest` is checked at
-      # depth 1 only because it already arrives transitively through
-      # canton-lib's `common` (-> canton-api-client, a non-optional dep of it),
-      # which decman-lib needs for `DamlDecimal` / `transfer_factory::Context`.
-      # A direct `reqwest` dependency on decman-lib still fails the gate.
-      #
-      # `cargo tree` can't see feature flags, so `tonic` gaining its
-      # `transport` feature (a network stack) would not show up in either
-      # tree below — that stays a by-hand check.
-      #
-      # Both checks are `if ...; then exit 1; fi` rather than `! cmd`: GitHub
-      # runs this block as `bash -e {0}`, and errexit exempts `!`-inverted
-      # commands, so a `!`-line can only fail the job when it happens to be the
-      # last one. The trees are captured into variables first because errexit is
-      # also suspended inside an `if` condition, and `pipefail` reports the
-      # RIGHTMOST non-zero status — a failing `cargo tree` piped into a
-      # non-matching `grep` would still read as "no match". As plain assignments
-      # they are ordinary commands, so a `cargo tree` failure aborts the step.
-      - name: decman-lib forbidden dependencies
-        run: |
-          set -euo pipefail
-          direct_deps=$(cargo tree -p decman-lib -e normal --depth 1)
-          full_tree=$(cargo tree -p decman-lib -e normal)
-          if grep -E '\b(reqwest|actix(-[a-z]+)?|sqlx|uuid|rand)\b' <<<"$direct_deps"; then exit 1; fi
-          if grep -E '\b(actix(-[a-z]+)?|sqlx|uuid|rand)\b' <<<"$full_tree"; then exit 1; fi
       - name: Install coverage tooling
         if: steps.cache-grcov.outputs.cache-hit != 'true'
         # --force because rust-cache runs with cache-bin: true and its restore

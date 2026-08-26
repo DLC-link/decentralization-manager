@@ -1184,7 +1184,7 @@ mod tests {
 
     // ---- codec round trips ----
 
-    /// The Task 1 action fixtures minus the two AdditionalProposer variants
+    /// Every `ActionType` variant, minus the two AdditionalProposer variants
     /// (those only exist in the self-management form).
     fn vault_encodable_fixtures() -> Vec<ActionType> {
         vec![

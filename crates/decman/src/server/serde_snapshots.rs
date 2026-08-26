@@ -1,6 +1,6 @@
-//! Pins the HTTP-JSON shape of the two governance enums. The decman-lib
-//! extraction reshapes `ProposalType` to newtype variants and moves
-//! `ActionType` to the lib; these snapshots prove the wire JSON never moves.
+//! Pins the HTTP-JSON shape of the two governance enums — `ProposalType`'s
+//! newtype variants and decman-lib's `ActionType` — so the wire JSON never
+//! drifts.
 
 use canton_common::decimal::DamlDecimal;
 use common::api::{
