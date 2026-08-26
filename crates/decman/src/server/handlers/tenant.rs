@@ -35,8 +35,8 @@ use crate::{
     },
     workflow::external_party::{
         add_hosts::{
-            ExternalPartyAddHostsPayload, prepare_add_hosts, read_party_to_participant,
-            submit_add_hosts,
+            AddHostsError, ExternalPartyAddHostsPayload, prepare_add_hosts,
+            read_party_to_participant, submit_add_hosts,
         },
         keys::fingerprint_from_public_key,
         steps::{
@@ -297,10 +297,11 @@ pub async fn tenant_status(
     request_body = TenantAddHostsRequest,
     responses(
         (status = 200, description = "Unsigned add-hosts topology", body = TenantAddHostsPrepareResponse),
-        (status = 400, description = "Bad request", body = ErrorResponse),
+        (status = 400, description = "Bad request, or a host set this party cannot take", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 404, description = "This host does not host this party", body = ErrorResponse),
         (status = 409, description = "This host reads a different serial for the party", body = ErrorResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
+        (status = 500, description = "A Canton call failed on this host", body = ErrorResponse)
     )
 )]
 #[post("/v0/tenant/add-hosts/prepare")]
@@ -318,34 +319,9 @@ pub async fn tenant_add_hosts_prepare(
         });
     }
 
-    // Read first so a stale pin is a 409 the wallet can act on (re-read and
-    // retry), not a 500 that looks like this host is broken.
-    let current = match read_party_to_participant(&data.config, &body.party_id).await {
-        Ok(Some(current)) => current,
-        Ok(None) => {
-            return HttpResponse::NotFound().json(ErrorResponse {
-                error: format!("This host does not host external party {}", body.party_id),
-            });
-        }
-        Err(e) => {
-            tracing::error!("tenant add-hosts prepare: topology read failed: {e:#}");
-            return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to read the party's current topology: {e}"),
-            });
-        }
-    };
-    if current.serial != body.base_serial {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format!(
-                "This host reads serial {found} for {party}, not the {pinned} the request \
-                 pinned; re-read the party and retry",
-                found = current.serial,
-                party = body.party_id,
-                pinned = body.base_serial
-            ),
-        });
-    }
-
+    // `prepare_add_hosts` reads head state itself and reports *why* it refused,
+    // so there is no pre-read here: a second read would only widen the window in
+    // which the serial can move between the check and the build.
     match prepare_add_hosts(
         &data.config,
         &body.party_id,
@@ -368,12 +344,7 @@ pub async fn tenant_add_hosts_prepare(
                 .map(|tx| STANDARD.encode(tx))
                 .collect(),
         }),
-        Err(e) => {
-            tracing::error!("tenant add-hosts prepare: topology generation failed: {e:#}");
-            HttpResponse::BadRequest().json(ErrorResponse {
-                error: format!("Failed to prepare the add-hosts topology: {e}"),
-            })
-        }
+        Err(e) => add_hosts_error_response("prepare", e),
     }
 }
 
@@ -391,7 +362,9 @@ pub async fn tenant_add_hosts_prepare(
         (status = 202, description = "Submitted on this host", body = TenantAddHostsOnboardResponse),
         (status = 400, description = "Bad request, or topology that is not a plain add-hosts", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
-        (status = 500, description = "Submission failed on this participant", body = ErrorResponse)
+        (status = 404, description = "This host does not host this party", body = ErrorResponse),
+        (status = 409, description = "The pinned base serial has moved on this host", body = ErrorResponse),
+        (status = 500, description = "A Canton call failed on this host", body = ErrorResponse)
     )
 )]
 #[post("/v0/tenant/add-hosts/onboard")]
@@ -432,16 +405,9 @@ pub async fn tenant_add_hosts_onboard(
         signed_by: body.signed_by.clone(),
     };
 
-    // A rejection here is the caller's bundle failing validation against this
-    // host's own view, which is a 400 — not this host malfunctioning.
     let base_serial = match submit_add_hosts(&data.config, &bundle).await {
         Ok(serial) => serial,
-        Err(e) => {
-            tracing::error!("tenant add-hosts onboard: submission failed: {e:#}");
-            return HttpResponse::BadRequest().json(ErrorResponse {
-                error: format!("Failed to submit the add-hosts topology on this host: {e}"),
-            });
-        }
+        Err(e) => return add_hosts_error_response("onboard", e),
     };
 
     // Report this host's view. The serial advances only once the change is
@@ -499,6 +465,39 @@ fn decode_all(encoded: &[String], what: &str) -> std::result::Result<Vec<Vec<u8>
         .collect()
 }
 
+/// Map an [`AddHostsError`] onto the status code that tells the wallet what to
+/// do about it: re-read and retry (409), fix the request (400/404), or treat
+/// this host as unhealthy (500). Collapsing these into one code is the bug this
+/// exists to prevent.
+fn add_hosts_error_response(stage: &str, error: AddHostsError) -> HttpResponse {
+    match error {
+        AddHostsError::UnknownParty { .. } => {
+            tracing::info!("tenant add-hosts {stage}: {error}");
+            HttpResponse::NotFound().json(ErrorResponse {
+                error: error.to_string(),
+            })
+        }
+        AddHostsError::StaleSerial { .. } => {
+            tracing::info!("tenant add-hosts {stage}: {error}");
+            HttpResponse::Conflict().json(ErrorResponse {
+                error: error.to_string(),
+            })
+        }
+        AddHostsError::Invalid(_) => {
+            tracing::warn!("tenant add-hosts {stage}: refused the request: {error}");
+            HttpResponse::BadRequest().json(ErrorResponse {
+                error: error.to_string(),
+            })
+        }
+        AddHostsError::Canton(_) => {
+            tracing::error!("tenant add-hosts {stage}: Canton call failed: {error}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: error.to_string(),
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -531,13 +530,19 @@ mod tests {
         assert!(decoded.is_empty());
     }
 
+    /// A full namespace fingerprint — `CantonId` deserializes through
+    /// `Namespace::from_hex`, which refuses a truncated stub.
+    fn test_participant() -> String {
+        format!("participant-3::1220{}", "bb".repeat(32))
+    }
+
     /// The wallet crate mirrors these types, so the wire names must not drift.
     /// Anything renamed here fails to deserialize on the other end.
     #[test]
     fn add_hosts_request_keeps_its_wire_shape() {
         let json = serde_json::json!({
             "party_id": "alice::1220aa",
-            "new_hosts": ["participant-3::1220bb"],
+            "new_hosts": [test_participant()],
             "base_serial": 4,
         });
         let Ok(request) = serde_json::from_value::<TenantAddHostsRequest>(json) else {
@@ -564,5 +569,59 @@ mod tests {
             request.topology_transactions.len()
         );
         assert_eq!(request.signed_by, "1220aa");
+    }
+
+    /// The bug this guards: one status code for every failure sends the wallet
+    /// to the wrong remedy. A stale pin means "re-read and retry"; a refused
+    /// bundle means "fix your request"; a Canton failure means "this host is
+    /// unhealthy". They must not collapse.
+    #[test]
+    fn add_hosts_errors_map_to_distinct_status_codes() {
+        let cases = [
+            (
+                AddHostsError::UnknownParty {
+                    party: "alice::1220aa".to_string(),
+                },
+                actix_web::http::StatusCode::NOT_FOUND,
+            ),
+            (
+                AddHostsError::StaleSerial {
+                    party: "alice::1220aa".to_string(),
+                    pinned: 4,
+                    found: 5,
+                },
+                actix_web::http::StatusCode::CONFLICT,
+            ),
+            (
+                AddHostsError::Invalid(anyhow::anyhow!("drops current host")),
+                actix_web::http::StatusCode::BAD_REQUEST,
+            ),
+            (
+                AddHostsError::Canton(anyhow::anyhow!("AddTransactions RPC failed")),
+                actix_web::http::StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+        ];
+        for (error, expected) in cases {
+            let label = error.to_string();
+            assert_eq!(
+                add_hosts_error_response("prepare", error).status(),
+                expected,
+                "wrong status for {label}"
+            );
+        }
+    }
+
+    /// A stale-pin error must name both serials, or the wallet cannot tell what
+    /// to re-read to.
+    #[test]
+    fn stale_serial_names_both_serials() {
+        let message = AddHostsError::StaleSerial {
+            party: "alice::1220aa".to_string(),
+            pinned: 4,
+            found: 7,
+        }
+        .to_string();
+        assert!(message.contains('4'), "{message}");
+        assert!(message.contains('7'), "{message}");
     }
 }

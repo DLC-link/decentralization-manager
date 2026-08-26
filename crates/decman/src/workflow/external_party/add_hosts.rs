@@ -48,6 +48,37 @@ use crate::{
     workflow::{external_party::steps::party_query, topology},
 };
 
+/// Why an add-hosts call could not proceed.
+///
+/// The tenant endpoints map these onto status codes, and they cannot do that
+/// from an opaque `anyhow::Error`: a caller who pinned a serial that has since
+/// moved, a caller who submitted bytes this host refuses, and a Canton RPC that
+/// fell over are three different answers (409, 400, 500) with three different
+/// remedies. Collapsing them into one status sends the wallet to the wrong one.
+#[derive(Debug, thiserror::Error)]
+pub enum AddHostsError {
+    /// This node holds no authorized mapping for the party.
+    #[error("{party} has no authorized PartyToParticipant on this node")]
+    UnknownParty { party: String },
+    /// The pinned base serial disagrees with head state — the party moved under
+    /// the request. The caller re-reads and retries.
+    #[error(
+        "this host reads serial {found} for {party}, not the {pinned} the request pinned; \
+         re-read the party and retry"
+    )]
+    StaleSerial {
+        party: String,
+        pinned: u32,
+        found: u32,
+    },
+    /// The caller's host set or submitted bytes failed validation.
+    #[error("{0:#}")]
+    Invalid(#[source] anyhow::Error),
+    /// A Canton RPC failed, or this node could not read its own state.
+    #[error("{0:#}")]
+    Canton(#[source] anyhow::Error),
+}
+
 /// The unsigned add-hosts topology, plus the hash the party must sign for each
 /// transaction. The two vectors are index-aligned.
 ///
@@ -196,32 +227,41 @@ pub async fn prepare_add_hosts(
     party_id: &str,
     new_hosts: &[CantonId],
     base_serial: u32,
-) -> Result<PreparedAddHosts> {
-    let synchronizer_id = utils::get_synchronizer_id(config).await?;
+) -> std::result::Result<PreparedAddHosts, AddHostsError> {
+    let synchronizer_id = utils::get_synchronizer_id(config)
+        .await
+        .map_err(AddHostsError::Canton)?;
 
-    let Some(current) = read_party_to_participant(config, party_id).await? else {
-        anyhow::bail!(
-            "{party_id} has no authorized PartyToParticipant on this node; it cannot gain a host \
-             here"
-        );
+    let Some(current) = read_party_to_participant(config, party_id)
+        .await
+        .map_err(AddHostsError::Canton)?
+    else {
+        return Err(AddHostsError::UnknownParty {
+            party: party_id.to_string(),
+        });
     };
     if current.serial != base_serial {
-        anyhow::bail!(
-            "{party_id} is at serial {found} on this node, not the {base_serial} the request \
-             pinned; re-read the party and retry",
-            found = current.serial
-        );
+        return Err(AddHostsError::StaleSerial {
+            party: party_id.to_string(),
+            pinned: base_serial,
+            found: current.serial,
+        });
     }
 
-    let mapping = add_hosts_mapping(&current.mapping, new_hosts)?;
-    let next_serial = current.serial.checked_add(1).with_context(|| {
-        format!(
+    let mapping = add_hosts_mapping(&current.mapping, new_hosts).map_err(AddHostsError::Invalid)?;
+    let next_serial = current.serial.checked_add(1).ok_or_else(|| {
+        AddHostsError::Invalid(anyhow::anyhow!(
             "{party_id} is at serial {s}, which cannot be advanced",
             s = current.serial
-        )
+        ))
     })?;
 
-    let mut client = TopologyManagerWriteServiceClient::new(config.admin_channel().await?);
+    let mut client = TopologyManagerWriteServiceClient::new(
+        config
+            .admin_channel()
+            .await
+            .map_err(AddHostsError::Canton)?,
+    );
     let response = client
         .generate_transactions(tonic::Request::new(GenerateTransactionsRequest {
             proposals: vec![generate_transactions_request::Proposal {
@@ -237,11 +277,15 @@ pub async fn prepare_add_hosts(
             base_request: None,
         }))
         .await
-        .context("GenerateTransactions RPC failed")?
+        .map_err(|e| {
+            AddHostsError::Canton(anyhow::Error::new(e).context("GenerateTransactions RPC failed"))
+        })?
         .into_inner();
 
     if response.generated_transactions.is_empty() {
-        anyhow::bail!("GenerateTransactions returned no transactions for {party_id}");
+        return Err(AddHostsError::Canton(anyhow::anyhow!(
+            "GenerateTransactions returned no transactions for {party_id}"
+        )));
     }
 
     tracing::info!(
@@ -518,24 +562,39 @@ pub fn validate_add_hosts_topology(
 /// key touches anything — see [`validate_add_hosts_topology`].
 ///
 /// # Errors
-/// Returns an error if the party has no authorized mapping here, the bundle
-/// fails validation, or a topology RPC fails.
+/// [`AddHostsError::UnknownParty`] when this node holds no mapping,
+/// [`AddHostsError::StaleSerial`] when the pin has moved,
+/// [`AddHostsError::Invalid`] when the bundle fails validation, and
+/// [`AddHostsError::Canton`] when an RPC fails — so the caller can answer each
+/// differently.
 pub async fn submit_add_hosts(
     config: &NodeConfig,
     bundle: &ExternalPartyAddHostsPayload,
-) -> Result<u32> {
-    let Some(current) = read_party_to_participant(config, &bundle.party_id).await? else {
-        anyhow::bail!(
-            "{party} has no authorized PartyToParticipant on this node; it cannot gain a host \
-             here",
-            party = bundle.party_id
-        );
+) -> std::result::Result<u32, AddHostsError> {
+    let Some(current) = read_party_to_participant(config, &bundle.party_id)
+        .await
+        .map_err(AddHostsError::Canton)?
+    else {
+        return Err(AddHostsError::UnknownParty {
+            party: bundle.party_id.clone(),
+        });
     };
+    // Split out from the rest of validation: a pin that has moved is a race the
+    // caller resolves by re-reading, not malformed input.
+    if bundle.base_serial != current.serial {
+        return Err(AddHostsError::StaleSerial {
+            party: bundle.party_id.clone(),
+            pinned: bundle.base_serial,
+            found: current.serial,
+        });
+    }
 
     // Before this node's key goes anywhere near these bytes.
-    validate_add_hosts_topology(config, &current, bundle)?;
+    validate_add_hosts_topology(config, &current, bundle).map_err(AddHostsError::Invalid)?;
 
-    let synchronizer_id = utils::get_synchronizer_id(config).await?;
+    let synchronizer_id = utils::get_synchronizer_id(config)
+        .await
+        .map_err(AddHostsError::Canton)?;
     let store = topology::synchronizer_store_id(&synchronizer_id);
 
     let signed: Vec<SignedTopologyTransaction> = bundle
@@ -568,10 +627,16 @@ pub async fn submit_add_hosts(
         },
         "external-party add-hosts",
     )
-    .await?
+    .await
+    .map_err(AddHostsError::Canton)?
     .transactions;
 
-    let mut client = TopologyManagerWriteServiceClient::new(config.admin_channel().await?);
+    let mut client = TopologyManagerWriteServiceClient::new(
+        config
+            .admin_channel()
+            .await
+            .map_err(AddHostsError::Canton)?,
+    );
     client
         .add_transactions(tonic::Request::new(AddTransactionsRequest {
             transactions: co_signed,
@@ -580,7 +645,12 @@ pub async fn submit_add_hosts(
             wait_to_become_effective: None,
         }))
         .await
-        .context("AddTransactions RPC failed for external-party add-hosts")?;
+        .map_err(|e| {
+            AddHostsError::Canton(
+                anyhow::Error::new(e)
+                    .context("AddTransactions RPC failed for external-party add-hosts"),
+            )
+        })?;
 
     tracing::info!(
         party_id = %bundle.party_id,
