@@ -109,10 +109,22 @@ jobs:
       # canton-lib's `common` (-> canton-api-client, a non-optional dep of it),
       # which decman-lib needs for `DamlDecimal` / `transfer_factory::Context`.
       # A direct `reqwest` dependency on decman-lib still fails the gate.
+      #
+      # Both checks are `if ...; then exit 1; fi` rather than `! cmd`: GitHub
+      # runs this block as `bash -e {0}`, and errexit exempts `!`-inverted
+      # commands, so a `!`-line can only fail the job when it happens to be the
+      # last one. The trees are captured into variables first because errexit is
+      # also suspended inside an `if` condition, and `pipefail` reports the
+      # RIGHTMOST non-zero status — a failing `cargo tree` piped into a
+      # non-matching `grep` would still read as "no match". As plain assignments
+      # they are ordinary commands, so a `cargo tree` failure aborts the step.
       - name: decman-lib forbidden dependencies
         run: |
-          ! cargo tree -p decman-lib -e normal --depth 1 | grep -E '\b(reqwest|actix-web|sqlx|uuid|rand)\b'
-          ! cargo tree -p decman-lib -e normal | grep -E '\b(actix-web|sqlx|uuid|rand)\b'
+          set -euo pipefail
+          direct_deps=$(cargo tree -p decman-lib -e normal --depth 1)
+          full_tree=$(cargo tree -p decman-lib -e normal)
+          if grep -E '\b(reqwest|actix-web|sqlx|uuid|rand)\b' <<<"$direct_deps"; then exit 1; fi
+          if grep -E '\b(actix-web|sqlx|uuid|rand)\b' <<<"$full_tree"; then exit 1; fi
       - name: Install coverage tooling
         if: steps.cache-grcov.outputs.cache-hit != 'true'
         # --force because rust-cache runs with cache-bin: true and its restore
