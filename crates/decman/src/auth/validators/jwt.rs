@@ -684,7 +684,7 @@ mod tests {
         let principal = validator
             .validate(&token)
             .await
-            .map_err(|e| anyhow::anyhow!("expected Auth0 token to verify: {e:?}"))?;
+            .map_err(|e| anyhow::anyhow!("expected token with configured role claim to verify: {e:?}"))?;
         assert!(principal.has_role("decentralization-manager-admin"));
         assert!(principal.has_role("viewer"));
         Ok(())
