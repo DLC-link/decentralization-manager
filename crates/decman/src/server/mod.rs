@@ -941,18 +941,19 @@ pub async fn start_server(
             admin_role.clone().unwrap_or_default(),
         )))
     } else {
-        let no_top_level_config = config.keycloak.is_none();
+        let no_top_level_config = !config.has_top_level_idp();
         let no_party_creds = party_credentials.read().await.is_empty();
         if no_top_level_config && no_party_creds {
             tracing::warn!(
-                "No top-level Keycloak config (--keycloak-url/realm/client-id) and no \
-                 party credentials yet. Inbound auth will reject every request except \
-                 the first-run PUT /party-config bootstrap. Configure the IdP and \
-                 provision a party to make the node usable."
+                "No top-level IdP config (--keycloak-url/realm/client-id or \
+                 DECPM_AUTH0_DOMAIN/CLIENT_ID) and no party credentials yet. Inbound \
+                 auth will reject every request except the first-run PUT /party-config \
+                 bootstrap. Configure the IdP and provision a party to make the node \
+                 usable."
             );
         } else if no_top_level_config {
             tracing::info!(
-                "No top-level Keycloak config; trusting only issuers from \
+                "No top-level IdP config; trusting only issuers from \
                  party_credentials ({} configured).",
                 party_credentials.read().await.len()
             );
