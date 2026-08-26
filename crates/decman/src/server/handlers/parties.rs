@@ -140,6 +140,7 @@ pub async fn get_decentralized_parties(
     let party_creds = data.party_credentials.read().await.clone();
     match fetch_decentralized_parties(
         &data.config,
+        &data.db,
         Some(prefix.as_str()).filter(|s| !s.is_empty()),
         auth,
         &party_creds,
@@ -186,6 +187,7 @@ async fn refresh_and_cache_parties(data: &web::Data<AppState>, prefix: &str) {
     let party_creds = data.party_credentials.read().await.clone();
     match fetch_decentralized_parties(
         &data.config,
+        &data.db,
         Some(prefix).filter(|s| !s.is_empty()),
         auth,
         &party_creds,
@@ -682,15 +684,15 @@ pub async fn store_parties_to_db(
 /// Build the `list_party_to_participant` request used to discover this node's
 /// decentralized parties.
 ///
-/// `filter_participant` is always set to this node's participant id so the query
-/// is scoped to parties hosted here. Without it the synchronizer returns every
-/// party-to-participant mapping on the whole network, which on mainnet exceeds
-/// the gRPC decode limit. We only ever care about decentralized parties this
-/// node hosts, and every party we co-own lists our participant as a host, so the
-/// scope loses nothing. An optional party-id `prefix_filter` narrows on top.
+/// Exact `filter_party` values are the scalable path. Canton 3.5.12 pushes that
+/// filter into the topology store, while `filter_participant` is applied only
+/// after the store query. The participant filter still protects correctness,
+/// but an empty or prefix-only party filter can load the synchronizer-wide
+/// result before post-filtering and is reserved for the no-local-knowledge
+/// onboarding fallback.
 fn build_party_to_participant_request(
     synchronizer_id: &str,
-    prefix_filter: Option<&str>,
+    party_filter: Option<&str>,
     participant_id: &str,
 ) -> ListPartyToParticipantRequest {
     ListPartyToParticipantRequest {
@@ -707,7 +709,7 @@ fn build_party_to_participant_request(
             protocol_version: None,
             client_version: None,
         }),
-        filter_party: prefix_filter.unwrap_or_default().to_string(),
+        filter_party: party_filter.unwrap_or_default().to_string(),
         filter_participant: participant_id.to_string(),
     }
 }
@@ -740,18 +742,24 @@ fn build_decentralized_namespace_request(
     }
 }
 
-/// Return the configured decentralized party IDs matching the optional prefix.
+/// Union every decentralized party ID the node already knows locally.
 ///
-/// Party credentials are authoritative for an initialized node and let us use
-/// exact party filters instead of asking Canton to scan every party hosted by
-/// this participant.
-fn configured_party_filters(
+/// Credentials cover configured parties, workflow runs cover a party while it
+/// is being onboarded (before credentials exist), and cached rows preserve
+/// discovery after the originating workflow has been dismissed. Keeping all
+/// three sources prevents exact-filter discovery from hiding a newly added
+/// party on a node that already has credentials for another party.
+fn known_party_filters(
     party_credentials: &[PartyCredentials],
+    workflow_party_ids: impl IntoIterator<Item = String>,
+    cached_party_ids: impl IntoIterator<Item = String>,
     prefix_filter: Option<&str>,
 ) -> Vec<String> {
     let mut parties: Vec<_> = party_credentials
         .iter()
         .map(|credentials| credentials.dec_party_id.to_string())
+        .chain(workflow_party_ids)
+        .chain(cached_party_ids)
         .filter(|party_id| prefix_filter.is_none_or(|prefix| party_id.starts_with(prefix)))
         .collect();
     parties.sort();
@@ -762,6 +770,7 @@ fn configured_party_filters(
 /// Fetch decentralized parties from Canton topology and ledger APIs
 pub async fn fetch_decentralized_parties(
     config: &NodeConfig,
+    db: &SqlitePool,
     prefix_filter: Option<&str>,
     auth: Option<WorkflowAuth>,
     party_credentials: &[PartyCredentials],
@@ -775,15 +784,30 @@ pub async fn fetch_decentralized_parties(
 
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
 
-    // Prefer exact configured party IDs. On an uninitialized node there are no
-    // credentials yet, so fall back to participant-scoped discovery.
-    let party_filters: Vec<Option<String>> = if party_credentials.is_empty() {
+    let workflow_runs = db.get_visible_workflow_runs().await?;
+    let cached_parties = db.get_dec_parties_by_prefix("").await?;
+    let known_party_ids = known_party_filters(
+        party_credentials,
+        workflow_runs
+            .into_iter()
+            .filter_map(|run| run.dec_party_id.map(|party_id| party_id.to_string())),
+        cached_parties.into_iter().map(|party| party.party_id),
+        None,
+    );
+    let has_local_party_knowledge = !known_party_ids.is_empty();
+    let exact_party_filters: Vec<_> = known_party_ids
+        .into_iter()
+        .filter(|party_id| prefix_filter.is_none_or(|prefix| party_id.starts_with(prefix)))
+        .collect();
+
+    // Prefer exact IDs from every local source. Only a node that knows no
+    // matching party at all uses participant-scoped discovery; Canton applies
+    // that participant filter after loading topology rows, so this fallback is
+    // intentionally limited to bootstrap/onboarding.
+    let party_filters: Vec<Option<String>> = if !has_local_party_knowledge {
         vec![prefix_filter.map(str::to_string)]
     } else {
-        configured_party_filters(party_credentials, prefix_filter)
-            .into_iter()
-            .map(Some)
-            .collect()
+        exact_party_filters.into_iter().map(Some).collect()
     };
 
     let participant_id = config.participant_id().to_string();
@@ -1401,10 +1425,9 @@ mod tests {
     }
 
     #[test]
-    fn party_to_participant_request_scopes_to_local_participant() {
-        // The core of the mainnet fix: with no prefix filter the request must
-        // still be scoped to this participant, so it doesn't scan every party
-        // on the synchronizer and overflow the gRPC decode limit.
+    fn party_to_participant_fallback_scopes_to_local_participant() {
+        // The no-local-knowledge onboarding fallback has to use an empty party
+        // filter, but still post-filters the result to this participant.
         let request =
             build_party_to_participant_request("sync::physical", None, "participant::abc123");
 
@@ -1413,17 +1436,15 @@ mod tests {
     }
 
     #[test]
-    fn party_to_participant_request_composes_prefix_with_participant() {
-        // A caller-supplied party prefix must narrow on top of the participant
-        // scope, not replace it.
+    fn party_to_participant_request_uses_exact_party_and_participant() {
         let request = build_party_to_participant_request(
             "sync::physical",
-            Some("alice"),
+            Some("alice::namespace"),
             "participant::abc123",
         );
 
         assert_eq!(request.filter_participant, "participant::abc123");
-        assert_eq!(request.filter_party, "alice");
+        assert_eq!(request.filter_party, "alice::namespace");
     }
 
     #[test]
@@ -1435,9 +1456,10 @@ mod tests {
     }
 
     #[test]
-    fn configured_party_filters_are_exact_deduplicated_and_prefix_scoped() -> anyhow::Result<()> {
+    fn known_party_filters_union_all_sources_deduplicate_and_scope() -> anyhow::Result<()> {
         let namespace_a = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
         let namespace_b = "1220d5010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5893";
+        let namespace_c = "1220e6010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5894";
         let credentials = |party: &str, namespace: &str| -> anyhow::Result<PartyCredentials> {
             Ok(PartyCredentials {
                 dec_party_id: CantonId::parse(&format!("{party}::{namespace}"))?,
@@ -1448,19 +1470,32 @@ mod tests {
                 packages: Default::default(),
             })
         };
-        let cbtc = credentials("cbtc-network", namespace_a)?;
-        let parties = vec![
-            credentials("other-network", namespace_b)?,
-            cbtc.clone(),
-            cbtc,
+        let configured = credentials("cbtc-configured", namespace_a)?;
+        let parties = vec![configured.clone(), configured];
+        let workflow_ids = vec![
+            format!("cbtc-workflow::{namespace_b}"),
+            format!("cbtc-configured::{namespace_a}"),
+        ];
+        let cached_ids = vec![
+            format!("cbtc-cached::{namespace_c}"),
+            format!("other-network::{namespace_b}"),
         ];
 
         assert_eq!(
-            configured_party_filters(&parties, Some("cbtc-network")),
-            vec![format!("cbtc-network::{namespace_a}")]
+            known_party_filters(
+                &parties,
+                workflow_ids.clone(),
+                cached_ids.clone(),
+                Some("cbtc-")
+            ),
+            vec![
+                format!("cbtc-cached::{namespace_c}"),
+                format!("cbtc-configured::{namespace_a}"),
+                format!("cbtc-workflow::{namespace_b}"),
+            ]
         );
         assert_eq!(
-            configured_party_filters(&parties, Some("missing")),
+            known_party_filters(&parties, workflow_ids, cached_ids, Some("missing")),
             Vec::<String>::new()
         );
         Ok(())

@@ -1080,6 +1080,7 @@ pub async fn start_server(
 
         match handlers::fetch_decentralized_parties(
             &sync_config,
+            &sync_db,
             None,
             auth_snapshot,
             &creds_snapshot,
