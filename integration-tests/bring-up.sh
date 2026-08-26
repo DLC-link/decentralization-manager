@@ -43,8 +43,9 @@ teardown() {
     # the retry-loop subshells above were killed. Mirrors stop_canton_tunnels in
     # devnet.env.sh (see #142 for why bare `kill` on the loop PID is not enough).
     # KUBE_CONTEXT_DEVNET default must match the one in devnet.env.sh.
-    local _ctx="${KUBE_CONTEXT_DEVNET:-ieu-devnet}"
-    pkill -f "kubectl --context=$_ctx port-forward svc/participant-ibtc-devnet" 2>/dev/null || true
+    local _ctx="${KUBE_CONTEXT_DEVNET:-devnet}"
+    local _svc="${KUBE_CANTON_SVC:-participant}"
+    pkill -f "kubectl --context=$_ctx port-forward svc/$_svc" 2>/dev/null || true
 }
 
 if [[ "${1:-}" == "--teardown" ]]; then

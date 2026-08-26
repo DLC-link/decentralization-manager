@@ -177,6 +177,12 @@ test.describe.serial("governance happy path", () => {
   test("04 check peer DARs", async () => {
     await gotoTab(parts.p1, "Packages");
     await parts.p1.getByRole("button", { name: "Check Peer DARs" }).click();
+    // Narrow the table before asserting on it. The comparison view pages its
+    // rows 25 at a time and devnet vets 300+ packages, so `governance-core`
+    // sorts onto a later page and is never mounted — the count below sees 0 no
+    // matter how long it polls. Search filters comparison.local_packages ahead
+    // of pagination (PackagesPanel.tsx:92), so the matches land on page 1.
+    await parts.p1.getByPlaceholder("Search packages").fill("governance-core");
     // Comparison table renders one peer-status cell per package per peer
     // (data-testid="peer-dar-status", data-pkg, data-status), populated async
     // after /packages/compare-peers returns. Poll (NOT a one-shot count) until
