@@ -81,10 +81,10 @@ pub(crate) use types::*;
 // tests under `tests/` — both are separate crates that can only see `pub` items.
 pub use types::{
     AcceptTransferDetails, ActionType, AppRewardBeneficiary, BillingParams, BurnRequestsResponse,
-    ConfirmActionRequest, DomainGovernanceAction, ExecuteActionRequest, FarConfig,
-    GovernanceAction, GovernanceConfirmation, GovernanceResponse, HoldingInfo, HoldingsResponse,
-    MintRequestsResponse, PendingAction, ProposalType, ProposeActionRequest, ServiceRequestDetails,
-    TokenRequestInfo, TransferInstructionInfo, TransferInstructionStatus,
+    ConfirmActionRequest, DomainConfirmation, DomainGovernanceAction, ExecuteActionRequest,
+    FarConfig, GovernanceAction, GovernanceConfirmation, GovernanceResponse, HoldingInfo,
+    HoldingsResponse, MintRequestsResponse, PendingAction, ProposalType, ProposeActionRequest,
+    ServiceRequestDetails, TokenRequestInfo, TransferInstructionInfo, TransferInstructionStatus,
     TransferInstructionsResponse, TransferProposalDetails, VaultLimits,
 };
 
