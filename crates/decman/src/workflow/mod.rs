@@ -489,6 +489,11 @@ pub async fn start_peer(
                 // by post-onboarding workflows on this node.
                 match extract_party_id_from_p2p_payload(&payload) {
                     Ok(dec_party_id) => {
+                        if let Err(e) = db.write_run_party_id(&instance_name, &dec_party_id).await {
+                            tracing::error!(
+                                "Failed to persist party id {dec_party_id} on peer run: {e}"
+                            );
+                        }
                         if let Err(e) = onboarding::peer::copy_self_identity_for_party(
                             &db,
                             &instance_name,
