@@ -86,12 +86,9 @@ pub fn validate_future_micros(micros: i64, now_micros: i64, field: &str) -> Resu
 
 pub fn validate_positive_amount(amount: &DamlDecimal, field: &str) -> Result<(), Error> {
     // `DamlDecimal` itself doesn't implement `PartialOrd`; compare via the
-    // inner `rust_decimal::Decimal` returned by `value()` against a parsed
-    // zero so we don't need a direct dep on `rust_decimal`.
-    let zero = "0"
-        .parse::<DamlDecimal>()
-        .expect("'0' is a valid DamlDecimal")
-        .value();
+    // inner `rust_decimal::Decimal` returned by `value()` against the zero
+    // constant so we don't need a direct dep on `rust_decimal`.
+    let zero = DamlDecimal::ZERO.value();
     if amount.value() <= zero {
         return Err(Error::Validation(format!(
             "{field} must be strictly positive, got {amount}"
