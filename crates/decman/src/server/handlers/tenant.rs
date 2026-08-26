@@ -27,11 +27,17 @@ use crate::{
         AppState,
         middleware::require_tenant_api_key,
         types::{
-            ErrorResponse, TenantOnboardRequest, TenantOnboardResponse, TenantPrepareRequest,
-            TenantPrepareResponse, WorkflowProgress, WorkflowStatusResponse,
+            ErrorResponse, TenantAddHostsOnboardRequest, TenantAddHostsOnboardResponse,
+            TenantAddHostsPrepareResponse, TenantAddHostsRequest, TenantOnboardRequest,
+            TenantOnboardResponse, TenantPrepareRequest, TenantPrepareResponse, WorkflowProgress,
+            WorkflowStatusResponse,
         },
     },
     workflow::external_party::{
+        add_hosts::{
+            ExternalPartyAddHostsPayload, prepare_add_hosts, read_party_to_participant,
+            submit_add_hosts,
+        },
         keys::fingerprint_from_public_key,
         steps::{
             ExternalPartyAllocatePayload, HostOnboardingStatus, allocate_party,
@@ -279,6 +285,187 @@ pub async fn tenant_status(
 }
 
 // ============================================================================
+// Add hosts to an existing party (wallet-driven)
+// ============================================================================
+
+/// Prepare the serial-N+1 topology that adds hosts to an existing external
+/// party. Every host builds this independently and the wallet compares the
+/// bytes, which is why `base_serial` is pinned: a host whose head state has
+/// moved on refuses rather than returning different bytes from its peers.
+#[utoipa::path(
+    tag = "Tenant",
+    request_body = TenantAddHostsRequest,
+    responses(
+        (status = 200, description = "Unsigned add-hosts topology", body = TenantAddHostsPrepareResponse),
+        (status = 400, description = "Bad request", body = ErrorResponse),
+        (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 409, description = "This host reads a different serial for the party", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[post("/v0/tenant/add-hosts/prepare")]
+pub async fn tenant_add_hosts_prepare(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    body: web::Json<TenantAddHostsRequest>,
+) -> impl Responder {
+    if let Err(resp) = require_tenant_api_key(&http_req, &data) {
+        return resp;
+    }
+    if body.new_hosts.is_empty() {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: "new_hosts must name at least one participant to add".to_string(),
+        });
+    }
+
+    // Read first so a stale pin is a 409 the wallet can act on (re-read and
+    // retry), not a 500 that looks like this host is broken.
+    let current = match read_party_to_participant(&data.config, &body.party_id).await {
+        Ok(Some(current)) => current,
+        Ok(None) => {
+            return HttpResponse::NotFound().json(ErrorResponse {
+                error: format!("This host does not host external party {}", body.party_id),
+            });
+        }
+        Err(e) => {
+            tracing::error!("tenant add-hosts prepare: topology read failed: {e:#}");
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to read the party's current topology: {e}"),
+            });
+        }
+    };
+    if current.serial != body.base_serial {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!(
+                "This host reads serial {found} for {party}, not the {pinned} the request \
+                 pinned; re-read the party and retry",
+                found = current.serial,
+                party = body.party_id,
+                pinned = body.base_serial
+            ),
+        });
+    }
+
+    match prepare_add_hosts(
+        &data.config,
+        &body.party_id,
+        &body.new_hosts,
+        body.base_serial,
+    )
+    .await
+    {
+        Ok(prep) => HttpResponse::Ok().json(TenantAddHostsPrepareResponse {
+            party_id: prep.party_id,
+            serial: prep.serial,
+            transaction_hashes: prep
+                .transaction_hashes
+                .iter()
+                .map(|h| STANDARD.encode(h))
+                .collect(),
+            topology_transactions: prep
+                .topology_transactions
+                .iter()
+                .map(|tx| STANDARD.encode(tx))
+                .collect(),
+        }),
+        Err(e) => {
+            tracing::error!("tenant add-hosts prepare: topology generation failed: {e:#}");
+            HttpResponse::BadRequest().json(ErrorResponse {
+                error: format!("Failed to prepare the add-hosts topology: {e}"),
+            })
+        }
+    }
+}
+
+/// Submit the wallet-signed add-hosts topology on THIS host. The wallet calls
+/// this on every host that must authorize; no host relays to another.
+/// Idempotent, so a wallet may safely retry a host.
+///
+/// The bundle is validated against this host's own head-state read before its
+/// topology key co-signs anything — the party already exists and already holds
+/// contracts, so a forged serial N+1 could otherwise evict its current hosts.
+#[utoipa::path(
+    tag = "Tenant",
+    request_body = TenantAddHostsOnboardRequest,
+    responses(
+        (status = 202, description = "Submitted on this host", body = TenantAddHostsOnboardResponse),
+        (status = 400, description = "Bad request, or topology that is not a plain add-hosts", body = ErrorResponse),
+        (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 500, description = "Submission failed on this participant", body = ErrorResponse)
+    )
+)]
+#[post("/v0/tenant/add-hosts/onboard")]
+pub async fn tenant_add_hosts_onboard(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    body: web::Json<TenantAddHostsOnboardRequest>,
+) -> impl Responder {
+    if let Err(resp) = require_tenant_api_key(&http_req, &data) {
+        return resp;
+    }
+
+    let topology_transactions =
+        match decode_all(&body.topology_transactions, "topology transaction") {
+            Ok(v) => v,
+            Err(resp) => return resp,
+        };
+    let signatures = match decode_all(&body.signatures, "signature") {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    if signatures.len() != topology_transactions.len() {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: format!(
+                "expected one signature per topology transaction, got {sigs} signature(s) for \
+                 {txs} transaction(s)",
+                sigs = signatures.len(),
+                txs = topology_transactions.len()
+            ),
+        });
+    }
+
+    let bundle = ExternalPartyAddHostsPayload {
+        party_id: body.party_id.clone(),
+        base_serial: body.base_serial,
+        topology_transactions,
+        signatures,
+        signed_by: body.signed_by.clone(),
+    };
+
+    // A rejection here is the caller's bundle failing validation against this
+    // host's own view, which is a 400 — not this host malfunctioning.
+    let base_serial = match submit_add_hosts(&data.config, &bundle).await {
+        Ok(serial) => serial,
+        Err(e) => {
+            tracing::error!("tenant add-hosts onboard: submission failed: {e:#}");
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                error: format!("Failed to submit the add-hosts topology on this host: {e}"),
+            });
+        }
+    };
+
+    // Report this host's view. The serial advances only once the change is
+    // authorized; while it is still a proposal the read returns the base serial.
+    let (status, serial) = match read_party_to_participant(&data.config, &body.party_id).await {
+        Ok(Some(current)) if current.serial > base_serial => {
+            (WorkflowProgress::Completed, current.serial)
+        }
+        Ok(Some(current)) => (WorkflowProgress::InProgress, current.serial),
+        Ok(None) => (WorkflowProgress::InProgress, base_serial),
+        Err(e) => {
+            tracing::warn!("tenant add-hosts onboard: post-submit status read failed: {e:#}");
+            (WorkflowProgress::InProgress, base_serial)
+        }
+    };
+
+    HttpResponse::Accepted().json(TenantAddHostsOnboardResponse {
+        status,
+        party_id: body.party_id.clone(),
+        serial,
+    })
+}
+
+// ============================================================================
 // Helpers
 // ============================================================================
 
@@ -295,4 +482,87 @@ fn decode_public_key(encoded: &str) -> std::result::Result<[u8; 32], HttpRespons
             error: format!("public_key must be 32 bytes, got {len}", len = b.len()),
         })
     })
+}
+
+/// Base64-decode every entry of `encoded`, or the 400 response to return.
+/// `what` names the field in the error.
+fn decode_all(encoded: &[String], what: &str) -> std::result::Result<Vec<Vec<u8>>, HttpResponse> {
+    encoded
+        .iter()
+        .map(|value| {
+            STANDARD.decode(value).map_err(|e| {
+                HttpResponse::BadRequest().json(ErrorResponse {
+                    error: format!("{what} is not valid base64: {e}"),
+                })
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_all_accepts_well_formed_base64() {
+        let encoded = vec![STANDARD.encode([1u8, 2, 3]), STANDARD.encode([4u8, 5])];
+        let Ok(decoded) = decode_all(&encoded, "signature") else {
+            panic!("well-formed base64 must decode");
+        };
+        assert_eq!(decoded, vec![vec![1u8, 2, 3], vec![4u8, 5]]);
+    }
+
+    /// One bad entry fails the whole batch rather than being silently dropped —
+    /// a dropped entry would break the index alignment the signatures rely on.
+    #[test]
+    fn decode_all_rejects_the_whole_batch_on_one_bad_entry() {
+        let encoded = vec![STANDARD.encode([1u8]), "not base64!".to_string()];
+        assert!(
+            decode_all(&encoded, "signature").is_err(),
+            "a batch with an undecodable entry must be refused whole"
+        );
+    }
+
+    #[test]
+    fn decode_all_maps_an_empty_input_to_an_empty_batch() {
+        let Ok(decoded) = decode_all(&[], "signature") else {
+            panic!("an empty batch must decode");
+        };
+        assert!(decoded.is_empty());
+    }
+
+    /// The wallet crate mirrors these types, so the wire names must not drift.
+    /// Anything renamed here fails to deserialize on the other end.
+    #[test]
+    fn add_hosts_request_keeps_its_wire_shape() {
+        let json = serde_json::json!({
+            "party_id": "alice::1220aa",
+            "new_hosts": ["participant-3::1220bb"],
+            "base_serial": 4,
+        });
+        let Ok(request) = serde_json::from_value::<TenantAddHostsRequest>(json) else {
+            panic!("the documented add-hosts request shape must deserialize");
+        };
+        assert_eq!(request.base_serial, 4);
+        assert_eq!(request.new_hosts.len(), 1);
+    }
+
+    #[test]
+    fn add_hosts_onboard_request_keeps_its_wire_shape() {
+        let json = serde_json::json!({
+            "party_id": "alice::1220aa",
+            "base_serial": 4,
+            "topology_transactions": ["AQID"],
+            "signatures": ["BAU="],
+            "signed_by": "1220aa",
+        });
+        let Ok(request) = serde_json::from_value::<TenantAddHostsOnboardRequest>(json) else {
+            panic!("the documented add-hosts onboard shape must deserialize");
+        };
+        assert_eq!(
+            request.signatures.len(),
+            request.topology_transactions.len()
+        );
+        assert_eq!(request.signed_by, "1220aa");
+    }
 }

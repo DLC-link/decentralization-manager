@@ -21,14 +21,16 @@
 
 use anyhow::Context;
 use canton_proto_rs::com::digitalasset::canton::{
+    crypto::v30::{Signature, SignatureFormat, SigningAlgorithmSpec},
     protocol::v30::{
-        PartyToParticipant, TopologyMapping, TopologyTransaction,
+        PartyToParticipant, SignedTopologyTransaction, TopologyMapping, TopologyTransaction,
         enums::{ParticipantPermission, TopologyChangeOp},
         party_to_participant::{HostingParticipant, hosting_participant},
         topology_mapping,
     },
     topology::admin::v30::{
-        GenerateTransactionsRequest, ListPartyToParticipantRequest, generate_transactions_request,
+        AddTransactionsRequest, GenerateTransactionsRequest, ListPartyToParticipantRequest,
+        SignTransactionsRequest, generate_transactions_request,
         list_party_to_participant_response::result::Item as P2pItem,
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
         topology_manager_write_service_client::TopologyManagerWriteServiceClient,
@@ -502,6 +504,91 @@ pub fn validate_add_hosts_topology(
     }
 
     Ok(())
+}
+
+/// Co-sign the wallet's add-hosts bundle with this node's own topology key and
+/// submit it to this participant's synchronizer store.
+///
+/// Mirrors [`super::steps::allocate_party`], including the idempotence the
+/// wallet relies on: this host submits only its own authorization, Canton
+/// accumulates the rest, and re-submitting an identical transaction is a no-op,
+/// so a wallet retry converges instead of diverging.
+///
+/// The topology is validated against this node's own head-state read before its
+/// key touches anything — see [`validate_add_hosts_topology`].
+///
+/// # Errors
+/// Returns an error if the party has no authorized mapping here, the bundle
+/// fails validation, or a topology RPC fails.
+pub async fn submit_add_hosts(
+    config: &NodeConfig,
+    bundle: &ExternalPartyAddHostsPayload,
+) -> Result<u32> {
+    let Some(current) = read_party_to_participant(config, &bundle.party_id).await? else {
+        anyhow::bail!(
+            "{party} has no authorized PartyToParticipant on this node; it cannot gain a host \
+             here",
+            party = bundle.party_id
+        );
+    };
+
+    // Before this node's key goes anywhere near these bytes.
+    validate_add_hosts_topology(config, &current, bundle)?;
+
+    let synchronizer_id = utils::get_synchronizer_id(config).await?;
+    let store = topology::synchronizer_store_id(&synchronizer_id);
+
+    let signed: Vec<SignedTopologyTransaction> = bundle
+        .topology_transactions
+        .iter()
+        .zip(&bundle.signatures)
+        .map(|(transaction, signature)| SignedTopologyTransaction {
+            transaction: transaction.clone(),
+            signatures: vec![Signature {
+                format: SignatureFormat::Concat as i32,
+                signature: signature.clone(),
+                signed_by: bundle.signed_by.clone(),
+                signing_algorithm_spec: SigningAlgorithmSpec::Ed25519 as i32,
+                signature_delegation: None,
+            }],
+            proposal: true,
+            multi_transaction_signatures: vec![],
+        })
+        .collect();
+
+    // Empty `signed_by` lets the node pick its own key, matching how the
+    // onboarding path and the dec-party workflows call this.
+    let co_signed = topology::sign_transactions_with_topology_retry(
+        config,
+        SignTransactionsRequest {
+            transactions: signed,
+            signed_by: vec![],
+            store: Some(store.clone()),
+            force_flags: vec![],
+        },
+        "external-party add-hosts",
+    )
+    .await?
+    .transactions;
+
+    let mut client = TopologyManagerWriteServiceClient::new(config.admin_channel().await?);
+    client
+        .add_transactions(tonic::Request::new(AddTransactionsRequest {
+            transactions: co_signed,
+            force_changes: vec![],
+            store: Some(store),
+            wait_to_become_effective: None,
+        }))
+        .await
+        .context("AddTransactions RPC failed for external-party add-hosts")?;
+
+    tracing::info!(
+        party_id = %bundle.party_id,
+        base_serial = current.serial,
+        "external-party: add-hosts topology submitted on this host"
+    );
+
+    Ok(current.serial)
 }
 
 #[cfg(test)]
