@@ -501,6 +501,10 @@ impl Default for CantonConfig {
 }
 
 impl NodeConfig {
+    pub fn has_top_level_idp(&self) -> bool {
+        self.keycloak.is_some() || self.auth0.is_some()
+    }
+
     /// Create a NodeConfig with the given root directory
     pub fn with_root_dir<P: AsRef<Path>>(mut self, root_dir: P) -> Self {
         self.root_dir = root_dir.as_ref().to_path_buf();
@@ -880,6 +884,41 @@ mod tests {
             assert!(defaults.url.is_empty());
             assert!(defaults.realm.is_empty());
         }
+    }
+
+    fn auth0_config() -> Auth0Config {
+        Auth0Config {
+            domain: "tenant.eu.auth0.com".to_string(),
+            client_id: "spa-client-id".to_string(),
+            audience: Some("https://decman-api.example".to_string()),
+        }
+    }
+
+    #[test]
+    fn has_top_level_idp_is_false_when_neither_provider_is_set() {
+        assert!(!NodeConfig::default().has_top_level_idp());
+    }
+
+    #[test]
+    fn has_top_level_idp_accepts_a_keycloak_only_node() {
+        let config = NodeConfig {
+            keycloak: Some(KeycloakConfig::default()),
+            auth0: None,
+            ..NodeConfig::default()
+        };
+
+        assert!(config.has_top_level_idp());
+    }
+
+    #[test]
+    fn has_top_level_idp_accepts_an_auth0_only_node() {
+        let config = NodeConfig {
+            keycloak: None,
+            auth0: Some(auth0_config()),
+            ..NodeConfig::default()
+        };
+
+        assert!(config.has_top_level_idp());
     }
 
     #[test]
