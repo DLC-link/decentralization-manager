@@ -255,6 +255,18 @@ impl JwtValidator {
                 }
             }
         }
+        // Auth0 RBAC permissions, emitted when the API has "Add Permissions in
+        // the Access Token" enabled. Unlike `scope`, Auth0 does not filter this
+        // claim by the scopes the client requested, so an assigned permission
+        // reaches the token with no post-login Action. Read from the flattened
+        // map rather than a typed field so a provider that emits a
+        // differently-shaped `permissions` claim contributes no roles instead
+        // of failing the whole token decode.
+        if let Some(value) = claims.additional.get("permissions")
+            && let Ok(permissions) = serde_json::from_value::<Vec<String>>(value.clone())
+        {
+            flat_roles.extend(permissions);
+        }
         let roles = collect_roles(
             claims.realm_access.as_ref(),
             Some(&flat_roles),
@@ -893,6 +905,93 @@ mod tests {
             validator.validate("not.a.jwt").await,
             Err(ValidationError::MalformedToken)
         ));
+        Ok(())
+    }
+
+    /// Auth0 emits `permissions` when the API has "Add Permissions in the
+    /// Access Token" enabled, and does not filter it by the scopes the client
+    /// requested. Reading it is what lets an RBAC-assigned admin role reach
+    /// `require_admin` with no post-login Action and no custom claim.
+    #[tokio::test]
+    async fn accepts_auth0_permissions_claim() -> anyhow::Result<()> {
+        let (_server, validator, issuer) = setup().await;
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(TEST_KID.to_string());
+        let token = sign(
+            &header,
+            &json!({
+                "iss": issuer,
+                "sub": "auth0|operator",
+                "azp": "decman",
+                "exp": unix_now()? + 3600,
+                "scope": "openid profile email",
+                "permissions": ["decman-admin", "viewer"],
+            }),
+        )?;
+
+        let principal = validator
+            .validate(&token)
+            .await
+            .map_err(|e| anyhow::anyhow!("expected permissions token to verify: {e:?}"))?;
+        assert!(principal.has_role("decman-admin"));
+        assert!(principal.has_role("viewer"));
+        // The default scopes still land as roles, so nothing regresses for a
+        // provider that carries roles in `scope`.
+        assert!(principal.has_role("openid"));
+        Ok(())
+    }
+
+    /// `permissions` is read out of the flattened claim map, not a typed field,
+    /// precisely so a provider that emits a different shape under that name
+    /// contributes no roles rather than failing the whole token decode. A hard
+    /// failure here would lock every user out of an otherwise healthy node.
+    #[tokio::test]
+    async fn malformed_permissions_claim_still_verifies() -> anyhow::Result<()> {
+        let (_server, validator, issuer) = setup().await;
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(TEST_KID.to_string());
+        let token = sign(
+            &header,
+            &json!({
+                "iss": issuer,
+                "sub": "auth0|operator",
+                "azp": "decman",
+                "exp": unix_now()? + 3600,
+                "permissions": [{ "permission_name": "decman-admin" }],
+            }),
+        )?;
+
+        let principal = validator.validate(&token).await.map_err(|e| {
+            anyhow::anyhow!("a malformed permissions claim must not fail the token: {e:?}")
+        })?;
+        assert!(!principal.has_role("decman-admin"));
+        assert!(principal.roles.is_empty());
+        Ok(())
+    }
+
+    /// A role held in both `permissions` and `scope` must not appear twice.
+    #[tokio::test]
+    async fn permissions_and_scope_roles_are_deduped() -> anyhow::Result<()> {
+        let (_server, validator, issuer) = setup().await;
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(TEST_KID.to_string());
+        let token = sign(
+            &header,
+            &json!({
+                "iss": issuer,
+                "sub": "auth0|operator",
+                "azp": "decman",
+                "exp": unix_now()? + 3600,
+                "scope": "decman-admin",
+                "permissions": ["decman-admin"],
+            }),
+        )?;
+
+        let principal = validator
+            .validate(&token)
+            .await
+            .map_err(|e| anyhow::anyhow!("expected token to verify: {e:?}"))?;
+        assert_eq!(principal.roles, vec!["decman-admin".to_string()]);
         Ok(())
     }
 }
