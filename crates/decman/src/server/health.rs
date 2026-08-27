@@ -7,6 +7,9 @@ use crate::{
     server::ConnectionStatus,
 };
 
+// `WorkflowInfo` now lives in the shared `common` crate (consumed by both this
+// server and the `decman-cli` client). Re-exported here so the existing
+// `crate::server::health::WorkflowInfo` path keeps working.
 pub use common::types::WorkflowInfo;
 
 /// Health report a node returns in response to a `Health` Noise message.
