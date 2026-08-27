@@ -16,11 +16,11 @@
 //! to [`framework::commands::build_propose`]:
 //!
 //! ```
-//! use canton_proto_rs::com::daml::ledger::api::v2::Value;
-//! use common::canton_id::CantonId;
 //! use decman_lib::Error;
+//! use decman_lib::canton_proto_rs::com::daml::ledger::api::v2::Value;
 //! use decman_lib::catalog::commands::build_confirm_proposal;
-//! use decman_lib::catalog::interpret::parse_confirmation;
+//! use decman_lib::catalog::interpret::parse_domain_confirmation;
+//! use decman_lib::common::canton_id::CantonId;
 //! use decman_lib::framework::commands::build_propose;
 //! use decman_lib::framework::encode::{field, make_record, make_text};
 //! use decman_lib::framework::{
@@ -58,9 +58,12 @@
 //!     .unwrap();
 //! assert_eq!(commands.act_as, vec![member.to_string()]);
 //!
-//! // Read side: a Ledger API `CreatedEvent` decodes to a typed
-//! // `ParsedConfirmation`; an unrecognized shape comes back `None`.
-//! let _ = parse_confirmation(&Default::default());
+//! // Read side: a custom action's confirmations are `GovernanceConfirmation`
+//! // contracts, which carry no inline action. Decode their created events
+//! // with `parse_domain_confirmation`. (`parse_confirmation` reads only the
+//! // vault and self shapes, which embed the action, and returns `None` for
+//! // these.)
+//! let _ = parse_domain_confirmation(&Default::default());
 //!
 //! // By cid: once a proposal's contract id is known (e.g. from
 //! // `first_created_contract_id` on the propose transaction), confirm it
@@ -74,3 +77,10 @@ pub mod error;
 pub mod framework;
 
 pub use error::Error;
+
+// These crates appear in the public signatures. The re-exports let an
+// integrator name their types without a direct dependency pinned to the
+// same git revision.
+pub use canton_common;
+pub use canton_proto_rs;
+pub use common;
