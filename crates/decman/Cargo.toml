@@ -59,6 +59,7 @@ hyper-noise = { workspace = true }
 jsonwebtoken = { workspace = true }
 mime_guess = { workspace = true }
 p256 = { workspace = true }
+prometheus = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
 reqwest = { version = "0.13", features = ["form", "json"] }

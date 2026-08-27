@@ -83,10 +83,10 @@ pub(crate) use types::*;
 // tests under `tests/` — both are separate crates that can only see `pub` items.
 pub use types::{
     AcceptTransferDetails, ActionType, AppRewardBeneficiary, BillingParams, BurnRequestsResponse,
-    ConfirmActionRequest, DomainGovernanceAction, ExecuteActionRequest, FarConfig,
-    GovernanceAction, GovernanceConfirmation, GovernanceResponse, HoldingInfo, HoldingsResponse,
-    MintRequestsResponse, PendingAction, ProposalType, ProposeActionRequest, ServiceRequestDetails,
-    TokenRequestInfo, TransferInstructionInfo, TransferInstructionStatus,
+    ConfirmActionRequest, DomainConfirmation, DomainGovernanceAction, ExecuteActionRequest,
+    FarConfig, GovernanceAction, GovernanceConfirmation, GovernanceResponse, HoldingInfo,
+    HoldingsResponse, MintRequestsResponse, PendingAction, ProposalType, ProposeActionRequest,
+    ServiceRequestDetails, TokenRequestInfo, TransferInstructionInfo, TransferInstructionStatus,
     TransferInstructionsResponse, TransferProposalDetails, VaultLimits,
 };
 
@@ -148,6 +148,36 @@ pub struct AppState {
     /// startup so its connection pool / keep-alives are reused across
     /// requests instead of paying TCP+TLS setup on every call.
     pub http_client: reqwest::Client,
+}
+
+#[cfg(test)]
+impl AppState {
+    /// An `AppState` on an in-memory database, for tests that need one to reach
+    /// the code under test. Every field a test cares about is `auth`; the rest
+    /// are the cheapest value that satisfies the type.
+    pub(crate) async fn for_test(
+        auth: Option<crate::auth::WorkflowAuth>,
+    ) -> anyhow::Result<actix_web::web::Data<Self>> {
+        Ok(actix_web::web::Data::new(Self {
+            db: SqlitePool::connect("sqlite::memory:").await?,
+            config: NodeConfig::default(),
+            peer_status: Arc::new(RwLock::new(HashMap::new())),
+            last_seen: Arc::new(RwLock::new(HashMap::new())),
+            peer_job_sender: mpsc::unbounded_channel().0,
+            workflows: WorkflowRegistry::new(),
+            pending_invitations: Arc::new(RwLock::new(Vec::new())),
+            auth: Arc::new(RwLock::new(auth)),
+            token_validator: crate::auth::TokenValidator::Mock(Arc::new(
+                crate::auth::MockValidator::new("decman-admin".to_string()),
+            )),
+            admin_role: None,
+            party_credentials: Arc::new(RwLock::new(Vec::new())),
+            bootstrap_mu: Arc::new(Mutex::new(())),
+            test_mode: true,
+            refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
+            http_client: reqwest::Client::new(),
+        }))
+    }
 }
 
 // The previous `ListenerControl` struct collapsed to a single `Arc<AtomicBool>`
@@ -856,6 +886,7 @@ pub async fn start_server(
     config: NodeConfig,
     db: SqlitePool,
     admin_role: Option<String>,
+    jwt_role_claim: Option<String>,
     allowed_origin: Option<String>,
 ) -> Result {
     // Fail fast before any setup: the runtime `--insecure` flag must never be
@@ -943,18 +974,19 @@ pub async fn start_server(
             admin_role.clone().unwrap_or_default(),
         )))
     } else {
-        let no_top_level_config = config.keycloak.is_none();
+        let no_top_level_config = !config.has_top_level_idp();
         let no_party_creds = party_credentials.read().await.is_empty();
         if no_top_level_config && no_party_creds {
             tracing::warn!(
-                "No top-level Keycloak config (--keycloak-url/realm/client-id) and no \
-                 party credentials yet. Inbound auth will reject every request except \
-                 the first-run PUT /party-config bootstrap. Configure the IdP and \
-                 provision a party to make the node usable."
+                "No top-level IdP config (--keycloak-url/realm/client-id or \
+                 DECPM_AUTH0_DOMAIN/CLIENT_ID) and no party credentials yet. Inbound \
+                 auth will reject every request except the first-run PUT /party-config \
+                 bootstrap. Configure the IdP and provision a party to make the node \
+                 usable."
             );
         } else if no_top_level_config {
             tracing::info!(
-                "No top-level Keycloak config; trusting only issuers from \
+                "No top-level IdP config; trusting only issuers from \
                  party_credentials ({} configured).",
                 party_credentials.read().await.len()
             );
@@ -962,6 +994,7 @@ pub async fn start_server(
         TokenValidator::Jwt(Arc::new(JwtValidator::new(
             config.keycloak.clone(),
             config.auth0.clone(),
+            jwt_role_claim,
             party_credentials.clone(),
             http_client.clone(),
         )))
@@ -1032,24 +1065,32 @@ pub async fn start_server(
         workflows: workflows.clone(),
         peer_job_sender: peer_job_sender.clone(),
     };
-    tokio::spawn(async move {
-        run_heartbeat(
-            heartbeat_config,
-            heartbeat_db,
-            heartbeat_status,
-            heartbeat_last_seen,
-            heartbeat_triggers,
-        )
-        .await;
-    });
+    spawn_supervised(
+        "heartbeat",
+        "peer liveness stops updating until this node restarts",
+        async move {
+            run_heartbeat(
+                heartbeat_config,
+                heartbeat_db,
+                heartbeat_status,
+                heartbeat_last_seen,
+                heartbeat_triggers,
+            )
+            .await;
+        },
+    );
 
     // Background task: CIP-104 Mode A reward-assignment automation. Clone the
     // existing `web::Data<AppState>` (an Arc) so the loop shares the SAME state —
     // live party credentials, auth, config — never a fresh AppState.
     let reward_automation_state = app_state.clone();
-    tokio::spawn(async move {
-        reward_automation::run_reward_automation_loop(reward_automation_state).await;
-    });
+    spawn_supervised(
+        "reward automation",
+        "coupons will expire unassigned until this node restarts",
+        async move {
+            reward_automation::run_reward_automation_loop(reward_automation_state).await;
+        },
+    );
 
     // Single peer-job listener: drains the queue and spawns one
     // `workflow::start_peer` per accepted / retried / resumed invite, so this
@@ -1057,15 +1098,19 @@ pub async fn start_server(
     let peer_listener_config = config.clone();
     let peer_listener_db = db.clone();
     let peer_listener_auth = auth.clone();
-    tokio::spawn(async move {
-        run_peer_listener(
-            peer_listener_config,
-            peer_listener_db,
-            peer_listener_auth,
-            peer_job_receiver,
-        )
-        .await;
-    });
+    spawn_supervised(
+        "peer listener",
+        "this node accepts no further peer jobs until it restarts",
+        async move {
+            run_peer_listener(
+                peer_listener_config,
+                peer_listener_db,
+                peer_listener_auth,
+                peer_job_receiver,
+            )
+            .await;
+        },
+    );
 
     // Background task: sync decentralized parties from Canton on startup
     let sync_config = config.clone();
@@ -1082,6 +1127,7 @@ pub async fn start_server(
 
         match handlers::fetch_decentralized_parties(
             &sync_config,
+            &sync_db,
             None,
             auth_snapshot,
             &creds_snapshot,
@@ -1110,6 +1156,52 @@ pub async fn start_server(
             }
         }
     });
+
+    reward_automation::register_metrics();
+
+    // Separate from the API server, whose ingress forwards every path. 0 disables it.
+    let metrics_port = config.metrics_port;
+    if metrics_port == 0 {
+        tracing::info!("Metrics endpoint disabled (metrics_port = 0)");
+    } else if metrics_port == port || metrics_port == config.node.port {
+        // The metrics listener binds first, so racing it against the API or the
+        // noise server would let a signal take down governance. It yields the
+        // port instead, which is the same rule the bind-failure arm below keeps.
+        tracing::error!(
+            metrics_port,
+            api_port = port,
+            noise_port = config.node.port,
+            "metrics_port collides with another listener; this node reports no metrics"
+        );
+    } else {
+        let metrics_host = host.to_string();
+        match HttpServer::new(|| App::new().route("/metrics", web::get().to(handlers::metrics)))
+            // One worker: the default is one per logical CPU.
+            .workers(1)
+            .bind((metrics_host.clone(), metrics_port))
+        {
+            Ok(server) => {
+                tracing::info!("Serving metrics on {metrics_host}:{metrics_port}/metrics");
+                // `run()` before the async block: `HttpServer` holds an `Rc` and is
+                // not `Send`, while the `Server` it returns is.
+                let running = server.run();
+                spawn_supervised(
+                    "metrics server",
+                    "every alert rule reads an empty series while this node looks healthy",
+                    async move {
+                        if let Err(e) = running.await {
+                            tracing::error!(error = %e, "the metrics server stopped");
+                        }
+                    },
+                );
+            }
+            Err(e) => tracing::error!(
+                error = %e,
+                port = metrics_port,
+                "binding the metrics port failed; this node reports no metrics"
+            ),
+        }
+    }
 
     tracing::info!("Starting HTTP server on {host}:{port}");
     tracing::info!("Frontend available at http://{host}:{port}/");
@@ -1237,6 +1329,25 @@ pub async fn start_server(
     Ok(())
 }
 
+/// Spawns a task that must live as long as the process, and reports its death at
+/// `error` with what the operator loses. `consequence` completes the sentence
+/// "… returned; " and "… died; ".
+///
+/// The outer task is what catches a clean return, which never panics and so never
+/// reaches the panic hook in `main`. Nothing respawns: a task that returned left
+/// state nobody has inspected, and restarting it would hide that.
+fn spawn_supervised<F>(name: &'static str, consequence: &'static str, task: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(async move {
+        match tokio::spawn(task).await {
+            Ok(()) => tracing::error!(task = name, "{name} loop returned; {consequence}"),
+            Err(e) => tracing::error!(task = name, error = %e, "{name} task died; {consequence}"),
+        }
+    });
+}
+
 /// Background task that runs a Noise server for handling pings and invites
 async fn run_heartbeat(
     config: NodeConfig,
@@ -1285,50 +1396,54 @@ async fn run_heartbeat(
     let self_id_spawn = self_id.clone();
     let triggers_spawn = triggers.clone();
 
-    tokio::spawn(async move {
-        loop {
-            match TcpListener::bind(&listen_addr).await {
-                Ok(listener) => {
-                    tracing::info!("Noise listener started on {listen_addr}");
+    spawn_supervised(
+        "noise listener",
+        "this node accepts no inbound peer connections until it restarts",
+        async move {
+            loop {
+                match TcpListener::bind(&listen_addr).await {
+                    Ok(listener) => {
+                        tracing::info!("Noise listener started on {listen_addr}");
 
-                    loop {
-                        match listener.accept().await {
-                            Ok((socket, peer_addr)) => {
-                                let keypair = keypair_spawn.clone();
-                                let last_seen = last_seen_spawn.clone();
-                                let db = db_spawn.clone();
-                                let self_id = self_id_spawn.clone();
-                                let triggers = triggers_spawn.clone();
+                        loop {
+                            match listener.accept().await {
+                                Ok((socket, peer_addr)) => {
+                                    let keypair = keypair_spawn.clone();
+                                    let last_seen = last_seen_spawn.clone();
+                                    let db = db_spawn.clone();
+                                    let self_id = self_id_spawn.clone();
+                                    let triggers = triggers_spawn.clone();
 
-                                tokio::spawn(async move {
-                                    handle_incoming_connection(
-                                        socket, peer_addr, keypair, db, self_id, triggers,
-                                        last_seen,
-                                    )
-                                    .await;
-                                });
-                            }
-                            Err(e) => {
-                                // Don't tight-loop on persistent accept errors (e.g. FD
-                                // exhaustion): log and back off briefly before retrying.
-                                tracing::warn!(
-                                    "Noise listener accept error on {listen_addr}: {e}; \
-                                     backing off 100ms"
-                                );
-                                tokio::time::sleep(Duration::from_millis(100)).await;
+                                    tokio::spawn(async move {
+                                        handle_incoming_connection(
+                                            socket, peer_addr, keypair, db, self_id, triggers,
+                                            last_seen,
+                                        )
+                                        .await;
+                                    });
+                                }
+                                Err(e) => {
+                                    // Don't tight-loop on persistent accept errors (e.g. FD
+                                    // exhaustion): log and back off briefly before retrying.
+                                    tracing::warn!(
+                                        "Noise listener accept error on {listen_addr}: {e}; \
+                                         backing off 100ms"
+                                    );
+                                    tokio::time::sleep(Duration::from_millis(100)).await;
+                                }
                             }
                         }
                     }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to bind Noise listener on {listen_addr}: {e}, retrying in 5s"
-                    );
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to bind Noise listener on {listen_addr}: {e}, retrying in 5s"
+                        );
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
                 }
             }
-        }
-    });
+        },
+    );
 
     // Ping peers every 5 seconds
     run_peer_ping_loop(config, db, peer_status, last_seen, keypair).await;

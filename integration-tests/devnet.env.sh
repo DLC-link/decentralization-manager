@@ -146,6 +146,7 @@ export DECPM_TOPOLOGY_RETRY_MAX_ATTEMPTS=90
 # - HTTP: 8081/8082/8083 (DecMan's own HTTP API)
 # - Noise: 9000/9001/9002 (per-DecMan Noise listener; matches DECPM_NOISE_PORT
 #   values in the per-participant .env files)
+# - Metrics: 9464/9465/9466 (per-DecMan Prometheus listener)
 # - Canton ledger:  5001/5011/5021 (tunneled to participant-ibtc-devnet-{1,2,3}
 #   service port 5001 via kubectl port-forward)
 # - Canton admin:   5002/5012/5022 (tunneled the same way to service port 5002)
@@ -154,6 +155,7 @@ export DECPM_TOPOLOGY_RETRY_MAX_ATTEMPTS=90
 # ---------------------------------------------------------------------------
 export P1_HTTP=8081  P2_HTTP=8082  P3_HTTP=8083
 export P1_NOISE=9000 P2_NOISE=9001 P3_NOISE=9002
+export P1_METRICS=9464 P2_METRICS=9465 P3_METRICS=9466
 export P1_CANTON_LEDGER=5001 P1_CANTON_ADMIN=5002
 export P2_CANTON_LEDGER=5011 P2_CANTON_ADMIN=5012
 export P3_CANTON_LEDGER=5021 P3_CANTON_ADMIN=5022

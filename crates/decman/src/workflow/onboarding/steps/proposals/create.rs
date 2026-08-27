@@ -177,6 +177,11 @@ pub async fn create_proposals(
     let party_id = CantonId::parse(&party_id_str)?;
     tracing::info!("Party ID: {party_id}");
 
+    // Keep the resolved ID on the long-lived workflow row before writing the
+    // transient PARTY_ID artefact. Completion deletes workflow_artifacts, but
+    // topology discovery still needs this ID to issue an exact party query.
+    storage.write_run_party_id(instance_name, &party_id).await?;
+
     // Persist the resolved party ID — the HTTP path reads this artefact after
     // the coordinator workflow finishes so it can return the new party id to
     // the UI.

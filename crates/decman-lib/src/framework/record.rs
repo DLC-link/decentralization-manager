@@ -108,6 +108,18 @@ pub fn field_list_len(rec: &Record, label: &str) -> Result<usize, Error> {
     }
 }
 
+/// Return the field's value if it is a `Record`, e.g. a token-standard
+/// nested payload (`transfer`, `instrumentId`, and similar). Unlike the
+/// other typed accessors this stays borrowed and untyped rather than parsing
+/// into an application type — callers read further fields out of the nested
+/// record with their own `record_field`/`field_party`-family calls.
+pub fn field_record<'a>(rec: &'a Record, label: &str) -> Option<&'a Record> {
+    match record_field(rec, label) {
+        Some(value::Sum::Record(r)) => Some(r),
+        _ => None,
+    }
+}
+
 /// Read a list-of-`Party` field, parsing each element into a [`CantonId`].
 /// Mirrors `field_contract_id_list`, decoding each element the same way
 /// `field_party_id` decodes a single `Party` value.
@@ -553,6 +565,41 @@ mod tests {
         )]);
 
         assert!(!field_optional_is_none(&rec, "beneficiary"));
+    }
+
+    #[test]
+    fn field_record_returns_nested_record() {
+        let nested = record(vec![("id", Some(value::Sum::Text("abc".to_string())))]);
+        let rec = record(vec![(
+            "instrumentId",
+            Some(value::Sum::Record(nested.clone())),
+        )]);
+
+        assert_eq!(field_record(&rec, "instrumentId"), Some(&nested));
+    }
+
+    #[test]
+    fn field_record_none_on_absent_field() {
+        let rec = record(vec![]);
+
+        assert!(field_record(&rec, "instrumentId").is_none());
+    }
+
+    #[test]
+    fn field_record_none_on_empty_value() {
+        let rec = record_with_empty_value("instrumentId");
+
+        assert!(field_record(&rec, "instrumentId").is_none());
+    }
+
+    #[test]
+    fn field_record_none_on_wrong_variant() {
+        let rec = record(vec![(
+            "instrumentId",
+            Some(value::Sum::Text("not-a-record".to_string())),
+        )]);
+
+        assert!(field_record(&rec, "instrumentId").is_none());
     }
 
     #[test]
