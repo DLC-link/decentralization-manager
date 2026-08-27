@@ -1,15 +1,20 @@
-use std::collections::{BTreeSet, HashMap};
+use std::{
+    collections::{BTreeSet, HashMap},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::{Context, Result};
 use canton_proto_rs::com::digitalasset::canton::{
     admin::participant::v30::{ListPackagesRequest, package_service_client::PackageServiceClient},
+    protocol::v30::{enums::TopologyChangeOp, vetted_packages::VettedPackage},
     topology::admin::v30::{
-        BaseQuery, ListVettedPackagesRequest, StoreId, base_query, store_id,
+        BaseQuery, ListVettedPackagesRequest,
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
     },
 };
+use prost_types::Timestamp;
 
-use crate::{config::NodeConfig, utils};
+use crate::{config::NodeConfig, utils, workflow::topology};
 
 use super::{queries::compare_versions, types::VettedPackageInfo};
 
@@ -120,17 +125,28 @@ pub(crate) async fn fetch_package_id_to_name(
         .collect())
 }
 
-/// Packages this participant has actually vetted, with name and version.
+/// Packages this participant has vetted and that are in effect right now,
+/// with name and version.
 ///
-/// Reads topology vetting state — which is a strictly smaller set than the
-/// uploaded DARs `fetch_package_names` reports, since a DAR can be uploaded
-/// without being vetted. The topology entries carry only package ids, so
-/// name/version are joined in from the Admin PackageService.
+/// The topology entries carry only package ids, so name/version are joined in
+/// from the Admin PackageService. A vetted package can be missing there — a
+/// restore from backup keeps the vetting but not the DAR — and then name and
+/// version stay empty: vetting is topology state, not local package state.
+///
+/// Queries the synchronizer store: the DAR upload path registers vetting
+/// directly on the synchronizer, so on a live node the Authorized store holds
+/// an empty or stale copy (#376). Only `Replace` mappings are requested — at
+/// head state a `Remove` means "no longer vetted", and counting its package
+/// list would report a fully unvetted participant as vetted. Entries outside
+/// their validity window are dropped too: Splice schedules upgrades by vetting
+/// with a future `valid_from_inclusive`, which Canton rejects until that time
+/// arrives.
 ///
 /// Deliberately on the admin channel: the Ledger API has a paginated
 /// `ListVettedPackages`, but it needs a bearer token and tokens here are
 /// per-party — a participant-level endpoint has no party to borrow one from.
 pub(crate) async fn fetch_vetted_packages(config: &NodeConfig) -> Result<Vec<VettedPackageInfo>> {
+    let synchronizer_id = utils::get_synchronizer_id(config).await?;
     let channel = config
         .admin_channel()
         .await
@@ -141,15 +157,8 @@ pub(crate) async fn fetch_vetted_packages(config: &NodeConfig) -> Result<Vec<Vet
     let response = client
         .list_vetted_packages(tonic::Request::new(ListVettedPackagesRequest {
             base_query: Some(BaseQuery {
-                store: Some(StoreId {
-                    store: Some(store_id::Store::Authorized(store_id::Authorized {})),
-                }),
-                proposals: false,
-                operation: 0,
-                time_query: Some(base_query::TimeQuery::HeadState(())),
-                filter_signed_key: String::new(),
-                protocol_version: None,
-                client_version: None,
+                operation: TopologyChangeOp::AddReplace as i32,
+                ..topology::head_state_query(&synchronizer_id)
             }),
             filter_participant: config.participant_id().to_string(),
         }))
@@ -158,12 +167,16 @@ pub(crate) async fn fetch_vetted_packages(config: &NodeConfig) -> Result<Vec<Vet
         .into_inner();
 
     let descriptions = fetch_package_descriptions(config).await?;
+    let now = now_timestamp();
 
     let mut seen = std::collections::HashSet::new();
     let mut vetted = Vec::new();
     for result in response.results {
         let Some(item) = result.item else { continue };
         for package in item.packages {
+            if !package_valid_at(&package, &now) {
+                continue;
+            }
             if !seen.insert(package.package_id.clone()) {
                 continue;
             }
@@ -180,6 +193,31 @@ pub(crate) async fn fetch_vetted_packages(config: &NodeConfig) -> Result<Vec<Vet
     }
 
     Ok(vetted)
+}
+
+/// The current wall-clock time as a proto timestamp, for validity checks.
+fn now_timestamp() -> Timestamp {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    Timestamp {
+        seconds: i64::try_from(now.as_secs()).unwrap_or(i64::MAX),
+        nanos: i32::try_from(now.subsec_nanos()).unwrap_or(0),
+    }
+}
+
+/// Whether a vetting entry is in effect at `now`: `valid_from_inclusive` has
+/// passed (or is unset) and `valid_until_exclusive` has not (or is unset).
+fn package_valid_at(package: &VettedPackage, now: &Timestamp) -> bool {
+    let le = |a: &Timestamp, b: &Timestamp| (a.seconds, a.nanos) <= (b.seconds, b.nanos);
+    package
+        .valid_from_inclusive
+        .as_ref()
+        .is_none_or(|from| le(from, now))
+        && package
+            .valid_until_exclusive
+            .as_ref()
+            .is_none_or(|until| !le(until, now))
 }
 
 /// Load `(package_id → (name, version))` from the Admin PackageService.
@@ -283,6 +321,28 @@ mod tests {
         let ordered = newest_matching_names(&names, "governance-core");
 
         assert!(ordered.is_empty());
+    }
+
+    #[test]
+    fn test_package_valid_at() {
+        let ts = |seconds| Timestamp { seconds, nanos: 0 };
+        let pkg = |from: Option<i64>, until: Option<i64>| VettedPackage {
+            package_id: "pkg".to_string(),
+            valid_from_inclusive: from.map(ts),
+            valid_until_exclusive: until.map(ts),
+        };
+        let now = ts(100);
+
+        assert!(package_valid_at(&pkg(None, None), &now));
+        // `valid_from` is inclusive
+        assert!(package_valid_at(&pkg(Some(100), None), &now));
+        // scheduled for the future, e.g. a Splice upgrade vetting
+        assert!(!package_valid_at(&pkg(Some(101), None), &now));
+        assert!(package_valid_at(&pkg(None, Some(101)), &now));
+        // `valid_until` is exclusive
+        assert!(!package_valid_at(&pkg(None, Some(100)), &now));
+        // expired
+        assert!(!package_valid_at(&pkg(Some(0), Some(50)), &now));
     }
 
     #[test]

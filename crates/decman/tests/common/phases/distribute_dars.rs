@@ -66,12 +66,47 @@ async fn dar_present_on(f: &Fixture, port: u16, pkg: &str, module: &str, entity:
     f.get_json::<serde_json::Value>(port, &path).await.is_ok()
 }
 
+/// Daml package names of the distributed DARs — each filename is
+/// `<package-name>-<version>.dar`.
+fn distributed_package_names() -> Vec<&'static str> {
+    DAR_FILES
+        .iter()
+        .filter_map(|file| file.strip_suffix(".dar"))
+        .filter_map(|name| name.rsplit_once('-').map(|(package, _version)| package))
+        .collect()
+}
+
+/// Whether `/packages/vetted` on `port` reports every distributed package as
+/// vetted. Exact name match — a substring would also accept sibling families
+/// like `governance-core-test`.
+async fn dars_vetted_on(f: &Fixture, port: u16) -> bool {
+    let Some(vetted) = f.probe_get_json::<Value>(port, "/packages/vetted").await else {
+        return false;
+    };
+    let Some(packages) = vetted.as_array() else {
+        return false;
+    };
+    distributed_package_names().into_iter().all(|expected| {
+        packages
+            .iter()
+            .any(|p| p["package_name"].as_str() == Some(expected))
+    })
+}
+
 async fn all_dars_present(f: &Fixture) -> bool {
     for (pkg, module, entity) in DAR_PROBES {
         for port in [f.p1.http, f.p2.http, f.p3.http] {
             if !dar_present_on(f, port, pkg, module, entity).await {
                 return false;
             }
+        }
+    }
+    // The skip fast-path must confirm vetting too: on warm environments (the
+    // devnet target) the DARs persist from earlier runs, and skipping here
+    // would also skip the vetted probe below — the #376 regression gate.
+    for port in [f.p1.http, f.p2.http, f.p3.http] {
+        if !dars_vetted_on(f, port).await {
+            return false;
         }
     }
     true
@@ -226,6 +261,20 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             |f, _| {
                 Box::pin(async move {
                     probe_workflow_run_visible(f, f.p3.http, WorkflowKind::Dars, WorkflowRole::Peer, WorkflowProgress::Completed).await
+                })
+            },
+        )
+        .then(
+            "distributed DARs vetted per /packages/vetted on all participants",
+            Duration::from_secs(60),
+            |f, _| {
+                Box::pin(async move {
+                    for port in [f.p1.http, f.p2.http, f.p3.http] {
+                        if !dars_vetted_on(f, port).await {
+                            return None;
+                        }
+                    }
+                    Some(Ok(()))
                 })
             },
         )
