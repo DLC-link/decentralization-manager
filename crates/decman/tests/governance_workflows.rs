@@ -107,6 +107,9 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     // P1+P2+P3 at a 2-of-3 confirmation threshold. No Noise mesh is involved (the
     // calls are plain HTTP to each host), so it can run anywhere in the suite.
     phases::external_party_tenant::run(&mut f).await?;
+    // Serial-N+1 against a party that already exists: onboards on P1+P2, then
+    // adds P3. Same plain-HTTP path, so it sits here with its sibling.
+    phases::external_party_add_hosts::run(&mut f).await?;
     phases::create_dec_party::run(&mut f).await?;
     phases::distribute_dars::run(&mut f).await?;
     phases::check_peer_dars::run(&mut f).await?;
@@ -248,6 +251,7 @@ async fn external_party_e2e() -> anyhow::Result<()> {
     let mut f = Fixture::from_env()?;
     f.discover_network_parties().await?;
     phases::external_party_tenant::run(&mut f).await?;
+    phases::external_party_add_hosts::run(&mut f).await?;
     Ok(())
 }
 
