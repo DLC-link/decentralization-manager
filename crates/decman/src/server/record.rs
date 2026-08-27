@@ -11,7 +11,10 @@
 //! The typed accessors below (`field_party_id`, `field_decimal`, `field_time`,
 //! `field_optional_is_none`, `field_list_len`, `field_party_list`) originated
 //! in `reward_automation.rs`; they moved here unchanged so that module and any
-//! other can share them. Other modules (`queries.rs`, `transfer_context.rs`)
+//! other can share them. `field_record` was added later — `queries.rs` reads
+//! a nested `Record` payload (`transfer`, `instrumentId`, and similar) often
+//! enough that the narrowing to the `Record` variant earned its own accessor,
+//! same as the others. Other modules (`queries.rs`, `transfer_context.rs`)
 //! keep their own, differently-shaped accessors — some return `Option`, some
 //! clone into owned `String`s rather than parsing — only their internal
 //! traversal now goes through [`record_field`] rather than repeating it.
@@ -76,6 +79,18 @@ pub(crate) fn field_list_len(rec: &Record, label: &str) -> anyhow::Result<usize>
     match record_field(rec, label) {
         Some(value::Sum::List(l)) => Ok(l.elements.len()),
         _ => Err(anyhow!("field `{label}`: expected a List value")),
+    }
+}
+
+/// Return the field's value if it is a `Record`, e.g. a token-standard
+/// nested payload (`transfer`, `instrumentId`, and similar). Unlike the
+/// other typed accessors this stays borrowed and untyped rather than parsing
+/// into an application type — callers read further fields out of the nested
+/// record with their own `record_field`/`field_party`-family calls.
+pub(crate) fn field_record<'a>(rec: &'a Record, label: &str) -> Option<&'a Record> {
+    match record_field(rec, label) {
+        Some(value::Sum::Record(r)) => Some(r),
+        _ => None,
     }
 }
 
@@ -319,6 +334,44 @@ mod tests {
         )]);
 
         assert!(!field_optional_is_none(&rec, "beneficiary"));
+    }
+
+    #[test]
+    fn field_record_returns_nested_record() -> anyhow::Result<()> {
+        let nested = record(vec![("id", Some(value::Sum::Text("abc".to_string())))]);
+        let rec = record(vec![(
+            "instrumentId",
+            Some(value::Sum::Record(nested.clone())),
+        )]);
+
+        let found = field_record(&rec, "instrumentId");
+
+        assert_eq!(found, Some(&nested));
+        Ok(())
+    }
+
+    #[test]
+    fn field_record_none_on_absent_field() {
+        let rec = record(vec![]);
+
+        assert!(field_record(&rec, "instrumentId").is_none());
+    }
+
+    #[test]
+    fn field_record_none_on_empty_value() {
+        let rec = record_with_empty_value("instrumentId");
+
+        assert!(field_record(&rec, "instrumentId").is_none());
+    }
+
+    #[test]
+    fn field_record_none_on_wrong_variant() {
+        let rec = record(vec![(
+            "instrumentId",
+            Some(value::Sum::Text("not-a-record".to_string())),
+        )]);
+
+        assert!(field_record(&rec, "instrumentId").is_none());
     }
 
     #[test]
