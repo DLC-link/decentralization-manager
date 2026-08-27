@@ -239,6 +239,12 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: dec-party-manager
+        # A Prometheus-style collector reads `app` as the service name.
+        app: dec-party-manager
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "9464"
     spec:
       initContainers:
         - name: init-data
@@ -265,6 +271,9 @@ spec:
               containerPort: 8080
             - name: noise
               containerPort: 9000
+            - name: metrics
+              containerPort: 9464
+              protocol: TCP
           volumeMounts:
             - name: data
               mountPath: /app
@@ -278,6 +287,12 @@ spec:
             # fields as attributes only where a log pipeline parses the line,
             # so this environment needs its own decman pipeline in dlc-infra.
             # Set DECPM_LOG_FORMAT=text for the console format instead.
+            # Prometheus metrics are served on this port, separate from the API
+            # port so the Ingress never exposes them. The listener answers any
+            # caller that can reach it, so the port must stay inside the cluster.
+            # Set 0 to disable.
+            - name: DECPM_METRICS_PORT
+              value: "9464"
           envFrom:
             - secretRef:
                 name: dec-party-manager-secrets
@@ -290,6 +305,12 @@ spec:
 ### 3d. Service
 
 The deployment uses two Services. The first is a `ClusterIP` that backs the Ingress for the HTTP admin UI; the second is a `LoadBalancer` that exposes the Noise port (9000) to the public internet so peers can reach you. Splitting them keeps `DECPM_PUBLIC_ADDRESS` pointed at a stable, dedicated endpoint and avoids putting the admin UI on a raw load balancer.
+
+Neither Service exposes the metrics port. The metrics listener has no
+authentication, and it answers any caller that can reach it. Keep port 9464
+inside the cluster: bind it to a private interface, or block it in the host
+firewall or security group. An operator with no metrics collector should set
+`DECPM_METRICS_PORT=0` instead, which serves nothing.
 
 ```yaml
 apiVersion: v1
@@ -390,6 +411,11 @@ Most variables have a default that's only useful for local development (loopback
 |---|---|---|---|
 | `DECPM_LISTEN_ADDRESS` | `0.0.0.0` | optional | Noise transport bind address |
 | `DECPM_NOISE_PORT` | `9000` | optional | Noise transport port |
+| `DECPM_METRICS_PORT` | `9464` | optional | Prometheus metrics port, separate from the API port. `0` serves no metrics. The listener is unauthenticated, so keep the port off the public internet (see [Service](#3d-service)) |
+| `DECPM_REWARD_AUTOMATION_INTERVAL_SECS` | `300` | optional | How often the CIP-104 reward automation sweeps each decparty for unassigned coupons |
+| `DECPM_REWARD_EXPIRY_READ_INTERVAL_SECS` | `3600` | optional | How often the automation re-reads the backlog purely to refresh `decman_reward_oldest_unassigned_expires_in_seconds`. Both expiry alert rules read that gauge, so this bounds how stale their input can get. A sweep reads the ledger too, so the gauge refreshes at whichever interval is shorter |
+| `DECPM_REWARD_MAX_CREATES` | `100` | optional | Output contracts one `Delegation_Assign` may create, bounding the coupons per transaction. Lower it if assigns start failing |
+| `DECPM_REWARD_MIN_EXPIRY_MARGIN_SECS` | `120` | optional | Time a coupon must have left before expiry to be assigned |
 | `DECPM_PUBLIC_ADDRESS` | falls back to `DECPM_LISTEN_ADDRESS` | **yes** | Hostname peers use to reach this node from the public internet |
 | `DECPM_CANTON_ADMIN_HOST` | `127.0.0.1` | **yes** | Canton Admin API host |
 | `DECPM_CANTON_ADMIN_PORT` | `5002` | optional | Canton Admin API port |

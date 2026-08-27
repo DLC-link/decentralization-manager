@@ -27,6 +27,7 @@ pub struct NodeSpawn {
     pub data_dir: PathBuf,
     pub http_port: u16,
     pub noise_port: u16,
+    pub metrics_port: u16,
     pub canton_admin_port: u16,
     pub canton_ledger_port: u16,
     pub initial_pid: u32,
@@ -55,10 +56,11 @@ fn read_pid(key: &str) -> Result<u32> {
 
 impl Fixture {
     pub fn node_spawn(&self, participant: u8) -> Result<NodeSpawn> {
-        let (http, noise, ledger, admin, pid_var) = match participant {
+        let (http, noise, metrics, ledger, admin, pid_var) = match participant {
             1 => (
                 "P1_HTTP",
                 "P1_NOISE",
+                "P1_METRICS",
                 "P1_CANTON_LEDGER",
                 "P1_CANTON_ADMIN",
                 "P1_PID",
@@ -66,6 +68,7 @@ impl Fixture {
             2 => (
                 "P2_HTTP",
                 "P2_NOISE",
+                "P2_METRICS",
                 "P2_CANTON_LEDGER",
                 "P2_CANTON_ADMIN",
                 "P2_PID",
@@ -73,6 +76,7 @@ impl Fixture {
             3 => (
                 "P3_HTTP",
                 "P3_NOISE",
+                "P3_METRICS",
                 "P3_CANTON_LEDGER",
                 "P3_CANTON_ADMIN",
                 "P3_PID",
@@ -87,6 +91,7 @@ impl Fixture {
             data_dir,
             http_port: read_port(http)?,
             noise_port: read_port(noise)?,
+            metrics_port: read_port(metrics)?,
             canton_admin_port: read_port(admin)?,
             canton_ledger_port: read_port(ledger)?,
             initial_pid: read_pid(pid_var)?,
@@ -211,6 +216,7 @@ pub async fn spawn_node(spawn: &NodeSpawn, restarted_pids_file: &PathBuf) -> Res
             spawn.canton_ledger_port.to_string(),
         )
         .env("DECPM_CANTON_NETWORK", "devnet")
+        .env("DECPM_METRICS_PORT", spawn.metrics_port.to_string())
         .env("DECPM_NOISE_PORT", spawn.noise_port.to_string())
         .envs(
             spawn
