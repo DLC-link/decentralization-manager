@@ -2,7 +2,7 @@ use sqlx::SqlitePool;
 
 use crate::{
     canton_id::CantonId,
-    db::schema::{Commitable, SchemaRead, SchemaWrite},
+    db::schema::{Commitable, SchemaWrite},
     error::Result,
 };
 
@@ -14,24 +14,17 @@ use crate::{
 /// the removed participant as a member until an unrelated refresh happens to
 /// run: an immediate re-add is rejected with "already a member", and the
 /// post-add threshold bound is computed one member too high.
+///
+/// Deletes the single row rather than rewriting the whole participant set. The
+/// read-modify-write shape would revert a `permission` update landed by a
+/// concurrent refresh, and there is nothing here that needs the other rows.
 pub async fn prune_cached_membership(
     db: &SqlitePool,
     party_id: &CantonId,
     kicked: &CantonId,
 ) -> Result {
-    let kicked_uid = kicked.to_string();
-    let cached = db.get_dec_party_participants(party_id).await?;
-    if !cached.iter().any(|row| row.participant_uid == kicked_uid) {
-        return Ok(());
-    }
-
-    let remaining: Vec<_> = cached
-        .into_iter()
-        .filter(|row| row.participant_uid != kicked_uid)
-        .collect();
-
     let mut tx = db.begin_transaction().await?;
-    tx.replace_dec_party_participants(party_id, &remaining)
+    tx.delete_dec_party_participant(party_id, &kicked.to_string())
         .await?;
     Commitable::commit(tx).await?;
 
@@ -44,6 +37,7 @@ mod tests {
     use crate::db::{
         MIGRATOR,
         rows::{DecPartyParticipantRow, DecPartyRow},
+        schema::SchemaRead,
     };
 
     use super::*;
@@ -66,7 +60,7 @@ mod tests {
             .map(|uid| DecPartyParticipantRow {
                 dec_party_id: party_id_str.clone(),
                 participant_uid: (*uid).to_string(),
-                permission: "confirmation".to_string(),
+                permission: "submission".to_string(),
                 owner_key: None,
             })
             .collect();
@@ -114,6 +108,36 @@ mod tests {
 
         let remaining = pool.get_dec_party_participants(&party_id).await?;
         assert_eq!(remaining.len(), 2);
+        Ok(())
+    }
+
+    /// Pruning must not rewrite the surviving rows. Rebuilding the whole
+    /// participant set would push a stale `permission` back over one a
+    /// concurrent `/decentralized-parties` refresh had just updated.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn pruning_leaves_the_surviving_rows_untouched(pool: SqlitePool) -> Result {
+        let party_id = seed(&pool, &[NODE1, NODE2]).await?;
+
+        // Stand in for a concurrent refresh promoting NODE1's permission.
+        let mut tx = pool.begin_transaction().await?;
+        tx.replace_dec_party_participants(
+            &party_id,
+            &[DecPartyParticipantRow {
+                dec_party_id: party_id.to_string(),
+                participant_uid: NODE1.to_string(),
+                permission: "confirmation".to_string(),
+                owner_key: Some("fingerprint-1".to_string()),
+            }],
+        )
+        .await?;
+        Commitable::commit(tx).await?;
+
+        prune_cached_membership(&pool, &party_id, &CantonId::parse(NODE2)?).await?;
+
+        let remaining = pool.get_dec_party_participants(&party_id).await?;
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].permission, "confirmation");
+        assert_eq!(remaining[0].owner_key.as_deref(), Some("fingerprint-1"));
         Ok(())
     }
 }

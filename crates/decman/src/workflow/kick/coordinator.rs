@@ -142,12 +142,25 @@ pub async fn start_coordinator(
                         workflow_state.clear_peer_data().await;
 
                         submit_kick(&node_config, &db, &instance_name).await?;
-                        prune_cached_membership(
+                        // Deliberately not fatal. The kick is durable at this
+                        // point, so failing the step would leave the workflow
+                        // on SubmitKick and a resume would resubmit the same
+                        // topology transactions. A stale cache is recoverable
+                        // by the next /decentralized-parties refresh; a
+                        // rewound kick is not.
+                        if let Err(e) = prune_cached_membership(
                             &db,
                             &kick_config.decentralized_party_id,
                             &kick_config.participant_id,
                         )
-                        .await?;
+                        .await
+                        {
+                            tracing::warn!(
+                                "Kick submitted but pruning {} from cached membership failed: \
+                                 {e}. Refresh /decentralized-parties before re-adding it.",
+                                kick_config.participant_id
+                            );
+                        }
                         workflow_state.advance_step().await;
                     }
                     KickStep::Complete => {
