@@ -76,6 +76,26 @@ pub struct TokenManager {
     http: reqwest::Client,
 }
 
+/// How long a token call may take before it fails.
+///
+/// `reqwest::Client::new()` applies no timeout, so an IdP that accepts the
+/// connection and never answers blocks the caller forever. The reward
+/// automation calls this from the task that also carries its heartbeat, so one
+/// hung token call stops the beat and stalls every decparty on the node. 15s
+/// matches the decman-cli client (`crates/decman-cli/src/api.rs`).
+const TOKEN_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// An HTTP client for token calls, with [`TOKEN_REQUEST_TIMEOUT`] applied.
+///
+/// `build()` fails only if the TLS backend cannot initialise, which a
+/// timeout-only builder on a working platform does not do.
+fn token_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(TOKEN_REQUEST_TIMEOUT)
+        .build()
+        .expect("a timeout-only client builder cannot fail")
+}
+
 impl TokenManager {
     /// Create a TokenManager from a Keycloak config and perform initial auth.
     ///
@@ -88,7 +108,7 @@ impl TokenManager {
         member_party_id: CantonId,
     ) -> Result<Self> {
         let source = TokenSource::Keycloak(config);
-        let http = reqwest::Client::new();
+        let http = token_http_client();
         let state = Self::authenticate(&source, &http).await?;
         Ok(Self {
             source,
@@ -110,7 +130,7 @@ impl TokenManager {
         member_party_id: CantonId,
     ) -> Result<Self> {
         let source = TokenSource::Auth0(config);
-        let http = reqwest::Client::new();
+        let http = token_http_client();
         let state = Self::authenticate(&source, &http).await?;
         Ok(Self {
             source,
