@@ -172,6 +172,12 @@ pub enum Commands {
         #[arg(long, env = "DECPM_AUTH0_AUDIENCE", hide = true)]
         auth0_audience: Option<String>,
 
+        /// Optional JWT claim containing an array of role names. Use this for
+        /// provider-required namespaced custom claims; standard role carriers
+        /// remain enabled when this is unset.
+        #[arg(long, env = "DECPM_JWT_ROLE_CLAIM")]
+        jwt_role_claim: Option<String>,
+
         /// Role name that gates sensitive endpoints (PUT /party-config,
         /// POST /kick, etc.). Unset (default) skips the role check —
         /// every authenticated caller is treated as admin. Set this to

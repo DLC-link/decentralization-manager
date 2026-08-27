@@ -854,6 +854,7 @@ pub async fn start_server(
     config: NodeConfig,
     db: SqlitePool,
     admin_role: Option<String>,
+    jwt_role_claim: Option<String>,
     allowed_origin: Option<String>,
 ) -> Result {
     // Fail fast before any setup: the runtime `--insecure` flag must never be
@@ -960,6 +961,7 @@ pub async fn start_server(
         TokenValidator::Jwt(Arc::new(JwtValidator::new(
             config.keycloak.clone(),
             config.auth0.clone(),
+            jwt_role_claim,
             party_credentials.clone(),
             http_client.clone(),
         )))

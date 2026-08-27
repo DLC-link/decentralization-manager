@@ -163,6 +163,7 @@ async fn run() -> Result {
             auth0_domain,
             auth0_client_id,
             auth0_audience,
+            jwt_role_claim: _,
             timeout_handshake,
             timeout_message,
             timeout_retry_attempts,
@@ -353,6 +354,7 @@ async fn run() -> Result {
             ref host,
             port,
             ref admin_role,
+            ref jwt_role_claim,
             ref allowed_origin,
             ..
         } => {
@@ -362,6 +364,7 @@ async fn run() -> Result {
                 config,
                 pool,
                 admin_role.clone(),
+                jwt_role_claim.clone(),
                 allowed_origin.clone(),
             )
             .await?;
