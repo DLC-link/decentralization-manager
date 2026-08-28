@@ -4,15 +4,18 @@
 > PR #27 (February 2026) and reflects the Canton 3.3-era guidance, under
 > which ACS import required repair mode, a participant restart, and a
 > synchronizer disconnect. **The add-party workflow implemented in this
-> repository does NOT work that way**: it uses Canton 3.4 offline party
-> replication (`PartyManagementService.ExportPartyAcs` / `ImportPartyAcs`)
-> with the `HostingParticipant.Onboarding` marker and
-> `ClearPartyOnboardingFlag` — no repair mode, no restart, and the brief
-> synchronizer disconnect the import still requires is automated by the
-> workflow. See
-> [ADD_PARTY_REDEVELOPMENT.md](ADD_PARTY_REDEVELOPMENT.md) §6 for the
-> implemented design; keep this document only as background on the
-> replication problem space.
+> repository does NOT work that way**: it uses Canton offline party
+> replication (`PartyManagementService.ExportPartyAcs` / `ImportPartyAcs`),
+> stable at protocol version 35, with the `HostingParticipant.Onboarding`
+> marker and `ClearPartyOnboardingFlag` — no repair mode, no restart, and
+> the brief synchronizer disconnect the import still requires is automated
+> by the workflow. Every procedure below is therefore superseded; keep this
+> document only as background on the replication problem space.
+>
+> For the implemented design see
+> [ARCHITECTURE.md](ARCHITECTURE.md#add-party-add-a-host-to-an-existing-decentralized-party),
+> and for the code
+> [`crates/decman/src/workflow/add_party/`](../crates/decman/src/workflow/add_party/).
 
 ## Overview
 
@@ -392,48 +395,28 @@ struct GetAddPartyStatusRequest {
 > used. An earlier draft of this section listed those steps as "missing"; the
 > offline-replication flow above superseded them.
 
-### Recommended Approach
+### Shipped Approach
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Add Party Workflow                           │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  1. Check if party has active contracts                         │
-│     │                                                           │
-│     ├─── NO contracts ──► Simple Replication (current impl)     │
-│     │                                                           │
-│     └─── HAS contracts ──► ACS Replication Flow:                │
-│                            │                                    │
-│                            ├── a) New member enables repair     │
-│                            │      mode and restarts             │
-│                            │                                    │
-│                            ├── b) Topology transactions         │
-│                            │      (Observation permission)      │
-│                            │                                    │
-│                            ├── c) Wait for activation           │
-│                            │                                    │
-│                            ├── d) Export ACS from coordinator   │
-│                            │                                    │
-│                            ├── e) Transfer via Noise protocol   │
-│                            │                                    │
-│                            ├── f) New member disconnects        │
-│                            │                                    │
-│                            ├── g) Import ACS                    │
-│                            │                                    │
-│                            ├── h) Reconnect                     │
-│                            │                                    │
-│                            └── i) Upgrade to Confirmation       │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-```
+The implemented flow is the one listed above, and it does not branch on repair
+mode. Step by step it is documented in
+[ARCHITECTURE.md](ARCHITECTURE.md#add-party-add-a-host-to-an-existing-decentralized-party);
+the code lives in
+[`crates/decman/src/workflow/add_party/`](../crates/decman/src/workflow/add_party/).
 
-### User Experience Implications
+The `Recommended Approach` diagram and `User Experience Implications` list that
+stood here described the repair-mode design and were removed. What still holds
+of them:
 
-1. **Restart Required**: New member must restart with repair mode
-2. **Coordination**: Must coordinate timing of ACS export/import
-3. **Downtime**: New member experiences brief downtime during import
-4. **File Transfer**: ACS snapshot must be securely transferred
+1. **Coordination**: the export and the import must be sequenced against a
+   captured ledger offset. The workflow does this itself.
+2. **Downtime**: the joining node disconnects from the synchronizer for the
+   duration of the import, which briefly pauses that whole node. The party
+   keeps transacting on its other hosts.
+3. **File transfer**: the ACS snapshot travels over the authenticated Noise
+   channel between member nodes, capped at 16 MiB assembled.
+
+What no longer holds: no participant restarts, and no participant enters repair
+mode.
 
 ---
 

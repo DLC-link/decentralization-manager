@@ -444,6 +444,14 @@ The table below is a curated subset. A complete, interactive API reference is av
 | `/dars/distribute` | POST | Distributes DARs across all participants |
 | `/dars/distribute/status` | GET | Returns DARs distribution workflow progress |
 | `/packages/vetted` | GET | Returns packages uploaded on this node |
+| `/external-parties` | GET | Lists the external (co-validated) parties this node hosts |
+| `/v0/tenant/prepare` | POST | Wallet-facing: builds an external party's onboarding topology and returns the hash to sign |
+| `/v0/tenant/onboard` | POST | Wallet-facing: validates the wallet's signed topology, co-signs, and submits it |
+| `/v0/tenant/{party}/status` | GET | Wallet-facing: reports whether this host has the party hosted yet |
+
+The `/v0/tenant/*` endpoints are the tenant API. They authenticate with a
+separate tenant API key rather than the operator JWT, and are driven by
+[`decman-wallet`](crates/decman-wallet/README.md).
 
 ## Development
 
@@ -514,18 +522,20 @@ dec-party-manager INFO chatter and Canton/Noise convergence warnings.
 
 The suite is organised into two layers:
 
-- **Phases** — top-level workflow chunks, one file in `tests/common/phases/`
-  per phase (`create_dec_party`, `distribute_dars`, `deploy_gov_core`,
-  `token_custody`, `utility_onboarding`, `generic_vote`, `kick`). Each
-  phase corresponds 1:1 to one of the original bash scripts and is logged
-  as `INFO Phase: <name>`.
+- **Phases** — top-level workflow chunks, one file per phase in
+  [`crates/decman/tests/common/phases/`](crates/decman/tests/common/phases/).
+  [`crates/decman/tests/governance_workflows.rs`](crates/decman/tests/governance_workflows.rs)
+  runs them in order, and each is logged as `INFO Phase: <name>`. The set
+  covers the governance arc (`create_dec_party`, `distribute_dars`,
+  `deploy_gov_core`, `token_custody`, `utility_onboarding`, `generic_vote`,
+  `kick`), the add-party and external-party flows, and the chaos phases
+  (restart / resume, cancel cascades, concurrent workflows).
 - **Scenarios** — Given-When-Then story arcs built with the
-  [`Scenario`](tests/common/scenario.rs) DSL. Each scenario has its own
-  header, indented step trace, and completion line. A phase runs **one or
-  more scenarios**: six of the seven phases run a single scenario;
-  `utility_onboarding` runs eight (four propose-confirm-execute cycles —
-  ProvisionProviderService, SetupUtility, Mint, Burn — plus four
-  side-effect assertion scenarios), for **14 scenarios total**.
+  [`Scenario`](crates/decman/tests/common/scenario.rs) DSL. Each scenario has
+  its own header, indented step trace, and completion line. A phase runs one
+  or more scenarios: most run a single one, while `utility_onboarding` runs
+  eight (four propose-confirm-execute cycles — ProvisionProviderService,
+  SetupUtility, Mint, Burn — plus four side-effect assertion scenarios).
 
 A scenario may omit `Given` and/or `When` and contain only `Then`s.
 That happens when the action has already been taken by an earlier

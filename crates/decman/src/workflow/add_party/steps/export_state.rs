@@ -5,7 +5,8 @@ use crate::{
     error::Result,
     utils,
     workflow::{
-        add_party::{AddPartyConfig, steps::generate_keys::capture_offset_once},
+        add_party::AddPartyConfig,
+        party_replication::capture_offset_once,
         storage::{WorkflowStorage, artifact_kinds},
         topology,
     },

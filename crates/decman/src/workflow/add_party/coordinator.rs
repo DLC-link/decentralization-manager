@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use anyhow::Context;
 use sqlx::SqlitePool;
@@ -12,6 +12,7 @@ use crate::{
     utils,
     workflow::{
         kick::coordinator::split_signed_kick_pair,
+        party_replication::{collect_party_package_ids, export_party_acs, wait_for_flag_cleared},
         state::WorkflowState,
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
     },
@@ -19,10 +20,7 @@ use crate::{
 
 use super::{
     AddPartyConfig, AddPartyStep, resolve_ledger_token,
-    steps::{
-        clear_onboarding::wait_for_flag_cleared, collect_party_package_ids, create_proposals,
-        export_party_acs, export_state, submit_clear_proposal, submit_proposals,
-    },
+    steps::{create_proposals, export_state, submit_clear_proposal, submit_proposals},
 };
 
 pub async fn start_coordinator(
@@ -154,8 +152,12 @@ async fn run_workflow(
                 // The topology is live; export the party's ACS for the new
                 // member and ship it with the ImportAcs command. Empty when
                 // the party has no active contracts — the new member skips.
-                let snapshot =
-                    export_party_acs(&node_config, &db, &instance_name, &add_party_config).await?;
+                let snapshot = export_party_acs(
+                    &node_config,
+                    &db,
+                    &add_party_config.replication_target(&instance_name),
+                )
+                .await?;
                 // Package ids the new member must have to validate the imported
                 // ACS — its import preflight fails fast (before disconnecting) if
                 // any are missing, instead of the import dying mid-window. Skip the
@@ -330,6 +332,64 @@ async fn save_new_member_keys(
     Ok(())
 }
 
+/// Guard the resume path for a coordinator step that turns peer uploads into
+/// per-peer artefacts.
+///
+/// `peer_data` lives only in memory (`WorkflowState::from_persisted` restores
+/// `completed_peers` but re-initialises `peer_data` empty), while the peers
+/// that uploaded are already marked `completed` and will never re-send. So a
+/// coordinator restart in the window between the peer-gated step advancing and
+/// this step writing its artefacts leaves nothing to write.
+///
+/// Writing nothing used to be silent: the loop over an empty map is a no-op,
+/// and the submit step's `len == len` check passes at `0 == 0`, so the run
+/// submitted carrying only the coordinator's own signature. For threshold > 1
+/// Canton rejects that, and `retry_workflow` cannot recover it because the
+/// peers stay complete.
+///
+/// So: nothing uploaded this pass is fine only if a previous pass already
+/// persisted artefacts of this kind. Otherwise the signatures are gone, and
+/// failing here names the reason instead of failing later as an opaque
+/// under-signed submission.
+async fn require_complete_or_uploaded(
+    workflow_state: &WorkflowState<AddPartyStep>,
+    storage: &SqlitePool,
+    instance_name: &str,
+    artifact_kind: &str,
+    step: &str,
+) -> Result {
+    let completed = workflow_state.completed_peers().await;
+    let persisted: HashSet<String> = storage
+        .list_artifacts(instance_name, artifact_kind)
+        .await?
+        .into_iter()
+        .map(|(peer, _)| peer)
+        .collect();
+
+    let missing: Vec<String> = completed
+        .iter()
+        .map(std::string::ToString::to_string)
+        .filter(|peer| !persisted.contains(peer))
+        .collect();
+
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "{step}: {count} peer(s) are marked complete but have no {artifact_kind} artefact \
+             and no buffered upload: {missing:?}. Their uploads were lost with the in-memory \
+             state, most likely a coordinator restart mid-handoff, and the peers will not \
+             re-send. Start a fresh add-party run for this party.",
+            count = missing.len()
+        );
+    }
+
+    tracing::info!(
+        "{step}: no uploads this pass; all {count} completed peer(s) already have a \
+         {artifact_kind} artefact (resumed run) — continuing",
+        count = completed.len()
+    );
+    Ok(())
+}
+
 /// Split each peer's combined DNS||P2P signature upload into the two
 /// per-peer artefacts the submit step joins by peer id.
 async fn save_signature_pairs(
@@ -338,6 +398,16 @@ async fn save_signature_pairs(
     instance_name: &str,
 ) -> Result {
     let peer_data = workflow_state.get_all_peer_data().await;
+    if peer_data.is_empty() {
+        require_complete_or_uploaded(
+            workflow_state,
+            storage,
+            instance_name,
+            artifact_kinds::SIGNED_ADD_PARTY_DNS,
+            "SubmitProposals",
+        )
+        .await?;
+    }
     for (peer_id, combined) in &peer_data {
         let (dns_blob, p2p_blob) = split_signed_kick_pair(combined).with_context(|| {
             format!("Failed to split signed add-party pair from peer {peer_id}")
@@ -371,6 +441,16 @@ async fn save_clear_signatures(
     instance_name: &str,
 ) -> Result {
     let peer_data = workflow_state.get_all_peer_data().await;
+    if peer_data.is_empty() {
+        require_complete_or_uploaded(
+            workflow_state,
+            storage,
+            instance_name,
+            artifact_kinds::SIGNED_ADD_PARTY_CLEAR,
+            "SubmitClearOnboarding",
+        )
+        .await?;
+    }
     for (peer_id, data) in &peer_data {
         storage
             .write_artifact(
@@ -418,4 +498,182 @@ async fn copy_new_member_identity(
     }
     tracing::info!("Persisted new member identity for {party_id}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlx::SqlitePool;
+
+    use super::*;
+    use crate::{
+        canton_id::{CantonId, NAMESPACE_LENGTH, Namespace},
+        db::MIGRATOR,
+    };
+
+    fn peer(n: u8) -> CantonId {
+        CantonId::new(format!("p{n}"), Namespace::new([n; NAMESPACE_LENGTH]))
+    }
+
+    /// `workflow_artifacts.instance_name` is a foreign key onto
+    /// `workflow_runs`, so an artefact needs its run row to exist first.
+    async fn insert_run(pool: &SqlitePool, instance_name: &str) -> anyhow::Result<()> {
+        sqlx::query(
+            "INSERT INTO workflow_runs (
+                 instance_name, kind, role, status, current_step, step_index, step_total,
+                 config_json, expected_peers_json, completed_peers_json,
+                 created_at, updated_at
+             ) VALUES (?1, 'AddParty', 'Coordinator', 'inprogress', 'SubmitProposals',
+                       0, 1, '{}', '[]', '[]', 0, 0)",
+        )
+        .bind(instance_name)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    /// A resumed coordinator: `peer_data` is empty, `completed_peers` is not.
+    fn resumed_state(
+        pool: &SqlitePool,
+        completed: Vec<CantonId>,
+    ) -> Arc<WorkflowState<AddPartyStep>> {
+        WorkflowState::from_persisted(
+            pool.clone(),
+            "run-1".to_string(),
+            AddPartyStep::SubmitProposals,
+            completed.clone(),
+            completed,
+            None,
+        )
+    }
+
+    /// The window this guards: peers uploaded, the peer-gated step advanced and
+    /// persisted, then the coordinator restarted before the artefacts were
+    /// written. `peer_data` comes back empty and the peers stay `completed`, so
+    /// nothing will re-send.
+    ///
+    /// Before the guard this returned `Ok(())` and the run submitted with only
+    /// the coordinator's own signature.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn completed_peers_with_no_artefacts_fail_loudly(pool: SqlitePool) -> anyhow::Result<()> {
+        insert_run(&pool, "run-1").await?;
+        let state = resumed_state(&pool, vec![peer(1), peer(2)]);
+
+        let err = require_complete_or_uploaded(
+            &state,
+            &pool,
+            "run-1",
+            artifact_kinds::SIGNED_ADD_PARTY_DNS,
+            "SubmitProposals",
+        )
+        .await
+        .expect_err("completed peers with no artefacts must not pass");
+
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("coordinator restart"),
+            "unhelpful error: {msg}"
+        );
+        assert!(msg.contains("will not"), "unhelpful error: {msg}");
+        Ok(())
+    }
+
+    /// A PARTIAL set must fail too. Artefacts are written per peer and each
+    /// write commits on its own, so a restart mid-loop leaves some peers
+    /// persisted and some not. Treating "not empty" as good enough would let
+    /// the run submit under-signed anyway, which is the failure this guard
+    /// exists to stop.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_partial_artefact_set_fails(pool: SqlitePool) -> anyhow::Result<()> {
+        insert_run(&pool, "run-1").await?;
+        let state = resumed_state(&pool, vec![peer(1), peer(2)]);
+
+        // Only peer(1) made it to disk before the restart.
+        pool.write_artifact(
+            "run-1",
+            artifact_kinds::SIGNED_ADD_PARTY_DNS,
+            Some(&peer(1).to_string()),
+            b"sig",
+        )
+        .await?;
+
+        let err = require_complete_or_uploaded(
+            &state,
+            &pool,
+            "run-1",
+            artifact_kinds::SIGNED_ADD_PARTY_DNS,
+            "SubmitProposals",
+        )
+        .await
+        .expect_err("a partial artefact set must not pass");
+
+        let msg = format!("{err}");
+        assert!(
+            msg.contains(&peer(2).to_string()),
+            "must name who is missing: {msg}"
+        );
+        assert!(
+            !msg.contains(&peer(1).to_string()),
+            "must not name the peer it has: {msg}"
+        );
+        Ok(())
+    }
+
+    /// The legitimate resume: every completed peer already has its artefact, so
+    /// re-entering the step with an empty buffer continues. Without this the
+    /// guard would break every resumed run.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_complete_artefact_set_continues(pool: SqlitePool) -> anyhow::Result<()> {
+        insert_run(&pool, "run-1").await?;
+        let state = resumed_state(&pool, vec![peer(1), peer(2)]);
+
+        for p in [peer(1), peer(2)] {
+            pool.write_artifact(
+                "run-1",
+                artifact_kinds::SIGNED_ADD_PARTY_DNS,
+                Some(&p.to_string()),
+                b"sig",
+            )
+            .await?;
+        }
+
+        require_complete_or_uploaded(
+            &state,
+            &pool,
+            "run-1",
+            artifact_kinds::SIGNED_ADD_PARTY_DNS,
+            "SubmitProposals",
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// The two steps key on different artefact kinds, so a run that persisted
+    /// DNS signatures must not thereby satisfy the clearing-signature guard.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_guard_is_per_artefact_kind(pool: SqlitePool) -> anyhow::Result<()> {
+        insert_run(&pool, "run-1").await?;
+        let state = resumed_state(&pool, vec![peer(1)]);
+
+        pool.write_artifact(
+            "run-1",
+            artifact_kinds::SIGNED_ADD_PARTY_DNS,
+            Some(&peer(1).to_string()),
+            b"sig",
+        )
+        .await?;
+
+        assert!(
+            require_complete_or_uploaded(
+                &state,
+                &pool,
+                "run-1",
+                artifact_kinds::SIGNED_ADD_PARTY_CLEAR,
+                "SubmitClearOnboarding",
+            )
+            .await
+            .is_err(),
+            "DNS artefacts must not satisfy the clearing-signature guard"
+        );
+        Ok(())
+    }
 }
