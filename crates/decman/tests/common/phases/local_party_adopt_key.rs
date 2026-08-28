@@ -10,9 +10,9 @@
 //! It is a question about Canton's behaviour, so it is answered here rather
 //! than reasoned about. The phase:
 //!
-//! 1. Creates a genuine local party on P1 — namespace is P1's own participant
-//!    namespace, which is exactly what makes a party local — at serial 1.
-//! 2. Writes serial 2 adding a wallet-held Ed25519 key as the party's
+//! 1. Creates a genuine local party on P1. The namespace is P1's own
+//!    participant namespace, which is exactly what makes a party local.
+//! 2. Writes the next serial adding a wallet-held Ed25519 key as the party's
 //!    `party_signing_keys`, authorized by P1's namespace key alone (a local
 //!    party's namespace *is* the participant's key, so the participant can
 //!    authorize its own party's topology).
@@ -40,10 +40,7 @@ use canton_proto_rs::com::digitalasset::canton::{
         party_to_participant::HostingParticipant,
         topology_mapping,
     },
-    topology::admin::v30::{
-        AddTransactionsRequest, GenerateTransactionsRequest, generate_transactions_request,
-        topology_manager_write_service_client::TopologyManagerWriteServiceClient,
-    },
+    topology::admin::v30::{AuthorizeRequest, ForceFlag, authorize_request},
 };
 use tracing::info;
 
@@ -52,7 +49,7 @@ use dec_party_manager::{
     config::NodeConfig,
     workflow::{
         external_party::add_hosts::read_party_to_participant,
-        topology::{sign_transactions_with_topology_retry, synchronizer_store_id},
+        topology::{authorize_with_topology_retry, synchronizer_store_id},
     },
 };
 use decman_wallet::ExternalKeyPair;
@@ -74,71 +71,44 @@ fn p1_config(f: &Fixture) -> anyhow::Result<NodeConfig> {
     Ok(config)
 }
 
-/// Submit one `PartyToParticipant` at `serial`, signed by whatever key the node
-/// picks — for a local party that is the participant's own namespace key, which
-/// is the party's namespace too.
-async fn submit_mapping(
-    config: &NodeConfig,
-    mapping: PartyToParticipant,
-    serial: u32,
-) -> anyhow::Result<()> {
+/// Submit one `PartyToParticipant`, letting the participant author and sign it.
+///
+/// `Authorize` rather than `GenerateTransactions` + `SignTransactions`: the
+/// latter attaches signatures to bytes someone else produced, which is the
+/// wallet's shape, not a node writing its own topology. For a local party the
+/// participant's namespace key *is* the party's namespace, so it can fully
+/// authorize the write by itself, which is the whole reason a local party can
+/// be changed without asking anyone.
+///
+/// `serial: 0` lets Canton pick the next serial rather than the test guessing.
+/// `AllowUnvalidatedSigningKeys` is needed for the same reason the decparty
+/// proposal builder passes it: the wallet key has no NamespaceDelegation behind
+/// it, and that is exactly the situation under test.
+async fn submit_mapping(config: &NodeConfig, mapping: PartyToParticipant) -> anyhow::Result<()> {
     let synchronizer_id = dec_party_manager::utils::get_synchronizer_id(config).await?;
-    let store = synchronizer_store_id(&synchronizer_id);
-
-    let mut client = TopologyManagerWriteServiceClient::new(config.admin_channel().await?);
-    let generated = client
-        .generate_transactions(tonic::Request::new(GenerateTransactionsRequest {
-            proposals: vec![generate_transactions_request::Proposal {
-                operation: TopologyChangeOp::AddReplace as i32,
-                serial,
-                mapping: Some(generate_transactions_request::proposal::Mapping::V30(
-                    TopologyMapping {
-                        mapping: Some(topology_mapping::Mapping::PartyToParticipant(mapping)),
-                    },
-                )),
-                store: Some(store.clone()),
-            }],
-            base_request: None,
-        }))
-        .await
-        .context("GenerateTransactions failed")?
-        .into_inner()
-        .generated_transactions;
-
-    let unsigned: Vec<_> = generated
-        .into_iter()
-        .map(|tx| {
-            canton_proto_rs::com::digitalasset::canton::protocol::v30::SignedTopologyTransaction {
-                transaction: tx.serialized_transaction,
-                signatures: vec![],
-                proposal: false,
-                multi_transaction_signatures: vec![],
-            }
-        })
-        .collect();
-
-    let signed = sign_transactions_with_topology_retry(
+    authorize_with_topology_retry(
         config,
-        canton_proto_rs::com::digitalasset::canton::topology::admin::v30::SignTransactionsRequest {
-            transactions: unsigned,
+        AuthorizeRequest {
+            r#type: Some(authorize_request::Type::Proposal(
+                authorize_request::Proposal {
+                    change: TopologyChangeOp::AddReplace as i32,
+                    serial: 0,
+                    mapping: Some(authorize_request::proposal::Mapping::V30(TopologyMapping {
+                        mapping: Some(topology_mapping::Mapping::PartyToParticipant(mapping)),
+                    })),
+                },
+            )),
+            // The participant holds the party's namespace key, so this is not a
+            // proposal awaiting anyone.
+            must_fully_authorize: true,
+            force_changes: vec![ForceFlag::AllowUnvalidatedSigningKeys as i32],
             signed_by: vec![],
-            store: Some(store.clone()),
-            force_flags: vec![],
+            store: Some(synchronizer_store_id(&synchronizer_id)),
+            wait_to_become_effective: None,
         },
         "local-party spike",
     )
-    .await?
-    .transactions;
-
-    client
-        .add_transactions(tonic::Request::new(AddTransactionsRequest {
-            transactions: signed,
-            force_changes: vec![],
-            store: Some(store),
-            wait_to_become_effective: None,
-        }))
-        .await
-        .context("AddTransactions failed")?;
+    .await?;
     Ok(())
 }
 
@@ -183,10 +153,9 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                                 participants: hosts.clone(),
                                 party_signing_keys: None,
                             },
-                            1,
                         )
                         .await
-                        .context("allocating the local party at serial 1")?;
+                        .context("allocating the local party")?;
 
                         // 2) The question: bolt a wallet-held key onto it.
                         // Built by the product's own helper, so the spike proves
@@ -216,7 +185,6 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                                     },
                             ),
                         },
-                        2,
                     )
                     .await
                     .context(
