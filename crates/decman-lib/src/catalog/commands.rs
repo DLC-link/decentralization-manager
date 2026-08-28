@@ -366,10 +366,17 @@ pub fn build_cancel_domain_confirmation(
 /// interface rather than any one template, so the exercise carries the
 /// interface id, never the id of the template that actually created the
 /// proposal contract.
+///
+/// `own_domain_confirmation` accepts the domain confirmation only (see
+/// [`crate::catalog::templates::domain_confirmation_template`]): the builder
+/// hardcodes the `GovernanceConfirmation_Cancel` choice, and only that
+/// template declares it. Vault and self governance have no proposal contract
+/// to retract; cancel their confirmations with
+/// [`build_cancel_vault_confirmation`] or [`build_cancel_self_confirmation`].
 pub fn build_cancel_proposal(
     interface: &TemplateId,
     proposal_cid: &str,
-    own_confirmation: Option<(&str, &TemplateId)>,
+    own_domain_confirmation: Option<(&str, &TemplateId)>,
     member: &CantonId,
     governance_party: &CantonId,
     command_id: String,
@@ -380,7 +387,7 @@ pub fn build_cancel_proposal(
         "GovernableAction_ProposerCancel",
         empty_record(),
     )];
-    if let Some((confirmation_cid, confirmation_template)) = own_confirmation {
+    if let Some((confirmation_cid, confirmation_template)) = own_domain_confirmation {
         cmds.push(exercise(
             confirmation_template,
             confirmation_cid,

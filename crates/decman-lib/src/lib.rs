@@ -16,11 +16,10 @@
 //! to [`framework::commands::build_propose`]:
 //!
 //! ```
-//! use decman_lib::Error;
+//! use decman_lib::{CantonId, Error};
 //! use decman_lib::canton_proto_rs::com::daml::ledger::api::v2::Value;
 //! use decman_lib::catalog::commands::build_confirm_proposal;
 //! use decman_lib::catalog::interpret::parse_domain_confirmation;
-//! use decman_lib::common::canton_id::CantonId;
 //! use decman_lib::framework::commands::build_propose;
 //! use decman_lib::framework::encode::{field, make_record, make_text};
 //! use decman_lib::framework::{
@@ -80,7 +79,15 @@ pub use error::Error;
 
 // These crates appear in the public signatures. The re-exports let an
 // integrator name their types without a direct dependency pinned to the
-// same git revision.
+// same git revision. `common` is the decman server's own crate, so the
+// block re-exports only the types that the lib's signatures use, never
+// the server's HTTP surface.
 pub use canton_common;
 pub use canton_proto_rs;
-pub use common;
+pub use common::{
+    api::{
+        Claim, InstrumentAllowance, InstrumentId, InstrumentIdentifier,
+        InstrumentIssuerCredentials, PackageConfig, PartyCredentialRequirement, RequiredClaim,
+    },
+    canton_id::CantonId,
+};
