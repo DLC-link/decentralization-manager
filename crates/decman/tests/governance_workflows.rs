@@ -114,6 +114,9 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     // the adopt-key endpoints. Same plain-HTTP path, and it touches only its own
     // freshly allocated party, so it sits with the other two.
     phases::local_party_adopt_endpoints::run(&mut f).await?;
+    // Spike: does Canton let an existing local party adopt a wallet key? The
+    // answer decides whether Plan B1 exists at all.
+    phases::local_party_adopt_key::run(&mut f).await?;
     phases::create_dec_party::run(&mut f).await?;
     phases::distribute_dars::run(&mut f).await?;
     phases::check_peer_dars::run(&mut f).await?;
