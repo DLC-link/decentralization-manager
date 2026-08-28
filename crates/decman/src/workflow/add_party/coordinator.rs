@@ -209,8 +209,7 @@ async fn run_workflow(
                     &instance_name,
                     artifact_kinds::ADD_PARTY_SYNC_ACS_COMMAND,
                     None,
-                    &payload,
-                )
+                    &payload,                )
                 .await?;
                 workflow_state.set_command_payload(payload).await;
                 workflow_state.advance_step().await;

@@ -514,8 +514,16 @@ pub async fn tenant_acs_snapshot(
 
     // Drained from the block pipe the add-party path also uses, rather than a
     // second export API. The wallet relay hands the snapshot over HTTP in one
-    // body here, so the blocks are reassembled before responding.
-    let snapshot = match drain_export(&data.config, &data.db, &replication).await {
+    // body here, so the blocks are reassembled before responding — which is why
+    // the drain is capped rather than left to run to whatever size the party is.
+    let snapshot = match drain_export(
+        &data.config,
+        &data.db,
+        &replication,
+        data.config.tenant_acs_max_bytes,
+    )
+    .await
+    {
         Ok(snapshot) => snapshot,
         Err(e) => {
             tracing::error!("tenant acs snapshot: export failed: {e:#}");
@@ -882,6 +890,7 @@ async fn drain_export(
     config: &crate::config::NodeConfig,
     db: &sqlx::SqlitePool,
     replication: &crate::workflow::party_replication::ReplicationTarget,
+    max_bytes: usize,
 ) -> anyhow::Result<Vec<u8>> {
     let mut session = open_export_session(config, db, replication).await?;
     let mut out = Vec::new();
@@ -891,6 +900,13 @@ async fn drain_export(
     let mut seq = 1u64;
     while let PipeBlock::Data { bytes, .. } = session.block(seq, EXPORT_BLOCK_SIZE).await? {
         out.extend_from_slice(&bytes);
+        // Checked per block rather than at the end: this response is assembled
+        // whole in memory, so an oversized party would OOM the node long before
+        // there was a length to reject.
+        anyhow::ensure!(
+            out.len() <= max_bytes,
+            "the party's ACS exceeds DECPM_TENANT_ACS_MAX_BYTES ({max_bytes} bytes)"
+        );
         seq += 1;
     }
     Ok(out)
@@ -1012,11 +1028,11 @@ pub async fn tenant_local_party_adopt_onboard(
     let topology_transactions =
         match decode_all(&body.topology_transactions, "topology transaction") {
             Ok(v) => v,
-            Err(resp) => return resp,
+            Err(error) => return HttpResponse::BadRequest().json(ErrorResponse { error }),
         };
     let signatures = match decode_all(&body.signatures, "signature") {
         Ok(v) => v,
-        Err(resp) => return resp,
+        Err(error) => return HttpResponse::BadRequest().json(ErrorResponse { error }),
     };
 
     let bundle = LocalPartyAdoptionPayload {
