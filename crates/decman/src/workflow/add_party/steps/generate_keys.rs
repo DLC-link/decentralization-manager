@@ -89,7 +89,7 @@ pub async fn generate_keys(
     capture_offset_once(
         config,
         storage,
-        instance_name,
+        &add_party_config.replication_target(instance_name),
         artifact_kinds::ADD_PARTY_PRE_ACTIVATION_OFFSET,
         Some(&self_id),
         ledger_token,

@@ -23,9 +23,7 @@ use crate::{
     config::NodeConfig,
     error::Result,
     utils,
-    workflow::{
-        party_replication::ReplicationTarget, storage::WorkflowStorage, topology::fetch_p2p_mapping,
-    },
+    workflow::{party_replication::ReplicationTarget, topology::fetch_p2p_mapping},
 };
 
 const MAX_SAFE_TIME_WAIT_SECS: u64 = 600;
@@ -64,9 +62,9 @@ pub async fn clear_onboarding_flag(
     // No zero fallback: ClearPartyOnboardingFlag rejects non-positive
     // offsets, and a missing artifact means GenerateNewMemberKeys never
     // persisted one — a real bug to surface, not paper over.
-    let offset_bytes = storage
+    let offset_bytes = target
         .read_artifact(
-            &target.instance_name,
+            storage,
             target.artifacts.pre_activation_offset,
             Some(&self_id),
         )

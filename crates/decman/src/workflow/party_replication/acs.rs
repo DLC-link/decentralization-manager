@@ -25,7 +25,7 @@ use crate::{
     error::Result,
     noise::MAX_CHUNKED_TOTAL_SIZE,
     utils,
-    workflow::{party_replication::ReplicationTarget, storage::WorkflowStorage},
+    workflow::party_replication::ReplicationTarget,
 };
 
 /// How long Canton may wait for the party's activation topology transaction
@@ -57,8 +57,8 @@ pub async fn export_party_acs(
     let synchronizer_id =
         utils::extract_synchronizer_fingerprint(&utils::get_synchronizer_id(config).await?)?;
 
-    let offset_bytes = storage
-        .read_artifact(&target.instance_name, target.artifacts.export_offset, None)
+    let offset_bytes = target
+        .read_artifact(storage, target.artifacts.export_offset, None)
         .await?
         .ok_or_else(|| {
             anyhow::anyhow!(
@@ -186,12 +186,8 @@ pub async fn import_party_acs(
     // crash-looping (unclean participant shutdown). Recover conservatively:
     // reconnect and verify health before doing anything else. This is a no-op
     // when the participant is already connected and healthy.
-    let disconnect_window_opened = storage
-        .read_artifact(
-            &target.instance_name,
-            target.artifacts.import_inflight,
-            None,
-        )
+    let disconnect_window_opened = target
+        .read_artifact(storage, target.artifacts.import_inflight, None)
         .await?
         .is_some();
     if disconnect_window_opened {
@@ -280,13 +276,8 @@ pub async fn import_party_acs(
 
     // Open the crash-safety window BEFORE disconnecting so a crash between here
     // and a verified reconnect is detected on the next attempt.
-    storage
-        .write_artifact(
-            &target.instance_name,
-            target.artifacts.import_inflight,
-            None,
-            b"1",
-        )
+    target
+        .write_artifact(storage, target.artifacts.import_inflight, None, b"1")
         .await?;
 
     tracing::info!(

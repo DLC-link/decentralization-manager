@@ -49,7 +49,9 @@ use crate::{
     utils,
     workflow::{
         external_party::steps::party_query,
-        party_replication::{ReplicationArtifacts, ReplicationTarget, capture_offset_once},
+        party_replication::{
+            ArtifactStore, ReplicationArtifacts, ReplicationTarget, capture_offset_once,
+        },
         storage::artifact_kinds,
         topology,
     },
@@ -81,6 +83,9 @@ pub fn replication_target(party_id: &str, target: &CantonId) -> Result<Replicati
         target.clone(),
         replication_instance(party_id, target),
         TENANT_ADD_HOSTS_ARTIFACTS,
+        // No workflow run behind a tenant call, so the run-scoped artifact
+        // table's foreign key cannot hold these.
+        ArtifactStore::Tenant,
     ))
 }
 
@@ -300,7 +305,7 @@ pub async fn prepare_add_hosts(
         capture_offset_once(
             config,
             storage,
-            &target.instance_name,
+            &target,
             target.artifacts.export_offset,
             None,
             ledger_token,
@@ -311,7 +316,7 @@ pub async fn prepare_add_hosts(
         capture_offset_once(
             config,
             storage,
-            &target.instance_name,
+            &target,
             target.artifacts.pre_activation_offset,
             Some(&config.participant_id().to_string()),
             ledger_token,

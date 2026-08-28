@@ -17,7 +17,7 @@ use crate::{
     config::NodeConfig,
     error::Result,
     utils::{self, get_synchronizer_id},
-    workflow::storage::WorkflowStorage,
+    workflow::party_replication::ReplicationTarget,
 };
 
 /// Capture this participant's ledger offset into `kind` exactly once.
@@ -34,22 +34,18 @@ use crate::{
 pub async fn capture_offset_once(
     config: &NodeConfig,
     storage: &SqlitePool,
-    instance_name: &str,
+    target: &ReplicationTarget,
     kind: &str,
     scope: Option<&str>,
     ledger_token: Option<&str>,
     label: &str,
 ) -> Result {
-    if storage
-        .read_artifact(instance_name, kind, scope)
-        .await?
-        .is_some()
-    {
+    if target.read_artifact(storage, kind, scope).await?.is_some() {
         return Ok(());
     }
     let offset = current_ledger_offset(config, ledger_token).await?;
-    storage
-        .write_artifact(instance_name, kind, scope, offset.to_string().as_bytes())
+    target
+        .write_artifact(storage, kind, scope, offset.to_string().as_bytes())
         .await?;
     tracing::info!("Captured {label} ledger offset {offset}");
     Ok(())
