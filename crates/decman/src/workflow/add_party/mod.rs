@@ -4,10 +4,7 @@ pub mod peer;
 pub mod steps;
 
 pub use config::AddPartyConfig;
-pub use steps::{
-    ClearOutcome, author_clear_proposal, clear_onboarding_flag, generate_keys, import_party_acs,
-    sign_clear_proposal, sign_proposals,
-};
+pub use steps::{author_clear_proposal, generate_keys, sign_clear_proposal, sign_proposals};
 
 use crate::{
     auth::WorkflowAuth, canton_id::CantonId, noise::MessageType, server::WorkflowKind,
