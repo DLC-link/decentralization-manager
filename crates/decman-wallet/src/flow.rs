@@ -7,7 +7,11 @@
 //! last host has signed, so a party is only live once every host reports it.
 
 use common::{
-    api::{TenantOnboardRequest, TenantPrepareRequest},
+    api::{
+        TenantAcsImportRequest, TenantAddHostsOnboardRequest, TenantAddHostsRequest,
+        TenantOnboardRequest, TenantPrepareRequest, TenantThresholdOnboardRequest,
+        TenantThresholdRequest,
+    },
     canton_id::CantonId,
     types::WorkflowProgress,
 };
@@ -16,7 +20,7 @@ use serde::Serialize;
 use crate::{
     client::{HostStatus, TenantClient},
     error::{Error, Result},
-    key::ExternalKeyPair,
+    signer::Signer,
 };
 
 /// One participant that will host the party, and the DecMan instance in front of
@@ -128,7 +132,7 @@ fn progress_to_status(progress: WorkflowProgress) -> HostStatus {
 /// wrong party.
 pub async fn onboard_co_validated(
     hosts: &[WalletHost],
-    key: &ExternalKeyPair,
+    key: &dyn Signer,
     party_hint: &str,
     confirmation_threshold: Option<u32>,
 ) -> Result<OnboardedParty> {
@@ -227,7 +231,7 @@ pub async fn onboard_co_validated(
     let mut signatures = Vec::with_capacity(prepared.transaction_hashes.len());
     for encoded in &prepared.transaction_hashes {
         let hash = preparer.client.decode_b64("transaction_hash", encoded)?;
-        signatures.push(key.sign_b64(&hash));
+        signatures.push(key.sign_b64_async(&hash).await?);
     }
 
     let onboard_request = TenantOnboardRequest {
@@ -279,4 +283,287 @@ pub async fn statuses(hosts: &[WalletHost], party_id: &str) -> Vec<HostReport> {
         reports.push(report);
     }
     reports
+}
+
+/// The outcome of adding hosts to a party that already exists.
+#[derive(Debug)]
+pub struct AddedHosts {
+    /// The party that gained hosts.
+    pub party_id: String,
+    /// The serial the add-hosts write carries.
+    pub serial: u32,
+    /// Per-host outcome of the topology write.
+    pub hosts: Vec<HostReport>,
+    /// Whether every joining host imported the ACS and cleared its onboarding
+    /// marker. `false` means at least one is hosted but still suspended, holding
+    /// none of the party's contracts.
+    pub replicated: bool,
+    /// Joining hosts whose source could not preflight the packages, so their
+    /// import validated them only after disconnecting. Empty is the good case.
+    pub without_package_preflight: Vec<String>,
+}
+
+/// Add `new_hosts` to a party that already exists, and replicate its contracts
+/// onto them.
+///
+/// Three phases, in the order Canton forces:
+///
+/// 1. **Topology.** Every host prepares the serial-N+1 replace and the wallet
+///    requires them to agree, for exactly the reason onboarding does: the wallet
+///    signs a hash it cannot parse, so agreement between hosts is the only thing
+///    standing between it and a host that returns the hash of a mapping it never
+///    showed. Canton's rules need the party namespace plus each joining
+///    participant, so only the joiners submit.
+/// 2. **State.** A current host exports the ACS scoped to each joiner and the
+///    wallet relays it. There is no host-to-host channel by design: a partner's
+///    node is generally not in anyone else's mesh, and the wallet already talks
+///    to all of them.
+/// 3. **Activation.** The joiner clears Canton's onboarding marker, which is the
+///    moment the party becomes usable there.
+///
+/// The threshold is left alone. Raising it belongs in [`raise_threshold`], after
+/// the markers clear, because a marked host cannot confirm and so cannot count
+/// toward it.
+///
+/// # Errors
+/// Fails before signing if `new_hosts` is empty, if any host cannot prepare, or
+/// if the hosts disagree about what to sign. A host that rejects the bundle
+/// afterwards is recorded in its [`HostReport`] rather than aborting the run.
+pub async fn add_hosts(
+    current_hosts: &[WalletHost],
+    new_hosts: &[WalletHost],
+    key: &dyn Signer,
+    party_id: &str,
+    base_serial: u32,
+) -> Result<AddedHosts> {
+    if new_hosts.is_empty() {
+        return Err(Error::NotEnoughHosts(0));
+    }
+    let Some(source) = current_hosts.first() else {
+        return Err(Error::NotEnoughHosts(0));
+    };
+
+    let request = TenantAddHostsRequest {
+        party_id: party_id.to_string(),
+        new_hosts: new_hosts.iter().map(|h| h.participant_id.clone()).collect(),
+        base_serial,
+    };
+
+    // Everyone prepares, joiners included: a joiner reads the mapping from the
+    // shared synchronizer store, so it can check the others' work too.
+    let mut prepared_by_host = Vec::with_capacity(current_hosts.len() + new_hosts.len());
+    for host in current_hosts.iter().chain(new_hosts) {
+        let prepared = host.client.add_hosts_prepare(&request).await?;
+        prepared_by_host.push((host, prepared));
+    }
+
+    let Some(((preparer, prepared), others)) = prepared_by_host.split_first() else {
+        return Err(Error::NotEnoughHosts(0));
+    };
+    for (host, other) in others {
+        let disagreement = if other.topology_transactions != prepared.topology_transactions {
+            Some("different topology transactions".to_string())
+        } else if other.transaction_hashes != prepared.transaction_hashes {
+            Some("same transactions but different hashes to sign".to_string())
+        } else if other.serial != prepared.serial {
+            Some(format!(
+                "serial {found} vs {expected}",
+                found = other.serial,
+                expected = prepared.serial
+            ))
+        } else {
+            None
+        };
+        if let Some(detail) = disagreement {
+            return Err(Error::HostDisagreement {
+                host: host.client.base_url().to_string(),
+                reference: preparer.client.base_url().to_string(),
+                detail,
+            });
+        }
+    }
+
+    if prepared.transaction_hashes.len() != prepared.topology_transactions.len() {
+        return Err(Error::MalformedPreparation {
+            host: preparer.client.base_url().to_string(),
+            detail: format!(
+                "{hashes} hash(es) for {txs} transaction(s)",
+                hashes = prepared.transaction_hashes.len(),
+                txs = prepared.topology_transactions.len()
+            ),
+        });
+    }
+    let mut signatures = Vec::with_capacity(prepared.transaction_hashes.len());
+    for encoded in &prepared.transaction_hashes {
+        let hash = preparer.client.decode_b64("transaction_hash", encoded)?;
+        signatures.push(key.sign_b64_async(&hash).await?);
+    }
+
+    let onboard_request = TenantAddHostsOnboardRequest {
+        party_id: party_id.to_string(),
+        base_serial,
+        topology_transactions: prepared.topology_transactions.clone(),
+        signatures,
+        signed_by: key.fingerprint(),
+    };
+
+    // Only the joiners submit: Canton needs the party namespace plus each new
+    // participant, and the existing hosts are neither.
+    let mut reports = Vec::with_capacity(new_hosts.len());
+    for host in new_hosts {
+        let report = match host.client.add_hosts_onboard(&onboard_request).await {
+            Ok(resp) => {
+                tracing::info!(
+                    host = host.client.base_url(),
+                    party_id = %resp.party_id,
+                    serial = resp.serial,
+                    "submitted add-hosts on joining host"
+                );
+                HostReport::ok(host, progress_to_status(resp.status))
+            }
+            Err(e) => {
+                tracing::warn!(
+                    host = host.client.base_url(),
+                    "add-hosts submit failed: {e}"
+                );
+                HostReport::failed(host, &e)
+            }
+        };
+        reports.push(report);
+    }
+
+    // Phase 2 and 3, per joiner. A joiner whose topology write failed is skipped:
+    // Canton scopes the export to the joiner's activation, which does not exist.
+    let mut replicated = true;
+    let mut without_package_preflight = Vec::new();
+    for (host, report) in new_hosts.iter().zip(&reports) {
+        if report.error.is_some() {
+            replicated = false;
+            continue;
+        }
+        let snapshot = match source
+            .client
+            .acs_snapshot(party_id, &host.participant_id)
+            .await
+        {
+            Ok(snapshot) => snapshot,
+            Err(e) => {
+                tracing::warn!(host = host.client.base_url(), "ACS export failed: {e}");
+                replicated = false;
+                continue;
+            }
+        };
+        if !snapshot.package_preflight {
+            without_package_preflight.push(host.client.base_url().to_string());
+        }
+        let import = TenantAcsImportRequest {
+            party_id: party_id.to_string(),
+            snapshot: snapshot.snapshot,
+            package_ids: snapshot.package_ids,
+        };
+        match host.client.acs_import(&import).await {
+            Ok(resp) => {
+                if !resp.marker_cleared {
+                    tracing::warn!(
+                        host = host.client.base_url(),
+                        "ACS imported but the onboarding marker is still set; the party is \
+                         hosted here and not yet usable"
+                    );
+                    replicated = false;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(host = host.client.base_url(), "ACS import failed: {e}");
+                replicated = false;
+            }
+        }
+    }
+
+    Ok(AddedHosts {
+        party_id: party_id.to_string(),
+        serial: prepared.serial,
+        hosts: reports,
+        replicated,
+        without_package_preflight,
+    })
+}
+
+/// Move a party's confirmation threshold.
+///
+/// A threshold change needs the party namespace alone, so unlike an add there is
+/// no participant to co-sign and one host is enough to carry it. Every host is
+/// still asked to prepare and required to agree, because the wallet's inability
+/// to parse the hash it signs does not change with the operation.
+///
+/// Do this **after** the joiners' markers clear. A marked host cannot confirm, so
+/// a threshold raised to include one is a threshold the party cannot meet.
+///
+/// # Errors
+/// As [`add_hosts`], plus whatever the node returns for a threshold its hosts
+/// cannot field.
+pub async fn raise_threshold(
+    hosts: &[WalletHost],
+    key: &dyn Signer,
+    party_id: &str,
+    new_threshold: u32,
+    base_serial: u32,
+) -> Result<Vec<HostReport>> {
+    if hosts.is_empty() {
+        return Err(Error::NotEnoughHosts(0));
+    }
+
+    let request = TenantThresholdRequest {
+        party_id: party_id.to_string(),
+        new_threshold,
+        base_serial,
+    };
+
+    let mut prepared_by_host = Vec::with_capacity(hosts.len());
+    for host in hosts {
+        prepared_by_host.push((host, host.client.threshold_prepare(&request).await?));
+    }
+    let Some(((preparer, prepared), others)) = prepared_by_host.split_first() else {
+        return Err(Error::NotEnoughHosts(0));
+    };
+    for (host, other) in others {
+        if other.topology_transactions != prepared.topology_transactions
+            || other.transaction_hashes != prepared.transaction_hashes
+        {
+            return Err(Error::HostDisagreement {
+                host: host.client.base_url().to_string(),
+                reference: preparer.client.base_url().to_string(),
+                detail: "different threshold-change bytes".to_string(),
+            });
+        }
+    }
+
+    let mut signatures = Vec::with_capacity(prepared.transaction_hashes.len());
+    for encoded in &prepared.transaction_hashes {
+        let hash = preparer.client.decode_b64("transaction_hash", encoded)?;
+        signatures.push(key.sign_b64_async(&hash).await?);
+    }
+
+    let onboard = TenantThresholdOnboardRequest {
+        party_id: party_id.to_string(),
+        base_serial,
+        topology_transactions: prepared.topology_transactions.clone(),
+        signatures,
+        signed_by: key.fingerprint(),
+    };
+
+    let mut reports = Vec::with_capacity(hosts.len());
+    for host in hosts {
+        let report = match host.client.threshold_onboard(&onboard).await {
+            Ok(resp) => HostReport::ok(host, progress_to_status(resp.status)),
+            Err(e) => {
+                tracing::warn!(
+                    host = host.client.base_url(),
+                    "threshold submit failed: {e}"
+                );
+                HostReport::failed(host, &e)
+            }
+        };
+        reports.push(report);
+    }
+    Ok(reports)
 }

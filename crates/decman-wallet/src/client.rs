@@ -8,8 +8,12 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
 use common::{
     api::{
-        TenantOnboardRequest, TenantOnboardResponse, TenantPrepareRequest, TenantPrepareResponse,
+        TenantAcsImportRequest, TenantAcsImportResponse, TenantAcsSnapshotResponse,
+        TenantAddHostsOnboardRequest, TenantAddHostsOnboardResponse, TenantAddHostsPrepareResponse,
+        TenantAddHostsRequest, TenantOnboardRequest, TenantOnboardResponse, TenantPrepareRequest,
+        TenantPrepareResponse, TenantThresholdOnboardRequest, TenantThresholdRequest,
     },
+    canton_id::CantonId,
     types::WorkflowProgress,
 };
 use reqwest::{Client, StatusCode};
@@ -101,6 +105,61 @@ impl TenantClient {
             Err(e) if e.is_status(StatusCode::NOT_FOUND.as_u16()) => Ok(HostStatus::NotHosted),
             Err(e) => Err(e),
         }
+    }
+
+    /// `POST /v0/tenant/add-hosts/prepare` — the serial-N+1 topology that adds
+    /// hosts to a party that already exists.
+    pub async fn add_hosts_prepare(
+        &self,
+        req: &TenantAddHostsRequest,
+    ) -> Result<TenantAddHostsPrepareResponse> {
+        self.post("/v0/tenant/add-hosts/prepare", req).await
+    }
+
+    /// `POST /v0/tenant/add-hosts/onboard` — submit the signed add-hosts bundle
+    /// to THIS host.
+    pub async fn add_hosts_onboard(
+        &self,
+        req: &TenantAddHostsOnboardRequest,
+    ) -> Result<TenantAddHostsOnboardResponse> {
+        self.post("/v0/tenant/add-hosts/onboard", req).await
+    }
+
+    /// `GET /v0/tenant/{party}/acs/{target}` — the party's ACS scoped to a
+    /// joining host, for this wallet to relay to it.
+    pub async fn acs_snapshot(
+        &self,
+        party_id: &str,
+        target: &CantonId,
+    ) -> Result<TenantAcsSnapshotResponse> {
+        self.get(&format!("/v0/tenant/{party_id}/acs/{target}"))
+            .await
+    }
+
+    /// `POST /v0/tenant/add-hosts/import` — hand a joining host the snapshot and
+    /// have it clear its onboarding marker.
+    pub async fn acs_import(
+        &self,
+        req: &TenantAcsImportRequest,
+    ) -> Result<TenantAcsImportResponse> {
+        self.post("/v0/tenant/add-hosts/import", req).await
+    }
+
+    /// `POST /v0/tenant/threshold/prepare` — the serial-N+1 topology that moves
+    /// the confirmation threshold.
+    pub async fn threshold_prepare(
+        &self,
+        req: &TenantThresholdRequest,
+    ) -> Result<TenantAddHostsPrepareResponse> {
+        self.post("/v0/tenant/threshold/prepare", req).await
+    }
+
+    /// `POST /v0/tenant/threshold/onboard` — submit the signed threshold change.
+    pub async fn threshold_onboard(
+        &self,
+        req: &TenantThresholdOnboardRequest,
+    ) -> Result<TenantAddHostsOnboardResponse> {
+        self.post("/v0/tenant/threshold/onboard", req).await
     }
 
     /// Base64-decode a field the host sent us, tagging which field it was.
