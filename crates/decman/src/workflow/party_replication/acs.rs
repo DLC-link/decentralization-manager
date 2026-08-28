@@ -25,10 +25,7 @@ use crate::{
     error::Result,
     noise::MAX_CHUNKED_TOTAL_SIZE,
     utils,
-    workflow::{
-        add_party::AddPartyConfig,
-        storage::{WorkflowStorage, artifact_kinds},
-    },
+    workflow::party_replication::ReplicationTarget,
 };
 
 /// How long Canton may wait for the party's activation topology transaction
@@ -41,31 +38,33 @@ const EXPORT_ACTIVATION_TIMEOUT_SECS: i64 = 120;
 /// Canton's default 4 MiB gRPC message cap.
 const IMPORT_CHUNK_SIZE: usize = 1024 * 1024;
 
-/// Coordinator side: export the party's ACS for replication onto the new
-/// member, via the Canton 3.4 `ExportPartyAcs` admin endpoint. Canton locates
-/// the party's activation on the new member after `begin_offset_exclusive`
-/// (the offset persisted by ExportState BEFORE the topology was submitted)
-/// and produces a snapshot consistent with that activation — this is what
-/// fixes the old implementation's export-at-current-ledger-end gap.
+/// Source side: export the party's ACS for replication onto the target
+/// participant, via the Canton `ExportPartyAcs` admin endpoint. Canton locates
+/// the party's activation on the target after `begin_offset_exclusive` (the
+/// offset captured BEFORE the topology was submitted) and produces a snapshot
+/// consistent with that activation — this is what fixes the old
+/// implementation's export-at-current-ledger-end gap.
 ///
 /// Returns the raw snapshot bytes; empty when the party has no active
 /// contracts (the import side skips on empty).
 pub async fn export_party_acs(
     config: &NodeConfig,
     storage: &SqlitePool,
-    instance_name: &str,
-    add_party_config: &AddPartyConfig,
+    target: &ReplicationTarget,
 ) -> Result<Vec<u8>> {
     // Logical synchronizer id — see `current_ledger_offset` for why the
     // physical id is rejected by PartyManagementService.
     let synchronizer_id =
         utils::extract_synchronizer_fingerprint(&utils::get_synchronizer_id(config).await?)?;
 
-    let offset_bytes = storage
-        .read_artifact(instance_name, artifact_kinds::ADD_PARTY_EXPORT_OFFSET, None)
+    let offset_bytes = target
+        .read_artifact(storage, target.artifacts.export_offset, None)
         .await?
         .ok_or_else(|| {
-            anyhow::anyhow!("ADD_PARTY_EXPORT_OFFSET artifact missing — did ExportState run?")
+            anyhow::anyhow!(
+                "{kind} artifact missing — the pre-topology offset was never captured",
+                kind = target.artifacts.export_offset
+            )
         })?;
     let begin_offset_exclusive: i64 = String::from_utf8(offset_bytes)?
         .trim()
@@ -73,16 +72,16 @@ pub async fn export_party_acs(
         .map_err(|e| anyhow::anyhow!("Failed to parse export offset: {e}"))?;
 
     tracing::info!(
-        "Exporting ACS of {party} for new member {member} (begin offset {begin_offset_exclusive})",
-        party = add_party_config.decentralized_party_id,
-        member = add_party_config.new_participant_id
+        "Exporting ACS of {party} for target {member} (begin offset {begin_offset_exclusive})",
+        party = target.party_id,
+        member = target.target_participant_id
     );
 
     let mut client = PartyManagementServiceClient::new(config.admin_channel().await?);
 
     // Bounded retry on INVALID_STATE: the export locates the party's MOST
     // RECENT activation on the target in this participant's published
-    // ledger-API events. When the new member was a member before (kicked,
+    // ledger-API events. When the target hosted the party before (removed,
     // now re-added), an OLD flag-less activation is already published while
     // the re-add's event may still be awaiting publication — Canton then
     // aborts with "must be activated … with the onboarding flag set"
@@ -92,9 +91,9 @@ pub async fn export_party_acs(
     let retry_delay = Duration::from_secs(topology_retry_delay_secs());
     for attempt in 1..=max_attempts {
         let request = tonic::Request::new(ExportPartyAcsRequest {
-            party_id: add_party_config.decentralized_party_id.to_string(),
+            party_id: target.party_id.to_string(),
             synchronizer_id: synchronizer_id.clone(),
-            target_participant_uid: add_party_config.new_participant_id.to_string(),
+            target_participant_uid: target.target_participant_id.to_string(),
             begin_offset_exclusive,
             wait_for_activation_timeout: Some(prost_types::Duration {
                 seconds: EXPORT_ACTIVATION_TIMEOUT_SECS,
@@ -143,7 +142,7 @@ async fn collect_export_stream(
         if snapshot.len() > MAX_CHUNKED_TOTAL_SIZE {
             return Err(tonic::Status::out_of_range(format!(
                 "Exported ACS snapshot exceeds the {MAX_CHUNKED_TOTAL_SIZE}-byte \
-                 chunked-transfer cap — the new member cannot receive it over Noise. \
+                 chunked-transfer cap — the target cannot receive it over Noise. \
                  Raise MAX_CHUNKED_TOTAL_SIZE (with a memory-bound review) to replicate \
                  a party this large."
             )));
@@ -152,7 +151,7 @@ async fn collect_export_stream(
     Ok(snapshot)
 }
 
-/// New-member side: import the ACS snapshot via the Canton `ImportPartyAcs`
+/// Target side: import the ACS snapshot via the Canton `ImportPartyAcs`
 /// admin endpoint. Canton requires the participant to be disconnected from all
 /// synchronizers for the duration of the import (refused otherwise with
 /// `IMPORT_ACS_ERROR: There are still synchronizers connected`) — the party
@@ -177,8 +176,7 @@ async fn collect_export_stream(
 pub async fn import_party_acs(
     config: &NodeConfig,
     storage: &SqlitePool,
-    instance_name: &str,
-    add_party_config: &AddPartyConfig,
+    target: &ReplicationTarget,
     snapshot: Vec<u8>,
     required_package_ids: &[String],
 ) -> Result {
@@ -188,12 +186,8 @@ pub async fn import_party_acs(
     // crash-looping (unclean participant shutdown). Recover conservatively:
     // reconnect and verify health before doing anything else. This is a no-op
     // when the participant is already connected and healthy.
-    let disconnect_window_opened = storage
-        .read_artifact(
-            instance_name,
-            artifact_kinds::ADD_PARTY_ACS_IMPORT_INFLIGHT,
-            None,
-        )
+    let disconnect_window_opened = target
+        .read_artifact(storage, target.artifacts.import_inflight, None)
         .await?
         .is_some();
     if disconnect_window_opened {
@@ -230,9 +224,9 @@ pub async fn import_party_acs(
             .collect();
         if !missing.is_empty() {
             anyhow::bail!(
-                "new member is missing {n} package(s) required by the party's contracts — \
-                 vet the corresponding DAR(s) on this participant before onboarding; add-party \
-                 will not import the ACS without them. Missing package ids: {missing:?}",
+                "the target participant is missing {n} package(s) required by the party's \
+                 contracts — vet the corresponding DAR(s) on it before replicating; the ACS \
+                 will not be imported without them. Missing package ids: {missing:?}",
                 n = missing.len()
             );
         }
@@ -242,7 +236,7 @@ pub async fn import_party_acs(
     // pitfall) plus the party being imported.
     let synchronizer_id =
         utils::extract_synchronizer_fingerprint(&utils::get_synchronizer_id(config).await?)?;
-    let party_id = add_party_config.decentralized_party_id.to_string();
+    let party_id = target.party_id.to_string();
 
     let mut connectivity =
         SynchronizerConnectivityServiceClient::new(config.admin_channel().await?);
@@ -282,13 +276,8 @@ pub async fn import_party_acs(
 
     // Open the crash-safety window BEFORE disconnecting so a crash between here
     // and a verified reconnect is detected on the next attempt.
-    storage
-        .write_artifact(
-            instance_name,
-            artifact_kinds::ADD_PARTY_ACS_IMPORT_INFLIGHT,
-            None,
-            b"1",
-        )
+    target
+        .write_artifact(storage, target.artifacts.import_inflight, None, b"1")
         .await?;
 
     tracing::info!(
@@ -425,7 +414,7 @@ fn synchronizer_healthy(
 }
 
 /// Coordinator side: the distinct package ids referenced by the party's active
-/// contracts. Shipped to the new member so its ACS-import preflight can verify
+/// contracts. Shipped to the target so its ACS-import preflight can verify
 /// it has every package the imported contracts need before disconnecting.
 pub async fn collect_party_package_ids(
     config: &NodeConfig,

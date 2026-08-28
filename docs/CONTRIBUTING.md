@@ -49,10 +49,13 @@ process in [SECURITY.md](SECURITY.md).
   - `crates/decman/src/` — server source.
   - `crates/decman/frontend/` — React + Vite UI (embedded into the binary at build time).
   - `crates/decman/migrations/` — SQLx database migrations.
-- `crates/common/` — shared wire DTOs + Canton-ID helpers (used by `decman` and `decman-cli`).
+- `crates/common/` — shared wire DTOs, Canton-ID helpers, and external-party
+  fingerprint derivation (used by every other crate).
 - `crates/decman-cli/` — terminal UI client.
+- `crates/decman-wallet/` — wallet-side client library for the tenant API.
 - `daml/` — Daml governance packages and tests.
 - `integration-tests/` — end-to-end test harness and scripts.
+- `e2e/` — Playwright UI tests.
 - `docs/` — architecture, integration, and use-case documentation.
 
 ## Building, testing, and linting

@@ -495,6 +495,99 @@ pub struct TenantAddHostsOnboardResponse {
     pub serial: u32,
 }
 
+/// The party's ACS snapshot plus the packages needed to validate it, handed to
+/// the wallet so it can relay both to the joining host.
+///
+/// The wallet is the transport on purpose: the tenant API has no inter-node
+/// channel, and a partner's host is generally not in this node's Noise mesh.
+/// The wallet already talks to every host, so it carries the snapshot rather
+/// than the hosts needing to reach each other.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantAcsSnapshotResponse {
+    /// The party the snapshot belongs to.
+    pub party_id: String,
+    /// The snapshot, base64-encoded. Empty when the party holds no contracts,
+    /// in which case the joiner skips the import.
+    pub snapshot: String,
+    /// Package ids the joiner must have vetted before it can validate the
+    /// snapshot. Its import refuses up front if any are missing, rather than
+    /// failing after it has already disconnected.
+    pub package_ids: Vec<String>,
+    /// Whether `package_ids` is trustworthy.
+    ///
+    /// The scan reads the party's contracts over the **Ledger** API, which needs
+    /// a credential for that party. A node hosting an external party holds no
+    /// such credential — the whole point is that the key is the wallet's — so on
+    /// those deployments the scan cannot run and this is `false` with
+    /// `package_ids` empty.
+    ///
+    /// `false` does not make the import unsafe: Canton re-validates every
+    /// contract during `ImportPartyAcs` and fails on a missing package. It means
+    /// that failure arrives *after* the joiner has disconnected rather than
+    /// before, so an operator should confirm the joiner has the party's DARs
+    /// vetted first.
+    pub package_preflight: bool,
+}
+
+/// Request to import a relayed ACS snapshot on the joining host and clear its
+/// onboarding marker.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantAcsImportRequest {
+    /// The party being replicated onto this host.
+    pub party_id: String,
+    /// The base64 snapshot from `TenantAcsSnapshotResponse`.
+    pub snapshot: String,
+    /// The package ids that came with it.
+    #[serde(default)]
+    pub package_ids: Vec<String>,
+}
+
+/// Outcome of importing the ACS and attempting the marker clear on this host.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantAcsImportResponse {
+    pub party_id: String,
+    /// Whether the snapshot was imported. `false` means it was empty and the
+    /// import was skipped, which is a success, not a failure.
+    pub imported: bool,
+    /// Whether Canton's onboarding marker is gone, i.e. the party is live on
+    /// this host. `false` means the clearing transaction is proposed but not
+    /// yet authorized — the party is hosted here but still suspended.
+    pub marker_cleared: bool,
+}
+
+/// Request to prepare a confirmation-threshold change for an existing external
+/// party. Separate from add-hosts on purpose: a newly added host cannot confirm
+/// until its onboarding marker clears, so the two writes must not be combined.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantThresholdRequest {
+    pub party_id: String,
+    /// The threshold to move to. Must be between 1 and the number of hosts
+    /// currently able to confirm — marked hosts do not count.
+    pub new_threshold: u32,
+    /// The serial the wallet read from the party's current mapping.
+    pub base_serial: u32,
+}
+
+/// Request to submit a wallet-signed threshold change on one host.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantThresholdOnboardRequest {
+    pub party_id: String,
+    pub base_serial: u32,
+    pub topology_transactions: Vec<String>,
+    pub signatures: Vec<String>,
+    pub signed_by: String,
+}
+
 /// Response for key status check
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

@@ -572,8 +572,15 @@ pub(super) fn party_query(synchronizer_id: &str, proposals: bool) -> BaseQuery {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HostOnboardingStatus {
     /// An authorized `PartyToParticipant` names this participant with
-    /// Confirmation — hosting is live.
+    /// Confirmation and no onboarding marker — hosting is live.
     Hosted,
+    /// Named in the authorized mapping, but Canton's onboarding marker is still
+    /// set: the party is assigned here and suspended here. It holds none of the
+    /// party's contracts and cannot confirm for it until the marker clears.
+    ///
+    /// Distinct from [`Pending`](Self::Pending), which is about signatures the
+    /// topology still needs. This one is authorized and waiting on replication.
+    Onboarding,
     /// A proposal exists but is not yet fully authorized (waiting on more hosts).
     Pending,
     /// No mapping — authorized or proposed — for this party on this participant.
@@ -606,17 +613,28 @@ pub async fn host_onboarding_status(
             }))
             .await?
             .into_inner();
-        let names_self = response.results.iter().any(|r| {
-            matches!(&r.item, Some(P2pItem::V30(p)) if {
-                p.participants.iter().any(|h| {
-                    h.participant_uid == self_uid
-                        && h.permission == ParticipantPermission::Confirmation as i32
-                })
-            })
-        });
-        if names_self {
+        // The marker matters as much as the name: a host carrying it is in the
+        // mapping but suspended, holding none of the party's contracts. Reading
+        // only the uid and the permission reports such a host as live, which is
+        // how a caller ends up trusting a host that cannot yet confirm anything.
+        let mut named = None;
+        for result in &response.results {
+            let Some(P2pItem::V30(p)) = &result.item else {
+                continue;
+            };
+            if let Some(entry) = p.participants.iter().find(|h| {
+                h.participant_uid == self_uid
+                    && h.permission == ParticipantPermission::Confirmation as i32
+            }) {
+                named = Some(entry.onboarding.is_some());
+                break;
+            }
+        }
+        if let Some(marked) = named {
             return Ok(if proposals {
                 HostOnboardingStatus::Pending
+            } else if marked {
+                HostOnboardingStatus::Onboarding
             } else {
                 HostOnboardingStatus::Hosted
             });
