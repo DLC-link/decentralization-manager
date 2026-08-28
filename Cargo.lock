@@ -1882,6 +1882,7 @@ dependencies = [
 name = "decman-wallet"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "base64 0.23.0",
  "common 0.1.0",
  "ed25519-dalek",

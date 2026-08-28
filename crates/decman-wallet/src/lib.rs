@@ -49,8 +49,13 @@ pub mod client;
 pub mod error;
 pub mod flow;
 pub mod key;
+pub mod signer;
 
 pub use client::{HostStatus, TenantClient};
 pub use error::{Error, Result};
-pub use flow::{HostReport, OnboardedParty, WalletHost, onboard_co_validated, statuses};
+pub use flow::{
+    AddedHosts, HostReport, OnboardedParty, WalletHost, add_hosts, onboard_co_validated,
+    raise_threshold, statuses,
+};
 pub use key::ExternalKeyPair;
+pub use signer::Signer;

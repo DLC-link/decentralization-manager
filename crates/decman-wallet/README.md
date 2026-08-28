@@ -80,3 +80,52 @@ key. Neither belongs in a browser page. Keeping them in the process that embeds
 this library also keeps one implementation of the crypto — signing in the browser
 would mean a second copy of the fingerprint derivation and signature encoding, free
 to drift from the one the node validates against.
+
+## Adding a host to a party that already exists
+
+Onboarding creates a party. `add_hosts` grows one, in the order Canton forces:
+topology, then state, then activation.
+
+```rust
+use decman_wallet::{add_hosts, raise_threshold};
+
+// The party gained a host, but a host with no contracts confirms nothing.
+let added = add_hosts(&current_hosts, &new_hosts, &key, &party_id, base_serial).await?;
+assert!(added.replicated, "a joiner is hosted but still suspended");
+
+// Only once the markers have cleared, because a marked host cannot confirm and
+// so cannot count toward the threshold.
+raise_threshold(&all_hosts, &key, &party_id, 2, added.serial).await?;
+```
+
+`base_serial` is the serial the wallet last saw for the party. Every host is
+required to prepare the same bytes for it, which is what makes a single lying
+host detectable. A host whose own view has moved on answers 409 rather than
+preparing something different.
+
+The wallet carries the ACS snapshot from a current host to each joiner itself.
+There is no host-to-host channel: a partner's node is generally not in anyone
+else's mesh, and the wallet already talks to all of them.
+
+`AddedHosts::without_package_preflight` names joiners whose source could not
+check their vetted packages up front, so their import validated after
+disconnecting rather than before. Empty is the good case.
+
+## Keys the wallet does not hold
+
+`ExternalKeyPair` keeps the seed in this process. A provider whose keys live in
+a KMS implements [`Signer`] instead: the flows only ever need a public key and a
+signature over a hash the node computed, so they ask for those rather than for
+the key.
+
+```rust
+#[async_trait::async_trait]
+impl decman_wallet::Signer for MyKmsKey {
+    fn public_key_bytes(&self) -> [u8; 32] { self.cached_public_key }
+    async fn sign(&self, message: &[u8]) -> decman_wallet::Result<[u8; 64]> {
+        self.kms.sign(message).await
+    }
+}
+```
+
+Signing is async and fallible because a KMS signs over the network.
