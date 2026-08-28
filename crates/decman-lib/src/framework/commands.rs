@@ -52,6 +52,17 @@ pub fn proposal_create_arguments(
             "proposal payload must encode to a Record".into(),
         ));
     };
+
+    if record
+        .fields
+        .iter()
+        .any(|f| matches!(f.label.as_str(), "governanceParty" | "proposer"))
+    {
+        return Err(Error::Encode(
+            "proposal payload must not include governanceParty/proposer fields".into(),
+        ));
+    }
+
     let mut fields = vec![
         field("governanceParty", make_party(governance_party)),
         field("proposer", make_party(proposer)),
