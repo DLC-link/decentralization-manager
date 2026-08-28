@@ -448,6 +448,12 @@ The table below is a curated subset. A complete, interactive API reference is av
 | `/v0/tenant/prepare` | POST | Wallet-facing: builds an external party's onboarding topology and returns the hash to sign |
 | `/v0/tenant/onboard` | POST | Wallet-facing: validates the wallet's signed topology, co-signs, and submits it |
 | `/v0/tenant/{party}/status` | GET | Wallet-facing: reports whether this host has the party hosted yet |
+| `/v0/tenant/add-hosts/prepare` | POST | Wallet-facing: builds the serial-N+1 topology that adds hosts to an existing external party |
+| `/v0/tenant/add-hosts/onboard` | POST | Wallet-facing: validates the wallet-signed add-hosts topology, co-signs, and submits it |
+| `/v0/tenant/{party}/acs/{target}` | GET | Wallet-facing: exports the party's ACS scoped to a joining host, for the wallet to relay |
+| `/v0/tenant/add-hosts/import` | POST | Wallet-facing: imports a relayed ACS on this host and clears its onboarding marker |
+| `/v0/tenant/threshold/prepare` | POST | Wallet-facing: builds a confirmation-threshold change |
+| `/v0/tenant/threshold/onboard` | POST | Wallet-facing: submits the wallet-signed threshold change |
 
 The `/v0/tenant/*` endpoints are the tenant API. They authenticate with a
 separate tenant API key rather than the operator JWT, and are driven by

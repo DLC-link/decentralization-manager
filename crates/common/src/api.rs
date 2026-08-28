@@ -515,6 +515,20 @@ pub struct TenantAcsSnapshotResponse {
     /// snapshot. Its import refuses up front if any are missing, rather than
     /// failing after it has already disconnected.
     pub package_ids: Vec<String>,
+    /// Whether `package_ids` is trustworthy.
+    ///
+    /// The scan reads the party's contracts over the **Ledger** API, which needs
+    /// a credential for that party. A node hosting an external party holds no
+    /// such credential — the whole point is that the key is the wallet's — so on
+    /// those deployments the scan cannot run and this is `false` with
+    /// `package_ids` empty.
+    ///
+    /// `false` does not make the import unsafe: Canton re-validates every
+    /// contract during `ImportPartyAcs` and fails on a missing package. It means
+    /// that failure arrives *after* the joiner has disconnected rather than
+    /// before, so an operator should confirm the joiner has the party's DARs
+    /// vetted first.
+    pub package_preflight: bool,
 }
 
 /// Request to import a relayed ACS snapshot on the joining host and clear its

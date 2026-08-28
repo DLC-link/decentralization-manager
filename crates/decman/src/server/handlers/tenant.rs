@@ -515,16 +515,26 @@ pub async fn tenant_acs_snapshot(
     };
 
     // No contracts means no packages to check, and the ledger scan is not free.
-    let package_ids = if snapshot.is_empty() {
-        Vec::new()
+    //
+    // The scan is best-effort on purpose. It reads the party's contracts over
+    // the Ledger API, which needs a credential for that party, and a node
+    // hosting an *external* party has none — the key belongs to the wallet.
+    // Failing the whole export over a preflight that cannot run on this
+    // deployment would block replication entirely; instead the response says
+    // the preflight is unavailable and the joiner's own import still validates
+    // every contract, just after it has disconnected rather than before.
+    let (package_ids, package_preflight) = if snapshot.is_empty() {
+        (Vec::new(), true)
     } else {
         match collect_party_package_ids(&data.config, &party_id, None).await {
-            Ok(ids) => ids,
+            Ok(ids) => (ids, true),
             Err(e) => {
-                tracing::error!("tenant acs snapshot: package scan failed: {e:#}");
-                return HttpResponse::InternalServerError().json(ErrorResponse {
-                    error: format!("Failed to collect the party's package ids: {e}"),
-                });
+                tracing::warn!(
+                    "tenant acs snapshot: package preflight unavailable for {party_id} — this \
+                     node holds no ledger credential for an external party, so the joiner's \
+                     import will validate packages itself after disconnecting: {e:#}"
+                );
+                (Vec::new(), false)
             }
         }
     };
@@ -533,6 +543,7 @@ pub async fn tenant_acs_snapshot(
         party_id,
         snapshot: STANDARD.encode(&snapshot),
         package_ids,
+        package_preflight,
     })
 }
 
@@ -598,8 +609,15 @@ pub async fn tenant_acs_import(
     // it returns once the clearing transaction is proposed.
     if let Err(e) = clear_onboarding_flag(&data.config, &data.db, &replication).await {
         tracing::error!("tenant acs import: clearing the onboarding marker failed: {e:#}");
+        // An empty snapshot is skipped, not imported, so saying "imported" here
+        // would misdescribe the half that succeeded.
+        let did = if imported {
+            "Imported the ACS"
+        } else {
+            "The ACS was empty and needed no import"
+        };
         return HttpResponse::InternalServerError().json(ErrorResponse {
-            error: format!("Imported the ACS, but could not clear the onboarding marker: {e}"),
+            error: format!("{did}, but could not clear the onboarding marker: {e}"),
         });
     }
 

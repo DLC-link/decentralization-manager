@@ -399,14 +399,24 @@ async fn save_signature_pairs(
 ) -> Result {
     let peer_data = workflow_state.get_all_peer_data().await;
     if peer_data.is_empty() {
-        require_complete_or_uploaded(
-            workflow_state,
-            storage,
-            instance_name,
+        // Both kinds, not just the DNS. They are written one after the other in
+        // the loop below, so a coordinator that died between the two writes for
+        // a peer leaves the DNS artefact present and the P2P one missing. A
+        // guard that checked only the DNS would wave that through and fail
+        // later on a mismatched pair, hiding the real cause.
+        for kind in [
             artifact_kinds::SIGNED_ADD_PARTY_DNS,
-            "SubmitProposals",
-        )
-        .await?;
+            artifact_kinds::SIGNED_ADD_PARTY_P2P,
+        ] {
+            require_complete_or_uploaded(
+                workflow_state,
+                storage,
+                instance_name,
+                kind,
+                "SubmitProposals",
+            )
+            .await?;
+        }
     }
     for (peer_id, combined) in &peer_data {
         let (dns_blob, p2p_blob) = split_signed_kick_pair(combined).with_context(|| {

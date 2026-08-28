@@ -600,10 +600,15 @@ pub fn validate_add_hosts_topology(
         // threshold. If the unmarked hosts no longer reach it, the party stops
         // being able to transact the moment this lands — a self-inflicted
         // outage dressed as an expansion.
+        // Unmarked AND at Confirmation. An Observation host is listed and live
+        // but confirms nothing, so counting it would let an add through that
+        // leaves the party short of confirmations anyway.
         let active = p2p
             .participants
             .iter()
-            .filter(|p| p.onboarding.is_none())
+            .filter(|p| {
+                p.onboarding.is_none() && p.permission == ParticipantPermission::Confirmation as i32
+            })
             .count();
         if (active as u32) < p2p.threshold {
             anyhow::bail!(
@@ -1126,6 +1131,33 @@ mod tests {
         let bundle = bundle_of(mapping, 5);
         let Err(e) = validate_add_hosts_topology(&test_config(3), &current, &bundle) else {
             panic!("an add that strands the party below its threshold must be refused");
+        };
+        assert!(e.to_string().contains("below the party's threshold"), "{e}");
+    }
+
+    /// An Observation host is listed and unmarked but confirms nothing, so it
+    /// must not count toward the threshold either. Counting it would wave
+    /// through an add that still leaves the party short of confirmations.
+    #[test]
+    fn an_observation_host_does_not_count_as_active() {
+        let current = CurrentPartyTopology {
+            serial: 4,
+            mapping: PartyToParticipant {
+                party: "alice::1220aa".to_string(),
+                threshold: 2,
+                participants: vec![
+                    host(1, ParticipantPermission::Confirmation, false),
+                    host(2, ParticipantPermission::Observation, false),
+                ],
+                party_signing_keys: party_keys(),
+            },
+        };
+        let Ok(mapping) = add_hosts_mapping(&current.mapping, &[participant(3)]) else {
+            panic!("building must succeed");
+        };
+        let bundle = bundle_of(mapping, 5);
+        let Err(e) = validate_add_hosts_topology(&test_config(3), &current, &bundle) else {
+            panic!("only one host can confirm, so a threshold of 2 must be refused");
         };
         assert!(e.to_string().contains("below the party's threshold"), "{e}");
     }
