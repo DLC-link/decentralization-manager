@@ -28,6 +28,7 @@ pub use common::api::{
     GovernanceState, GovernanceStateResponse, GovernanceType, GrantRightsRequest,
     GrantRightsResponse, InstrumentInfo, InstrumentsResponse, InvitationActionRequest,
     KeyStatusResponse, KickInvitePayload, KickRequest, KnownMember, KnownMembersResponse,
+    LocalPartyAdoptOnboardRequest, LocalPartyAdoptRequest,
     MessageResponse, MissingEdgeKind, MissingPeerEdge, NetworkInfo, OnboardingInvitePayload,
     OnboardingMeshErrorResponse, OnboardingRequest, OperatorInfo, PartyAuthStatus,
     PartyConfigRequest, PartyConfigResponse, PendingInvitationsResponse, ProposalSummary,

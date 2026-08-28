@@ -19,6 +19,20 @@
 //!   clears — bundling the two would let the party's active hosts fall below its
 //!   own threshold mid-flight.
 
+//!
+//! ## Why there is no `PartyHostingLimits` check
+//!
+//! A synchronizer operator was once able to cap how many participants may host a
+//! given party, and a preflight against that cap belonged here. It no longer
+//! exists: `PartyHostingLimits` in `protocol/v30/topology.proto` carries only
+//! `synchronizer_id` and `party`, with `reserved 3; // was quota = 3;` where the
+//! cap used to be, and `protocol/v31` reuses that same message. Nothing is left
+//! to read, so a check could only confirm the mapping exists, which constrains
+//! nothing.
+//!
+//! If Canton reintroduces a cap, the preflight goes here, beside the
+//! active-hosts invariant.
+
 use anyhow::Context;
 use canton_proto_rs::com::digitalasset::canton::{
     crypto::v30::{Signature, SignatureFormat, SigningAlgorithmSpec},
