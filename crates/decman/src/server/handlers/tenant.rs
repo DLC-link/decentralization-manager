@@ -506,7 +506,16 @@ pub async fn tenant_acs_snapshot(
         }
     };
 
-    let snapshot = match export_party_acs(&data.config, &data.db, &replication).await {
+    // The wallet relays this over HTTP, so the Noise chunked-transfer limit is
+    // not the bound here — configuration is.
+    let snapshot = match export_party_acs(
+        &data.config,
+        &data.db,
+        &replication,
+        data.config.tenant_acs_max_bytes,
+    )
+    .await
+    {
         Ok(snapshot) => snapshot,
         Err(e) => {
             tracing::error!("tenant acs snapshot: export failed: {e:#}");
