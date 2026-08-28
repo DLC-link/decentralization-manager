@@ -588,6 +588,37 @@ pub struct TenantThresholdOnboardRequest {
     pub signed_by: String,
 }
 
+/// Request to prepare a local party's conversion to an externally-signed one.
+///
+/// Only the node whose namespace owns the party can do this, and even it cannot
+/// do it alone: the returned hash must be signed by the key being adopted.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct LocalPartyAdoptRequest {
+    /// The local party. Its namespace must be this participant's.
+    pub party_id: String,
+    /// The raw 32-byte Ed25519 public key to adopt, base64-encoded.
+    pub public_key: String,
+    /// The serial the caller read from the party's current mapping.
+    pub base_serial: u32,
+}
+
+/// Request to submit the owner-signed conversion.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct LocalPartyAdoptOnboardRequest {
+    pub party_id: String,
+    pub base_serial: u32,
+    /// The adopted key, so the host can rebuild what the mapping must carry
+    /// rather than trusting the submitted bytes.
+    pub public_key: String,
+    pub topology_transactions: Vec<String>,
+    pub signatures: Vec<String>,
+    pub signed_by: String,
+}
+
 /// Response for key status check
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

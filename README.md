@@ -454,6 +454,8 @@ The table below is a curated subset. A complete, interactive API reference is av
 | `/v0/tenant/add-hosts/import` | POST | Wallet-facing: imports a relayed ACS on this host and clears its onboarding marker |
 | `/v0/tenant/threshold/prepare` | POST | Wallet-facing: builds a confirmation-threshold change |
 | `/v0/tenant/threshold/onboard` | POST | Wallet-facing: submits the wallet-signed threshold change |
+| `/v0/tenant/local-party/adopt-key/prepare` | POST | Wallet-facing: builds the conversion that gives a local party an owner-held signing key |
+| `/v0/tenant/local-party/adopt-key/onboard` | POST | Wallet-facing: co-signs and submits the owner-signed conversion |
 
 The `/v0/tenant/*` endpoints are the tenant API. They authenticate with a
 separate tenant API key rather than the operator JWT, and are driven by
