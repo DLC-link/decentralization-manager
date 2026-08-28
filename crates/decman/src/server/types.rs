@@ -38,7 +38,8 @@ pub use common::api::{
     ResponseSource, RightsStatus, SuccessResponse, TenantAcsImportRequest, TenantAcsImportResponse,
     TenantAcsSnapshotResponse, TenantAddHostsOnboardRequest, TenantAddHostsOnboardResponse,
     TenantAddHostsPrepareResponse, TenantAddHostsRequest, TenantOnboardRequest,
-    TenantOnboardResponse, TenantPrepareRequest, TenantPrepareResponse, TransferFactoriesResponse,
+    TenantOnboardResponse, TenantPrepareRequest, TenantPrepareResponse,
+    TenantThresholdOnboardRequest, TenantThresholdRequest, TransferFactoriesResponse,
     TransferFactoryInfo, TransferPreapprovalsResponse, UserServiceInfo, UserServicesResponse,
     VaultInfo, VaultsResponse, WorkflowResponse, WorkflowRunsResponse, WorkflowStatusResponse,
 };

@@ -30,7 +30,8 @@ use crate::{
             ErrorResponse, TenantAcsImportRequest, TenantAcsImportResponse,
             TenantAcsSnapshotResponse, TenantAddHostsOnboardRequest, TenantAddHostsOnboardResponse,
             TenantAddHostsPrepareResponse, TenantAddHostsRequest, TenantOnboardRequest,
-            TenantOnboardResponse, TenantPrepareRequest, TenantPrepareResponse, WorkflowProgress,
+            TenantOnboardResponse, TenantPrepareRequest, TenantPrepareResponse,
+            TenantThresholdOnboardRequest, TenantThresholdRequest, WorkflowProgress,
             WorkflowStatusResponse,
         },
     },
@@ -44,6 +45,7 @@ use crate::{
             ExternalPartyAllocatePayload, HostOnboardingStatus, allocate_party,
             host_onboarding_status, prepare_topology,
         },
+        threshold::{ExternalPartyThresholdPayload, prepare_threshold, submit_threshold},
     },
     workflow::party_replication::{
         clear_onboarding_flag, collect_party_package_ids, export_party_acs, import_party_acs,
@@ -625,6 +627,127 @@ pub async fn tenant_acs_import(
         party_id: body.party_id.clone(),
         imported,
         marker_cleared,
+    })
+}
+
+// ============================================================================
+// Confirmation threshold
+// ============================================================================
+
+/// Prepare a threshold change. A separate serial bump from add-hosts, because a
+/// host still carrying the onboarding marker cannot confirm and so cannot count
+/// toward the new threshold: add, replicate, then raise.
+#[utoipa::path(
+    tag = "Tenant",
+    request_body = TenantThresholdRequest,
+    responses(
+        (status = 200, description = "Unsigned threshold change", body = TenantAddHostsPrepareResponse),
+        (status = 400, description = "A threshold this party cannot meet", body = ErrorResponse),
+        (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 404, description = "This host does not host this party", body = ErrorResponse),
+        (status = 409, description = "The pinned base serial has moved on this host", body = ErrorResponse),
+        (status = 500, description = "A Canton call failed on this host", body = ErrorResponse)
+    )
+)]
+#[post("/v0/tenant/threshold/prepare")]
+pub async fn tenant_threshold_prepare(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    body: web::Json<TenantThresholdRequest>,
+) -> impl Responder {
+    if let Err(resp) = require_tenant_api_key(&http_req, &data) {
+        return resp;
+    }
+    match prepare_threshold(
+        &data.config,
+        &body.party_id,
+        body.new_threshold,
+        body.base_serial,
+    )
+    .await
+    {
+        Ok(prep) => HttpResponse::Ok().json(TenantAddHostsPrepareResponse {
+            party_id: prep.party_id,
+            serial: prep.serial,
+            transaction_hashes: prep
+                .transaction_hashes
+                .iter()
+                .map(|h| STANDARD.encode(h))
+                .collect(),
+            topology_transactions: prep
+                .topology_transactions
+                .iter()
+                .map(|tx| STANDARD.encode(tx))
+                .collect(),
+        }),
+        Err(e) => add_hosts_error_response("threshold prepare", e),
+    }
+}
+
+/// Submit the wallet-signed threshold change on THIS host. A threshold change
+/// needs the party namespace alone, so the party's signature is the complete
+/// authorization and no host co-signs — but each host still validates what it
+/// submits to its own store.
+#[utoipa::path(
+    tag = "Tenant",
+    request_body = TenantThresholdOnboardRequest,
+    responses(
+        (status = 202, description = "Submitted on this host", body = TenantAddHostsOnboardResponse),
+        (status = 400, description = "Bad request, or a bundle that changes more than the threshold", body = ErrorResponse),
+        (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 404, description = "This host does not host this party", body = ErrorResponse),
+        (status = 409, description = "The pinned base serial has moved on this host", body = ErrorResponse),
+        (status = 500, description = "A Canton call failed on this host", body = ErrorResponse)
+    )
+)]
+#[post("/v0/tenant/threshold/onboard")]
+pub async fn tenant_threshold_onboard(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    body: web::Json<TenantThresholdOnboardRequest>,
+) -> impl Responder {
+    if let Err(resp) = require_tenant_api_key(&http_req, &data) {
+        return resp;
+    }
+    let topology_transactions =
+        match decode_all(&body.topology_transactions, "topology transaction") {
+            Ok(v) => v,
+            Err(resp) => return resp,
+        };
+    let signatures = match decode_all(&body.signatures, "signature") {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+
+    let bundle = ExternalPartyThresholdPayload {
+        party_id: body.party_id.clone(),
+        base_serial: body.base_serial,
+        topology_transactions,
+        signatures,
+        signed_by: body.signed_by.clone(),
+    };
+
+    let base_serial = match submit_threshold(&data.config, &bundle).await {
+        Ok(serial) => serial,
+        Err(e) => return add_hosts_error_response("threshold onboard", e),
+    };
+
+    let (status, serial) = match read_party_to_participant(&data.config, &body.party_id).await {
+        Ok(Some(current)) if current.serial > base_serial => {
+            (WorkflowProgress::Completed, current.serial)
+        }
+        Ok(Some(current)) => (WorkflowProgress::InProgress, current.serial),
+        Ok(None) => (WorkflowProgress::InProgress, base_serial),
+        Err(e) => {
+            tracing::warn!("tenant threshold onboard: post-submit status read failed: {e:#}");
+            (WorkflowProgress::InProgress, base_serial)
+        }
+    };
+
+    HttpResponse::Accepted().json(TenantAddHostsOnboardResponse {
+        status,
+        party_id: body.party_id.clone(),
+        serial,
     })
 }
 

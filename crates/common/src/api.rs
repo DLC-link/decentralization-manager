@@ -547,6 +547,33 @@ pub struct TenantAcsImportResponse {
     pub marker_cleared: bool,
 }
 
+/// Request to prepare a confirmation-threshold change for an existing external
+/// party. Separate from add-hosts on purpose: a newly added host cannot confirm
+/// until its onboarding marker clears, so the two writes must not be combined.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantThresholdRequest {
+    pub party_id: String,
+    /// The threshold to move to. Must be between 1 and the number of hosts
+    /// currently able to confirm — marked hosts do not count.
+    pub new_threshold: u32,
+    /// The serial the wallet read from the party's current mapping.
+    pub base_serial: u32,
+}
+
+/// Request to submit a wallet-signed threshold change on one host.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantThresholdOnboardRequest {
+    pub party_id: String,
+    pub base_serial: u32,
+    pub topology_transactions: Vec<String>,
+    pub signatures: Vec<String>,
+    pub signed_by: String,
+}
+
 /// Response for key status check
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
