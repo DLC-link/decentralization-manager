@@ -12,7 +12,8 @@
 //!
 //! 1. Creates a genuine local party on P1. The namespace is P1's own
 //!    participant namespace, which is exactly what makes a party local.
-//! 2. Writes serial 2 adding a wallet-held Ed25519 key as the party's
+//! 2. Waits for that to reach head state, then writes the next serial adding a
+//!    wallet-held Ed25519 key as the party's
 //!    `party_signing_keys`. This needs **two** signatures, not one:
 //!    `topology.proto`'s authorization table requires "party namespace + all the
 //!    new signing key" for adding a signing key. The namespace half is the
@@ -122,6 +123,26 @@ async fn submit_mapping(config: &NodeConfig, mapping: PartyToParticipant) -> any
     )
     .await?;
     Ok(())
+}
+
+/// Wait until `party_id` is visible in head state, and return the serial it sits
+/// at.
+///
+/// Topology writes are not effective the instant `Authorize` returns: the
+/// transaction has to reach the synchronizer and come back. Building the next
+/// write before that lands is what produced `TOPOLOGY_SERIAL_MISMATCH (provided
+/// 2, expected 1)` — Canton still saw no mapping at all, so the next serial it
+/// wanted was 1.
+///
+/// Returning the observed serial also means the caller never guesses it.
+async fn wait_for_party(config: &NodeConfig, party_id: &str) -> anyhow::Result<u32> {
+    for _ in 0..60 {
+        if let Some(current) = read_party_to_participant(config, party_id).await? {
+            return Ok(current.serial);
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    anyhow::bail!("{party_id} never appeared in head state after allocation")
 }
 
 /// Submit a mapping that needs the party's *own* key to sign as well.
@@ -255,6 +276,12 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         .await
                         .context("allocating the local party")?;
 
+                        // The allocation must be effective before the next write
+                        // can name a serial past it.
+                        let base_serial = wait_for_party(&config, &party_id)
+                            .await
+                            .context("waiting for the local party to reach head state")?;
+
                         // 2) The question: bolt a wallet-held key onto it.
                         //
                         // Two signatures, not one. topology.proto's authorization
@@ -264,9 +291,10 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         // holds the key it wants Canton to trust. Nothing but the
                         // key can produce it.
                         //
-                        // Serial 2 explicitly, because this path builds the
-                        // transaction up front to get a hash for the key to sign,
-                        // so Canton cannot pick the serial for us.
+                        // The serial is named explicitly, because this path builds
+                        // the transaction up front to get a hash for the key to
+                        // sign, so Canton cannot pick it for us. It comes from
+                        // head state rather than a guess.
                         //
                         // The key is built by the product's own helper, so this
                         // proves Canton accepts what DecMan would really write.
@@ -298,7 +326,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                                     threshold: 1,
                                 }),
                             },
-                            2,
+                            base_serial + 1,
                             &wallet,
                         )
                         .await
@@ -336,6 +364,8 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                             );
                         if current.serial < 2
                             || keys.threshold != 1
+                            // serial 2 is the floor: allocation is 1, adoption is
+                            // the next one.
                             || keys.keys.len() != 1
                             || keys.keys[0].public_key != expected.public_key
                             || keys.keys[0].format != expected.format
