@@ -495,6 +495,58 @@ pub struct TenantAddHostsOnboardResponse {
     pub serial: u32,
 }
 
+/// The party's ACS snapshot plus the packages needed to validate it, handed to
+/// the wallet so it can relay both to the joining host.
+///
+/// The wallet is the transport on purpose: the tenant API has no inter-node
+/// channel, and a partner's host is generally not in this node's Noise mesh.
+/// The wallet already talks to every host, so it carries the snapshot rather
+/// than the hosts needing to reach each other.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantAcsSnapshotResponse {
+    /// The party the snapshot belongs to.
+    pub party_id: String,
+    /// The snapshot, base64-encoded. Empty when the party holds no contracts,
+    /// in which case the joiner skips the import.
+    pub snapshot: String,
+    /// Package ids the joiner must have vetted before it can validate the
+    /// snapshot. Its import refuses up front if any are missing, rather than
+    /// failing after it has already disconnected.
+    pub package_ids: Vec<String>,
+}
+
+/// Request to import a relayed ACS snapshot on the joining host and clear its
+/// onboarding marker.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantAcsImportRequest {
+    /// The party being replicated onto this host.
+    pub party_id: String,
+    /// The base64 snapshot from `TenantAcsSnapshotResponse`.
+    pub snapshot: String,
+    /// The package ids that came with it.
+    #[serde(default)]
+    pub package_ids: Vec<String>,
+}
+
+/// Outcome of importing the ACS and attempting the marker clear on this host.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantAcsImportResponse {
+    pub party_id: String,
+    /// Whether the snapshot was imported. `false` means it was empty and the
+    /// import was skipped, which is a success, not a failure.
+    pub imported: bool,
+    /// Whether Canton's onboarding marker is gone, i.e. the party is live on
+    /// this host. `false` means the clearing transaction is proposed but not
+    /// yet authorized — the party is hosted here but still suspended.
+    pub marker_cleared: bool,
+}
+
 /// Response for key status check
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

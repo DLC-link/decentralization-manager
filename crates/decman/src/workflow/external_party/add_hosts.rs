@@ -40,13 +40,49 @@ use canton_proto_rs::com::digitalasset::canton::{
 use prost::Message as _;
 use serde::{Deserialize, Serialize};
 
+use sqlx::SqlitePool;
+
 use crate::{
     canton_id::CantonId,
     config::NodeConfig,
     error::Result,
     utils,
-    workflow::{external_party::steps::party_query, topology},
+    workflow::{
+        external_party::steps::party_query,
+        party_replication::{ReplicationArtifacts, ReplicationTarget, capture_offset_once},
+        storage::artifact_kinds,
+        topology,
+    },
 };
+
+/// The artifact keys the tenant add-hosts replication uses. Distinct from the
+/// decparty add-party keys so the two flows cannot read each other's offsets.
+pub const TENANT_ADD_HOSTS_ARTIFACTS: ReplicationArtifacts = ReplicationArtifacts {
+    export_offset: artifact_kinds::TENANT_ADD_HOSTS_EXPORT_OFFSET,
+    pre_activation_offset: artifact_kinds::TENANT_ADD_HOSTS_PRE_ACTIVATION_OFFSET,
+    import_inflight: artifact_kinds::TENANT_ADD_HOSTS_IMPORT_INFLIGHT,
+};
+
+/// The run name a tenant add-hosts replication stores its artifacts under.
+///
+/// The tenant API has no workflow run to key artifacts by — it is stateless
+/// HTTP, and Canton is the coordination store. This derives a stable name from
+/// the pair the replication is actually about, so every host computes the same
+/// one without coordinating, and two concurrent add-hosts for different joiners
+/// cannot collide.
+pub fn replication_instance(party_id: &str, target: &CantonId) -> String {
+    format!("tenant-add-hosts:{party_id}:{target}")
+}
+
+/// The replication this add-hosts implies: `party_id` moving onto `target`.
+pub fn replication_target(party_id: &str, target: &CantonId) -> Result<ReplicationTarget> {
+    Ok(ReplicationTarget::new(
+        CantonId::parse(party_id)?,
+        target.clone(),
+        replication_instance(party_id, target),
+        TENANT_ADD_HOSTS_ARTIFACTS,
+    ))
+}
 
 /// Why an add-hosts call could not proceed.
 ///
@@ -224,9 +260,11 @@ fn add_hosts_mapping(
 /// `GenerateTransactions` fails.
 pub async fn prepare_add_hosts(
     config: &NodeConfig,
+    storage: &SqlitePool,
     party_id: &str,
     new_hosts: &[CantonId],
     base_serial: u32,
+    ledger_token: Option<&str>,
 ) -> std::result::Result<PreparedAddHosts, AddHostsError> {
     let synchronizer_id = utils::get_synchronizer_id(config)
         .await
@@ -249,6 +287,39 @@ pub async fn prepare_add_hosts(
     }
 
     let mapping = add_hosts_mapping(&current.mapping, new_hosts).map_err(AddHostsError::Invalid)?;
+
+    // Capture the replication offsets HERE, before the topology is submitted.
+    // `ExportPartyAcs` and `ClearPartyOnboardingFlag` both search forward from
+    // an offset that must predate the party's activation on the joiner, so a
+    // capture taken any later would look for it in a window that no longer
+    // contains it. Every host captures both keys: prepare is called on all of
+    // them and none knows yet which role it will play. The capture is
+    // once-only, so a retry keeps the original value.
+    for host in new_hosts {
+        let target = replication_target(party_id, host).map_err(AddHostsError::Invalid)?;
+        capture_offset_once(
+            config,
+            storage,
+            &target.instance_name,
+            target.artifacts.export_offset,
+            None,
+            ledger_token,
+            "tenant add-hosts export",
+        )
+        .await
+        .map_err(AddHostsError::Canton)?;
+        capture_offset_once(
+            config,
+            storage,
+            &target.instance_name,
+            target.artifacts.pre_activation_offset,
+            Some(&config.participant_id().to_string()),
+            ledger_token,
+            "tenant add-hosts pre-activation",
+        )
+        .await
+        .map_err(AddHostsError::Canton)?;
+    }
     let next_serial = current.serial.checked_add(1).ok_or_else(|| {
         AddHostsError::Invalid(anyhow::anyhow!(
             "{party_id} is at serial {s}, which cannot be advanced",
@@ -518,6 +589,23 @@ pub fn validate_add_hosts_topology(
         }
         if added == 0 {
             anyhow::bail!("topology transaction {index} adds no host");
+        }
+        // The invariant an add must never break: hosts still carrying the
+        // onboarding marker cannot confirm, so they do not count toward the
+        // threshold. If the unmarked hosts no longer reach it, the party stops
+        // being able to transact the moment this lands — a self-inflicted
+        // outage dressed as an expansion.
+        let active = p2p
+            .participants
+            .iter()
+            .filter(|p| p.onboarding.is_none())
+            .count();
+        if (active as u32) < p2p.threshold {
+            anyhow::bail!(
+                "topology transaction {index} would leave {active} host(s) able to confirm, \
+                 below the party's threshold of {threshold}; the party could not transact",
+                threshold = p2p.threshold
+            );
         }
         if !p2p
             .participants
@@ -1006,6 +1094,35 @@ mod tests {
             panic!("adding no host must be refused");
         };
         assert!(e.to_string().contains("adds no host"), "{e}");
+    }
+
+    /// The outage this guards: marked hosts cannot confirm, so an add that
+    /// leaves too few unmarked hosts stops the party transacting the moment it
+    /// lands.
+    #[test]
+    fn rejects_an_add_that_drops_active_hosts_below_the_threshold() {
+        // A party at threshold 2 whose current hosts are both already marked —
+        // adding another marked host leaves nobody able to confirm.
+        let current = CurrentPartyTopology {
+            serial: 4,
+            mapping: PartyToParticipant {
+                party: "alice::1220aa".to_string(),
+                threshold: 2,
+                participants: vec![
+                    host(1, ParticipantPermission::Confirmation, true),
+                    host(2, ParticipantPermission::Confirmation, true),
+                ],
+                party_signing_keys: party_keys(),
+            },
+        };
+        let Ok(mapping) = add_hosts_mapping(&current.mapping, &[participant(3)]) else {
+            panic!("building must succeed");
+        };
+        let bundle = bundle_of(mapping, 5);
+        let Err(e) = validate_add_hosts_topology(&test_config(3), &current, &bundle) else {
+            panic!("an add that strands the party below its threshold must be refused");
+        };
+        assert!(e.to_string().contains("below the party's threshold"), "{e}");
     }
 
     #[test]

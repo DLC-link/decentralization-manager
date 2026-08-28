@@ -35,12 +35,12 @@ pub use common::api::{
     PendingInvitationsResponse, ProviderConfigurationInfo, ProviderConfigurationsResponse,
     ProviderServiceInfo, ProviderServicesResponse, RegistrarServiceInfo,
     RegistrarServiceRequestInfo, RegistrarServiceRequestsResponse, RegistrarServicesResponse,
-    ResponseSource, RightsStatus, SuccessResponse, TenantAddHostsOnboardRequest,
-    TenantAddHostsOnboardResponse, TenantAddHostsPrepareResponse, TenantAddHostsRequest,
-    TenantOnboardRequest, TenantOnboardResponse, TenantPrepareRequest, TenantPrepareResponse,
-    TransferFactoriesResponse, TransferFactoryInfo, TransferPreapprovalsResponse, UserServiceInfo,
-    UserServicesResponse, VaultInfo, VaultsResponse, WorkflowResponse, WorkflowRunsResponse,
-    WorkflowStatusResponse,
+    ResponseSource, RightsStatus, SuccessResponse, TenantAcsImportRequest, TenantAcsImportResponse,
+    TenantAcsSnapshotResponse, TenantAddHostsOnboardRequest, TenantAddHostsOnboardResponse,
+    TenantAddHostsPrepareResponse, TenantAddHostsRequest, TenantOnboardRequest,
+    TenantOnboardResponse, TenantPrepareRequest, TenantPrepareResponse, TransferFactoriesResponse,
+    TransferFactoryInfo, TransferPreapprovalsResponse, UserServiceInfo, UserServicesResponse,
+    VaultInfo, VaultsResponse, WorkflowResponse, WorkflowRunsResponse, WorkflowStatusResponse,
 };
 pub use common::types::{
     AuditLogEntry, AuthConfigResponse, ConnectionStatus, ContractInfo, DecentralizedParty,

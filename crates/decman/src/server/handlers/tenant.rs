@@ -27,7 +27,8 @@ use crate::{
         AppState,
         middleware::require_tenant_api_key,
         types::{
-            ErrorResponse, TenantAddHostsOnboardRequest, TenantAddHostsOnboardResponse,
+            ErrorResponse, TenantAcsImportRequest, TenantAcsImportResponse,
+            TenantAcsSnapshotResponse, TenantAddHostsOnboardRequest, TenantAddHostsOnboardResponse,
             TenantAddHostsPrepareResponse, TenantAddHostsRequest, TenantOnboardRequest,
             TenantOnboardResponse, TenantPrepareRequest, TenantPrepareResponse, WorkflowProgress,
             WorkflowStatusResponse,
@@ -36,13 +37,17 @@ use crate::{
     workflow::external_party::{
         add_hosts::{
             AddHostsError, ExternalPartyAddHostsPayload, prepare_add_hosts,
-            read_party_to_participant, submit_add_hosts,
+            read_party_to_participant, replication_target, submit_add_hosts,
         },
         keys::fingerprint_from_public_key,
         steps::{
             ExternalPartyAllocatePayload, HostOnboardingStatus, allocate_party,
             host_onboarding_status, prepare_topology,
         },
+    },
+    workflow::party_replication::{
+        clear_onboarding_flag, collect_party_package_ids, export_party_acs, import_party_acs,
+        wait_for_flag_cleared,
     },
 };
 
@@ -272,6 +277,17 @@ pub async fn tenant_status(
             status: WorkflowProgress::InProgress,
             error: None,
         }),
+        // Assigned here but still marked: the topology is authorized and the
+        // party is not usable on this host yet. Reporting it Completed is what
+        // this variant exists to stop.
+        Ok(HostOnboardingStatus::Onboarding) => HttpResponse::Ok().json(WorkflowStatusResponse {
+            status: WorkflowProgress::InProgress,
+            error: Some(
+                "hosted but still carrying Canton's onboarding marker — the ACS has not been \
+                 replicated to this host yet"
+                    .to_string(),
+            ),
+        }),
         Ok(HostOnboardingStatus::Absent) => HttpResponse::NotFound().json(ErrorResponse {
             error: format!("This host does not host external party {party}"),
         }),
@@ -322,11 +338,16 @@ pub async fn tenant_add_hosts_prepare(
     // `prepare_add_hosts` reads head state itself and reports *why* it refused,
     // so there is no pre-read here: a second read would only widen the window in
     // which the serial can move between the check and the build.
+    // No ledger token: an external party's key is the wallet's, and this node
+    // holds no credential for it. The offset capture degrades to its admin-API
+    // tiers, which is exactly the tokenless path the tenant API is built on.
     match prepare_add_hosts(
         &data.config,
+        &data.db,
         &body.party_id,
         &body.new_hosts,
         body.base_serial,
+        None,
     )
     .await
     {
@@ -428,6 +449,182 @@ pub async fn tenant_add_hosts_onboard(
         status,
         party_id: body.party_id.clone(),
         serial,
+    })
+}
+
+// ============================================================================
+// ACS replication, relayed by the wallet
+// ============================================================================
+
+/// Export the party's ACS for `target`, for the wallet to relay to it.
+///
+/// Called on a host that already holds the party, AFTER the add-hosts topology
+/// is authorized: Canton scopes the snapshot to the joiner's activation, which
+/// must exist first. The offset it searches from was captured at prepare time,
+/// before the topology moved.
+#[utoipa::path(
+    tag = "Tenant",
+    params(
+        ("party" = String, Path, description = "Full party id"),
+        ("target" = String, Path, description = "Participant the snapshot is for")
+    ),
+    responses(
+        (status = 200, description = "ACS snapshot for the target", body = TenantAcsSnapshotResponse),
+        (status = 400, description = "Bad target participant id", body = ErrorResponse),
+        (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 500, description = "Export failed on this host", body = ErrorResponse)
+    )
+)]
+#[get("/v0/tenant/{party}/acs/{target}")]
+pub async fn tenant_acs_snapshot(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    path: web::Path<(String, String)>,
+) -> impl Responder {
+    if let Err(resp) = require_tenant_api_key(&http_req, &data) {
+        return resp;
+    }
+    let (party_id, target) = path.into_inner();
+    let target = match crate::canton_id::CantonId::parse(&target) {
+        Ok(id) => id,
+        Err(e) => {
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                error: format!("target is not a valid participant id: {e}"),
+            });
+        }
+    };
+    let replication = match replication_target(&party_id, &target) {
+        Ok(t) => t,
+        Err(e) => {
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                error: format!("party_id is not a valid party id: {e}"),
+            });
+        }
+    };
+
+    let snapshot = match export_party_acs(&data.config, &data.db, &replication).await {
+        Ok(snapshot) => snapshot,
+        Err(e) => {
+            tracing::error!("tenant acs snapshot: export failed: {e:#}");
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to export the party's ACS: {e}"),
+            });
+        }
+    };
+
+    // No contracts means no packages to check, and the ledger scan is not free.
+    let package_ids = if snapshot.is_empty() {
+        Vec::new()
+    } else {
+        match collect_party_package_ids(&data.config, &party_id, None).await {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::error!("tenant acs snapshot: package scan failed: {e:#}");
+                return HttpResponse::InternalServerError().json(ErrorResponse {
+                    error: format!("Failed to collect the party's package ids: {e}"),
+                });
+            }
+        }
+    };
+
+    HttpResponse::Ok().json(TenantAcsSnapshotResponse {
+        party_id,
+        snapshot: STANDARD.encode(&snapshot),
+        package_ids,
+    })
+}
+
+/// Import a relayed ACS snapshot on THIS host and clear its onboarding marker.
+///
+/// The marker is what keeps the party suspended here until its contracts land,
+/// so the import and the clear belong together: a host that imported but stayed
+/// marked is not usable, and a host that cleared without importing would start
+/// confirming transactions it cannot validate.
+#[utoipa::path(
+    tag = "Tenant",
+    request_body = TenantAcsImportRequest,
+    responses(
+        (status = 200, description = "Imported; marker_cleared says whether the party is live here", body = TenantAcsImportResponse),
+        (status = 400, description = "Bad base64, bad party id, or missing packages", body = ErrorResponse),
+        (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 500, description = "Import failed on this participant", body = ErrorResponse)
+    )
+)]
+#[post("/v0/tenant/add-hosts/import")]
+pub async fn tenant_acs_import(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    body: web::Json<TenantAcsImportRequest>,
+) -> impl Responder {
+    if let Err(resp) = require_tenant_api_key(&http_req, &data) {
+        return resp;
+    }
+    let snapshot = match STANDARD.decode(&body.snapshot) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                error: format!("snapshot is not valid base64: {e}"),
+            });
+        }
+    };
+    let replication = match replication_target(&body.party_id, data.config.participant_id()) {
+        Ok(t) => t,
+        Err(e) => {
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                error: format!("party_id is not a valid party id: {e}"),
+            });
+        }
+    };
+
+    let imported = !snapshot.is_empty();
+    if let Err(e) = import_party_acs(
+        &data.config,
+        &data.db,
+        &replication,
+        snapshot,
+        &body.package_ids,
+    )
+    .await
+    {
+        tracing::error!("tenant acs import: import failed: {e:#}");
+        return HttpResponse::InternalServerError().json(ErrorResponse {
+            error: format!("Failed to import the party's ACS on this host: {e}"),
+        });
+    }
+
+    // Canton refuses to clear before its safe time, so this can take a while;
+    // it returns once the clearing transaction is proposed.
+    if let Err(e) = clear_onboarding_flag(&data.config, &data.db, &replication).await {
+        tracing::error!("tenant acs import: clearing the onboarding marker failed: {e:#}");
+        return HttpResponse::InternalServerError().json(ErrorResponse {
+            error: format!("Imported the ACS, but could not clear the onboarding marker: {e}"),
+        });
+    }
+
+    // Whether the proposal alone suffices depends on what Canton demands for a
+    // single-key party: the proto says the onboarding participant clears its own
+    // flag, but decparties were observed to need owner signatures anyway. Report
+    // what actually happened rather than assuming — a `false` here means the
+    // wallet must run a signing round, and that is worth knowing precisely.
+    let marker_cleared = match crate::utils::get_synchronizer_id(&data.config).await {
+        Ok(synchronizer_id) => wait_for_flag_cleared(
+            &data.config,
+            &synchronizer_id,
+            &replication.party_id,
+            &replication.target_participant_id,
+        )
+        .await
+        .is_ok(),
+        Err(e) => {
+            tracing::warn!("tenant acs import: could not resolve synchronizer id: {e:#}");
+            false
+        }
+    };
+
+    HttpResponse::Ok().json(TenantAcsImportResponse {
+        party_id: body.party_id.clone(),
+        imported,
+        marker_cleared,
     })
 }
 
