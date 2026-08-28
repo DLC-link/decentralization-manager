@@ -105,7 +105,7 @@ plainly rather than letting them infer symmetry that is not there.
 | `package_preflight: false` | The source cannot read the party's contracts over the Ledger API, which is normal for an external party | Confirm the joiner has the party's DARs vetted **before** importing. Without it the import fails after disconnecting |
 | Import fails mid-window | The joiner disconnected and the import did not complete | The import reconnects and verifies health on its own. Retry it; the durable marker makes re-entry safe |
 | Joiner crash-loops after an import | Orphan ACS rows from an unclean shutdown | Manual repair. See `RepairCommitmentsUsingAcs` below |
-| Party's ACS exceeds 16 MiB | The snapshot is capped by the chunked-transfer limit | Not yet supported. Streaming is unbuilt (§06 item 5) |
+| Export refused as too large | The snapshot exceeds this path's cap | The wallet-relayed path is bounded by `DECPM_TENANT_ACS_MAX_BYTES` (512 MiB by default), not by the 16 MiB Noise limit. Raise it, remembering the snapshot is held in memory on both ends |
 
 ### Commitment mismatches after an import
 
@@ -119,7 +119,9 @@ partial import replaces one inconsistency with a different one.
 
 - **Replicate a party onto a node outside the mesh without the wallet.** The
   wallet is the transport by design.
-- **Move an ACS larger than 16 MiB.** The cap is `MAX_CHUNKED_TOTAL_SIZE`.
+- **Stream an ACS.** The snapshot is assembled whole in memory on the exporting
+  and importing nodes, so `DECPM_TENANT_ACS_MAX_BYTES` is a memory commitment
+  rather than a transport limit. A genuinely streaming relay is still unbuilt.
 - **Prove a converted party can submit.** #388 proved Canton accepts the key.
   Whether the party then transacts with it is a different runtime path and is
   not yet covered by a test.
