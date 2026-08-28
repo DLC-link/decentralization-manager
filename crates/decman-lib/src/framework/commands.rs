@@ -123,7 +123,7 @@ mod tests {
     use common::api::PackageConfig;
 
     use super::*;
-    use crate::framework::encode::make_text;
+    use crate::framework::encode::{make_record, make_text};
     use crate::framework::traits::tests::FakeProposal;
 
     fn cid(prefix: &str) -> CantonId {
@@ -195,6 +195,43 @@ mod tests {
         }
         let err = proposal_create_arguments(&Bad, &cid("gov"), &cid("member")).unwrap_err();
         assert!(matches!(err, Error::Encode(_)));
+    }
+
+    /// A payload whose encoded record carries one caller-chosen label.
+    struct OneField(&'static str);
+
+    impl DamlProtoEncode for OneField {
+        fn to_daml_proto(&self) -> Result<Value, Error> {
+            Ok(make_record(vec![field(self.0, make_text("x"))]))
+        }
+    }
+
+    fn assert_reserved_field_rejected(label: &'static str) {
+        let err =
+            proposal_create_arguments(&OneField(label), &cid("gov"), &cid("member")).unwrap_err();
+        let Error::Encode(message) = err else {
+            panic!("expected an Encode error");
+        };
+        assert!(message.contains("must not include"), "got: {message}");
+    }
+
+    #[test]
+    fn payload_that_carries_governance_party_is_an_encode_error() {
+        assert_reserved_field_rejected("governanceParty");
+    }
+
+    #[test]
+    fn payload_that_carries_proposer_is_an_encode_error() {
+        assert_reserved_field_rejected("proposer");
+    }
+
+    #[test]
+    fn payload_field_named_like_a_reserved_one_is_kept() {
+        let record =
+            proposal_create_arguments(&OneField("proposerNote"), &cid("gov"), &cid("member"))
+                .unwrap();
+        let labels: Vec<&str> = record.fields.iter().map(|f| f.label.as_str()).collect();
+        assert_eq!(labels, vec!["governanceParty", "proposer", "proposerNote"]);
     }
 
     #[test]
