@@ -654,6 +654,13 @@ pub struct HostedExternalParty {
     /// When the mapping became effective, RFC 3339. `None` if Canton did not
     /// report it.
     pub created_at: Option<String>,
+    /// Whether this node still carries Canton's onboarding marker for the party.
+    ///
+    /// `true` means the party is assigned here and suspended here: it holds none
+    /// of the party's contracts and confirms nothing. Listing such a party
+    /// without saying so is how an operator concludes a replication finished
+    /// when it has not.
+    pub onboarding: bool,
 }
 
 /// Render a protobuf timestamp as RFC 3339 (UTC), for display.
@@ -716,13 +723,13 @@ pub async fn list_hosted_external_parties(config: &NodeConfig) -> Result<Vec<Hos
         let Some(P2pItem::V30(mapping)) = result.item else {
             continue;
         };
-        let hosts_us_confirming = mapping.participants.iter().any(|h| {
+        let Some(entry) = mapping.participants.iter().find(|h| {
             h.participant_uid == self_uid
                 && h.permission == ParticipantPermission::Confirmation as i32
-        });
-        if !hosts_us_confirming {
+        }) else {
             continue;
-        }
+        };
+        let onboarding = entry.onboarding.is_some();
         let Some((_, fingerprint)) = mapping.party.rsplit_once("::") else {
             continue;
         };
@@ -738,6 +745,7 @@ pub async fn list_hosted_external_parties(config: &NodeConfig) -> Result<Vec<Hos
             threshold: mapping.threshold,
             host_count: mapping.participants.len() as u32,
             created_at,
+            onboarding,
         });
     }
     Ok(parties)

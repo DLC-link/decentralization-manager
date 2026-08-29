@@ -331,6 +331,10 @@ pub struct ExternalPartyInfo {
     pub host_count: u32,
     /// When the hosting mapping became effective, RFC 3339.
     pub created_at: Option<String>,
+    /// Whether this node still carries Canton's onboarding marker for the party.
+    /// `true` means the party is hosted here and suspended here — it holds none
+    /// of the party's contracts and confirms nothing yet.
+    pub onboarding: bool,
 }
 
 /// Response wrapper for `GET /external-parties`.
