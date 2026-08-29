@@ -30,7 +30,8 @@ pub trait Signer: Send + Sync {
     /// never something this crate derived.
     ///
     /// # Errors
-    /// Whatever the backing key store failed with.
+    /// [`Error::Signing`](crate::Error::Signing), which exists so a key-store
+    /// failure does not have to be dressed up as an HTTP one.
     async fn sign(&self, message: &[u8]) -> Result<[u8; 64]>;
 
     /// The public key, base64-encoded, as the tenant API expects it.
@@ -90,7 +91,9 @@ mod tests {
 
         async fn sign(&self, _message: &[u8]) -> Result<[u8; 64]> {
             if !self.available {
-                return Err(crate::Error::NotEnoughHosts(0));
+                return Err(crate::Error::Signing {
+                    message: "the key store is unreachable".to_string(),
+                });
             }
             Ok([9u8; 64])
         }

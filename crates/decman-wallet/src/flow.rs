@@ -286,7 +286,7 @@ pub async fn statuses(hosts: &[WalletHost], party_id: &str) -> Vec<HostReport> {
 }
 
 /// The outcome of adding hosts to a party that already exists.
-#[derive(Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct AddedHosts {
     /// The party that gained hosts.
     pub party_id: String,
@@ -337,10 +337,17 @@ pub async fn add_hosts(
     base_serial: u32,
 ) -> Result<AddedHosts> {
     if new_hosts.is_empty() {
-        return Err(Error::NotEnoughHosts(0));
+        return Err(Error::NoHosts {
+            operation: "adding hosts",
+            role: "joining host",
+        });
     }
+    // A current host is needed as the ACS source, not merely as a signer.
     let Some(source) = current_hosts.first() else {
-        return Err(Error::NotEnoughHosts(0));
+        return Err(Error::NoHosts {
+            operation: "adding hosts",
+            role: "host that already holds the party",
+        });
     };
 
     let request = TenantAddHostsRequest {
@@ -358,7 +365,10 @@ pub async fn add_hosts(
     }
 
     let Some(((preparer, prepared), others)) = prepared_by_host.split_first() else {
-        return Err(Error::NotEnoughHosts(0));
+        return Err(Error::NoHosts {
+            operation: "adding hosts",
+            role: "host",
+        });
     };
     for (host, other) in others {
         let disagreement = if other.topology_transactions != prepared.topology_transactions {
@@ -509,7 +519,10 @@ pub async fn raise_threshold(
     base_serial: u32,
 ) -> Result<Vec<HostReport>> {
     if hosts.is_empty() {
-        return Err(Error::NotEnoughHosts(0));
+        return Err(Error::NoHosts {
+            operation: "changing the threshold",
+            role: "host",
+        });
     }
 
     let request = TenantThresholdRequest {
@@ -523,7 +536,10 @@ pub async fn raise_threshold(
         prepared_by_host.push((host, host.client.threshold_prepare(&request).await?));
     }
     let Some(((preparer, prepared), others)) = prepared_by_host.split_first() else {
-        return Err(Error::NotEnoughHosts(0));
+        return Err(Error::NoHosts {
+            operation: "changing the threshold",
+            role: "host",
+        });
     };
     for (host, other) in others {
         if other.topology_transactions != prepared.topology_transactions
