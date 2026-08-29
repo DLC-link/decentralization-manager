@@ -299,7 +299,7 @@ fn validate_onboarding_topology(
 /// [`validate_onboarding_topology`] rejects a submitted mapping that does not carry
 /// precisely this. If they drifted, the validator would start refusing the topology
 /// this node itself produced.
-pub fn party_signing_key(public_key: &[u8; 32]) -> SigningPublicKey {
+pub(crate) fn party_signing_key(public_key: &[u8; 32]) -> SigningPublicKey {
     SigningPublicKey {
         // Canton parses this as X.509 SubjectPublicKeyInfo and rejects a bare
         // 32-byte key even when the format field says RAW.
