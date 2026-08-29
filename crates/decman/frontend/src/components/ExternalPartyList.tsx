@@ -118,6 +118,11 @@ export const ExternalPartyList = ({ parties }: ExternalPartyListProps) => {
           >
             Party ID
           </Typography>
+          <Tooltip title="Live means this node holds the party's contracts and confirms for it. Onboarding means it is assigned here but still carries Canton's onboarding marker, so its contracts have not been replicated yet.">
+            <Typography component="span" sx={{ ...legendSx, cursor: "help" }}>
+              Status
+            </Typography>
+          </Tooltip>
           <Tooltip title="How many participants host this party. Any one of them being down does not take the party down.">
             <Typography
               component="span"
@@ -171,6 +176,18 @@ export const ExternalPartyList = ({ parties }: ExternalPartyListProps) => {
               dataAttrs={{ "data-testid": "external-party-row" }}
             >
               <PartyIdText partyId={party.party_id} />
+              {/* Live means this node holds the party's contracts and confirms
+                * for it. Onboarding means the party is assigned here but still
+                * carries Canton's onboarding marker, so it holds none of them
+                * and confirms nothing — listing that as a normal row is how an
+                * operator concludes a replication finished when it has not. */}
+              <Chip
+                label={party.onboarding ? "Onboarding" : "Live"}
+                size="small"
+                color={party.onboarding ? "warning" : "success"}
+                variant="outlined"
+                sx={{ flexShrink: 0 }}
+              />
               <Typography
                 component="span"
                 sx={{
