@@ -796,9 +796,9 @@ pub async fn tenant_threshold_onboard(
     request_body = LocalPartyAdoptRequest,
     responses(
         (status = 200, description = "Unsigned conversion", body = TenantAddHostsPrepareResponse),
-        (status = 400, description = "Not a local party here, already converted, or a bad key", body = ErrorResponse),
+        (status = 400, description = "Not local to this participant, already converted, or a bad key", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
-        (status = 404, description = "This host does not host this party", body = ErrorResponse),
+        (status = 404, description = "No authorized mapping for this party on this host", body = ErrorResponse),
         (status = 409, description = "The pinned base serial has moved on this host", body = ErrorResponse),
         (status = 500, description = "A Canton call failed on this host", body = ErrorResponse)
     )
@@ -843,9 +843,9 @@ pub async fn tenant_local_party_adopt_prepare(
     request_body = LocalPartyAdoptOnboardRequest,
     responses(
         (status = 202, description = "Submitted on this host", body = TenantAddHostsOnboardResponse),
-        (status = 400, description = "Bad request, or a bundle that changes more than adopting the key", body = ErrorResponse),
+        (status = 400, description = "Bad request, not local to this participant, or a bundle that changes more than adopting the key", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
-        (status = 404, description = "This host does not host this party", body = ErrorResponse),
+        (status = 404, description = "No authorized mapping for this party on this host", body = ErrorResponse),
         (status = 409, description = "The pinned base serial has moved on this host", body = ErrorResponse),
         (status = 500, description = "A Canton call failed on this host", body = ErrorResponse)
     )
