@@ -3099,6 +3099,7 @@ pub async fn list_external_parties(data: web::Data<AppState>) -> impl Responder 
                     threshold: p.threshold,
                     host_count: p.host_count,
                     created_at: p.created_at,
+                    onboarding: p.onboarding,
                     hosts: p
                         .hosts
                         .into_iter()
