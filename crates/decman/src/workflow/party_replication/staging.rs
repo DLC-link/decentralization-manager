@@ -325,6 +325,51 @@ mod tests {
         Ok(())
     }
 
+    /// The ceiling that bounds the Noise path is a `u32` `PayloadLength`, which
+    /// truncates silently past 4 GiB. This path is `u64` end to end, and this
+    /// proves it: offsets and range arithmetic past `u32::MAX` must work rather
+    /// than wrap.
+    ///
+    /// Sparse: `set_len` allocates no blocks, so a 5 GiB file costs nothing on
+    /// any filesystem that supports holes. The bytes are irrelevant — the
+    /// arithmetic is what is under test, and materialising 5 GiB to check a
+    /// `u64` seek would be a waste of a CI runner.
+    #[tokio::test]
+    async fn offsets_past_u32_max_are_not_truncated() -> anyhow::Result<()> {
+        const BEYOND_U32: u64 = 5 * 1024 * 1024 * 1024;
+        let dir = temp_dir("wide");
+        let config = config(&dir);
+
+        tokio::fs::create_dir_all(staging_dir(&config)).await?;
+        let path = staging_path(&config, "run");
+        let file = tokio::fs::File::create(&path).await?;
+        file.set_len(BEYOND_U32).await?;
+        drop(file);
+
+        // The reported length must be the real one, not a wrapped u32.
+        assert_eq!(staged_len(&config, "run").await?, Some(BEYOND_U32));
+        assert!(BEYOND_U32 > u64::from(u32::MAX));
+
+        // A read seeked past 4 GiB must land where it was asked to, not at
+        // `offset % 2^32`.
+        let far = u64::from(u32::MAX) + 1000;
+        assert_eq!(read_range(&config, "run", far, 256).await?.len(), 256);
+
+        // Appending continues from the real end.
+        assert_eq!(
+            append(&config, "run", BEYOND_U32, b"tail").await?,
+            BEYOND_U32 + 4
+        );
+        // And an offset that wrapped to something small is still refused.
+        let Err(e) = append(&config, "run", 1000, b"nope").await else {
+            panic!("a wrapped offset must be refused");
+        };
+        assert!(e.to_string().contains("resume from"), "{e}");
+
+        discard(&config, "run").await?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn discarding_is_idempotent() -> anyhow::Result<()> {
         let dir = temp_dir("discard");
