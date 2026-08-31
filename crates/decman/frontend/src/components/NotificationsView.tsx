@@ -612,17 +612,15 @@ const ActionCard = ({
     <>
       <ApprovalCard
         accent={needsYou}
+        // No pill once quorum is met: the Execute button is the state, and a
+        // "Ready to execute" label next to it says the same thing twice.
         pill={
-          <Pill
-            label={
-              action.can_execute
-                ? "Ready to execute"
-                : ownConfirmation
-                  ? "Awaiting others"
-                  : "Your vote needed"
-            }
-            tone={needsYou ? "accent" : "neutral"}
-          />
+          action.can_execute ? undefined : (
+            <Pill
+              label={ownConfirmation ? "Awaiting others" : "Your vote needed"}
+              tone={needsYou ? "accent" : "neutral"}
+            />
+          )
         }
         time={
           action.last_confirmation_at
@@ -722,20 +720,22 @@ const ActionCard = ({
                 Revoke
               </Button>
             ) : (
-              <Button
-                size="small"
-                variant="contained"
-                color="success"
-                onClick={handleConfirm}
-                disabled={busy || !party.rulesContractId}
-              >
-                Confirm
-              </Button>
+              !action.can_execute && (
+                <Button
+                  size="small"
+                  variant="contained"
+                  color="success"
+                  onClick={handleConfirm}
+                  disabled={busy || !party.rulesContractId}
+                >
+                  Confirm
+                </Button>
+              )
             )}
             {action.can_execute && (
               <Button
                 size="small"
-                variant="outlined"
+                variant="contained"
                 color="success"
                 onClick={() => {
                   setExecuteError(null);
@@ -1027,25 +1027,17 @@ const DomainActionCard = ({
   return (
     <ApprovalCard
       accent={needsYou}
+      // As on the action card: once quorum is met the Execute button is the
+      // state. Orphaned keeps its pill — that is a problem, not a step.
       pill={
-        <Pill
-          label={
-            domainAction.orphaned
-              ? "Orphaned"
-              : domainAction.can_execute
-                ? "Ready to execute"
-                : ownConfirmation
-                  ? "Awaiting others"
-                  : "Your vote needed"
-          }
-          tone={
-            domainAction.orphaned
-              ? "danger"
-              : domainAction.can_execute || !ownConfirmation
-                ? "accent"
-                : "neutral"
-          }
-        />
+        domainAction.orphaned ? (
+          <Pill label="Orphaned" tone="danger" />
+        ) : domainAction.can_execute ? undefined : (
+          <Pill
+            label={ownConfirmation ? "Awaiting others" : "Your vote needed"}
+            tone={ownConfirmation ? "neutral" : "accent"}
+          />
+        )
       }
       time={latestConfirm > 0 ? formatRelativeTime(latestConfirm) : undefined}
       title={domainAction.action_label}
@@ -1151,15 +1143,17 @@ const DomainActionCard = ({
                 Revoke
               </Button>
             ) : (
-              <Button
-                size="small"
-                variant="contained"
-                color="success"
-                onClick={handleConfirm}
-                disabled={busy || !party.rulesContractId}
-              >
-                Confirm
-              </Button>
+              !domainAction.can_execute && (
+                <Button
+                  size="small"
+                  variant="contained"
+                  color="success"
+                  onClick={handleConfirm}
+                  disabled={busy || !party.rulesContractId}
+                >
+                  Confirm
+                </Button>
+              )
             )}
             {canCancelProposal && (
               <Button
@@ -1175,7 +1169,7 @@ const DomainActionCard = ({
             {domainAction.can_execute && (
               <Button
                 size="small"
-                variant="outlined"
+                variant="contained"
                 color="success"
                 onClick={handleExecute}
                 disabled={busy || !party.rulesContractId}
