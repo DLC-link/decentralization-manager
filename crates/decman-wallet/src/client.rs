@@ -131,9 +131,12 @@ impl TenantClient {
         &self,
         party_id: &str,
         target: &CantonId,
+        base_serial: u32,
     ) -> Result<TenantAcsSnapshotResponse> {
-        self.get(&format!("/v0/tenant/{party_id}/acs/{target}"))
-            .await
+        self.get(&format!(
+            "/v0/tenant/{party_id}/acs/{target}?base_serial={base_serial}"
+        ))
+        .await
     }
 
     /// `POST /v0/tenant/add-hosts/import` — hand a joining host the snapshot and
