@@ -595,6 +595,31 @@ pub struct TenantThresholdOnboardRequest {
     pub signed_by: String,
 }
 
+/// A hosted party's current topology, as this host sees it.
+///
+/// Exists because `base_serial` is required by every write in this API and was
+/// otherwise undiscoverable: a wallet has no Canton Admin API access, and
+/// neither the status endpoint nor `/external-parties` reported the serial. The
+/// writes were only usable by a caller that already knew something it had no way
+/// to learn.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantPartyStateResponse {
+    pub party_id: String,
+    /// The authorized mapping's serial. Pin this as `base_serial` on the next
+    /// write.
+    pub serial: u32,
+    /// How many hosts must confirm.
+    pub threshold: u32,
+    /// How many participants host the party.
+    pub host_count: u32,
+    /// Hosts still carrying Canton's onboarding marker, which confirm nothing
+    /// until it clears. A threshold above `host_count - onboarding_hosts` is one
+    /// the party cannot currently meet.
+    pub onboarding_hosts: u32,
+}
+
 /// Response for key status check
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

@@ -30,9 +30,9 @@ use crate::{
             ErrorResponse, TenantAcsImportRequest, TenantAcsImportResponse,
             TenantAcsSnapshotResponse, TenantAddHostsOnboardRequest, TenantAddHostsOnboardResponse,
             TenantAddHostsPrepareResponse, TenantAddHostsRequest, TenantOnboardRequest,
-            TenantOnboardResponse, TenantPrepareRequest, TenantPrepareResponse,
-            TenantThresholdOnboardRequest, TenantThresholdRequest, WorkflowProgress,
-            WorkflowStatusResponse,
+            TenantOnboardResponse, TenantPartyStateResponse, TenantPrepareRequest,
+            TenantPrepareResponse, TenantThresholdOnboardRequest, TenantThresholdRequest,
+            WorkflowProgress, WorkflowStatusResponse,
         },
     },
     workflow::external_party::{
@@ -775,6 +775,61 @@ pub async fn tenant_threshold_onboard(
         party_id: body.party_id.clone(),
         serial,
     })
+}
+
+/// This host's view of a hosted party's topology, including the serial every
+/// write in this API needs pinned.
+///
+/// Without it the writes are unusable by an actual wallet: they all require
+/// `base_serial`, and a wallet has no Canton Admin API access and no other
+/// endpoint that reports it. Reading it here is the first step of any change.
+#[utoipa::path(
+    tag = "Tenant",
+    params(("party" = String, Path, description = "Full party id")),
+    responses(
+        (status = 200, description = "The party's current topology on this host", body = TenantPartyStateResponse),
+        (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 404, description = "This host holds no authorized mapping for this party", body = ErrorResponse),
+        (status = 500, description = "A Canton call failed on this host", body = ErrorResponse)
+    )
+)]
+#[get("/v0/tenant/{party}/state")]
+pub async fn tenant_party_state(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    path: web::Path<String>,
+) -> impl Responder {
+    if let Err(resp) = require_tenant_api_key(&http_req, &data) {
+        return resp;
+    }
+    let party_id = path.into_inner();
+
+    match read_party_to_participant(&data.config, &party_id).await {
+        Ok(Some(current)) => {
+            let onboarding_hosts = current
+                .mapping
+                .participants
+                .iter()
+                .filter(|p| p.onboarding.is_some())
+                .count() as u32;
+            HttpResponse::Ok().json(TenantPartyStateResponse {
+                party_id,
+                serial: current.serial,
+                threshold: current.mapping.threshold,
+                host_count: current.mapping.participants.len() as u32,
+                onboarding_hosts,
+            })
+        }
+        Ok(None) => HttpResponse::NotFound().json(ErrorResponse {
+            error: format!("This host holds no authorized mapping for {party_id}"),
+        }),
+        Err(e) => {
+            tracing::error!("tenant party state: topology read failed: {e:#}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to read the party's topology: {e}"),
+            })
+        }
+    }
 }
 
 // ============================================================================
