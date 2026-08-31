@@ -431,7 +431,9 @@ export const NetworkConfigAccordion = ({
                     sx={{ fontFamily: "var(--font-mono)", fontSize: "0.75rem", py: 1, whiteSpace: "nowrap" }}
                   >
                     {getStat(selfEntry.participant_id)?.build_version ??
+                      getStat(selfEntry.participant_id)?.version ??
                       nodeConfig?.build_version ??
+                      nodeConfig?.version ??
                       "—"}
                   </TableCell>
                 </TableRow>
@@ -477,7 +479,9 @@ export const NetworkConfigAccordion = ({
                     <TableCell
                       sx={{ fontFamily: "var(--font-mono)", fontSize: "0.75rem", py: 1, whiteSpace: "nowrap" }}
                     >
-                      {st?.build_version ?? "—"}
+                      {/* Falls back to the compatibility semver: a peer that
+                        * predates `build_version` still reports `version`. */}
+                      {st?.build_version ?? st?.version ?? "—"}
                     </TableCell>
                   </TableRow>
                 );
