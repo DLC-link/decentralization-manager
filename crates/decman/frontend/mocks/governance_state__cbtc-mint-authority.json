@@ -1,7 +1,7 @@
 {
   "state": {
     "contract_id": "00499f115c368b166283244cde318e3455533fbbca612e14b135308d7cc29a3408",
-    "vault_manager": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
+    "governance_party": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
     "members": [
       "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
       "utility-registrar::12206a58a9f547e2c9e833c6e261806a51c224cd7faab962ed4fee21df39fa06",

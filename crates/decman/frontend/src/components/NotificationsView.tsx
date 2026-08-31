@@ -36,11 +36,11 @@ import type {
 
 export interface PartyActions {
   partyId: string;
-  /** Contract that holds the GovernanceRules (or vault gov rules) — needed for confirm/execute. */
+  /** Contract that holds the GovernanceRules — needed for confirm/execute. */
   rulesContractId?: string;
   /** Caller's member party id for this dec party — used to detect own confirmations. */
   memberPartyId?: string;
-  /** Used when sending mutating requests (vault vs core_self vs core_domain). */
+  /** Used when sending mutating requests (core_self vs core_domain). */
   governanceType: GovernanceType;
   threshold: number;
   actions: GovernanceAction[];

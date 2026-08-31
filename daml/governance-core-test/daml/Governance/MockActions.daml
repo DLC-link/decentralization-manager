@@ -3,7 +3,7 @@
 
 -- | Mock action implementations for testing the governance-core.
 -- These templates implement GovernableAction without depending on any
--- real domain packages (vault, cbtc, etc.).
+-- real domain packages (cbtc, token custody, etc.).
 module Governance.MockActions where
 
 import Governance.Action

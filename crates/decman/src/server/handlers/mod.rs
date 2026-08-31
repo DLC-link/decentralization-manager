@@ -42,7 +42,7 @@ pub(crate) use token_standard::{
     get_provider_services_handler, get_registrar_service_requests_handler,
     get_registrar_services_handler, get_token_standard_contracts, get_transfer_factories_handler,
     get_transfer_instructions_handler, get_transfer_preapprovals_handler,
-    get_user_services_handler, get_vaults_handler, query_contracts_handler,
+    get_user_services_handler, query_contracts_handler,
 };
 pub(crate) use workflows::{
     cancel_add_party, cancel_change_threshold, cancel_contracts, cancel_dars, cancel_kick,

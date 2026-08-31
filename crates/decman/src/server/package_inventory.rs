@@ -260,16 +260,16 @@ mod tests {
             "governance-action"
         );
         assert_eq!(
-            package_name_prefix("#bitsafe-vault-governance-v0-rc8"),
-            "bitsafe-vault-governance"
+            package_name_prefix("#governance-utility-onboarding-v0-rc8"),
+            "governance-utility-onboarding"
         );
         assert_eq!(package_name_prefix("cbtc-governance"), "cbtc-governance");
         assert_eq!(
             package_name_prefix("governance-core-v0-rc3"),
             "governance-core"
         );
-        // `vault` starts with `v` but is not a version segment
-        assert_eq!(package_name_prefix("#bitsafe-vault"), "bitsafe-vault");
+        // `validator` starts with `v` but is not a version segment
+        assert_eq!(package_name_prefix("#splice-validator"), "splice-validator");
     }
 
     #[test]
@@ -315,7 +315,7 @@ mod tests {
     fn test_newest_matching_names_empty_when_family_absent() {
         let names = vec![
             "cbtc-governance".to_string(),
-            "bitsafe-vault-v1".to_string(),
+            "utility-registry-app-v0".to_string(),
         ];
 
         let ordered = newest_matching_names(&names, "governance-core");

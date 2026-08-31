@@ -299,7 +299,7 @@ pub struct GovConfirmation {
     pub expires_at: i64,
 }
 
-/// A pending off-chain governance action (vault / core-self), grouped by hash.
+/// A pending off-chain governance action (core-self), grouped by hash.
 #[derive(Clone, Debug, Deserialize)]
 pub struct GovAction {
     /// The `ActionType` payload, echoed back verbatim on confirm / execute.
@@ -571,7 +571,6 @@ fn short_id(id: &str) -> &str {
 fn source_endpoint(source: PickerSource) -> (&'static str, &'static str) {
     match source {
         PickerSource::Instruments => ("/instruments", "instruments"),
-        PickerSource::Vaults => ("/vaults", "vaults"),
         PickerSource::ProviderServices => ("/services/provider", "services"),
         PickerSource::UserServices => ("/services/user", "services"),
         PickerSource::RegistrarServices => ("/services/registrar", "services"),
@@ -611,14 +610,6 @@ fn picker_label(source: PickerSource, item: &Value) -> String {
     let p = |key: &str| short_id(&f(key)).to_owned();
     let label = match source {
         PickerSource::Instruments => format!("{} · {}", f("instrument_id"), p("instrument_admin")),
-        PickerSource::Vaults => {
-            let (name, symbol) = (f("vault_name"), f("share_symbol"));
-            if symbol.is_empty() {
-                name
-            } else {
-                format!("{name} ({symbol})")
-            }
-        }
         PickerSource::ProviderServices => format!("provider {}", p("provider")),
         PickerSource::UserServices => format!("user {}", p("user")),
         PickerSource::RegistrarServices => format!("registrar {}", p("registrar")),
@@ -1898,7 +1889,6 @@ mod tests {
             source_endpoint(PickerSource::MintRequests),
             ("/governance/mint-requests", "mint_requests")
         );
-        assert_eq!(source_endpoint(PickerSource::Vaults), ("/vaults", "vaults"));
         assert_eq!(
             source_endpoint(PickerSource::ProviderServices),
             ("/services/provider", "services")
@@ -1908,16 +1898,13 @@ mod tests {
     #[test]
     fn picker_option_skips_empty_cid_and_labels_by_source() {
         // A contract with no id (e.g. a synthetic transfer-factory row) is dropped.
-        assert!(picker_option(PickerSource::Vaults, &json!({ "vault_name": "v" })).is_none());
-
-        // Vault: name + share symbol.
-        let vault = picker_option(
-            PickerSource::Vaults,
-            &json!({ "contract_id": "00v", "vault_name": "Treasury", "share_symbol": "tSHR" }),
-        )
-        .expect("vault option");
-        assert_eq!(vault.value, "00v");
-        assert_eq!(vault.label, "Treasury (tSHR)");
+        assert!(
+            picker_option(
+                PickerSource::Instruments,
+                &json!({ "instrument_id": "CBTC" })
+            )
+            .is_none()
+        );
 
         // Mint request: amount, instrument, holder prefix.
         let mint = picker_option(

@@ -39,9 +39,9 @@ use crate::{
             to_proto_disclosed_contracts,
         },
         types::{
-            ActiveCouponReassignmentDelegation, AuditLogEntry, AuditLogQuery, AuditLogResponse,
-            AuditScope, CancelConfirmationRequest, CancelProposalRequest, ChainAuditEntry,
-            ChainAuditQuery, ChainAuditResponse, ConfirmActionRequest,
+            ActionType, ActiveCouponReassignmentDelegation, AuditLogEntry, AuditLogQuery,
+            AuditLogResponse, AuditScope, CancelConfirmationRequest, CancelProposalRequest,
+            ChainAuditEntry, ChainAuditQuery, ChainAuditResponse, ConfirmActionRequest,
             CouponReassignmentDelegationSummary, ErrorResponse, ExecuteActionRequest,
             ExpireConfirmationRequest, GovernanceResponse, GovernanceStateResponse, GovernanceType,
             KnownMember, KnownMembersResponse, MessageResponse, ProposalType, ProposeActionRequest,
@@ -77,7 +77,7 @@ pub async fn get_governance(
     let packages = packages();
 
     // Pull `(rules_contract_id, threshold)` off the active GovernanceRules /
-    // VaultGovernanceRules contract. The Daml `ExecuteGovernanceAction`
+    // rules contract. The Daml `ExecuteGovernanceAction`
     // choice gates on THIS threshold ("Enough member confirmations to
     // execute action") — not the decentralized-namespace topology
     // threshold, which is a separate value used for signing
@@ -121,7 +121,7 @@ pub async fn get_governance(
     }
 }
 
-/// Get governance state (VaultGovernanceRules contract state)
+/// Get governance state (GovernanceRules contract state)
 #[utoipa::path(
     tag = "Governance",
     params(GovernanceQuery),
@@ -1022,6 +1022,39 @@ pub async fn propose_action(
     }
 }
 
+/// Reject an inline action the `core_self` path cannot carry, before any
+/// ledger work happens.
+///
+/// The inline confirm/execute choices serialize a `GovernanceSelfAction`, so
+/// only the six self-management variants fit. Everything else in `ActionType`
+/// exists for the read path and belongs on `POST /governance/propose`. Caught
+/// here it is a clear 400; left to the serializer it would be a 500.
+///
+/// Also runs the action's own field validation (thresholds, timeouts) so a
+/// malformed value surfaces as a 400 rather than a generic ledger submission
+/// error.
+///
+/// Scoped to `core_self` deliberately. `core_domain` builds its choice from
+/// `proposal_cid` and ignores `action` entirely, so both clients send a
+/// deliberate `governance_set_threshold: 0` placeholder there for payload
+/// symmetry — validating it would 400 every domain confirm and execute.
+fn validate_inline_action(
+    action: &ActionType,
+    governance_type: GovernanceType,
+) -> Result<(), String> {
+    if !matches!(governance_type, GovernanceType::CoreSelf) {
+        return Ok(());
+    }
+    if !action.is_governance_self_action() {
+        return Err(format!(
+            "action '{}' is not a governance self-management action; submit it as a domain \
+             proposal via POST /governance/propose",
+            crate::server::audit::action_summary(action)
+        ));
+    }
+    action.validate()
+}
+
 /// Submit a confirmation for a governance action using structured ActionType
 #[utoipa::path(
     tag = "Governance",
@@ -1042,6 +1075,9 @@ pub async fn confirm_action(
 ) -> impl Responder {
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
+    }
+    if let Err(error) = validate_inline_action(&body.action, body.governance_type) {
+        return HttpResponse::BadRequest().json(ErrorResponse { error });
     }
 
     let party_id = &body.party_id;
@@ -1131,6 +1167,9 @@ pub async fn execute_action(
 ) -> impl Responder {
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
+    }
+    if let Err(error) = validate_inline_action(&body.action, body.governance_type) {
+        return HttpResponse::BadRequest().json(ErrorResponse { error });
     }
 
     let party_id = &body.party_id;
@@ -1638,7 +1677,7 @@ pub(crate) fn packages() -> PackageConfig {
 // Ledger Command Execution
 // ============================================================================
 
-/// Execute ConfirmAction choice on VaultGovernanceRules contract with structured action
+/// Execute ConfirmAction choice on the GovernanceRules contract with structured action
 async fn execute_confirm_action(
     config: &NodeConfig,
     request: &ConfirmActionRequest,
@@ -1649,21 +1688,6 @@ async fn execute_confirm_action(
     let member_party_id_str = member_party_id.to_string();
     let member_party_id = member_party_id_str.as_str();
     let (mut template_id, choice, choice_argument) = match request.governance_type {
-        GovernanceType::Vault => {
-            let pkg = packages
-                .vault_governance
-                .as_deref()
-                .context("vault_governance package not configured")?;
-            (
-                Identifier {
-                    package_id: pkg.to_string(),
-                    module_name: "BitsafeVault.VaultGovernance".to_string(),
-                    entity_name: "VaultGovernanceRules".to_string(),
-                },
-                "VaultGovernanceRules_ConfirmAction".to_string(),
-                action_serializer::build_confirm_action_argument(member_party_id, &request.action),
-            )
-        }
         GovernanceType::CoreSelf => {
             let pkg = packages
                 .governance_core
@@ -1679,7 +1703,7 @@ async fn execute_confirm_action(
                 action_serializer::build_confirm_governance_action_arg(
                     member_party_id,
                     &request.action,
-                ),
+                )?,
             )
         }
         GovernanceType::CoreDomain => {
@@ -1705,19 +1729,14 @@ async fn execute_confirm_action(
 
     // The rules contract may be an out-of-date fallback living under an older
     // governance-core package — exercise it under its actual package ref.
-    if matches!(
-        request.governance_type,
-        GovernanceType::CoreSelf | GovernanceType::CoreDomain
-    ) {
-        template_id.package_id = resolve_contract_package_ref(
-            config,
-            &request.party_id,
-            Some(token.to_string()),
-            &request.rules_contract_id,
-            &template_id.package_id,
-        )
-        .await;
-    }
+    template_id.package_id = resolve_contract_package_ref(
+        config,
+        &request.party_id,
+        Some(token.to_string()),
+        &request.rules_contract_id,
+        &template_id.package_id,
+    )
+    .await;
 
     let channel = config.ledger_channel().await?;
 
@@ -1773,26 +1792,6 @@ async fn execute_confirmed_action(
     let member_party_id_str = member_party_id.to_string();
     let member_party_id = member_party_id_str.as_str();
     let (mut template_id, choice, choice_argument) = match request.governance_type {
-        GovernanceType::Vault => {
-            let pkg = packages
-                .vault_governance
-                .as_deref()
-                .context("vault_governance package not configured")?;
-            (
-                Identifier {
-                    package_id: pkg.to_string(),
-                    module_name: "BitsafeVault.VaultGovernance".to_string(),
-                    entity_name: "VaultGovernanceRules".to_string(),
-                },
-                "VaultGovernanceRules_ExecuteConfirmedAction".to_string(),
-                action_serializer::build_execute_action_argument(
-                    member_party_id,
-                    &request.action,
-                    &request.confirmation_cids,
-                    None,
-                ),
-            )
-        }
         GovernanceType::CoreSelf => {
             let pkg = packages
                 .governance_core
@@ -1809,7 +1808,7 @@ async fn execute_confirmed_action(
                     member_party_id,
                     &request.action,
                     &request.confirmation_cids,
-                ),
+                )?,
             )
         }
         GovernanceType::CoreDomain => {
@@ -1839,19 +1838,14 @@ async fn execute_confirmed_action(
 
     // The rules contract may be an out-of-date fallback living under an older
     // governance-core package — exercise it under its actual package ref.
-    if matches!(
-        request.governance_type,
-        GovernanceType::CoreSelf | GovernanceType::CoreDomain
-    ) {
-        template_id.package_id = resolve_contract_package_ref(
-            config,
-            &request.party_id,
-            Some(token.to_string()),
-            &request.rules_contract_id,
-            &template_id.package_id,
-        )
-        .await;
-    }
+    template_id.package_id = resolve_contract_package_ref(
+        config,
+        &request.party_id,
+        Some(token.to_string()),
+        &request.rules_contract_id,
+        &template_id.package_id,
+    )
+    .await;
 
     // For `AcceptTransferProposal` execution the executor's submission must
     // include the registry-supplied disclosed contracts (transfer rule + its
@@ -1970,7 +1964,7 @@ async fn execute_expire_confirmation(
 ) -> Result {
     let member_party_id_str = member_party_id.to_string();
     let member_party_id = member_party_id_str.as_str();
-    // Both vault and core use the same argument shape: { member, staleConfirmationCid }
+    // Both core paths use the same argument shape: { member, staleConfirmationCid }
     let choice_argument = Value {
         sum: Some(value::Sum::Record(Record {
             record_id: None,
@@ -1992,20 +1986,6 @@ async fn execute_expire_confirmation(
     };
 
     let (mut template_id, choice) = match request.governance_type {
-        GovernanceType::Vault => {
-            let pkg = packages
-                .vault_governance
-                .as_deref()
-                .context("vault_governance package not configured")?;
-            (
-                Identifier {
-                    package_id: pkg.to_string(),
-                    module_name: "BitsafeVault.VaultGovernance".to_string(),
-                    entity_name: "VaultGovernanceRules".to_string(),
-                },
-                "VaultGovernanceRules_ExpireConfirmation".to_string(),
-            )
-        }
         GovernanceType::CoreSelf => {
             let pkg = packages
                 .governance_core
@@ -2044,19 +2024,14 @@ async fn execute_expire_confirmation(
 
     // The rules contract may be an out-of-date fallback living under an older
     // governance-core package — exercise it under its actual package ref.
-    if matches!(
-        request.governance_type,
-        GovernanceType::CoreSelf | GovernanceType::CoreDomain
-    ) {
-        template_id.package_id = resolve_contract_package_ref(
-            config,
-            &request.party_id,
-            Some(token.to_string()),
-            &request.rules_contract_id,
-            &template_id.package_id,
-        )
-        .await;
-    }
+    template_id.package_id = resolve_contract_package_ref(
+        config,
+        &request.party_id,
+        Some(token.to_string()),
+        &request.rules_contract_id,
+        &template_id.package_id,
+    )
+    .await;
 
     let channel = config.ledger_channel().await?;
 
@@ -2112,20 +2087,6 @@ async fn execute_cancel_confirmation(
     let member_party_id_str = member_party_id.to_string();
     let member_party_id = member_party_id_str.as_str();
     let (mut template_id, choice) = match request.governance_type {
-        GovernanceType::Vault => {
-            let pkg = packages
-                .vault_governance
-                .as_deref()
-                .context("vault_governance package not configured")?;
-            (
-                Identifier {
-                    package_id: pkg.to_string(),
-                    module_name: "BitsafeVault.VaultGovernance".to_string(),
-                    entity_name: "VaultGovernanceConfirmation".to_string(),
-                },
-                "VaultGovernanceConfirmation_Cancel".to_string(),
-            )
-        }
         GovernanceType::CoreSelf => {
             let pkg = packages
                 .governance_core
@@ -2162,19 +2123,14 @@ async fn execute_cancel_confirmation(
     // The confirmation contract is created by the rules contract's choice, so
     // it shares the rules contract's (possibly out-of-date) package —
     // exercise it under its actual package ref.
-    if matches!(
-        request.governance_type,
-        GovernanceType::CoreSelf | GovernanceType::CoreDomain
-    ) {
-        template_id.package_id = resolve_contract_package_ref(
-            config,
-            &request.party_id,
-            Some(token.to_string()),
-            &request.confirmation_cid,
-            &template_id.package_id,
-        )
-        .await;
-    }
+    template_id.package_id = resolve_contract_package_ref(
+        config,
+        &request.party_id,
+        Some(token.to_string()),
+        &request.confirmation_cid,
+        &template_id.package_id,
+    )
+    .await;
 
     let channel = config.ledger_channel().await?;
 
@@ -2487,6 +2443,50 @@ mod propose_guard_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `core_domain` builds its choice from `proposal_cid` and never reads
+    /// `action`, so both clients send `governance_set_threshold: 0` as a
+    /// deliberate placeholder (`NotificationsView.tsx`, `app.rs`). The inline
+    /// guard must let it through untouched — validating it would 400 every
+    /// domain confirm and execute.
+    #[test]
+    fn domain_confirms_accept_the_zero_threshold_placeholder() {
+        let placeholder = ActionType::GovernanceSetThreshold { new_threshold: 0 };
+        assert!(
+            validate_inline_action(&placeholder, GovernanceType::CoreDomain).is_ok(),
+            "the core_domain placeholder must not be validated"
+        );
+    }
+
+    /// The same placeholder on the inline path is a real threshold, and 0 is
+    /// not a legal one.
+    #[test]
+    fn self_management_confirms_still_validate_the_threshold() {
+        let bad = ActionType::GovernanceSetThreshold { new_threshold: 0 };
+        match validate_inline_action(&bad, GovernanceType::CoreSelf) {
+            Ok(()) => panic!("new_threshold 0 must not pass core_self validation"),
+            Err(error) => assert!(
+                error.contains("at least 1"),
+                "error should name the bound: {error}"
+            ),
+        }
+    }
+
+    /// A non-self-management action paired with `core_self` is a client error,
+    /// caught before it reaches the serializer that cannot encode it.
+    #[test]
+    fn self_management_confirms_reject_a_domain_action() {
+        let action = ActionType::DevNetFeatureApp {
+            amulet_rules_cid: "00amulet".to_owned(),
+        };
+        match validate_inline_action(&action, GovernanceType::CoreSelf) {
+            Ok(()) => panic!("DevNetFeatureApp is not a self-management action"),
+            Err(error) => assert!(
+                error.contains("/governance/propose"),
+                "error should point at the proposal path: {error}"
+            ),
+        }
+    }
 
     fn entry_at(offset: i64) -> ChainAuditEntry {
         ChainAuditEntry {

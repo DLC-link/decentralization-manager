@@ -291,8 +291,8 @@ pub enum GovItem {
 pub struct GovView {
     pub party_name: String,
     pub party_id: String,
-    /// The party's governance type (`core_self` or `vault`), used for off-chain
-    /// actions and to refresh the overlay after a mutation.
+    /// The party's governance type, used for off-chain actions and to refresh
+    /// the overlay after a mutation.
     pub governance_type: String,
     pub rules_contract_id: String,
     pub member_party_id: String,
@@ -1354,9 +1354,6 @@ fn party_governance_type(party: &DecentralizedParty) -> Option<&'static str> {
         let template = contract.template_id.as_str();
         if template == "Governance.Rules:GovernanceRules" {
             Some("core_self")
-        } else if template.contains("VaultGovernanceRules") || template.contains("VaultGovernance")
-        {
-            Some("vault")
         } else {
             None
         }
@@ -3516,14 +3513,18 @@ mod tests {
 
     #[test]
     fn filter_parties_matches_name_case_insensitively() {
-        let parties = [party("cbtc-network"), party("vault-rc5"), party("test-net")];
+        let parties = [
+            party("cbtc-network"),
+            party("treasury-rc5"),
+            party("test-net"),
+        ];
 
         let all = filter_parties(&parties, "");
-        let vault = filter_parties(&parties, "VAULT");
+        let treasury = filter_parties(&parties, "TREASURY");
 
         assert_eq!(all.len(), 3);
-        assert_eq!(vault.len(), 1);
-        assert_eq!(party_name(vault[0]), "vault-rc5");
+        assert_eq!(treasury.len(), 1);
+        assert_eq!(party_name(treasury[0]), "treasury-rc5");
     }
 
     #[test]
@@ -3536,7 +3537,7 @@ mod tests {
 
     #[test]
     fn validate_prefix_accepts_valid_and_rejects_invalid() {
-        assert!(validate_prefix("vault-rc5").is_ok());
+        assert!(validate_prefix("treasury-rc5").is_ok());
         assert!(validate_prefix("a_b-9").is_ok());
         assert!(validate_prefix("").is_err()); // empty
         assert!(validate_prefix("9abc").is_err()); // must start with a letter

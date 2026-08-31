@@ -1718,9 +1718,6 @@ fn gov_action_summary(action: &serde_json::Value) -> String {
             field_str("member").map(|m| id_prefix(m).to_owned())
         }
         "governance_set_timeout" => field_i64("new_timeout_microseconds").map(format_micros_human),
-        "vault_pause" | "vault_unpause" | "vault_update_limits" | "vault_update_backend" => {
-            field_str("vault_id").map(|v| truncate(v, 12))
-        }
         _ => None,
     };
     match detail {
@@ -2715,11 +2712,11 @@ mod tests {
                 &Status::Loaded,
                 &refs,
                 &mut state,
-                tab_block(Tab::Parties, Some(("search: vault▏".to_owned(), true))),
+                tab_block(Tab::Parties, Some(("search: treasury▏".to_owned(), true))),
                 "⠋",
             );
         });
-        assert!(rendered.contains("search: vault"));
+        assert!(rendered.contains("search: treasury"));
     }
 
     #[test]
@@ -2817,7 +2814,7 @@ mod tests {
                 coordinator_pubkey: "1220deadbeef".to_owned(),
                 coordinator_name: Some("alice".to_owned()),
                 received_at: 0,
-                prefix: Some("vault-rc5".to_owned()),
+                prefix: Some("treasury-rc5".to_owned()),
                 participants: Vec::new(),
                 dar_filenames: Vec::new(),
                 kicked_participant: None,
@@ -2854,7 +2851,7 @@ mod tests {
         assert!(!rendered.contains("6/6"));
         // The invitation row is present and actionable.
         assert!(rendered.contains("Onboarding"));
-        assert!(rendered.contains("vault-rc5"));
+        assert!(rendered.contains("treasury-rc5"));
         assert!(rendered.contains("Invitation"));
     }
 
@@ -2881,14 +2878,14 @@ mod tests {
     #[test]
     fn compare_popup_renders_matrix_of_marks() {
         let comparison = PeerPackageComparison {
-            local_packages: vec![pkg("cbtc", "1.0.0"), pkg("vault", "0.0.1")],
+            local_packages: vec![pkg("cbtc", "1.0.0"), pkg("treasury", "0.0.1")],
             peers: vec![
                 PeerPackageResult {
                     participant_id: "p1::1220".to_owned(),
                     name: "devnet 1".to_owned(),
                     reachable: true,
                     error_kind: None,
-                    // Has cbtc but is missing vault.
+                    // Has cbtc but is missing treasury.
                     packages: vec![pkg("cbtc", "1.0.0")],
                 },
                 PeerPackageResult {
@@ -2909,7 +2906,7 @@ mod tests {
         assert!(rendered.contains("Local packages: 2"));
         assert!(rendered.contains("PACKAGE"));
         assert!(rendered.contains("cbtc"));
-        // devnet 1: cbtc ✓, vault ✗; devnet 4: unreachable → – in every cell.
+        // devnet 1: cbtc ✓, treasury ✗; devnet 4: unreachable → – in every cell.
         assert!(rendered.contains('✓'));
         assert!(rendered.contains('✗'));
         assert!(rendered.contains('–'));
@@ -3084,7 +3081,7 @@ mod tests {
     #[test]
     fn onboard_popup_renders_prefix_and_peers() {
         let overlay = Overlay::Onboard(OnboardForm {
-            prefix: "vault".to_owned(),
+            prefix: "treasury".to_owned(),
             peers: vec![PeerChoice {
                 id: "p1::1220".to_owned(),
                 name: "alpha".to_owned(),
@@ -3094,7 +3091,7 @@ mod tests {
         });
         let rendered = render(|frame, area| draw_overlay(frame, area, &overlay, "⠋"));
         assert!(rendered.contains("Onboard new party"));
-        assert!(rendered.contains("vault"));
+        assert!(rendered.contains("treasury"));
         assert!(rendered.contains("alpha"));
         assert!(rendered.contains("[x]"));
     }
@@ -3253,7 +3250,7 @@ mod tests {
     #[test]
     fn feed_detail_popup_renders_run_fields_and_error() {
         let run = WorkflowRun {
-            instance_name: "onboarding-vault-abc".to_owned(),
+            instance_name: "onboarding-treasury-abc".to_owned(),
             kind: WorkflowKind::Onboarding,
             role: WorkflowRole::Coordinator,
             status: WorkflowProgress::Failed,
@@ -3267,7 +3264,7 @@ mod tests {
             expected_peers: Vec::new(),
             completed_peers: Vec::new(),
             dec_party_id: None,
-            prefix: Some("vault".to_owned()),
+            prefix: Some("treasury".to_owned()),
             participants: Vec::new(),
             previous_threshold: None,
             new_threshold: None,
@@ -3347,13 +3344,14 @@ mod tests {
         );
         assert_eq!(
             gov_action_summary(
-                &serde_json::json!({ "type": "vault_pause", "vault_id": "00abcdef0123456789" })
+                &serde_json::json!({ "type": "governance_add_member", "member": "alice::1220" })
             ),
-            "Vault Pause  00abcdef012…"
+            "Governance Add Member  alice"
         );
+        // An action with no detail arm renders the humanized type alone.
         assert_eq!(
-            gov_action_summary(&serde_json::json!({ "type": "vault_deployment" })),
-            "Vault Deployment"
+            gov_action_summary(&serde_json::json!({ "type": "utility_setup" })),
+            "Utility Setup"
         );
     }
 
@@ -3364,7 +3362,7 @@ mod tests {
         let view = GovView {
             party_name: "cbtc-network".to_owned(),
             party_id: "dec::1220".to_owned(),
-            governance_type: "vault".to_owned(),
+            governance_type: "core_self".to_owned(),
             rules_contract_id: "00rules".to_owned(),
             member_party_id: "member::1220".to_owned(),
             threshold: 2,

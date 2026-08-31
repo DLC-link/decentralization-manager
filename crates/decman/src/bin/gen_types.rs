@@ -25,12 +25,11 @@ use dec_party_manager::{
     server::{
         AcceptTransferDetails, ActionType, AppRewardBeneficiary, BillingParams,
         BurnRequestsResponse, ConfirmActionRequest, DomainConfirmation, DomainGovernanceAction,
-        ExecuteActionRequest, FarConfig, GovernanceAction, GovernanceConfirmation,
-        GovernanceResponse, HoldingInfo, HoldingsResponse, MintRequestsResponse,
-        NodeConfigResponse, PendingAction, ProposalType, ProposeActionRequest,
-        ServiceRequestDetails, TokenRequestInfo, TransferInstructionInfo,
-        TransferInstructionStatus, TransferInstructionsResponse, TransferProposalDetails,
-        VaultLimits,
+        ExecuteActionRequest, GovernanceAction, GovernanceConfirmation, GovernanceResponse,
+        HoldingInfo, HoldingsResponse, MintRequestsResponse, NodeConfigResponse, PendingAction,
+        ProposalType, ProposeActionRequest, ServiceRequestDetails, TokenRequestInfo,
+        TransferInstructionInfo, TransferInstructionStatus, TransferInstructionsResponse,
+        TransferProposalDetails,
     },
 };
 
@@ -149,8 +148,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         TransferPreapprovalsResponse,
         UserServiceInfo,
         UserServicesResponse,
-        VaultInfo,
-        VaultsResponse,
         VettedPackageInfo,
         WorkflowInfo,
         WorkflowKind,
@@ -170,7 +167,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         DomainConfirmation,
         DomainGovernanceAction,
         ExecuteActionRequest,
-        FarConfig,
         GovernanceAction,
         GovernanceConfirmation,
         GovernanceResponse,
@@ -186,7 +182,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         TransferInstructionStatus,
         TransferInstructionsResponse,
         TransferProposalDetails,
-        VaultLimits,
         // node config DTOs
         Auth0Config,
         CantonConfig,

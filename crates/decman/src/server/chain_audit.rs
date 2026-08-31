@@ -46,27 +46,11 @@ struct ChainFilters {
 /// participant's own inventory, and events are classified client-side purely
 /// by `(module_name, entity_name)`, so the audit trail covers events from
 /// any package version (rc3, rc4, future). `packages` is kept as an argument
-/// so a build that omits some governance kinds (vault / core / cbtc) still
+/// so a build that omits some governance kinds (core / cbtc) still
 /// skips them entirely.
 fn chain_filters(packages: &PackageConfig) -> ChainFilters {
     let mut templates = Vec::new();
     let mut interfaces = Vec::new();
-
-    if let Some(pkg) = &packages.vault_governance {
-        let prefix = package_name_prefix(pkg);
-        templates.push(ChainTemplate {
-            package_prefix: prefix.clone(),
-            module_name: "BitsafeVault.VaultGovernance",
-            entity_name: "VaultGovernanceRules",
-            governance_type: "vault",
-        });
-        templates.push(ChainTemplate {
-            package_prefix: prefix,
-            module_name: "BitsafeVault.VaultGovernance",
-            entity_name: "VaultGovernanceConfirmation",
-            governance_type: "vault",
-        });
-    }
 
     if let Some(pkg) = &packages.governance_core {
         let prefix = package_name_prefix(pkg);

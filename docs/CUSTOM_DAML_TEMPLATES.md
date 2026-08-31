@@ -205,8 +205,7 @@ curl http://localhost:8080/packages/compare-peers   # admin-only — catches mis
 ```
 governance_action, governance_core, governance_token_custody,
 governance_utility_credential, governance_utility_onboarding,
-utility_credential, utility_credential_app, utility_registry,
-vault, vault_governance
+utility_credential, utility_credential_app, utility_registry
 ```
 
 Custom packages are **not** in that map. That is fine — for the `core_domain` flow, only `governance_core` is dereferenced by name (to target `GovernanceRules`); the proposal's own package id is implied by the contract id and never needs to be resolved by DecMan.
@@ -233,7 +232,7 @@ Minimal request — 3 members, threshold 2, 30-minute confirmation window. The D
 curl -X POST http://coordinator:8080/contracts \
   -H 'Content-Type: application/json' \
   -d '{
-    "decentralized_party_id": "my-vault-network::1220abc...",
+    "decentralized_party_id": "my-domain-network::1220abc...",
     "participant_ids":   ["node1::1220...", "node2::1220...", "node3::1220..."],
     "participant_parties": ["member1::1220...", "member2::1220...", "member3::1220..."],
     "operator_party":    "operator::1220...",
@@ -293,7 +292,7 @@ DARs must be uploaded ahead of this call via `/dars/distribute`; `POST /contract
 curl -X POST http://localhost:8080/contracts \
   -H 'Content-Type: application/json' \
   -d '{
-    "decentralized_party_id": "my-vault-network::1220abc...",
+    "decentralized_party_id": "my-domain-network::1220abc...",
     "participant_ids": ["node1::1220...", "node2::1220...", "node3::1220..."],
     "participant_parties": ["member1::1220...", "member2::1220...", "member3::1220..."],
     "operator_party": "operator::1220...",
@@ -342,7 +341,7 @@ These endpoints are package-agnostic for `core_domain` — they only need the pr
 curl -X POST http://localhost:8080/governance/confirm \
   -H 'Content-Type: application/json' \
   -d '{
-    "party_id":           "my-vault-network::1220abc...",
+    "party_id":           "my-domain-network::1220abc...",
     "rules_contract_id":  "<governance-rules-cid>",
     "action":             { "type": "generic_vote", "description": "placeholder" },
     "governance_type":    "core_domain",
@@ -355,7 +354,7 @@ The `action` field is required by the request schema but is **not used** when `g
 ### List outstanding confirmations
 
 ```bash
-curl 'http://localhost:8080/governance/confirmations?party_id=my-vault-network::1220abc...'
+curl 'http://localhost:8080/governance/confirmations?party_id=my-domain-network::1220abc...'
 ```
 
 The response groups domain actions under `domain_actions[]`, keyed by `proposal_cid`, with `action_label`, `description`, the per-member `confirmations[]`, and a `can_execute` boolean.
@@ -366,7 +365,7 @@ The response groups domain actions under `domain_actions[]`, keyed by `proposal_
 curl -X POST http://localhost:8080/governance/execute \
   -H 'Content-Type: application/json' \
   -d '{
-    "party_id":           "my-vault-network::1220abc...",
+    "party_id":           "my-domain-network::1220abc...",
     "rules_contract_id":  "<governance-rules-cid>",
     "action":             { "type": "generic_vote", "description": "placeholder" },
     "confirmation_cids":  ["<conf-cid-1>", "<conf-cid-2>"],
@@ -400,7 +399,7 @@ If a non-member party needs to file proposals — an admin tool, a regulatory of
 curl -X POST http://node:8080/governance/confirm \
   -H 'Content-Type: application/json' \
   -d '{
-    "party_id":          "my-vault-network::1220abc...",
+    "party_id":          "my-domain-network::1220abc...",
     "rules_contract_id": "<governance-rules-cid>",
     "action":            {
       "type": "governance_add_additional_proposer",
@@ -413,7 +412,7 @@ curl -X POST http://node:8080/governance/confirm \
 curl -X POST http://node:8080/governance/execute \
   -H 'Content-Type: application/json' \
   -d '{
-    "party_id":          "my-vault-network::1220abc...",
+    "party_id":          "my-domain-network::1220abc...",
     "rules_contract_id": "<governance-rules-cid>",
     "action":            {
       "type": "governance_add_additional_proposer",
@@ -450,7 +449,7 @@ The proposer (the original creator of the `PauseProposal`) can also retract the 
 Use the generic contract query endpoint to find live instances of your template:
 
 ```bash
-curl 'http://localhost:8080/contracts/query?party_id=my-vault-network::1220abc...&package_id=%23my-package-v0&module_name=MyDomain.PauseProposal&entity_name=PauseProposal&interface=false'
+curl 'http://localhost:8080/contracts/query?party_id=my-domain-network::1220abc...&package_id=%23my-package-v0&module_name=MyDomain.PauseProposal&entity_name=PauseProposal&interface=false'
 ```
 
 Set `interface=true` to query by interface id instead — useful for listing every active `GovernableAction` regardless of underlying template:
