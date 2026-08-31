@@ -567,17 +567,23 @@ where
 
     let mut entries: Vec<ChainAuditEntry> = Vec::new();
     let mut page_token = None;
-    // Whether Canton still had pages left when we stopped. Distinguishes
+    // Whether Canton still had updates left when we stopped. Distinguishes
     // "stopped because the page was full" from "stopped because the range ran
-    // out", which is what decides if an older page exists.
-    let mut pages_remain = false;
+    // out", which is what decides if an older page exists. Every exit from the
+    // walk below sets it, so it starts unassigned rather than at a default the
+    // compiler can see is never read.
+    let pages_remain;
 
     loop {
-        let page = fetch_page(page_token)
+        let TransactionPage {
+            transactions,
+            next_page_token,
+            truncated,
+        } = fetch_page(page_token)
             .await
             .context("Failed to read ledger updates")?;
 
-        for tx in page.transactions {
+        for tx in transactions {
             entries.extend(
                 transaction_entries(tx, template_index, scope)
                     .into_iter()
@@ -585,14 +591,20 @@ where
             );
         }
 
+        // A truncated page counts the same as a continuation token: the
+        // pre-3.5.1 fallback has none to give, and reading its short page as
+        // "the range is done" would hide every older entry behind it.
         if entries.len() >= limit {
-            pages_remain = page.next_page_token.is_some();
+            pages_remain = next_page_token.is_some() || truncated;
             break;
         }
 
-        match page.next_page_token {
+        match next_page_token {
             Some(next) => page_token = Some(next),
-            None => break,
+            None => {
+                pages_remain = truncated;
+                break;
+            }
         }
     }
 
@@ -1127,6 +1139,7 @@ mod tests {
         TransactionPage {
             transactions: vec![tx_at(offsets)],
             next_page_token: more.then(|| b"next".to_vec()),
+            ..Default::default()
         }
     }
 
@@ -1244,6 +1257,7 @@ mod tests {
             TransactionPage {
                 transactions: vec![noise],
                 next_page_token: Some(b"next".to_vec()),
+                ..Default::default()
             },
             scripted_page(&[30], false),
         ];
@@ -1275,6 +1289,23 @@ mod tests {
         assert_eq!(plan(AuditScope::All, 0).page_size(), 1);
     }
 
+    /// The pre-3.5.1 fallback has no continuation token, so a page it cut to
+    /// its bound is the only signal that older updates exist. Reading it as an
+    /// exhausted range would strand every entry behind it.
+    #[tokio::test]
+    async fn walk_reports_more_when_the_page_was_truncated() {
+        let pages = vec![TransactionPage {
+            transactions: vec![tx_at(&[30, 20])],
+            next_page_token: None,
+            truncated: true,
+        }];
+
+        let page = walk(pages, 5).await;
+
+        assert_eq!(offsets_of(&page.entries), vec![30, 20]);
+        assert!(page.has_more);
+    }
+
     /// One transaction exercising a choice the governance classifier has no
     /// name for — an application party's own template.
     fn app_exercise_at(offset: i64) -> Transaction {
@@ -1303,7 +1334,7 @@ mod tests {
     async fn governance_scope_drops_application_events() {
         let pages = vec![TransactionPage {
             transactions: vec![app_exercise_at(40)],
-            next_page_token: None,
+            ..Default::default()
         }];
 
         let page = walk_scoped(pages, AuditScope::Governance, 5).await;
@@ -1317,7 +1348,7 @@ mod tests {
     async fn all_scope_keeps_application_events() {
         let pages = vec![TransactionPage {
             transactions: vec![app_exercise_at(40)],
-            next_page_token: None,
+            ..Default::default()
         }];
 
         let page = walk_scoped(pages, AuditScope::All, 5).await;

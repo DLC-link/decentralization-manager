@@ -298,6 +298,15 @@ export const GovernanceAuditTrail = ({
           );
           if (res.ok) {
             const response: AuditLogResponse = await res.json();
+            // The local log pages by offset and reports no total, so a page
+            // that comes back exactly full cannot say whether another follows.
+            // An empty page past the first is that answer arriving late: it is
+            // the end of the log, so stay on the page we are on rather than
+            // replacing the table with the empty state.
+            if (response.entries.length === 0 && pageIndex > 0) {
+              setLocalHasNext(false);
+              return false;
+            }
             setRows(response.entries.map(localRow));
             setLocalHasNext(response.entries.length >= CHAIN_LIMIT);
             return true;
