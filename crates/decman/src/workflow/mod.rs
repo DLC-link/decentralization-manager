@@ -5,6 +5,7 @@ pub mod dars;
 pub mod external_party;
 pub mod kick;
 pub mod onboarding;
+pub mod party_replication;
 pub mod state;
 pub mod storage;
 pub mod topology;
@@ -854,11 +855,10 @@ pub async fn start_peer(
                     .map(str::to_string)
                     .collect();
 
-                if let Err(e) = add_party::import_party_acs(
+                if let Err(e) = party_replication::import_party_acs(
                     &node_config,
                     &db,
-                    &instance_name,
-                    &add_party_config,
+                    &add_party_config.replication_target(&instance_name),
                     items[1].clone(),
                     &required_package_ids,
                 )
@@ -889,15 +889,14 @@ pub async fn start_peer(
                     continue;
                 }
 
-                match add_party::clear_onboarding_flag(
+                match party_replication::clear_onboarding_flag(
                     &node_config,
                     &db,
-                    &instance_name,
-                    &add_party_config,
+                    &add_party_config.replication_target(&instance_name),
                 )
                 .await
                 {
-                    Ok(add_party::ClearOutcome::Proposed) => {
+                    Ok(party_replication::ClearOutcome::Proposed) => {
                         // Canton requires the ONBOARDING PARTICIPANT to issue
                         // the flag-clear transaction — author it here and ship
                         // it to the coordinator for the threshold-signing
@@ -937,7 +936,7 @@ pub async fn start_peer(
                             }
                         }
                     }
-                    Ok(add_party::ClearOutcome::Cleared) => {
+                    Ok(party_replication::ClearOutcome::Cleared) => {
                         consecutive_step_failures = 0;
                         if let Err(e) = client
                             .send_status(b"ClearOnboardingFlag: Cleared".to_vec())

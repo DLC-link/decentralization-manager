@@ -58,6 +58,10 @@ struct CachedJwks {
 struct TrustedIssuer {
     client_id: String,
     discovery_base: String,
+    /// True when the matched config is Auth0. Gates the Auth0-specific
+    /// `permissions` role carrier so another provider emitting a top-level
+    /// `permissions` array cannot widen the privilege surface.
+    is_auth0: bool,
 }
 
 #[derive(Clone)]
@@ -137,6 +141,24 @@ struct Claims {
     additional: HashMap<String, serde_json::Value>,
 }
 
+/// Roles carried by Auth0's `permissions` claim, emitted when the API has
+/// "Add Permissions in the Access Token" enabled. Unlike `scope`, Auth0 does
+/// not filter this claim by the scopes the client requested, so an assigned
+/// permission reaches the token with no post-login Action.
+///
+/// Read out of the flattened claim map rather than a typed `Claims` field: a
+/// typed field would make a differently-shaped `permissions` claim fail the
+/// whole token decode, locking every user out of an otherwise healthy node.
+/// Callers must gate this on the matched issuer actually being Auth0 so that
+/// another provider emitting a top-level `permissions` array cannot reach the
+/// admin gate through it.
+fn auth0_permission_roles(additional: &HashMap<String, serde_json::Value>) -> Vec<String> {
+    additional
+        .get("permissions")
+        .and_then(|value| serde_json::from_value::<Vec<String>>(value.clone()).ok())
+        .unwrap_or_default()
+}
+
 impl JwtValidator {
     pub fn new(
         inbound: Option<KeycloakConfig>,
@@ -177,6 +199,7 @@ impl JwtValidator {
             return Err(ValidationError::UntrustedIssuer(issuer));
         };
         let expected_client_id = trusted.client_id;
+        let issuer_is_auth0 = trusted.is_auth0;
 
         let header = decode_header(token).map_err(|_| ValidationError::MalformedToken)?;
         let kid = header.kid.ok_or(ValidationError::MalformedToken)?;
@@ -255,6 +278,9 @@ impl JwtValidator {
                 }
             }
         }
+        if issuer_is_auth0 {
+            flat_roles.extend(auth0_permission_roles(&claims.additional));
+        }
         let roles = collect_roles(
             claims.realm_access.as_ref(),
             Some(&flat_roles),
@@ -283,6 +309,7 @@ impl JwtValidator {
             return Some(TrustedIssuer {
                 client_id: cfg.client_id.clone(),
                 discovery_base: oidc_discovery_base_of(cfg),
+                is_auth0: false,
             });
         }
         if let Some(ref cfg) = self.auth0
@@ -291,6 +318,7 @@ impl JwtValidator {
             return Some(TrustedIssuer {
                 client_id: cfg.client_id.clone(),
                 discovery_base: issuer.to_string(),
+                is_auth0: true,
             });
         }
         let creds = self.party_credentials.read().await;
@@ -301,12 +329,14 @@ impl JwtValidator {
                 return Some(TrustedIssuer {
                     client_id: a.client_id.clone(),
                     discovery_base: issuer.to_string(),
+                    is_auth0: true,
                 });
             }
             if oidc_issuer_of(&party.keycloak) == issuer {
                 return Some(TrustedIssuer {
                     client_id: party.keycloak.client_id.clone(),
                     discovery_base: oidc_discovery_base_of(&party.keycloak),
+                    is_auth0: false,
                 });
             }
         }
@@ -893,6 +923,103 @@ mod tests {
             validator.validate("not.a.jwt").await,
             Err(ValidationError::MalformedToken)
         ));
+        Ok(())
+    }
+
+    /// Auth0's `permissions` array is the carrier that lets an RBAC-assigned
+    /// admin role reach `require_admin` with no post-login Action and no
+    /// custom claim.
+    #[test]
+    fn permission_roles_are_read_from_the_permissions_claim() {
+        let additional =
+            HashMap::from([("permissions".to_string(), json!(["decman-admin", "viewer"]))]);
+        assert_eq!(
+            auth0_permission_roles(&additional),
+            vec!["decman-admin".to_string(), "viewer".to_string()]
+        );
+    }
+
+    /// A differently-shaped `permissions` claim must contribute no roles. It
+    /// is read from the flattened map, not a typed `Claims` field, precisely so
+    /// this degrades quietly instead of failing the whole token decode — a hard
+    /// failure would lock every user out of an otherwise healthy node.
+    #[test]
+    fn malformed_permissions_claim_contributes_no_roles() {
+        let additional = HashMap::from([(
+            "permissions".to_string(),
+            json!([{ "permission_name": "decman-admin" }]),
+        )]);
+        assert!(auth0_permission_roles(&additional).is_empty());
+        assert!(auth0_permission_roles(&HashMap::new()).is_empty());
+    }
+
+    /// The carrier is Auth0-specific, so `find_trusted` has to say which
+    /// provider matched. Only the Auth0 arms may report `is_auth0`, otherwise a
+    /// Keycloak realm emitting a top-level `permissions` array would widen the
+    /// privilege surface.
+    #[tokio::test]
+    async fn only_auth0_issuers_are_tagged_as_auth0() {
+        let keycloak = KeycloakConfig {
+            url: "https://keycloak.example.com".to_string(),
+            internal_url: None,
+            realm: "test".to_string(),
+            client_id: "decman".to_string(),
+            client_secret: None,
+            username: None,
+            password: None,
+        };
+        let auth0 = Auth0Config {
+            domain: "tenant.eu.auth0.com".to_string(),
+            client_id: "spa-client-id".to_string(),
+            audience: None,
+            scope: None,
+        };
+        let validator = JwtValidator::new(
+            Some(keycloak.clone()),
+            Some(auth0.clone()),
+            None,
+            std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            reqwest::Client::new(),
+        );
+
+        let matched = validator
+            .find_trusted(&auth0_issuer_of(&auth0))
+            .await
+            .expect("auth0 issuer should be trusted");
+        assert!(matched.is_auth0);
+
+        let matched = validator
+            .find_trusted(&oidc_issuer_of(&keycloak))
+            .await
+            .expect("keycloak issuer should be trusted");
+        assert!(!matched.is_auth0);
+    }
+
+    /// End-to-end guard for the same concern: a token from the Keycloak issuer
+    /// carrying a top-level `permissions` array must not satisfy the admin
+    /// gate through it.
+    #[tokio::test]
+    async fn keycloak_issuer_ignores_a_permissions_claim() -> anyhow::Result<()> {
+        let (_server, validator, issuer) = setup().await;
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(TEST_KID.to_string());
+        let token = sign(
+            &header,
+            &json!({
+                "iss": issuer,
+                "sub": "operator",
+                "azp": "decman",
+                "exp": unix_now()? + 3600,
+                "permissions": ["decman-admin"],
+            }),
+        )?;
+
+        let principal = validator
+            .validate(&token)
+            .await
+            .map_err(|e| anyhow::anyhow!("expected token to verify: {e:?}"))?;
+        assert!(!principal.has_role("decman-admin"));
+        assert!(principal.roles.is_empty());
         Ok(())
     }
 }

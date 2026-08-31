@@ -753,6 +753,21 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         Ok(())
     }
 
+    async fn delete_dec_party_participant(
+        &mut self,
+        party_id: &CantonId,
+        participant_uid: &str,
+    ) -> Result {
+        sqlx::query(
+            "DELETE FROM dec_party_participant WHERE dec_party_id = ? AND participant_uid = ?",
+        )
+        .bind(party_id.to_string())
+        .bind(participant_uid)
+        .execute(&mut **self)
+        .await?;
+        Ok(())
+    }
+
     async fn replace_dec_party_contracts(
         &mut self,
         party_id: &CantonId,

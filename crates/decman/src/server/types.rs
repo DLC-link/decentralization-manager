@@ -1393,6 +1393,22 @@ fn default_audit_limit() -> i64 {
 // Chain Audit Trail Types
 // ============================================================================
 
+/// Which ledger events a chain-audit read returns.
+///
+/// `Governance` filters Canton-side to the governance packages and keeps only
+/// proposals, confirmations, executions and their outcomes. `All` drops both
+/// filters and returns every event the party witnesses, so a party whose
+/// activity lives in its own application packages — an app or oracle party
+/// that never deploys governance contracts — is not reported as having done
+/// nothing.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum AuditScope {
+    #[default]
+    Governance,
+    All,
+}
+
 /// Query parameters for the on-chain governance audit endpoint
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
 pub struct ChainAuditQuery {
@@ -1409,6 +1425,9 @@ pub struct ChainAuditQuery {
     /// When true, fetches fresh data from Canton and updates cache
     #[serde(default)]
     pub refresh: bool,
+    /// Which events to return: `governance` (default) or `all`.
+    #[serde(default)]
+    pub scope: AuditScope,
 }
 
 fn default_chain_audit_limit() -> usize {

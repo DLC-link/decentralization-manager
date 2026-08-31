@@ -994,8 +994,9 @@ pub async fn fetch_decentralized_parties(
 )]
 #[get("/packages/vetted")]
 pub async fn get_vetted_packages(data: web::Data<AppState>) -> impl Responder {
-    // Reads topology vetting state: vetting is a strict subset of the uploaded
-    // DARs, and the admin `ListPackages` reports the larger set.
+    // Reads topology vetting state. Neither list contains the other: a DAR can
+    // be uploaded without being vetted, and a vetting can outlive its DAR
+    // (e.g. after a restore from backup).
     match fetch_vetted_packages(&data.config).await {
         Ok(packages) => HttpResponse::Ok().json(packages),
         Err(e) => {

@@ -117,6 +117,12 @@ pub struct Auth0Config {
     /// return a backend-validatable JWT rather than a userinfo-scoped token.
     #[serde(default)]
     pub audience: Option<String>,
+    /// Extra space-separated scopes the SPA requests on top of the default
+    /// `openid profile email`. Auth0 RBAC returns a permission in `scope` only
+    /// when the client asked for it, so an admin role granted as a
+    /// resource-server scope needs naming here to reach the token.
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 /// Per-party Auth0 M2M credentials. Used to mint outbound access tokens the
@@ -254,6 +260,12 @@ pub struct NodeConfig {
     /// automation loop. Enablement is on-ledger (presence of a
     /// `CouponReassignmentDelegation`), so this only controls cadence. Default 300s.
     pub reward_automation_interval_secs: u64,
+    /// How often (seconds) to re-read the backlog purely to refresh the expiry
+    /// gauge, when no sweep is due. A sweep reads the ledger anyway, so the gauge
+    /// refreshes at whichever of the two intervals is shorter. Separating them lets
+    /// the sweep interval stay long enough to fill a `Delegation_Assign` chunk
+    /// without making the expiry signal that stale. Default 3600s.
+    pub reward_expiry_read_interval_secs: u64,
     /// Output contracts one `Delegation_Assign` may create, which bounds the
     /// coupons per transaction (`/ beneficiary_count`). The ledger's real
     /// ceiling for this transaction shape is unmeasured — configurable so it can
@@ -269,6 +281,9 @@ pub struct NodeConfig {
     /// try, so this should be a small submission-latency allowance rather than
     /// a generous window. Default 120s.
     pub reward_min_expiry_margin_secs: u64,
+    /// Port serving Prometheus metrics at `/metrics`, on its own listener rather
+    /// than the API port. 0 serves no metrics. Default 9464.
+    pub metrics_port: u16,
     /// Top-level Keycloak config for frontend website gating
     pub keycloak: Option<KeycloakConfig>,
     /// Top-level Auth0 config for frontend website gating (mutually exclusive
@@ -300,8 +315,10 @@ impl Default for NodeConfig {
             timeouts: Timeouts::default(),
             noise_retry: NoiseRetryConfig::default(),
             reward_automation_interval_secs: 300,
+            reward_expiry_read_interval_secs: 3600,
             reward_max_creates: 100,
             reward_min_expiry_margin_secs: 120,
+            metrics_port: 9464,
             keycloak: None,
             auth0: None,
             insecure: false,
@@ -889,6 +906,7 @@ mod tests {
             domain: "tenant.eu.auth0.com".to_string(),
             client_id: "spa-client-id".to_string(),
             audience: Some("https://decman-api.example".to_string()),
+            scope: None,
         }
     }
 

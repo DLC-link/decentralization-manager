@@ -163,6 +163,7 @@ async fn run() -> Result {
             auth0_domain,
             auth0_client_id,
             auth0_audience,
+            auth0_scope,
             jwt_role_claim: _,
             timeout_handshake,
             timeout_message,
@@ -172,8 +173,10 @@ async fn run() -> Result {
             noise_retry_max_attempts,
             noise_retry_backoff_ms,
             reward_automation_interval_secs,
+            reward_expiry_read_interval_secs,
             reward_max_creates,
             reward_min_expiry_margin_secs,
+            metrics_port,
             db_encryption_key,
             insecure,
             canton_hmac_secret,
@@ -272,7 +275,13 @@ async fn run() -> Result {
                     domain: domain.clone(),
                     client_id: client_id.clone(),
                     audience: auth0_audience.clone(),
+                    scope: auth0_scope.clone(),
                 });
+            } else if auth0_scope.is_some() {
+                tracing::warn!(
+                    "DECPM_AUTH0_SCOPE is set but DECPM_AUTH0_DOMAIN/CLIENT_ID are not; no \
+                     Auth0 config was created and the scope is ignored"
+                );
             }
             if let Some(v) = timeout_handshake {
                 config.timeouts.handshake_timeout_secs = *v;
@@ -298,11 +307,17 @@ async fn run() -> Result {
             if let Some(v) = reward_automation_interval_secs {
                 config.reward_automation_interval_secs = *v;
             }
+            if let Some(v) = reward_expiry_read_interval_secs {
+                config.reward_expiry_read_interval_secs = *v;
+            }
             if let Some(v) = reward_max_creates {
                 config.reward_max_creates = *v;
             }
             if let Some(v) = reward_min_expiry_margin_secs {
                 config.reward_min_expiry_margin_secs = *v;
+            }
+            if let Some(v) = metrics_port {
+                config.metrics_port = *v;
             }
 
             config.tenant_api_keys = tenant_api_keys
