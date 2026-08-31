@@ -56,10 +56,25 @@ have nothing to add.
 
 ### Phase 2 — state
 
-`GET /v0/tenant/{party}/acs/{target}` on a host that already holds the party,
-then `POST /v0/tenant/add-hosts/import` on the joiner. The wallet carries the
-snapshot: there is no host-to-host channel, because a partner's node is
-generally not in anyone else's mesh and the wallet already talks to all of them.
+`GET /v0/tenant/{party}/acs/{target}?offset=N` on a host that already holds the
+party, then `POST /v0/tenant/add-hosts/import` on the joiner, in a loop until
+the import reports `complete`. The wallet carries the snapshot: there is no
+host-to-host channel, because a partner's node is generally not in anyone else's
+mesh and the wallet already talks to all of them.
+
+**Relay in ranges, not in one shot.** The source exports once and stages the
+snapshot to disk; each `GET` serves a byte range out of that file, and each
+`POST` appends one. That is not an optimisation:
+
+- A whole snapshot in one JSON body is refused past ~75 MiB. actix caps JSON at
+  100 MiB and base64 inflates by 4/3, so a single-body relay has a ceiling far
+  below what the export allows and it arrives as a bare 413.
+- The joiner reports `received` after every range, so an interrupted transfer
+  resumes from there instead of starting over. On a large party that is the
+  difference between a retry and a restart.
+- An `offset` that does not match what the joiner holds is **refused**, not
+  written. Writing it would leave a hole, and Canton only discovers that
+  mid-import with the participant already disconnected.
 
 ### Phase 3 — activation
 
@@ -105,7 +120,8 @@ plainly rather than letting them infer symmetry that is not there.
 | `package_preflight: false` | The source cannot read the party's contracts over the Ledger API, which is normal for an external party | Confirm the joiner has the party's DARs vetted **before** importing. Without it the import fails after disconnecting |
 | Import fails mid-window | The joiner disconnected and the import did not complete | The import reconnects and verifies health on its own. Retry it; the durable marker makes re-entry safe |
 | Joiner crash-loops after an import | Orphan ACS rows from an unclean shutdown | Manual repair. See `RepairCommitmentsUsingAcs` below |
-| Export refused as too large | The snapshot exceeds this path's cap | The wallet-relayed path is bounded by `DECPM_TENANT_ACS_MAX_BYTES` (512 MiB by default), not by the 16 MiB Noise limit. Raise it, remembering the snapshot is held in memory on both ends |
+| Export refused as too large | The snapshot exceeds this path's cap | Bounded by `DECPM_TENANT_ACS_MAX_BYTES` (512 MiB by default), not by the 16 MiB Noise limit. The export still assembles the whole snapshot in memory once before staging it, so raising this is a memory commitment |
+| `400` naming an offset from import | The range's `offset` disagrees with what the joiner holds | Resume from the `received` the error names. Do not retry the same range |
 
 ### Commitment mismatches after an import
 
@@ -119,9 +135,16 @@ partial import replaces one inconsistency with a different one.
 
 - **Replicate a party onto a node outside the mesh without the wallet.** The
   wallet is the transport by design.
-- **Stream an ACS.** The snapshot is assembled whole in memory on the exporting
-  and importing nodes, so `DECPM_TENANT_ACS_MAX_BYTES` is a memory commitment
-  rather than a transport limit. A genuinely streaming relay is still unbuilt.
+- **Stream the export itself.** The transfer is now ranged and resumable, and
+  neither end holds the snapshot in a request body — but the source still
+  assembles it whole in memory once before staging, so
+  `DECPM_TENANT_ACS_MAX_BYTES` remains a memory commitment on the exporting node.
+  Streaming Canton's export straight to disk would remove that.
+- **Survive a terabyte-scale ACS.** At that size the wall is the import, not the
+  transfer: Canton re-authenticates every contract while the joiner is
+  disconnected, which no transport change touches. Sequencer retention and the
+  node's volume size become the binding constraints, and shrinking the ACS beats
+  moving it faster.
 - **Prove a converted party can submit.** #388 proved Canton accepts the key.
   Whether the party then transacts with it is a different runtime path and is
   not yet covered by a test.

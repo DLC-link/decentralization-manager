@@ -51,7 +51,7 @@ use crate::{
     },
     workflow::party_replication::{
         clear_onboarding_flag, collect_party_package_ids, export_party_acs, import_party_acs,
-        wait_for_flag_cleared,
+        staging, wait_for_flag_cleared,
     },
 };
 
@@ -460,21 +460,28 @@ pub async fn tenant_add_hosts_onboard(
 // ACS replication, relayed by the wallet
 // ============================================================================
 
-/// Export the party's ACS for `target`, for the wallet to relay to it.
+/// Serve one range of the party's ACS for `target`, for the wallet to relay.
 ///
 /// Called on a host that already holds the party, AFTER the add-hosts topology
 /// is authorized: Canton scopes the snapshot to the joiner's activation, which
 /// must exist first. The offset it searches from was captured at prepare time,
 /// before the topology moved.
+///
+/// The first call exports and stages the snapshot to disk; later ones read
+/// ranges out of that file. Staging once matters for more than speed — a
+/// re-export could observe a different ledger state, and ranges stitched from
+/// two different snapshots are not a snapshot.
 #[utoipa::path(
     tag = "Tenant",
     params(
         ("party" = String, Path, description = "Full party id"),
-        ("target" = String, Path, description = "Participant the snapshot is for")
+        ("target" = String, Path, description = "Participant the snapshot is for"),
+        ("offset" = Option<u64>, Query, description = "Where this range starts. Defaults to 0"),
+        ("limit" = Option<usize>, Query, description = "Maximum bytes to return")
     ),
     responses(
-        (status = 200, description = "ACS snapshot for the target", body = TenantAcsSnapshotResponse),
-        (status = 400, description = "Bad target participant id", body = ErrorResponse),
+        (status = 200, description = "One range of the ACS snapshot", body = TenantAcsSnapshotResponse),
+        (status = 400, description = "Bad target participant id, or an offset past the snapshot", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
         (status = 500, description = "Export failed on this host", body = ErrorResponse)
     )
@@ -484,6 +491,7 @@ pub async fn tenant_acs_snapshot(
     http_req: HttpRequest,
     data: web::Data<AppState>,
     path: web::Path<(String, String)>,
+    query: web::Query<AcsRangeQuery>,
 ) -> impl Responder {
     if let Err(resp) = require_tenant_api_key(&http_req, &data) {
         return resp;
@@ -505,23 +513,72 @@ pub async fn tenant_acs_snapshot(
             });
         }
     };
+    let offset = query.offset.unwrap_or(0);
+    let limit = query.limit.unwrap_or(ACS_RANGE_DEFAULT).min(ACS_RANGE_MAX);
 
-    // The wallet relays this over HTTP, so the Noise chunked-transfer limit is
-    // not the bound here — configuration is.
-    let snapshot = match export_party_acs(
-        &data.config,
-        &data.db,
-        &replication,
-        data.config.tenant_acs_max_bytes,
-    )
-    .await
-    {
-        Ok(snapshot) => snapshot,
+    // Export once, on the first range. A later range reads the staged file, so
+    // every range comes from the same snapshot.
+    let staged = match staging::staged_len(&data.config, &replication.instance_name).await {
+        Ok(staged) => staged,
         Err(e) => {
-            tracing::error!("tenant acs snapshot: export failed: {e:#}");
+            tracing::error!("tenant acs snapshot: staging check failed: {e:#}");
             return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to export the party's ACS: {e}"),
+                error: format!("Failed to inspect the staged ACS: {e}"),
             });
+        }
+    };
+    let total_size = match staged {
+        Some(len) if offset > 0 => len,
+        _ => {
+            let snapshot = match export_party_acs(
+                &data.config,
+                &data.db,
+                &replication,
+                data.config.tenant_acs_max_bytes,
+            )
+            .await
+            {
+                Ok(snapshot) => snapshot,
+                Err(e) => {
+                    tracing::error!("tenant acs snapshot: export failed: {e:#}");
+                    return HttpResponse::InternalServerError().json(ErrorResponse {
+                        error: format!("Failed to export the party's ACS: {e}"),
+                    });
+                }
+            };
+            let len = snapshot.len() as u64;
+            if let Err(e) =
+                staging::stage(&data.config, &replication.instance_name, &snapshot).await
+            {
+                tracing::error!("tenant acs snapshot: staging failed: {e:#}");
+                return HttpResponse::InternalServerError().json(ErrorResponse {
+                    error: format!("Failed to stage the exported ACS: {e}"),
+                });
+            }
+            len
+        }
+    };
+
+    if offset > total_size {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: format!(
+                "offset {offset} is past the {total_size}-byte snapshot; resume from at most \
+                 {total_size}"
+            ),
+        });
+    }
+
+    let chunk = if total_size == 0 {
+        Vec::new()
+    } else {
+        match staging::read_range(&data.config, &replication.instance_name, offset, limit).await {
+            Ok(chunk) => chunk,
+            Err(e) => {
+                tracing::error!("tenant acs snapshot: range read failed: {e:#}");
+                return HttpResponse::InternalServerError().json(ErrorResponse {
+                    error: format!("Failed to read the staged ACS: {e}"),
+                });
+            }
         }
     };
 
@@ -534,7 +591,7 @@ pub async fn tenant_acs_snapshot(
     // deployment would block replication entirely; instead the response says
     // the preflight is unavailable and the joiner's own import still validates
     // every contract, just after it has disconnected rather than before.
-    let (package_ids, package_preflight) = if snapshot.is_empty() {
+    let (package_ids, package_preflight) = if total_size == 0 {
         (Vec::new(), true)
     } else {
         match collect_party_package_ids(&data.config, &party_id, None).await {
@@ -552,24 +609,26 @@ pub async fn tenant_acs_snapshot(
 
     HttpResponse::Ok().json(TenantAcsSnapshotResponse {
         party_id,
-        snapshot: STANDARD.encode(&snapshot),
+        total_size,
+        offset,
+        chunk: STANDARD.encode(&chunk),
         package_ids,
         package_preflight,
     })
 }
 
-/// Import a relayed ACS snapshot on THIS host and clear its onboarding marker.
+/// Append one range of a relayed ACS snapshot on THIS host, importing and
+/// clearing the onboarding marker once the whole thing has arrived.
 ///
-/// The marker is what keeps the party suspended here until its contracts land,
-/// so the import and the clear belong together: a host that imported but stayed
-/// marked is not usable, and a host that cleared without importing would start
-/// confirming transactions it cannot validate.
+/// Import and clear stay together: a host that imported but stayed marked is not
+/// usable, and one that cleared without importing would start confirming
+/// transactions it cannot validate.
 #[utoipa::path(
     tag = "Tenant",
     request_body = TenantAcsImportRequest,
     responses(
-        (status = 200, description = "Imported; marker_cleared says whether the party is live here", body = TenantAcsImportResponse),
-        (status = 400, description = "Bad base64, bad party id, or missing packages", body = ErrorResponse),
+        (status = 200, description = "Range accepted; complete says whether the import ran", body = TenantAcsImportResponse),
+        (status = 400, description = "Bad base64, bad party id, an offset that does not match what is staged, or missing packages", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
         (status = 500, description = "Import failed on this participant", body = ErrorResponse)
     )
@@ -583,11 +642,11 @@ pub async fn tenant_acs_import(
     if let Err(resp) = require_tenant_api_key(&http_req, &data) {
         return resp;
     }
-    let snapshot = match STANDARD.decode(&body.snapshot) {
+    let chunk = match STANDARD.decode(&body.chunk) {
         Ok(bytes) => bytes,
         Err(e) => {
             return HttpResponse::BadRequest().json(ErrorResponse {
-                error: format!("snapshot is not valid base64: {e}"),
+                error: format!("chunk is not valid base64: {e}"),
             });
         }
     };
@@ -597,6 +656,55 @@ pub async fn tenant_acs_import(
             return HttpResponse::BadRequest().json(ErrorResponse {
                 error: format!("party_id is not a valid party id: {e}"),
             });
+        }
+    };
+
+    // An empty snapshot has nothing to stage and nothing to import, but the
+    // marker still has to clear or the joiner stays suspended forever.
+    let received = if body.total_size == 0 {
+        0
+    } else {
+        match staging::append(
+            &data.config,
+            &replication.instance_name,
+            body.offset,
+            &chunk,
+        )
+        .await
+        {
+            Ok(received) => received,
+            Err(e) => {
+                // An offset mismatch is the caller's to resolve by resuming from
+                // what this host actually holds, so it is a 400 rather than a 500.
+                tracing::warn!("tenant acs import: refused a range: {e:#}");
+                return HttpResponse::BadRequest().json(ErrorResponse {
+                    error: format!("{e}"),
+                });
+            }
+        }
+    };
+
+    if received < body.total_size {
+        return HttpResponse::Ok().json(TenantAcsImportResponse {
+            party_id: body.party_id.clone(),
+            received,
+            complete: false,
+            imported: false,
+            marker_cleared: false,
+        });
+    }
+
+    let snapshot = if body.total_size == 0 {
+        Vec::new()
+    } else {
+        match staging::read_all(&data.config, &replication.instance_name).await {
+            Ok(snapshot) => snapshot,
+            Err(e) => {
+                tracing::error!("tenant acs import: staged read failed: {e:#}");
+                return HttpResponse::InternalServerError().json(ErrorResponse {
+                    error: format!("Failed to read the staged ACS: {e}"),
+                });
+            }
         }
     };
 
@@ -620,8 +728,6 @@ pub async fn tenant_acs_import(
     // it returns once the clearing transaction is proposed.
     if let Err(e) = clear_onboarding_flag(&data.config, &data.db, &replication).await {
         tracing::error!("tenant acs import: clearing the onboarding marker failed: {e:#}");
-        // An empty snapshot is skipped, not imported, so saying "imported" here
-        // would misdescribe the half that succeeded.
         let did = if imported {
             "Imported the ACS"
         } else {
@@ -633,10 +739,8 @@ pub async fn tenant_acs_import(
     }
 
     // Whether the proposal alone suffices depends on what Canton demands for a
-    // single-key party: the proto says the onboarding participant clears its own
-    // flag, but decparties were observed to need owner signatures anyway. Report
-    // what actually happened rather than assuming — a `false` here means the
-    // wallet must run a signing round, and that is worth knowing precisely.
+    // single-key party. #388 showed the onboarding participant clears its own
+    // flag, but report what actually happened rather than assuming.
     let marker_cleared = match crate::utils::get_synchronizer_id(&data.config).await {
         Ok(synchronizer_id) => wait_for_flag_cleared(
             &data.config,
@@ -652,8 +756,17 @@ pub async fn tenant_acs_import(
         }
     };
 
+    // The staged copy has served its purpose. Leaving it behind would keep a
+    // full ACS on disk indefinitely, which for a large party is the whole
+    // problem this change exists to bound.
+    if let Err(e) = staging::discard(&data.config, &replication.instance_name).await {
+        tracing::warn!("tenant acs import: could not discard the staged ACS: {e:#}");
+    }
+
     HttpResponse::Ok().json(TenantAcsImportResponse {
         party_id: body.party_id.clone(),
+        received,
+        complete: true,
         imported,
         marker_cleared,
     })
@@ -909,6 +1022,26 @@ pub async fn tenant_local_party_adopt_onboard(
 // ============================================================================
 // Helpers
 // ============================================================================
+
+/// Bytes a range returns when the caller does not say.
+///
+/// 8 MiB base64-encodes to ~11 MiB, comfortably inside actix's 100 MiB JSON
+/// limit with room for the rest of the body, and small enough that a failed
+/// range costs little to retry.
+const ACS_RANGE_DEFAULT: usize = 8 * 1024 * 1024;
+
+/// Ceiling on a single range, whatever the caller asks for.
+///
+/// 32 MiB base64-encodes to ~43 MiB. Past this a range starts to approach the
+/// JSON limit, which would turn a tunable into a 413.
+const ACS_RANGE_MAX: usize = 32 * 1024 * 1024;
+
+/// `?offset=&limit=` on the ACS range endpoint.
+#[derive(Debug, serde::Deserialize)]
+pub struct AcsRangeQuery {
+    pub offset: Option<u64>,
+    pub limit: Option<usize>,
+}
 
 /// Base64-decode a raw Ed25519 public key into its fixed 32-byte array, or the
 /// 400 response to return.

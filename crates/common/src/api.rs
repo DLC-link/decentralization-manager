@@ -499,25 +499,36 @@ pub struct TenantAddHostsOnboardResponse {
     pub serial: u32,
 }
 
-/// The party's ACS snapshot plus the packages needed to validate it, handed to
-/// the wallet so it can relay both to the joining host.
+/// One range of the party's ACS snapshot, plus the packages needed to validate
+/// it.
+///
+/// Ranged rather than whole because the snapshot used to travel base64-encoded
+/// in a single JSON body, which capped it far below what the export allowed:
+/// actix refuses a JSON body over 100 MiB and base64 inflates by 4/3, so
+/// anything past ~75 MiB was rejected outright. It also meant a transfer that
+/// died at 90% started again from nothing.
 ///
 /// The wallet is the transport on purpose: the tenant API has no inter-node
 /// channel, and a partner's host is generally not in this node's Noise mesh.
-/// The wallet already talks to every host, so it carries the snapshot rather
-/// than the hosts needing to reach each other.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct TenantAcsSnapshotResponse {
     /// The party the snapshot belongs to.
     pub party_id: String,
-    /// The snapshot, base64-encoded. Empty when the party holds no contracts,
-    /// in which case the joiner skips the import.
-    pub snapshot: String,
+    /// The whole snapshot's size. `0` means the party holds no contracts and
+    /// the joiner skips the import entirely.
+    #[cfg_attr(feature = "typegen", ts(type = "number"))]
+    pub total_size: u64,
+    /// Where this range starts.
+    #[cfg_attr(feature = "typegen", ts(type = "number"))]
+    pub offset: u64,
+    /// This range's bytes, base64-encoded. Shorter than requested means the end
+    /// of the snapshot.
+    pub chunk: String,
     /// Package ids the joiner must have vetted before it can validate the
-    /// snapshot. Its import refuses up front if any are missing, rather than
-    /// failing after it has already disconnected.
+    /// snapshot. Repeated on every range so a resumed transfer does not have to
+    /// have kept the first response.
     pub package_ids: Vec<String>,
     /// Whether `package_ids` is trustworthy.
     ///
@@ -535,16 +546,27 @@ pub struct TenantAcsSnapshotResponse {
     pub package_preflight: bool,
 }
 
-/// Request to import a relayed ACS snapshot on the joining host and clear its
-/// onboarding marker.
+/// Request to append one range of a relayed ACS snapshot on the joining host.
+///
+/// The joiner imports and clears its onboarding marker once it holds
+/// `total_size` bytes, so the last range completes the replication and the
+/// earlier ones only accumulate.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct TenantAcsImportRequest {
     /// The party being replicated onto this host.
     pub party_id: String,
-    /// The base64 snapshot from `TenantAcsSnapshotResponse`.
-    pub snapshot: String,
+    /// Where this range starts. Must equal what the host already holds; a
+    /// mismatch is refused rather than written, because a snapshot with a hole
+    /// only fails once Canton is mid-import and the participant is disconnected.
+    #[cfg_attr(feature = "typegen", ts(type = "number"))]
+    pub offset: u64,
+    /// The whole snapshot's size, so the host knows when it has everything.
+    #[cfg_attr(feature = "typegen", ts(type = "number"))]
+    pub total_size: u64,
+    /// This range's bytes, base64-encoded.
+    pub chunk: String,
     /// The package ids that came with it.
     #[serde(default)]
     pub package_ids: Vec<String>,
@@ -556,8 +578,15 @@ pub struct TenantAcsImportRequest {
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct TenantAcsImportResponse {
     pub party_id: String,
-    /// Whether the snapshot was imported. `false` means it was empty and the
-    /// import was skipped, which is a success, not a failure.
+    /// How many bytes this host now holds. A wallet resuming an interrupted
+    /// transfer continues from here rather than starting over.
+    #[cfg_attr(feature = "typegen", ts(type = "number"))]
+    pub received: u64,
+    /// Whether the whole snapshot has arrived and the import ran. `false` while
+    /// ranges are still outstanding.
+    pub complete: bool,
+    /// Whether the snapshot was imported. `false` with `complete` means it was
+    /// empty and the import was skipped, which is a success, not a failure.
     pub imported: bool,
     /// Whether Canton's onboarding marker is gone, i.e. the party is live on
     /// this host. `false` means the clearing transaction is proposed but not

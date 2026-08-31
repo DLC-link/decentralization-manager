@@ -13,8 +13,11 @@
 //! wallet and a lying host. A phase that prepared on one host would not test it.
 //!
 //! After the topology lands the phase drives the rest of the replication: the
-//! wallet pulls the ACS snapshot from a current host and relays it to the
-//! joiner, which imports it and clears Canton's onboarding marker. The final
+//! wallet pulls the ACS from a current host **a range at a time** and relays
+//! each to the joiner, which appends until it holds the whole snapshot, then
+//! imports it and clears Canton's onboarding marker. Relaying in ranges is what
+//! keeps the snapshot out of a single request body, so the loop here is the
+//! shape a real wallet uses rather than a test convenience. The final
 //! assertion is that P3 reports the party fully hosted — marker gone — which is
 //! the only state in which it can actually confirm for the party.
 //!
@@ -252,31 +255,55 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             move |f, _| {
                 let party_id = party_id.clone();
                 Box::pin(async move {
-                    // Pulled from a host that already holds the party, scoped to
-                    // the joiner. Canton needs the joiner's activation to exist
-                    // first, which the authorized serial-2 write just created.
+                    // Pulled from a host that already holds the party, scoped
+                    // to the joiner, and relayed a range at a time. Neither end
+                    // ever holds the whole snapshot in a request body.
                     let target = f.p3.participant_id.clone();
-                    let snapshot: Value = f
-                        .get_json(f.p1.http, &format!("/v0/tenant/{party_id}/acs/{target}"))
-                        .await?;
+                    let mut offset: u64 = 0;
+                    let mut rounds = 0;
+                    let result = loop {
+                        rounds += 1;
+                        anyhow::ensure!(rounds < 64, "the relay did not converge");
 
-                    // The wallet is the transport: no host-to-host channel is
-                    // involved, which is the whole point for a partner node that
-                    // is not in this mesh.
-                    let import_req = json!({
-                        "party_id": party_id,
-                        "snapshot": snapshot
-                            .get("snapshot")
-                            .cloned()
-                            .context("acs response missing snapshot")?,
-                        "package_ids": snapshot
-                            .get("package_ids")
-                            .cloned()
-                            .context("acs response missing package_ids")?,
-                    });
-                    let result: Value = f
-                        .post_json(f.p3.http, "/v0/tenant/add-hosts/import", &import_req)
-                        .await?;
+                        let range: Value = f
+                            .get_json(
+                                f.p1.http,
+                                &format!("/v0/tenant/{party_id}/acs/{target}?offset={offset}"),
+                            )
+                            .await?;
+                        let import_req = json!({
+                            "party_id": party_id,
+                            "offset": offset,
+                            "total_size": range
+                                .get("total_size")
+                                .cloned()
+                                .context("acs range missing total_size")?,
+                            "chunk": range
+                                .get("chunk")
+                                .cloned()
+                                .context("acs range missing chunk")?,
+                            "package_ids": range
+                                .get("package_ids")
+                                .cloned()
+                                .context("acs range missing package_ids")?,
+                        });
+                        let progress: Value = f
+                            .post_json(f.p3.http, "/v0/tenant/add-hosts/import", &import_req)
+                            .await?;
+
+                        if progress.get("complete").and_then(Value::as_bool) == Some(true) {
+                            break progress;
+                        }
+                        let received = progress
+                            .get("received")
+                            .and_then(Value::as_u64)
+                            .context("import progress missing received")?;
+                        anyhow::ensure!(
+                            received > offset,
+                            "the joiner did not advance past {offset}"
+                        );
+                        offset = received;
+                    };
                     info!("add-hosts import on P3: {result}");
                     Ok(())
                 })
