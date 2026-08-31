@@ -2164,7 +2164,11 @@ export const NotificationsView = ({
 
   return (
     <Box sx={{ flex: 1, display: "flex", flexDirection: "column" }}>
-      <Box sx={{ flex: 1, ...columnSx }}>
+      {/* No top padding — the sticky filter bar belongs at the top of the view
+        * — but the last card still needs to clear the bottom of the page. With
+        * the Completed footer showing, this is the gutter above it; the bar
+        * itself is a sibling, so it stays flush. */}
+      <Box sx={{ flex: 1, pb: 3, ...columnSx }}>
       {/* The sticky element is this outer box, and its fill runs on past the
         * rule: cards scroll *under* the bar, so without that strip the next one
         * arrives flush against the rule. A margin cannot do the job — it
