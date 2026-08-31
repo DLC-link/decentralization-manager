@@ -213,7 +213,6 @@ const InvitationCard = ({
         "data-testid": "invitation-card",
         "data-kind": invitation.invitation_type,
       }}
-      pill={<Pill label="Respond" tone="accent" />}
       time={formatRelativeTime(invitation.received_at)}
       title={inviteTitle}
       facts={
@@ -612,15 +611,13 @@ const ActionCard = ({
     <>
       <ApprovalCard
         accent={needsYou}
-        // No pill once quorum is met: the Execute button is the state, and a
-        // "Ready to execute" label next to it says the same thing twice.
+        // A pill only where the card offers no way forward. Execute already
+        // says quorum is met, and Confirm already says a vote is wanted;
+        // "Awaiting others" is the one state no button accounts for.
         pill={
-          action.can_execute ? undefined : (
-            <Pill
-              label={ownConfirmation ? "Awaiting others" : "Your vote needed"}
-              tone={needsYou ? "accent" : "neutral"}
-            />
-          )
+          !action.can_execute && ownConfirmation ? (
+            <Pill label="Awaiting others" tone="neutral" />
+          ) : undefined
         }
         time={
           action.last_confirmation_at
@@ -1027,17 +1024,14 @@ const DomainActionCard = ({
   return (
     <ApprovalCard
       accent={needsYou}
-      // As on the action card: once quorum is met the Execute button is the
-      // state. Orphaned keeps its pill — that is a problem, not a step.
+      // As on the action card: a pill only where no button says it already.
+      // Orphaned keeps one — that is a problem, not a step.
       pill={
         domainAction.orphaned ? (
           <Pill label="Orphaned" tone="danger" />
-        ) : domainAction.can_execute ? undefined : (
-          <Pill
-            label={ownConfirmation ? "Awaiting others" : "Your vote needed"}
-            tone={ownConfirmation ? "neutral" : "accent"}
-          />
-        )
+        ) : !domainAction.can_execute && ownConfirmation ? (
+          <Pill label="Awaiting others" tone="neutral" />
+        ) : undefined
       }
       time={latestConfirm > 0 ? formatRelativeTime(latestConfirm) : undefined}
       title={domainAction.action_label}
@@ -1680,7 +1674,10 @@ const WorkflowRunCard = ({
         "data-prefix": run.prefix ?? "",
         "data-status": run.status,
       }}
-      pill={<StatusPill status={run.status} />}
+      // The pipeline, the peer count and the current step below already say a
+      // run is going; a "Running" pill on top of them is noise. Queued and the
+      // terminal states have no such body, so they keep theirs.
+      pill={isInProgress ? undefined : <StatusPill status={run.status} />}
       time={formatRelativeTime(run.updated_at)}
       title={run.prefix ? `${run.kind} · ${run.prefix}` : run.kind}
       facts={
