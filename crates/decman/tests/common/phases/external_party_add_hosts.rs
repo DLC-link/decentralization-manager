@@ -50,6 +50,14 @@ use crate::common::{
 /// here because no endpoint reports it yet (see the module docs).
 const BASE_SERIAL: u32 = 1;
 
+/// Bytes per relayed range.
+///
+/// Deliberately far below the endpoint's 8 MiB default so this party's small ACS
+/// still takes several rounds. A range large enough to swallow the whole
+/// snapshot would exercise the endpoints while skipping the chunking entirely,
+/// which is the part most likely to be wrong.
+const RANGE_LIMIT: u64 = 512;
+
 /// Read side of `/external-parties`. The shipped `ExternalPartiesResponse` is
 /// serialize-only, so the test declares the fields it reads.
 #[derive(Debug, Deserialize)]
@@ -261,23 +269,61 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     let target = f.p3.participant_id.clone();
                     let mut offset: u64 = 0;
                     let mut rounds = 0;
+                    // Set on the first range; the completion assertion below
+                    // reads whatever the last round saw.
+                    #[allow(unused_assignments)]
+                    let mut total_size = 0u64;
+                    let mut probed_bad_offset = false;
                     let result = loop {
                         rounds += 1;
-                        anyhow::ensure!(rounds < 64, "the relay did not converge");
+                        anyhow::ensure!(rounds < 512, "the relay did not converge");
 
+                        // A deliberately tiny range so this party's small ACS
+                        // still needs several of them. Without it the loop
+                        // completes on the first pass and the chunking — offset
+                        // advancement, staged appends, completion detection —
+                        // is never actually exercised.
                         let range: Value = f
                             .get_json(
                                 f.p1.http,
-                                &format!("/v0/tenant/{party_id}/acs/{target}?offset={offset}"),
+                                &format!(
+                                    "/v0/tenant/{party_id}/acs/{target}\
+                                     ?offset={offset}&limit={RANGE_LIMIT}"
+                                ),
                             )
                             .await?;
+                        total_size = range
+                            .get("total_size")
+                            .and_then(Value::as_u64)
+                            .context("acs range missing total_size")?;
+                        // Once, mid-transfer: a range at the wrong offset must be
+                        // refused rather than written. A hole would only surface
+                        // mid-import, with the participant already disconnected.
+                        if !probed_bad_offset && offset > 0 {
+                            probed_bad_offset = true;
+                            let bogus = json!({
+                                "party_id": party_id,
+                                "offset": offset + 7,
+                                "total_size": total_size,
+                                "chunk": range
+                                    .get("chunk")
+                                    .cloned()
+                                    .context("acs range missing chunk")?,
+                                "package_ids": [],
+                            });
+                            let refused: anyhow::Result<Value> = f
+                                .post_json(f.p3.http, "/v0/tenant/add-hosts/import", &bogus)
+                                .await;
+                            anyhow::ensure!(
+                                refused.is_err(),
+                                "a range at the wrong offset must be refused, not written"
+                            );
+                        }
+
                         let import_req = json!({
                             "party_id": party_id,
                             "offset": offset,
-                            "total_size": range
-                                .get("total_size")
-                                .cloned()
-                                .context("acs range missing total_size")?,
+                            "total_size": total_size,
                             "chunk": range
                                 .get("chunk")
                                 .cloned()
@@ -304,7 +350,20 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         );
                         offset = received;
                     };
-                    info!("add-hosts import on P3: {result}");
+                    // The point of the loop: prove it really did take several
+                    // ranges, so a green run means the chunking works rather
+                    // than that it was skipped.
+                    if total_size > RANGE_LIMIT {
+                        anyhow::ensure!(
+                            rounds > 1,
+                            "a {total_size}-byte snapshot at {RANGE_LIMIT}-byte ranges must take \
+                             more than one round, took {rounds}"
+                        );
+                    }
+                    info!(
+                        "add-hosts import on P3 after {rounds} range(s) of {total_size} byte(s): \
+                         {result}"
+                    );
                     Ok(())
                 })
             }
