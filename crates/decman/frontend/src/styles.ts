@@ -42,6 +42,17 @@ export const insetTableSx = {
   "& .MuiTableCell-root:last-of-type": { paddingRight: 0 },
 };
 
+/**
+ * Insets a table's leading column to a fixed gutter rather than the shared
+ * content pad — a Finder-style list, where the first column stays at the left
+ * of the pane however wide the window gets, with just enough padding to keep it
+ * off the edge.
+ */
+export const finderTableSx = {
+  "& .MuiTableCell-root:first-of-type": { paddingLeft: "24px" },
+  "& .MuiTableCell-root:last-of-type": { paddingRight: "24px" },
+};
+
 /** Column label above a card list, in the same treatment as a table head. */
 export const legendSx = {
   fontFamily: "var(--font-mono)",

@@ -25,7 +25,7 @@ import { PaginationControls } from "./Pagination";
 import { usePagination } from "../usePagination";
 import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
-import { zebraRow } from "../styles";
+import { finderTableSx, zebraRow } from "../styles";
 import type {
   VettedPackageInfo,
   PeerPackageComparison,
@@ -192,7 +192,7 @@ export const PackagesPanel = ({
 
   return (
     <Box sx={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
-      <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 2, mb: 2, flexShrink: 0, px: "var(--content-pad)", pt: 2 }}>
+      <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 2, mb: 2, flexShrink: 0, px: "24px", pt: 2 }}>
         <Box sx={{ display: "flex", alignItems: "center", gap: 2, flex: 1, minWidth: 0 }}>
           <TextField
             size="small"
@@ -283,7 +283,7 @@ export const PackagesPanel = ({
             }}
           >
             {loadingPackages ? (
-              <Table size="small" sx={{ minWidth: 650 }}>
+              <Table size="small" sx={{ minWidth: 650, ...finderTableSx }}>
                 <TableHead>
                   <TableRow>
                     <TableCell sx={{ py: 1 }}><Skeleton width="60%" /></TableCell>
@@ -311,15 +311,14 @@ export const PackagesPanel = ({
                   // it likes, which left the last peer squeezed against its
                   // neighbours. Fixed honours them, so every peer is one width.
                   tableLayout: "fixed",
-                  // The theme pads a table's trailing cell out to
-                  // `--content-pad`, so a full-bleed table's last column lines
-                  // its content up with the rest of the UI. This table isn't
-                  // full-bleed — it's a fixed grid inside a scroller — and that
-                  // padding ate the last peer column, leaving its tick sitting
-                  // against the column's left edge while the column itself
-                  // painted full width. The leading inset stays: it lines the
-                  // package name up with the panel's header above it.
-                  "& .MuiTableCell-root:last-of-type": { pr: 2 },
+                  // The theme pads a table's leading/trailing cell out to
+                  // `--content-pad`. This table isn't full-bleed — it's a fixed
+                  // grid inside a scroller — and that padding ate the last peer
+                  // column, leaving its tick sitting against the column's left
+                  // edge while the column itself painted full width. The Finder
+                  // rule replaces both with a fixed gutter, so the package name
+                  // stays at the left of the pane at any window width.
+                  ...finderTableSx,
                   // Grows with the peer count, so the columns keep their width
                   // and the table overflows into the scroller instead of every
                   // column shrinking as peers are added.
@@ -464,7 +463,10 @@ export const PackagesPanel = ({
               </Table>
             ) : (
               /* Default local-only table */
-              <Table size="small" sx={{ minWidth: 650, tableLayout: "fixed" }}>
+              <Table
+                size="small"
+                sx={{ minWidth: 650, tableLayout: "fixed", ...finderTableSx }}
+              >
                 <TableHead>
                   <TableRow>
                     <TableCell sx={{ py: 1, width: "48%" }}>Package Name</TableCell>
