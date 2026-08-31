@@ -1236,6 +1236,33 @@ pub async fn start_server(
         }
     }
 
+    // Nothing else reclaims a source host's staged ACS: the joiner discards its
+    // own copy once the import lands, but the exporting host is never told the
+    // wallet is finished. Left alone, every replication leaves a full copy of
+    // the party's contracts on disk permanently.
+    {
+        let sweep_config = config.clone();
+        spawn_supervised(
+            "ACS staging sweep",
+            "abandoned ACS snapshots accumulate on disk until the node is restarted",
+            async move {
+                let ttl = crate::workflow::party_replication::staging::STAGING_TTL;
+                loop {
+                    match crate::workflow::party_replication::staging::sweep(&sweep_config, ttl)
+                        .await
+                    {
+                        Ok(0) => {}
+                        Ok(removed) => {
+                            tracing::info!("swept {removed} abandoned ACS staging file(s)");
+                        }
+                        Err(e) => tracing::warn!("sweeping the ACS staging directory: {e:#}"),
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                }
+            },
+        );
+    }
+
     tracing::info!("Starting HTTP server on {host}:{port}");
     tracing::info!("Frontend available at http://{host}:{port}/");
 

@@ -138,16 +138,21 @@ impl TenantClient {
         self.post("/v0/tenant/add-hosts/onboard", req).await
     }
 
-    /// `GET /v0/tenant/{party}/acs/{target}` — the party's ACS scoped to a
-    /// joining host, for this wallet to relay to it.
-    pub async fn acs_snapshot(
+    /// `GET /v0/tenant/{party}/acs/{target}?offset=` — one range of the party's
+    /// ACS scoped to a joining host, for this wallet to relay to it.
+    ///
+    /// Ranged because the whole snapshot in one body is capped far below what the
+    /// export allows, and because a transfer that dies partway should resume
+    /// rather than restart.
+    pub async fn acs_range(
         &self,
         party_id: &str,
         target: &CantonId,
         base_serial: u32,
+        offset: u64,
     ) -> Result<TenantAcsSnapshotResponse> {
         self.get(&format!(
-            "/v0/tenant/{party_id}/acs/{target}?base_serial={base_serial}"
+            "/v0/tenant/{party_id}/acs/{target}?base_serial={base_serial}&offset={offset}"
         ))
         .await
     }
