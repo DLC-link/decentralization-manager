@@ -163,6 +163,7 @@ async fn run() -> Result {
             auth0_domain,
             auth0_client_id,
             auth0_audience,
+            auth0_scope,
             jwt_role_claim: _,
             timeout_handshake,
             timeout_message,
@@ -274,7 +275,13 @@ async fn run() -> Result {
                     domain: domain.clone(),
                     client_id: client_id.clone(),
                     audience: auth0_audience.clone(),
+                    scope: auth0_scope.clone(),
                 });
+            } else if auth0_scope.is_some() {
+                tracing::warn!(
+                    "DECPM_AUTH0_SCOPE is set but DECPM_AUTH0_DOMAIN/CLIENT_ID are not; no \
+                     Auth0 config was created and the scope is ignored"
+                );
             }
             if let Some(v) = timeout_handshake {
                 config.timeouts.handshake_timeout_secs = *v;

@@ -115,11 +115,31 @@ In the application's **APIs** tab, **authorize** it against the API you just cre
 - `DECPM_AUTH0_DOMAIN` = the tenant domain shown on the application page (for example `your-tenant.us.auth0.com` — no scheme).
 - `DECPM_AUTH0_CLIENT_ID` = the application's **Client ID**.
 - `DECPM_AUTH0_AUDIENCE` = the API **Identifier** from step 1.
-- `DECPM_JWT_ROLE_CLAIM` = a URI-namespaced claim owned by your deployment (for example `https://example.com/decman/roles`) when using the admin-role gate.
+- `DECPM_AUTH0_SCOPE` = extra space-separated scopes the SPA should request, when the admin role is granted as a resource-server scope (see **Admin role** below).
+- `DECPM_JWT_ROLE_CLAIM` = a URI-namespaced claim owned by your deployment (for example `https://example.com/decman/roles`) when the admin role arrives as a custom claim.
 
 **Allowed Web Origins** plays the same role as Keycloak's Web Origins — without it the browser blocks the SPA's token requests with CORS errors. Set it to your UI host; do not rely on Auth0 deriving it from callback URLs.
 
-**Admin role**: Auth0 does not embed roles in access tokens by default. If you set `DECPM_ADMIN_ROLE`, you must also add an Action under **Actions → Library → Build Custom** that copies the user's role into the token. A minimal Action looks like:
+**Admin role**: Auth0 does not embed roles in access tokens by default, so with
+`DECPM_ADMIN_ROLE` set you must pick one of the three carriers below. Create the
+role under **User Management → Roles** and assign it to the appropriate users
+first; the name must match `DECPM_ADMIN_ROLE` exactly.
+
+*Option 1 — RBAC permissions (no Action needed, recommended).* On the API from
+step 1, enable **RBAC** and **Add Permissions in the Access Token**, add a
+permission named after your `DECPM_ADMIN_ROLE`, and grant it to the role. Auth0
+then emits a `permissions` array that DecMan reads directly. Auth0 does not
+filter that array by the scopes the SPA requested, so no further configuration
+is required.
+
+*Option 2 — RBAC scope.* Same API settings, but set
+`DECPM_AUTH0_SCOPE=<your-admin-role>`. Auth0 returns a permission in `scope`
+only when the client asked for it, and the SPA cannot ask for what the backend
+never named. The scopes you list here are added to Auth0's default
+`openid profile email`, not substituted for it.
+
+*Option 3 — namespaced custom claim.* Add an Action under **Actions → Library →
+Build Custom**, attached to the Login flow:
 
 ```js
 exports.onExecutePostLogin = async (event, api) => {
@@ -128,11 +148,12 @@ exports.onExecutePostLogin = async (event, api) => {
 };
 ```
 
-Set `DECPM_JWT_ROLE_CLAIM=https://example.com/decman/roles`, replacing the
-example namespace with one controlled by your deployment. Attach the Action to
-the Login flow, then create the matching role under **User Management → Roles**
-and assign it to the appropriate users. DecMan also supports the standard flat
-`roles`, `realm_access.roles`, and `scope` carriers without this setting.
+Then set `DECPM_JWT_ROLE_CLAIM=https://example.com/decman/roles`, replacing the
+example namespace with one controlled by your deployment. Auth0 silently drops
+custom claims that are not URI-namespaced, so the namespace is not optional.
+
+DecMan also reads the standard flat `roles`, `realm_access.roles`, and `scope`
+carriers with no configuration at all.
 
 ## 3 — Apply the manifests
 
@@ -439,7 +460,8 @@ Most variables have a default that's only useful for local development (loopback
 | `DECPM_AUTH0_DOMAIN` | unset | **yes**¹ | Auth0 tenant domain for frontend auth (mutually exclusive with `DECPM_KEYCLOAK_*`) |
 | `DECPM_AUTH0_CLIENT_ID` | unset | **yes**¹ | Auth0 SPA client ID |
 | `DECPM_AUTH0_AUDIENCE` | unset | **yes**¹ | Auth0 API audience targeted by SPA tokens |
-| `DECPM_JWT_ROLE_CLAIM` | unset | optional | Provider-specific JWT claim containing a role-name array; typically required for Auth0's namespaced custom claim |
+| `DECPM_AUTH0_SCOPE` | unset | optional | Extra space-separated scopes the SPA requests, added to Auth0's default `openid profile email`. Needed only when the admin role is granted as an RBAC scope |
+| `DECPM_JWT_ROLE_CLAIM` | unset | optional | Provider-specific JWT claim containing a role-name array; needed only when the admin role arrives as a namespaced custom claim |
 | `DECPM_ADMIN_ROLE` | unset | recommended | IdP role required for privileged endpoints. If unset, every authenticated caller is treated as admin. |
 | `DECPM_ALLOWED_ORIGIN` | same-origin | optional | CORS origin if UI host ≠ API host |
 | `DECPM_DB_ENCRYPTION_KEY` | unset | recommended | Random passphrase (hashed via SHA-256) protecting party secrets at rest. If unset, secrets are stored in plaintext in the SQLite DB. |
@@ -496,4 +518,4 @@ or dismiss them first).
 - **UI loads but login fails**: confirm `<your-ui-host>` is registered as a valid redirect URI on your IdP client, and that the `DECPM_KEYCLOAK_*` (or `DECPM_AUTH0_*`) env vars match the IdP. For Auth0, the SPA application must also have the configured audience listed in its Allowed Callback / API Authorization.
 - **Peers shown as unreachable**: check that the Noise port (9000) is exposed publicly, that `DECPM_PUBLIC_ADDRESS` resolves to that endpoint, and that the peer has your current public key.
 - **Every Canton call fails with `transport error` / `BrokenPipe`, immediately and permanently**: the channel's TLS setting does not match what the endpoint speaks. A plaintext client against a TLS listener has its connection closed on the first bytes, which looks identical to the participant being down. Confirm with `grpcurl -plaintext <host>:<port> list` — if that fails but `grpcurl <host>:<port> list` succeeds, the endpoint is TLS: set `DECPM_CANTON_ADMIN_TLS=true` (and `DECPM_CANTON_LEDGER_TLS=true` for the ledger API), plus `..._TLS_CA_CERT` when a private CA issued the certificate. The connect error message names the variable to change in either direction.
-- **Privileged endpoints return 403**: you have `DECPM_ADMIN_ROLE` set but the calling user doesn't have that role assigned in the IdP, or `DECPM_JWT_ROLE_CLAIM` does not match the claim emitted by the IdP. Correct the claim configuration, grant the role, or unset the admin-role gate.
+- **Privileged endpoints return 403**: you have `DECPM_ADMIN_ROLE` set but the calling user doesn't have that role assigned in the IdP, or the role never reaches the token. On Auth0, decode the access token and check for the role in `permissions`, `scope`, or your `DECPM_JWT_ROLE_CLAIM`; a token carrying only `openid profile email` means no carrier is configured (see **Admin role**). Correct the carrier, grant the role, or unset the admin-role gate.

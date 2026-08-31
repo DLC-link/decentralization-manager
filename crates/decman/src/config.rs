@@ -117,6 +117,12 @@ pub struct Auth0Config {
     /// return a backend-validatable JWT rather than a userinfo-scoped token.
     #[serde(default)]
     pub audience: Option<String>,
+    /// Extra space-separated scopes the SPA requests on top of the default
+    /// `openid profile email`. Auth0 RBAC returns a permission in `scope` only
+    /// when the client asked for it, so an admin role granted as a
+    /// resource-server scope needs naming here to reach the token.
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 /// Per-party Auth0 M2M credentials. Used to mint outbound access tokens the
@@ -902,6 +908,7 @@ mod tests {
             domain: "tenant.eu.auth0.com".to_string(),
             client_id: "spa-client-id".to_string(),
             audience: Some("https://decman-api.example".to_string()),
+            scope: None,
         }
     }
 
