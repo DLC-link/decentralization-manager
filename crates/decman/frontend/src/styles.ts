@@ -21,6 +21,27 @@ export const columnSx = {
   px: 3,
 };
 
+/**
+ * The one-step-above-surface fill, by theme mode. Lives here rather than on the
+ * MUI palette, which has no slot for it — the party detail's section bands read
+ * it so the hex isn't restated per component.
+ */
+export const SURFACE2 = { light: "#F2F0EE", dark: "#241F1C" } as const;
+
+/**
+ * Insets a full-bleed table to the shared content pad, so its row rules and
+ * zebra fills stop where the content does instead of running to the view's
+ * edges. The theme pads a table's leading/trailing cell out to `--content-pad`
+ * for the full-bleed case; inside this wrapper that inset belongs to the
+ * wrapper, so the cells give it back and the column lines up with the section
+ * title above it.
+ */
+export const insetTableSx = {
+  px: "var(--content-pad)",
+  "& .MuiTableCell-root:first-of-type": { paddingLeft: 0 },
+  "& .MuiTableCell-root:last-of-type": { paddingRight: 0 },
+};
+
 /** Column label above a card list, in the same treatment as a table head. */
 export const legendSx = {
   fontFamily: "var(--font-mono)",

@@ -41,7 +41,7 @@ import { GovernanceActionsDialog } from "./GovernanceActionsDialog";
 import { GovernanceAuditTrail } from "./GovernanceAuditTrail";
 import { HoldingsSection } from "./HoldingsSection";
 import { AuthSection, getAuthStatusIcon } from "./AuthSection";
-import { zebraRow } from "../styles";
+import { SURFACE2, insetTableSx, zebraRow } from "../styles";
 import { ADMIN_ACCESS, API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
 import { formatMicroseconds } from "../governanceFormat";
@@ -112,6 +112,13 @@ interface CollapsibleSectionProps {
   children: ReactNode;
 }
 
+/**
+ * Section titles carry more weight than the generic `subtitle2` eyebrow and sit
+ * at full text contrast, so the band reads as a header against the secondary
+ * grey of the table head directly beneath it.
+ */
+const sectionTitleSx = { fontWeight: 700, color: "text.primary" };
+
 const CollapsibleSection = ({
   title,
   expanded,
@@ -129,11 +136,16 @@ const CollapsibleSection = ({
         cursor: "pointer",
         py: 1,
         px: "var(--content-pad)",
-        backgroundColor: expanded
-          ? "transparent"
-          : theme.palette.mode === "light"
-            ? "rgba(0, 0, 0, 0.03)"
-            : "rgba(255, 255, 255, 0.04)",
+        // The band keeps its fill whether open or shut: expanded, it is what
+        // separates one section's table from the next section's title. A clear
+        // step above the table head below it, which sits on `raised`.
+        backgroundColor: SURFACE2[theme.palette.mode],
+        "&:hover": {
+          backgroundColor:
+            theme.palette.mode === "light"
+              ? "rgba(0, 0, 0, 0.06)"
+              : "rgba(255, 255, 255, 0.07)",
+        },
         transition: "background-color 0.2s ease",
       })}
       onClick={onToggle}
@@ -148,12 +160,14 @@ const CollapsibleSection = ({
       />
       {helpText ? (
         <TextHelp text={helpText}>
-          <Typography variant="subtitle2" component="span">
+          <Typography variant="subtitle2" component="span" sx={sectionTitleSx}>
             {title}
           </Typography>
         </TextHelp>
       ) : (
-        <Typography variant="subtitle2">{title}</Typography>
+        <Typography variant="subtitle2" sx={sectionTitleSx}>
+          {title}
+        </Typography>
       )}
       {badge}
     </Box>
@@ -476,7 +490,7 @@ export const PartyDetail = ({
           </>
         }
       >
-        <Box sx={{ overflowX: "auto" }}>
+        <Box sx={{ overflowX: "auto", ...insetTableSx }}>
           <Table size="small">
             <TableHead>
               <TableRow>
@@ -574,6 +588,7 @@ export const PartyDetail = ({
                 maxHeight: 180,
                 overflowY: "auto",
                 overflowX: "auto",
+                ...insetTableSx,
               }}
             >
               <Table size="small">

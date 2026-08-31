@@ -24,7 +24,6 @@ const tokens = {
     bg: "#0F0E0D", // stone-950 page
     surface: "#1E1A17", // stone-850 card fill
     raised: "#1A1714", // stone-900
-    surface2: "#241F1C",
     border: "#2A2420", // stone-800
     text: "#FFFFFF",
     text2: "#A89B92", // warm secondary (lightened stone-400/500 for legibility)
@@ -42,7 +41,6 @@ const tokens = {
     bg: "#FAF9F8", // stone-75 warm off-white
     surface: "#FFFFFF",
     raised: "#FFFFFF",
-    surface2: "#F2F0EE",
     border: "#E0DBDA", // stone-200
     text: "#1A1714", // stone-900
     text2: "#66605C", // stone-600
