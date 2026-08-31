@@ -542,6 +542,10 @@ pub struct AuthConfigResponse {
     pub auth0_client_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth0_audience: Option<String>,
+    /// Extra space-separated scopes the SPA appends to Auth0's default
+    /// `openid profile email` request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth0_scope: Option<String>,
 }
 
 /// A single governance audit log entry
