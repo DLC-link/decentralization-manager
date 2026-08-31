@@ -234,6 +234,11 @@ pub(crate) struct TransactionPage {
 /// a time, so a caller that only wants the most recent N can stop early instead
 /// of draining the whole ledger.
 ///
+/// `max_page_size` is the caller's, not [`FETCH_CHUNK`]: a narrow filter wants
+/// a big page so a long range is walked in few round trips, while an unfiltered
+/// read wants a small one — nearly every transaction it sees is a keeper, so a
+/// full chunk would pull a thousand payloads to use the first handful.
+///
 /// On a pre-3.5.1 participant there is no way to ask for "newest first" — the
 /// fallback drains the range in ascending order and reverses, which is exactly
 /// the behaviour this replaces.
@@ -243,6 +248,7 @@ pub(crate) async fn fetch_transactions_page(
     begin_exclusive: i64,
     end_inclusive: i64,
     update_format: UpdateFormat,
+    max_page_size: i32,
     page_token: Option<Vec<u8>>,
 ) -> Result<TransactionPage> {
     let mut client = utils::create_update_client(config, token.clone()).await?;
@@ -250,7 +256,7 @@ pub(crate) async fn fetch_transactions_page(
     let request = GetUpdatesPageRequest {
         begin_offset_exclusive: Some(begin_exclusive),
         end_offset_inclusive: Some(end_inclusive),
-        max_page_size: Some(FETCH_CHUNK),
+        max_page_size: Some(max_page_size),
         update_format: Some(update_format.clone()),
         descending_order: true,
         page_token,

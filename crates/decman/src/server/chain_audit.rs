@@ -16,9 +16,9 @@ use crate::{
 
 use super::{
     event_filters::{interface_filter, party_event_format, template_filter, wildcard_filter},
-    ledger_paging::{TransactionPage, fetch_transactions_page},
+    ledger_paging::{FETCH_CHUNK, TransactionPage, fetch_transactions_page},
     package_inventory::{fetch_package_names, matching_names, package_name_prefix},
-    types::ChainAuditEntry,
+    types::{AuditScope, ChainAuditEntry},
 };
 
 struct ChainTemplate {
@@ -278,13 +278,19 @@ fn optional_value_to_json(v: &Option<Value>) -> JsonValue {
     }
 }
 
-/// Query Canton's ledger for on-chain governance events for a party.
+/// Query Canton's ledger for on-chain events for a party.
 ///
 /// Streams `GetUpdates` from the pruned offset to the current ledger end,
-/// filtered to governance templates Canton-side when possible (falling back
-/// to a wildcard query otherwise). Returns only governance actions —
-/// proposals, confirmations, executions and their outcomes — sorted
-/// newest-first.
+/// sorted newest-first.
+///
+/// Under [`AuditScope::Governance`] the read is filtered to governance
+/// templates Canton-side when possible (falling back to a wildcard query
+/// otherwise) and narrowed to governance actions — proposals, confirmations,
+/// executions and their outcomes.
+///
+/// Under [`AuditScope::All`] neither filter applies: the party's whole
+/// witnessed history comes back, so an app party that never deploys
+/// governance contracts still has a trail.
 ///
 /// # Errors
 ///
@@ -294,6 +300,7 @@ pub async fn get_chain_audit(
     party_id: &CantonId,
     token: Option<String>,
     packages: &PackageConfig,
+    scope: AuditScope,
     limit: usize,
     before_offset: Option<i64>,
 ) -> Result<AuditPage> {
@@ -331,13 +338,20 @@ pub async fn get_chain_audit(
     if end_offset <= begin_offset {
         return Ok(AuditPage::default());
     }
-    let range = OffsetRange {
-        begin_exclusive: begin_offset,
-        end_inclusive: end_offset,
+    let plan = ReadPlan {
+        range: OffsetRange {
+            begin_exclusive: begin_offset,
+            end_inclusive: end_offset,
+        },
+        scope,
+        limit,
     };
 
     let filters = chain_filters(packages);
-    if filters.templates.is_empty() && filters.interfaces.is_empty() {
+    if scope == AuditScope::Governance
+        && filters.templates.is_empty()
+        && filters.interfaces.is_empty()
+    {
         tracing::warn!("No governance templates configured; returning empty chain audit");
         return Ok(AuditPage::default());
     }
@@ -366,25 +380,32 @@ pub async fn get_chain_audit(
     // inventory. Fall back to the wildcard (every event for the party,
     // classified client-side) if the inventory is unavailable or the
     // filtered query is rejected.
-    let canton_filters = match fetch_package_names(config).await {
-        Ok(names) => {
-            let cumulative = build_canton_filters(&filters, &names);
-            if cumulative.is_empty() {
+    let canton_filters = match scope {
+        // `all` narrows nothing, so the package inventory is not worth a round
+        // trip: the wildcard read is what it wants either way.
+        AuditScope::All => None,
+        AuditScope::Governance => match fetch_package_names(config).await {
+            Ok(names) => {
+                let cumulative = build_canton_filters(&filters, &names);
+                if cumulative.is_empty() {
+                    tracing::warn!(
+                        "No governance packages found on participant; falling back to wildcard"
+                    );
+                    None
+                } else {
+                    Some(cumulative)
+                }
+            }
+            Err(e) => {
                 tracing::warn!(
-                    "No governance packages found on participant; falling back to wildcard"
+                    "Failed to list participant packages: {e:#}; falling back to wildcard"
                 );
                 None
-            } else {
-                Some(cumulative)
             }
-        }
-        Err(e) => {
-            tracing::warn!("Failed to list participant packages: {e:#}; falling back to wildcard");
-            None
-        }
+        },
     };
 
-    // `collect_entries` already keeps governance entries only, sorted newest
+    // `collect_entries` already applies the scope's narrowing, sorted newest
     // first and trimmed to whole offset groups around `limit`.
     let page = match canton_filters {
         Some(cumulative) => {
@@ -392,10 +413,9 @@ pub async fn get_chain_audit(
                 config,
                 token.clone(),
                 party_id,
-                range,
+                plan,
                 cumulative,
                 &template_index,
-                limit,
             )
             .await;
             match filtered {
@@ -408,10 +428,9 @@ pub async fn get_chain_audit(
                         config,
                         token,
                         party_id,
-                        range,
+                        plan,
                         wildcard_filters(),
                         &template_index,
-                        limit,
                     )
                     .await?
                 }
@@ -422,10 +441,9 @@ pub async fn get_chain_audit(
                 config,
                 token,
                 party_id,
-                range,
+                plan,
                 wildcard_filters(),
                 &template_index,
-                limit,
             )
             .await?
         }
@@ -445,6 +463,31 @@ pub async fn get_chain_audit(
 struct OffsetRange {
     begin_exclusive: i64,
     end_inclusive: i64,
+}
+
+/// What one chain-audit read asks for, aside from which filters it carries.
+#[derive(Clone, Copy)]
+struct ReadPlan {
+    range: OffsetRange,
+    scope: AuditScope,
+    /// Entries to collect before the walk may stop.
+    limit: usize,
+}
+
+impl ReadPlan {
+    /// How many transactions to pull from Canton per round trip.
+    ///
+    /// The governance scope discards nearly everything it reads, so it wants
+    /// the full chunk — a small page there would turn one long range scan into
+    /// hundreds of round trips. `all` discards nothing, so a page the size of
+    /// what the caller asked for is enough, and asking for a thousand
+    /// transaction payloads to render twenty-five rows is not.
+    fn page_size(self) -> i32 {
+        match self.scope {
+            AuditScope::Governance => FETCH_CHUNK,
+            AuditScope::All => i32::try_from(self.limit).unwrap_or(FETCH_CHUNK).max(1),
+        }
+    }
 }
 
 /// One page of the audit trail, newest-first.
@@ -471,10 +514,9 @@ async fn collect_entries(
     config: &NodeConfig,
     token: Option<String>,
     party_id: &str,
-    range: OffsetRange,
+    plan: ReadPlan,
     cumulative: Vec<CumulativeFilter>,
     template_index: &HashMap<(String, String), &'static str>,
-    limit: usize,
 ) -> Result<AuditPage> {
     let update_format = UpdateFormat {
         include_transactions: Some(TransactionFormat {
@@ -490,14 +532,16 @@ async fn collect_entries(
             fetch_transactions_page(
                 config,
                 token.clone(),
-                range.begin_exclusive,
-                range.end_inclusive,
+                plan.range.begin_exclusive,
+                plan.range.end_inclusive,
                 update_format.clone(),
+                plan.page_size(),
                 page_token,
             )
         },
         template_index,
-        limit,
+        plan.scope,
+        plan.limit,
     )
     .await
 }
@@ -510,6 +554,7 @@ async fn collect_entries(
 async fn collect_from_pages<F, Fut>(
     mut fetch_page: F,
     template_index: &HashMap<(String, String), &'static str>,
+    scope: AuditScope,
     limit: usize,
 ) -> Result<AuditPage>
 where
@@ -534,9 +579,9 @@ where
 
         for tx in page.transactions {
             entries.extend(
-                transaction_entries(tx, template_index)
+                transaction_entries(tx, template_index, scope)
                     .into_iter()
-                    .filter(is_governance_entry),
+                    .filter(|entry| scope == AuditScope::All || is_governance_entry(entry)),
             );
         }
 
@@ -591,9 +636,15 @@ fn trim_to_offset_groups(entries: &mut Vec<ChainAuditEntry>, limit: usize) -> bo
 }
 
 /// Convert one transaction's Created/Exercised events into audit entries.
+///
+/// Under [`AuditScope::All`] an event the governance index does not recognise
+/// keeps its plain ledger kind — `create` or `exercise` — rather than being
+/// forced through the governance naming heuristics, which would label an
+/// unrelated application create a `propose`.
 fn transaction_entries(
     tx: Transaction,
     template_index: &HashMap<(String, String), &'static str>,
+    scope: AuditScope,
 ) -> Vec<ChainAuditEntry> {
     let mut entries: Vec<ChainAuditEntry> = Vec::new();
     let tx_ts = tx.effective_at.as_ref().map(|t| t.seconds).unwrap_or(0);
@@ -634,7 +685,12 @@ fn transaction_entries(
                 let is_child_of_exercise = exercise_ranges
                     .iter()
                     .any(|(start, end)| c.node_id > *start && c.node_id <= *end);
-                let (event_type, action_summary) = classify_created(tid, is_child_of_exercise);
+                let (event_type, action_summary) = match scope {
+                    AuditScope::All if gov_type == "unknown" => {
+                        ("create".to_string(), tid.entity_name.clone())
+                    }
+                    _ => classify_created(tid, is_child_of_exercise),
+                };
 
                 entries.push(ChainAuditEntry {
                     offset: c.offset,
@@ -666,7 +722,10 @@ fn transaction_entries(
                     })
                     .unwrap_or("unknown");
 
-                let event_type = classify_choice(&x.choice);
+                let event_type = match scope {
+                    AuditScope::All if gov_type == "unknown" => "exercise".to_string(),
+                    _ => classify_choice(&x.choice),
+                };
                 let choice = x.choice.clone();
                 entries.push(ChainAuditEntry {
                     offset: x.offset,
@@ -740,7 +799,8 @@ mod tests {
     use std::collections::VecDeque;
 
     use canton_proto_rs::com::daml::ledger::api::v2::{
-        CreatedEvent, Enum, Event as EventEnvelope, Optional, RecordField, TextMap, Variant,
+        CreatedEvent, Enum, Event as EventEnvelope, ExercisedEvent, Optional, RecordField, TextMap,
+        Variant,
     };
 
     use super::*;
@@ -1073,6 +1133,15 @@ mod tests {
     /// Run the walk over `pages`. Asking for a page beyond the script is an
     /// error, so a test that over-reads fails rather than quietly passing.
     async fn walk(pages: Vec<TransactionPage>, limit: usize) -> AuditPage {
+        walk_scoped(pages, AuditScope::Governance, limit).await
+    }
+
+    /// [`walk`] with the scope under test.
+    async fn walk_scoped(
+        pages: Vec<TransactionPage>,
+        scope: AuditScope,
+        limit: usize,
+    ) -> AuditPage {
         let mut remaining = VecDeque::from(pages);
         let template_index = HashMap::new();
 
@@ -1082,6 +1151,7 @@ mod tests {
                 async move { page.context("asked for a page beyond the script") }
             },
             &template_index,
+            scope,
             limit,
         )
         .await
@@ -1182,5 +1252,91 @@ mod tests {
 
         assert_eq!(offsets_of(&page.entries), vec![30]);
         assert!(!page.has_more);
+    }
+
+    /// The page size follows the scope: the filtered read wants the big chunk
+    /// so a long range costs few round trips, the unfiltered one only what the
+    /// caller asked for.
+    #[test]
+    fn page_size_follows_the_scope() {
+        let plan = |scope, limit| ReadPlan {
+            range: OffsetRange {
+                begin_exclusive: 0,
+                end_inclusive: 100,
+            },
+            scope,
+            limit,
+        };
+
+        assert_eq!(plan(AuditScope::Governance, 25).page_size(), FETCH_CHUNK);
+        assert_eq!(plan(AuditScope::All, 25).page_size(), 25);
+        // A zero-row page never reaches Canton, but the size stays valid — a
+        // `max_page_size` of 0 is rejected outright.
+        assert_eq!(plan(AuditScope::All, 0).page_size(), 1);
+    }
+
+    /// One transaction exercising a choice the governance classifier has no
+    /// name for — an application party's own template.
+    fn app_exercise_at(offset: i64) -> Transaction {
+        Transaction {
+            events: vec![EventEnvelope {
+                event: Some(Event::Exercised(ExercisedEvent {
+                    offset,
+                    contract_id: format!("c-{offset}"),
+                    choice: "PriceFeed_Push".to_string(),
+                    template_id: Some(Identifier {
+                        package_id: "#alpend-oracle-chainlink".to_string(),
+                        module_name: "Alpend.Oracle".to_string(),
+                        entity_name: "PriceFeed".to_string(),
+                    }),
+                    ..Default::default()
+                })),
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// The governance scope has no name for an application choice, so it drops
+    /// it — which is why a party whose whole history is application traffic
+    /// reads as empty.
+    #[tokio::test]
+    async fn governance_scope_drops_application_events() {
+        let pages = vec![TransactionPage {
+            transactions: vec![app_exercise_at(40)],
+            next_page_token: None,
+        }];
+
+        let page = walk_scoped(pages, AuditScope::Governance, 5).await;
+
+        assert!(page.entries.is_empty());
+    }
+
+    /// The same read under `all` keeps it, labelled by its plain ledger kind
+    /// rather than squeezed into a governance event name.
+    #[tokio::test]
+    async fn all_scope_keeps_application_events() {
+        let pages = vec![TransactionPage {
+            transactions: vec![app_exercise_at(40)],
+            next_page_token: None,
+        }];
+
+        let page = walk_scoped(pages, AuditScope::All, 5).await;
+
+        assert_eq!(offsets_of(&page.entries), vec![40]);
+        assert_eq!(page.entries[0].event_type, "exercise");
+        assert_eq!(page.entries[0].choice.as_deref(), Some("PriceFeed_Push"));
+        assert_eq!(page.entries[0].template_id, "Alpend.Oracle:PriceFeed");
+    }
+
+    /// A create the governance index does not recognise is a `create` under
+    /// `all`, not the `propose` the governance heuristics would call it.
+    #[tokio::test]
+    async fn all_scope_does_not_call_an_unknown_create_a_proposal() {
+        let governance =
+            walk_scoped(vec![scripted_page(&[30], false)], AuditScope::Governance, 5).await;
+        assert_eq!(governance.entries[0].event_type, "propose");
+
+        let all = walk_scoped(vec![scripted_page(&[30], false)], AuditScope::All, 5).await;
+        assert_eq!(all.entries[0].event_type, "create");
     }
 }
