@@ -48,6 +48,9 @@ use crate::{
     workflow::{external_party::steps::party_query, topology},
 };
 
+/// Length of a concatenated Ed25519 signature, which is what this path submits.
+const ED25519_SIGNATURE_LEN: usize = 64;
+
 /// Why an add-hosts call could not proceed.
 ///
 /// The tenant endpoints map these onto status codes, and they cannot do that
@@ -358,6 +361,19 @@ pub fn validate_add_hosts_topology(
             s = bundle.signatures.len()
         );
     }
+    // These go to Canton labelled as concatenated Ed25519, which is always 64
+    // bytes. Base64 decoding accepts any length, so without this an empty or
+    // truncated signature passes validation and fails inside a Canton RPC
+    // instead, surfacing as a 500 for what is plainly malformed input.
+    for (index, signature) in bundle.signatures.iter().enumerate() {
+        if signature.len() != ED25519_SIGNATURE_LEN {
+            anyhow::bail!(
+                "signature {index} is {len} byte(s); a concatenated Ed25519 signature is always \
+                 {ED25519_SIGNATURE_LEN}",
+                len = signature.len()
+            );
+        }
+    }
     if bundle.party_id != current.mapping.party {
         anyhow::bail!(
             "add-hosts names party {found}, but this node read {expected} from head state",
@@ -550,6 +566,34 @@ pub fn validate_add_hosts_topology(
     Ok(())
 }
 
+/// Whether head state is already exactly what `bundle` asked for.
+///
+/// Used only to recognise a retry of a submission that landed. It compares the
+/// authorized mapping against the one inside the submitted transaction rather
+/// than assuming an advanced serial means *this* bundle caused it.
+fn submitted_mapping_matches(
+    bundle: &ExternalPartyAddHostsPayload,
+    authorized: &PartyToParticipant,
+) -> bool {
+    bundle.topology_transactions.iter().any(|serialized| {
+        let Ok(versioned) = UntypedVersionedMessage::decode(serialized.as_slice()) else {
+            return false;
+        };
+        let Some(untyped_versioned_message::Wrapper::Data(inner)) = versioned.wrapper else {
+            return false;
+        };
+        let Ok(transaction) = TopologyTransaction::decode(inner.as_slice()) else {
+            return false;
+        };
+        matches!(
+            transaction.mapping,
+            Some(TopologyMapping {
+                mapping: Some(topology_mapping::Mapping::PartyToParticipant(ref p2p)),
+            }) if p2p == authorized
+        )
+    })
+}
+
 /// Co-sign the wallet's add-hosts bundle with this node's own topology key and
 /// submit it to this participant's synchronizer store.
 ///
@@ -582,6 +626,26 @@ pub async fn submit_add_hosts(
     // Split out from the rest of validation: a pin that has moved is a race the
     // caller resolves by re-reading, not malformed input.
     if bundle.base_serial != current.serial {
+        // A retry whose first attempt actually landed must not look like a
+        // conflict. Canton treats a re-submitted identical transaction as a
+        // no-op, but this host reads the advanced serial first and would answer
+        // 409 before Canton ever saw it — so a wallet that lost the response to
+        // a successful call could never learn it succeeded.
+        //
+        // Only when head state is exactly one past the pin AND carries what this
+        // bundle asked for. Anything else is a genuine stale pin: another write
+        // could have moved the party, and calling that success would tell the
+        // wallet its change is live when it is not.
+        if current.serial == bundle.base_serial.saturating_add(1)
+            && submitted_mapping_matches(bundle, &current.mapping)
+        {
+            tracing::info!(
+                party_id = %bundle.party_id,
+                serial = current.serial,
+                "add-hosts already applied; treating the retry as success"
+            );
+            return Ok(bundle.base_serial);
+        }
         return Err(AddHostsError::StaleSerial {
             party: bundle.party_id.clone(),
             pinned: bundle.base_serial,
@@ -1026,6 +1090,25 @@ mod tests {
             panic!("a signature count mismatch must be refused");
         };
         assert!(e.to_string().contains("index-aligned"), "{e}");
+    }
+
+    /// The bug this guards: a signature is submitted to Canton labelled as
+    /// concatenated Ed25519, which is always 64 bytes. Base64 accepts any
+    /// length, so a truncated or empty one used to pass validation and fail
+    /// inside a Canton RPC, surfacing as a 500 for plainly malformed input.
+    #[test]
+    fn rejects_a_signature_that_is_not_64_bytes() {
+        for len in [0usize, 1, 63, 65, 128] {
+            let mut bundle = bundle_of(built(), 5);
+            bundle.signatures = vec![vec![0u8; len]];
+            let Err(e) = validate_add_hosts_topology(&test_config(3), &current(), &bundle) else {
+                panic!("a {len}-byte signature must be refused");
+            };
+            assert!(
+                e.to_string().contains("Ed25519") || e.to_string().contains("index-aligned"),
+                "{e}"
+            );
+        }
     }
 
     #[test]
