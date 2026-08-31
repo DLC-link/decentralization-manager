@@ -485,3 +485,218 @@ async fn an_api_error_carries_the_host_and_the_server_message() {
         "the server's message should reach the operator: {error}"
     );
 }
+
+// ============================================================================
+// Adding hosts to a party that already exists
+// ============================================================================
+
+/// A stub host that prepares an add-hosts topology.
+async fn stub_add_hosts_prepare(server: &MockServer, serial: u32) {
+    Mock::given(method("POST"))
+        .and(path("/v0/tenant/add-hosts/prepare"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "party_id": "alice::1220aa",
+            "serial": serial,
+            "transaction_hashes": TX_HASHES.map(|h| STANDARD.encode(h)),
+            "topology_transactions": ["dHgtb25l", "dHgtdHdv"],
+        })))
+        .mount(server)
+        .await;
+}
+
+async fn stub_add_hosts_onboard(server: &MockServer, serial: u32) {
+    Mock::given(method("POST"))
+        .and(path("/v0/tenant/add-hosts/onboard"))
+        .respond_with(ResponseTemplate::new(202).set_body_json(json!({
+            "status": "completed",
+            "party_id": "alice::1220aa",
+            "serial": serial,
+        })))
+        .mount(server)
+        .await;
+}
+
+/// A stub source host that serves the party's ACS, and a joiner that accepts it
+/// and reports its marker cleared.
+async fn stub_acs_relay(source: &MockServer, joiner: &MockServer) {
+    Mock::given(method("GET"))
+        .and(wiremock::matchers::path_regex(r"^/v0/tenant/.+/acs/.+$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "party_id": "alice::1220aa",
+            "snapshot": STANDARD.encode(b"an-acs-snapshot"),
+            "package_ids": ["pkg-one"],
+            "package_preflight": true,
+        })))
+        .mount(source)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v0/tenant/add-hosts/import"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "party_id": "alice::1220aa",
+            "imported": true,
+            "marker_cleared": true,
+        })))
+        .mount(joiner)
+        .await;
+}
+
+/// The safeguard: every host — current and joining — must prepare, because the
+/// wallet cannot check one host's word for what it is signing.
+#[tokio::test]
+async fn add_hosts_prepares_on_every_host_and_submits_only_to_joiners() {
+    let (p1, p2, p3) = (
+        MockServer::start().await,
+        MockServer::start().await,
+        MockServer::start().await,
+    );
+    for (s, serial) in [(&p1, 5u32), (&p2, 5), (&p3, 5)] {
+        stub_add_hosts_prepare(s, serial).await;
+    }
+    stub_add_hosts_onboard(&p3, 5).await;
+    stub_acs_relay(&p1, &p3).await;
+
+    let key = ExternalKeyPair::from_seed([4u8; 32]);
+    let current = vec![host_for(&p1, 1), host_for(&p2, 2)];
+    let joining = vec![host_for(&p3, 3)];
+
+    let Ok(added) = decman_wallet::add_hosts(&current, &joining, &key, "alice::1220aa", 4).await
+    else {
+        panic!("a consistent add-hosts must succeed");
+    };
+
+    // All three prepared, including the joiner: it reads the mapping from the
+    // shared synchronizer store, so it can check the others' work.
+    for server in [&p1, &p2, &p3] {
+        assert_eq!(
+            add_hosts_prepare_calls(server).await,
+            1,
+            "every host must be asked to prepare"
+        );
+    }
+    // Only the joiner submits: Canton needs the party namespace plus each new
+    // participant, and the existing hosts are neither.
+    assert_eq!(add_hosts_onboard_calls(&p1).await, 0);
+    assert_eq!(add_hosts_onboard_calls(&p2).await, 0);
+    assert_eq!(add_hosts_onboard_calls(&p3).await, 1);
+    assert!(added.replicated, "the joiner should have been switched on");
+    assert!(added.without_package_preflight.is_empty());
+}
+
+/// A host that prepares different bytes must stop the run before anything is
+/// signed. This is the whole reason every host prepares.
+#[tokio::test]
+async fn add_hosts_refuses_when_hosts_disagree() {
+    let (p1, p2, p3) = (
+        MockServer::start().await,
+        MockServer::start().await,
+        MockServer::start().await,
+    );
+    stub_add_hosts_prepare(&p1, 5).await;
+    stub_add_hosts_prepare(&p2, 5).await;
+    // A different serial is a different transaction.
+    stub_add_hosts_prepare(&p3, 9).await;
+    stub_add_hosts_onboard(&p3, 5).await;
+
+    let key = ExternalKeyPair::from_seed([4u8; 32]);
+    let current = vec![host_for(&p1, 1), host_for(&p2, 2)];
+    let joining = vec![host_for(&p3, 3)];
+
+    let Err(e) = decman_wallet::add_hosts(&current, &joining, &key, "alice::1220aa", 4).await
+    else {
+        panic!("disagreeing hosts must abort the run");
+    };
+    assert!(format!("{e}").contains("disagree") || format!("{e:?}").contains("HostDisagreement"));
+    // Nothing was submitted, so nothing was signed into topology.
+    assert_eq!(add_hosts_onboard_calls(&p3).await, 0);
+}
+
+/// A threshold change needs fewer Canton signatures than an add, but the wallet
+/// still cannot verify one host's hash alone — so one host is refused.
+#[tokio::test]
+async fn raise_threshold_refuses_a_single_host() {
+    let p1 = MockServer::start().await;
+    let key = ExternalKeyPair::from_seed([4u8; 32]);
+
+    let Err(e) =
+        decman_wallet::raise_threshold(&[host_for(&p1, 1)], &key, "alice::1220aa", 2, 5).await
+    else {
+        panic!("a lone preparer must be refused");
+    };
+    assert!(format!("{e}").contains("host"), "{e}");
+    // It refused before asking, so no signature was ever produced.
+    assert_eq!(threshold_prepare_calls(&p1).await, 0);
+}
+
+/// A preparer that returns more hashes than transactions is trying to get a
+/// signature over something the wallet was never shown.
+#[tokio::test]
+async fn raise_threshold_refuses_extra_hashes() {
+    let (p1, p2) = (MockServer::start().await, MockServer::start().await);
+    for s in [&p1, &p2] {
+        Mock::given(method("POST"))
+            .and(path("/v0/tenant/threshold/prepare"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "party_id": "alice::1220aa",
+                "serial": 6,
+                // Three hashes for two transactions.
+                "transaction_hashes": [
+                    STANDARD.encode(TX_HASHES[0]),
+                    STANDARD.encode(TX_HASHES[1]),
+                    STANDARD.encode(b"hash-of-something-else"),
+                ],
+                "topology_transactions": ["dHgtb25l", "dHgtdHdv"],
+            })))
+            .mount(s)
+            .await;
+    }
+
+    let key = ExternalKeyPair::from_seed([4u8; 32]);
+    let Err(e) = decman_wallet::raise_threshold(
+        &[host_for(&p1, 1), host_for(&p2, 2)],
+        &key,
+        "alice::1220aa",
+        2,
+        5,
+    )
+    .await
+    else {
+        panic!("a hash without a matching transaction must be refused");
+    };
+    assert!(format!("{e:?}").contains("MalformedPreparation"), "{e}");
+}
+
+async fn add_hosts_prepare_calls(server: &MockServer) -> usize {
+    server
+        .received_requests()
+        .await
+        .map(|reqs| {
+            reqs.iter()
+                .filter(|r| r.url.path() == "/v0/tenant/add-hosts/prepare")
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+async fn add_hosts_onboard_calls(server: &MockServer) -> usize {
+    server
+        .received_requests()
+        .await
+        .map(|reqs| {
+            reqs.iter()
+                .filter(|r| r.url.path() == "/v0/tenant/add-hosts/onboard")
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+async fn threshold_prepare_calls(server: &MockServer) -> usize {
+    server
+        .received_requests()
+        .await
+        .map(|reqs| {
+            reqs.iter()
+                .filter(|r| r.url.path() == "/v0/tenant/threshold/prepare")
+                .count()
+        })
+        .unwrap_or(0)
+}
