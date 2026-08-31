@@ -395,7 +395,7 @@ fn cached_chain_audit_page(
     tag = "Governance",
     params(ChainAuditQuery),
     responses(
-        (status = 200, description = "On-chain governance audit entries", body = ChainAuditResponse),
+        (status = 200, description = "On-chain audit entries for the requested scope", body = ChainAuditResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     )
 )]
