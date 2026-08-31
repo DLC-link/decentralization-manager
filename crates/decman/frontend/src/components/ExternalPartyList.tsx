@@ -1,9 +1,10 @@
-import { Box, Tooltip, Typography } from "@mui/material";
+import { Box, Chip, Tooltip, Typography } from "@mui/material";
+import { CopyableText } from "./CopyableText";
 import { PartyIdText } from "./PartyIdText";
 import { RowCard } from "./RowCard";
 import { PaginationControls } from "./Pagination";
 import { usePagination } from "../usePagination";
-import { columnSx, legendSx } from "../styles";
+import { EXPANDER_SLOT, columnSx, legendSx } from "../styles";
 import type { ExternalPartyInfo } from "../types";
 
 interface ExternalPartyListProps {
@@ -24,6 +25,53 @@ const factSx = {
   // than the rest of the list.
   whiteSpace: "nowrap" as const,
 };
+
+/**
+ * The participants named by the party's hosting mapping. `hosts` is ordered as
+ * the mapping lists them, and the confirmation threshold applies across the set
+ * — so this is the list any M of which must confirm.
+ */
+const HostsPanel = ({ party }: { party: ExternalPartyInfo }) => (
+  <Box
+    sx={{
+      pl: `calc(16px + ${EXPANDER_SLOT}px + 16px)`,
+      pr: "16px",
+      pb: 1.5,
+      pt: 0.5,
+      display: "flex",
+      flexDirection: "column",
+      gap: 0.75,
+    }}
+  >
+    <Typography component="span" sx={{ ...legendSx, fontSize: "0.65rem" }}>
+      Hosted by
+    </Typography>
+    {party.hosts.length === 0 ? (
+      <Typography variant="body2" color="text.secondary">
+        The topology mapping names no participants.
+      </Typography>
+    ) : (
+      party.hosts.map((host) => (
+        <Box
+          key={host.participant_uid}
+          sx={{ display: "flex", alignItems: "center", gap: 1.5, minWidth: 0 }}
+        >
+          <Box sx={{ flex: 1, minWidth: 0 }}>
+            <CopyableText
+              text={host.participant_uid}
+              truncate={{ start: 32, end: 16 }}
+              variant="body2"
+            />
+          </Box>
+          {/* No colour by permission: Confirmation is the norm for a hosting
+            * mapping, so tinting it would paint nearly every row green and
+            * leave nothing for the exceptions to stand out against. */}
+          <Chip label={host.permission} size="small" sx={{ flexShrink: 0 }} />
+        </Box>
+      ))
+    )}
+  </Box>
+);
 
 /** Render an RFC 3339 timestamp as a readable UTC date + time. */
 const formatCreated = (iso: string | null | undefined) => {
@@ -61,6 +109,9 @@ export const ExternalPartyList = ({ parties }: ExternalPartyListProps) => {
             pb: 1,
           }}
         >
+          {/* Matches the chevron slot each row now carries, so the Party ID
+            * legend still sits over the party ids. */}
+          <Box sx={{ width: EXPANDER_SLOT, flexShrink: 0 }} aria-hidden />
           <Typography
             component="span"
             sx={{ ...legendSx, flex: 1, minWidth: 0 }}
@@ -113,7 +164,12 @@ export const ExternalPartyList = ({ parties }: ExternalPartyListProps) => {
 
         <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
           {pageItems.map((party) => (
-            <RowCard key={party.party_id}>
+            <RowCard
+              key={party.party_id}
+              detail={<HostsPanel party={party} />}
+              detailLabel={`Show the participants hosting ${party.party_id}`}
+              dataAttrs={{ "data-testid": "external-party-row" }}
+            >
               <PartyIdText partyId={party.party_id} />
               <Typography
                 component="span"
