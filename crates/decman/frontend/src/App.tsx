@@ -757,10 +757,11 @@ const App = () => {
             display: "flex",
             flexDirection: "column",
           }),
-          // The parties list ends in a footer bar that should sit at the bottom
-          // of the view even when a short page doesn't fill it — so the region
-          // is at least a screen tall and the list flexes into the leftover.
-          ...(activeTab === 0 && {
+          // The parties list and the approvals feed both end in a footer bar
+          // that should sit at the bottom of the view even when a short page
+          // doesn't fill it — so the region is at least a screen tall and the
+          // list flexes into the leftover.
+          ...((activeTab === 0 || activeTab === 3) && {
             minHeight: "100vh",
             display: "flex",
             flexDirection: "column",
@@ -1087,7 +1088,16 @@ const App = () => {
 
       {/* Tab 3: Notifications */}
       {activeTab === 3 && !loading && !error && (
-        <Box sx={{ pt: isLargeScreen ? 4 : 0 }}>
+        // Same as the parties tab: passes the leftover height down so the
+        // Completed footer bar lands at the bottom of the view.
+        <Box
+          sx={{
+            pt: isLargeScreen ? 4 : 0,
+            flex: 1,
+            display: "flex",
+            flexDirection: "column",
+          }}
+        >
           <NotificationsView
             pendingInvitations={pendingInvitations}
             partyActions={partyActions}

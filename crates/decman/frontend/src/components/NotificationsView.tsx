@@ -2153,8 +2153,18 @@ export const NotificationsView = ({
     { group: "done", label: "Completed" },
   ];
 
+  // Whether the Completed footer bar shows. Decided here rather than inside the
+  // section loop because the bar renders *outside* the capped column, so its
+  // rule runs the full width of the view — the same shape the parties lists use.
+  const doneShown =
+    (statusFilter === "all" || statusFilter === "done") &&
+    grouped.done.length > 0 &&
+    !(doneCollapsed && statusFilter !== "done");
+  const showDoneFooter = doneShown && donePageCount > 1;
+
   return (
-    <Box sx={{ py: 3, ...columnSx }}>
+    <Box sx={{ flex: 1, display: "flex", flexDirection: "column" }}>
+      <Box sx={{ pt: 3, flex: 1, ...columnSx }}>
       <Box
         sx={{
           position: "sticky",
@@ -2337,18 +2347,21 @@ export const NotificationsView = ({
                 ))}
               </Box>
             )}
-            {!collapsed && group === "done" && donePageCount > 1 && (
-              <PaginationControls
-                page={donePage}
-                pageCount={donePageCount}
-                total={doneTotal}
-                onChange={setDonePage}
-                sx={{ px: 0 }}
-              />
-            )}
           </Box>
         );
       })}
+      </Box>
+
+      {/* Outside the column, so the rule runs the full width of the view and
+        * the bar sits flush at the bottom — the parties lists' footer shape. */}
+      {showDoneFooter && (
+        <PaginationControls
+          page={donePage}
+          pageCount={donePageCount}
+          total={doneTotal}
+          onChange={setDonePage}
+        />
+      )}
     </Box>
   );
 };
