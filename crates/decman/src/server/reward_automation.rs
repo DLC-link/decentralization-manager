@@ -618,6 +618,16 @@ static AUTH_UNREGISTERED: LazyLock<IntCounterVec> = LazyLock::new(|| {
     .expect("metric name is a unique literal")
 });
 
+// Carries no decparty label: one enablement read serves every decparty this
+// node holds credentials for, and a pass that fails reads none of them.
+static ENABLEMENT_UNREADABLE: LazyLock<IntCounter> = LazyLock::new(|| {
+    prometheus::register_int_counter!(
+        "decman_reward_enablement_unreadable_total",
+        "Passes that could not read the delegated decparties, so no auth fault was attributable to any of them."
+    )
+    .expect("metric name is a unique literal")
+});
+
 static OLDEST_EXPIRES_IN: LazyLock<GaugeVec> = LazyLock::new(|| {
     prometheus::register_gauge_vec!(
         "decman_reward_oldest_unassigned_expires_in_seconds",
@@ -638,6 +648,7 @@ pub(crate) fn register_metrics() {
     LazyLock::force(&EXPIRY_READS);
     LazyLock::force(&CREDENTIALS_UNAVAILABLE);
     LazyLock::force(&AUTH_UNREGISTERED);
+    LazyLock::force(&ENABLEMENT_UNREADABLE);
     LazyLock::force(&OLDEST_EXPIRES_IN);
 }
 
@@ -1160,8 +1171,25 @@ fn counts_as_auth_fault(
     ) && enabled.is_some_and(|set| set.contains(decparty))
 }
 
+/// Whether a pass that could not read the enablement set is a fault (pure).
+///
+/// [`counts_as_auth_fault`] attributes an auth fault only to a decparty in the
+/// set, so a pass holding no set attributes nothing. A node whose every
+/// credential fails therefore counts no auth fault at all, and it keeps beating
+/// because the loop still ticks. Both reward rules stay silent while nothing
+/// assigns. This counter is that pass's only signal.
+///
+/// A node serving no decparty has nothing to read, so `None` there is not a
+/// fault — counting it would alert on every idle node.
+fn counts_as_unreadable_enablement(read: Option<&HashSet<CantonId>>, served: usize) -> bool {
+    read.is_none() && served > 0
+}
+
 /// The decparties this node is a named assigner for, or `None` when no token
 /// could be obtained to ask with.
+///
+/// A `None` moves `decman_reward_enablement_unreadable_total` at the call site,
+/// so the blind pass reports itself — see [`counts_as_unreadable_enablement`].
 ///
 /// Tries each served decparty in turn: the read needs any one working token, not
 /// that decparty's own. A node whose every credential fails cannot ask, and
@@ -1254,7 +1282,16 @@ pub(crate) async fn run_reward_automation_loop(data: actix_web::web::Data<AppSta
 
         prune_unserved(&mut oldest, &parties);
 
-        if let Some(set) = read_enablement(&data, &parties).await {
+        let read = read_enablement(&data, &parties).await;
+        if counts_as_unreadable_enablement(read.as_ref(), parties.len()) {
+            ENABLEMENT_UNREADABLE.inc();
+            tracing::warn!(
+                served = parties.len(),
+                "no credential could read the delegated decparties; until one can, this node \
+                 attributes no auth fault to any of them"
+            );
+        }
+        if let Some(set) = read {
             enabled = Some(set);
         }
 
@@ -2324,6 +2361,18 @@ mod tests {
     }
 
     #[test]
+    fn the_unreadable_enablement_counter_is_exposed_before_any_pass_runs() {
+        // Unlabelled, so `gather()` exports it from boot. Its alert reads an
+        // increase, which needs a zero to increase from.
+        register_metrics();
+        assert!(
+            gathered_family_names()
+                .iter()
+                .any(|n| n == "decman_reward_enablement_unreadable_total")
+        );
+    }
+
+    #[test]
     fn a_labelled_family_appears_once_a_decparty_is_known() {
         // `gather()` omits a labelled family with no series, so these appear only
         // once a decparty is known.
@@ -2554,7 +2603,8 @@ mod tests {
     fn an_unread_enablement_set_counts_nothing() {
         // `None` is "we could not ask", not "nothing is enabled". Counting on it
         // would alert for every decparty on a node whose first read has not
-        // landed yet.
+        // landed yet. The pass itself is counted instead — see
+        // `counts_as_unreadable_enablement`.
         let decparty = CantonId::parse(GOV).expect("GOV is a valid canton id");
         assert!(!counts_as_auth_fault(
             &SweepOutcome::AuthUnregistered,
@@ -2566,6 +2616,28 @@ mod tests {
             &decparty,
             None
         ));
+    }
+
+    #[test]
+    fn an_unreadable_enablement_set_counts_on_a_serving_node() {
+        // The blind pass attributes no auth fault to any decparty, so without
+        // this counter a node whose every credential fails reports nothing at
+        // all while it keeps beating.
+        assert!(counts_as_unreadable_enablement(None, 17));
+    }
+
+    #[test]
+    fn an_unreadable_enablement_set_counts_nothing_on_an_idle_node() {
+        // A node serving no decparty has nothing to read, and a stall alert
+        // already states that such a node still beats.
+        assert!(!counts_as_unreadable_enablement(None, 0));
+    }
+
+    #[test]
+    fn a_read_enablement_set_counts_nothing() {
+        let decparty = CantonId::parse(GOV).expect("GOV is a valid canton id");
+        let enabled: HashSet<CantonId> = std::iter::once(decparty).collect();
+        assert!(!counts_as_unreadable_enablement(Some(&enabled), 17));
     }
 
     #[test]
