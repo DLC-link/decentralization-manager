@@ -278,6 +278,21 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         .post_json(f.p3.http, "/v0/tenant/add-hosts/import", &import_req)
                         .await?;
                     info!("add-hosts import on P3: {result}");
+
+                    // Checked here, inside the step that does the import, rather
+                    // than as a later Then. Scenario steps run in sequence, so a
+                    // Then would only observe P1 after replication finished and
+                    // would pass even if P1 had dropped out during it — which is
+                    // exactly the regression worth catching, since the import
+                    // disconnects the joiner and must not touch anyone else.
+                    let p1_status: Value = f
+                        .get_json(f.p1.http, &format!("/v0/tenant/{party_id}/status"))
+                        .await
+                        .context("P1's view of the party right after the import")?;
+                    anyhow::ensure!(
+                        p1_status.get("status").and_then(Value::as_str) == Some("completed"),
+                        "P1 stopped reporting the party live across the import: {p1_status}"
+                    );
                     Ok(())
                 })
             }
@@ -296,28 +311,6 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         probe_workflow_status(
                             &*f,
                             f.p3.http,
-                            &format!("/v0/tenant/{party_id}/status"),
-                            "tenant-add-hosts",
-                        )
-                        .await
-                    })
-                }
-            },
-        )
-        // The party must keep working where it already worked. The import
-        // disconnects only the joiner, so the original hosts should never have
-        // noticed.
-        .then(
-            "P1 still reports the party live throughout",
-            Duration::from_secs(60),
-            {
-                let party_id = party_id.clone();
-                move |f, _| {
-                    let party_id = party_id.clone();
-                    Box::pin(async move {
-                        probe_workflow_status(
-                            &*f,
-                            f.p1.http,
                             &format!("/v0/tenant/{party_id}/status"),
                             "tenant-add-hosts",
                         )

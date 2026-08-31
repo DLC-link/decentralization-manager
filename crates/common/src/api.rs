@@ -539,6 +539,13 @@ pub struct TenantAcsSnapshotResponse {
 pub struct TenantAcsImportRequest {
     /// The party being replicated onto this host.
     pub party_id: String,
+    /// The serial the add-hosts write was pinned to.
+    ///
+    /// Part of how this replication's staged state is keyed, so a target that
+    /// was removed and later re-added does not inherit the first attempt's
+    /// offsets — an offset predating the earlier activation makes the export
+    /// find the stale one and abort.
+    pub base_serial: u32,
     /// The base64 snapshot from `TenantAcsSnapshotResponse`.
     pub snapshot: String,
     /// The package ids that came with it.

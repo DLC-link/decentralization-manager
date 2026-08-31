@@ -285,8 +285,10 @@ pub async fn tenant_status(
         Ok(HostOnboardingStatus::Onboarding) => HttpResponse::Ok().json(WorkflowStatusResponse {
             status: WorkflowProgress::InProgress,
             error: Some(
-                "hosted but still carrying Canton's onboarding marker — the ACS has not been \
-                 replicated to this host yet"
+                "hosted but still carrying Canton's onboarding marker, so the party is not \
+                 usable here yet. Either the ACS has not been replicated or the clearing \
+                 transaction is proposed and not yet authorized — the marker does not say \
+                 which"
                     .to_string(),
             ),
         }),
@@ -468,7 +470,8 @@ pub async fn tenant_add_hosts_onboard(
     tag = "Tenant",
     params(
         ("party" = String, Path, description = "Full party id"),
-        ("target" = String, Path, description = "Participant the snapshot is for")
+        ("target" = String, Path, description = "Participant the snapshot is for"),
+        ("base_serial" = u32, Query, description = "The serial the add-hosts write was pinned to")
     ),
     responses(
         (status = 200, description = "ACS snapshot for the target", body = TenantAcsSnapshotResponse),
@@ -482,6 +485,7 @@ pub async fn tenant_acs_snapshot(
     http_req: HttpRequest,
     data: web::Data<AppState>,
     path: web::Path<(String, String)>,
+    query: web::Query<AcsBaseSerialQuery>,
 ) -> impl Responder {
     if let Err(resp) = require_tenant_api_key(&http_req, &data) {
         return resp;
@@ -495,7 +499,7 @@ pub async fn tenant_acs_snapshot(
             });
         }
     };
-    let replication = match replication_target(&party_id, &target) {
+    let replication = match replication_target(&party_id, &target, query.base_serial) {
         Ok(t) => t,
         Err(e) => {
             return HttpResponse::BadRequest().json(ErrorResponse {
@@ -580,7 +584,11 @@ pub async fn tenant_acs_import(
             });
         }
     };
-    let replication = match replication_target(&body.party_id, data.config.participant_id()) {
+    let replication = match replication_target(
+        &body.party_id,
+        data.config.participant_id(),
+        body.base_serial,
+    ) {
         Ok(t) => t,
         Err(e) => {
             return HttpResponse::BadRequest().json(ErrorResponse {
@@ -772,6 +780,15 @@ pub async fn tenant_threshold_onboard(
 // ============================================================================
 // Helpers
 // ============================================================================
+
+/// `?base_serial=` on the ACS export endpoint.
+///
+/// Required rather than defaulted: it keys the replication's staged state, and
+/// guessing it would silently reuse another attempt's offsets.
+#[derive(Debug, serde::Deserialize)]
+pub struct AcsBaseSerialQuery {
+    pub base_serial: u32,
+}
 
 /// Base64-decode a raw Ed25519 public key into its fixed 32-byte array, or the
 /// 400 response to return.
