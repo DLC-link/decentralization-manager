@@ -278,7 +278,7 @@ const InvitationCard = ({
           </Button>
           <Button
             variant="contained"
-            color="primary"
+            color="success"
             size="small"
             onClick={() => respond("accept")}
             disabled={busy}
@@ -638,7 +638,7 @@ const ActionCard = ({
                 sx={{
                   ml: 0.75,
                   fontFamily: "var(--font-mono)",
-                  color: "primary.main",
+                  color: "text.primary",
                 }}
               >
                 {details[0].before !== undefined
@@ -715,7 +715,7 @@ const ActionCard = ({
               <Button
                 size="small"
                 variant="outlined"
-                color="warning"
+                color="error"
                 onClick={handleRevoke}
                 disabled={busy}
               >
@@ -725,6 +725,7 @@ const ActionCard = ({
               <Button
                 size="small"
                 variant="contained"
+                color="success"
                 onClick={handleConfirm}
                 disabled={busy || !party.rulesContractId}
               >
@@ -734,7 +735,7 @@ const ActionCard = ({
             {action.can_execute && (
               <Button
                 size="small"
-                variant="contained"
+                variant="outlined"
                 color="success"
                 onClick={() => {
                   setExecuteError(null);
@@ -1102,7 +1103,7 @@ const DomainActionCard = ({
               <Button
                 size="small"
                 variant="outlined"
-                color="warning"
+                color="error"
                 onClick={handleRevoke}
                 disabled={busy}
               >
@@ -1143,7 +1144,7 @@ const DomainActionCard = ({
               <Button
                 size="small"
                 variant="outlined"
-                color="warning"
+                color="error"
                 onClick={handleRevoke}
                 disabled={busy}
               >
@@ -1153,6 +1154,7 @@ const DomainActionCard = ({
               <Button
                 size="small"
                 variant="contained"
+                color="success"
                 onClick={handleConfirm}
                 disabled={busy || !party.rulesContractId}
               >
@@ -1173,7 +1175,7 @@ const DomainActionCard = ({
             {domainAction.can_execute && (
               <Button
                 size="small"
-                variant="contained"
+                variant="outlined"
                 color="success"
                 onClick={handleExecute}
                 disabled={busy || !party.rulesContractId}
