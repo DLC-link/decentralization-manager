@@ -47,6 +47,10 @@ export const zebraRow = (index: number) => ({
   },
 });
 
+// Leading slot an expandable card row gives its chevron. Shared with the
+// legend above the rows so the two cannot drift apart.
+export const EXPANDER_SLOT = 18;
+
 // Card lists have no header row, so the two icon columns are labelled by a
 // legend above them. These widths are shared by the legend, the cards and the
 // loading skeleton to keep all three aligned.
