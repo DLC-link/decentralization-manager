@@ -67,7 +67,7 @@ This deploys a `GovernanceRules` contract with all 3 members, threshold 2, and a
 
 ### Full Deployment Flow
 
-The complete end-to-end deployment follows these steps. Each governance action (steps 6-9) requires threshold confirmations before execution.
+The complete end-to-end deployment follows these steps. Steps 6-9 are **domain proposals**: `POST /governance/propose`, then the same confirm -> threshold -> execute flow as any other proposal. `GovernanceRules` accepts only self-management actions on the inline `POST /governance/confirm` path (add/remove member, threshold, timeout, additional proposers) — every domain operation goes through a proposal.
 
 > **Note:** `#governance-*-<version>` package IDs use `<version>` as a placeholder — substitute the version of the governance packages you deployed (these are configured per party via `PUT /party-config`).
 
@@ -78,17 +78,16 @@ The complete end-to-end deployment follows these steps. Each governance action (
 | 3 | Grant Ledger API rights | External (Canton admin) | Grant `actAs`/`readAs` rights for member parties on the decentralized party |
 | 4 | Upload DARs | DecMan (DARs workflow) | Upload DAR packages to all participant nodes |
 | 5 | Deploy GovernanceRules | DecMan (contracts workflow) | Deploy `GovernanceRules` contract with package `#governance-core-<version>` |
-| 6 | Create ProviderService | Governance action | `utility_create_provider_request` |
-| 7 | Create UserService | Governance action | `utility_create_user_request` |
-| 8 | Setup Utility | Governance action | `utility_setup` -- links provider and user services |
-| 9 | Request DevNet FAR | Governance action | `dev_net_feature_app` -- register as featured app |
-| 10 | Accept Free Credential | Governance action | `credential_accept_free` |
+| 6 | Create ProviderService | Governance proposal | `provision_provider_service` (or `create_provider_service_request`) |
+| 7 | Create UserService | Governance proposal | `create_user_service_request` |
+| 8 | Setup Utility | Governance proposal | `setup_utility` -- runs the Utility-Registry onboarding |
+| 9 | Accept Free Credential | Governance proposal | `accept_free_credential` |
 
 Steps marked "External" are performed outside the DecMan application (e.g., via Canton admin console or deployment tooling).
 
 ### Day-to-Day Operations
 
-All governed operations follow the same flow: **Confirm -> Threshold Check -> Execute**. See [Utility Services](#utility-services), [Token Custody](#token-custody) and [Generic Voting](#generic-voting) below for the concrete action and proposal payloads.
+All governed operations follow the same flow: **Confirm -> Threshold Check -> Execute**. Membership and quorum changes are inline actions on `POST /governance/confirm`; everything else is a proposal on `POST /governance/propose`. See [Utility Services](#utility-services), [Token Custody](#token-custody) and [Generic Voting](#generic-voting) below for the concrete payloads.
 
 ### Membership Changes
 
@@ -214,18 +213,15 @@ Omitting `provider_app_reward_beneficiaries` clears the current setting.
 
 ### DevNet Feature App Registration
 
-To register as a featured app in the Amulet ecosystem on DevNet:
+Registering as a featured app in the Amulet ecosystem is the prerequisite for
+holding the `FeaturedAppRight` contract that backs the reward beneficiaries
+above.
 
-```json
-{
-  "action": {
-    "type": "dev_net_feature_app",
-    "amulet_rules_cid": "<amulet-rules-contract-id>"
-  }
-}
-```
-
-This is a prerequisite for obtaining the `FeaturedAppRight` contract that backs the reward beneficiaries above.
+> **Not currently submittable through DecMan.** `dev_net_feature_app` exists
+> only as an inline `ActionType`, and the inline path now carries governance
+> self-management actions only. There is no `GovernableAction` proposal for it
+> yet, so register the featured app outside DecMan (Canton admin console /
+> deployment tooling) until one is added.
 
 ## Multi-Signature Wallet
 
@@ -236,7 +232,7 @@ The Decentralized Party Manager can serve as the foundation for a custodial mult
 | Multi-Sig Concept | DecParty Equivalent |
 |-------------------|---------------------|
 | N-of-M signers | N = threshold, M = number of members |
-| Transaction proposal | Governance action (any `ActionType`) |
+| Transaction proposal | Governance proposal (any `ProposalType`) |
 | Signature collection | Confirmation flow (`ConfirmAction` calls) |
 | Quorum reached | `can_execute: true` in confirmations response |
 | Transaction execution | `ExecuteConfirmedAction` call |
@@ -288,15 +284,30 @@ DecMan supports onboarding to the Utility Registry, which provides provider and 
 
 ### Full Onboarding Flow
 
-The following sequence of governance actions sets up a complete utility service:
+The following sequence of governance proposals sets up a complete utility
+service. Each one is submitted to `POST /governance/propose` and then follows
+the usual propose -> confirm -> execute flow.
 
 **1. Create ProviderService:**
 
 ```json
 {
-  "action": {
-    "type": "utility_create_provider_request",
-    "operator": "operator::1220..."
+  "proposal": {
+    "type": "provision_provider_service"
+  }
+}
+```
+
+`provision_provider_service` takes no fields — it creates the `ProviderService`
+for the governance party itself. Use `create_provider_service_request` instead
+when the provider is a different party:
+
+```json
+{
+  "proposal": {
+    "type": "create_provider_service_request",
+    "operator": "operator::1220...",
+    "provider": "provider-party::1220..."
   }
 }
 ```
@@ -305,39 +316,41 @@ The following sequence of governance actions sets up a complete utility service:
 
 ```json
 {
-  "action": {
-    "type": "utility_create_user_request",
-    "operator": "operator::1220..."
+  "proposal": {
+    "type": "create_user_service_request",
+    "operator": "operator::1220...",
+    "user": "user-party::1220..."
   }
 }
 ```
 
 **3. Link Services (Setup):**
 
-After both services are created, link them:
+After the provider service exists, run the onboarding:
 
 ```json
 {
-  "action": {
-    "type": "utility_setup",
+  "proposal": {
+    "type": "setup_utility",
     "operator": "operator::1220...",
     "provider_service_cid": "<provider-service-contract-id>",
-    "user_service_cid": "<user-service-contract-id>"
+    "instrument_id_text": "<instrument-uuid>",
+    "create_transfer_rule": true,
+    "create_allocation_factory": true
   }
 }
 ```
 
 ### Dual Governance Onboarding Flow
 
-This flow splits the utility roles across two decentralized parties. The provider decparty owns the `ProviderService` and decides which registrars to accept. The registrar decparty owns the `RegistrarService` and manages its instruments and instrument issuers. Each decparty has its own `GovernanceRules` and members. Step 1 is the same governance action as the Full Onboarding Flow above. Steps 2-7 are proposals and follow the same propose -> confirm -> execute flow as generic votes, voted on the named decparty.
+This flow splits the utility roles across two decentralized parties. The provider decparty owns the `ProviderService` and decides which registrars to accept. The registrar decparty owns the `RegistrarService` and manages its instruments and instrument issuers. Each decparty has its own `GovernanceRules` and members. Step 1 is the same proposal as the Full Onboarding Flow above. Steps 2-7 follow the same propose -> confirm -> execute flow as generic votes, voted on the named decparty.
 
 **1. Create ProviderService (provider decparty):**
 
 ```json
 {
-  "action": {
-    "type": "utility_create_provider_request",
-    "operator": "operator::1220..."
+  "proposal": {
+    "type": "provision_provider_service"
   }
 }
 ```
@@ -492,15 +505,15 @@ curl "http://localhost:8080/services/user?party_id=joint-custody::1220..."
 
 ### Credential Management
 
-Issue and accept credentials through governance:
+Issue and accept credentials through governance. Both are domain proposals on
+`POST /governance/propose`:
 
 **Offer a free credential:**
 
 ```json
 {
-  "action": {
-    "type": "credential_offer_free",
-    "operator": "operator::1220...",
+  "proposal": {
+    "type": "offer_free_credential",
     "user_service_cid": "<user-service-contract-id>",
     "holder": "holder-party::1220...",
     "id": "kyc-verified",
@@ -517,9 +530,8 @@ Issue and accept credentials through governance:
 
 ```json
 {
-  "action": {
-    "type": "credential_accept_free",
-    "operator": "operator::1220...",
+  "proposal": {
+    "type": "accept_free_credential",
     "user_service_cid": "<user-service-contract-id>",
     "credential_offer_cid": "<credential-offer-contract-id>"
   }
