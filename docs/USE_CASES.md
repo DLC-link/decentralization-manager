@@ -53,7 +53,10 @@ curl -X POST http://custodian-a:8080/contracts \
         "entity_name": "GovernanceRules",
         "fields": [
           { "type": "decentralized_party" },
-          { "type": "party_set", "parties": [] },
+          {
+            "type": "party_set",
+            "parties": ["member-a::1220...", "member-b::1220...", "member-c::1220..."]
+          },
           { "type": "governance_threshold" },
           { "type": "rel_time", "microseconds": 86400000000 },
           { "type": "optional", "inner": { "type": "party_set", "parties": [] } }
@@ -197,6 +200,7 @@ The beneficiaries live on the party's `InstrumentConfiguration` and are set thro
 ```json
 {
   "party_id": "joint-custody::1220...",
+  "rules_contract_id": "<governance-rules-cid>",
   "proposal": {
     "type": "set_provider_app_reward_beneficiaries",
     "instrument_configuration_cid": "<instrument-configuration-cid>",
@@ -287,6 +291,10 @@ DecMan supports onboarding to the Utility Registry, which provides provider and 
 The following sequence of governance proposals sets up a complete utility
 service. Each one is submitted to `POST /governance/propose` and then follows
 the usual propose -> confirm -> execute flow.
+
+The payloads below show the `proposal` object only; a full request also carries
+`party_id` and `rules_contract_id` (see [Generic Voting](#generic-voting) for a
+complete `curl`).
 
 **1. Create ProviderService:**
 
