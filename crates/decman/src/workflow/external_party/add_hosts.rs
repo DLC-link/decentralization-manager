@@ -99,6 +99,26 @@ pub fn replication_instance(party_id: &str, target: &CantonId, base_serial: u32)
     format!("tenant-add-hosts:{party_id}:{target}:{base_serial}")
 }
 
+/// A [`ReplicationTarget`] for artefact access only, rebuilt from an instance
+/// name.
+///
+/// The party and target ids inside a `ReplicationTarget` matter to Canton calls;
+/// for reading and writing this run's artefacts only the instance name and the
+/// artifact keys do. This exists so a caller holding an instance name can reach
+/// its artefacts without re-parsing a party id out of it.
+pub fn replication_target_by_instance(
+    instance_name: &str,
+    participant: &CantonId,
+) -> ReplicationTarget {
+    ReplicationTarget::new(
+        participant.clone(),
+        participant.clone(),
+        instance_name.to_string(),
+        TENANT_ADD_HOSTS_ARTIFACTS,
+        ArtifactStore::Tenant,
+    )
+}
+
 /// The replication this add-hosts implies: `party_id` moving onto `target`.
 pub fn replication_target(
     party_id: &str,
