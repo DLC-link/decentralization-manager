@@ -40,11 +40,12 @@ use crate::{
         },
         types::{
             ActiveCouponReassignmentDelegation, AuditLogEntry, AuditLogQuery, AuditLogResponse,
-            CancelConfirmationRequest, CancelProposalRequest, ChainAuditEntry, ChainAuditQuery,
-            ChainAuditResponse, ConfirmActionRequest, CouponReassignmentDelegationSummary,
-            ErrorResponse, ExecuteActionRequest, ExpireConfirmationRequest, GovernanceResponse,
-            GovernanceStateResponse, GovernanceType, KnownMember, KnownMembersResponse,
-            MessageResponse, ProposalType, ProposeActionRequest, chain_audit_entry_from_row,
+            AuditScope, CancelConfirmationRequest, CancelProposalRequest, ChainAuditEntry,
+            ChainAuditQuery, ChainAuditResponse, ConfirmActionRequest,
+            CouponReassignmentDelegationSummary, ErrorResponse, ExecuteActionRequest,
+            ExpireConfirmationRequest, GovernanceResponse, GovernanceStateResponse, GovernanceType,
+            KnownMember, KnownMembersResponse, MessageResponse, ProposalType, ProposeActionRequest,
+            chain_audit_entry_from_row,
         },
     },
     utils,
@@ -383,13 +384,18 @@ fn cached_chain_audit_page(
     Some(chain_audit_response(entries, has_more))
 }
 
-/// Get on-chain governance audit entries.
-/// Returns cached data by default. Pass `refresh=true` to fetch from Canton and update cache.
+/// Get on-chain audit entries for a party.
+///
+/// Defaults to the governance scope, served from cache; pass `refresh=true` to
+/// fetch from Canton and update the cache. `scope=all` returns every ledger
+/// event the party witnesses and is always read live — the cache holds
+/// governance-scoped pages, and mixing the two under one party key would let
+/// an `all` read answer a governance request.
 #[utoipa::path(
     tag = "Governance",
     params(ChainAuditQuery),
     responses(
-        (status = 200, description = "On-chain governance audit entries", body = ChainAuditResponse),
+        (status = 200, description = "On-chain audit entries for the requested scope", body = ChainAuditResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     )
 )]
@@ -408,7 +414,9 @@ pub async fn get_governance_chain_audit(
         return HttpResponse::Ok().json(chain_audit_response(Vec::new(), false));
     }
 
-    if !query.refresh {
+    let cacheable = query.scope == AuditScope::Governance;
+
+    if !query.refresh && cacheable {
         match data
             .db
             .get_chain_audit_cache(party_id, limit as i64, query.before_offset)
@@ -435,19 +443,22 @@ pub async fn get_governance_chain_audit(
         party_id,
         token,
         &pkgs,
+        query.scope,
         limit,
         query.before_offset,
     )
     .await
     {
         Ok(page) => {
-            // Save to cache in background
-            let pool = data.db.clone();
-            let pid = party_id.clone();
-            let cached = page.entries.clone();
-            tokio::spawn(async move {
-                chain_audit::save_chain_audit_cache(&pool, &pid, &cached).await;
-            });
+            if cacheable {
+                // Save to cache in background
+                let pool = data.db.clone();
+                let pid = party_id.clone();
+                let cached = page.entries.clone();
+                tokio::spawn(async move {
+                    chain_audit::save_chain_audit_cache(&pool, &pid, &cached).await;
+                });
+            }
 
             HttpResponse::Ok().json(chain_audit_response(page.entries, page.has_more))
         }

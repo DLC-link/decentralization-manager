@@ -12,6 +12,8 @@ import {
   Chip,
   IconButton,
   Collapse,
+  ToggleButton,
+  ToggleButtonGroup,
   Tooltip,
   useTheme,
 } from "@mui/material";
@@ -25,7 +27,12 @@ import { authenticatedFetch } from "../api";
 import { zebraRow } from "../styles";
 import { CopyableText } from "./CopyableText";
 import { CursorPagination } from "./Pagination";
-import type { ChainAuditEntry, ChainAuditResponse } from "../types";
+import type {
+  AuditLogEntry,
+  AuditLogResponse,
+  ChainAuditEntry,
+  ChainAuditResponse,
+} from "../types";
 
 interface GovernanceAuditTrailProps {
   partyId: string;
@@ -45,8 +52,91 @@ interface GovernanceAuditTrailProps {
 
 export const CHAIN_LIMIT = PAGE_SIZE;
 
+/**
+ * Which trail the panel shows.
+ *
+ * `governance` and `all` are the two scopes of the on-ledger read; `local` is
+ * this node's own record of what it attempted, which exists even for actions
+ * that never reached the ledger.
+ */
+export type AuditMode = "governance" | "all" | "local";
+
+const MODE_LABELS: { value: AuditMode; label: string; hint: string }[] = [
+  {
+    value: "governance",
+    label: "Governance",
+    hint: "Proposals, confirmations and executions from the governance packages",
+  },
+  {
+    value: "all",
+    label: "All activity",
+    hint: "Every ledger event this party witnesses, its own application templates included",
+  },
+  {
+    value: "local",
+    label: "Local log",
+    hint: "What this node attempted for the party, successes and failures alike",
+  },
+];
+
+const EMPTY_MESSAGE: Record<AuditMode, string> = {
+  governance:
+    "No on-chain governance events found for this party. A party with no governance contracts deployed never produces any — switch to All activity to see its ledger events.",
+  all: "No on-chain events found for this party.",
+  local: "This node has not run a governance action for this party.",
+};
+
+/** One table row, whichever trail it came from. */
+interface AuditRow {
+  key: string;
+  timestamp: number;
+  eventType: string;
+  action: string;
+  /** Fourth column: governance type on-ledger, outcome in the local log. */
+  meta: string;
+  metaTone?: "success" | "error";
+  /** Fifth column: the contract on-ledger, the acting member locally. */
+  ident: string;
+  details: unknown;
+  /** Label/value pairs shown when the row is expanded. */
+  facts: [string, string][];
+  error?: string;
+}
+
 const formatTimestamp = (epochSeconds: number): string =>
   new Date(epochSeconds * 1000).toLocaleString();
+
+const chainRow = (entry: ChainAuditEntry): AuditRow => ({
+  key: `${entry.offset}-${entry.contract_id}-${entry.event_type}`,
+  timestamp: entry.timestamp,
+  eventType: entry.event_type,
+  action: entry.action_summary,
+  meta: entry.governance_type,
+  ident: entry.contract_id,
+  details: entry.details,
+  facts: [
+    ["Template", entry.template_id],
+    ["Package", entry.package_id],
+    ["Acting parties", entry.acting_parties.join(", ")],
+    ["Update ID", entry.update_id],
+    ...(entry.choice
+      ? ([["Choice", entry.choice]] as [string, string][])
+      : []),
+  ],
+});
+
+const localRow = (entry: AuditLogEntry): AuditRow => ({
+  key: `local-${entry.id}`,
+  timestamp: entry.timestamp,
+  eventType: entry.event_type,
+  action: entry.action_summary,
+  meta: entry.status,
+  metaTone: entry.status === "success" ? "success" : "error",
+  ident: entry.member_party_id,
+  details: entry.details,
+  facts: [["Governance type", entry.governance_type]],
+  error: entry.error_message,
+});
 
 const eventTypeColor = (
   eventType: string,
@@ -130,24 +220,32 @@ export const GovernanceAuditTrail = ({
   onLoadingChange,
 }: GovernanceAuditTrailProps) => {
   const jsonTreeTheme = useJsonTreeTheme();
+  const [mode, setMode] = useState<AuditMode>("governance");
+  const modeRef = useRef<AuditMode>("governance");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [entries, setEntries] = useState<ChainAuditEntry[]>([]);
-  const sortedEntries = useMemo(
-    () => [...entries].sort((a, b) => b.timestamp - a.timestamp),
-    [entries],
+  const [rows, setRows] = useState<AuditRow[]>([]);
+  const sortedRows = useMemo(
+    () => [...rows].sort((a, b) => b.timestamp - a.timestamp),
+    [rows],
   );
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
-  const [cacheLoaded, setCacheLoaded] = useState(false);
-  // One cursor per visited page. Index 0 is `undefined` (newest page); each
-  // Next pushes the `next_before_offset` the server handed back, so Previous
-  // is a pop rather than a re-query from the top.
+  const [loadedMode, setLoadedMode] = useState<AuditMode | null>(null);
+  // One cursor per visited page of an on-ledger trail. Index 0 is `undefined`
+  // (newest page); each Next pushes the `next_before_offset` the server handed
+  // back, so Previous is a pop rather than a re-query from the top. The local
+  // log pages by offset instead and ignores this.
   const [cursors, setCursors] = useState<(number | undefined)[]>([undefined]);
   const [page, setPage] = useState(0);
   const [nextCursor, setNextCursor] = useState<number | null>(null);
+  // The local log has no cursor: a full page is what says another one follows.
+  const [localHasNext, setLocalHasNext] = useState(false);
   const [canScrollUp, setCanScrollUp] = useState(false);
   const [canScrollDown, setCanScrollDown] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  const isLocal = mode === "local";
+  const hasNext = isLocal ? localHasNext : nextCursor !== null;
 
   const updateScrollShadows = useCallback(() => {
     const el = scrollRef.current;
@@ -169,15 +267,21 @@ export const GovernanceAuditTrail = ({
         observer.disconnect();
       };
     }
-  }, [entries, updateScrollShadows]);
+  }, [rows, updateScrollShadows]);
 
   const fetchAudit = useCallback(
-    async (refresh: boolean, before?: number): Promise<boolean> => {
+    async (
+      target: AuditMode,
+      refresh: boolean,
+      // On-ledger cursor, or the page index for the local log.
+      before?: number,
+      pageIndex = 0,
+    ): Promise<boolean> => {
       setLoading(true);
       setError(null);
       // A refresh pulls in events newer than anything we've paged past, which
       // invalidates every cursor below — start the stack over at the top.
-      if (refresh && before === undefined) {
+      if (refresh && before === undefined && pageIndex === 0) {
         setCursors([undefined]);
         setPage(0);
       }
@@ -186,6 +290,33 @@ export const GovernanceAuditTrail = ({
           party_id: partyId,
           limit: String(CHAIN_LIMIT),
         });
+
+        if (target === "local") {
+          params.set("offset", String(pageIndex * CHAIN_LIMIT));
+          const res = await authenticatedFetch(
+            `${API_BASE}/governance/audit?${params}`,
+          );
+          if (res.ok) {
+            const response: AuditLogResponse = await res.json();
+            // The local log pages by offset and reports no total, so a page
+            // that comes back exactly full cannot say whether another follows.
+            // An empty page past the first is that answer arriving late: it is
+            // the end of the log, so stay on the page we are on rather than
+            // replacing the table with the empty state.
+            if (response.entries.length === 0 && pageIndex > 0) {
+              setLocalHasNext(false);
+              return false;
+            }
+            setRows(response.entries.map(localRow));
+            setLocalHasNext(response.entries.length >= CHAIN_LIMIT);
+            return true;
+          }
+          const errData = await res.json().catch(() => ({}));
+          setError(errData.error || "Failed to fetch audit trail");
+          return false;
+        }
+
+        params.set("scope", target);
         if (refresh) params.set("refresh", "true");
         if (before !== undefined) params.set("before_offset", String(before));
 
@@ -194,7 +325,7 @@ export const GovernanceAuditTrail = ({
         );
         if (res.ok) {
           const response: ChainAuditResponse = await res.json();
-          setEntries(response.entries);
+          setRows(response.entries.map(chainRow));
           setNextCursor(response.next_before_offset ?? null);
           return true;
         }
@@ -213,19 +344,30 @@ export const GovernanceAuditTrail = ({
     [partyId],
   );
 
-  // Load from cache on mount
+  // Load on mount, and again whenever the operator switches trail. Switching
+  // starts from the newest page: the cursors of the trail left behind mean
+  // nothing in the one being entered.
   useEffect(() => {
-    if (!cacheLoaded) {
-      setCacheLoaded(true);
-      fetchAudit(false);
+    if (loadedMode !== mode) {
+      setLoadedMode(mode);
+      setRows([]);
+      setExpandedRow(null);
+      setCursors([undefined]);
+      setPage(0);
+      setNextCursor(null);
+      setLocalHasNext(false);
+      fetchAudit(mode, false);
     }
-  }, [cacheLoaded, fetchAudit]);
+  }, [loadedMode, mode, fetchAudit]);
 
   // Re-fetch (force fresh) whenever the parent bumps the nonce after a
-  // sibling governance mutation.
+  // sibling governance mutation. The trail is read from `modeRef` — which the
+  // toggle writes alongside `setMode` — so the nonce stays the only trigger;
+  // depending on `mode` here would re-run this on a switch, on top of the
+  // fetch the switch effect above already does.
   useEffect(() => {
     if (refreshNonce === undefined || refreshNonce === 0) return;
-    fetchAudit(true);
+    fetchAudit(modeRef.current, true);
   }, [refreshNonce, fetchAudit]);
 
   // A new page is read from its top, same as the client-paged views — see
@@ -238,34 +380,77 @@ export const GovernanceAuditTrail = ({
   // leave the indicator and the cursor stack describing a page whose rows
   // never arrived, and the next Prev would then walk from the wrong cursor.
   const goToNextPage = useCallback(async () => {
+    if (isLocal) {
+      if (!localHasNext) return;
+      if (await fetchAudit(mode, false, undefined, page + 1)) {
+        setPage(page + 1);
+        scrollToFirstRow();
+      }
+      return;
+    }
     if (nextCursor === null) return;
     const cursor = nextCursor;
-    if (await fetchAudit(false, cursor)) {
+    if (await fetchAudit(mode, false, cursor)) {
       setCursors((prev) => [...prev.slice(0, page + 1), cursor]);
       setPage(page + 1);
       scrollToFirstRow();
     }
-  }, [nextCursor, page, fetchAudit, scrollToFirstRow]);
+  }, [
+    isLocal,
+    localHasNext,
+    mode,
+    nextCursor,
+    page,
+    fetchAudit,
+    scrollToFirstRow,
+  ]);
 
   const goToPrevPage = useCallback(async () => {
     if (page === 0) return;
-    if (await fetchAudit(false, cursors[page - 1])) {
+    const landed = isLocal
+      ? await fetchAudit(mode, false, undefined, page - 1)
+      : await fetchAudit(mode, false, cursors[page - 1]);
+    if (landed) {
       setPage(page - 1);
       scrollToFirstRow();
     }
-  }, [page, cursors, fetchAudit, scrollToFirstRow]);
+  }, [isLocal, mode, page, cursors, fetchAudit, scrollToFirstRow]);
 
   useEffect(() => {
-    onCountChange?.(entries.length, nextCursor !== null);
-  }, [entries.length, nextCursor, onCountChange]);
+    onCountChange?.(rows.length, hasNext);
+  }, [rows.length, hasNext, onCountChange]);
 
   useEffect(() => {
     onLoadingChange?.(loading);
   }, [loading, onLoadingChange]);
 
+  const modeToggle = (
+    <ToggleButtonGroup
+      size="small"
+      exclusive
+      value={mode}
+      onChange={(_e, next: AuditMode | null) => {
+        if (next) {
+          modeRef.current = next;
+          setMode(next);
+        }
+      }}
+      sx={{ mb: 1.5 }}
+    >
+      {MODE_LABELS.map(({ value, label, hint }) => (
+        <Tooltip key={value} title={hint}>
+          <ToggleButton value={value} sx={{ textTransform: "none", px: 1.5 }}>
+            {label}
+          </ToggleButton>
+        </Tooltip>
+      ))}
+    </ToggleButtonGroup>
+  );
+
   if (error) {
     return (
       <Box sx={{ mt: 2, mb: 2 }}>
+        {modeToggle}
         <Alert
           severity="error"
           sx={{ mb: 2 }}
@@ -275,7 +460,7 @@ export const GovernanceAuditTrail = ({
         </Alert>
         <Button
           startIcon={<RefreshIcon />}
-          onClick={() => fetchAudit(true)}
+          onClick={() => fetchAudit(mode, true)}
           size="small"
           variant="outlined"
         >
@@ -287,9 +472,10 @@ export const GovernanceAuditTrail = ({
 
   return (
     <Box>
-      {entries.length === 0 ? (
+      {modeToggle}
+      {rows.length === 0 ? (
         <Typography variant="body2" color="text.secondary" sx={{ py: 2 }}>
-          No on-chain governance events found for this party.
+          {EMPTY_MESSAGE[mode]}
         </Typography>
       ) : (
         <Box sx={{ position: "relative" }}>
@@ -327,25 +513,26 @@ export const GovernanceAuditTrail = ({
                 <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>Time</TableCell>
                 <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>Event</TableCell>
                 <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>Action</TableCell>
-                <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>Type</TableCell>
                 <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>
-                  Contract
+                  {isLocal ? "Status" : "Type"}
+                </TableCell>
+                <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>
+                  {isLocal ? "Member party" : "Contract"}
                 </TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
-              {sortedEntries.map((entry, idx) => {
-                const rowKey = `${entry.offset}-${entry.contract_id}`;
-                const isExpanded = expandedRow === rowKey;
+              {sortedRows.map((row, idx) => {
+                const isExpanded = expandedRow === row.key;
                 return (
-                  <Fragment key={rowKey}>
+                  <Fragment key={row.key}>
                     <TableRow sx={zebraRow(idx)}>
                       <TableCell sx={{ py: 0.5 }}>
                         <Tooltip title={isExpanded ? "Hide details" : "Show details"}>
                           <IconButton
                             size="small"
                             onClick={() =>
-                              setExpandedRow(isExpanded ? null : rowKey)
+                              setExpandedRow(isExpanded ? null : row.key)
                             }
                           >
                             {isExpanded ? (
@@ -359,19 +546,19 @@ export const GovernanceAuditTrail = ({
                       <TableCell
                         sx={{ py: 1, fontSize: "0.8rem", whiteSpace: "nowrap" }}
                       >
-                        {entry.timestamp > 0
-                          ? formatTimestamp(entry.timestamp)
+                        {row.timestamp > 0
+                          ? formatTimestamp(row.timestamp)
                           : "—"}
                       </TableCell>
                       <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>
                         <Chip
-                          label={entry.event_type}
+                          label={row.eventType}
                           size="small"
-                          color={eventTypeColor(entry.event_type)}
+                          color={eventTypeColor(row.eventType)}
                         />
                       </TableCell>
                       <TableCell sx={{ py: 1, maxWidth: 320 }}>
-                        <Tooltip title={entry.action_summary}>
+                        <Tooltip title={row.action}>
                           <Typography
                             variant="body2"
                             sx={{
@@ -382,18 +569,27 @@ export const GovernanceAuditTrail = ({
                               textOverflow: "ellipsis",
                             }}
                           >
-                            {entry.action_summary}
+                            {row.action}
                           </Typography>
                         </Tooltip>
                       </TableCell>
                       <TableCell
                         sx={{ py: 1, fontSize: "0.8rem", whiteSpace: "nowrap" }}
                       >
-                        {entry.governance_type}
+                        {row.metaTone ? (
+                          <Chip
+                            label={row.meta}
+                            size="small"
+                            color={row.metaTone}
+                            variant="outlined"
+                          />
+                        ) : (
+                          row.meta
+                        )}
                       </TableCell>
                       <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>
                         <CopyableText
-                          text={entry.contract_id}
+                          text={row.ident}
                           truncate={{ start: 8, end: 8 }}
                           variant="caption"
                         />
@@ -406,44 +602,26 @@ export const GovernanceAuditTrail = ({
                       >
                         <Collapse in={isExpanded} timeout="auto" unmountOnExit>
                           <Box sx={{ p: 2, overflow: "hidden" }}>
-                            <Typography
-                              variant="caption"
-                              color="text.secondary"
-                              component="div"
-                            >
-                              Template: {entry.template_id}
-                            </Typography>
-                            <Typography
-                              variant="caption"
-                              color="text.secondary"
-                              component="div"
-                            >
-                              Package: {entry.package_id}
-                            </Typography>
-                            <Typography
-                              variant="caption"
-                              color="text.secondary"
-                              component="div"
-                            >
-                              Acting parties: {entry.acting_parties.join(", ")}
-                            </Typography>
-                            <Typography
-                              variant="caption"
-                              color="text.secondary"
-                              component="div"
-                            >
-                              Update ID: {entry.update_id}
-                            </Typography>
-                            {entry.choice && (
+                            {row.facts.map(([label, value]) => (
                               <Typography
+                                key={label}
                                 variant="caption"
                                 color="text.secondary"
                                 component="div"
                               >
-                                Choice: {entry.choice}
+                                {label}: {value}
+                              </Typography>
+                            ))}
+                            {row.error && (
+                              <Typography
+                                variant="caption"
+                                color="error"
+                                component="div"
+                              >
+                                Error: {row.error}
                               </Typography>
                             )}
-                            {entry.details != null && Object.keys(entry.details).length > 0 && <Box
+                            {row.details != null && Object.keys(row.details).length > 0 && <Box
                               sx={{
                                 mt: 1,
                                 p: 1.5,
@@ -457,10 +635,10 @@ export const GovernanceAuditTrail = ({
                               }}
                             >
                               <Box sx={{ position: "absolute", top: 4, right: 4, zIndex: 1 }}>
-                                <CopyButton data={entry.details} label="Copy JSON" />
+                                <CopyButton data={row.details} label="Copy JSON" />
                               </Box>
                               <JSONTree
-                                data={entry.details}
+                                data={row.details}
                                 theme={jsonTreeTheme}
                                 invertTheme={false}
                                 hideRoot
@@ -507,7 +685,7 @@ export const GovernanceAuditTrail = ({
       )}
       <CursorPagination
         page={page}
-        hasNext={nextCursor !== null}
+        hasNext={hasNext}
         disabled={loading}
         onPrev={goToPrevPage}
         onNext={goToNextPage}
