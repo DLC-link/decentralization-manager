@@ -41,8 +41,7 @@ use crate::{
         types::{
             ActionType, ActiveCouponReassignmentDelegation, AuditLogEntry, AuditLogQuery,
             AuditLogResponse, AuditScope, CancelConfirmationRequest, CancelProposalRequest,
-            ChainAuditEntry,
-            ChainAuditQuery, ChainAuditResponse, ConfirmActionRequest,
+            ChainAuditEntry, ChainAuditQuery, ChainAuditResponse, ConfirmActionRequest,
             CouponReassignmentDelegationSummary, ErrorResponse, ExecuteActionRequest,
             ExpireConfirmationRequest, GovernanceResponse, GovernanceStateResponse, GovernanceType,
             KnownMember, KnownMembersResponse, MessageResponse, ProposalType, ProposeActionRequest,
