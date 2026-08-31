@@ -1033,11 +1033,19 @@ pub async fn propose_action(
 /// Also runs the action's own field validation (thresholds, timeouts) so a
 /// malformed value surfaces as a 400 rather than a generic ledger submission
 /// error.
+///
+/// Scoped to `core_self` deliberately. `core_domain` builds its choice from
+/// `proposal_cid` and ignores `action` entirely, so both clients send a
+/// deliberate `governance_set_threshold: 0` placeholder there for payload
+/// symmetry — validating it would 400 every domain confirm and execute.
 fn validate_inline_action(
     action: &ActionType,
     governance_type: GovernanceType,
 ) -> Result<(), String> {
-    if matches!(governance_type, GovernanceType::CoreSelf) && !action.is_governance_self_action() {
+    if !matches!(governance_type, GovernanceType::CoreSelf) {
+        return Ok(());
+    }
+    if !action.is_governance_self_action() {
         return Err(format!(
             "action '{}' is not a governance self-management action; submit it as a domain \
              proposal via POST /governance/propose",
@@ -2435,6 +2443,50 @@ mod propose_guard_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `core_domain` builds its choice from `proposal_cid` and never reads
+    /// `action`, so both clients send `governance_set_threshold: 0` as a
+    /// deliberate placeholder (`NotificationsView.tsx`, `app.rs`). The inline
+    /// guard must let it through untouched — validating it would 400 every
+    /// domain confirm and execute.
+    #[test]
+    fn domain_confirms_accept_the_zero_threshold_placeholder() {
+        let placeholder = ActionType::GovernanceSetThreshold { new_threshold: 0 };
+        assert!(
+            validate_inline_action(&placeholder, GovernanceType::CoreDomain).is_ok(),
+            "the core_domain placeholder must not be validated"
+        );
+    }
+
+    /// The same placeholder on the inline path is a real threshold, and 0 is
+    /// not a legal one.
+    #[test]
+    fn self_management_confirms_still_validate_the_threshold() {
+        let bad = ActionType::GovernanceSetThreshold { new_threshold: 0 };
+        match validate_inline_action(&bad, GovernanceType::CoreSelf) {
+            Ok(()) => panic!("new_threshold 0 must not pass core_self validation"),
+            Err(error) => assert!(
+                error.contains("at least 1"),
+                "error should name the bound: {error}"
+            ),
+        }
+    }
+
+    /// A non-self-management action paired with `core_self` is a client error,
+    /// caught before it reaches the serializer that cannot encode it.
+    #[test]
+    fn self_management_confirms_reject_a_domain_action() {
+        let action = ActionType::DevNetFeatureApp {
+            amulet_rules_cid: "00amulet".to_owned(),
+        };
+        match validate_inline_action(&action, GovernanceType::CoreSelf) {
+            Ok(()) => panic!("DevNetFeatureApp is not a self-management action"),
+            Err(error) => assert!(
+                error.contains("/governance/propose"),
+                "error should point at the proposal path: {error}"
+            ),
+        }
+    }
 
     fn entry_at(offset: i64) -> ChainAuditEntry {
         ChainAuditEntry {
