@@ -519,11 +519,26 @@ async fn stub_add_hosts_onboard(server: &MockServer, serial: u32) {
 /// A stub source host that serves the party's ACS, and a joiner that accepts it
 /// and reports its marker cleared.
 async fn stub_acs_relay(source: &MockServer, joiner: &MockServer) {
+    let snapshot = b"an-acs-snapshot".to_vec();
+    let total = snapshot.len() as u64;
+
+    Mock::given(method("GET"))
+        .and(wiremock::matchers::path_regex(
+            r"^/v0/tenant/.+/acs-progress$",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "party_id": "alice::1220aa",
+            "received": 0,
+        })))
+        .mount(joiner)
+        .await;
     Mock::given(method("GET"))
         .and(wiremock::matchers::path_regex(r"^/v0/tenant/.+/acs/.+$"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "party_id": "alice::1220aa",
-            "snapshot": STANDARD.encode(b"an-acs-snapshot"),
+            "total_size": total,
+            "offset": 0,
+            "chunk": STANDARD.encode(&snapshot),
             "package_ids": ["pkg-one"],
             "package_preflight": true,
         })))
@@ -533,6 +548,8 @@ async fn stub_acs_relay(source: &MockServer, joiner: &MockServer) {
         .and(path("/v0/tenant/add-hosts/import"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "party_id": "alice::1220aa",
+            "received": total,
+            "complete": true,
             "imported": true,
             "marker_cleared": true,
         })))
@@ -598,10 +615,22 @@ async fn add_hosts_waits_out_a_marker_the_import_did_not_clear() {
     }
     stub_add_hosts_onboard(&p3, 5).await;
     Mock::given(method("GET"))
+        .and(wiremock::matchers::path_regex(
+            r"^/v0/tenant/.+/acs-progress$",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "party_id": "alice::1220aa",
+            "received": 0,
+        })))
+        .mount(&p3)
+        .await;
+    Mock::given(method("GET"))
         .and(wiremock::matchers::path_regex(r"^/v0/tenant/.+/acs/.+$"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "party_id": "alice::1220aa",
-            "snapshot": STANDARD.encode(b"an-acs-snapshot"),
+            "total_size": 15,
+            "offset": 0,
+            "chunk": STANDARD.encode(b"an-acs-snapshot"),
             "package_ids": ["pkg-one"],
             "package_preflight": true,
         })))
@@ -612,6 +641,8 @@ async fn add_hosts_waits_out_a_marker_the_import_did_not_clear() {
         .and(path("/v0/tenant/add-hosts/import"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "party_id": "alice::1220aa",
+            "received": 15,
+            "complete": true,
             "imported": true,
             "marker_cleared": false,
         })))
@@ -657,6 +688,12 @@ async fn add_hosts_falls_back_to_another_source_for_the_acs() {
         .mount(&p1)
         .await;
     stub_acs_relay(&p2, &p3).await;
+    // The joiner's own status, for the marker wait after the import.
+    Mock::given(method("GET"))
+        .and(path("/v0/tenant/alice::1220aa/status"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"status": "completed"})))
+        .mount(&p3)
+        .await;
 
     let key = ExternalKeyPair::from_seed([4u8; 32]);
     let current = vec![host_for(&p1, 1), host_for(&p2, 2)];
