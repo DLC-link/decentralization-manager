@@ -453,7 +453,7 @@ pub async fn add_hosts(
         }
         let snapshot = match source
             .client
-            .acs_snapshot(party_id, &host.participant_id)
+            .acs_snapshot(party_id, &host.participant_id, base_serial)
             .await
         {
             Ok(snapshot) => snapshot,
@@ -468,6 +468,10 @@ pub async fn add_hosts(
         }
         let import = TenantAcsImportRequest {
             party_id: party_id.to_string(),
+            // The same serial the topology write was pinned to. It keys this
+            // replication's staged state, so a target that was removed and
+            // re-added does not inherit the earlier attempt's offsets.
+            base_serial,
             snapshot: snapshot.snapshot,
             package_ids: snapshot.package_ids,
         };
