@@ -42,7 +42,7 @@ The system defaults to a majority threshold for both topology changes and govern
 | Operation | Threshold |
 |-----------|-----------|
 | Topology changes (DNS/P2P) | `ceil(n/2)` of namespace owners must sign by default (bare majority for even `n`); set at creation and adjustable via the change-threshold workflow |
-| Governance actions | Configurable per `GovernanceRules` or `VaultGovernanceRules` contract |
+| Governance actions | Configurable per `GovernanceRules` contract |
 
 ### Key Types
 
@@ -473,8 +473,6 @@ The system is split into the following Daml packages:
 | `governance-utility-onboarding` | Utility-registry onboarding actions and token mint / burn |
 | `governance-utility-credential` | Credential domain: offer/accept free and paid credentials |
 
-A legacy `VaultGovernanceRules` contract (from the `bitsafe-vault-governance` package) is also supported for backward compatibility with existing vault deployments.
-
 ### GovernableAction Interface
 
 The `GovernableAction` interface (from `Governance.Action`) is the single extension point for all domain-specific governance actions. Any Daml template implementing this interface can be governed without modifying the core governance contracts.
@@ -670,93 +668,12 @@ The governance party bootstraps itself as a utility-registry provider and regist
 
 **Prerequisite.** `SetupUtility` consumes an existing `ProviderService` for the governance party. Use `ProvisionProviderService` to create one through the governance flow — direct creation of `ProviderService` via `POST /contracts` or a multi-party daml-script submit fails on Canton when the governance party is externally signed, because `ProviderService` has two signatories (`operator, provider`).
 
-### Legacy: VaultGovernanceRules
-
-The `VaultGovernanceRules` contract (from `BitsafeVault.VaultGovernance`, package `#bitsafe-vault-governance-v0-rc8`) is the original governance primitive used for vault operations. It remains supported for backward compatibility with existing vault deployments.
-
-```
-VaultGovernanceRules {
-    vaultManager : Party            -- The decentralized party
-    members      : [Party]          -- Member parties authorized to vote
-    threshold    : Int              -- Minimum confirmations required
-    actionConfirmationTimeout : Optional RelTime  -- Auto-expiry for stale confirmations
-}
-```
-
-Unlike the modular `GovernanceRules`, `VaultGovernanceRules` uses a monolithic design where all action types are encoded as variants of a closed `ActionRequiringConfirmation` enum. Confirmations are matched by value equality rather than `ContractId`.
-
-Choices on `VaultGovernanceRules`:
-- `VaultGovernanceRules_ConfirmAction` -- Submit a confirmation for an action
-- `VaultGovernanceRules_ExecuteConfirmedAction` -- Execute when threshold is met
-- `VaultGovernanceRules_ExpireConfirmation` -- Remove a stale confirmation
-
-#### Vault Action Types
-
-The vault governance system supports 21 action types across 7 categories:
-
-**Governance (6 actions):**
-
-| Action | Parameters | Description |
-|--------|------------|-------------|
-| `GovernanceAddMember` | member, new_threshold | Add a new governance member |
-| `GovernanceRemoveMember` | member, new_threshold | Remove a governance member |
-| `GovernanceSetThreshold` | new_threshold | Change the approval threshold |
-| `GovernanceSetTimeout` | new_timeout_microseconds | Set confirmation expiry timeout |
-| `GovernanceAddAdditionalProposer` | additional_proposer | Grant propose-only rights to a non-member party |
-| `GovernanceRemoveAdditionalProposer` | additional_proposer | Revoke propose-only rights from a party |
-
-**Vault Deployment (2 actions):**
-
-| Action | Parameters | Description |
-|--------|------------|-------------|
-| `VaultDeployment` | vault_rules_cid, vault_name, share_symbol, asset_instrument_id, limits, vault_backend_signatory, vault_far_config, allocation_factory_cid, registrar_service_cid | Deploy a new BitsafeVault |
-| `YieldEpochDeployment` | vault_rules_cid, vault_cid, asset_instrument_id, vault_backend_signatory | Deploy a yield epoch |
-
-**Vault Operations (5 actions):**
-
-| Action | Parameters | Description |
-|--------|------------|-------------|
-| `VaultPause` | vault_id | Pause vault operations |
-| `VaultUnpause` | vault_id | Resume vault operations |
-| `VaultUpdateLimits` | vault_id, new_limits | Update deposit/withdrawal limits |
-| `VaultUpdateBackend` | vault_id, new_backend_signatory | Change backend signatory |
-| `VaultUpdateFarBeneficiaries` | vault_id, new_beneficiaries | Update FAR reward distribution |
-
-**Processor (1 action):**
-
-| Action | Parameters | Description |
-|--------|------------|-------------|
-| `ProcessorDeploymentRequest` | vault_processor_rules_cid, vault_backend_signatory, allocation_factory_cid, processor_far_config, initial_supported_vaults | Deploy a vault processor |
-
-**Utility Onboarding (4 actions):**
-
-| Action | Parameters | Description |
-|--------|------------|-------------|
-| `UtilityCreateProviderRequest` | operator | Create a ProviderService |
-| `UtilityCreateUserRequest` | operator | Create a UserService |
-| `UtilitySetup` | operator, provider_service_cid, user_service_cid | Link provider and user services |
-| `UtilityAcceptHolderServiceRequest` | operator, provider_service_cid, holder_service_request_cid, holder | Accept a holder service request |
-
-**Credentials (2 actions):**
-
-| Action | Parameters | Description |
-|--------|------------|-------------|
-| `CredentialOfferFree` | operator, user_service_cid, holder, id, description, claims | Offer a free credential |
-| `CredentialAcceptFree` | operator, user_service_cid, credential_offer_cid | Accept a free credential |
-
-**DevNet (1 action):**
-
-| Action | Parameters | Description |
-|--------|------------|-------------|
-| `DevNetFeatureApp` | amulet_rules_cid | Register as featured app in Amulet ecosystem |
-
 ### Featured App Rewards (FAR)
 
-FAR is a reward distribution mechanism for featured application participants in the Amulet ecosystem:
+FAR is a reward distribution mechanism for featured application participants in the Amulet ecosystem. The beneficiaries live on the governance party's `InstrumentConfiguration`:
 
 ```json
 {
-    "featured_app_right_cid": "<contract-id>",
     "beneficiaries": [
         { "beneficiary": "party::1220abc...", "weight": "0.50" },
         { "beneficiary": "party::1220def...", "weight": "0.30" },
@@ -765,10 +682,7 @@ FAR is a reward distribution mechanism for featured application participants in 
 }
 ```
 
-FAR configuration is used in:
-- `VaultDeployment` -- initial FAR setup for a new vault
-- `ProcessorDeploymentRequest` -- FAR for processor rewards
-- `VaultUpdateFarBeneficiaries` -- update beneficiaries and weights for an existing vault
+Weights are decimal strings and must sum to exactly 1.0; `SetProviderAppRewardBeneficiaries` is the governance proposal that sets or clears them. `DevNetFeatureApp` registers the party as a featured app on DevNet, which is the prerequisite for holding the `FeaturedAppRight` the rewards are paid against.
 
 ## Technical Constraints
 
@@ -815,8 +729,6 @@ The system depends on the following Daml packages:
 | `#governance-token-custody-<version>` | TransferProposal, AcceptTransferProposal, preapproval proposals |
 | `#governance-utility-onboarding-<version>` | SetupUtility, six granular onboarding proposals, MintProposal, BurnProposal |
 | `#governance-utility-credential-<version>` | Credential domain: offer/accept free and paid credentials |
-| `#bitsafe-vault-governance-v0-rc8` | Legacy VaultGovernanceRules contract templates |
-| `#bitsafe-vault-v0-rc8` | VaultRules and Vault contract templates |
 | `#utility-registry-app-v0` | ProviderService, UserService, AllocationFactory |
 | `#utility-credential-app-v0` | Credential offer/accept templates |
 | `#utility-commercials-v0` | DelegatedBatchedMarkersProxy (required by `CreateDelegatedBatchedMarkersProxy`) |

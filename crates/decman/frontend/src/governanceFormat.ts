@@ -6,7 +6,7 @@ export interface ActionTypeOption {
   hidden?: boolean;
 }
 
-// Action types — ordered per GOVERNANCE_CLIENT_MIGRATION.md vault launch sequence.
+// Action types — ordered per GOVERNANCE_CLIENT_MIGRATION.md launch sequence.
 // Hidden entries are kept for type safety and display of existing actions.
 export const getActionTypeOptions = (network?: Network): ActionTypeOption[] => [
   // Step 1: Utility Registry Onboarding
@@ -16,17 +16,11 @@ export const getActionTypeOptions = (network?: Network): ActionTypeOption[] => [
   },
   { value: "utility_create_user_request", label: "Create User Service" },
   { value: "utility_setup", label: "Setup Utility" },
-  // Feature App (needed before vault deployment for FAR config, devnet only)
+  // Feature App (needed before FAR config, devnet only)
   {
     value: "dev_net_feature_app",
     label: "DevNet: Feature App",
     hidden: network !== "devnet",
-  },
-  { value: "vault_deployment", label: "Deploy Vault" },
-  { value: "yield_epoch_deployment", label: "Deploy YieldEpoch" },
-  {
-    value: "processor_deployment_request",
-    label: "Request Processor Deployment",
   },
   {
     value: "utility_accept_holder_service_request",
@@ -51,19 +45,6 @@ export const getActionTypeOptions = (network?: Network): ActionTypeOption[] => [
   {
     value: "governance_set_timeout",
     label: "Set Governance Timeout",
-    hidden: true,
-  },
-  { value: "vault_pause", label: "Pause Vault" },
-  { value: "vault_unpause", label: "Unpause Vault" },
-  { value: "vault_update_limits", label: "Update Vault Limits", hidden: true },
-  {
-    value: "vault_update_backend",
-    label: "Update Vault Backend",
-    hidden: true,
-  },
-  {
-    value: "vault_update_far_beneficiaries",
-    label: "Update FAR Beneficiaries",
     hidden: true,
   },
   {
@@ -154,34 +135,6 @@ export const formatActionDetails = (
           after: formatMicroseconds(action.new_timeout_microseconds),
         },
       ];
-    case "vault_pause":
-    case "vault_unpause":
-      return [{ label: "Vault", after: truncatePartyId(action.vault_id) }];
-    case "vault_update_backend":
-      return [
-        { label: "Vault", after: truncatePartyId(action.vault_id) },
-        {
-          label: "Backend",
-          after: truncatePartyId(action.new_backend_signatory),
-        },
-      ];
-    case "vault_update_far_beneficiaries":
-      return [
-        { label: "Vault", after: truncatePartyId(action.vault_id) },
-        {
-          label: "Beneficiaries",
-          after: `${action.new_beneficiaries.length} entr${action.new_beneficiaries.length === 1 ? "y" : "ies"}`,
-        },
-      ];
-    case "vault_update_limits":
-      return [{ label: "Vault", after: truncatePartyId(action.vault_id) }];
-    case "vault_deployment":
-      return [
-        { label: "Name", after: action.vault_name },
-        { label: "Symbol", after: action.share_symbol },
-      ];
-    case "yield_epoch_deployment":
-      return [{ label: "Vault", after: truncatePartyId(action.vault_cid) }];
     case "credential_offer_free":
       return [
         { label: "Holder", after: truncatePartyId(action.holder) },

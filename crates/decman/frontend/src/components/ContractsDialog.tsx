@@ -32,7 +32,6 @@ import AccountBalanceIcon from "@mui/icons-material/AccountBalance";
 import GavelIcon from "@mui/icons-material/Gavel";
 import HandymanIcon from "@mui/icons-material/Handyman";
 import LockIcon from "@mui/icons-material/Lock";
-import StorageIcon from "@mui/icons-material/Storage";
 import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
 import { useSnackbar } from "../contexts";
@@ -59,7 +58,7 @@ interface ContractsDialogProps {
   vettedPackages?: VettedPackageInfo[];
 }
 
-type ContractType = "governance-core" | "cbtc" | "vault" | null;
+type ContractType = "governance-core" | "cbtc" | null;
 
 const FIELD_TYPES = [
   { value: "decentralized_party", label: "Dec. Party" },
@@ -214,32 +213,6 @@ const getCbtcContracts = (): ContractDefinition[] => [
   },
 ];
 
-// Vault contract definitions
-const getVaultContracts = (
-  participantCount: number = 3,
-  vaultGovernancePkg: string = "",
-): ContractDefinition[] => {
-  const defaultThreshold = Math.max(2, Math.ceil((participantCount * 2) / 3));
-  return [
-    {
-      id: "create-vault-governance-rules",
-      name: "VaultGovernanceRules",
-      package_id: vaultGovernancePkg,
-      module_name: "BitsafeVault.VaultGovernance",
-      entity_name: "VaultGovernanceRules",
-      fields: [
-        { type: "decentralized_party" }, // vaultManager : Party
-        { type: "party_set", parties: [] }, // members : Set Party - add parties manually
-        { type: "governance_threshold", value: defaultThreshold }, // threshold : Int
-        {
-          type: "optional",
-          inner: { type: "rel_time", microseconds: 86400000000 },
-        }, // actionConfirmationTimeout : Optional RelTime (24 hours)
-      ],
-    },
-  ];
-};
-
 const getContractsForType = (
   type: ContractType,
   participantCount: number = 3,
@@ -253,11 +226,6 @@ const getContractsForType = (
       );
     case "cbtc":
       return getCbtcContracts();
-    case "vault":
-      return getVaultContracts(
-        participantCount,
-        packages?.vault_governance ?? "",
-      );
     default:
       return [];
   }
@@ -1229,17 +1197,6 @@ const ContractTypeSelection = ({
             />
             <PluginCard
               icon={
-                <StorageIcon
-                  sx={{ fontSize: 48, color: "primary.main", mb: 1 }}
-                />
-              }
-              label="Vault"
-              description="Pooled custody with yield and share accounting"
-              onClick={() => onSelect("vault")}
-              tooltip="Coming soon"
-            />
-            <PluginCard
-              icon={
                 <HandymanIcon
                   sx={{ fontSize: 48, color: "primary.main", mb: 1 }}
                 />
@@ -1338,8 +1295,6 @@ export const ContractsDialog = ({
   const allPackageIds = useMemo(() => {
     const ids = new Set(knownPackageIds);
     if (packages.governance_core) ids.add(packages.governance_core);
-    if (packages.vault_governance) ids.add(packages.vault_governance);
-    if (packages.vault) ids.add(packages.vault);
     if (packages.utility_registry) ids.add(packages.utility_registry);
     if (packages.utility_credential) ids.add(packages.utility_credential);
     if (packages.utility_credential_app) ids.add(packages.utility_credential_app);
@@ -1476,18 +1431,13 @@ export const ContractsDialog = ({
     setError(null);
 
     // Validate required fields
-    if (
-      contractType !== "vault" &&
-      contractType !== "governance-core" &&
-      !operatorParty
-    ) {
+    if (contractType !== "governance-core" && !operatorParty) {
       setError("Operator party ID is required");
       setLoading(false);
       return;
     }
 
     if (
-      contractType !== "vault" &&
       contractType !== "governance-core" &&
       participantParties.length !== participantIds.length
     ) {
@@ -1576,8 +1526,7 @@ export const ContractsDialog = ({
     if (!contractType)
       return isGovernanceCoreDeployed ? "Plugin Manager" : "Deploy Contracts";
     if (contractType === "governance-core") return "Deploy Governance Core";
-    if (contractType === "cbtc") return "Deploy CBTC Contracts";
-    return "Deploy Vault Contracts";
+    return "Deploy CBTC Contracts";
   };
 
   return (
@@ -1638,18 +1587,16 @@ export const ContractsDialog = ({
                 submissions. Make sure DARs have been uploaded first.
               </Typography>
 
-              {contractType !== "vault" &&
-                contractType !== "governance-core" && (
-                  <>
-                    <Divider />
-                    <Typography variant="subtitle1">
-                      Party Configuration
-                    </Typography>
-                  </>
-                )}
+              {contractType !== "governance-core" && (
+                <>
+                  <Divider />
+                  <Typography variant="subtitle1">
+                    Party Configuration
+                  </Typography>
+                </>
+              )}
 
-              {contractType !== "vault" &&
-                contractType !== "governance-core" && (
+              {contractType !== "governance-core" && (
                   <TextField
                     size="small"
                     label="Operator Party ID"

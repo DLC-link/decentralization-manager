@@ -226,20 +226,12 @@ export const PartyDetail = ({
   const contractsScrollRef = useRef<HTMLDivElement>(null);
 
   const isGovRulesContract = (template_id: string) =>
-    template_id.includes("VaultGovernanceRules") ||
-    template_id.includes("VaultGovernance") ||
     template_id === "Governance.Rules:GovernanceRules";
 
   const governanceContracts =
     party.contracts?.filter((c) => isGovRulesContract(c.template_id)) ?? [];
   const rulesContract = governanceContracts[0];
-  const governanceTypeFor = (template_id: string) =>
-    template_id === "Governance.Rules:GovernanceRules"
-      ? ("core_self" as const)
-      : ("vault" as const);
-  const governanceType = rulesContract
-    ? governanceTypeFor(rulesContract.template_id)
-    : ("vault" as const);
+  const governanceType = "core_self" as const;
 
   const editingContract =
     editGovContractId != null
@@ -555,7 +547,7 @@ export const PartyDetail = ({
           title="Contracts"
           expanded={contractsExpanded}
           onToggle={() => setContractsExpanded(!contractsExpanded)}
-          helpText="Daml contracts associated with the party — typically governance rules, vaults, registrar services, etc."
+          helpText="Daml contracts associated with the party — typically governance rules, registrar services, etc."
           badge={
             <Chip label={party.contracts.length} size="small" sx={{ ml: 1 }} />
           }
@@ -813,7 +805,7 @@ export const PartyDetail = ({
           rulesContractId={editingContract.contract_id}
           defaultOperatorParty={operatorParty}
           network={network}
-          governanceType={governanceTypeFor(editingContract.template_id)}
+          governanceType={governanceType}
           onAfterAction={() => {
             setGovernanceRefreshNonce((n) => n + 1);
             onNavigateToNotifications();

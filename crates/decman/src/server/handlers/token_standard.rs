@@ -1,6 +1,6 @@
 //! Read-only token-standard, registry, and network-proxy endpoints.
 //!
-//! Split out of `governance.rs` (#282): these handlers query vaults,
+//! Split out of `governance.rs` (#282): these handlers query
 //! services, credentials, transfer instructions/factories, holdings,
 //! instruments, generic contracts, package configuration, and the DSO
 //! network/operator proxies. They share nothing with the propose -> confirm
@@ -24,7 +24,7 @@ use crate::{
             get_holdings, get_instruments, get_open_burn_requests, get_open_mint_requests,
             get_open_transfer_instructions, get_provider_configurations, get_provider_services,
             get_registrar_service_requests, get_registrar_services, get_transfer_factories,
-            get_user_services, get_vaults, query_contracts_by_template,
+            get_user_services, query_contracts_by_template,
         },
         types::{
             BurnRequestsResponse, ContractQueryResponse, CredentialOffersResponse,
@@ -32,7 +32,7 @@ use crate::{
             MintRequestsResponse, NetworkInfo, OperatorInfo, ProviderConfigurationsResponse,
             ProviderServicesResponse, RegistrarServiceRequestsResponse, RegistrarServicesResponse,
             TransferFactoriesResponse, TransferFactoryInfo, TransferInstructionsResponse,
-            TransferPreapprovalsResponse, UserServicesResponse, VaultsResponse,
+            TransferPreapprovalsResponse, UserServicesResponse,
         },
     },
 };
@@ -59,36 +59,6 @@ pub struct ContractQueryParams {
     /// without an `executeBefore` field.
     #[serde(default)]
     pub active_only: bool,
-}
-
-/// Get deployed Vault contracts
-#[utoipa::path(
-    tag = "Services",
-    params(GovernanceQuery),
-    responses(
-        (status = 200, description = "Deployed vaults", body = VaultsResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
-    )
-)]
-#[get("/vaults")]
-pub async fn get_vaults_handler(
-    data: web::Data<AppState>,
-    query: web::Query<GovernanceQuery>,
-) -> impl Responder {
-    let party_id = &query.party_id;
-
-    let token = get_party_token(&data, party_id).await;
-    let packages = packages();
-
-    match get_vaults(&data.config, party_id, token, &packages).await {
-        Ok(vaults) => HttpResponse::Ok().json(VaultsResponse { vaults }),
-        Err(e) => {
-            tracing::error!("Failed to fetch vaults: {e}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch vaults: {e}"),
-            })
-        }
-    }
 }
 
 /// Get ProviderService contracts

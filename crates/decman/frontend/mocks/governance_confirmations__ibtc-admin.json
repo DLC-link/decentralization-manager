@@ -7,7 +7,7 @@
       "action_hash": "c02c0b965e023abee808f2b548d8d5193a8b5229be6f3121a6f16e2d41a449b3",
       "action": {
         "type": "governance_add_member",
-        "member": "vault-yield-btc::1220425311ae37972f78e3781dcd68f64665f39e3b55688ffc060f062f0d2670",
+        "member": "yield-btc::1220425311ae37972f78e3781dcd68f64665f39e3b55688ffc060f062f0d2670",
         "new_threshold": 4
       },
       "confirmations": [
@@ -15,7 +15,7 @@
           "contract_id": "006141c7551141fc116abdfd041ce2dc06fc989908289728a66690274e1c252d5f",
           "action": {
             "type": "governance_add_member",
-            "member": "vault-yield-btc::1220425311ae37972f78e3781dcd68f64665f39e3b55688ffc060f062f0d2670",
+            "member": "yield-btc::1220425311ae37972f78e3781dcd68f64665f39e3b55688ffc060f062f0d2670",
             "new_threshold": 4
           },
           "confirming_party": "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78",
@@ -26,7 +26,7 @@
           "contract_id": "002dac1d7e654634908a142097ed6ec4289205fc4bc6b626838cd98919d5b02d7b",
           "action": {
             "type": "governance_add_member",
-            "member": "vault-yield-btc::1220425311ae37972f78e3781dcd68f64665f39e3b55688ffc060f062f0d2670",
+            "member": "yield-btc::1220425311ae37972f78e3781dcd68f64665f39e3b55688ffc060f062f0d2670",
             "new_threshold": 4
           },
           "confirming_party": "ibtc-admin::12209688b4410a59414d40a2a541644d22ac9e85a7f9438545749f65965a495f",
@@ -71,7 +71,7 @@
             "type": "governance_set_threshold",
             "new_threshold": 3
           },
-          "confirming_party": "vault-rc7-2::1220fb3be8c3236d9258e9e1f25fc5d1a924cd368f7346a7a7ff4a82dd3eba54",
+          "confirming_party": "treasury-rc7-2::1220fb3be8c3236d9258e9e1f25fc5d1a924cd368f7346a7a7ff4a82dd3eba54",
           "created_at": 1782124323,
           "expires_at": 1782214323
         }

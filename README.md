@@ -20,7 +20,7 @@ A web application for managing decentralized parties in Canton blockchain networ
 - [User Guide](USER_GUIDE.md) -- Walkthrough of the web UI for day-to-day party and governance operations
 - [Custom Daml Templates](docs/CUSTOM_DAML_TEMPLATES.md) -- Authoring and deploying your own Daml governance templates
 - [Deployment Guide](docs/DEPLOYMENT_GUIDE.md) -- Deploying a node to Kubernetes from scratch: manifests, identity-provider setup, and configuration reference
-- [Use Cases](docs/USE_CASES.md) -- Vault governance, FAR rewards, multi-sig wallet, and utility service walkthroughs
+- [Use Cases](docs/USE_CASES.md) -- Joint custody governance, FAR rewards, multi-sig wallet, and utility service walkthroughs
 - [Contributing Guide](docs/CONTRIBUTING.md) -- Development setup, coding standards, commit conventions, and the PR process
 
 ## Architecture
@@ -428,12 +428,11 @@ The table below is a curated subset. A complete, interactive API reference is av
 | `/auth/status` | GET | Returns authentication status for configured parties |
 | `/auth/test` | POST | Tests outbound IdP authentication (Keycloak or Auth0, per party) |
 | `/governance/confirmations` | GET | Returns governance confirmations grouped by action |
-| `/governance/state` | GET | Returns governance state (VaultGovernanceRules) |
+| `/governance/state` | GET | Returns governance state (GovernanceRules) |
 | `/governance/confirm` | POST | Submits a governance confirmation |
 | `/governance/execute` | POST | Executes a confirmed governance action |
 | `/governance/expire` | POST | Expires a stale governance confirmation |
 | `/governance/cancel` | POST | Cancels a governance confirmation |
-| `/vaults` | GET | Returns deployed Vault contracts |
 | `/services/provider` | GET | Returns ProviderService contracts |
 | `/services/user` | GET | Returns UserService contracts |
 | `/services/registrar` | GET | Returns RegistrarService contracts |

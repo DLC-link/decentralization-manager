@@ -48,7 +48,7 @@ use super::{
         PendingAction, ProviderConfigurationInfo, ProviderServiceInfo, RegistrarServiceInfo,
         RegistrarServiceRequestInfo, ServiceRequestDetails, TokenRequestInfo, TransferFactoryInfo,
         TransferInstructionInfo, TransferInstructionStatus, TransferProposalDetails,
-        UserServiceInfo, VaultInfo,
+        UserServiceInfo,
     },
 };
 
@@ -98,14 +98,6 @@ fn contract_templates(packages: &PackageConfig) -> Vec<TemplateId> {
             entity_name: "GovernanceRules",
         });
     }
-    // Vault contracts (configurable package ID)
-    if let Some(ref pkg) = packages.vault_governance {
-        templates.push(TemplateId {
-            package_id: pkg.clone(),
-            module_name: "BitsafeVault.VaultGovernance",
-            entity_name: "VaultGovernanceRules",
-        });
-    }
     // Utility-Registry offer contracts produced by AllocationFactory_OfferMint /
     // AllocationFactory_OfferBurn (used by the utility-onboarding plugin).
     if let Some(ref pkg) = packages.utility_registry {
@@ -127,13 +119,6 @@ fn contract_templates(packages: &PackageConfig) -> Vec<TemplateId> {
 /// Each template is queried separately to handle cases where packages may not exist
 fn governance_templates(packages: &PackageConfig) -> Vec<TemplateId> {
     let mut templates = Vec::new();
-    if let Some(ref pkg) = packages.vault_governance {
-        templates.push(TemplateId {
-            package_id: pkg.clone(),
-            module_name: "BitsafeVault.VaultGovernance",
-            entity_name: "VaultGovernanceConfirmation",
-        });
-    }
     templates.push(TemplateId {
         package_id: "#cbtc-governance".to_string(),
         module_name: "CBTC.Governance",
@@ -154,16 +139,9 @@ fn governance_templates(packages: &PackageConfig) -> Vec<TemplateId> {
     templates
 }
 
-/// Governance state template identifiers (tries both vault and core)
+/// Governance state template identifiers
 fn governance_state_templates(packages: &PackageConfig) -> Vec<TemplateId> {
     let mut templates = Vec::new();
-    if let Some(ref pkg) = packages.vault_governance {
-        templates.push(TemplateId {
-            package_id: pkg.clone(),
-            module_name: "BitsafeVault.VaultGovernance",
-            entity_name: "VaultGovernanceRules",
-        });
-    }
     if let Some(ref pkg) = packages.governance_core {
         templates.push(TemplateId {
             package_id: pkg.clone(),
@@ -172,15 +150,6 @@ fn governance_state_templates(packages: &PackageConfig) -> Vec<TemplateId> {
         });
     }
     templates
-}
-
-/// Vault template identifier
-fn vault_template(packages: &PackageConfig) -> Option<TemplateId> {
-    packages.vault.as_ref().map(|pkg| TemplateId {
-        package_id: pkg.clone(),
-        module_name: "BitsafeVault.Vault",
-        entity_name: "Vault",
-    })
 }
 
 /// ProviderService template identifier
@@ -576,7 +545,7 @@ pub async fn get_governance_confirmations(
     token: Option<String>,
     packages: &PackageConfig,
 ) -> Result<(Vec<GovernanceAction>, Vec<DomainGovernanceAction>)> {
-    // Collect confirmations grouped by action hash (vault + core self-management)
+    // Collect confirmations grouped by action hash (core self-management)
     let mut confirmations_by_hash: HashMap<String, (ActionType, Vec<GovernanceConfirmation>)> =
         HashMap::new();
     // Collect domain confirmations grouped by proposal CID (core domain actions)
@@ -861,14 +830,14 @@ fn extract_and_add_confirmation(
         return;
     };
 
-    // Extract action field (this is a Variant for VaultGovernance)
+    // Extract action field (a Variant)
     let action_value = record.fields.iter().find(|f| f.label == "action");
     let Some(action_field) = action_value.and_then(|f| f.value.as_ref()) else {
         tracing::warn!("No action field found in confirmation contract");
         return;
     };
 
-    // Try to parse the action (vault ActionRequiringConfirmation or core GovernanceSelfAction)
+    // Try to parse the action (ActionRequiringConfirmation or GovernanceSelfAction)
     let action = match action_serializer::deserialize_action(action_field) {
         Ok(a) => a,
         Err(_) => match action_serializer::deserialize_self_action(action_field) {
@@ -885,7 +854,7 @@ fn extract_and_add_confirmation(
     // garbage upstream (the old code used "unknown") makes the consumer
     // fragile.
     // Two names for one field across templates: governance-core's
-    // `GovernanceConfirmation` calls it `confirmer`, the vault path
+    // `GovernanceConfirmation` calls it `confirmer`, the cbtc path
     // `confirmingParty`. No template declares both, so the fallback only ever
     // picks the one that is there. It differs from a single find-either-label
     // only for a record carrying both with the first malformed, which the
@@ -1366,14 +1335,14 @@ fn compute_action_hash(action: &ActionType) -> String {
 // Governance State Query
 // ============================================================================
 
-/// Get the state of the VaultGovernanceRules contract for a party
+/// Get the state of the GovernanceRules contract for a party
 pub async fn get_governance_state(
     config: &NodeConfig,
     party_id: &CantonId,
     token: Option<String>,
     packages: &PackageConfig,
 ) -> Result<Option<GovernanceState>> {
-    // Try each governance template (vault, core) until we find a match
+    // Try each governance template until we find a match
     for template in governance_state_templates(packages) {
         match fetch_governance_state_for_template(config, party_id, token.clone(), &template).await
         {
@@ -1484,16 +1453,12 @@ async fn fetch_governance_state_for_template(
         .and_then(extract_governance_state))
 }
 
-/// Extract governance state from a VaultGovernanceRules or GovernanceRules created event
+/// Extract governance state from a GovernanceRules created event
 fn extract_governance_state(created: &CreatedEvent) -> Option<GovernanceState> {
     let record = created.create_arguments.as_ref()?;
 
-    // Extract governance party (vaultManager for vault, governanceParty for
-    // core). Same one-field-two-names case as `confirmingParty`/`confirmer`
-    // above: a record carries one or the other, never both.
-    let vault_manager: CantonId = field_party(record, "vaultManager")
-        .or_else(|| field_party(record, "governanceParty"))
-        .and_then(|p| p.parse().ok())?;
+    let governance_party: CantonId =
+        field_party(record, "governanceParty").and_then(|p| p.parse().ok())?;
 
     // Extract members (Set Party - stored as GenMap<Party, Unit> inside a Record)
     let members: Vec<CantonId> = record_field(record, "members")
@@ -1510,14 +1475,14 @@ fn extract_governance_state(created: &CreatedEvent) -> Option<GovernanceState> {
     }
     .unwrap_or(0);
 
-    // Extract actionConfirmationTimeout
-    // VaultGovernanceRules: Optional RelTime; GovernanceRules: RelTime (non-optional)
+    // Extract actionConfirmationTimeout. Older rules contracts wrap it in an
+    // Optional; the current GovernanceRules declares it non-optional.
     let timeout = record_field(record, "actionConfirmationTimeout")
         .and_then(|v| extract_optional_reltime(v).or_else(|| extract_reltime(v)));
 
     Some(GovernanceState {
         contract_id: created.contract_id.clone(),
-        vault_manager,
+        governance_party,
         members,
         threshold,
         action_confirmation_timeout_microseconds: timeout,
@@ -1658,85 +1623,6 @@ fn extract_reltime(sum: &value::Sum) -> Option<i64> {
         value::Sum::Int64(i) => Some(*i),
         _ => None,
     }
-}
-
-// ============================================================================
-// Vault Contracts Query
-// ============================================================================
-
-/// Get all Vault contracts for a party
-pub async fn get_vaults(
-    config: &NodeConfig,
-    party_id: &CantonId,
-    token: Option<String>,
-    packages: &PackageConfig,
-) -> Result<Vec<VaultInfo>> {
-    match vault_template(packages) {
-        Some(template) => fetch_vaults_for_template(config, party_id, token, &template).await,
-        None => Ok(Vec::new()),
-    }
-}
-
-/// Fetch vaults using TemplateFilter
-async fn fetch_vaults_for_template(
-    config: &NodeConfig,
-    party_id: &CantonId,
-    token: Option<String>,
-    template: &TemplateId,
-) -> Result<Vec<VaultInfo>> {
-    let event_format = party_event_format(
-        party_id,
-        vec![template_filter(
-            Identifier {
-                package_id: template.package_id.clone(),
-                module_name: template.module_name.to_string(),
-                entity_name: template.entity_name.to_string(),
-            },
-            false,
-        )],
-        true,
-    );
-
-    fetch_active_contracts_filtered(config, token, event_format, |created| {
-        extract_vault_info(&created)
-    })
-    .await
-}
-
-/// Extract VaultInfo from a Vault created event
-fn extract_vault_info(created: &CreatedEvent) -> Option<VaultInfo> {
-    let record = created.create_arguments.as_ref()?;
-
-    // Extract vaultConfig (Record with name and shareSymbol)
-    let vault_config = field_record(record, "vaultConfig")?;
-
-    let (vault_name, share_symbol) = extract_vault_config(vault_config)?;
-
-    // Extract isPaused (Bool)
-    let is_paused = match record_field(record, "isPaused") {
-        Some(value::Sum::Bool(b)) => Some(*b),
-        _ => None,
-    }
-    .unwrap_or(false);
-
-    // Extract vaultManager (Party)
-    let vault_manager: CantonId =
-        field_party(record, "vaultManager").and_then(|p| p.parse().ok())?;
-
-    Some(VaultInfo {
-        contract_id: created.contract_id.clone(),
-        vault_name,
-        share_symbol,
-        is_paused,
-        vault_manager,
-    })
-}
-
-/// Extract vault name and share symbol from VaultConfig record
-fn extract_vault_config(record: &Record) -> Option<(String, String)> {
-    let name = field_text(record, "name")?;
-    let share_symbol = field_text(record, "shareSymbol")?;
-    Some((name, share_symbol))
 }
 
 // ============================================================================
@@ -3962,14 +3848,14 @@ mod tests {
         // The visibility rule: a package decman has never heard of, whose
         // template names its own fields differently, still gets a card. No
         // allowlist of labels or templates may gate the pending path.
-        let event = governable_action_view_event("VaultPause", "pause the vault");
+        let event = governable_action_view_event("PauseTrading", "pause trading");
         let mut infos = HashMap::new();
         extract_proposal_info(&event, &gov_party()?, &mut infos);
 
         let actions = build_domain_actions(HashMap::new(), infos, true, true, 2, 0);
 
         assert_eq!(actions.len(), 1);
-        assert_eq!(actions[0].action_label, "VaultPause");
+        assert_eq!(actions[0].action_label, "PauseTrading");
         assert_eq!(actions[0].confirmation_count, 0);
 
         Ok(())
@@ -4068,7 +3954,7 @@ mod tests {
         // Seeing a proposal is not governing it. Another package may name our
         // party as an observer while a different governance party controls the
         // action, and Confirm there would be rejected on-ledger.
-        let mut event = governable_action_view_event("VaultPause", "pause the vault");
+        let mut event = governable_action_view_event("PauseTrading", "pause trading");
         if let Some(view) = event
             .interface_views
             .first_mut()

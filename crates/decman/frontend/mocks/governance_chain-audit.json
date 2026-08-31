@@ -24,18 +24,18 @@
       "timestamp": 1782037923,
       "event_type": "CreatedEvent",
       "contract_id": "00837d256f26f731c28b89485251590fb308ea26ca9e71c3b3dcd04752ca76e603",
-      "template_id": "BitsafeVault.VaultRules:VaultRules",
+      "template_id": "CBTC.Governance:CBTCGovernanceRules",
       "package_id": "0e9fc2c91ef3e23b2612c02f9e0655e473dbb548fae325b1dac4917e96e4778d",
-      "governance_type": "vault",
-      "action_summary": "Deploy CBTC Yield Vault",
-      "choice": "Deploy",
+      "governance_type": "cbtc",
+      "action_summary": "Onboard yCBTC instrument",
+      "choice": "OnboardInstrument",
       "acting_parties": [
         "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78",
         "ibtc-admin::12209688b4410a59414d40a2a541644d22ac9e85a7f9438545749f65965a495f"
       ],
       "update_id": "0045f00b8708ba7a2bcb0fbbbeb21312c028f5754c1ed77007515a64424bd63d6a",
       "details": {
-        "vault": "CBTC Yield Vault",
+        "instrument": "yCBTC",
         "symbol": "yCBTC"
       }
     },
@@ -62,9 +62,9 @@
       "timestamp": 1781951523,
       "event_type": "ExercisedEvent",
       "contract_id": "001c01991c8dd10bd7d34e43589a14f71fa63733a252a71d65a205306e514035a6",
-      "template_id": "BitsafeVault.VaultRules:VaultRules",
+      "template_id": "CBTC.Governance:CBTCGovernanceRules",
       "package_id": "0e9fc2c91ef3e23b2612c02f9e0655e473dbb548fae325b1dac4917e96e4778d",
-      "governance_type": "vault",
+      "governance_type": "cbtc",
       "action_summary": "Mint 500.00 CBTC",
       "choice": "Mint",
       "acting_parties": [
@@ -101,17 +101,17 @@
       "timestamp": 1781865123,
       "event_type": "ArchivedEvent",
       "contract_id": "00c202f277f6f788dc65928fa0dbedf19e3a13631194d379eafeacaa01eb16f56d",
-      "template_id": "BitsafeVault.VaultRules:VaultRules",
+      "template_id": "CBTC.Governance:CBTCGovernanceRules",
       "package_id": "0e9fc2c91ef3e23b2612c02f9e0655e473dbb548fae325b1dac4917e96e4778d",
-      "governance_type": "vault",
-      "action_summary": "Pause Delta-Neutral BTC vault",
+      "governance_type": "cbtc",
+      "action_summary": "Pause Delta-Neutral BTC issuance",
       "choice": "Pause",
       "acting_parties": [
         "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
       ],
       "update_id": "00ae166746fb5d4a6784eb05d3b24b225ded019dce3df7a73f46015a036e1eefef",
       "details": {
-        "vault": "Delta-Neutral BTC"
+        "instrument": "Delta-Neutral BTC"
       }
     },
     {
@@ -137,9 +137,9 @@
       "timestamp": 1781778723,
       "event_type": "ExercisedEvent",
       "contract_id": "00a2e50b207385f9c1ddfe9c4ba2be0e1b43e47cd86ed8d0b87f58f9d894fa3ab7",
-      "template_id": "BitsafeVault.VaultRules:VaultRules",
+      "template_id": "CBTC.Governance:CBTCGovernanceRules",
       "package_id": "0e9fc2c91ef3e23b2612c02f9e0655e473dbb548fae325b1dac4917e96e4778d",
-      "governance_type": "vault",
+      "governance_type": "cbtc",
       "action_summary": "Burn 75.00 CBTC",
       "choice": "Burn",
       "acting_parties": [
@@ -210,10 +210,10 @@
       "timestamp": 1781605923,
       "event_type": "ExercisedEvent",
       "contract_id": "0097f5cf217fb8e40fa355ce3a6c8482feada6dfd7292008922fd04220f29b3c43",
-      "template_id": "BitsafeVault.VaultRules:VaultRules",
+      "template_id": "CBTC.Governance:CBTCGovernanceRules",
       "package_id": "0e9fc2c91ef3e23b2612c02f9e0655e473dbb548fae325b1dac4917e96e4778d",
-      "governance_type": "vault",
-      "action_summary": "Update vault limits (max 10,000 CBTC)",
+      "governance_type": "cbtc",
+      "action_summary": "Update issuance limits (max 10,000 CBTC)",
       "choice": "UpdateLimits",
       "acting_parties": [
         "governance-core::1220b49bc40b5fc97a403d844155fd5074d3fb20e98a733ef85473b89831cce5"
@@ -250,7 +250,7 @@
       "package_id": "1c8f8f2792779b51f80291e17eadc0132cc4f1cdf665ec829d1521f701a396c4",
       "governance_type": "core_self",
       "action_summary": "Deploy governance core",
-      "choice": "Deploy",
+      "choice": "OnboardInstrument",
       "acting_parties": [
         "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
       ],

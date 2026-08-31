@@ -37,8 +37,8 @@ pub use common::api::{
     RegistrarServiceRequestInfo, RegistrarServiceRequestsResponse, RegistrarServicesResponse,
     ResponseSource, RightsStatus, SuccessResponse, TenantOnboardRequest, TenantOnboardResponse,
     TenantPrepareRequest, TenantPrepareResponse, TransferFactoriesResponse, TransferFactoryInfo,
-    TransferPreapprovalsResponse, UserServiceInfo, UserServicesResponse, VaultInfo, VaultsResponse,
-    WorkflowResponse, WorkflowRunsResponse, WorkflowStatusResponse,
+    TransferPreapprovalsResponse, UserServiceInfo, UserServicesResponse, WorkflowResponse,
+    WorkflowRunsResponse, WorkflowStatusResponse,
 };
 pub use common::types::{
     AuditLogEntry, AuthConfigResponse, ConnectionStatus, ContractInfo, DecentralizedParty,
@@ -315,24 +315,6 @@ pub type OnboardingResponse = WorkflowResponse;
 // Governance Types (Structured Actions)
 // ============================================================================
 
-/// Vault limits configuration (all fields are optional in Daml)
-#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct VaultLimits {
-    #[schema(value_type = Option<String>)]
-    #[cfg_attr(feature = "typegen", ts(type = "string"))]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_total_deposit: Option<DamlDecimal>,
-    #[schema(value_type = Option<String>)]
-    #[cfg_attr(feature = "typegen", ts(type = "string"))]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub min_deposit_amount: Option<DamlDecimal>,
-    #[schema(value_type = Option<String>)]
-    #[cfg_attr(feature = "typegen", ts(type = "string"))]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub min_withdrawal_amount: Option<DamlDecimal>,
-}
-
 /// Featured App Right beneficiary
 #[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
@@ -353,15 +335,7 @@ pub struct RewardBeneficiary {
     pub percentage: DamlDecimal,
 }
 
-/// Featured App Right configuration
-#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct FarConfig {
-    pub featured_app_right_cid: String,
-    pub beneficiaries: Vec<AppRewardBeneficiary>,
-}
-
-/// Structured action types for Vault governance
+/// Structured action types for decentralized-party governance
 #[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -386,56 +360,6 @@ pub enum ActionType {
     },
     GovernanceRemoveAdditionalProposer {
         additional_proposer: CantonId,
-    },
-
-    // Vault Deployment (2)
-    VaultDeployment {
-        vault_rules_cid: String,
-        vault_name: String,
-        share_symbol: String,
-        asset_instrument_id: InstrumentId,
-        limits: VaultLimits,
-        vault_backend_signatory: CantonId,
-        #[serde(default)]
-        vault_far_config: Option<FarConfig>,
-        allocation_factory_cid: String,
-        registrar_service_cid: String,
-    },
-    YieldEpochDeployment {
-        vault_rules_cid: String,
-        vault_cid: String,
-        asset_instrument_id: InstrumentId,
-        vault_backend_signatory: CantonId,
-    },
-
-    // Vault Operations (5)
-    VaultPause {
-        vault_id: String,
-    },
-    VaultUnpause {
-        vault_id: String,
-    },
-    VaultUpdateLimits {
-        vault_id: String,
-        new_limits: VaultLimits,
-    },
-    VaultUpdateBackend {
-        vault_id: String,
-        new_backend_signatory: CantonId,
-    },
-    VaultUpdateFarBeneficiaries {
-        vault_id: String,
-        new_beneficiaries: Vec<AppRewardBeneficiary>,
-    },
-
-    // Processor (1)
-    ProcessorDeploymentRequest {
-        vault_processor_rules_cid: String,
-        vault_backend_signatory: CantonId,
-        allocation_factory_cid: String,
-        #[serde(default)]
-        processor_far_config: Option<FarConfig>,
-        initial_supported_vaults: Vec<String>,
     },
 
     // Utility Onboarding (4)
@@ -494,17 +418,6 @@ impl ActionType {
             ActionType::GovernanceSetTimeout {
                 new_timeout_microseconds,
             } => validate_timeout(*new_timeout_microseconds),
-            ActionType::VaultDeployment {
-                vault_far_config: Some(far),
-                ..
-            }
-            | ActionType::ProcessorDeploymentRequest {
-                processor_far_config: Some(far),
-                ..
-            } => validate_beneficiary_weights(&far.beneficiaries),
-            ActionType::VaultUpdateFarBeneficiaries {
-                new_beneficiaries, ..
-            } => validate_beneficiary_weights(new_beneficiaries),
             _ => Ok(()),
         }
     }
@@ -1250,7 +1163,7 @@ pub struct GovernanceConfirmation {
 
 /// A single confirmation of a domain-action proposal (governance-core
 /// `Governance.Confirmation`). Unlike [`GovernanceConfirmation`] (which
-/// backs vault / core-self-management confirmations, each carrying its own
+/// backs core-self-management confirmations, each carrying its own
 /// real inline `action`), the on-chain `Confirmation` contract carries no
 /// action at all — only `actionProposalCid` and `actionLabel`, surfaced at
 /// the parent [`DomainGovernanceAction`] level. There is no meaningful
@@ -1301,8 +1214,8 @@ pub struct GovernanceResponse {
     /// The member party ID for the requesting party (used to identify own confirmations)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub member_party_id: Option<CantonId>,
-    /// Current contract id of the active GovernanceRules / VaultGovernanceRules
-    /// contract for this party. The choice exercised when confirming an action
+    /// Current contract id of the active GovernanceRules contract for this
+    /// party. The choice exercised when confirming an action
     /// is consuming, so this id changes after each confirm/execute — clients
     /// should use this field rather than a cached value to avoid
     /// `CONTRACT_NOT_FOUND` on stale ids.
@@ -2110,17 +2023,17 @@ mod tests {
     /// governance-core `Confirmation` contracts) has no real inline action —
     /// only the parent `DomainGovernanceAction.action_label` describes it —
     /// so it must never serialize an `"action"` key at all, placeholder or
-    /// otherwise. The sibling vault/self-management confirmation
+    /// otherwise. The sibling self-management confirmation
     /// (`GovernanceConfirmation`) genuinely does carry its own action and
     /// must keep serializing the real one.
     #[test]
-    fn domain_confirmation_omits_action_vault_confirmation_keeps_it() -> anyhow::Result<()> {
+    fn domain_confirmation_omits_action_self_confirmation_keeps_it() -> anyhow::Result<()> {
         let response = GovernanceResponse {
             actions: vec![GovernanceAction {
                 action_hash: "hash".to_owned(),
                 action: ActionType::GovernanceSetThreshold { new_threshold: 7 },
                 confirmations: vec![GovernanceConfirmation {
-                    contract_id: "vault-conf".to_owned(),
+                    contract_id: "self-conf".to_owned(),
                     action: ActionType::GovernanceSetThreshold { new_threshold: 7 },
                     confirming_party: test_party("m1")?,
                     created_at: 0,
@@ -2166,12 +2079,12 @@ mod tests {
         // Sanity: not just an empty object — the fields we do expect are there.
         assert_eq!(domain_confirmation["contract_id"], "domain-conf");
 
-        let vault_confirmation = &value["actions"][0]["confirmations"][0];
+        let self_confirmation = &value["actions"][0]["confirmations"][0];
         assert_eq!(
-            vault_confirmation["action"]["type"], "governance_set_threshold",
-            "vault confirmation must keep its real action: {vault_confirmation}"
+            self_confirmation["action"]["type"], "governance_set_threshold",
+            "self-management confirmation must keep its real action: {self_confirmation}"
         );
-        assert_eq!(vault_confirmation["action"]["new_threshold"], 7);
+        assert_eq!(self_confirmation["action"]["new_threshold"], 7);
 
         Ok(())
     }

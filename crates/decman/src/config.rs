@@ -436,8 +436,6 @@ pub fn default_package_config() -> PackageConfig {
         utility_credential: Some("#utility-credential-v0".to_string()),
         utility_credential_app: Some("#utility-credential-app-v0".to_string()),
         utility_registry: Some("#utility-registry-app-v0".to_string()),
-        vault: Some("#bitsafe-vault-v0-rc8".to_string()),
-        vault_governance: Some("#bitsafe-vault-governance-v0-rc8".to_string()),
     }
 }
 
@@ -959,11 +957,6 @@ mod tests {
         assert_eq!(
             packages.utility_registry.as_deref(),
             Some("#utility-registry-app-v0"),
-        );
-        assert_eq!(packages.vault.as_deref(), Some("#bitsafe-vault-v0-rc8"));
-        assert_eq!(
-            packages.vault_governance.as_deref(),
-            Some("#bitsafe-vault-governance-v0-rc8"),
         );
     }
 }

@@ -1249,8 +1249,6 @@ mod tests {
                 utility_credential: None,
                 utility_credential_app: None,
                 utility_registry: None,
-                vault: None,
-                vault_governance: None,
             },
         }
     }
@@ -1727,9 +1725,9 @@ mod tests {
             DecPartyContractRow {
                 dec_party_id: party_id_str.clone(),
                 contract_id: "contract-2".to_string(),
-                template_id: "Vault:Vault".to_string(),
-                package_id: "#vault".to_string(),
-                package_name: "vault".to_string(),
+                template_id: "CBTC.Governance:CBTCGovernanceRules".to_string(),
+                package_id: "#cbtc-governance".to_string(),
+                package_name: "cbtc-governance".to_string(),
                 package_version: "0.1.0".to_string(),
                 created_at: "2026-04-28T11:08:00.000000Z".to_string(),
             },
@@ -1837,7 +1835,7 @@ mod tests {
         .bind(event_type)
         .bind(party_id)
         .bind("member::1220aa")
-        .bind("vault")
+        .bind("core_self")
         .bind("governance_add_member")
         .bind(r#"{"type":"governance_add_member"}"#)
         .bind(status)

@@ -2,15 +2,13 @@
 
 Practical walkthroughs for the primary applications of the Decentralized Party Manager.
 
-## Vault Governance
+## Joint Custody Governance
 
-The primary use case: multiple custodians jointly managing BitsafeVault contracts through a shared decentralized party identity.
-
-> **Note:** The `#bitsafe-vault-*` DARs are external/proprietary and are not included in this repository — the repo ships only the splice, utility, and governance DARs — so this example requires those vault packages to be supplied separately.
+The primary use case: several organizations jointly governing a shared decentralized party identity, where no single member can act alone.
 
 ### Scenario
 
-Three custodial organizations (Custodian A, B, C) want to jointly manage a digital asset vault. No single custodian should be able to unilaterally deploy, pause, or modify the vault. All critical operations require a 2-of-3 majority.
+Three custodial organizations (Custodian A, B, C) want to jointly govern a shared party. No single custodian should be able to unilaterally change the membership, onboard services, or issue tokens. All critical operations require a 2-of-3 majority.
 
 ### Initial Setup
 
@@ -22,7 +20,7 @@ Each custodian runs a DecMan node connected to their Canton participant. The coo
 curl -X POST http://custodian-a:8080/onboarding \
   -H "Content-Type: application/json" \
   -d '{
-    "party_id_prefix": "joint-vault",
+    "party_id_prefix": "joint-custody",
     "peer_ids": [
       "custodian-b::1220...",
       "custodian-c::1220..."
@@ -30,7 +28,7 @@ curl -X POST http://custodian-a:8080/onboarding \
   }'
 ```
 
-After all peers accept and the workflow completes, a decentralized party `joint-vault::1220...` exists with threshold 2.
+After all peers accept and the workflow completes, a decentralized party `joint-custody::1220...` exists with threshold 2.
 
 **2. Deploy governance contracts:**
 
@@ -38,39 +36,38 @@ After all peers accept and the workflow completes, a decentralized party `joint-
 curl -X POST http://custodian-a:8080/contracts \
   -H "Content-Type: application/json" \
   -d '{
-    "decentralized_party_id": "joint-vault::1220...",
+    "decentralized_party_id": "joint-custody::1220...",
     "participant_ids": ["a::1220...", "b::1220...", "c::1220..."],
     "participant_parties": ["member-a::1220...", "member-b::1220...", "member-c::1220..."],
     "operator_party": "operator::1220...",
     "dar_files": [
-      { "filename": "vault-governance.dar", "data": "<base64>" },
-      { "filename": "vault.dar", "data": "<base64>" }
+      { "filename": "governance-core.dar", "data": "<base64>" },
+      { "filename": "governance-action.dar", "data": "<base64>" }
     ],
     "contracts": [
       {
         "id": "governance-rules",
-        "name": "VaultGovernanceRules",
-        "package_id": "#bitsafe-vault-governance-v0-rc8",
-        "module_name": "BitsafeVault.VaultGovernance",
-        "entity_name": "VaultGovernanceRules",
+        "name": "GovernanceRules",
+        "package_id": "#governance-core-<version>",
+        "module_name": "Governance.Rules",
+        "entity_name": "GovernanceRules",
         "fields": [
           { "type": "decentralized_party" },
-          { "type": "attestors_set" },
+          { "type": "party_set", "parties": [] },
           { "type": "governance_threshold" },
-          { "type": "optional", "inner": { "type": "rel_time", "microseconds": 86400000000 } }
+          { "type": "rel_time", "microseconds": 86400000000 },
+          { "type": "optional", "inner": { "type": "party_set", "parties": [] } }
         ]
       }
     ]
   }'
 ```
 
-This deploys a `VaultGovernanceRules` contract with all 3 members, threshold 2, and a 24-hour confirmation timeout.
-
-> **Note:** New deployments should use `GovernanceRules` (from `#governance-core-<version>`) instead.
+This deploys a `GovernanceRules` contract with all 3 members, threshold 2, and a 24-hour confirmation timeout.
 
 ### Full Deployment Flow
 
-The complete end-to-end deployment of a vault system follows these steps. Each governance action (steps 6-15) requires threshold confirmations before execution. Steps 5a/5b show the two governance contract options.
+The complete end-to-end deployment follows these steps. Each governance action (steps 6-9) requires threshold confirmations before execution.
 
 > **Note:** `#governance-*-<version>` package IDs use `<version>` as a placeholder — substitute the version of the governance packages you deployed (these are configured per party via `PUT /party-config`).
 
@@ -80,187 +77,18 @@ The complete end-to-end deployment of a vault system follows these steps. Each g
 | 2 | Configure party credentials | DecMan (`PUT /party-config` API) | Configure OAuth credentials (Keycloak or Auth0) and package IDs for each party |
 | 3 | Grant Ledger API rights | External (Canton admin) | Grant `actAs`/`readAs` rights for member parties on the decentralized party |
 | 4 | Upload DARs | DecMan (DARs workflow) | Upload DAR packages to all participant nodes |
-| 5a | Deploy GovernanceRules | DecMan (contracts workflow) | Deploy `GovernanceRules` contract with package `#governance-core-<version>` (recommended) |
-| 5b | Deploy VaultGovernance | DecMan (contracts workflow) | Deploy `VaultGovernanceRules` contract with package `#bitsafe-vault-governance-v0-rc8` (legacy) |
+| 5 | Deploy GovernanceRules | DecMan (contracts workflow) | Deploy `GovernanceRules` contract with package `#governance-core-<version>` |
 | 6 | Create ProviderService | Governance action | `utility_create_provider_request` |
 | 7 | Create UserService | Governance action | `utility_create_user_request` |
 | 8 | Setup Utility | Governance action | `utility_setup` -- links provider and user services |
 | 9 | Request DevNet FAR | Governance action | `dev_net_feature_app` -- register as featured app |
-| 10 | Add VaultManager | External (Canton admin) | Grant VaultManager role to the decentralized party |
-| 11 | Deploy Vault | Governance action | `vault_deployment` -- add member parties as beneficiaries |
-| 12 | Deploy YieldEpoch | Governance action | `yield_epoch_deployment` |
-| 13 | Request Processor | Governance action | `processor_deployment_request` -- same beneficiaries as vault |
-| 14 | Accept Processor | External (Canton admin) | Accept the processor deployment |
-| 15 | Accept Free Credential | Governance action | `credential_accept_free` |
+| 10 | Accept Free Credential | Governance action | `credential_accept_free` |
 
 Steps marked "External" are performed outside the DecMan application (e.g., via Canton admin console or deployment tooling).
 
 ### Day-to-Day Operations
 
-All vault operations follow the same governance flow: **Confirm -> Threshold Check -> Execute**.
-
-#### Deploy a New Vault
-
-**Step 1: Custodian A proposes a vault deployment:**
-
-```bash
-curl -X POST http://custodian-a:8080/governance/confirm \
-  -H "Content-Type: application/json" \
-  -d '{
-    "party_id": "joint-vault::1220...",
-    "rules_contract_id": "<governance-rules-cid>",
-    "action": {
-      "type": "vault_deployment",
-      "vault_rules_cid": "<vault-rules-cid>",
-      "vault_name": "BTC Custody Vault",
-      "share_symbol": "vBTC",
-      "asset_instrument_id": {
-        "admin": "operator::1220...",
-        "id": "btc-instrument"
-      },
-      "limits": {
-        "max_total_deposit": "1000000.00",
-        "min_deposit_amount": "0.001",
-        "min_withdrawal_amount": "0.001"
-      },
-      "vault_backend_signatory": "backend::1220...",
-      "vault_far_config": null,
-      "allocation_factory_cid": "<allocation-factory-cid>",
-      "registrar_service_cid": "<registrar-service-cid>"
-    }
-  }'
-```
-
-**Step 2: Custodian B confirms (reaching threshold):**
-
-Same request from Custodian B's node. After 2 confirmations, the action can be executed.
-
-**Step 3: Check confirmation status:**
-
-```bash
-curl "http://custodian-a:8080/governance/confirmations?party_id=joint-vault::1220..."
-```
-
-```json
-{
-  "actions": [
-    {
-      "action_hash": "abc123...",
-      "action": {
-        "type": "vault_deployment",
-        "vault_name": "BTC Custody Vault",
-        ...
-      },
-      "confirmations": [
-        { "contract_id": "confirm-cid-1", "confirming_party": "member-a::1220..." },
-        { "contract_id": "confirm-cid-2", "confirming_party": "member-b::1220..." }
-      ],
-      "confirmation_count": 2,
-      "can_execute": true
-    }
-  ],
-  "threshold": 2
-}
-```
-
-**Step 4: Execute the deployment:**
-
-```bash
-curl -X POST http://custodian-a:8080/governance/execute \
-  -H "Content-Type: application/json" \
-  -d '{
-    "party_id": "joint-vault::1220...",
-    "rules_contract_id": "<governance-rules-cid>",
-    "action": {
-      "type": "vault_deployment",
-      "vault_rules_cid": "<vault-rules-cid>",
-      "vault_name": "BTC Custody Vault",
-      "share_symbol": "vBTC",
-      "asset_instrument_id": { "admin": "operator::1220...", "id": "btc-instrument" },
-      "limits": {
-        "max_total_deposit": "1000000.00",
-        "min_deposit_amount": "0.001",
-        "min_withdrawal_amount": "0.001"
-      },
-      "vault_backend_signatory": "backend::1220...",
-      "vault_far_config": null,
-      "allocation_factory_cid": "<allocation-factory-cid>",
-      "registrar_service_cid": "<registrar-service-cid>"
-    },
-    "confirmation_cids": ["confirm-cid-1", "confirm-cid-2"]
-  }'
-```
-
-#### Pause / Unpause a Vault
-
-```json
-{
-  "action": { "type": "vault_pause", "vault_id": "<vault-contract-id>" }
-}
-```
-
-```json
-{
-  "action": { "type": "vault_unpause", "vault_id": "<vault-contract-id>" }
-}
-```
-
-#### Update Vault Limits
-
-```json
-{
-  "action": {
-    "type": "vault_update_limits",
-    "vault_id": "<vault-contract-id>",
-    "new_limits": {
-      "max_total_deposit": "5000000.00",
-      "min_deposit_amount": "0.01",
-      "min_withdrawal_amount": "0.01"
-    }
-  }
-}
-```
-
-#### Change Backend Signatory
-
-```json
-{
-  "action": {
-    "type": "vault_update_backend",
-    "vault_id": "<vault-contract-id>",
-    "new_backend_signatory": "new-backend::1220..."
-  }
-}
-```
-
-#### Deploy YieldEpoch
-
-```json
-{
-  "action": {
-    "type": "yield_epoch_deployment",
-    "vault_rules_cid": "<vault-rules-cid>",
-    "vault_cid": "<vault-contract-id>",
-    "asset_instrument_id": { "admin": "operator::1220...", "id": "btc-instrument" },
-    "vault_backend_signatory": "backend::1220..."
-  }
-}
-```
-
-#### Request Processor Deployment
-
-```json
-{
-  "action": {
-    "type": "processor_deployment_request",
-    "vault_processor_rules_cid": "<vault-processor-rules-cid>",
-    "vault_backend_signatory": "backend::1220...",
-    "allocation_factory_cid": "<allocation-factory-cid>",
-    "processor_far_config": null,
-    "initial_supported_vaults": ["<vault-contract-id>"]
-  }
-}
-```
+All governed operations follow the same flow: **Confirm -> Threshold Check -> Execute**. See [Utility Services](#utility-services), [Token Custody](#token-custody) and [Generic Voting](#generic-voting) below for the concrete action and proposal payloads.
 
 ### Membership Changes
 
@@ -287,7 +115,7 @@ Adding a 4th custodian involves both governance and topology:
     curl -X POST http://custodian-a:8080/add-party \
       -H "Content-Type: application/json" \
       -d '{
-        "decentralized_party_id": "joint-vault::1220...",
+        "decentralized_party_id": "joint-custody::1220...",
         "new_participant_id": "custodian-d::1220...",
         "new_threshold": 3,
         "previous_threshold": 2
@@ -318,44 +146,25 @@ Adding a 4th custodian involves both governance and topology:
     curl -X POST http://custodian-a:8080/kick \
       -H "Content-Type: application/json" \
       -d '{
-        "decentralized_party_id": "joint-vault::1220...",
+        "decentralized_party_id": "joint-custody::1220...",
         "participant_id": "custodian-c::1220...",
         "new_threshold": 2,
         "previous_threshold": 3
       }'
     ```
 
-### Querying Vault State
-
-**List deployed vaults:**
-```bash
-curl "http://localhost:8080/vaults?party_id=joint-vault::1220..."
-```
-
-```json
-{
-  "vaults": [
-    {
-      "contract_id": "00abc...",
-      "vault_name": "BTC Custody Vault",
-      "share_symbol": "vBTC",
-      "is_paused": false,
-      "vault_manager": "joint-vault::1220..."
-    }
-  ]
-}
-```
+### Querying Governance State
 
 **Get governance state:**
 ```bash
-curl "http://localhost:8080/governance/state?party_id=joint-vault::1220..."
+curl "http://localhost:8080/governance/state?party_id=joint-custody::1220..."
 ```
 
 ```json
 {
   "state": {
     "contract_id": "00def...",
-    "vault_manager": "joint-vault::1220...",
+    "governance_party": "joint-custody::1220...",
     "members": ["member-a::1220...", "member-b::1220...", "member-c::1220..."],
     "threshold": 2,
     "action_confirmation_timeout_microseconds": 86400000000
@@ -365,13 +174,12 @@ curl "http://localhost:8080/governance/state?party_id=joint-vault::1220..."
 
 ## Featured App Rewards (FAR)
 
-FAR is a reward distribution mechanism for featured application participants in the Amulet ecosystem. It allows vault operators to configure how rewards from featured app rights are distributed among beneficiaries.
+FAR is a reward distribution mechanism for featured application participants in the Amulet ecosystem. It lets a decentralized party configure how rewards from its featured app right are distributed among beneficiaries.
 
-### FarConfig Structure
+### Beneficiary Structure
 
 ```json
 {
-  "featured_app_right_cid": "<featured-app-right-contract-id>",
   "beneficiaries": [
     { "beneficiary": "party-a::1220...", "weight": "0.50" },
     { "beneficiary": "party-b::1220...", "weight": "0.30" },
@@ -380,59 +188,29 @@ FAR is a reward distribution mechanism for featured application participants in 
 }
 ```
 
-- `featured_app_right_cid`: Contract ID of the `FeaturedAppRight` contract (from the Amulet ecosystem)
 - `beneficiaries`: List of parties and their reward weights (must sum to 1.0)
 - `weight`: Decimal string representing the proportion of rewards
 
-### Where FAR Is Used
+### Setting the Provider Reward Beneficiaries
 
-| Action | Purpose |
-|--------|---------|
-| `VaultDeployment` | Set initial FAR config when deploying a vault (`vault_far_config` field) |
-| `ProcessorDeploymentRequest` | Set FAR config for processor rewards (`processor_far_config` field) |
-| `VaultUpdateFarBeneficiaries` | Update beneficiary weights for an existing vault |
-
-### Setting Initial FAR on Vault Deployment
+The beneficiaries live on the party's `InstrumentConfiguration` and are set through the `set_provider_app_reward_beneficiaries` domain proposal:
 
 ```json
 {
-  "action": {
-    "type": "vault_deployment",
-    "vault_rules_cid": "...",
-    "vault_name": "BTC Vault",
-    "share_symbol": "vBTC",
-    "asset_instrument_id": { "admin": "...", "id": "btc" },
-    "limits": { "min_deposit_amount": "0.001" },
-    "vault_backend_signatory": "backend::1220...",
-    "vault_far_config": {
-      "featured_app_right_cid": "00abc...",
-      "beneficiaries": [
-        { "beneficiary": "custodian-a::1220...", "weight": "0.50" },
-        { "beneficiary": "custodian-b::1220...", "weight": "0.30" },
-        { "beneficiary": "custodian-c::1220...", "weight": "0.20" }
-      ]
-    },
-    "allocation_factory_cid": "<allocation-factory-cid>",
-    "registrar_service_cid": "<registrar-service-cid>"
-  }
-}
-```
-
-### Updating FAR Beneficiaries
-
-```json
-{
-  "action": {
-    "type": "vault_update_far_beneficiaries",
-    "vault_id": "<vault-contract-id>",
-    "new_beneficiaries": [
-      { "beneficiary": "custodian-a::1220...", "weight": "0.40" },
-      { "beneficiary": "custodian-b::1220...", "weight": "0.40" },
+  "party_id": "joint-custody::1220...",
+  "proposal": {
+    "type": "set_provider_app_reward_beneficiaries",
+    "instrument_configuration_cid": "<instrument-configuration-cid>",
+    "provider_app_reward_beneficiaries": [
+      { "beneficiary": "custodian-a::1220...", "weight": "0.50" },
+      { "beneficiary": "custodian-b::1220...", "weight": "0.30" },
       { "beneficiary": "custodian-c::1220...", "weight": "0.20" }
     ]
   }
 }
 ```
+
+Omitting `provider_app_reward_beneficiaries` clears the current setting.
 
 ### DevNet Feature App Registration
 
@@ -447,7 +225,7 @@ To register as a featured app in the Amulet ecosystem on DevNet:
 }
 ```
 
-This is a prerequisite for obtaining the `FeaturedAppRight` contract used in FAR configurations.
+This is a prerequisite for obtaining the `FeaturedAppRight` contract that backs the reward beneficiaries above.
 
 ## Multi-Signature Wallet
 
@@ -490,9 +268,9 @@ End Users (Mobile/Web)
             v                               v
 ┌─────────────────────────────────────────────────────────┐
 │              Canton Ledger (Shared State)                │
-│  - VaultGovernanceRules (threshold, members, timeout)    │
-│  - VaultGovernanceConfirmation (per-action approvals)    │
-│  - Vault contracts (assets under management)             │
+│  - GovernanceRules (threshold, members, timeout)         │
+│  - GovernanceSelfConfirmation (per-action approvals)      │
+│  - Domain contracts (assets under management)            │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -680,7 +458,7 @@ Credentialed issuers request mints and burns through the `AllocationFactory`. Th
 
 **List ProviderServices:**
 ```bash
-curl "http://localhost:8080/services/provider?party_id=joint-vault::1220..."
+curl "http://localhost:8080/services/provider?party_id=joint-custody::1220..."
 ```
 
 ```json
@@ -689,7 +467,7 @@ curl "http://localhost:8080/services/provider?party_id=joint-vault::1220..."
     {
       "contract_id": "00abc...",
       "operator": "operator::1220...",
-      "provider": "joint-vault::1220..."
+      "provider": "joint-custody::1220..."
     }
   ]
 }
@@ -697,7 +475,7 @@ curl "http://localhost:8080/services/provider?party_id=joint-vault::1220..."
 
 **List UserServices:**
 ```bash
-curl "http://localhost:8080/services/user?party_id=joint-vault::1220..."
+curl "http://localhost:8080/services/user?party_id=joint-custody::1220..."
 ```
 
 ```json
@@ -706,7 +484,7 @@ curl "http://localhost:8080/services/user?party_id=joint-vault::1220..."
     {
       "contract_id": "00def...",
       "operator": "operator::1220...",
-      "user": "joint-vault::1220..."
+      "user": "joint-custody::1220..."
     }
   ]
 }
@@ -752,7 +530,7 @@ All credential operations go through the same governance confirmation flow, requ
 
 ## Generic Voting
 
-The `GovernanceRules` contract supports free-text governance votes through the `GenericVoteProposal` template. Unlike vault or token actions, a generic vote has no on-chain side effect -- the outcome is recorded solely as a `GovernanceExecutionResult` contract on the ledger.
+The `GovernanceRules` contract supports free-text governance votes through the `GenericVoteProposal` template. Unlike token actions, a generic vote has no on-chain side effect -- the outcome is recorded solely as a `GovernanceExecutionResult` contract on the ledger.
 
 This is useful for off-chain decisions (e.g., policy changes, operational approvals) where you want an auditable on-chain record of the vote without triggering any contract state change.
 
@@ -766,7 +544,7 @@ Three custodians want to formally vote on a policy change. The vote itself doesn
 curl -X POST http://custodian-a:8080/governance/propose \
   -H "Content-Type: application/json" \
   -d '{
-    "party_id": "joint-vault::1220...",
+    "party_id": "joint-custody::1220...",
     "rules_contract_id": "<governance-rules-cid>",
     "proposal": {
       "type": "generic_vote",
@@ -780,7 +558,7 @@ The proposer (Custodian A) automatically receives one confirmation.
 ### Step 2: Check Pending Proposals
 
 ```bash
-curl "http://custodian-a:8080/governance/confirmations?party_id=joint-vault::1220..."
+curl "http://custodian-a:8080/governance/confirmations?party_id=joint-custody::1220..."
 ```
 
 ```json
@@ -812,7 +590,7 @@ curl "http://custodian-a:8080/governance/confirmations?party_id=joint-vault::122
 curl -X POST http://custodian-b:8080/governance/confirm \
   -H "Content-Type: application/json" \
   -d '{
-    "party_id": "joint-vault::1220...",
+    "party_id": "joint-custody::1220...",
     "rules_contract_id": "<governance-rules-cid>",
     "action": { "type": "governance_set_threshold", "new_threshold": 0 },
     "governance_type": "core_domain",
@@ -828,7 +606,7 @@ After Custodian B's confirmation, threshold (2) is met and `can_execute` becomes
 curl -X POST http://custodian-a:8080/governance/execute \
   -H "Content-Type: application/json" \
   -d '{
-    "party_id": "joint-vault::1220...",
+    "party_id": "joint-custody::1220...",
     "rules_contract_id": "<governance-rules-cid>",
     "action": { "type": "governance_set_threshold", "new_threshold": 0 },
     "confirmation_cids": ["confirm-cid-1", "confirm-cid-2"],
@@ -861,7 +639,7 @@ Allows the governance party to receive Canton Coin transfers without per-transfe
 curl -X POST http://custodian-a:8080/governance/propose \
   -H "Content-Type: application/json" \
   -d '{
-    "party_id": "joint-vault::1220...",
+    "party_id": "joint-custody::1220...",
     "rules_contract_id": "<governance-rules-cid>",
     "proposal": {
       "type": "setup_cc_preapproval",
@@ -879,7 +657,7 @@ Allows the governance party to receive utility token transfers. This creates a `
 curl -X POST http://custodian-a:8080/governance/propose \
   -H "Content-Type: application/json" \
   -d '{
-    "party_id": "joint-vault::1220...",
+    "party_id": "joint-custody::1220...",
     "rules_contract_id": "<governance-rules-cid>",
     "proposal": {
       "type": "setup_token_preapproval",
@@ -900,7 +678,7 @@ Transfers tokens from the governance party to a receiver via a `TransferFactory`
 curl -X POST http://custodian-a:8080/governance/propose \
   -H "Content-Type: application/json" \
   -d '{
-    "party_id": "joint-vault::1220...",
+    "party_id": "joint-custody::1220...",
     "rules_contract_id": "<governance-rules-cid>",
     "proposal": {
       "type": "transfer",
@@ -924,7 +702,7 @@ Accepts a pending `TransferInstruction` directed at the governance party.
 curl -X POST http://custodian-a:8080/governance/propose \
   -H "Content-Type: application/json" \
   -d '{
-    "party_id": "joint-vault::1220...",
+    "party_id": "joint-custody::1220...",
     "rules_contract_id": "<governance-rules-cid>",
     "proposal": {
       "type": "accept_transfer",
@@ -937,7 +715,7 @@ curl -X POST http://custodian-a:8080/governance/propose \
 
 ### Governance Self-Management
 
-The `GovernanceRules` contract supports self-management actions (add/remove members, change threshold, change timeout, manage the additional-proposers allowlist) through the `core_self` governance type. These do not require proposals -- they use value-based matching like `VaultGovernanceRules`.
+The `GovernanceRules` contract supports self-management actions (add/remove members, change threshold, change timeout, manage the additional-proposers allowlist) through the `core_self` governance type. These do not require proposals -- they use value-based matching rather than a proposal contract id.
 
 **Add a new member:**
 
@@ -945,7 +723,7 @@ The `GovernanceRules` contract supports self-management actions (add/remove memb
 curl -X POST http://custodian-a:8080/governance/confirm \
   -H "Content-Type: application/json" \
   -d '{
-    "party_id": "joint-vault::1220...",
+    "party_id": "joint-custody::1220...",
     "rules_contract_id": "<governance-rules-cid>",
     "action": {
       "type": "governance_add_member",
@@ -962,7 +740,7 @@ curl -X POST http://custodian-a:8080/governance/confirm \
 curl -X POST http://custodian-a:8080/governance/confirm \
   -H "Content-Type: application/json" \
   -d '{
-    "party_id": "joint-vault::1220...",
+    "party_id": "joint-custody::1220...",
     "rules_contract_id": "<governance-rules-cid>",
     "action": {
       "type": "governance_set_threshold",
@@ -978,7 +756,7 @@ curl -X POST http://custodian-a:8080/governance/confirm \
 curl -X POST http://custodian-a:8080/governance/confirm \
   -H "Content-Type: application/json" \
   -d '{
-    "party_id": "joint-vault::1220...",
+    "party_id": "joint-custody::1220...",
     "rules_contract_id": "<governance-rules-cid>",
     "action": {
       "type": "governance_set_timeout",
@@ -994,7 +772,7 @@ curl -X POST http://custodian-a:8080/governance/confirm \
 curl -X POST http://custodian-a:8080/governance/confirm \
   -H "Content-Type: application/json" \
   -d '{
-    "party_id": "joint-vault::1220...",
+    "party_id": "joint-custody::1220...",
     "rules_contract_id": "<governance-rules-cid>",
     "action": {
       "type": "governance_add_additional_proposer",
@@ -1012,7 +790,7 @@ After threshold confirmations are collected, execute with:
 curl -X POST http://custodian-a:8080/governance/execute \
   -H "Content-Type: application/json" \
   -d '{
-    "party_id": "joint-vault::1220...",
+    "party_id": "joint-custody::1220...",
     "rules_contract_id": "<governance-rules-cid>",
     "action": {
       "type": "governance_set_threshold",
