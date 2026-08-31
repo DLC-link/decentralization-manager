@@ -2164,19 +2164,27 @@ export const NotificationsView = ({
 
   return (
     <Box sx={{ flex: 1, display: "flex", flexDirection: "column" }}>
-      <Box sx={{ pt: 3, flex: 1, ...columnSx }}>
+      <Box sx={{ flex: 1, ...columnSx }}>
+      {/* The sticky element is this outer box, and its fill runs on past the
+        * rule: cards scroll *under* the bar, so without that strip the next one
+        * arrives flush against the rule. A margin cannot do the job — it
+        * scrolls away with the content. */}
       <Box
         sx={{
           position: "sticky",
           top: 0,
           zIndex: 5,
+          pb: 1.5,
+          bgcolor: "background.default",
+        }}
+      >
+      <Box
+        sx={{
           display: "flex",
           flexWrap: "wrap",
           alignItems: "center",
           gap: 1,
           py: 1.5,
-          mb: 1,
-          bgcolor: "background.default",
           borderBottom: "1px solid",
           borderColor: "divider",
         }}
@@ -2261,6 +2269,7 @@ export const NotificationsView = ({
             );
           })}
         </Box>
+      </Box>
       </Box>
 
       {!anyVisible && (

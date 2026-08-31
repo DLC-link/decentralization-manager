@@ -832,7 +832,10 @@ const App = () => {
         sx={{
           pt: isLargeScreen ? 4 : 2,
           pb: 0,
-          ...((activeTab === 0 || activeTab === 2 || (isLargeScreen && activeTab === 1)) && { display: "none" }),
+          ...((activeTab === 0 ||
+            activeTab === 2 ||
+            activeTab === 3 ||
+            (isLargeScreen && activeTab === 1)) && { display: "none" }),
         }}
       >
         {window.location.pathname.startsWith("/swagger-ui") &&
@@ -1089,10 +1092,10 @@ const App = () => {
       {/* Tab 3: Notifications */}
       {activeTab === 3 && !loading && !error && (
         // Same as the parties tab: passes the leftover height down so the
-        // Completed footer bar lands at the bottom of the view.
+        // Completed footer bar lands at the bottom of the view. No top padding
+        // — this tab opens on a sticky filter bar, which belongs at the top.
         <Box
           sx={{
-            pt: isLargeScreen ? 4 : 0,
             flex: 1,
             display: "flex",
             flexDirection: "column",
