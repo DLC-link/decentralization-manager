@@ -69,9 +69,10 @@ snapshot to disk; each `GET` serves a byte range out of that file, and each
 - A whole snapshot in one JSON body is refused past ~75 MiB. actix caps JSON at
   100 MiB and base64 inflates by 4/3, so a single-body relay has a ceiling far
   below what the export allows and it arrives as a bare 413.
-- The joiner reports `received` after every range, so an interrupted transfer
-  resumes from there instead of starting over. On a large party that is the
-  difference between a retry and a restart.
+- The joiner reports `received` after every range, and
+  `GET /v0/tenant/{party}/acs-progress` reports it before one, so a wallet
+  restarted from scratch resumes rather than beginning again. On a large party
+  that is the difference between a retry and a restart.
 - An `offset` that does not match what the joiner holds is **refused**, not
   written. Writing it would leave a hole, and Canton only discovers that
   mid-import with the participant already disconnected.
@@ -121,7 +122,8 @@ plainly rather than letting them infer symmetry that is not there.
 | Import fails mid-window | The joiner disconnected and the import did not complete | The import reconnects and verifies health on its own. Retry it; the durable marker makes re-entry safe |
 | Joiner crash-loops after an import | Orphan ACS rows from an unclean shutdown | Manual repair. See `RepairCommitmentsUsingAcs` below |
 | Export refused as too large | The snapshot exceeds this path's cap | Bounded by `DECPM_TENANT_ACS_MAX_BYTES` (512 MiB by default), not by the 16 MiB Noise limit. The export still assembles the whole snapshot in memory once before staging it, so raising this is a memory commitment |
-| `400` naming an offset from import | The range's `offset` disagrees with what the joiner holds | Resume from the `received` the error names. Do not retry the same range |
+| `400` naming an offset from import | The range's `offset` disagrees with what the joiner holds | Read `/v0/tenant/{party}/acs-progress` and resume from there. Do not retry the same range |
+| `400` about `total_size` from import | The declared size exceeds this host's cap, or the range runs past it | The joiner cannot export to check the size itself, so it bounds what it is told. Check the source and the joiner agree on the same snapshot |
 
 ### Commitment mismatches after an import
 

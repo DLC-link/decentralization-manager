@@ -8,10 +8,11 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
 use common::{
     api::{
-        TenantAcsImportRequest, TenantAcsImportResponse, TenantAcsSnapshotResponse,
-        TenantAddHostsOnboardRequest, TenantAddHostsOnboardResponse, TenantAddHostsPrepareResponse,
-        TenantAddHostsRequest, TenantOnboardRequest, TenantOnboardResponse, TenantPrepareRequest,
-        TenantPrepareResponse, TenantThresholdOnboardRequest, TenantThresholdRequest,
+        TenantAcsImportRequest, TenantAcsImportResponse, TenantAcsProgressResponse,
+        TenantAcsSnapshotResponse, TenantAddHostsOnboardRequest, TenantAddHostsOnboardResponse,
+        TenantAddHostsPrepareResponse, TenantAddHostsRequest, TenantOnboardRequest,
+        TenantOnboardResponse, TenantPrepareRequest, TenantPrepareResponse,
+        TenantThresholdOnboardRequest, TenantThresholdRequest,
     },
     canton_id::CantonId,
     types::WorkflowProgress,
@@ -141,6 +142,13 @@ impl TenantClient {
             "/v0/tenant/{party_id}/acs/{target}?offset={offset}"
         ))
         .await
+    }
+
+    /// `GET /v0/tenant/{party}/acs-progress` — how much of the snapshot this
+    /// host already holds, so a fresh run resumes rather than restarts.
+    pub async fn acs_progress(&self, party_id: &str) -> Result<TenantAcsProgressResponse> {
+        self.get(&format!("/v0/tenant/{party_id}/acs-progress"))
+            .await
     }
 
     /// `POST /v0/tenant/add-hosts/import` — hand a joining host the snapshot and

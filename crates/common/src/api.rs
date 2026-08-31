@@ -572,6 +572,22 @@ pub struct TenantAcsImportRequest {
     pub package_ids: Vec<String>,
 }
 
+/// How far a joining host has got with a relayed snapshot.
+///
+/// A wallet asks this before it starts relaying, so a fresh run can continue an
+/// interrupted transfer instead of restarting it. Without it the wallet would
+/// begin at zero, be correctly refused, and have no way to act on the refusal.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantAcsProgressResponse {
+    pub party_id: String,
+    /// Bytes already staged here. `0` means nothing has arrived, so relaying
+    /// starts from the beginning.
+    #[cfg_attr(feature = "typegen", ts(type = "number"))]
+    pub received: u64,
+}
+
 /// Outcome of importing the ACS and attempting the marker clear on this host.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

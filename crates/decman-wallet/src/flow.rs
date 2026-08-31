@@ -449,7 +449,30 @@ pub async fn add_hosts(
         // after every range and the next read starts from there. So a wallet
         // that died mid-transfer resumes correctly on a fresh run without having
         // persisted anything itself.
-        let mut offset = 0u64;
+        // Ask the joiner where it is before relaying anything. A fresh wallet
+        // run has no memory of a previous attempt, so without this it would
+        // start at zero, be correctly refused for an offset mismatch, and have
+        // nothing to do about it — the transfer would be resumable in the
+        // protocol and not in practice.
+        let mut offset = match host.client.acs_progress(party_id).await {
+            Ok(progress) => {
+                if progress.received > 0 {
+                    tracing::info!(
+                        host = host.client.base_url(),
+                        received = progress.received,
+                        "resuming a partially relayed ACS"
+                    );
+                }
+                progress.received
+            }
+            Err(e) => {
+                tracing::warn!(
+                    host = host.client.base_url(),
+                    "could not read relay progress, starting from the beginning: {e}"
+                );
+                0
+            }
+        };
         let mut seen_first_range = false;
         let mut failed = false;
         loop {

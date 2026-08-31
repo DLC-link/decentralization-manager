@@ -121,6 +121,11 @@ pub mod artifact_kinds {
     /// Tenant add-hosts: durable disconnect-window marker, same contract as
     /// [`ADD_PARTY_ACS_IMPORT_INFLIGHT`].
     pub const TENANT_ADD_HOSTS_IMPORT_INFLIGHT: &str = "tenant_add_hosts_import_inflight";
+    /// Tenant add-hosts: the package ids the staged snapshot needs, newline
+    /// separated. Computed once when the snapshot is staged, because the scan
+    /// behind it is a ledger query and a ranged transfer would otherwise repeat
+    /// it once per range.
+    pub const TENANT_ADD_HOSTS_PACKAGE_IDS: &str = "tenant_add_hosts_package_ids";
     /// Unsigned onboarding-flag clearing proposal (P2P update without the
     /// new member's Onboarding marker) created by the coordinator. Empty
     /// payload doubles as the "flag already cleared — skip the sign round"

@@ -1165,6 +1165,7 @@ pub async fn start_server(
             .service(handlers::tenant_add_hosts_onboard)
             .service(handlers::tenant_acs_snapshot)
             .service(handlers::tenant_acs_import)
+            .service(handlers::tenant_acs_progress)
             .service(handlers::tenant_threshold_prepare)
             .service(handlers::tenant_threshold_onboard)
             .service(handlers::tenant_local_party_adopt_prepare)

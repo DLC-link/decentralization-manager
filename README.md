@@ -453,6 +453,7 @@ The table below is a curated subset. A complete, interactive API reference is av
 | `/v0/tenant/add-hosts/prepare` | POST | Wallet-facing: builds the serial-N+1 topology that adds hosts to an existing external party |
 | `/v0/tenant/add-hosts/onboard` | POST | Wallet-facing: validates the wallet-signed add-hosts topology, co-signs, and submits it |
 | `/v0/tenant/{party}/acs/{target}` | GET | Wallet-facing: serves one byte range of the party's ACS scoped to a joining host (`?offset=`, `?limit=`), for the wallet to relay |
+| `/v0/tenant/{party}/acs-progress` | GET | Wallet-facing: how much of a relayed snapshot this host already holds, so a transfer resumes rather than restarts |
 | `/v0/tenant/add-hosts/import` | POST | Wallet-facing: appends one range of a relayed ACS, importing and clearing the onboarding marker once it holds the whole snapshot |
 | `/v0/tenant/threshold/prepare` | POST | Wallet-facing: builds a confirmation-threshold change |
 | `/v0/tenant/threshold/onboard` | POST | Wallet-facing: submits the wallet-signed threshold change |

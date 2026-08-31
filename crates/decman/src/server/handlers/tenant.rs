@@ -28,8 +28,8 @@ use crate::{
         middleware::require_tenant_api_key,
         types::{
             ErrorResponse, LocalPartyAdoptOnboardRequest, LocalPartyAdoptRequest,
-            TenantAcsImportRequest, TenantAcsImportResponse, TenantAcsSnapshotResponse,
-            TenantAddHostsOnboardRequest, TenantAddHostsOnboardResponse,
+            TenantAcsImportRequest, TenantAcsImportResponse, TenantAcsProgressResponse,
+            TenantAcsSnapshotResponse, TenantAddHostsOnboardRequest, TenantAddHostsOnboardResponse,
             TenantAddHostsPrepareResponse, TenantAddHostsRequest, TenantOnboardRequest,
             TenantOnboardResponse, TenantPrepareRequest, TenantPrepareResponse,
             TenantThresholdOnboardRequest, TenantThresholdRequest, WorkflowProgress,
@@ -53,6 +53,7 @@ use crate::{
         clear_onboarding_flag, collect_party_package_ids, export_party_acs, import_party_acs,
         staging, wait_for_flag_cleared,
     },
+    workflow::storage::artifact_kinds,
 };
 
 use super::workflows::validate_confirmation_threshold;
@@ -514,10 +515,20 @@ pub async fn tenant_acs_snapshot(
         }
     };
     let offset = query.offset.unwrap_or(0);
-    let limit = query.limit.unwrap_or(ACS_RANGE_DEFAULT).min(ACS_RANGE_MAX);
+    // A zero limit reads zero bytes, and a caller reasonably treats an empty
+    // chunk as the end of the snapshot — so honouring it would truncate the
+    // transfer silently. One byte is useless but honest.
+    let limit = query
+        .limit
+        .unwrap_or(ACS_RANGE_DEFAULT)
+        .clamp(1, ACS_RANGE_MAX);
 
-    // Export once, on the first range. A later range reads the staged file, so
-    // every range comes from the same snapshot.
+    // Export once per transfer, and reuse the staged copy for every range —
+    // including a range at offset 0, which a restarted wallet asks for.
+    // Re-exporting there would observe a possibly different ledger state, and
+    // ranges stitched from two snapshots are not a snapshot. The staged copy is
+    // discarded when the import completes, so the next transfer gets a fresh
+    // export.
     let staged = match staging::staged_len(&data.config, &replication.instance_name).await {
         Ok(staged) => staged,
         Err(e) => {
@@ -527,9 +538,25 @@ pub async fn tenant_acs_snapshot(
             });
         }
     };
-    let total_size = match staged {
-        Some(len) if offset > 0 => len,
-        _ => {
+
+    let (total_size, package_ids, package_preflight) = match staged {
+        Some(len) => {
+            // Package ids were computed when the snapshot was staged. Repeating
+            // the scan per range would multiply a ledger query by the number of
+            // ranges, and repeat its warning just as often.
+            let (ids, preflight) =
+                match read_staged_package_ids(&data, &replication.instance_name).await {
+                    Ok(found) => found,
+                    Err(e) => {
+                        tracing::error!("tenant acs snapshot: package id read failed: {e:#}");
+                        return HttpResponse::InternalServerError().json(ErrorResponse {
+                            error: format!("Failed to read the staged package ids: {e}"),
+                        });
+                    }
+                };
+            (len, ids, preflight)
+        }
+        None => {
             let snapshot = match export_party_acs(
                 &data.config,
                 &data.db,
@@ -547,6 +574,35 @@ pub async fn tenant_acs_snapshot(
                 }
             };
             let len = snapshot.len() as u64;
+
+            // No contracts means no packages to check, and the ledger scan is
+            // not free.
+            //
+            // The scan is best-effort on purpose. It reads the party's contracts
+            // over the Ledger API, which needs a credential for that party, and
+            // a node hosting an *external* party has none — the key belongs to
+            // the wallet. Failing the whole export over a preflight that cannot
+            // run on this deployment would block replication entirely; instead
+            // the response says the preflight is unavailable and the joiner's
+            // own import still validates every contract, just after it has
+            // disconnected rather than before.
+            let (ids, preflight) = if len == 0 {
+                (Vec::new(), true)
+            } else {
+                match collect_party_package_ids(&data.config, &party_id, None).await {
+                    Ok(ids) => (ids, true),
+                    Err(e) => {
+                        tracing::warn!(
+                            "tenant acs snapshot: package preflight unavailable for {party_id} — \
+                             this node holds no ledger credential for an external party, so the \
+                             joiner's import will validate packages itself after disconnecting: \
+                             {e:#}"
+                        );
+                        (Vec::new(), false)
+                    }
+                }
+            };
+
             if let Err(e) =
                 staging::stage(&data.config, &replication.instance_name, &snapshot).await
             {
@@ -555,7 +611,13 @@ pub async fn tenant_acs_snapshot(
                     error: format!("Failed to stage the exported ACS: {e}"),
                 });
             }
-            len
+            if let Err(e) = write_staged_package_ids(&data, &replication, &ids, preflight).await {
+                tracing::error!("tenant acs snapshot: package id staging failed: {e:#}");
+                return HttpResponse::InternalServerError().json(ErrorResponse {
+                    error: format!("Failed to stage the package ids: {e}"),
+                });
+            }
+            (len, ids, preflight)
         }
     };
 
@@ -582,31 +644,6 @@ pub async fn tenant_acs_snapshot(
         }
     };
 
-    // No contracts means no packages to check, and the ledger scan is not free.
-    //
-    // The scan is best-effort on purpose. It reads the party's contracts over
-    // the Ledger API, which needs a credential for that party, and a node
-    // hosting an *external* party has none — the key belongs to the wallet.
-    // Failing the whole export over a preflight that cannot run on this
-    // deployment would block replication entirely; instead the response says
-    // the preflight is unavailable and the joiner's own import still validates
-    // every contract, just after it has disconnected rather than before.
-    let (package_ids, package_preflight) = if total_size == 0 {
-        (Vec::new(), true)
-    } else {
-        match collect_party_package_ids(&data.config, &party_id, None).await {
-            Ok(ids) => (ids, true),
-            Err(e) => {
-                tracing::warn!(
-                    "tenant acs snapshot: package preflight unavailable for {party_id} — this \
-                     node holds no ledger credential for an external party, so the joiner's \
-                     import will validate packages itself after disconnecting: {e:#}"
-                );
-                (Vec::new(), false)
-            }
-        }
-    };
-
     HttpResponse::Ok().json(TenantAcsSnapshotResponse {
         party_id,
         total_size,
@@ -615,6 +652,56 @@ pub async fn tenant_acs_snapshot(
         package_ids,
         package_preflight,
     })
+}
+
+/// How far this host has got with a relayed snapshot, so a wallet can resume
+/// rather than restart.
+///
+/// Without this a fresh wallet run has no way to learn the joiner already holds
+/// part of the snapshot: it would start at zero, be correctly refused for an
+/// offset mismatch, and have nothing to do about it. The resumability the ranged
+/// transfer makes possible only becomes usable here.
+#[utoipa::path(
+    tag = "Tenant",
+    params(("party" = String, Path, description = "Full party id")),
+    responses(
+        (status = 200, description = "Bytes staged on this host", body = TenantAcsProgressResponse),
+        (status = 400, description = "Bad party id", body = ErrorResponse),
+        (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 500, description = "Could not inspect the staged snapshot", body = ErrorResponse)
+    )
+)]
+#[get("/v0/tenant/{party}/acs-progress")]
+pub async fn tenant_acs_progress(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    path: web::Path<String>,
+) -> impl Responder {
+    if let Err(resp) = require_tenant_api_key(&http_req, &data) {
+        return resp;
+    }
+    let party_id = path.into_inner();
+    let replication = match replication_target(&party_id, data.config.participant_id()) {
+        Ok(t) => t,
+        Err(e) => {
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                error: format!("party_id is not a valid party id: {e}"),
+            });
+        }
+    };
+    match staging::staged_len(&data.config, &replication.instance_name).await {
+        // Nothing staged is a normal answer, not an error: it means start at 0.
+        Ok(staged) => HttpResponse::Ok().json(TenantAcsProgressResponse {
+            party_id,
+            received: staged.unwrap_or(0),
+        }),
+        Err(e) => {
+            tracing::error!("tenant acs progress: staging check failed: {e:#}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to inspect the staged ACS: {e}"),
+            })
+        }
+    }
 }
 
 /// Append one range of a relayed ACS snapshot on THIS host, importing and
@@ -658,6 +745,47 @@ pub async fn tenant_acs_import(
             });
         }
     };
+
+    // Everything about the size comes from the caller, and the joiner cannot
+    // export to check it. So it is bounded rather than trusted: without these,
+    // a caller could claim a small `total_size` and have this host import a
+    // truncated snapshot, or dribble ranges in forever and grow the staged file
+    // past the configured cap.
+    let cap = data.config.tenant_acs_max_bytes as u64;
+    if body.total_size > cap {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: format!(
+                "total_size {total} exceeds this host's {cap}-byte ACS ceiling \
+                 (DECPM_TENANT_ACS_MAX_BYTES)",
+                total = body.total_size
+            ),
+        });
+    }
+    if body.offset > body.total_size {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: format!(
+                "offset {offset} is past the declared {total}-byte snapshot",
+                offset = body.offset,
+                total = body.total_size
+            ),
+        });
+    }
+    if body.total_size > 0 && chunk.is_empty() {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: "chunk is empty but total_size is not; an empty range cannot make progress \
+                    and would loop forever"
+                .to_string(),
+        });
+    }
+    if body.offset + chunk.len() as u64 > body.total_size {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: format!(
+                "this range ends at {end} but the snapshot was declared as {total} byte(s)",
+                end = body.offset + chunk.len() as u64,
+                total = body.total_size
+            ),
+        });
+    }
 
     // An empty snapshot has nothing to stage and nothing to import, but the
     // marker still has to clear or the joiner stays suspended forever.
@@ -1017,6 +1145,64 @@ pub async fn tenant_local_party_adopt_onboard(
         party_id: body.party_id.clone(),
         serial,
     })
+}
+
+/// Read the package ids staged alongside a snapshot.
+///
+/// The stored form is a preflight marker line followed by one id per line, so a
+/// missing preflight is distinguishable from an empty id list — they mean very
+/// different things to a joiner.
+async fn read_staged_package_ids(
+    data: &web::Data<AppState>,
+    instance_name: &str,
+) -> anyhow::Result<(Vec<String>, bool)> {
+    let target = crate::workflow::external_party::add_hosts::replication_target_by_instance(
+        instance_name,
+        data.config.participant_id(),
+    );
+    let Some(bytes) = target
+        .read_artifact(&data.db, artifact_kinds::TENANT_ADD_HOSTS_PACKAGE_IDS, None)
+        .await?
+    else {
+        // Staged before this was recorded: treat the preflight as unavailable
+        // rather than claim an empty list is authoritative.
+        return Ok((Vec::new(), false));
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    let mut lines = text.lines();
+    let preflight = lines.next() == Some("preflight");
+    let ids = lines
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect();
+    Ok((ids, preflight))
+}
+
+/// Record the package ids for a staged snapshot, so ranges after the first do
+/// not repeat the ledger scan behind them.
+async fn write_staged_package_ids(
+    data: &web::Data<AppState>,
+    target: &crate::workflow::party_replication::ReplicationTarget,
+    ids: &[String],
+    preflight: bool,
+) -> anyhow::Result<()> {
+    let marker = if preflight {
+        "preflight"
+    } else {
+        "unavailable"
+    };
+    let payload = std::iter::once(marker.to_string())
+        .chain(ids.iter().cloned())
+        .collect::<Vec<_>>()
+        .join("\n");
+    target
+        .write_artifact(
+            &data.db,
+            artifact_kinds::TENANT_ADD_HOSTS_PACKAGE_IDS,
+            None,
+            payload.as_bytes(),
+        )
+        .await
 }
 
 // ============================================================================
