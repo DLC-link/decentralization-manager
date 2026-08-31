@@ -38,7 +38,10 @@ pub(crate) use parties::{
     store_parties_to_db,
 };
 pub(crate) use party_config::{discover_member_party, get_party_config, save_party_config};
-pub(crate) use tenant::{tenant_onboard, tenant_prepare, tenant_status};
+pub(crate) use tenant::{
+    tenant_add_hosts_onboard, tenant_add_hosts_prepare, tenant_onboard, tenant_prepare,
+    tenant_status,
+};
 pub(crate) use workflows::{
     cancel_add_party, cancel_change_threshold, cancel_contracts, cancel_dars, cancel_kick,
     cancel_onboarding, cancel_workflow_instance, dismiss_workflow, get_add_party_status,

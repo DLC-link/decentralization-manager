@@ -1161,6 +1161,8 @@ pub async fn start_server(
             .service(handlers::list_external_parties)
             .service(handlers::tenant_prepare)
             .service(handlers::tenant_onboard)
+            .service(handlers::tenant_add_hosts_prepare)
+            .service(handlers::tenant_add_hosts_onboard)
             .service(handlers::tenant_status)
             .service(handlers::start_onboarding)
             .service(handlers::get_onboarding_status)

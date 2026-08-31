@@ -428,6 +428,73 @@ pub struct TenantOnboardResponse {
     pub party_id: String,
 }
 
+/// Request to prepare an add-hosts topology for an existing external party.
+///
+/// The wallet pins `base_serial` — the serial it read from the party's current
+/// mapping — so every host builds the same serial N+1 transaction. A host whose
+/// own view has moved on refuses rather than quietly preparing different bytes.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantAddHostsRequest {
+    /// Full party id (`{hint}::{fingerprint}`) of the party gaining hosts.
+    pub party_id: String,
+    /// Participants to add. Each lands at Confirmation with Canton's onboarding
+    /// marker, and none may already host the party.
+    pub new_hosts: Vec<CantonId>,
+    /// The serial the wallet read from the party's current `PartyToParticipant`.
+    pub base_serial: u32,
+}
+
+/// The unsigned add-hosts topology for the wallet to sign. Base64 and
+/// index-aligned exactly as [`TenantPrepareResponse`].
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantAddHostsPrepareResponse {
+    /// The party gaining hosts, echoed back.
+    pub party_id: String,
+    /// The serial the returned transactions carry (`base_serial + 1`).
+    pub serial: u32,
+    /// The hash to sign for each transaction, base64-encoded.
+    pub transaction_hashes: Vec<String>,
+    /// The serialized topology transactions, each base64-encoded.
+    pub topology_transactions: Vec<String>,
+}
+
+/// Request to submit a wallet-signed add-hosts topology on one host.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantAddHostsOnboardRequest {
+    /// Full party id of the party gaining hosts.
+    pub party_id: String,
+    /// The serial the wallet pinned when it prepared. Re-checked against this
+    /// host's head state before anything is signed.
+    pub base_serial: u32,
+    /// The (unchanged) transactions from `TenantAddHostsPrepareResponse`. The
+    /// host set rides inside them and must not be passed separately.
+    pub topology_transactions: Vec<String>,
+    /// One base64-encoded signature per transaction, index-aligned.
+    pub signatures: Vec<String>,
+    /// Fingerprint of the party key that produced the signatures.
+    pub signed_by: String,
+}
+
+/// Response to an add-hosts submission. Reports this host's view only.
+/// `Completed` means this host's authorized mapping already carries the new
+/// hosts; `InProgress` means the change is still a proposal here.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantAddHostsOnboardResponse {
+    pub status: WorkflowProgress,
+    pub party_id: String,
+    /// The serial this host now has for the party. Advances once the change is
+    /// authorized; still the base serial while it is a proposal.
+    pub serial: u32,
+}
+
 /// Response for key status check
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
