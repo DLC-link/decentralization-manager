@@ -402,6 +402,25 @@ pub enum ActionType {
 }
 
 impl ActionType {
+    /// True for the six `GovernanceSelfAction` variants — the only actions the
+    /// inline (`core_self`) confirm/execute path can serialize.
+    ///
+    /// `ActionType` still models the utility / credential / DevNet variants
+    /// because `deserialize_action` parses them off CBTC confirmations on the
+    /// read path. There is no inline submit path for them: they belong on
+    /// `POST /governance/propose` as `GovernableAction` proposals.
+    pub fn is_governance_self_action(&self) -> bool {
+        matches!(
+            self,
+            ActionType::GovernanceAddMember { .. }
+                | ActionType::GovernanceRemoveMember { .. }
+                | ActionType::GovernanceSetThreshold { .. }
+                | ActionType::GovernanceSetTimeout { .. }
+                | ActionType::GovernanceAddAdditionalProposer { .. }
+                | ActionType::GovernanceRemoveAdditionalProposer { .. }
+        )
+    }
+
     /// Validate the action's fields. Returns an error message if invalid.
     ///
     /// Catches obviously-malformed inputs (negative thresholds, non-positive

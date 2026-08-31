@@ -39,12 +39,13 @@ use crate::{
             to_proto_disclosed_contracts,
         },
         types::{
-            ActiveCouponReassignmentDelegation, AuditLogEntry, AuditLogQuery, AuditLogResponse,
-            CancelConfirmationRequest, CancelProposalRequest, ChainAuditEntry, ChainAuditQuery,
-            ChainAuditResponse, ConfirmActionRequest, CouponReassignmentDelegationSummary,
-            ErrorResponse, ExecuteActionRequest, ExpireConfirmationRequest, GovernanceResponse,
-            GovernanceStateResponse, GovernanceType, KnownMember, KnownMembersResponse,
-            MessageResponse, ProposalType, ProposeActionRequest, chain_audit_entry_from_row,
+            ActionType, ActiveCouponReassignmentDelegation, AuditLogEntry, AuditLogQuery,
+            AuditLogResponse, CancelConfirmationRequest, CancelProposalRequest, ChainAuditEntry,
+            ChainAuditQuery, ChainAuditResponse, ConfirmActionRequest,
+            CouponReassignmentDelegationSummary, ErrorResponse, ExecuteActionRequest,
+            ExpireConfirmationRequest, GovernanceResponse, GovernanceStateResponse, GovernanceType,
+            KnownMember, KnownMembersResponse, MessageResponse, ProposalType, ProposeActionRequest,
+            chain_audit_entry_from_row,
         },
     },
     utils,
@@ -1011,6 +1012,31 @@ pub async fn propose_action(
     }
 }
 
+/// Reject an inline action the `core_self` path cannot carry, before any
+/// ledger work happens.
+///
+/// The inline confirm/execute choices serialize a `GovernanceSelfAction`, so
+/// only the six self-management variants fit. Everything else in `ActionType`
+/// exists for the read path and belongs on `POST /governance/propose`. Caught
+/// here it is a clear 400; left to the serializer it would be a 500.
+///
+/// Also runs the action's own field validation (thresholds, timeouts) so a
+/// malformed value surfaces as a 400 rather than a generic ledger submission
+/// error.
+fn validate_inline_action(
+    action: &ActionType,
+    governance_type: GovernanceType,
+) -> Result<(), String> {
+    if matches!(governance_type, GovernanceType::CoreSelf) && !action.is_governance_self_action() {
+        return Err(format!(
+            "action '{}' is not a governance self-management action; submit it as a domain \
+             proposal via POST /governance/propose",
+            crate::server::audit::action_summary(action)
+        ));
+    }
+    action.validate()
+}
+
 /// Submit a confirmation for a governance action using structured ActionType
 #[utoipa::path(
     tag = "Governance",
@@ -1031,6 +1057,9 @@ pub async fn confirm_action(
 ) -> impl Responder {
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
+    }
+    if let Err(error) = validate_inline_action(&body.action, body.governance_type) {
+        return HttpResponse::BadRequest().json(ErrorResponse { error });
     }
 
     let party_id = &body.party_id;
@@ -1120,6 +1149,9 @@ pub async fn execute_action(
 ) -> impl Responder {
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
+    }
+    if let Err(error) = validate_inline_action(&body.action, body.governance_type) {
+        return HttpResponse::BadRequest().json(ErrorResponse { error });
     }
 
     let party_id = &body.party_id;
@@ -1653,7 +1685,7 @@ async fn execute_confirm_action(
                 action_serializer::build_confirm_governance_action_arg(
                     member_party_id,
                     &request.action,
-                ),
+                )?,
             )
         }
         GovernanceType::CoreDomain => {
@@ -1758,7 +1790,7 @@ async fn execute_confirmed_action(
                     member_party_id,
                     &request.action,
                     &request.confirmation_cids,
-                ),
+                )?,
             )
         }
         GovernanceType::CoreDomain => {

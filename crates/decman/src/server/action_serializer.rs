@@ -363,8 +363,15 @@ fn serialize_reltime(microseconds: i64) -> Value {
 ///
 /// Maps the shared ActionType variants to the governance-core
 /// GovernanceSelfAction enum (different field names).
-fn serialize_self_action(action: &ActionType) -> Value {
-    match action {
+///
+/// Errors on any other variant rather than panicking: `ActionType` still
+/// carries the utility / credential / DevNet variants for the read path
+/// (`deserialize_action` parses them off CBTC confirmations), but the inline
+/// confirm/execute path can only serialize the six self-management ones. A
+/// request pairing one of the others with `core_self` is a client error, not
+/// an invariant violation, so it must not take the worker down.
+fn serialize_self_action(action: &ActionType) -> Result<Value> {
+    let value = match action {
         ActionType::GovernanceAddMember {
             member,
             new_threshold,
@@ -416,8 +423,13 @@ fn serialize_self_action(action: &ActionType) -> Value {
                 make_party(additional_proposer),
             )]),
         ),
-        _ => panic!("ActionType {action:?} is not a governance self-management action"),
-    }
+        other => anyhow::bail!(
+            "action {} is not a governance self-management action; \
+             submit it as a domain proposal via POST /governance/propose",
+            crate::server::audit::action_summary(other)
+        ),
+    };
+    Ok(value)
 }
 
 /// Deserialize a GovernanceSelfAction Daml variant to ActionType
@@ -482,11 +494,11 @@ pub fn deserialize_self_action(value: &Value) -> Result<ActionType> {
 /// Build the GovernanceRules_ConfirmGovernanceAction choice argument
 ///
 /// Daml structure: { confirmer: Party, action: GovernanceSelfAction }
-pub fn build_confirm_governance_action_arg(confirmer: &str, action: &ActionType) -> Value {
-    make_record(vec![
+pub fn build_confirm_governance_action_arg(confirmer: &str, action: &ActionType) -> Result<Value> {
+    Ok(make_record(vec![
         field("confirmer", make_party(confirmer)),
-        field("action", serialize_self_action(action)),
-    ])
+        field("action", serialize_self_action(action)?),
+    ]))
 }
 
 /// Build the GovernanceRules_ExecuteGovernanceAction choice argument
@@ -496,7 +508,7 @@ pub fn build_execute_governance_action_arg(
     executor: &str,
     action: &ActionType,
     confirmation_cids: &[String],
-) -> Value {
+) -> Result<Value> {
     let confirmations = make_list(
         confirmation_cids
             .iter()
@@ -504,11 +516,11 @@ pub fn build_execute_governance_action_arg(
             .collect(),
     );
 
-    make_record(vec![
+    Ok(make_record(vec![
         field("executor", make_party(executor)),
-        field("action", serialize_self_action(action)),
+        field("action", serialize_self_action(action)?),
         field("confirmations", confirmations),
-    ])
+    ]))
 }
 
 // ============================================================================
@@ -1812,14 +1824,14 @@ mod tests {
     }
 
     #[test]
-    fn serialize_self_action_uses_governance_self_labels() {
+    fn serialize_self_action_uses_governance_self_labels() -> Result {
         // The self-management serializer maps an ActionType to the
         // `GovernanceSelfAction` constructor + field names. Pin them so the
         // Daml-side labels can't silently drift.
         let add = serialize_self_action(&ActionType::GovernanceAddMember {
             member: party_id(),
             new_threshold: 3,
-        });
+        })?;
         let (ctor, record) = as_variant(&add);
         assert_eq!(ctor, "SelfAction_AddMemberAndSetThreshold");
         assert_eq!(record_labels(record), ["newMember", "newThresholdAfterAdd"]);
@@ -1827,7 +1839,7 @@ mod tests {
         let remove = serialize_self_action(&ActionType::GovernanceRemoveMember {
             member: party_id(),
             new_threshold: 1,
-        });
+        })?;
         let (ctor, record) = as_variant(&remove);
         assert_eq!(ctor, "SelfAction_RemoveMemberAndSetThreshold");
         assert_eq!(
@@ -1836,10 +1848,37 @@ mod tests {
         );
 
         let set_threshold =
-            serialize_self_action(&ActionType::GovernanceSetThreshold { new_threshold: 2 });
+            serialize_self_action(&ActionType::GovernanceSetThreshold { new_threshold: 2 })?;
         let (ctor, record) = as_variant(&set_threshold);
         assert_eq!(ctor, "SelfAction_SetThreshold");
         assert_eq!(record_labels(record), ["updatedThreshold"]);
+        Ok(())
+    }
+
+    /// The inline `core_self` path can only carry the six self-management
+    /// actions. `ActionType` still models the utility / credential / DevNet
+    /// variants for the read path, so a request pairing one of those with
+    /// `core_self` must come back as an error the handler can turn into a
+    /// 400 — never a panic that takes the worker down.
+    #[test]
+    fn serialize_self_action_rejects_a_non_self_management_action() {
+        let action = ActionType::DevNetFeatureApp {
+            amulet_rules_cid: "00amulet".to_owned(),
+        };
+        match serialize_self_action(&action) {
+            Ok(_) => panic!("DevNetFeatureApp is not a self-management action"),
+            Err(err) => {
+                let msg = err.to_string();
+                assert!(
+                    msg.contains("not a governance self-management action"),
+                    "error should say why: {msg}"
+                );
+                assert!(
+                    msg.contains("/governance/propose"),
+                    "error should point at the proposal path: {msg}"
+                );
+            }
+        }
     }
 
     #[test]
