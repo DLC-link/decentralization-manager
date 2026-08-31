@@ -30,9 +30,9 @@ use crate::{
             ErrorResponse, TenantAcsImportRequest, TenantAcsImportResponse,
             TenantAcsSnapshotResponse, TenantAddHostsOnboardRequest, TenantAddHostsOnboardResponse,
             TenantAddHostsPrepareResponse, TenantAddHostsRequest, TenantOnboardRequest,
-            TenantOnboardResponse, TenantPrepareRequest, TenantPrepareResponse,
-            TenantThresholdOnboardRequest, TenantThresholdRequest, WorkflowProgress,
-            WorkflowStatusResponse,
+            TenantOnboardResponse, TenantPartyStateResponse, TenantPrepareRequest,
+            TenantPrepareResponse, TenantThresholdOnboardRequest, TenantThresholdRequest,
+            WorkflowProgress, WorkflowStatusResponse,
         },
     },
     workflow::external_party::{
@@ -285,8 +285,10 @@ pub async fn tenant_status(
         Ok(HostOnboardingStatus::Onboarding) => HttpResponse::Ok().json(WorkflowStatusResponse {
             status: WorkflowProgress::InProgress,
             error: Some(
-                "hosted but still carrying Canton's onboarding marker — the ACS has not been \
-                 replicated to this host yet"
+                "hosted but still carrying Canton's onboarding marker, so the party is not \
+                 usable here yet. Either the ACS has not been replicated or the clearing \
+                 transaction is proposed and not yet authorized — the marker does not say \
+                 which"
                     .to_string(),
             ),
         }),
@@ -468,7 +470,8 @@ pub async fn tenant_add_hosts_onboard(
     tag = "Tenant",
     params(
         ("party" = String, Path, description = "Full party id"),
-        ("target" = String, Path, description = "Participant the snapshot is for")
+        ("target" = String, Path, description = "Participant the snapshot is for"),
+        ("base_serial" = u32, Query, description = "The serial the add-hosts write was pinned to")
     ),
     responses(
         (status = 200, description = "ACS snapshot for the target", body = TenantAcsSnapshotResponse),
@@ -482,6 +485,7 @@ pub async fn tenant_acs_snapshot(
     http_req: HttpRequest,
     data: web::Data<AppState>,
     path: web::Path<(String, String)>,
+    query: web::Query<AcsBaseSerialQuery>,
 ) -> impl Responder {
     if let Err(resp) = require_tenant_api_key(&http_req, &data) {
         return resp;
@@ -495,7 +499,7 @@ pub async fn tenant_acs_snapshot(
             });
         }
     };
-    let replication = match replication_target(&party_id, &target) {
+    let replication = match replication_target(&party_id, &target, query.base_serial) {
         Ok(t) => t,
         Err(e) => {
             return HttpResponse::BadRequest().json(ErrorResponse {
@@ -580,7 +584,11 @@ pub async fn tenant_acs_import(
             });
         }
     };
-    let replication = match replication_target(&body.party_id, data.config.participant_id()) {
+    let replication = match replication_target(
+        &body.party_id,
+        data.config.participant_id(),
+        body.base_serial,
+    ) {
         Ok(t) => t,
         Err(e) => {
             return HttpResponse::BadRequest().json(ErrorResponse {
@@ -769,9 +777,73 @@ pub async fn tenant_threshold_onboard(
     })
 }
 
+/// This host's view of a hosted party's topology, including the serial every
+/// write in this API needs pinned.
+///
+/// Without it the writes are unusable by an actual wallet: they all require
+/// `base_serial`, and a wallet has no Canton Admin API access and no other
+/// endpoint that reports it. Reading it here is the first step of any change.
+#[utoipa::path(
+    tag = "Tenant",
+    params(("party" = String, Path, description = "Full party id")),
+    responses(
+        (status = 200, description = "The party's current topology on this host", body = TenantPartyStateResponse),
+        (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 404, description = "This host holds no authorized mapping for this party", body = ErrorResponse),
+        (status = 500, description = "A Canton call failed on this host", body = ErrorResponse)
+    )
+)]
+#[get("/v0/tenant/{party}/state")]
+pub async fn tenant_party_state(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    path: web::Path<String>,
+) -> impl Responder {
+    if let Err(resp) = require_tenant_api_key(&http_req, &data) {
+        return resp;
+    }
+    let party_id = path.into_inner();
+
+    match read_party_to_participant(&data.config, &party_id).await {
+        Ok(Some(current)) => {
+            let onboarding_hosts = current
+                .mapping
+                .participants
+                .iter()
+                .filter(|p| p.onboarding.is_some())
+                .count() as u32;
+            HttpResponse::Ok().json(TenantPartyStateResponse {
+                party_id,
+                serial: current.serial,
+                threshold: current.mapping.threshold,
+                host_count: current.mapping.participants.len() as u32,
+                onboarding_hosts,
+            })
+        }
+        Ok(None) => HttpResponse::NotFound().json(ErrorResponse {
+            error: format!("This host holds no authorized mapping for {party_id}"),
+        }),
+        Err(e) => {
+            tracing::error!("tenant party state: topology read failed: {e:#}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to read the party's topology: {e}"),
+            })
+        }
+    }
+}
+
 // ============================================================================
 // Helpers
 // ============================================================================
+
+/// `?base_serial=` on the ACS export endpoint.
+///
+/// Required rather than defaulted: it keys the replication's staged state, and
+/// guessing it would silently reuse another attempt's offsets.
+#[derive(Debug, serde::Deserialize)]
+pub struct AcsBaseSerialQuery {
+    pub base_serial: u32,
+}
 
 /// Base64-decode a raw Ed25519 public key into its fixed 32-byte array, or the
 /// 400 response to return.

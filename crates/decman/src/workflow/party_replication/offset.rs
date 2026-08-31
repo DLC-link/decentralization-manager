@@ -44,10 +44,21 @@ pub async fn capture_offset_once(
         return Ok(());
     }
     let offset = current_ledger_offset(config, ledger_token).await?;
-    target
-        .write_artifact(storage, kind, scope, offset.to_string().as_bytes())
+    // Insert-only, so two concurrent callers cannot both pass the check above
+    // and have the slower one overwrite a value the faster one already acted on.
+    // Losing that race is success: the offset that is stored is the one every
+    // later step will use, and it is by definition pre-activation.
+    let wrote = target
+        .write_artifact_if_absent(storage, kind, scope, offset.to_string().as_bytes())
         .await?;
-    tracing::info!("Captured {label} ledger offset {offset}");
+    if wrote {
+        tracing::info!("Captured {label} ledger offset {offset}");
+    } else {
+        tracing::info!(
+            "Another caller captured the {label} offset first; keeping theirs and discarding \
+             {offset}"
+        );
+    }
     Ok(())
 }
 
