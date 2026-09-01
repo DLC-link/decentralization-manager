@@ -13,11 +13,18 @@ design is shaped this way, read the module docs in
 The party's namespace decides it, and the namespace is the half of the party id
 after `::`.
 
-| The namespace is | The party is | Path |
-|---|---|---|
-| Its own key, held by a wallet | External | [Add hosts](#adding-hosts-to-an-external-party) |
-| A participant's root key | Local | [Convert first](#converting-a-local-party), then add hosts |
-| A `DecentralizedNamespaceDefinition` | A decparty | Use the add-party workflow, not this |
+| The namespace is | Signing keys | The party is | Path |
+|---|---|---|---|
+| Its own key, held by a wallet | present | External | [Add hosts](#adding-hosts-to-an-external-party) |
+| A participant's root key | **absent** | Local, unconverted | [Convert first](#converting-a-local-party), then add hosts |
+| A participant's root key | **present** | Local, already converted | [Add hosts](#adding-hosts-to-an-external-party) — do **not** convert again |
+| A `DecentralizedNamespaceDefinition` | — | A decparty | Use the add-party workflow, not this |
+
+The namespace alone is not enough to pick a row. A converted party keeps its
+participant's namespace forever — that is the point of the conversion being
+in-place — so the presence of `party_signing_keys` is what distinguishes one
+that has already been converted from one that has not. Converting twice is
+refused, because it would replace the owner's key with someone else's.
 
 To tell a local party from an external one, compare the party's namespace with
 the hosting participant's:

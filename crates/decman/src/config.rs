@@ -262,9 +262,15 @@ pub struct NodeConfig {
     /// connection. The tenant path goes over HTTP, so the Noise limit never
     /// applied to it and only constrained it by accident of shared code.
     ///
-    /// Still bounded: the snapshot is assembled in memory on both ends, so this
-    /// is a real memory commitment on the exporting and importing nodes. Raise
-    /// it deliberately.
+    /// **Export-side only.** It bounds what this node will export and does not
+    /// bound what it will accept: the import decodes whatever it is given, and
+    /// the server's fixed 100 MiB `JsonConfig` limit is what actually rejects an
+    /// oversized body first. So raising this past roughly 75 MiB of ACS buys
+    /// nothing on its own — base64 inflates by 4/3 — and a snapshot that large
+    /// needs the transfer to move in bounded pieces rather than one body.
+    ///
+    /// The snapshot is also assembled whole in memory, so this is a real memory
+    /// commitment on the exporting node. Raise it deliberately.
     pub tenant_acs_max_bytes: usize,
     /// Output contracts one `Delegation_Assign` may create, which bounds the
     /// coupons per transaction (`/ beneficiary_count`). The ledger's real

@@ -35,7 +35,8 @@ pub(crate) use party_config::{discover_member_party, get_party_config, save_part
 pub(crate) use tenant::{
     tenant_acs_import, tenant_acs_snapshot, tenant_add_hosts_onboard, tenant_add_hosts_prepare,
     tenant_local_party_adopt_onboard, tenant_local_party_adopt_prepare, tenant_onboard,
-    tenant_prepare, tenant_status, tenant_threshold_onboard, tenant_threshold_prepare,
+    tenant_party_state, tenant_prepare, tenant_status, tenant_threshold_onboard,
+    tenant_threshold_prepare,
 };
 pub(crate) use token_standard::{
     get_burn_requests_handler, get_credential_offers_handler, get_credentials_handler,
