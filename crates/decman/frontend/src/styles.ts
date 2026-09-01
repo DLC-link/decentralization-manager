@@ -29,17 +29,24 @@ export const columnSx = {
 export const SURFACE2 = { light: "#F2F0EE", dark: "#241F1C" } as const;
 
 /**
- * Insets a full-bleed table to the shared content pad, so its row rules and
- * zebra fills stop where the content does instead of running to the view's
- * edges. The theme pads a table's leading/trailing cell out to `--content-pad`
- * for the full-bleed case; inside this wrapper that inset belongs to the
- * wrapper, so the cells give it back and the column lines up with the section
- * title above it.
+ * A table that lives inside a card. The theme pads a table's leading and
+ * trailing cell out to `--content-pad` so a *full-bleed* table lines its content
+ * up with the rest of the UI; inside a card the card's own edge is the boundary,
+ * so the cells fall back to the ordinary gutter and the row rules stop where the
+ * card does.
  */
-export const insetTableSx = {
-  px: "var(--content-pad)",
-  "& .MuiTableCell-root:first-of-type": { paddingLeft: 0 },
-  "& .MuiTableCell-root:last-of-type": { paddingRight: 0 },
+export const cardTableSx = {
+  "& .MuiTableCell-root:first-of-type": { paddingLeft: "16px" },
+  "& .MuiTableCell-root:last-of-type": { paddingRight: "16px" },
+};
+
+/** Card chrome shared by the party detail's sections. */
+export const sectionCardSx = {
+  border: "1px solid",
+  borderColor: "divider",
+  borderRadius: "12px",
+  bgcolor: "background.paper",
+  overflow: "hidden",
 };
 
 /**

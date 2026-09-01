@@ -24,7 +24,7 @@ import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import { JSONTree } from "react-json-tree";
 import { API_BASE, PAGE_SIZE } from "../constants";
 import { authenticatedFetch } from "../api";
-import { insetTableSx, zebraRow } from "../styles";
+import { cardTableSx, zebraRow } from "../styles";
 import { CopyableText } from "./CopyableText";
 import { CursorPagination } from "./Pagination";
 import type {
@@ -437,7 +437,7 @@ export const GovernanceAuditTrail = ({
           setMode(next);
         }
       }}
-      sx={{ mb: 1.5, ml: "var(--content-pad)" }}
+      sx={{ mb: 1.5, ml: 2, mt: 1.5 }}
     >
       {MODE_LABELS.map(({ value, label, hint }) => (
         <Tooltip key={value} title={hint}>
@@ -479,7 +479,7 @@ export const GovernanceAuditTrail = ({
         <Typography
           variant="body2"
           color="text.secondary"
-          sx={{ py: 2, px: "var(--content-pad)" }}
+          sx={{ py: 2, px: 2 }}
         >
           {EMPTY_MESSAGE[mode]}
         </Typography>
@@ -510,7 +510,7 @@ export const GovernanceAuditTrail = ({
               maxHeight: "calc(100vh - 280px)",
               overflowY: "auto",
               overflowX: "auto",
-              ...insetTableSx,
+              ...cardTableSx,
             }}
           >
           <Table size="small">

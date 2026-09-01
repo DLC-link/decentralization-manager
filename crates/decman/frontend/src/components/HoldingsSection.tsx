@@ -17,7 +17,7 @@ import { CopyableText } from "./CopyableText";
 import { TextHelp } from "./FieldHelp";
 import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
-import { insetTableSx, zebraRow } from "../styles";
+import { cardTableSx, zebraRow } from "../styles";
 import { PaginationControls } from "./Pagination";
 import { usePagination } from "../usePagination";
 import type { Holding, HoldingsResponse } from "../types";
@@ -91,7 +91,7 @@ export const HoldingsSection = ({
 
   if (error) {
     return (
-      <Box sx={{ py: 2, px: "var(--content-pad)" }}>
+      <Box sx={{ py: 2, px: 2 }}>
         <Alert
           severity="error"
           sx={{ mb: 2 }}
@@ -113,7 +113,7 @@ export const HoldingsSection = ({
 
   if (loading && holdings.length === 0) {
     return (
-      <Box sx={{ display: "flex", alignItems: "center", gap: 1, py: 2, px: "var(--content-pad)" }}>
+      <Box sx={{ display: "flex", alignItems: "center", gap: 1, py: 2, px: 2 }}>
         <CircularProgress size={16} />
         <Typography variant="body2" color="text.secondary">
           Loading holdings…
@@ -124,7 +124,7 @@ export const HoldingsSection = ({
 
   if (holdings.length === 0) {
     return (
-      <Typography variant="body2" color="text.secondary" sx={{ py: 2, px: "var(--content-pad)" }}>
+      <Typography variant="body2" color="text.secondary" sx={{ py: 2, px: 2 }}>
         This party has no holdings.
       </Typography>
     );
@@ -135,7 +135,7 @@ export const HoldingsSection = ({
     // capture the footer's `position: sticky` and pin it to a box that never
     // scrolls vertically.
     <Box>
-      <Box sx={{ overflowX: "auto", ...insetTableSx }}>
+      <Box sx={{ overflowX: "auto", ...cardTableSx }}>
         <Table size="small">
           <TableHead>
             <TableRow>
@@ -217,7 +217,7 @@ export const HoldingsSection = ({
         pageCount={pageCount}
         total={total}
         onChange={setPage}
-        sx={{ px: 3 }}
+        sx={{ px: 2 }}
       />
     </Box>
   );
