@@ -1289,7 +1289,7 @@
       }
     },
     {
-      "party_id": "vault-basis-btc::1220f6f48d14fe041563d9d47b660259db8d993e4788d160c547b0e241facf9f",
+      "party_id": "treasury-basis-btc::1220f6f48d14fe041563d9d47b660259db8d993e4788d160c547b0e241facf9f",
       "threshold": 3,
       "owners": [
         "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
@@ -1335,7 +1335,7 @@
       }
     },
     {
-      "party_id": "vault-carry-eth::122041138f3c525b216bfdd347ce51e3acd5fca898301a51cdcf43cde0e2ab8f",
+      "party_id": "treasury-carry-eth::122041138f3c525b216bfdd347ce51e3acd5fca898301a51cdcf43cde0e2ab8f",
       "threshold": 1,
       "owners": [
         "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",

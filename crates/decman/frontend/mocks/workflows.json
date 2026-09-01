@@ -344,7 +344,7 @@
       "created_at": 1782000000,
       "updated_at": 1782003600,
       "dar_filenames": [
-        "bitsafe-vault-0.0.3.dar",
+        "cbtc-governance-0.0.3.dar",
         "governance-core-0.2.3.dar"
       ]
     },
@@ -372,7 +372,7 @@
       "created_at": 1782003600,
       "updated_at": 1782007200,
       "dar_filenames": [
-        "bitsafe-vault-0.0.3.dar",
+        "cbtc-governance-0.0.3.dar",
         "governance-core-0.2.3.dar"
       ]
     },
@@ -400,7 +400,7 @@
       "created_at": 1782007200,
       "updated_at": 1782010800,
       "dar_filenames": [
-        "bitsafe-vault-0.0.3.dar",
+        "cbtc-governance-0.0.3.dar",
         "governance-core-0.2.3.dar"
       ]
     },
@@ -428,7 +428,7 @@
       "created_at": 1782010800,
       "updated_at": 1782014400,
       "dar_filenames": [
-        "bitsafe-vault-0.0.3.dar",
+        "cbtc-governance-0.0.3.dar",
         "governance-core-0.2.3.dar"
       ],
       "error": "Peer iBTC-validator-2 did not confirm within the timeout"
@@ -457,7 +457,7 @@
       "created_at": 1782014400,
       "updated_at": 1782018000,
       "dar_filenames": [
-        "bitsafe-vault-0.0.3.dar",
+        "cbtc-governance-0.0.3.dar",
         "governance-core-0.2.3.dar"
       ]
     },
@@ -485,7 +485,7 @@
       "created_at": 1782018000,
       "updated_at": 1782021600,
       "dar_filenames": [
-        "bitsafe-vault-0.0.3.dar",
+        "cbtc-governance-0.0.3.dar",
         "governance-core-0.2.3.dar"
       ]
     },
@@ -513,7 +513,7 @@
       "created_at": 1782021600,
       "updated_at": 1782025200,
       "dar_filenames": [
-        "bitsafe-vault-0.0.3.dar",
+        "cbtc-governance-0.0.3.dar",
         "governance-core-0.2.3.dar"
       ]
     },
@@ -541,7 +541,7 @@
       "created_at": 1782025200,
       "updated_at": 1782028800,
       "dar_filenames": [
-        "bitsafe-vault-0.0.3.dar",
+        "cbtc-governance-0.0.3.dar",
         "governance-core-0.2.3.dar"
       ]
     },
@@ -569,7 +569,7 @@
       "created_at": 1782028800,
       "updated_at": 1782032400,
       "dar_filenames": [
-        "bitsafe-vault-0.0.3.dar",
+        "cbtc-governance-0.0.3.dar",
         "governance-core-0.2.3.dar"
       ],
       "error": "Peer iBTC-validator-2 did not confirm within the timeout"
@@ -598,7 +598,7 @@
       "created_at": 1782032400,
       "updated_at": 1782036000,
       "dar_filenames": [
-        "bitsafe-vault-0.0.3.dar",
+        "cbtc-governance-0.0.3.dar",
         "governance-core-0.2.3.dar"
       ]
     },
@@ -626,7 +626,7 @@
       "created_at": 1782036000,
       "updated_at": 1782039600,
       "dar_filenames": [
-        "bitsafe-vault-0.0.3.dar",
+        "cbtc-governance-0.0.3.dar",
         "governance-core-0.2.3.dar"
       ]
     },
@@ -654,7 +654,7 @@
       "created_at": 1782039600,
       "updated_at": 1782043200,
       "dar_filenames": [
-        "bitsafe-vault-0.0.3.dar",
+        "cbtc-governance-0.0.3.dar",
         "governance-core-0.2.3.dar"
       ]
     },
@@ -682,7 +682,7 @@
       "created_at": 1782043200,
       "updated_at": 1782046800,
       "dar_filenames": [
-        "bitsafe-vault-0.0.3.dar",
+        "cbtc-governance-0.0.3.dar",
         "governance-core-0.2.3.dar"
       ]
     },
@@ -710,7 +710,7 @@
       "created_at": 1782046800,
       "updated_at": 1782050400,
       "dar_filenames": [
-        "bitsafe-vault-0.0.3.dar",
+        "cbtc-governance-0.0.3.dar",
         "governance-core-0.2.3.dar"
       ],
       "error": "Peer iBTC-validator-2 did not confirm within the timeout"
@@ -739,7 +739,7 @@
       "created_at": 1782050400,
       "updated_at": 1782054000,
       "dar_filenames": [
-        "bitsafe-vault-0.0.3.dar",
+        "cbtc-governance-0.0.3.dar",
         "governance-core-0.2.3.dar"
       ]
     },
@@ -767,7 +767,7 @@
       "created_at": 1782054000,
       "updated_at": 1782057600,
       "dar_filenames": [
-        "bitsafe-vault-0.0.3.dar",
+        "cbtc-governance-0.0.3.dar",
         "governance-core-0.2.3.dar"
       ]
     },
@@ -795,7 +795,7 @@
       "created_at": 1782057600,
       "updated_at": 1782061200,
       "dar_filenames": [
-        "bitsafe-vault-0.0.3.dar",
+        "cbtc-governance-0.0.3.dar",
         "governance-core-0.2.3.dar"
       ]
     },
@@ -823,7 +823,7 @@
       "created_at": 1782061200,
       "updated_at": 1782064800,
       "dar_filenames": [
-        "bitsafe-vault-0.0.3.dar",
+        "cbtc-governance-0.0.3.dar",
         "governance-core-0.2.3.dar"
       ]
     },
@@ -851,7 +851,7 @@
       "created_at": 1782064800,
       "updated_at": 1782068400,
       "dar_filenames": [
-        "bitsafe-vault-0.0.3.dar",
+        "cbtc-governance-0.0.3.dar",
         "governance-core-0.2.3.dar"
       ],
       "error": "Peer iBTC-validator-2 did not confirm within the timeout"
@@ -880,7 +880,7 @@
       "created_at": 1782068400,
       "updated_at": 1782072000,
       "dar_filenames": [
-        "bitsafe-vault-0.0.3.dar",
+        "cbtc-governance-0.0.3.dar",
         "governance-core-0.2.3.dar"
       ]
     },
@@ -908,7 +908,7 @@
       "created_at": 1782072000,
       "updated_at": 1782075600,
       "dar_filenames": [
-        "bitsafe-vault-0.0.3.dar",
+        "cbtc-governance-0.0.3.dar",
         "governance-core-0.2.3.dar"
       ]
     },
@@ -936,7 +936,7 @@
       "created_at": 1782075600,
       "updated_at": 1782079200,
       "dar_filenames": [
-        "bitsafe-vault-0.0.3.dar",
+        "cbtc-governance-0.0.3.dar",
         "governance-core-0.2.3.dar"
       ]
     },
@@ -964,7 +964,7 @@
       "created_at": 1782079200,
       "updated_at": 1782082800,
       "dar_filenames": [
-        "bitsafe-vault-0.0.3.dar",
+        "cbtc-governance-0.0.3.dar",
         "governance-core-0.2.3.dar"
       ]
     }
