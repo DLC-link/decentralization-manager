@@ -516,8 +516,8 @@ async fn stub_add_hosts_onboard(server: &MockServer, serial: u32) {
         .await;
 }
 
-/// A stub source host that serves the party's ACS, and a joiner that accepts it
-/// and reports its marker cleared.
+/// A stub source host that serves the party's ACS as ranges, and a joiner that
+/// accepts them and reports completion.
 async fn stub_acs_relay(source: &MockServer, joiner: &MockServer) {
     let snapshot = b"an-acs-snapshot".to_vec();
     let total = snapshot.len() as u64;
