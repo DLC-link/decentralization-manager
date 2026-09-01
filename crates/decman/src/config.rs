@@ -254,6 +254,24 @@ pub struct NodeConfig {
     /// automation loop. Enablement is on-ledger (presence of a
     /// `CouponReassignmentDelegation`), so this only controls cadence. Default 300s.
     pub reward_automation_interval_secs: u64,
+    /// Ceiling on an ACS snapshot the wallet relays over the tenant API, in
+    /// bytes.
+    ///
+    /// Distinct from the Noise chunked-transfer limit, which bounds the decparty
+    /// add-party path because that snapshot really does cross a Noise
+    /// connection. The tenant path goes over HTTP, so the Noise limit never
+    /// applied to it and only constrained it by accident of shared code.
+    ///
+    /// **Export-side only.** It bounds what this node will export and does not
+    /// bound what it will accept: the import decodes whatever it is given, and
+    /// the server's fixed 100 MiB `JsonConfig` limit is what actually rejects an
+    /// oversized body first. So raising this past roughly 75 MiB of ACS buys
+    /// nothing on its own — base64 inflates by 4/3 — and a snapshot that large
+    /// needs the transfer to move in bounded pieces rather than one body.
+    ///
+    /// The snapshot is also assembled whole in memory, so this is a real memory
+    /// commitment on the exporting node. Raise it deliberately.
+    pub tenant_acs_max_bytes: usize,
     /// Output contracts one `Delegation_Assign` may create, which bounds the
     /// coupons per transaction (`/ beneficiary_count`). The ledger's real
     /// ceiling for this transaction shape is unmeasured — configurable so it can
@@ -300,6 +318,9 @@ impl Default for NodeConfig {
             timeouts: Timeouts::default(),
             noise_retry: NoiseRetryConfig::default(),
             reward_automation_interval_secs: 300,
+            // 512 MiB: comfortably past the 16 MiB the Noise path allows, while
+            // still a bound a node operator can reason about.
+            tenant_acs_max_bytes: 512 * 1024 * 1024,
             reward_max_creates: 100,
             reward_min_expiry_margin_secs: 120,
             keycloak: None,

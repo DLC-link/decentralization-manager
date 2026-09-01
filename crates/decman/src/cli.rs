@@ -249,6 +249,12 @@ pub enum Commands {
         /// this only controls cadence. Defaults to 300.
         #[arg(long, env = "DECPM_REWARD_AUTOMATION_INTERVAL_SECS")]
         reward_automation_interval_secs: Option<u64>,
+        /// Ceiling on an ACS snapshot the wallet relays over the tenant API, in
+        /// bytes. The Noise chunked-transfer limit does not apply to that path,
+        /// which goes over HTTP. The snapshot is assembled in memory on both
+        /// ends, so this is a real memory commitment. Defaults to 512 MiB.
+        #[arg(long, env = "DECPM_TENANT_ACS_MAX_BYTES")]
+        tenant_acs_max_bytes: Option<usize>,
         /// Output contracts one Delegation_Assign may create, bounding the
         /// coupons per transaction. Raise stepwise to find the ledger's real
         /// ceiling; set too high, assigns fail and nothing is assigned.

@@ -18,6 +18,7 @@ A web application for managing decentralized parties in Canton blockchain networ
 
 - [Architecture Overview](docs/ARCHITECTURE.md) -- System architecture, core concepts, communication protocol, and technical constraints
 - [User Guide](USER_GUIDE.md) -- Walkthrough of the web UI for day-to-day party and governance operations
+- [Decentralizing an Existing Party](docs/DECENTRALIZING_AN_EXISTING_PARTY.md) -- Adding hosts to a party that already exists, and converting a local party
 - [Custom Daml Templates](docs/CUSTOM_DAML_TEMPLATES.md) -- Authoring and deploying your own Daml governance templates
 - [Deployment Guide](docs/DEPLOYMENT_GUIDE.md) -- Deploying a node to Kubernetes from scratch: manifests, identity-provider setup, and configuration reference
 - [Use Cases](docs/USE_CASES.md) -- Vault governance, FAR rewards, multi-sig wallet, and utility service walkthroughs
@@ -177,6 +178,7 @@ The database file path can be overridden with the `--db` CLI flag.
 | `DECPM_KEYCLOAK_REALM` | Keycloak realm name for frontend auth | _(none)_ |
 | `DECPM_KEYCLOAK_CLIENT_ID` | Keycloak client ID for frontend auth | _(none)_ |
 | `DECPM_KEYCLOAK_INTERNAL_URL` | Internal/backchannel Keycloak URL the server uses for OIDC discovery, JWKS, and introspection when it cannot reach `DECPM_KEYCLOAK_URL` directly (e.g. that is a tailnet host but the pod is in-cluster) | `DECPM_KEYCLOAK_URL` |
+| `DECPM_TENANT_ACS_MAX_BYTES` | Ceiling on an ACS snapshot the wallet relays over the tenant API. The Noise chunked-transfer limit does not bound that path; it goes over HTTP. Assembled in memory on both ends, so raise deliberately | `536870912` (512 MiB) |
 | `DECPM_AUTH0_DOMAIN` | Auth0 tenant domain for frontend auth (mutually exclusive with `DECPM_KEYCLOAK_*`) | _(none)_ |
 | `DECPM_AUTH0_CLIENT_ID` | Auth0 SPA client ID for frontend auth | _(none)_ |
 | `DECPM_AUTH0_AUDIENCE` | Auth0 API audience the SPA's access tokens target | _(none)_ |
@@ -455,6 +457,8 @@ The table below is a curated subset. A complete, interactive API reference is av
 | `/v0/tenant/add-hosts/import` | POST | Wallet-facing: imports a relayed ACS on this host and clears its onboarding marker |
 | `/v0/tenant/threshold/prepare` | POST | Wallet-facing: builds a confirmation-threshold change |
 | `/v0/tenant/threshold/onboard` | POST | Wallet-facing: submits the wallet-signed threshold change |
+| `/v0/tenant/local-party/adopt-key/prepare` | POST | Wallet-facing: builds the conversion that gives a local party an owner-held signing key |
+| `/v0/tenant/local-party/adopt-key/onboard` | POST | Wallet-facing: co-signs and submits the owner-signed conversion |
 
 The `/v0/tenant/*` endpoints are the tenant API. They authenticate with a
 separate tenant API key rather than the operator JWT, and are driven by

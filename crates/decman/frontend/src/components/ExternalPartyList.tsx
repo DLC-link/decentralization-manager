@@ -1,5 +1,6 @@
 import {
   Box,
+  Chip,
   Table,
   TableBody,
   TableCell,
@@ -48,6 +49,11 @@ export const ExternalPartyList = ({ parties }: ExternalPartyListProps) => {
           <TableRow>
             <TableCell sx={{ py: 1 }}>Party ID</TableCell>
             <TableCell sx={{ py: 1 }}>Fingerprint</TableCell>
+            <TableCell sx={{ py: 1 }}>
+              <Tooltip title="Live means this node holds the party's contracts and confirms for it. Onboarding means the party is assigned here but still carries Canton's onboarding marker: its contracts have not been replicated yet, so it confirms nothing.">
+                <span>Status</span>
+              </Tooltip>
+            </TableCell>
             <TableCell sx={{ py: 1 }} align="right">
               <Tooltip title="How many participants host this party. Any one of them being down does not take the party down.">
                 <span>Hosts</span>
@@ -81,6 +87,23 @@ export const ExternalPartyList = ({ parties }: ExternalPartyListProps) => {
                   truncate={{ start: 10, end: 8 }}
                   variant="body2"
                 />
+              </TableCell>
+              <TableCell sx={{ py: 1.5 }}>
+                {party.onboarding ? (
+                  <Chip
+                    label="Onboarding"
+                    size="small"
+                    color="warning"
+                    variant="outlined"
+                  />
+                ) : (
+                  <Chip
+                    label="Live"
+                    size="small"
+                    color="success"
+                    variant="outlined"
+                  />
+                )}
               </TableCell>
               <TableCell sx={{ py: 1.5 }} align="right">
                 <Typography variant="body2">{party.host_count}</Typography>

@@ -152,10 +152,13 @@ async fn run_workflow(
                 // The topology is live; export the party's ACS for the new
                 // member and ship it with the ImportAcs command. Empty when
                 // the party has no active contracts — the new member skips.
+                // The Noise cap, because this snapshot really does cross a Noise
+                // connection to reach the new member.
                 let snapshot = export_party_acs(
                     &node_config,
                     &db,
                     &add_party_config.replication_target(&instance_name),
+                    crate::noise::MAX_CHUNKED_TOTAL_SIZE,
                 )
                 .await?;
                 // Package ids the new member must have to validate the imported

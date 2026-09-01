@@ -23,7 +23,6 @@ use crate::{
     config::NodeConfig,
     consts::{topology_retry_delay_secs, topology_retry_max_attempts},
     error::Result,
-    noise::MAX_CHUNKED_TOTAL_SIZE,
     utils,
     workflow::party_replication::ReplicationTarget,
 };
@@ -45,12 +44,18 @@ const IMPORT_CHUNK_SIZE: usize = 1024 * 1024;
 /// consistent with that activation — this is what fixes the old
 /// implementation's export-at-current-ledger-end gap.
 ///
+/// `max_bytes` bounds the assembled snapshot. It is the caller's, not the
+/// export's: a Noise-transported replication cannot exceed the chunked-transfer
+/// limit, while the wallet-relayed tenant path goes over HTTP and is bounded by
+/// configuration instead.
+///
 /// Returns the raw snapshot bytes; empty when the party has no active
 /// contracts (the import side skips on empty).
 pub async fn export_party_acs(
     config: &NodeConfig,
     storage: &SqlitePool,
     target: &ReplicationTarget,
+    max_bytes: usize,
 ) -> Result<Vec<u8>> {
     // Logical synchronizer id — see `current_ledger_offset` for why the
     // physical id is rejected by PartyManagementService.
@@ -101,10 +106,12 @@ pub async fn export_party_acs(
             }),
         });
 
-        match collect_export_stream(&mut client, request).await {
+        match collect_export_stream(&mut client, request, max_bytes).await {
             Ok(snapshot) => {
-                // Size cap is enforced mid-stream in `collect_export_stream`, so a
-                // returned snapshot is always within the chunked-transfer limit.
+                // Enforced mid-stream in `collect_export_stream`, so a returned
+                // snapshot is always within the `max_bytes` this caller passed —
+                // which is the Noise chunked-transfer limit for add-party and a
+                // configured, much larger ceiling for the tenant path.
                 tracing::info!("Exported ACS snapshot: {len} bytes", len = snapshot.len());
                 return Ok(snapshot);
             }
@@ -131,20 +138,22 @@ pub async fn export_party_acs(
 async fn collect_export_stream(
     client: &mut PartyManagementServiceClient<tonic::transport::Channel>,
     request: tonic::Request<ExportPartyAcsRequest>,
+    max_bytes: usize,
 ) -> std::result::Result<Vec<u8>, tonic::Status> {
     let mut stream = client.export_party_acs(request).await?.into_inner();
     let mut snapshot = Vec::new();
     while let Some(response) = stream.message().await? {
         snapshot.extend_from_slice(&response.chunk);
-        // Enforce the chunked-transfer cap while streaming so an oversized party
-        // can't accumulate unbounded memory (and OOM) before the export finishes
-        // — abort as soon as the running total crosses the cap.
-        if snapshot.len() > MAX_CHUNKED_TOTAL_SIZE {
+        // The cap belongs to the caller's transport, not to the export. Enforced
+        // while streaming so an oversized party cannot accumulate unbounded
+        // memory (and OOM) before the export finishes: abort as soon as the
+        // running total crosses it.
+        if snapshot.len() > max_bytes {
             return Err(tonic::Status::out_of_range(format!(
-                "Exported ACS snapshot exceeds the {MAX_CHUNKED_TOTAL_SIZE}-byte \
-                 chunked-transfer cap — the target cannot receive it over Noise. \
-                 Raise MAX_CHUNKED_TOTAL_SIZE (with a memory-bound review) to replicate \
-                 a party this large."
+                "Exported ACS snapshot exceeds the {max_bytes}-byte cap this caller can \
+                 carry. A Noise-transported replication is bounded by the chunked-transfer \
+                 limit; the wallet-relayed path is bounded by \
+                 DECPM_TENANT_ACS_MAX_BYTES."
             )));
         }
     }
