@@ -17,13 +17,10 @@ public, so no special repository access is needed):
 
 ```bash
 # Build the image (replace the key path with your own GitHub-registered key)
-docker build --ssh default=$HOME/.ssh/id_ed25519 -t dec-party-manager .
+docker build --ssh default=$HOME/.ssh/id_ed25519 -f development/Dockerfile -t dec-party-manager .
 
 # Run
-# The image runs as uid 65532, so the host directory must be writable by it.
-mkdir -p ./data && sudo chown 65532:65532 ./data
-
-docker run -p 8080:8080 -p 9000:9000 -v ./data:/home/nonroot/data \
+docker run -p 8080:8080 -p 9000:9000 -v ./data:/data \
   -e DECPM_PORT=8080 \
   -e DECPM_NOISE_PORT=9000 \
   -e DECPM_CANTON_ADMIN_HOST=canton-node \
@@ -37,16 +34,33 @@ docker run -p 8080:8080 -p 9000:9000 -v ./data:/home/nonroot/data \
 
 Then open the web UI at `http://localhost:8080`.
 
-The `-v ./data:/home/nonroot/data` mount persists the SQLite database (peers,
-party credentials) and the auto-generated Noise keypair across restarts.
+The `-v ./data:/data` mount persists the SQLite database (peers, party
+credentials) and the auto-generated Noise keypair across restarts.
 
-`/home/nonroot` is the image's default `DECPM_DIR`, and the app writes
-`$DECPM_DIR/data` — so that is the directory to mount. Point the mount
-somewhere else and pass `-e DECPM_DIR=<parent>` to match, or the container
-writes inside its own filesystem and the data disappears with it.
+`/` is the image's default `DECPM_DIR`, and the app writes `$DECPM_DIR/data` —
+so that is the directory to mount. Point the mount somewhere else and pass
+`-e DECPM_DIR=<parent>` to match, or the container writes inside its own
+filesystem and the data disappears with it.
 
-The `chown` is needed because the image runs as uid 65532 rather than root. A
-bind mount keeps the host's ownership, so without it the first write fails.
+### Nonroot image
+
+Every release is published twice — `…:<tag>` and `…:<tag>-nonroot`. Both hold
+the same binary; the second runs as uid 65532 rather than root, which is the
+one to deploy where a policy forbids root containers.
+
+Its `DECPM_DIR` defaults to `/home/nonroot`, because uid 65532 cannot create
+`/data`. So the mount moves with it, and the host directory has to belong to
+that uid — a bind mount keeps the host's ownership, and without the `chown` the
+first write fails:
+
+```bash
+mkdir -p ./data && sudo chown 65532:65532 ./data
+docker run -p 8080:8080 -p 9000:9000 -v ./data:/home/nonroot/data \
+  ... public.ecr.aws/dlc-link/decentralization-manager:<tag>-nonroot
+```
+
+Nothing else changes: same ports, same env vars, same entrypoint. For
+Kubernetes, see the [Deployment Guide](docs/DEPLOYMENT_GUIDE.md).
 
 ## Configuration
 

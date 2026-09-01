@@ -42,13 +42,29 @@ anything that needs `sh` — init containers, `kubectl exec` debugging, exec
 probes — on a utility image such as `busybox`, not on this image. The
 Deployment example below shows the pattern.
 
-It runs as **uid 65532** and needs no root: it binds 8080 and 9000, both above
-1024, and writes only under its data directory. Give the data volume an
-`fsGroup` so that uid can write to it — the Deployment example does.
+### Root or nonroot
 
-> Releases up to and including **v1.6.2** ran as uid 0. To harden one of those
-> without upgrading, set `runAsUser: 65532` and the same `fsGroup` on the pod;
-> the binary never needed the privileges it had.
+Each release is published as two images:
+
+| Tag | Runs as | `DECPM_DIR` default |
+|---|---|---|
+| `…:<tag>` | uid 0 (root) | `/` |
+| `…:<tag>-nonroot` | uid 65532 | `/home/nonroot` |
+
+They hold the same binary and take the same configuration; only the runtime
+identity differs. **Prefer `-nonroot`.** It is what an admission policy that
+inspects the image expects — a bare `runAsNonRoot: true` with no `runAsUser`
+rejects the plain tag, because the image itself declares uid 0. The plain tag
+stays for existing pins and for clusters that set `runAsUser` in the pod spec.
+
+Neither one needs root: the binary binds 8080 and 9000, both above 1024, and
+writes only under its data directory. Give the data volume an `fsGroup` so uid
+65532 can write to it — the Deployment example does, and that example runs
+either tag as 65532 because it pins `runAsUser` itself.
+
+> Releases up to and including **v1.6.2** shipped only the root image. To
+> harden one of those without upgrading, set `runAsUser: 65532` and the same
+> `fsGroup` on the pod; the binary never needed the privileges it had.
 
 To check the version of a running pod:
 
@@ -243,9 +259,10 @@ spec:
       labels:
         app.kubernetes.io/name: dec-party-manager
     spec:
-      # The image runs as uid 65532 and needs no root. fsGroup makes the
-      # mounted PVC group-writable by that uid, which is what lets both the
-      # init container and the app create files under /app.
+      # The app needs no root. Pinning runAsUser here means this works with
+      # either published tag; with `-nonroot` it matches the image default.
+      # fsGroup makes the mounted PVC group-writable by that uid, which is what
+      # lets both the init container and the app create files under /app.
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -263,6 +280,7 @@ spec:
               mountPath: /app
       containers:
         - name: dec-party-manager
+          # Append `-nonroot` for the image that runs as 65532 by itself.
           image: public.ecr.aws/dlc-link/decentralization-manager:<tag>
           imagePullPolicy: Always
           securityContext:
