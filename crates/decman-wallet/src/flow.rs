@@ -286,7 +286,7 @@ pub async fn statuses(hosts: &[WalletHost], party_id: &str) -> Vec<HostReport> {
 }
 
 /// The outcome of adding hosts to a party that already exists.
-#[derive(Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct AddedHosts {
     /// The party that gained hosts.
     pub party_id: String,
@@ -337,10 +337,17 @@ pub async fn add_hosts(
     base_serial: u32,
 ) -> Result<AddedHosts> {
     if new_hosts.is_empty() {
-        return Err(Error::NotEnoughHosts(0));
+        return Err(Error::NoHosts {
+            operation: "adding hosts",
+            role: "joining host",
+        });
     }
+    // A current host is needed as the ACS source, not merely as a signer.
     let Some(source) = current_hosts.first() else {
-        return Err(Error::NotEnoughHosts(0));
+        return Err(Error::NoHosts {
+            operation: "adding hosts",
+            role: "host that already holds the party",
+        });
     };
 
     let request = TenantAddHostsRequest {
@@ -358,7 +365,10 @@ pub async fn add_hosts(
     }
 
     let Some(((preparer, prepared), others)) = prepared_by_host.split_first() else {
-        return Err(Error::NotEnoughHosts(0));
+        return Err(Error::NoHosts {
+            operation: "adding hosts",
+            role: "host",
+        });
     };
     for (host, other) in others {
         let disagreement = if other.topology_transactions != prepared.topology_transactions {
@@ -443,7 +453,7 @@ pub async fn add_hosts(
         }
         let snapshot = match source
             .client
-            .acs_snapshot(party_id, &host.participant_id)
+            .acs_snapshot(party_id, &host.participant_id, base_serial)
             .await
         {
             Ok(snapshot) => snapshot,
@@ -458,6 +468,10 @@ pub async fn add_hosts(
         }
         let import = TenantAcsImportRequest {
             party_id: party_id.to_string(),
+            // The same serial the topology write was pinned to. It keys this
+            // replication's staged state, so a target that was removed and
+            // re-added does not inherit the earlier attempt's offsets.
+            base_serial,
             snapshot: snapshot.snapshot,
             package_ids: snapshot.package_ids,
         };
@@ -491,9 +505,10 @@ pub async fn add_hosts(
 /// Move a party's confirmation threshold.
 ///
 /// A threshold change needs the party namespace alone, so unlike an add there is
-/// no participant to co-sign and one host is enough to carry it. Every host is
-/// still asked to prepare and required to agree, because the wallet's inability
-/// to parse the hash it signs does not change with the operation.
+/// no participant to co-sign. That does not make one host enough *here*: the
+/// wallet cannot bind the hash it signs to the transaction it was shown, so
+/// agreement between independent preparers is its only defence, and this
+/// requires at least two.
 ///
 /// Do this **after** the joiners' markers clear. A marked host cannot confirm, so
 /// a threshold raised to include one is a threshold the party cannot meet.
@@ -508,8 +523,14 @@ pub async fn raise_threshold(
     new_threshold: u32,
     base_serial: u32,
 ) -> Result<Vec<HostReport>> {
-    if hosts.is_empty() {
-        return Err(Error::NotEnoughHosts(0));
+    // Two, not one. The wallet signs a hash it cannot parse, so a lone preparer
+    // could return a benign-looking threshold transaction alongside the hash of
+    // a different mapping and collect a valid party signature for it. Comparing
+    // what several hosts independently built is the only check available, and it
+    // is not optional just because a threshold change needs fewer signatures
+    // than an add.
+    if hosts.len() < 2 {
+        return Err(Error::NotEnoughHosts(hosts.len()));
     }
 
     let request = TenantThresholdRequest {
@@ -523,11 +544,15 @@ pub async fn raise_threshold(
         prepared_by_host.push((host, host.client.threshold_prepare(&request).await?));
     }
     let Some(((preparer, prepared), others)) = prepared_by_host.split_first() else {
-        return Err(Error::NotEnoughHosts(0));
+        return Err(Error::NoHosts {
+            operation: "changing the threshold",
+            role: "host",
+        });
     };
     for (host, other) in others {
         if other.topology_transactions != prepared.topology_transactions
             || other.transaction_hashes != prepared.transaction_hashes
+            || other.serial != prepared.serial
         {
             return Err(Error::HostDisagreement {
                 host: host.client.base_url().to_string(),
@@ -537,6 +562,20 @@ pub async fn raise_threshold(
         }
     }
 
+    // One hash per transaction, checked before signing anything. Without this a
+    // preparer can append the hash of a different topology and get it signed:
+    // the extra signature travels with the bundle and authorizes a mapping the
+    // wallet never saw.
+    if prepared.transaction_hashes.len() != prepared.topology_transactions.len() {
+        return Err(Error::MalformedPreparation {
+            host: preparer.client.base_url().to_string(),
+            detail: format!(
+                "{hashes} hash(es) for {txs} transaction(s)",
+                hashes = prepared.transaction_hashes.len(),
+                txs = prepared.topology_transactions.len()
+            ),
+        });
+    }
     let mut signatures = Vec::with_capacity(prepared.transaction_hashes.len());
     for encoded in &prepared.transaction_hashes {
         let hash = preparer.client.decode_b64("transaction_hash", encoded)?;
