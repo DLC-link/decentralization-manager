@@ -267,11 +267,11 @@ const InvitationCard = ({
       actions={
         <>
           <Button
-            variant="text"
+            variant="outlined"
+            color="error"
             size="small"
             onClick={() => respond("decline")}
             disabled={busy}
-            sx={{ color: "text.secondary" }}
           >
             Decline
           </Button>
