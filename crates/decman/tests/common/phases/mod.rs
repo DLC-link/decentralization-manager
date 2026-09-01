@@ -25,6 +25,7 @@ pub mod identity_survives_dismiss;
 pub mod invite_cap;
 pub mod invite_survives_peer_restart;
 pub mod kick;
+pub mod local_party_adopt_key;
 pub mod notification_feed;
 pub mod owner_key_resilience;
 pub mod peer_3_strikes_abort;

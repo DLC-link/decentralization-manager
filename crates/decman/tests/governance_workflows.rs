@@ -110,6 +110,9 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     // Serial-N+1 against a party that already exists: onboards on P1+P2, then
     // adds P3. Same plain-HTTP path, so it sits here with its sibling.
     phases::external_party_add_hosts::run(&mut f).await?;
+    // Spike: does Canton let an existing local party adopt a wallet key? The
+    // answer decides whether Plan B1 exists at all.
+    phases::local_party_adopt_key::run(&mut f).await?;
     phases::create_dec_party::run(&mut f).await?;
     phases::distribute_dars::run(&mut f).await?;
     phases::check_peer_dars::run(&mut f).await?;
