@@ -557,6 +557,13 @@ pub struct TenantAcsSnapshotResponse {
 pub struct TenantAcsImportRequest {
     /// The party being replicated onto this host.
     pub party_id: String,
+    /// The serial the add-hosts write was pinned to.
+    ///
+    /// Part of how this replication's staged state is keyed, so a target that
+    /// was removed and later re-added does not inherit the first attempt's
+    /// offsets — an offset predating the earlier activation makes the export
+    /// find the stale one and abort.
+    pub base_serial: u32,
     /// Where this range starts. Must equal what the host already holds; a
     /// mismatch is refused rather than written, because a snapshot with a hole
     /// only fails once Canton is mid-import and the participant is disconnected.
@@ -666,6 +673,31 @@ pub struct LocalPartyAdoptOnboardRequest {
     pub topology_transactions: Vec<String>,
     pub signatures: Vec<String>,
     pub signed_by: String,
+}
+
+/// A hosted party's current topology, as this host sees it.
+///
+/// Exists because `base_serial` is required by every write in this API and was
+/// otherwise undiscoverable: a wallet has no Canton Admin API access, and
+/// neither the status endpoint nor `/external-parties` reported the serial. The
+/// writes were only usable by a caller that already knew something it had no way
+/// to learn.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantPartyStateResponse {
+    pub party_id: String,
+    /// The authorized mapping's serial. Pin this as `base_serial` on the next
+    /// write.
+    pub serial: u32,
+    /// How many hosts must confirm.
+    pub threshold: u32,
+    /// How many participants host the party.
+    pub host_count: u32,
+    /// Hosts still carrying Canton's onboarding marker, which confirm nothing
+    /// until it clears. A threshold above `host_count - onboarding_hosts` is one
+    /// the party cannot currently meet.
+    pub onboarding_hosts: u32,
 }
 
 /// Response for key status check

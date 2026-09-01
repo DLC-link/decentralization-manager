@@ -137,18 +137,25 @@ impl TenantClient {
         party_id: &str,
         target: &CantonId,
         offset: u64,
+        base_serial: u32,
     ) -> Result<TenantAcsSnapshotResponse> {
         self.get(&format!(
-            "/v0/tenant/{party_id}/acs/{target}?offset={offset}"
+            "/v0/tenant/{party_id}/acs/{target}?offset={offset}&base_serial={base_serial}"
         ))
         .await
     }
 
     /// `GET /v0/tenant/{party}/acs-progress` — how much of the snapshot this
     /// host already holds, so a fresh run resumes rather than restarts.
-    pub async fn acs_progress(&self, party_id: &str) -> Result<TenantAcsProgressResponse> {
-        self.get(&format!("/v0/tenant/{party_id}/acs-progress"))
-            .await
+    pub async fn acs_progress(
+        &self,
+        party_id: &str,
+        base_serial: u32,
+    ) -> Result<TenantAcsProgressResponse> {
+        self.get(&format!(
+            "/v0/tenant/{party_id}/acs-progress?base_serial={base_serial}"
+        ))
+        .await
     }
 
     /// `POST /v0/tenant/add-hosts/import` — hand a joining host the snapshot and

@@ -1170,6 +1170,7 @@ pub async fn start_server(
             .service(handlers::tenant_threshold_onboard)
             .service(handlers::tenant_local_party_adopt_prepare)
             .service(handlers::tenant_local_party_adopt_onboard)
+            .service(handlers::tenant_party_state)
             .service(handlers::tenant_status)
             .service(handlers::start_onboarding)
             .service(handlers::get_onboarding_status)

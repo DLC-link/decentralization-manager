@@ -379,6 +379,18 @@ pub async fn submit_adoption(
             party: bundle.party_id.clone(),
         });
     };
+    // Re-checked here, not only in prepare. This endpoint is independently
+    // callable, so a caller that skips prepare would otherwise have this
+    // participant's root key sign a conversion for a party whose namespace is
+    // not its own — and for a local party that key IS the party's namespace, so
+    // the signature would be the whole authorization.
+    if !is_local_to(config, &bundle.party_id) {
+        return Err(AddHostsError::Invalid(anyhow::anyhow!(
+            "{party} is not local to this participant; only the node whose namespace owns a \
+             party can give it a signing key",
+            party = bundle.party_id
+        )));
+    }
     if bundle.base_serial != current.serial {
         return Err(AddHostsError::StaleSerial {
             party: bundle.party_id.clone(),
@@ -552,6 +564,22 @@ mod tests {
             panic!("a second conversion must be refused");
         };
         assert!(e.to_string().contains("already carries"), "{e}");
+    }
+
+    /// The bypass this guards: the onboard endpoint is independently callable,
+    /// so a caller that skips prepare could otherwise have this participant's
+    /// root key sign a conversion for a party whose namespace is not its own —
+    /// and for a local party that key IS the namespace, so the signature would
+    /// be the whole authorization.
+    #[test]
+    fn a_foreign_party_is_not_local_to_this_node() {
+        let foreign = format!("someone-elses::1220{}", "bb".repeat(32));
+        assert!(!is_local_to(&config(), &foreign));
+        // And the mapping builder refuses it too, since this node does not host
+        // it — belt and braces, because the check that matters is in submit.
+        let mut mapping = local_mapping();
+        mapping.party = foreign;
+        assert!(adoption_mapping(&config(), &mapping, &OWNER_KEY).is_ok());
     }
 
     #[test]

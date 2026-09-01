@@ -89,6 +89,27 @@ pub enum Error {
 
     #[error("a co-validated party needs at least two hosts, got {0}")]
     NotEnoughHosts(usize),
+
+    /// The key store backing a [`Signer`](crate::Signer) could not sign.
+    ///
+    /// Its own variant because the rest of this enum describes talking to a
+    /// host, and a KMS or HSM failure is not that. Shoehorning it into an
+    /// HTTP-shaped variant would put a misleading message in front of whoever
+    /// has to debug it.
+    #[error("the key store could not sign: {message}")]
+    Signing { message: String },
+
+    /// A flow was given no hosts to act on.
+    ///
+    /// Distinct from [`NotEnoughHosts`](Self::NotEnoughHosts), which is about
+    /// onboarding's two-host minimum. Adding hosts needs at least one joiner and
+    /// at least one host that already holds the party, and neither is a
+    /// "co-validated party" requirement.
+    #[error("{operation} needs at least one {role}, and none was given")]
+    NoHosts {
+        operation: &'static str,
+        role: &'static str,
+    },
 }
 
 impl Error {
@@ -103,7 +124,9 @@ impl Error {
             | Self::PartyIdMismatch { host, .. }
             | Self::MalformedPreparation { host, .. }
             | Self::HostDisagreement { host, .. } => host,
-            Self::NotEnoughHosts(_) => "",
+            // Not about any one host: a signing failure is local, and a missing
+            // host set has nobody to name.
+            Self::NotEnoughHosts(_) | Self::Signing { .. } | Self::NoHosts { .. } => "",
         }
     }
 

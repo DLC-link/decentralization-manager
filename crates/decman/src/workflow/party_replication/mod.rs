@@ -115,6 +115,63 @@ impl ReplicationTarget {
         }
     }
 
+    /// Write one of this replication's artefacts only if it is not already
+    /// there, reporting whether this call was the one that wrote it.
+    ///
+    /// The offset capture is "first capture wins", and a read-then-write cannot
+    /// enforce that: two concurrent prepares both see nothing staged, and the
+    /// slower one overwrites the first — possibly after the topology activated,
+    /// leaving an offset that `ExportPartyAcs` and `ClearPartyOnboardingFlag`
+    /// will search forward from in vain. The database decides instead.
+    ///
+    /// # Errors
+    /// Propagates the database error.
+    pub async fn write_artifact_if_absent(
+        &self,
+        db: &SqlitePool,
+        kind: &str,
+        scope: Option<&str>,
+        payload: &[u8],
+    ) -> Result<bool> {
+        match self.store {
+            ArtifactStore::WorkflowRun => {
+                // The Noise workflows serialise their steps through the
+                // coordinator, so a read-then-write is not racing anything.
+                if db
+                    .read_artifact(&self.instance_name, kind, scope)
+                    .await?
+                    .is_some()
+                {
+                    return Ok(false);
+                }
+                db.write_artifact(&self.instance_name, kind, scope, payload)
+                    .await?;
+                Ok(true)
+            }
+            ArtifactStore::Tenant => {
+                let scope = scope.unwrap_or_default();
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or_default();
+                let result = sqlx::query(
+                    "INSERT INTO tenant_replication_artifacts \
+                     (instance_name, artifact_kind, attestor_id, payload, created_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5) \
+                     ON CONFLICT(instance_name, artifact_kind, attestor_id) DO NOTHING",
+                )
+                .bind(&self.instance_name)
+                .bind(kind)
+                .bind(scope)
+                .bind(payload)
+                .bind(now)
+                .execute(db)
+                .await?;
+                Ok(result.rows_affected() > 0)
+            }
+        }
+    }
+
     /// Write one of this replication's artefacts, replacing any existing value.
     ///
     /// # Errors

@@ -108,8 +108,10 @@ pub async fn export_party_acs(
 
         match collect_export_stream(&mut client, request, max_bytes).await {
             Ok(snapshot) => {
-                // Size cap is enforced mid-stream in `collect_export_stream`, so a
-                // returned snapshot is always within the chunked-transfer limit.
+                // Enforced mid-stream in `collect_export_stream`, so a returned
+                // snapshot is always within the `max_bytes` this caller passed —
+                // which is the Noise chunked-transfer limit for add-party and a
+                // configured, much larger ceiling for the tenant path.
                 tracing::info!("Exported ACS snapshot: {len} bytes", len = snapshot.len());
                 return Ok(snapshot);
             }

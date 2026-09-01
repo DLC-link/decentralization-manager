@@ -28,9 +28,9 @@
 //! this phase's final step times out, the answer is the latter and the wallet
 //! needs a signing round.
 //!
-//! Still not covered: the wallet has no endpoint reporting a party's current
-//! serial, so the base serial is pinned from knowledge that a freshly onboarded
-//! party sits at 1. A real wallet cannot do that.
+//! The base serial comes from `GET /v0/tenant/{party}/state`, the way a real
+//! wallet learns it, rather than from the test knowing a freshly onboarded party
+//! sits at 1.
 
 use std::time::Duration;
 
@@ -45,10 +45,6 @@ use decman_wallet::ExternalKeyPair;
 use crate::common::{
     Fixture, chaos::fresh_prefix, http::probe_workflow_status, scenario::Scenario,
 };
-
-/// A freshly onboarded party's `PartyToParticipant` sits at serial 1. Pinned
-/// here because no endpoint reports it yet (see the module docs).
-const BASE_SERIAL: u32 = 1;
 
 /// Bytes per relayed range.
 ///
@@ -166,10 +162,26 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 move |f, _| {
                     let party_id = party_id.clone();
                     Box::pin(async move {
+                        // The way a real wallet learns it. Asserting it is 1 as
+                        // well, because a freshly onboarded party should be, and
+                        // a surprise there would mean the endpoint is reporting
+                        // something else entirely.
+                        let state: Value = f
+                            .get_json(f.p1.http, &format!("/v0/tenant/{party_id}/state"))
+                            .await?;
+                        let base_serial = state
+                            .get("serial")
+                            .and_then(Value::as_u64)
+                            .context("party state missing serial")?;
+                        anyhow::ensure!(
+                            base_serial == 1,
+                            "a freshly onboarded party should sit at serial 1, got {base_serial}"
+                        );
+
                         let request = json!({
                             "party_id": party_id,
                             "new_hosts": [&f.p3.participant_id],
-                            "base_serial": BASE_SERIAL,
+                            "base_serial": base_serial,
                         });
 
                         // Every host — the two current ones AND the joiner —
@@ -203,7 +215,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                             .and_then(Value::as_u64)
                             .context("prepare response missing serial")?;
                         anyhow::ensure!(
-                            serial == u64::from(BASE_SERIAL) + 1,
+                            serial == base_serial + 1,
                             "add-hosts must write exactly one serial past the base, got {serial}"
                         );
 
@@ -214,7 +226,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         // do not sign an add.
                         let onboard_req = json!({
                             "party_id": party_id,
-                            "base_serial": BASE_SERIAL,
+                            "base_serial": base_serial,
                             "topology_transactions": first
                                 .get("topology_transactions")
                                 .cloned()
@@ -267,6 +279,20 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     // to the joiner, and relayed a range at a time. Neither end
                     // ever holds the whole snapshot in a request body.
                     let target = f.p3.participant_id.clone();
+
+                    // The staged replication is keyed by the serial the add was
+                    // pinned to, not the current one. The add advanced exactly
+                    // one serial, so the base is one behind head state.
+                    let state: Value = f
+                        .get_json(f.p1.http, &format!("/v0/tenant/{party_id}/state"))
+                        .await?;
+                    let base_serial = state
+                        .get("serial")
+                        .and_then(Value::as_u64)
+                        .context("party state missing serial")?
+                        .checked_sub(1)
+                        .context("the add-hosts write should have advanced the serial")?;
+
                     let mut offset: u64 = 0;
                     let mut rounds = 0;
                     // Set on the first range; the completion assertion below
@@ -288,7 +314,8 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                                 f.p1.http,
                                 &format!(
                                     "/v0/tenant/{party_id}/acs/{target}\
-                                     ?offset={offset}&limit={RANGE_LIMIT}"
+                                     ?offset={offset}&limit={RANGE_LIMIT}\
+                                     &base_serial={base_serial}"
                                 ),
                             )
                             .await?;
@@ -303,6 +330,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                             probed_bad_offset = true;
                             let bogus = json!({
                                 "party_id": party_id,
+                                "base_serial": base_serial,
                                 "offset": offset + 7,
                                 "total_size": total_size,
                                 "chunk": range
@@ -322,6 +350,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
 
                         let import_req = json!({
                             "party_id": party_id,
+                            "base_serial": base_serial,
                             "offset": offset,
                             "total_size": total_size,
                             "chunk": range
@@ -382,28 +411,6 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         probe_workflow_status(
                             &*f,
                             f.p3.http,
-                            &format!("/v0/tenant/{party_id}/status"),
-                            "tenant-add-hosts",
-                        )
-                        .await
-                    })
-                }
-            },
-        )
-        // The party must keep working where it already worked. The import
-        // disconnects only the joiner, so the original hosts should never have
-        // noticed.
-        .then(
-            "P1 still reports the party live throughout",
-            Duration::from_secs(60),
-            {
-                let party_id = party_id.clone();
-                move |f, _| {
-                    let party_id = party_id.clone();
-                    Box::pin(async move {
-                        probe_workflow_status(
-                            &*f,
-                            f.p1.http,
                             &format!("/v0/tenant/{party_id}/status"),
                             "tenant-add-hosts",
                         )

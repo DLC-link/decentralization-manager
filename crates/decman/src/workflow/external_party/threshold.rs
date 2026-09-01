@@ -16,7 +16,8 @@ use canton_proto_rs::com::digitalasset::canton::{
     crypto::v30::{Signature, SignatureFormat, SigningAlgorithmSpec},
     protocol::v30::{
         PartyToParticipant, SignedTopologyTransaction, TopologyMapping, TopologyTransaction,
-        enums::TopologyChangeOp, topology_mapping,
+        enums::{ParticipantPermission, TopologyChangeOp},
+        topology_mapping,
     },
     topology::admin::v30::{
         AddTransactionsRequest, GenerateTransactionsRequest, SignTransactionsRequest,
@@ -67,7 +68,13 @@ fn active_host_count(mapping: &PartyToParticipant) -> u32 {
     mapping
         .participants
         .iter()
-        .filter(|p| p.onboarding.is_none())
+        .filter(|p| {
+            // Unmarked AND at Confirmation. An Observation host is listed and
+            // live but confirms nothing, so counting it would authorize a
+            // threshold the party cannot meet — the same mistake the add-hosts
+            // guard originally made.
+            p.onboarding.is_none() && p.permission == ParticipantPermission::Confirmation as i32
+        })
         .count() as u32
 }
 

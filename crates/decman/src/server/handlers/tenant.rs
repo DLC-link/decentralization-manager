@@ -31,9 +31,9 @@ use crate::{
             TenantAcsImportRequest, TenantAcsImportResponse, TenantAcsProgressResponse,
             TenantAcsSnapshotResponse, TenantAddHostsOnboardRequest, TenantAddHostsOnboardResponse,
             TenantAddHostsPrepareResponse, TenantAddHostsRequest, TenantOnboardRequest,
-            TenantOnboardResponse, TenantPrepareRequest, TenantPrepareResponse,
-            TenantThresholdOnboardRequest, TenantThresholdRequest, WorkflowProgress,
-            WorkflowStatusResponse,
+            TenantOnboardResponse, TenantPartyStateResponse, TenantPrepareRequest,
+            TenantPrepareResponse, TenantThresholdOnboardRequest, TenantThresholdRequest,
+            WorkflowProgress, WorkflowStatusResponse,
         },
     },
     workflow::external_party::{
@@ -288,8 +288,10 @@ pub async fn tenant_status(
         Ok(HostOnboardingStatus::Onboarding) => HttpResponse::Ok().json(WorkflowStatusResponse {
             status: WorkflowProgress::InProgress,
             error: Some(
-                "hosted but still carrying Canton's onboarding marker — the ACS has not been \
-                 replicated to this host yet"
+                "hosted but still carrying Canton's onboarding marker, so the party is not \
+                 usable here yet. Either the ACS has not been replicated or the clearing \
+                 transaction is proposed and not yet authorized — the marker does not say \
+                 which"
                     .to_string(),
             ),
         }),
@@ -478,7 +480,8 @@ pub async fn tenant_add_hosts_onboard(
         ("party" = String, Path, description = "Full party id"),
         ("target" = String, Path, description = "Participant the snapshot is for"),
         ("offset" = Option<u64>, Query, description = "Where this range starts. Defaults to 0"),
-        ("limit" = Option<usize>, Query, description = "Maximum bytes to return")
+        ("limit" = Option<usize>, Query, description = "Maximum bytes to return"),
+        ("base_serial" = u32, Query, description = "The serial the add-hosts write was pinned to")
     ),
     responses(
         (status = 200, description = "One range of the ACS snapshot", body = TenantAcsSnapshotResponse),
@@ -506,7 +509,7 @@ pub async fn tenant_acs_snapshot(
             });
         }
     };
-    let replication = match replication_target(&party_id, &target) {
+    let replication = match replication_target(&party_id, &target, query.base_serial) {
         Ok(t) => t,
         Err(e) => {
             return HttpResponse::BadRequest().json(ErrorResponse {
@@ -663,7 +666,10 @@ pub async fn tenant_acs_snapshot(
 /// transfer makes possible only becomes usable here.
 #[utoipa::path(
     tag = "Tenant",
-    params(("party" = String, Path, description = "Full party id")),
+    params(
+        ("party" = String, Path, description = "Full party id"),
+        ("base_serial" = u32, Query, description = "The serial the add-hosts write was pinned to")
+    ),
     responses(
         (status = 200, description = "Bytes staged on this host", body = TenantAcsProgressResponse),
         (status = 400, description = "Bad party id", body = ErrorResponse),
@@ -676,19 +682,21 @@ pub async fn tenant_acs_progress(
     http_req: HttpRequest,
     data: web::Data<AppState>,
     path: web::Path<String>,
+    query: web::Query<BaseSerialQuery>,
 ) -> impl Responder {
     if let Err(resp) = require_tenant_api_key(&http_req, &data) {
         return resp;
     }
     let party_id = path.into_inner();
-    let replication = match replication_target(&party_id, data.config.participant_id()) {
-        Ok(t) => t,
-        Err(e) => {
-            return HttpResponse::BadRequest().json(ErrorResponse {
-                error: format!("party_id is not a valid party id: {e}"),
-            });
-        }
-    };
+    let replication =
+        match replication_target(&party_id, data.config.participant_id(), query.base_serial) {
+            Ok(t) => t,
+            Err(e) => {
+                return HttpResponse::BadRequest().json(ErrorResponse {
+                    error: format!("party_id is not a valid party id: {e}"),
+                });
+            }
+        };
     match staging::staged_len(&data.config, &replication.instance_name).await {
         // Nothing staged is a normal answer, not an error: it means start at 0.
         Ok(staged) => HttpResponse::Ok().json(TenantAcsProgressResponse {
@@ -737,7 +745,11 @@ pub async fn tenant_acs_import(
             });
         }
     };
-    let replication = match replication_target(&body.party_id, data.config.participant_id()) {
+    let replication = match replication_target(
+        &body.party_id,
+        data.config.participant_id(),
+        body.base_serial,
+    ) {
         Ok(t) => t,
         Err(e) => {
             return HttpResponse::BadRequest().json(ErrorResponse {
@@ -1021,6 +1033,61 @@ pub async fn tenant_threshold_onboard(
     })
 }
 
+/// This host's view of a hosted party's topology, including the serial every
+/// write in this API needs pinned.
+///
+/// Without it the writes are unusable by an actual wallet: they all require
+/// `base_serial`, and a wallet has no Canton Admin API access and no other
+/// endpoint that reports it. Reading it here is the first step of any change.
+#[utoipa::path(
+    tag = "Tenant",
+    params(("party" = String, Path, description = "Full party id")),
+    responses(
+        (status = 200, description = "The party's current topology on this host", body = TenantPartyStateResponse),
+        (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 404, description = "This host holds no authorized mapping for this party", body = ErrorResponse),
+        (status = 500, description = "A Canton call failed on this host", body = ErrorResponse)
+    )
+)]
+#[get("/v0/tenant/{party}/state")]
+pub async fn tenant_party_state(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    path: web::Path<String>,
+) -> impl Responder {
+    if let Err(resp) = require_tenant_api_key(&http_req, &data) {
+        return resp;
+    }
+    let party_id = path.into_inner();
+
+    match read_party_to_participant(&data.config, &party_id).await {
+        Ok(Some(current)) => {
+            let onboarding_hosts = current
+                .mapping
+                .participants
+                .iter()
+                .filter(|p| p.onboarding.is_some())
+                .count() as u32;
+            HttpResponse::Ok().json(TenantPartyStateResponse {
+                party_id,
+                serial: current.serial,
+                threshold: current.mapping.threshold,
+                host_count: current.mapping.participants.len() as u32,
+                onboarding_hosts,
+            })
+        }
+        Ok(None) => HttpResponse::NotFound().json(ErrorResponse {
+            error: format!("This host holds no authorized mapping for {party_id}"),
+        }),
+        Err(e) => {
+            tracing::error!("tenant party state: topology read failed: {e:#}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to read the party's topology: {e}"),
+            })
+        }
+    }
+}
+
 // ============================================================================
 // Converting a local party (Plan B1)
 // ============================================================================
@@ -1222,11 +1289,21 @@ const ACS_RANGE_DEFAULT: usize = 8 * 1024 * 1024;
 /// JSON limit, which would turn a tunable into a 413.
 const ACS_RANGE_MAX: usize = 32 * 1024 * 1024;
 
-/// `?offset=&limit=` on the ACS range endpoint.
+/// `?base_serial=` alone, for endpoints that address a replication without
+/// reading a range of it.
+#[derive(Debug, serde::Deserialize)]
+pub struct BaseSerialQuery {
+    pub base_serial: u32,
+}
+
+/// `?offset=&limit=&base_serial=` on the ACS range endpoint.
 #[derive(Debug, serde::Deserialize)]
 pub struct AcsRangeQuery {
     pub offset: Option<u64>,
     pub limit: Option<usize>,
+    /// Required, not defaulted: it keys the replication's staged state, and
+    /// guessing it would silently reuse another attempt's offsets.
+    pub base_serial: u32,
 }
 
 /// Base64-decode a raw Ed25519 public key into its fixed 32-byte array, or the

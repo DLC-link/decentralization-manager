@@ -83,11 +83,20 @@ pub const TENANT_ADD_HOSTS_ARTIFACTS: ReplicationArtifacts = ReplicationArtifact
 ///
 /// The tenant API has no workflow run to key artifacts by — it is stateless
 /// HTTP, and Canton is the coordination store. This derives a stable name from
-/// the pair the replication is actually about, so every host computes the same
-/// one without coordinating, and two concurrent add-hosts for different joiners
-/// cannot collide.
-pub fn replication_instance(party_id: &str, target: &CantonId) -> String {
-    format!("tenant-add-hosts:{party_id}:{target}")
+/// what the replication is about, so every host computes the same one without
+/// coordinating, and two concurrent add-hosts for different joiners cannot
+/// collide.
+///
+/// The base serial is part of the key, and that is load-bearing rather than
+/// decorative. Tenant artefacts are never deleted and the offset capture is
+/// once-only, so a key of `(party, target)` alone would have a target that was
+/// removed and later re-added reuse the *first* attempt's offsets. `offset.rs`
+/// explains why that is dangerous: an offset predating the earlier activation
+/// makes `ExportPartyAcs` find the stale flag-less activation and abort with
+/// INVALID_STATE. A re-add always happens at a different serial, so including it
+/// gives the second attempt its own offsets.
+pub fn replication_instance(party_id: &str, target: &CantonId, base_serial: u32) -> String {
+    format!("tenant-add-hosts:{party_id}:{target}:{base_serial}")
 }
 
 /// A [`ReplicationTarget`] for artefact access only, rebuilt from an instance
@@ -111,11 +120,15 @@ pub fn replication_target_by_instance(
 }
 
 /// The replication this add-hosts implies: `party_id` moving onto `target`.
-pub fn replication_target(party_id: &str, target: &CantonId) -> Result<ReplicationTarget> {
+pub fn replication_target(
+    party_id: &str,
+    target: &CantonId,
+    base_serial: u32,
+) -> Result<ReplicationTarget> {
     Ok(ReplicationTarget::new(
         CantonId::parse(party_id)?,
         target.clone(),
-        replication_instance(party_id, target),
+        replication_instance(party_id, target, base_serial),
         TENANT_ADD_HOSTS_ARTIFACTS,
         // No workflow run behind a tenant call, so the run-scoped artifact
         // table's foreign key cannot hold these.
@@ -335,7 +348,8 @@ pub async fn prepare_add_hosts(
     // them and none knows yet which role it will play. The capture is
     // once-only, so a retry keeps the original value.
     for host in new_hosts {
-        let target = replication_target(party_id, host).map_err(AddHostsError::Invalid)?;
+        let target =
+            replication_target(party_id, host, base_serial).map_err(AddHostsError::Invalid)?;
         capture_offset_once(
             config,
             storage,

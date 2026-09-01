@@ -450,6 +450,7 @@ The table below is a curated subset. A complete, interactive API reference is av
 | `/v0/tenant/prepare` | POST | Wallet-facing: builds an external party's onboarding topology and returns the hash to sign |
 | `/v0/tenant/onboard` | POST | Wallet-facing: validates the wallet's signed topology, co-signs, and submits it |
 | `/v0/tenant/{party}/status` | GET | Wallet-facing: reports whether this host has the party hosted yet |
+| `/v0/tenant/{party}/state` | GET | Wallet-facing: the party's current serial, threshold and host count, so a caller can pin `base_serial` on the next write |
 | `/v0/tenant/add-hosts/prepare` | POST | Wallet-facing: builds the serial-N+1 topology that adds hosts to an existing external party |
 | `/v0/tenant/add-hosts/onboard` | POST | Wallet-facing: validates the wallet-signed add-hosts topology, co-signs, and submits it |
 | `/v0/tenant/{party}/acs/{target}` | GET | Wallet-facing: serves one byte range of the party's ACS scoped to a joining host (`?offset=`, `?limit=`), for the wallet to relay |
