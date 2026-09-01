@@ -268,8 +268,29 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     // the joiner. Canton needs the joiner's activation to exist
                     // first, which the authorized serial-2 write just created.
                     let target = f.p3.participant_id.clone();
+
+                    // The replication's staged state is keyed by the serial the
+                    // add was pinned to, not the current one. The add advanced
+                    // exactly one serial, so the base is one behind whatever
+                    // head state reads now.
+                    let state: Value = f
+                        .get_json(f.p1.http, &format!("/v0/tenant/{party_id}/state"))
+                        .await?;
+                    let current_serial = state
+                        .get("serial")
+                        .and_then(Value::as_u64)
+                        .context("party state missing serial")?;
+                    let base_serial = current_serial
+                        .checked_sub(1)
+                        .context("the add-hosts write should have advanced the serial")?;
+
                     let snapshot: Value = f
-                        .get_json(f.p1.http, &format!("/v0/tenant/{party_id}/acs/{target}"))
+                        .get_json(
+                            f.p1.http,
+                            &format!(
+                                "/v0/tenant/{party_id}/acs/{target}?base_serial={base_serial}"
+                            ),
+                        )
                         .await?;
 
                     // The wallet is the transport: no host-to-host channel is
@@ -277,6 +298,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     // is not in this mesh.
                     let import_req = json!({
                         "party_id": party_id,
+                        "base_serial": base_serial,
                         "snapshot": snapshot
                             .get("snapshot")
                             .cloned()
