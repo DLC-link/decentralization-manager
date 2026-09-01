@@ -87,20 +87,9 @@
           "confirming_party": "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78",
           "created_at": 1782124323,
           "expires_at": 1782214323
-        },
-        {
-          "contract_id": "007649cb6baf34ec9a618870ef599f80c6ced9c18f68177cc39b801821113cd8d1",
-          "action": {
-            "type": "governance_remove_member",
-            "member": "backend-signatory-0::12201bc2c8500d04c208285d5799eb60cf6a65e084033c9a78707a38c5a0ef60",
-            "new_threshold": 3
-          },
-          "confirming_party": "ibtc-admin::12209688b4410a59414d40a2a541644d22ac9e85a7f9438545749f65965a495f",
-          "created_at": 1782124323,
-          "expires_at": 1782214323
         }
       ],
-      "confirmation_count": 2,
+      "confirmation_count": 1,
       "can_execute": false,
       "last_confirmation_at": 1782126123
     },
@@ -187,6 +176,74 @@
       "confirmation_count": 1,
       "can_execute": false,
       "last_confirmation_at": 1782126123
+    },
+    {
+      "action_hash": "9b3f61c7a0d4e28f5c1b7a93e6d08f24b5c1e7a93d604f8b2c7e15a9d3b06f48",
+      "action": {
+        "type": "governance_set_timeout",
+        "new_timeout_microseconds": 7200000000
+      },
+      "confirmations": [
+        {
+          "contract_id": "00c1a7f4e9b23d5680fa4c17e8b03d95f7a2c46e1b9d80375fa6c2e94b18d0f36",
+          "action": {
+            "type": "governance_set_timeout",
+            "new_timeout_microseconds": 7200000000
+          },
+          "confirming_party": "ibtc-member-fra1::1220ba3790e06fa4524e56d2f223576013c73a660055439f9046b17c621c6c1d",
+          "created_at": 1782124323,
+          "expires_at": 1782214323
+        }
+      ],
+      "confirmation_count": 1,
+      "can_execute": false,
+      "last_confirmation_at": 1782126123
+    },
+    {
+      "action_hash": "1c7e05b9d34a86f2015be7c9a4d3f680927ce1b45a08df36e2c9714b8d05a3f7",
+      "action": {
+        "type": "governance_remove_member",
+        "member": "treasury-rc7-2::1220fb3be8c3236d9258e9e1f25fc5d1a924cd368f7346a7a7ff4a82dd3eba54",
+        "new_threshold": 2
+      },
+      "confirmations": [
+        {
+          "contract_id": "00b4e21a7c95df3068a1fc4be720d35917ac6e84b2d905f371ae6c28d4b90f157",
+          "action": {
+            "type": "governance_remove_member",
+            "member": "treasury-rc7-2::1220fb3be8c3236d9258e9e1f25fc5d1a924cd368f7346a7a7ff4a82dd3eba54",
+            "new_threshold": 2
+          },
+          "confirming_party": "ibtc-member-fra1::1220ba3790e06fa4524e56d2f223576013c73a660055439f9046b17c621c6c1d",
+          "created_at": 1782124323,
+          "expires_at": 1782214323
+        },
+        {
+          "contract_id": "0071ca38e6b04d29f5183ae7c9b62d40851fc7e39a2b06d4185ce7a92f3b04d68",
+          "action": {
+            "type": "governance_remove_member",
+            "member": "treasury-rc7-2::1220fb3be8c3236d9258e9e1f25fc5d1a924cd368f7346a7a7ff4a82dd3eba54",
+            "new_threshold": 2
+          },
+          "confirming_party": "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78",
+          "created_at": 1782124323,
+          "expires_at": 1782214323
+        },
+        {
+          "contract_id": "003ea9c15d78b60249fc3b8ae175d02968bc4e17a39d825f60ce1b74a9d3f0286",
+          "action": {
+            "type": "governance_remove_member",
+            "member": "treasury-rc7-2::1220fb3be8c3236d9258e9e1f25fc5d1a924cd368f7346a7a7ff4a82dd3eba54",
+            "new_threshold": 2
+          },
+          "confirming_party": "ibtc-admin::12209688b4410a59414d40a2a541644d22ac9e85a7f9438545749f65965a495f",
+          "created_at": 1782124323,
+          "expires_at": 1782214323
+        }
+      ],
+      "confirmation_count": 3,
+      "can_execute": true,
+      "last_confirmation_at": 1782126123
     }
   ],
   "domain_actions": [
@@ -194,8 +251,15 @@
       "proposal_cid": "000ad52e338662c923b15fd45a73c6e97336efccf28a7aef9449443cc6dd7415fb",
       "action_label": "Transfer",
       "description": "Transfer 250.00 CBTC to treasury",
-      "confirmations": [],
-      "confirmation_count": 2,
+      "confirmations": [
+        {
+          "contract_id": "0000d5b8e2a7c194f306ba8d1e57c92b40f68ae3c71d95b204fa8c6e13b7d0f200",
+          "confirming_party": "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78",
+          "created_at": 1782124323,
+          "expires_at": 1782214323
+        }
+      ],
+      "confirmation_count": 1,
       "can_execute": false,
       "transfer_details": {
         "receiver": "dec-treasury::1220e5eff180952bf0ea0588c3d2ab779dcebc3c3cb5c5c70904d534cccd8862",
@@ -208,7 +272,38 @@
       "proposal_cid": "008b53639f152c8fc6ef30802fde462ba0be9cf085f7580dc69efd72e002abbb35",
       "action_label": "Generic vote",
       "description": "Approve devnet parameter change DIP-042",
-      "confirmations": [],
+      "confirmations": [
+        {
+          "contract_id": "0010d5b8e2a7c194f306ba8d1e57c92b40f68ae3c71d95b204fa8c6e13b7d0f210",
+          "confirming_party": "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78",
+          "created_at": 1782124323,
+          "expires_at": 1782214323
+        },
+        {
+          "contract_id": "0011d5b8e2a7c194f306ba8d1e57c92b40f68ae3c71d95b204fa8c6e13b7d0f211",
+          "confirming_party": "ibtc-admin::12209688b4410a59414d40a2a541644d22ac9e85a7f9438545749f65965a495f",
+          "created_at": 1782124323,
+          "expires_at": 1782214323
+        },
+        {
+          "contract_id": "0012d5b8e2a7c194f306ba8d1e57c92b40f68ae3c71d95b204fa8c6e13b7d0f212",
+          "confirming_party": "treasury-rc7-2::1220fb3be8c3236d9258e9e1f25fc5d1a924cd368f7346a7a7ff4a82dd3eba54",
+          "created_at": 1782124323,
+          "expires_at": 1782214323
+        },
+        {
+          "contract_id": "0013d5b8e2a7c194f306ba8d1e57c92b40f68ae3c71d95b204fa8c6e13b7d0f213",
+          "confirming_party": "cbtc-attestor-pool::122070884b3eb2e563698a1e51f29ea9cec1d6b9d25272be0efd76cc715b769a",
+          "created_at": 1782124323,
+          "expires_at": 1782214323
+        },
+        {
+          "contract_id": "0014d5b8e2a7c194f306ba8d1e57c92b40f68ae3c71d95b204fa8c6e13b7d0f214",
+          "confirming_party": "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78",
+          "created_at": 1782124323,
+          "expires_at": 1782214323
+        }
+      ],
       "confirmation_count": 5,
       "can_execute": true
     },
@@ -216,10 +311,46 @@
       "proposal_cid": "00e788103ee15318fcd2af9b73b4ebbb33a903b020de7b307d71f5fed0f433e548",
       "action_label": "Accept transfer",
       "description": "Accept 12.5 CBTC (orphaned)",
-      "confirmations": [],
+      "confirmations": [
+        {
+          "contract_id": "00f2ae7b19c46d3085b1ce7a24d9f03651ac8e27b3d90f4816ae5c93b7d20f184",
+          "confirming_party": "ibtc-member-fra1::1220ba3790e06fa4524e56d2f223576013c73a660055439f9046b17c621c6c1d",
+          "created_at": 1782124323,
+          "expires_at": 1782214323
+        },
+        {
+          "contract_id": "0058c13ae79b20d46f815ce3a92d70b418fc6e29a3d805b71ce4a86d93f207b52",
+          "confirming_party": "ibtc-admin::12209688b4410a59414d40a2a541644d22ac9e85a7f9438545749f65965a495f",
+          "created_at": 1782124323,
+          "expires_at": 1782214323
+        },
+        {
+          "contract_id": "00a91e4c76b32d80f5a1ce87b940d26317fc5e8a29b3d704f186ce2a95d3b08f7",
+          "confirming_party": "cbtc-attestor-pool::122070884b3eb2e563698a1e51f29ea9cec1d6b9d25272be0efd76cc715b769a",
+          "created_at": 1782124323,
+          "expires_at": 1782214323
+        }
+      ],
       "confirmation_count": 3,
       "can_execute": false,
       "orphaned": true
+    },
+    {
+      "proposal_cid": "00e7b3164ac9d20f58e1b7c34a96d5f08273be1c9a4d06f85b2ce713a9d4f0286",
+      "action_label": "Generic vote",
+      "description": "Adopt the Q4 fee schedule",
+      "confirmations": [
+        {
+          "contract_id": "0043d8a92e61b7c05f3a8d14be92c706fa15d38ce7b249016ac5e83b7d2f09a41",
+          "confirming_party": "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78",
+          "created_at": 1782124323,
+          "expires_at": 1782214323
+        }
+      ],
+      "confirmation_count": 1,
+      "can_execute": false,
+      "proposer": "ibtc-member-fra1::1220ba3790e06fa4524e56d2f223576013c73a660055439f9046b17c621c6c1d",
+      "created_at": 1782126400
     }
   ]
 }

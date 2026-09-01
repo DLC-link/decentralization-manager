@@ -61,9 +61,22 @@
       "proposal_cid": "00865ab0d317f36965e43d20d275b545a6773137adad19db1d61ecb8032f473e0b",
       "action_label": "Generic vote",
       "description": "Ratify validator set rotation",
-      "confirmations": [],
+      "confirmations": [
+        {
+          "contract_id": "0200b8f4c1a37d29e506cb8e3f71d42a69f18bc5d93e07a426fb1d8e35c9a2f400",
+          "confirming_party": "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78",
+          "created_at": 1782124323,
+          "expires_at": 1782214323
+        },
+        {
+          "contract_id": "0201b8f4c1a37d29e506cb8e3f71d42a69f18bc5d93e07a426fb1d8e35c9a2f401",
+          "confirming_party": "ibtc-admin::12209688b4410a59414d40a2a541644d22ac9e85a7f9438545749f65965a495f",
+          "created_at": 1782124323,
+          "expires_at": 1782214323
+        }
+      ],
       "confirmation_count": 2,
-      "can_execute": false
+      "can_execute": true
     }
   ]
 }

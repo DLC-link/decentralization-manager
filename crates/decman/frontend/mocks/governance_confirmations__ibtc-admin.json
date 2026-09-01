@@ -35,7 +35,7 @@
         }
       ],
       "confirmation_count": 2,
-      "can_execute": false,
+      "can_execute": true,
       "last_confirmation_at": 1782126123
     },
     {
@@ -86,12 +86,42 @@
       "proposal_cid": "005c88e7a226e11ad1204cb8d30cd5d6ff6cba69bc32da73134928e17c90c54086",
       "action_label": "Create user service request",
       "description": "Onboard utility user",
-      "confirmations": [],
+      "confirmations": [
+        {
+          "contract_id": "0100a7e3b9c26d18f405ba7d2e69c31b58f07ae4c82d96b315fa9c7e24b8d1f300",
+          "confirming_party": "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78",
+          "created_at": 1782124323,
+          "expires_at": 1782214323
+        }
+      ],
       "confirmation_count": 1,
-      "can_execute": false,
+      "can_execute": true,
       "service_request_details": {
         "operator": "ibtc-admin::12209688b4410a59414d40a2a541644d22ac9e85a7f9438545749f65965a495f",
         "user": "ibtc-member-fra1::1220ba3790e06fa4524e56d2f223576013c73a660055439f9046b17c621c6c1d"
+      }
+    },
+    {
+      "proposal_cid": "0092c47ae1b36d05f8a1ce7b249d3f0687ac5e91b3d720f4a86ce13b95d0f2748",
+      "action_label": "Transfer",
+      "description": "Transfer 40.00 CBTC to the attestor pool",
+      "confirmations": [
+        {
+          "contract_id": "0067b2ae94c13d70f5a8ce21b937d40f86ac5e73b9d21f048ae6c395b7d0f2183",
+          "confirming_party": "ibtc-member-fra1::1220ba3790e06fa4524e56d2f223576013c73a660055439f9046b17c621c6c1d",
+          "created_at": 1782124323,
+          "expires_at": 1782214323
+        }
+      ],
+      "confirmation_count": 1,
+      "can_execute": true,
+      "proposer": "ibtc-member-fra1::1220ba3790e06fa4524e56d2f223576013c73a660055439f9046b17c621c6c1d",
+      "created_at": 1782126500,
+      "transfer_details": {
+        "receiver": "cbtc-attestor-pool::122070884b3eb2e563698a1e51f29ea9cec1d6b9d25272be0efd76cc715b769a",
+        "amount": "40.00",
+        "instrument_admin": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
+        "instrument_id": "CBTC"
       }
     }
   ]
