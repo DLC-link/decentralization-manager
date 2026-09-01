@@ -176,6 +176,56 @@ Coordinator                           Peer
     |--- Disconnect --------------------->|
 ```
 
+### Coordinator / Peer Trust Model
+
+A coordinator drives the protocol; a peer executes what it is told. The two are
+not equally trusted, and the boundary matters because a peer's Canton
+participant holds keys that can authorize topology changes for the
+decentralized party.
+
+**What the coordinator is trusted for.** Sequencing the run: deciding which
+step happens when, aggregating signatures, and submitting the result. It also
+builds the payloads — the topology proposals, the DAR bytes, the prepared
+ledger submissions.
+
+**What the coordinator is not trusted for.** The *content* of those payloads. A
+coordinator that is compromised, or simply running modified code, can put
+anything in them. The Noise channel proves who the coordinator is, not that
+what it sends is what the peer's operator agreed to.
+
+**Where the peer's consent lives.** The invitation. The operator sees the
+party, the members, the threshold, the participant being added or removed and
+the DAR filenames and hashes, and accepts once per run. That invitation is
+persisted on the peer's `workflow_runs` row and is the reference for
+everything that follows (`workflow::validation::PeerExpectations`).
+
+**What the peer checks before it signs or installs anything:**
+
+- The command belongs to the accepted workflow kind. A Contracts invitation
+  cannot be used to drive a kick.
+- Topology proposals decode to the expected mapping kind, target the accepted
+  party, carry exactly the accepted member set, keep this node's namespace
+  among the owners, and use the accepted threshold. For onboarding — where the
+  party does not exist yet — the peer instead checks that the decentralized
+  namespace really is the hash of the proposed owner set, and that the P2P
+  proposal is for the namespace it signed in the DNS step.
+- Prepared ledger submissions are re-hashed locally from the transaction that
+  accompanies them (`canton_hash`), so a signature can only ever authorize the
+  transaction the peer can inspect, and that transaction must act as the
+  accepted party. A hashing scheme this node cannot reproduce is refused
+  rather than signed blind.
+- DAR files match the filenames *and* the SHA-256 hashes named in the
+  invitation, so a coordinator cannot get different code vetted under an
+  accepted name.
+
+Any mismatch fails the step. Repeated mismatches abort the peer run.
+
+**Known limits.** A coordinator on an older version may send an invitation
+without the DAR hashes; the peer then checks filenames only and logs a warning,
+so a network mid-upgrade keeps working. Governance confirm/execute is not
+covered here and does not need to be: the peer builds those commands locally
+and the Daml layer re-validates them against the on-ledger proposal.
+
 ## Communication Protocol
 
 ### Wire Format

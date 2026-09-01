@@ -1,3 +1,4 @@
+use anyhow::Context;
 use bytes::{Buf, BufMut, BytesMut};
 use canton_proto_rs::com::{
     daml::ledger::api::v2::interactive::PrepareSubmissionResponse,
@@ -20,6 +21,7 @@ use canton_proto_rs::com::{
 use sqlx::SqlitePool;
 
 use crate::{
+    canton_hash,
     canton_id::CantonId,
     config::NodeConfig,
     error::Result,
@@ -192,14 +194,27 @@ pub async fn sign_submissions(
     }
 
     // Decode the per-submission `varint(len)||proto` blobs.
+    //
+    // The coordinator prepared these, so the hash it wants signed is only
+    // trustworthy once we have recomputed it from the transaction beside it —
+    // otherwise it could show a harmless transaction and collect a signature
+    // over a different one. `verify_prepared_transaction` also pins the acting
+    // party, so a signature can only ever authorize the dec party this run is
+    // for.
     let mut prepared_submissions: Vec<PrepareSubmissionResponse> =
         Vec::with_capacity(submission_rows.len());
     for (ordinal, payload) in &submission_rows {
         let prepared_sub: PrepareSubmissionResponse =
             utils::read_first_message_from_bytes(payload)?;
+        verify_prepared_transaction(&prepared_sub, dec_party_id)
+            .with_context(|| format!("prepared submission {ordinal} failed validation"))?;
         tracing::debug!("Loaded prepared submission ordinal {ordinal}");
         prepared_submissions.push(prepared_sub);
     }
+    tracing::info!(
+        "Verified {count} prepared submission(s) against their transactions",
+        count = prepared_submissions.len()
+    );
 
     tracing::debug!(
         "Loaded {count} prepared submissions",
@@ -243,6 +258,43 @@ pub async fn sign_submissions(
     .await?;
 
     tracing::info!("Signatures saved successfully");
+    Ok(())
+}
+
+/// Check a coordinator-prepared submission before signing its hash.
+///
+/// Two things have to hold. The hash must be the hash of the transaction the
+/// coordinator sent — the Ledger API is explicit that a client must recompute
+/// it when the preparing participant is not trusted, and here it is the
+/// coordinator we are guarding against. And the transaction must act as the
+/// dec party this run is for, so a signature made with this node's key can
+/// only ever authorize that party.
+///
+/// # Errors
+///
+/// Errors if the hash does not belong to the transaction, if the hashing
+/// scheme is one this node cannot reproduce, or if the transaction acts as any
+/// party other than `dec_party_id`.
+fn verify_prepared_transaction(
+    prepared: &PrepareSubmissionResponse,
+    dec_party_id: &CantonId,
+) -> Result {
+    canton_hash::verify_prepared_submission(prepared)?;
+
+    let act_as = prepared
+        .prepared_transaction
+        .as_ref()
+        .and_then(|tx| tx.metadata.as_ref())
+        .and_then(|metadata| metadata.submitter_info.as_ref())
+        .map(|submitter| submitter.act_as.as_slice())
+        .unwrap_or_default();
+
+    let expected = dec_party_id.to_string();
+    if act_as != [expected.clone()] {
+        anyhow::bail!(
+            "prepared submission acts as {act_as:?}, but this run is for {expected} only"
+        );
+    }
     Ok(())
 }
 

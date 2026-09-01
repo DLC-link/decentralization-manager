@@ -190,6 +190,7 @@ pub struct PendingInvitationRow {
     pub prefix: Option<String>,
     pub participants: Option<String>,
     pub dar_filenames: Option<String>,
+    pub dar_hashes: Option<String>,
     pub kicked_participant: Option<String>,
     pub new_participant: Option<String>,
     pub new_threshold: Option<i64>,
@@ -237,6 +238,7 @@ impl PendingInvitationRow {
             prefix: inv.prefix.clone(),
             participants: encode_list(&inv.participants, "pending invitation participants")?,
             dar_filenames: encode_list(&inv.dar_filenames, "pending invitation dar_filenames")?,
+            dar_hashes: encode_list(&inv.dar_hashes, "pending invitation dar_hashes")?,
             kicked_participant: inv.kicked_participant.as_ref().map(|p| p.to_string()),
             new_participant: inv.new_participant.as_ref().map(|p| p.to_string()),
             new_threshold: inv.new_threshold.map(i64::from),
@@ -258,6 +260,7 @@ impl PendingInvitationRow {
             .with_context(|| format!("invalid invitation_type for id {}", self.id))?;
         let participants = decode_list(self.participants, &self.id, "participants")?;
         let dar_filenames = decode_list(self.dar_filenames, &self.id, "dar_filenames")?;
+        let dar_hashes = decode_list(self.dar_hashes, &self.id, "dar_hashes")?;
         let package_names = decode_list(self.package_names, &self.id, "package_names")?;
         let kicked_participant = self
             .kicked_participant
@@ -283,6 +286,7 @@ impl PendingInvitationRow {
             prefix: self.prefix,
             participants,
             dar_filenames,
+            dar_hashes,
             kicked_participant,
             new_participant,
             new_threshold: self.new_threshold.map(|v| v as i32),
@@ -460,6 +464,7 @@ mod tests {
             prefix: None,
             participants: None,
             dar_filenames: None,
+            dar_hashes: None,
             kicked_participant: None,
             new_participant: None,
             new_threshold: None,

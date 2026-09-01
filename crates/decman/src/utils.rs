@@ -27,6 +27,7 @@ use canton_proto_rs::com::{
             GetIdRequest,
             identity_initialization_service_client::IdentityInitializationServiceClient,
         },
+        version::v1::{UntypedVersionedMessage, untyped_versioned_message},
     },
 };
 
@@ -101,6 +102,26 @@ pub fn read_first_message_from_bytes<M: Message + Default>(data: &[u8]) -> Resul
     let message_bytes = &cursor[..len];
     let message = M::decode(message_bytes)?;
     Ok(message)
+}
+
+/// Unwrap Canton's protocol-versioning envelope.
+///
+/// Canton wraps every protocol-versioned message in an
+/// `UntypedVersionedMessage`, so the bytes in e.g.
+/// `SignedTopologyTransaction::transaction` are the envelope, not the inner
+/// message. This peels one layer and decodes what is inside.
+///
+/// # Errors
+///
+/// Errors if the envelope or the message inside it fails to decode.
+pub fn decode_versioned<M: Message + Default>(bytes: &[u8]) -> Result<M> {
+    let versioned = UntypedVersionedMessage::decode(bytes)
+        .context("Failed to decode UntypedVersionedMessage envelope")?;
+    let inner = match versioned.wrapper {
+        Some(untyped_versioned_message::Wrapper::Data(data)) => data,
+        None => anyhow::bail!("UntypedVersionedMessage has no wrapper data"),
+    };
+    M::decode(inner.as_slice()).context("Failed to decode the versioned message payload")
 }
 
 /// Encode a single protobuf message as `varint(len)||proto` — the same

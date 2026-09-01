@@ -9,6 +9,7 @@ pub mod party_replication;
 pub mod state;
 pub mod storage;
 pub mod topology;
+pub mod validation;
 
 use std::sync::Arc;
 
@@ -33,6 +34,7 @@ use crate::{
     workflow::{
         state::WorkflowStep,
         storage::{WorkflowStorage, artifact_kinds},
+        validation::PeerExpectations,
     },
 };
 
@@ -240,26 +242,19 @@ pub async fn start_peer(
         coordinator.participant_id
     );
 
+    // The invitation the operator accepted, read back before the first
+    // command arrives. Every payload this loop is asked to act on is checked
+    // against it, so a coordinator cannot widen the run beyond what was
+    // agreed. Without it the peer cannot tell what it consented to, so the
+    // run fails rather than signing blind.
+    let coordinator_id = coordinator.participant_id.clone();
+    let expectations =
+        PeerExpectations::load(&db, &instance_name, &node_config, &coordinator_id).await?;
+    let peer_kind = expectations.kind;
+
     let client = NoiseClient::new(node_config.clone(), coordinator, coordinator_instance).await?;
 
     tracing::info!("Noise client initialized, entering command polling loop");
-
-    // Cache the workflow kind so each polled command can be mapped to a
-    // human-readable step (current_step / step_index) on this peer's
-    // workflow_runs row. Falling back to None just means the notification
-    // feed UI keeps showing the row's initial "Active" placeholder for this
-    // run, which is harmless.
-    let peer_kind: Option<WorkflowKind> = match db.get_workflow_run(&instance_name).await {
-        Ok(Some(run)) => Some(run.kind),
-        Ok(None) => {
-            tracing::warn!("peer step persist: no workflow_runs row for {instance_name}");
-            None
-        }
-        Err(e) => {
-            tracing::warn!("peer step persist: lookup failed for {instance_name}: {e}");
-            None
-        }
-    };
 
     // Command polling loop
     let mut consecutive_errors = 0;
@@ -331,9 +326,25 @@ pub async fn start_peer(
         let command = message.msg_type;
         let payload = message.payload;
 
-        if let Some(kind) = peer_kind {
-            persist_peer_step(&db, &instance_name, kind, command).await;
+        // Only commands that belong to the accepted workflow kind are
+        // executed. A Contracts invitation must not become a licence to sign
+        // a kick's topology transactions.
+        if !command_matches_kind(peer_kind, command) {
+            tracing::error!(
+                "Refusing {command:?}: the accepted invitation is for a {peer_kind:?} workflow"
+            );
+            consecutive_step_failures += 1;
+            if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                anyhow::bail!(
+                    "Aborting peer: coordinator sent {MAX_CONSECUTIVE_STEP_FAILURES} commands \
+                     that do not belong to the accepted {peer_kind:?} workflow"
+                );
+            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+            continue;
         }
+
+        persist_peer_step(&db, &instance_name, peer_kind, command).await;
 
         match command {
             MessageType::Wait => {
@@ -360,6 +371,20 @@ pub async fn start_peer(
                         }
                     }
                 };
+
+                // Vetting a DAR makes this participant willing to execute its
+                // code, so the files must be the ones the operator accepted.
+                if let Err(e) = expectations.check_dars(&dar_files) {
+                    tracing::error!("Refusing the coordinator's DARs: {e}");
+                    consecutive_step_failures += 1;
+                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                        anyhow::bail!(
+                            "Aborting peer: coordinator's DARs do not match the invitation: {e}"
+                        );
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    continue;
+                }
 
                 if let Err(e) = contracts::upload_dars_from_bytes(&node_config, dar_files).await {
                     tracing::error!("Step execution failed: {e}");
@@ -423,6 +448,37 @@ pub async fn start_peer(
                     tracing::error!("No DNS proposal payload received from coordinator");
                     continue;
                 }
+                match expectations
+                    .check_onboarding_dns(&db, &instance_name, &payload)
+                    .await
+                {
+                    // Remember the namespace we authorized so the P2P
+                    // proposal that follows can be pinned to the same party.
+                    Ok(namespace) => {
+                        if let Err(e) = db
+                            .write_artifact(
+                                &instance_name,
+                                artifact_kinds::ACCEPTED_DNS_NAMESPACE,
+                                None,
+                                namespace.as_bytes(),
+                            )
+                            .await
+                        {
+                            tracing::warn!("Failed to record the signed DNS namespace: {e}");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Refusing the coordinator's DNS proposal: {e}");
+                        consecutive_step_failures += 1;
+                        if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                            anyhow::bail!(
+                                "Aborting peer: DNS proposal does not match the accepted invitation: {e}"
+                            );
+                        }
+                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                        continue;
+                    }
+                }
                 if let Err(e) =
                     onboarding::sign_dns_proposals(&node_config, &db, &instance_name, &payload)
                         .await
@@ -453,6 +509,30 @@ pub async fn start_peer(
                 tracing::info!("Executing: Sign P2P proposals");
                 if payload.is_empty() {
                     tracing::error!("No P2P proposal payload received from coordinator");
+                    continue;
+                }
+                let signed_namespace = db
+                    .read_artifact(&instance_name, artifact_kinds::ACCEPTED_DNS_NAMESPACE, None)
+                    .await
+                    .unwrap_or_default()
+                    .and_then(|bytes| String::from_utf8(bytes).ok());
+                if let Err(e) = expectations
+                    .check_onboarding_p2p(
+                        &db,
+                        &instance_name,
+                        &payload,
+                        signed_namespace.as_deref(),
+                    )
+                    .await
+                {
+                    tracing::error!("Refusing the coordinator's P2P proposal: {e}");
+                    consecutive_step_failures += 1;
+                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                        anyhow::bail!(
+                            "Aborting peer: P2P proposal does not match the accepted invitation: {e}"
+                        );
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     continue;
                 }
                 if let Err(e) =
@@ -538,6 +618,17 @@ pub async fn start_peer(
                     };
 
                 let dec_party_id = contracts_config.decentralized_party_id.clone();
+                if let Err(e) = expectations.check_dec_party(&dec_party_id) {
+                    tracing::error!("Refusing the coordinator's contracts config: {e}");
+                    consecutive_step_failures += 1;
+                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                        anyhow::bail!(
+                            "Aborting peer: contracts config does not match the accepted invitation: {e}"
+                        );
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    continue;
+                }
 
                 // Persist the prepared submissions sent by the coordinator into
                 // this peer's workflow_artifacts so sign_submissions can
@@ -605,6 +696,21 @@ pub async fn start_peer(
                     }
                 };
 
+                if let Err(e) = expectations
+                    .check_party_proposals(&db, &instance_name, &items[1], &items[2])
+                    .await
+                {
+                    tracing::error!("Refusing the coordinator's kick proposals: {e}");
+                    consecutive_step_failures += 1;
+                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                        anyhow::bail!(
+                            "Aborting peer: kick proposals do not match the accepted invitation: {e}"
+                        );
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    continue;
+                }
+
                 let kick_data = utils::encode_length_prefixed(&[&items[1], &items[2]]);
                 if let Err(e) =
                     kick::sign_proposals(&node_config, &db, &instance_name, &kick_data).await
@@ -657,6 +763,21 @@ pub async fn start_peer(
                         }
                     };
 
+                if let Err(e) = expectations
+                    .check_party_proposals(&db, &instance_name, &items[1], &items[2])
+                    .await
+                {
+                    tracing::error!("Refusing the coordinator's change-threshold proposals: {e}");
+                    consecutive_step_failures += 1;
+                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                        anyhow::bail!(
+                            "Aborting peer: change-threshold proposals do not match the accepted invitation: {e}"
+                        );
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    continue;
+                }
+
                 let proposal_data = utils::encode_length_prefixed(&[&items[1], &items[2]]);
                 if let Err(e) = change_threshold::sign_proposals(
                     &node_config,
@@ -696,6 +817,12 @@ pub async fn start_peer(
                 let Some(add_party_config) = decode_add_party_config(&payload) else {
                     continue;
                 };
+                if let Err(e) =
+                    expectations.check_dec_party(&add_party_config.decentralized_party_id)
+                {
+                    tracing::error!("Refusing the coordinator's add-party config: {e}");
+                    continue;
+                }
                 if !is_new_member(&node_config, &add_party_config) {
                     send_skip_status(&client, "GenerateAddPartyKeys").await;
                     continue;
@@ -754,6 +881,26 @@ pub async fn start_peer(
                 let Some(add_party_config) = decode_add_party_config(&items[0]) else {
                     continue;
                 };
+
+                let add_party_check = async {
+                    expectations.check_dec_party(&add_party_config.decentralized_party_id)?;
+                    expectations.check_new_participant(&add_party_config.new_participant_id)?;
+                    expectations
+                        .check_party_proposals(&db, &instance_name, &items[1], &items[2])
+                        .await
+                }
+                .await;
+                if let Err(e) = add_party_check {
+                    tracing::error!("Refusing the coordinator's add-party proposals: {e}");
+                    consecutive_step_failures += 1;
+                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                        anyhow::bail!(
+                            "Aborting peer: add-party proposals do not match the accepted invitation: {e}"
+                        );
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    continue;
+                }
 
                 let proposal_data = utils::encode_length_prefixed(&[&items[1], &items[2]]);
                 if let Err(e) =
@@ -843,6 +990,12 @@ pub async fn start_peer(
                 let Some(add_party_config) = decode_add_party_config(&items[0]) else {
                     continue;
                 };
+                if let Err(e) =
+                    expectations.check_dec_party(&add_party_config.decentralized_party_id)
+                {
+                    tracing::error!("Refusing the coordinator's ACS import: {e}");
+                    continue;
+                }
                 if !is_new_member(&node_config, &add_party_config) {
                     send_skip_status(&client, "ImportAcs").await;
                     continue;
@@ -884,6 +1037,12 @@ pub async fn start_peer(
                 let Some(add_party_config) = decode_add_party_config(&payload) else {
                     continue;
                 };
+                if let Err(e) =
+                    expectations.check_dec_party(&add_party_config.decentralized_party_id)
+                {
+                    tracing::error!("Refusing the coordinator's clearing request: {e}");
+                    continue;
+                }
                 if !is_new_member(&node_config, &add_party_config) {
                     send_skip_status(&client, "ClearOnboardingFlag").await;
                     continue;
@@ -970,6 +1129,18 @@ pub async fn start_peer(
                     // Skip marker: the flag already cleared without a
                     // signing round (e.g. a single-owner-threshold party).
                     send_skip_status(&client, "SignClearOnboarding").await;
+                    continue;
+                }
+
+                if let Err(e) = expectations.check_clear_onboarding(&items[1]) {
+                    tracing::error!("Refusing the coordinator's clearing proposal: {e}");
+                    consecutive_step_failures += 1;
+                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                        anyhow::bail!(
+                            "Aborting peer: clearing proposal does not match the accepted invitation: {e}"
+                        );
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     continue;
                 }
 
@@ -1066,6 +1237,19 @@ fn extract_party_id_from_p2p_payload(payload: &[u8]) -> Result<CantonId> {
         topology_mapping::Mapping::PartyToParticipant(p2p) => CantonId::parse(&p2p.party),
         other => anyhow::bail!("Expected PartyToParticipant mapping, got {other:?}"),
     }
+}
+
+/// Whether a command belongs to the workflow kind the operator accepted.
+///
+/// `Wait`, `Ping` and `Disconnect` are protocol control messages that carry no
+/// payload and drive no step, so they are allowed for every kind. Everything
+/// else must map to a real step of `kind`: an accepted invitation authorizes
+/// one workflow, not a channel the coordinator can drive anywhere.
+fn command_matches_kind(kind: WorkflowKind, command: MessageType) -> bool {
+    matches!(
+        command,
+        MessageType::Wait | MessageType::Ping | MessageType::Disconnect
+    ) || peer_step_for_command(kind, command).is_some()
 }
 
 /// Map an inbound coordinator command to the peer's view of step
@@ -1220,6 +1404,53 @@ async fn save_prepared_submissions_from_payload(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An accepted invitation authorizes one workflow. A command belonging to
+    /// another kind is the coordinator reaching past what the operator agreed
+    /// to, and must be refused before any signing step sees its payload.
+    #[test]
+    fn refuses_commands_from_another_workflow_kind() {
+        assert!(!command_matches_kind(
+            WorkflowKind::Contracts,
+            MessageType::SignKick
+        ));
+        assert!(!command_matches_kind(
+            WorkflowKind::Dars,
+            MessageType::SignSubmissions
+        ));
+        assert!(!command_matches_kind(
+            WorkflowKind::Onboarding,
+            MessageType::SignAddParty
+        ));
+        assert!(!command_matches_kind(
+            WorkflowKind::ChangeThreshold,
+            MessageType::UploadDars
+        ));
+    }
+
+    #[test]
+    fn allows_a_kinds_own_commands_and_the_control_messages() {
+        assert!(command_matches_kind(
+            WorkflowKind::Onboarding,
+            MessageType::SignDns
+        ));
+        assert!(command_matches_kind(
+            WorkflowKind::Kick,
+            MessageType::SignKick
+        ));
+        for kind in [
+            WorkflowKind::Onboarding,
+            WorkflowKind::Kick,
+            WorkflowKind::Contracts,
+            WorkflowKind::Dars,
+            WorkflowKind::AddParty,
+            WorkflowKind::ChangeThreshold,
+        ] {
+            assert!(command_matches_kind(kind, MessageType::Wait));
+            assert!(command_matches_kind(kind, MessageType::Ping));
+            assert!(command_matches_kind(kind, MessageType::Disconnect));
+        }
+    }
 
     #[test]
     fn peer_step_maps_known_commands_and_rejects_the_rest() {

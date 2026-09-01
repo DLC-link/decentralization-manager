@@ -120,6 +120,7 @@ pub(crate) async fn insert_peer_run(
             "prefix": invitation.prefix,
             "participants": invitation.participants,
             "dar_filenames": invitation.dar_filenames,
+            "dar_hashes": invitation.dar_hashes,
             "participant_id": invitation.kicked_participant,
             "new_participant_id": invitation.new_participant,
             "new_threshold": invitation.new_threshold,

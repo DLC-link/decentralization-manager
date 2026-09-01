@@ -7,6 +7,7 @@ use std::{
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 
 use anyhow::Context;
+use base64::{Engine, engine::general_purpose::STANDARD};
 use sqlx::SqlitePool;
 
 use super::parties::{
@@ -2512,11 +2513,31 @@ pub async fn start_dars(
             .iter()
             .map(|f| f.filename.clone())
             .collect();
+        // Pin the content, not just the name: the invitation the operator
+        // sees carries the hash of the exact bytes the peers will be asked to
+        // upload and vet.
+        let dar_hashes: Vec<String> = dars_config
+            .dar_files
+            .iter()
+            .map(|f| {
+                STANDARD
+                    .decode(&f.data)
+                    .map(|bytes| workflow::validation::hash_dar(&bytes))
+            })
+            .collect::<std::result::Result<_, _>>()
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    "Could not hash the DARs for the invitation ({e}); peers will only be \
+                     able to check filenames"
+                );
+                Vec::new()
+            });
         let invite_result = send_dars_invites(
             &config,
             &db,
             &peer_ids,
             &dar_filenames,
+            &dar_hashes,
             &dars_config.instance_name,
         )
         .await;
@@ -2610,6 +2631,7 @@ async fn send_dars_invites(
     db: &SqlitePool,
     peer_ids: &[CantonId],
     dar_filenames: &[String],
+    dar_hashes: &[String],
     instance_name: &str,
 ) -> Result {
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
@@ -2617,6 +2639,7 @@ async fn send_dars_invites(
 
     let payload = DarsInvitePayload {
         dar_filenames: dar_filenames.to_vec(),
+        dar_hashes: dar_hashes.to_vec(),
         // Carry the member set so the peer card shows the same participant
         // list the coordinator shows.
         participants: peer_ids.to_vec(),

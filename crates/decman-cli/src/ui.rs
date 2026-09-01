@@ -2817,6 +2817,7 @@ mod tests {
                 prefix: Some("treasury-rc5".to_owned()),
                 participants: Vec::new(),
                 dar_filenames: Vec::new(),
+                dar_hashes: Vec::new(),
                 kicked_participant: None,
                 new_threshold: None,
                 previous_threshold: None,
