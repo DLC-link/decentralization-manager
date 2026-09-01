@@ -51,10 +51,15 @@ one to deploy where a policy forbids root containers.
 Its `DECPM_DIR` defaults to `/home/nonroot`, because uid 65532 cannot create
 `/data`. So the mount moves with it, and the host directory has to belong to
 that uid — a bind mount keeps the host's ownership, and without the `chown` the
-first write fails:
+first write fails.
+
+Make it recursive. A `./data` carried over from the root image holds root-owned
+files — the SQLite database and the mode-0600 Noise key — and uid 65532 cannot
+open those, so a non-recursive `chown` fixes the first write and then fails on
+the second start:
 
 ```bash
-mkdir -p ./data && sudo chown 65532:65532 ./data
+mkdir -p ./data && sudo chown -R 65532:65532 ./data
 docker run -p 8080:8080 -p 9000:9000 -v ./data:/home/nonroot/data \
   ... public.ecr.aws/dlc-link/decentralization-manager:<tag>-nonroot
 ```

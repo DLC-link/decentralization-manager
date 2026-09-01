@@ -112,10 +112,12 @@ docker run -p 8080:8080 -v ./data:/data \
 Published releases ship that same binary as two images, `…:<tag>` and
 `…:<tag>-nonroot`; the second runs as uid 65532 and defaults `DECPM_DIR` to
 `/home/nonroot`, so its mount goes at `/home/nonroot/data` and the host
-directory has to belong to that uid:
+directory has to belong to that uid. The `chown` is recursive because a `./data`
+left behind by the root image holds root-owned files — the SQLite database and
+the mode-0600 Noise key — that uid 65532 could otherwise not open:
 
 ```bash
-mkdir -p ./data && sudo chown 65532:65532 ./data
+mkdir -p ./data && sudo chown -R 65532:65532 ./data
 docker run -p 8080:8080 -v ./data:/home/nonroot/data \
   ... public.ecr.aws/dlc-link/decentralization-manager:<tag>-nonroot
 ```

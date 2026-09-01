@@ -62,9 +62,41 @@ writes only under its data directory. Give the data volume an `fsGroup` so uid
 65532 can write to it — the Deployment example does, and that example runs
 either tag as 65532 because it pins `runAsUser` itself.
 
+### Moving an existing node to uid 65532
+
+A volume written by the root image holds root-owned files, and `fsGroup` does
+not fix that on its own: it re-owns the contents to the **group** and adds group
+write, but the user owner stays root. `data/noise.key` is the one that bites.
+The node re-asserts mode 0600 on it at every start, and uid 65532 cannot chmod a
+file it does not own, so the pod fails with `Failed to chmod key file`. Without
+`fsGroup` it fails one step earlier, on the read.
+
+Chown the volume once, with a throwaway root init container ahead of the
+existing one:
+
+```yaml
+initContainers:
+  - name: chown-data
+    image: busybox:latest
+    command: ["sh", "-c", "chown -R 65532:65532 /app"]
+    securityContext:
+      runAsUser: 0
+      runAsNonRoot: false
+    volumeMounts:
+      - name: data
+        mountPath: /app
+```
+
+Drop it again after one successful start — from then on the node owns
+everything it writes. A namespace under the `restricted` Pod Security Standard
+rejects that container; run the same `chown -R` from a one-off root pod that
+mounts the PVC instead. A bind-mounted `docker run` has the same requirement and
+the same fix.
+
 > Releases up to and including **v1.6.2** shipped only the root image. To
-> harden one of those without upgrading, set `runAsUser: 65532` and the same
-> `fsGroup` on the pod; the binary never needed the privileges it had.
+> harden one of those without upgrading, do the one-time chown above, then set
+> `runAsUser: 65532` and the same `fsGroup` on the pod; the binary never needed
+> the privileges it had.
 
 To check the version of a running pod:
 
