@@ -42,6 +42,62 @@ anything that needs `sh` — init containers, `kubectl exec` debugging, exec
 probes — on a utility image such as `busybox`, not on this image. The
 Deployment example below shows the pattern.
 
+### Root or nonroot
+
+Each release is published as two images:
+
+| Tag | Runs as | `DECPM_DIR` default |
+|---|---|---|
+| `…:<tag>` | uid 0 (root) | `/` |
+| `…:<tag>-nonroot` | uid 65532 | `/home/nonroot` |
+
+They hold the same binary and take the same configuration; only the runtime
+identity differs. **Prefer `-nonroot`.** It is what an admission policy that
+inspects the image expects — a bare `runAsNonRoot: true` with no `runAsUser`
+rejects the plain tag, because the image itself declares uid 0. The plain tag
+stays for existing pins and for clusters that set `runAsUser` in the pod spec.
+
+Neither one needs root: the binary binds 8080 and 9000, both above 1024, and
+writes only under its data directory. Give the data volume an `fsGroup` so uid
+65532 can write to it — the Deployment example does, and that example runs
+either tag as 65532 because it pins `runAsUser` itself.
+
+### Moving an existing node to uid 65532
+
+A volume written by the root image holds root-owned files, and `fsGroup` does
+not fix that on its own: it re-owns the contents to the **group** and adds group
+write, but the user owner stays root. `data/noise.key` is the one that bites.
+The node re-asserts mode 0600 on it at every start, and uid 65532 cannot chmod a
+file it does not own, so the pod fails with `Failed to chmod key file`. Without
+`fsGroup` it fails one step earlier, on the read.
+
+Chown the volume once, with a throwaway root init container ahead of the
+existing one:
+
+```yaml
+initContainers:
+  - name: chown-data
+    image: busybox:latest
+    command: ["sh", "-c", "chown -R 65532:65532 /app"]
+    securityContext:
+      runAsUser: 0
+      runAsNonRoot: false
+    volumeMounts:
+      - name: data
+        mountPath: /app
+```
+
+Drop it again after one successful start — from then on the node owns
+everything it writes. A namespace under the `restricted` Pod Security Standard
+rejects that container; run the same `chown -R` from a one-off root pod that
+mounts the PVC instead. A bind-mounted `docker run` has the same requirement and
+the same fix.
+
+> Releases up to and including **v1.6.2** shipped only the root image. To
+> harden one of those without upgrading, do the one-time chown above, then set
+> `runAsUser: 65532` and the same `fsGroup` on the pod; the binary never needed
+> the privileges it had.
+
 To check the version of a running pod:
 
 ```bash
@@ -267,17 +323,39 @@ spec:
         prometheus.io/path: "/metrics"
         prometheus.io/port: "9464"
     spec:
+      # The app needs no root. Pinning runAsUser here means this works with
+      # either published tag; with `-nonroot` it matches the image default.
+      # fsGroup makes the mounted PVC group-writable by that uid, which is what
+      # lets both the init container and the app create files under /app.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
       initContainers:
         - name: init-data
           image: busybox:latest
           command: ["sh", "-c", "mkdir -p /app/data"]
+          # Inherits the pod securityContext above, so it runs as 65532 too.
+          # busybox defaults to root, and with runAsNonRoot set the pod would
+          # refuse to start if this container were left to that default.
           volumeMounts:
             - name: data
               mountPath: /app
       containers:
         - name: dec-party-manager
+          # Append `-nonroot` for the image that runs as 65532 by itself.
           image: public.ecr.aws/dlc-link/decentralization-manager:<tag>
           imagePullPolicy: Always
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            # The server writes only under its data directory, so a read-only
+            # root filesystem should hold. Left commented because it has not
+            # been proven against a live deploy: a dependency writing to /tmp
+            # would surface only at runtime. Enable it, then watch one restart.
+            # readOnlyRootFilesystem: true
           command:
             - dec-party-manager
             - -d
