@@ -516,14 +516,29 @@ async fn stub_add_hosts_onboard(server: &MockServer, serial: u32) {
         .await;
 }
 
-/// A stub source host that serves the party's ACS, and a joiner that accepts it
-/// and reports its marker cleared.
+/// A stub source host that serves the party's ACS as ranges, and a joiner that
+/// accepts them and reports completion.
 async fn stub_acs_relay(source: &MockServer, joiner: &MockServer) {
+    let snapshot = b"an-acs-snapshot".to_vec();
+    let total = snapshot.len() as u64;
+
+    Mock::given(method("GET"))
+        .and(wiremock::matchers::path_regex(
+            r"^/v0/tenant/.+/acs-progress$",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "party_id": "alice::1220aa",
+            "received": 0,
+        })))
+        .mount(joiner)
+        .await;
     Mock::given(method("GET"))
         .and(wiremock::matchers::path_regex(r"^/v0/tenant/.+/acs/.+$"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "party_id": "alice::1220aa",
-            "snapshot": STANDARD.encode(b"an-acs-snapshot"),
+            "total_size": total,
+            "offset": 0,
+            "chunk": STANDARD.encode(&snapshot),
             "package_ids": ["pkg-one"],
             "package_preflight": true,
         })))
@@ -533,6 +548,8 @@ async fn stub_acs_relay(source: &MockServer, joiner: &MockServer) {
         .and(path("/v0/tenant/add-hosts/import"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "party_id": "alice::1220aa",
+            "received": total,
+            "complete": true,
             "imported": true,
             "marker_cleared": true,
         })))

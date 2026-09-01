@@ -178,7 +178,7 @@ The database file path can be overridden with the `--db` CLI flag.
 | `DECPM_KEYCLOAK_REALM` | Keycloak realm name for frontend auth | _(none)_ |
 | `DECPM_KEYCLOAK_CLIENT_ID` | Keycloak client ID for frontend auth | _(none)_ |
 | `DECPM_KEYCLOAK_INTERNAL_URL` | Internal/backchannel Keycloak URL the server uses for OIDC discovery, JWKS, and introspection when it cannot reach `DECPM_KEYCLOAK_URL` directly (e.g. that is a tailnet host but the pod is in-cluster) | `DECPM_KEYCLOAK_URL` |
-| `DECPM_TENANT_ACS_MAX_BYTES` | Ceiling on an ACS snapshot the wallet relays over the tenant API. The Noise chunked-transfer limit does not bound that path; it goes over HTTP. Assembled in memory on both ends, so raise deliberately | `536870912` (512 MiB) |
+| `DECPM_TENANT_ACS_MAX_BYTES` | Ceiling on an ACS snapshot the wallet relays over the tenant API. The Noise chunked-transfer limit does not bound that path; it goes over HTTP in ranges. The export still assembles the snapshot once in memory before staging it, so raise deliberately | `536870912` (512 MiB) |
 | `DECPM_AUTH0_DOMAIN` | Auth0 tenant domain for frontend auth (mutually exclusive with `DECPM_KEYCLOAK_*`) | _(none)_ |
 | `DECPM_AUTH0_CLIENT_ID` | Auth0 SPA client ID for frontend auth | _(none)_ |
 | `DECPM_AUTH0_AUDIENCE` | Auth0 API audience the SPA's access tokens target | _(none)_ |
@@ -453,8 +453,9 @@ The table below is a curated subset. A complete, interactive API reference is av
 | `/v0/tenant/{party}/state` | GET | Wallet-facing: the party's current serial, threshold and host count, so a caller can pin `base_serial` on the next write |
 | `/v0/tenant/add-hosts/prepare` | POST | Wallet-facing: builds the serial-N+1 topology that adds hosts to an existing external party |
 | `/v0/tenant/add-hosts/onboard` | POST | Wallet-facing: validates the wallet-signed add-hosts topology, co-signs, and submits it |
-| `/v0/tenant/{party}/acs/{target}` | GET | Wallet-facing: exports the party's ACS scoped to a joining host, for the wallet to relay |
-| `/v0/tenant/add-hosts/import` | POST | Wallet-facing: imports a relayed ACS on this host and clears its onboarding marker |
+| `/v0/tenant/{party}/acs/{target}` | GET | Wallet-facing: serves one byte range of the party's ACS scoped to a joining host (`?offset=`, `?limit=`), for the wallet to relay |
+| `/v0/tenant/{party}/acs-progress` | GET | Wallet-facing: how much of a relayed snapshot this host already holds, so a transfer resumes rather than restarts |
+| `/v0/tenant/add-hosts/import` | POST | Wallet-facing: appends one range of a relayed ACS, importing and clearing the onboarding marker once it holds the whole snapshot |
 | `/v0/tenant/threshold/prepare` | POST | Wallet-facing: builds a confirmation-threshold change |
 | `/v0/tenant/threshold/onboard` | POST | Wallet-facing: submits the wallet-signed threshold change |
 | `/v0/tenant/local-party/adopt-key/prepare` | POST | Wallet-facing: builds the conversion that gives a local party an owner-held signing key |

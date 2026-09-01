@@ -21,6 +21,7 @@
 pub mod acs;
 pub mod offset;
 pub mod onboarding_flag;
+pub mod staging;
 
 use sqlx::SqlitePool;
 

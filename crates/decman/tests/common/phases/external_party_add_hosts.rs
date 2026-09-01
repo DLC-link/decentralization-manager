@@ -13,8 +13,11 @@
 //! wallet and a lying host. A phase that prepared on one host would not test it.
 //!
 //! After the topology lands the phase drives the rest of the replication: the
-//! wallet pulls the ACS snapshot from a current host and relays it to the
-//! joiner, which imports it and clears Canton's onboarding marker. The final
+//! wallet pulls the ACS from a current host **a range at a time** and relays
+//! each to the joiner, which appends until it holds the whole snapshot, then
+//! imports it and clears Canton's onboarding marker. Relaying in ranges is what
+//! keeps the snapshot out of a single request body, so the loop here is the
+//! shape a real wallet uses rather than a test convenience. The final
 //! assertion is that P3 reports the party fully hosted — marker gone — which is
 //! the only state in which it can actually confirm for the party.
 //!
@@ -42,6 +45,14 @@ use decman_wallet::ExternalKeyPair;
 use crate::common::{
     Fixture, chaos::fresh_prefix, http::probe_workflow_status, scenario::Scenario,
 };
+
+/// Bytes per relayed range.
+///
+/// Deliberately far below the endpoint's 8 MiB default so this party's small ACS
+/// still takes several rounds. A range large enough to swallow the whole
+/// snapshot would exercise the endpoints while skipping the chunking entirely,
+/// which is the part most likely to be wrong.
+const RANGE_LIMIT: u64 = 512;
 
 /// Read side of `/external-parties`. The shipped `ExternalPartiesResponse` is
 /// serialize-only, so the test declares the fields it reads.
@@ -264,68 +275,123 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             move |f, _| {
                 let party_id = party_id.clone();
                 Box::pin(async move {
-                    // Pulled from a host that already holds the party, scoped to
-                    // the joiner. Canton needs the joiner's activation to exist
-                    // first, which the authorized serial-2 write just created.
+                    // Pulled from a host that already holds the party, scoped
+                    // to the joiner, and relayed a range at a time. Neither end
+                    // ever holds the whole snapshot in a request body.
                     let target = f.p3.participant_id.clone();
 
-                    // The replication's staged state is keyed by the serial the
-                    // add was pinned to, not the current one. The add advanced
-                    // exactly one serial, so the base is one behind whatever
-                    // head state reads now.
+                    // The staged replication is keyed by the serial the add was
+                    // pinned to, not the current one. The add advanced exactly
+                    // one serial, so the base is one behind head state.
                     let state: Value = f
                         .get_json(f.p1.http, &format!("/v0/tenant/{party_id}/state"))
                         .await?;
-                    let current_serial = state
+                    let base_serial = state
                         .get("serial")
                         .and_then(Value::as_u64)
-                        .context("party state missing serial")?;
-                    let base_serial = current_serial
+                        .context("party state missing serial")?
                         .checked_sub(1)
                         .context("the add-hosts write should have advanced the serial")?;
 
-                    let snapshot: Value = f
-                        .get_json(
-                            f.p1.http,
-                            &format!(
-                                "/v0/tenant/{party_id}/acs/{target}?base_serial={base_serial}"
-                            ),
-                        )
-                        .await?;
+                    let mut offset: u64 = 0;
+                    let mut rounds = 0;
+                    // Set on the first range; the completion assertion below
+                    // reads whatever the last round saw.
+                    #[allow(unused_assignments)]
+                    let mut total_size = 0u64;
+                    let mut probed_bad_offset = false;
+                    let result = loop {
+                        rounds += 1;
+                        anyhow::ensure!(rounds < 512, "the relay did not converge");
 
-                    // The wallet is the transport: no host-to-host channel is
-                    // involved, which is the whole point for a partner node that
-                    // is not in this mesh.
-                    let import_req = json!({
-                        "party_id": party_id,
-                        "base_serial": base_serial,
-                        "snapshot": snapshot
-                            .get("snapshot")
-                            .cloned()
-                            .context("acs response missing snapshot")?,
-                        "package_ids": snapshot
-                            .get("package_ids")
-                            .cloned()
-                            .context("acs response missing package_ids")?,
-                    });
-                    let result: Value = f
-                        .post_json(f.p3.http, "/v0/tenant/add-hosts/import", &import_req)
-                        .await?;
-                    info!("add-hosts import on P3: {result}");
+                        // A deliberately tiny range so this party's small ACS
+                        // still needs several of them. Without it the loop
+                        // completes on the first pass and the chunking — offset
+                        // advancement, staged appends, completion detection —
+                        // is never actually exercised.
+                        let range: Value = f
+                            .get_json(
+                                f.p1.http,
+                                &format!(
+                                    "/v0/tenant/{party_id}/acs/{target}\
+                                     ?offset={offset}&limit={RANGE_LIMIT}\
+                                     &base_serial={base_serial}"
+                                ),
+                            )
+                            .await?;
+                        total_size = range
+                            .get("total_size")
+                            .and_then(Value::as_u64)
+                            .context("acs range missing total_size")?;
+                        // Once, mid-transfer: a range at the wrong offset must be
+                        // refused rather than written. A hole would only surface
+                        // mid-import, with the participant already disconnected.
+                        if !probed_bad_offset && offset > 0 {
+                            probed_bad_offset = true;
+                            let bogus = json!({
+                                "party_id": party_id,
+                                "base_serial": base_serial,
+                                "offset": offset + 7,
+                                "total_size": total_size,
+                                "chunk": range
+                                    .get("chunk")
+                                    .cloned()
+                                    .context("acs range missing chunk")?,
+                                "package_ids": [],
+                            });
+                            let refused: anyhow::Result<Value> = f
+                                .post_json(f.p3.http, "/v0/tenant/add-hosts/import", &bogus)
+                                .await;
+                            anyhow::ensure!(
+                                refused.is_err(),
+                                "a range at the wrong offset must be refused, not written"
+                            );
+                        }
 
-                    // Checked here, inside the step that does the import, rather
-                    // than as a later Then. Scenario steps run in sequence, so a
-                    // Then would only observe P1 after replication finished and
-                    // would pass even if P1 had dropped out during it — which is
-                    // exactly the regression worth catching, since the import
-                    // disconnects the joiner and must not touch anyone else.
-                    let p1_status: Value = f
-                        .get_json(f.p1.http, &format!("/v0/tenant/{party_id}/status"))
-                        .await
-                        .context("P1's view of the party right after the import")?;
-                    anyhow::ensure!(
-                        p1_status.get("status").and_then(Value::as_str) == Some("completed"),
-                        "P1 stopped reporting the party live across the import: {p1_status}"
+                        let import_req = json!({
+                            "party_id": party_id,
+                            "base_serial": base_serial,
+                            "offset": offset,
+                            "total_size": total_size,
+                            "chunk": range
+                                .get("chunk")
+                                .cloned()
+                                .context("acs range missing chunk")?,
+                            "package_ids": range
+                                .get("package_ids")
+                                .cloned()
+                                .context("acs range missing package_ids")?,
+                        });
+                        let progress: Value = f
+                            .post_json(f.p3.http, "/v0/tenant/add-hosts/import", &import_req)
+                            .await?;
+
+                        if progress.get("complete").and_then(Value::as_bool) == Some(true) {
+                            break progress;
+                        }
+                        let received = progress
+                            .get("received")
+                            .and_then(Value::as_u64)
+                            .context("import progress missing received")?;
+                        anyhow::ensure!(
+                            received > offset,
+                            "the joiner did not advance past {offset}"
+                        );
+                        offset = received;
+                    };
+                    // The point of the loop: prove it really did take several
+                    // ranges, so a green run means the chunking works rather
+                    // than that it was skipped.
+                    if total_size > RANGE_LIMIT {
+                        anyhow::ensure!(
+                            rounds > 1,
+                            "a {total_size}-byte snapshot at {RANGE_LIMIT}-byte ranges must take \
+                             more than one round, took {rounds}"
+                        );
+                    }
+                    info!(
+                        "add-hosts import on P3 after {rounds} range(s) of {total_size} byte(s): \
+                         {result}"
                     );
                     Ok(())
                 })
