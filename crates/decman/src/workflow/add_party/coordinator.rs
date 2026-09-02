@@ -96,11 +96,33 @@ async fn run_workflow(
             AddPartyStep::WaitingForPeers
             | AddPartyStep::GenerateNewMemberKeys
             | AddPartyStep::SignProposals
-            | AddPartyStep::SyncAcs
             | AddPartyStep::ProposeClearOnboarding
             | AddPartyStep::SignClearOnboarding => {
                 // Peer-gated (or connection-gated) — the listener advances the
                 // state as peers report in; the coordinator just idles.
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            }
+            AddPartyStep::SyncAcs => {
+                // Peer-gated like the arm above, but the payload it serves is
+                // the one thing a resumed coordinator cannot rebuild: the
+                // manifest names a staged snapshot that is still on disk, so
+                // restoring the payload is what lets the transfer carry on
+                // instead of the new member failing to decode an empty one.
+                if workflow_state.get_command_payload().await.is_empty()
+                    && let Some(saved) = db
+                        .read_artifact(
+                            &instance_name,
+                            artifact_kinds::ADD_PARTY_SYNC_ACS_COMMAND,
+                            None,
+                        )
+                        .await?
+                {
+                    tracing::info!(
+                        "Restored the SyncAcs command payload after a restart ({len} bytes)",
+                        len = saved.len()
+                    );
+                    workflow_state.set_command_payload(saved).await;
+                }
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             }
             AddPartyStep::ExportState => {
@@ -179,6 +201,13 @@ async fn run_workflow(
                     &manifest_payload,
                     &package_ids_payload,
                 ]);
+                db.write_artifact(
+                    &instance_name,
+                    artifact_kinds::ADD_PARTY_SYNC_ACS_COMMAND,
+                    None,
+                    &payload,
+                )
+                .await?;
                 workflow_state.set_command_payload(payload).await;
                 workflow_state.advance_step().await;
             }
