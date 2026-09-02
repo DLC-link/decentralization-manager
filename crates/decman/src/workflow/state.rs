@@ -12,13 +12,15 @@ use std::{
 };
 
 use sqlx::SqlitePool;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::{
     canton_id::CantonId,
     db::schema::{Commitable, SchemaWrite},
+    error::Result,
     noise::MessageType,
     server::{WorkflowKind, WorkflowProgress},
+    workflow::party_replication::pipe::{ExportSession, PipeBlock},
 };
 
 /// Trait for workflow steps. Implementations are small `Copy` enums per
@@ -72,6 +74,11 @@ pub struct WorkflowState<S> {
     peer_data: RwLock<HashMap<CantonId, Vec<u8>>>,
     /// Payload data to send with the next command (e.g., proposals for signing)
     command_payload: RwLock<Vec<u8>>,
+    /// The source's open ACS export, held between block requests.
+    ///
+    /// A live gRPC stream, so it cannot be persisted and does not survive a
+    /// restart: a resumed run re-opens it and the transfer starts from block 1.
+    acs_export: Mutex<Option<ExportSession>>,
     _p: PhantomData<()>,
 }
 
@@ -96,6 +103,7 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
             completed_peers: RwLock::new(HashSet::new()),
             peer_data: RwLock::new(HashMap::new()),
             command_payload: RwLock::new(Vec::new()),
+            acs_export: Mutex::new(None),
             _p: PhantomData,
         })
     }
@@ -121,6 +129,7 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
             completed_peers: RwLock::new(completed_peers.into_iter().collect()),
             peer_data: RwLock::new(HashMap::new()),
             command_payload: RwLock::new(Vec::new()),
+            acs_export: Mutex::new(None),
             _p: PhantomData,
         })
     }
@@ -141,6 +150,37 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
     }
 
     /// Clear the command payload
+    /// Install a freshly opened export session, replacing any previous one.
+    pub async fn set_acs_export(&self, session: ExportSession) {
+        *self.acs_export.lock().await = Some(session);
+    }
+
+    /// Whether an export session is currently open.
+    pub async fn has_acs_export(&self) -> bool {
+        self.acs_export.lock().await.is_some()
+    }
+
+    /// Serve block `seq` from the open export session.
+    ///
+    /// # Errors
+    /// Returns an error if no session is open, or if the session refuses the
+    /// sequence number (see [`ExportSession::block`]).
+    pub async fn next_acs_block(&self, seq: u64, block_size: usize) -> Result<PipeBlock> {
+        let mut guard = self.acs_export.lock().await;
+        let session = guard.as_mut().ok_or_else(|| {
+            anyhow::anyhow!(
+                "no ACS export is open on this run — the coordinator restarted, so the \
+                 transfer must begin again from block 1"
+            )
+        })?;
+        session.block(seq, block_size).await
+    }
+
+    /// Drop the export session, closing the Canton stream.
+    pub async fn clear_acs_export(&self) {
+        *self.acs_export.lock().await = None;
+    }
+
     pub async fn clear_command_payload(&self) {
         let mut cmd_payload = self.command_payload.write().await;
         cmd_payload.clear();

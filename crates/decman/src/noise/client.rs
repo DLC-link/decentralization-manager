@@ -10,9 +10,10 @@ use crate::{
     config::{NodeConfig, Peer},
     noise::{
         CHUNK_SIZE, MAX_CHUNK_COUNT, MAX_CHUNKED_TOTAL_SIZE, Message, MessageType,
-        NOISE_CHUNK_TIMEOUT, NOISE_REQUEST_TIMEOUT, NoiseError, NoiseKeypair, acs_range_size,
-        is_transient, parse_flexible_uri, parse_public_key,
+        NOISE_CHUNK_TIMEOUT, NOISE_REQUEST_TIMEOUT, NoiseError, NoiseKeypair, is_transient,
+        parse_flexible_uri, parse_public_key,
     },
+    workflow::party_replication::pipe::{PipeBlock, decode_data, decode_end},
 };
 
 /// Max attempts to fetch a single chunk (each on a fresh connection) before the
@@ -437,22 +438,18 @@ impl NoiseClient {
         Ok(Message::new(command, payload))
     }
 
-    /// Fetch the ACS range starting at `offset` from the coordinator's staged
-    /// snapshot, retrying transient failures on a fresh connection.
+    /// Fetch block `seq` of the coordinator's open ACS export.
     ///
-    /// Returns the bytes at `offset`. A response shorter than `acs_range_size`
-    /// means the end of the snapshot was reached — the caller stops there
-    /// rather than the coordinator tracking per-peer progress.
+    /// Retries transient failures on a fresh connection. The coordinator
+    /// replays the block it served last, so a retry of the same `seq` is safe;
+    /// anything further out of step fails the run, because an export stream
+    /// cannot rewind.
     ///
     /// # Errors
-    /// Returns an error if the coordinator cannot serve the range, or if the
-    /// response does not echo the requested offset.
-    pub async fn request_acs_range(&self, offset: u64) -> Result<Vec<u8>, NoiseError> {
-        let len = acs_range_size();
-        let mut payload = Vec::with_capacity(12);
-        payload.extend_from_slice(&offset.to_be_bytes());
-        payload.extend_from_slice(&(len as u32).to_be_bytes());
-        let message = Message::new(MessageType::GetAcsRange, payload);
+    /// Returns an error if the block cannot be fetched, or if the response does
+    /// not carry the sequence number that was asked for.
+    pub async fn request_next_acs_block(&self, seq: u64) -> Result<PipeBlock, NoiseError> {
+        let message = Message::new(MessageType::GetNextAcsBlock, seq.to_be_bytes().to_vec());
 
         let mut attempt = 1;
         let response = loop {
@@ -463,7 +460,7 @@ impl NoiseClient {
                 Ok(r) => break r,
                 Err(e) if attempt < CHUNK_FETCH_MAX_ATTEMPTS && is_transient(&e) => {
                     tracing::warn!(
-                        "ACS range at {offset} attempt {attempt}/{CHUNK_FETCH_MAX_ATTEMPTS} \
+                        "ACS block {seq} attempt {attempt}/{CHUNK_FETCH_MAX_ATTEMPTS} \
                          failed: {e}; retrying"
                     );
                     attempt += 1;
@@ -474,22 +471,31 @@ impl NoiseClient {
         };
 
         let resp_msg = Message::from_bytes(&response).map_err(|_| NoiseError::InvalidMessage)?;
-        if resp_msg.msg_type != MessageType::AcsRange || resp_msg.payload.len() < 8 {
+        let block = match resp_msg.msg_type {
+            MessageType::AcsBlock => {
+                let (got, bytes) =
+                    decode_data(&resp_msg.payload).map_err(|_| NoiseError::InvalidMessage)?;
+                PipeBlock::Data { seq: got, bytes }
+            }
+            MessageType::AcsBlockEnd => {
+                let (got, trailer) =
+                    decode_end(&resp_msg.payload).map_err(|_| NoiseError::InvalidMessage)?;
+                PipeBlock::End { seq: got, trailer }
+            }
+            _ => return Err(NoiseError::InvalidMessage),
+        };
+
+        // The echoed sequence is what proves this response belongs to the block
+        // we asked for: a stale one fed into the import stream would land at the
+        // wrong position, and there is no copy to check it against afterwards.
+        let got = match &block {
+            PipeBlock::Data { seq, .. } | PipeBlock::End { seq, .. } => *seq,
+        };
+        if got != seq {
+            tracing::warn!("ACS block response carried seq {got}, requested {seq}");
             return Err(NoiseError::InvalidMessage);
         }
-
-        // The echoed offset is what makes a retried range safe to append: a
-        // response for a different offset would otherwise be written at the
-        // wrong place and only surface as a digest mismatch at the end.
-        let mut echoed = [0u8; 8];
-        echoed.copy_from_slice(&resp_msg.payload[..8]);
-        let echoed = u64::from_be_bytes(echoed);
-        if echoed != offset {
-            tracing::warn!("ACS range response carried offset {echoed}, requested {offset}");
-            return Err(NoiseError::InvalidMessage);
-        }
-
-        Ok(resp_msg.payload[8..].to_vec())
+        Ok(block)
     }
 
     /// Request a chunk, retrying transient failures (connection reset, timeout,

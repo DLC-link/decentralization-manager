@@ -4,10 +4,7 @@ use crate::{
     config::NodeConfig,
     error::Result,
     noise::client::NoiseClient,
-    workflow::{
-        party_replication::{acs::AcsManifest, staging},
-        storage::{WorkflowStorage, artifact_kinds},
-    },
+    workflow::storage::{WorkflowStorage, artifact_kinds},
 };
 
 /// Status string a non-addressed peer replies with when a new-member-only
@@ -106,66 +103,5 @@ pub async fn send_clear_signature_to_coordinator(
         .ok_or_else(|| anyhow::anyhow!("SIGNED_ADD_PARTY_CLEAR artifact missing for {node_id}"))?;
 
     client.send_add_party_clear_signature(data).await?;
-    Ok(())
-}
-
-/// Pull the coordinator's staged ACS into this node's staging file, resuming
-/// from whatever is already there.
-///
-/// The resume point is the staged length, so a transfer interrupted by a
-/// restart on either side continues instead of starting over. Each range is
-/// appended offset-checked, so a retried range cannot be written twice.
-///
-/// # Errors
-/// Returns an error if a range cannot be fetched or appended, or if the
-/// coordinator stops serving bytes before the manifest's length is reached.
-pub async fn fetch_staged_acs(
-    client: &NoiseClient,
-    node_config: &NodeConfig,
-    instance_name: &str,
-    manifest: &AcsManifest,
-) -> Result {
-    if manifest.is_empty() {
-        return Ok(());
-    }
-    let data_dir = node_config.data_dir();
-
-    let mut offset = staging::staged_len(&data_dir, instance_name)
-        .await?
-        .unwrap_or(0);
-    if offset > manifest.total_len {
-        tracing::warn!(
-            "staged ACS is {offset} bytes but the manifest declares {total} — \
-             discarding and starting over",
-            total = manifest.total_len
-        );
-        staging::discard(&data_dir, instance_name).await?;
-        offset = 0;
-    }
-    if offset > 0 {
-        tracing::info!(
-            "Resuming ACS transfer at {offset} of {total} bytes",
-            total = manifest.total_len
-        );
-    }
-
-    while offset < manifest.total_len {
-        let bytes = client.request_acs_range(offset).await?;
-        if bytes.is_empty() {
-            anyhow::bail!(
-                "coordinator served no bytes at offset {offset} but the manifest \
-                 declares {total} — the source's staged snapshot is shorter than \
-                 the manifest it sent",
-                total = manifest.total_len
-            );
-        }
-        offset = staging::append(&data_dir, instance_name, offset, &bytes).await?;
-        tracing::debug!(
-            "ACS transfer at {offset}/{total} bytes",
-            total = manifest.total_len
-        );
-    }
-
-    tracing::info!("ACS transfer complete: {offset} bytes staged");
     Ok(())
 }
