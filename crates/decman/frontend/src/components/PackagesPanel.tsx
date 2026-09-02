@@ -25,7 +25,7 @@ import { PaginationControls } from "./Pagination";
 import { usePagination } from "../usePagination";
 import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
-import { zebraRow } from "../styles";
+import { finderTableSx, zebraRow } from "../styles";
 import type {
   VettedPackageInfo,
   PeerPackageComparison,
@@ -39,6 +39,15 @@ interface PackagesPanelProps {
   /// a fresh fetch of the vetted-packages list without a manual refresh.
   refreshNonce?: number;
 }
+
+// Comparison-table columns. Every one is stated, because a fixed-layout table
+// hands an unstated column a share of the space rather than the remainder, which
+// had left the package name in ~110px. Peers share one width so they read as a
+// grid however long their names are, and adding peers pushes the table wider —
+// into the scroller — instead of squeezing the name that identifies the row.
+const PEER_COL_WIDTH = 150;
+const VERSION_COL_WIDTH = 110;
+const PACKAGE_MIN_WIDTH = 260;
 
 export const PackagesPanel = ({
   onUploadDars,
@@ -183,7 +192,7 @@ export const PackagesPanel = ({
 
   return (
     <Box sx={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
-      <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 2, mb: 2, flexShrink: 0, px: 3, pt: 2 }}>
+      <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 2, mb: 2, flexShrink: 0, px: "24px", pt: 2 }}>
         <Box sx={{ display: "flex", alignItems: "center", gap: 2, flex: 1, minWidth: 0 }}>
           <TextField
             size="small"
@@ -274,7 +283,7 @@ export const PackagesPanel = ({
             }}
           >
             {loadingPackages ? (
-              <Table size="small" sx={{ minWidth: 650 }}>
+              <Table size="small" sx={{ minWidth: 650, ...finderTableSx }}>
                 <TableHead>
                   <TableRow>
                     <TableCell sx={{ py: 1 }}><Skeleton width="60%" /></TableCell>
@@ -294,7 +303,43 @@ export const PackagesPanel = ({
               </Table>
             ) : comparison ? (
               /* Comparison table */
-              <Table size="small" sx={{ minWidth: 650 }}>
+              <Table
+                size="small"
+                sx={{
+                  // Fixed rather than auto: auto treats a column width as a
+                  // suggestion and takes the shortfall out of whichever column
+                  // it likes, which left the last peer squeezed against its
+                  // neighbours. Fixed honours them, so every peer is one width.
+                  tableLayout: "fixed",
+                  // The theme pads a table's leading/trailing cell out to
+                  // `--content-pad`. This table isn't full-bleed — it's a fixed
+                  // grid inside a scroller — and that padding ate the last peer
+                  // column, leaving its tick sitting against the column's left
+                  // edge while the column itself painted full width. The Finder
+                  // rule replaces both with a fixed gutter, so the package name
+                  // stays at the left of the pane at any window width.
+                  ...finderTableSx,
+                  // Grows with the peer count, so the columns keep their width
+                  // and the table overflows into the scroller instead of every
+                  // column shrinking as peers are added.
+                  minWidth:
+                    PACKAGE_MIN_WIDTH +
+                    VERSION_COL_WIDTH +
+                    peerLookups.length * PEER_COL_WIDTH,
+                }}
+              >
+                {/* Columns are declared here rather than inferred from the
+                  * header cells: sizing a fixed-layout table off its cells left
+                  * the last peer's column painting one width while laying its
+                  * content out at another. The package column is left open so it
+                  * takes whatever the stated columns leave. */}
+                <colgroup>
+                  <col />
+                  <col style={{ width: VERSION_COL_WIDTH }} />
+                  {peerLookups.map(({ peer }) => (
+                    <col key={peer.participant_id} style={{ width: PEER_COL_WIDTH }} />
+                  ))}
+                </colgroup>
                 <TableHead>
                   <TableRow>
                     <TableCell sx={{ py: 1, fontWeight: "bold" }}>
@@ -311,6 +356,7 @@ export const PackagesPanel = ({
                           fontWeight: "bold",
                           textAlign: "center",
                           opacity: peer.reachable ? 1 : 0.5,
+                          whiteSpace: "nowrap",
                         }}
                       >
                         <Box
@@ -321,11 +367,27 @@ export const PackagesPanel = ({
                             gap: 0.5,
                           }}
                         >
-                          {peer.name || peer.participant_id}
+                          <Tooltip title={peer.participant_id} arrow>
+                            <Box
+                              component="span"
+                              sx={{
+                                minWidth: 0,
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                              }}
+                            >
+                              {peer.name || peer.participant_id}
+                            </Box>
+                          </Tooltip>
                           {!peer.reachable && (
                             <Tooltip title="Unreachable" arrow>
                               <SignalWifiOffIcon
-                                sx={{ fontSize: 14, color: "text.disabled" }}
+                                sx={{
+                                  fontSize: 14,
+                                  color: "text.disabled",
+                                  flexShrink: 0,
+                                }}
                               />
                             </Tooltip>
                           )}
@@ -338,10 +400,17 @@ export const PackagesPanel = ({
                   {comparisonPaging.pageItems
                     .map((pkg, idx) => (
                       <TableRow key={pkg.package_id} sx={zebraRow(idx)}>
-                        <TableCell sx={{ py: 0.75 }}>
+                        <TableCell
+                          sx={{
+                            py: 1,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
                           {pkg.name || "-"}
                         </TableCell>
-                        <TableCell sx={{ py: 0.75 }}>
+                        <TableCell sx={{ py: 1 }}>
                           {pkg.version || "-"}
                         </TableCell>
                         {peerLookups.map(({ peer, lookup }) => {
@@ -358,7 +427,7 @@ export const PackagesPanel = ({
                               data-pkg={pkg.name}
                               data-status={status}
                               sx={{
-                                py: 0.75,
+                                py: 1,
                                 textAlign: "center",
                                 bgcolor: statusColor(status, idx),
                               }}
@@ -394,12 +463,15 @@ export const PackagesPanel = ({
               </Table>
             ) : (
               /* Default local-only table */
-              <Table size="small" sx={{ minWidth: 650 }}>
+              <Table
+                size="small"
+                sx={{ minWidth: 650, tableLayout: "fixed", ...finderTableSx }}
+              >
                 <TableHead>
                   <TableRow>
-                    <TableCell sx={{ py: 1 }}>Package Name</TableCell>
-                    <TableCell sx={{ py: 1 }}>Version</TableCell>
-                    <TableCell sx={{ py: 1 }}>Package ID</TableCell>
+                    <TableCell sx={{ py: 1, width: "48%" }}>Package Name</TableCell>
+                    <TableCell sx={{ py: 1, width: "16%" }}>Version</TableCell>
+                    <TableCell sx={{ py: 1, width: "36%" }}>Package ID</TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>

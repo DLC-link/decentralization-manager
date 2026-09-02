@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     canton_id::CantonId,
     types::{
-        AuditLogEntry, DecentralizedParty, PendingInvitation, WorkflowKind, WorkflowProgress,
-        WorkflowRun,
+        AuditLogEntry, DecentralizedParty, PendingInvitation, Permission, WorkflowKind,
+        WorkflowProgress, WorkflowRun,
     },
 };
 
@@ -329,6 +329,21 @@ pub struct ExternalPartyInfo {
     pub host_count: u32,
     /// When the hosting mapping became effective, RFC 3339.
     pub created_at: Option<String>,
+    /// The participants named by the hosting mapping, so the UI can show *which*
+    /// nodes host the party rather than only how many. Ordered as the mapping
+    /// lists them.
+    pub hosts: Vec<ExternalPartyHost>,
+}
+
+/// One participant named by an external party's `PartyToParticipant` mapping.
+#[derive(Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct ExternalPartyHost {
+    /// The hosting participant's uid (`{hint}::{fingerprint}`).
+    pub participant_uid: String,
+    /// What the mapping lets this participant do for the party.
+    pub permission: Permission,
 }
 
 /// Response wrapper for `GET /external-parties`.

@@ -1,39 +1,82 @@
+import { Box, Skeleton } from "@mui/material";
 import {
-  Box,
-  Skeleton,
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableRow,
-} from "@mui/material";
-import { zebraRow } from "../styles";
+  AUTH_SLOT,
+  VISIBILITY_SLOT,
+  columnSx,
+  fabGutterSx,
+  legendSx,
+} from "../styles";
+import { RowCard } from "./RowCard";
 
+/**
+ * Stand-in for the parties list. Built from the same row shell and column slots
+ * as the real thing, so the rows don't resize or shift under the cursor when
+ * the data lands.
+ */
 export const LoadingSkeleton = () => (
-  <Table size="small">
-    <TableHead>
-      <TableRow>
-        <TableCell sx={{ py: 1 }}><Skeleton width="60%" /></TableCell>
-        <TableCell sx={{ py: 1 }} align="center"><Skeleton width={50} sx={{ mx: "auto" }} /></TableCell>
-        <TableCell sx={{ py: 1 }} align="center"><Skeleton width={45} sx={{ mx: "auto" }} /></TableCell>
-        <TableCell sx={{ py: 1 }} align="center"><Skeleton width={70} sx={{ mx: "auto" }} /></TableCell>
-        <TableCell sx={{ py: 1 }} align="center"><Skeleton width={55} sx={{ mx: "auto" }} /></TableCell>
-        <TableCell sx={{ py: 1 }} align="center"><Skeleton variant="circular" width={18} height={18} sx={{ mx: "auto" }} /></TableCell>
-      </TableRow>
-    </TableHead>
-    <TableBody>
-      {Array.from({ length: 20 }).map((_, i) => (
-        <TableRow key={i} sx={zebraRow(i)}>
-          <TableCell sx={{ py: 1.5 }}><Skeleton width={`${55 + (i % 3) * 10}%`} /></TableCell>
-          <TableCell sx={{ py: 1.5 }} align="center"><Skeleton width={20} sx={{ mx: "auto" }} /></TableCell>
-          <TableCell sx={{ py: 1.5 }} align="center"><Skeleton width={20} sx={{ mx: "auto" }} /></TableCell>
-          <TableCell sx={{ py: 1.5 }} align="center"><Skeleton width={20} sx={{ mx: "auto" }} /></TableCell>
-          <TableCell sx={{ py: 1.5 }} align="center"><Skeleton variant="rounded" width={32} height={20} sx={{ mx: "auto" }} /></TableCell>
-          <TableCell sx={{ py: 1.5 }} align="center"><Skeleton variant="circular" width={18} height={18} sx={{ mx: "auto" }} /></TableCell>
-        </TableRow>
+  <Box sx={{ pt: 1, ...columnSx }}>
+    <Box
+      sx={{ display: "flex", alignItems: "center", gap: 2, px: "16px", pb: 1 }}
+    >
+      <Box component="span" sx={{ ...legendSx, flex: 1, minWidth: 0 }}>
+        Party ID
+      </Box>
+      <Box
+        component="span"
+        sx={{ ...legendSx, width: AUTH_SLOT, textAlign: "right", flexShrink: 0 }}
+      >
+        Auth
+      </Box>
+      <Box
+        component="span"
+        sx={{
+          ...legendSx,
+          width: VISIBILITY_SLOT,
+          textAlign: "right",
+          flexShrink: 0,
+        }}
+      >
+        Visibility
+      </Box>
+      <Box sx={fabGutterSx} aria-hidden />
+    </Box>
+
+    <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+      {Array.from({ length: 12 }).map((_, i) => (
+        <RowCard key={i}>
+          {/* Varied widths so the placeholder reads as a list of ids rather
+            * than a stack of identical bars. The bar carries the width, not the
+            * flex child — stretching it would flatten the variation back out. */}
+          <Box sx={{ flex: 1, minWidth: 0 }}>
+            <Skeleton width={`${38 + (i % 4) * 9}%`} />
+          </Box>
+          <Box
+            sx={{
+              width: AUTH_SLOT,
+              flexShrink: 0,
+              display: "flex",
+              justifyContent: "flex-end",
+              minHeight: 30,
+              alignItems: "center",
+            }}
+          >
+            <Skeleton variant="circular" width={18} height={18} />
+          </Box>
+          <Box
+            sx={{
+              width: VISIBILITY_SLOT,
+              flexShrink: 0,
+              display: "flex",
+              justifyContent: "flex-end",
+            }}
+          >
+            <Skeleton variant="circular" width={18} height={18} />
+          </Box>
+          <Box sx={fabGutterSx} aria-hidden />
+        </RowCard>
       ))}
-    </TableBody>
-  </Table>
+    </Box>
+  </Box>
 );
 
 export const PackagesTabSkeleton = () => (

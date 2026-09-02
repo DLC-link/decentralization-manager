@@ -89,6 +89,86 @@
       "package_id": "578597487eae5e67d7f4c6e98892188e0f6339c0cdc17e91cdbc1c251759a12a",
       "name": "canton-network-token",
       "version": "0.4.0"
+    },
+    {
+      "package_id": "7c68dc90dfb386af474d8442a882f6b9117430c42de78553d56aca96683900fd",
+      "name": "cbtc-governance-3",
+      "version": "0.3.4"
+    },
+    {
+      "package_id": "566dce3883a4bc37f0296c2a7fbc2d8124b7a8ecc61c8f5bace37cfedc978045",
+      "name": "governance-core-3",
+      "version": "0.4.5"
+    },
+    {
+      "package_id": "53f8f4e09b84a2bfdfaa51125f243d497dd22614133ada63fd1a7c66ca4de88d",
+      "name": "governance-action-3",
+      "version": "0.1.6"
+    },
+    {
+      "package_id": "42d0f0885e295a474f6fd2fa6d96461184a4483c7b6a866b12d968ce0d5959d5",
+      "name": "governance-rewards-3",
+      "version": "0.2.0"
+    },
+    {
+      "package_id": "49906130fd2d02cf4d0d91e2cd5167d93d22af6449d7b373741de236215af41d",
+      "name": "governance-token-custody-3",
+      "version": "0.3.1"
+    },
+    {
+      "package_id": "0225e6d8fd6dbc57388b2dca0878c2a1c9d5fb8c4f32817b0699889e1617d765",
+      "name": "utility-onboarding-3",
+      "version": "0.4.2"
+    },
+    {
+      "package_id": "e45421809f8da6df12e446b20d9376693e5accb4922f10830631fc0613f923ad",
+      "name": "utility-credential-3",
+      "version": "0.1.3"
+    },
+    {
+      "package_id": "0031b1285872e2679c887c9abc0ca331c1e1c2dc1005808bcb80dc6e708bf8f5",
+      "name": "orphan-marker-3",
+      "version": "0.2.4"
+    },
+    {
+      "package_id": "08a935d059c78eef43db6f8200b368f901af7e048cf1f1936253c9d65301773d",
+      "name": "cbtc-bridge-3",
+      "version": "0.3.5"
+    },
+    {
+      "package_id": "adf94f782a79cc77e3b4bf6a823ae7c1f39c9e2c74b4839bf02c643ee8aebe85",
+      "name": "ibtc-registry-3",
+      "version": "0.4.6"
+    },
+    {
+      "package_id": "48349e204f3bbaff51e00c52ddba3f89e895c354cb1156a3eac04ba6298ceecd",
+      "name": "token-standard-3",
+      "version": "0.1.0"
+    },
+    {
+      "package_id": "d1c1c1c803037a87bd9cf63a732c9051ef1b8d7c2c508aab1e79200e2cb92815",
+      "name": "splice-amulet-3",
+      "version": "0.2.1"
+    },
+    {
+      "package_id": "31db5a70ff8b2b0fde1f1d22c1f0fa1985c29ca4ddbe3fb384f481760cf48a5d",
+      "name": "dec-namespace-3",
+      "version": "0.3.2"
+    },
+    {
+      "package_id": "d710081855d0ec97f10e210a554a9ce19db390ccee2a95bbeb840fde5d2435a5",
+      "name": "attestor-kit-3",
+      "version": "0.4.3"
+    },
+    {
+      "package_id": "a1c26ac05696df1f8905a1f240e098a9ed2b09f46669acc369ad6b462cd149ed",
+      "name": "relay-core-3",
+      "version": "0.1.4"
+    },
+    {
+      "package_id": "1ea922688ae322a72c153fda2d3e0d7191f9a81c89d3a4cba7aa33ae9ca8e735",
+      "name": "settlement-rails-3",
+      "version": "0.2.5"
     }
   ],
   "peers": [
@@ -181,6 +261,61 @@
           "package_id": "afb35c207709ec7726f25bd97d3f5d39651227690aa327bc856529f1e659f74a",
           "name": "dec-party-core",
           "version": "0.1.10"
+        },
+        {
+          "package_id": "7c68dc90dfb386af474d8442a882f6b9117430c42de78553d56aca96683900fd",
+          "name": "cbtc-governance-3",
+          "version": "0.3.4"
+        },
+        {
+          "package_id": "566dce3883a4bc37f0296c2a7fbc2d8124b7a8ecc61c8f5bace37cfedc978045",
+          "name": "governance-core-3",
+          "version": "0.4.5"
+        },
+        {
+          "package_id": "42d0f0885e295a474f6fd2fa6d96461184a4483c7b6a866b12d968ce0d5959d5",
+          "name": "governance-rewards-3",
+          "version": "0.2.0"
+        },
+        {
+          "package_id": "49906130fd2d02cf4d0d91e2cd5167d93d22af6449d7b373741de236215af41d",
+          "name": "governance-token-custody-3",
+          "version": "0.3.1"
+        },
+        {
+          "package_id": "e45421809f8da6df12e446b20d9376693e5accb4922f10830631fc0613f923ad",
+          "name": "utility-credential-3",
+          "version": "0.1.3"
+        },
+        {
+          "package_id": "0031b1285872e2679c887c9abc0ca331c1e1c2dc1005808bcb80dc6e708bf8f5",
+          "name": "orphan-marker-3",
+          "version": "0.2.4"
+        },
+        {
+          "package_id": "adf94f782a79cc77e3b4bf6a823ae7c1f39c9e2c74b4839bf02c643ee8aebe85",
+          "name": "ibtc-registry-3",
+          "version": "0.4.6"
+        },
+        {
+          "package_id": "48349e204f3bbaff51e00c52ddba3f89e895c354cb1156a3eac04ba6298ceecd",
+          "name": "token-standard-3",
+          "version": "0.1.0"
+        },
+        {
+          "package_id": "31db5a70ff8b2b0fde1f1d22c1f0fa1985c29ca4ddbe3fb384f481760cf48a5d",
+          "name": "dec-namespace-3",
+          "version": "0.3.2"
+        },
+        {
+          "package_id": "d710081855d0ec97f10e210a554a9ce19db390ccee2a95bbeb840fde5d2435a5",
+          "name": "attestor-kit-3",
+          "version": "0.4.3"
+        },
+        {
+          "package_id": "1ea922688ae322a72c153fda2d3e0d7191f9a81c89d3a4cba7aa33ae9ca8e735",
+          "name": "settlement-rails-3",
+          "version": "0.2.5"
         }
       ]
     },
@@ -268,6 +403,61 @@
           "package_id": "578597487eae5e67d7f4c6e98892188e0f6339c0cdc17e91cdbc1c251759a12a",
           "name": "canton-network-token",
           "version": "0.4.0"
+        },
+        {
+          "package_id": "7c68dc90dfb386af474d8442a882f6b9117430c42de78553d56aca96683900fd",
+          "name": "cbtc-governance-3",
+          "version": "0.3.4"
+        },
+        {
+          "package_id": "53f8f4e09b84a2bfdfaa51125f243d497dd22614133ada63fd1a7c66ca4de88d",
+          "name": "governance-action-3",
+          "version": "0.1.6"
+        },
+        {
+          "package_id": "42d0f0885e295a474f6fd2fa6d96461184a4483c7b6a866b12d968ce0d5959d5",
+          "name": "governance-rewards-3",
+          "version": "0.2.0"
+        },
+        {
+          "package_id": "0225e6d8fd6dbc57388b2dca0878c2a1c9d5fb8c4f32817b0699889e1617d765",
+          "name": "utility-onboarding-3",
+          "version": "0.4.2"
+        },
+        {
+          "package_id": "e45421809f8da6df12e446b20d9376693e5accb4922f10830631fc0613f923ad",
+          "name": "utility-credential-3",
+          "version": "0.1.3"
+        },
+        {
+          "package_id": "08a935d059c78eef43db6f8200b368f901af7e048cf1f1936253c9d65301773d",
+          "name": "cbtc-bridge-3",
+          "version": "0.3.5"
+        },
+        {
+          "package_id": "adf94f782a79cc77e3b4bf6a823ae7c1f39c9e2c74b4839bf02c643ee8aebe85",
+          "name": "ibtc-registry-3",
+          "version": "0.4.6"
+        },
+        {
+          "package_id": "d1c1c1c803037a87bd9cf63a732c9051ef1b8d7c2c508aab1e79200e2cb92815",
+          "name": "splice-amulet-3",
+          "version": "0.2.1"
+        },
+        {
+          "package_id": "31db5a70ff8b2b0fde1f1d22c1f0fa1985c29ca4ddbe3fb384f481760cf48a5d",
+          "name": "dec-namespace-3",
+          "version": "0.3.2"
+        },
+        {
+          "package_id": "a1c26ac05696df1f8905a1f240e098a9ed2b09f46669acc369ad6b462cd149ed",
+          "name": "relay-core-3",
+          "version": "0.1.4"
+        },
+        {
+          "package_id": "1ea922688ae322a72c153fda2d3e0d7191f9a81c89d3a4cba7aa33ae9ca8e735",
+          "name": "settlement-rails-3",
+          "version": "0.2.5"
         }
       ]
     },
@@ -275,7 +465,58 @@
       "participant_id": "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
       "name": "cn-validator-07",
       "reachable": false,
-      "packages": []
+      "packages": [
+        {
+          "package_id": "566dce3883a4bc37f0296c2a7fbc2d8124b7a8ecc61c8f5bace37cfedc978045",
+          "name": "governance-core-3",
+          "version": "0.4.5"
+        },
+        {
+          "package_id": "53f8f4e09b84a2bfdfaa51125f243d497dd22614133ada63fd1a7c66ca4de88d",
+          "name": "governance-action-3",
+          "version": "0.1.6"
+        },
+        {
+          "package_id": "49906130fd2d02cf4d0d91e2cd5167d93d22af6449d7b373741de236215af41d",
+          "name": "governance-token-custody-3",
+          "version": "0.3.1"
+        },
+        {
+          "package_id": "0225e6d8fd6dbc57388b2dca0878c2a1c9d5fb8c4f32817b0699889e1617d765",
+          "name": "utility-onboarding-3",
+          "version": "0.4.2"
+        },
+        {
+          "package_id": "0031b1285872e2679c887c9abc0ca331c1e1c2dc1005808bcb80dc6e708bf8f5",
+          "name": "orphan-marker-3",
+          "version": "0.2.4"
+        },
+        {
+          "package_id": "08a935d059c78eef43db6f8200b368f901af7e048cf1f1936253c9d65301773d",
+          "name": "cbtc-bridge-3",
+          "version": "0.3.5"
+        },
+        {
+          "package_id": "48349e204f3bbaff51e00c52ddba3f89e895c354cb1156a3eac04ba6298ceecd",
+          "name": "token-standard-3",
+          "version": "0.1.0"
+        },
+        {
+          "package_id": "d1c1c1c803037a87bd9cf63a732c9051ef1b8d7c2c508aab1e79200e2cb92815",
+          "name": "splice-amulet-3",
+          "version": "0.2.1"
+        },
+        {
+          "package_id": "d710081855d0ec97f10e210a554a9ce19db390ccee2a95bbeb840fde5d2435a5",
+          "name": "attestor-kit-3",
+          "version": "0.4.3"
+        },
+        {
+          "package_id": "a1c26ac05696df1f8905a1f240e098a9ed2b09f46669acc369ad6b462cd149ed",
+          "name": "relay-core-3",
+          "version": "0.1.4"
+        }
+      ]
     },
     {
       "participant_id": "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
@@ -371,6 +612,61 @@
           "package_id": "578597487eae5e67d7f4c6e98892188e0f6339c0cdc17e91cdbc1c251759a12a",
           "name": "canton-network-token",
           "version": "0.4.0"
+        },
+        {
+          "package_id": "7c68dc90dfb386af474d8442a882f6b9117430c42de78553d56aca96683900fd",
+          "name": "cbtc-governance-3",
+          "version": "0.3.4"
+        },
+        {
+          "package_id": "566dce3883a4bc37f0296c2a7fbc2d8124b7a8ecc61c8f5bace37cfedc978045",
+          "name": "governance-core-3",
+          "version": "0.4.5"
+        },
+        {
+          "package_id": "42d0f0885e295a474f6fd2fa6d96461184a4483c7b6a866b12d968ce0d5959d5",
+          "name": "governance-rewards-3",
+          "version": "0.2.0"
+        },
+        {
+          "package_id": "49906130fd2d02cf4d0d91e2cd5167d93d22af6449d7b373741de236215af41d",
+          "name": "governance-token-custody-3",
+          "version": "0.3.1"
+        },
+        {
+          "package_id": "e45421809f8da6df12e446b20d9376693e5accb4922f10830631fc0613f923ad",
+          "name": "utility-credential-3",
+          "version": "0.1.3"
+        },
+        {
+          "package_id": "0031b1285872e2679c887c9abc0ca331c1e1c2dc1005808bcb80dc6e708bf8f5",
+          "name": "orphan-marker-3",
+          "version": "0.2.4"
+        },
+        {
+          "package_id": "adf94f782a79cc77e3b4bf6a823ae7c1f39c9e2c74b4839bf02c643ee8aebe85",
+          "name": "ibtc-registry-3",
+          "version": "0.4.6"
+        },
+        {
+          "package_id": "48349e204f3bbaff51e00c52ddba3f89e895c354cb1156a3eac04ba6298ceecd",
+          "name": "token-standard-3",
+          "version": "0.1.0"
+        },
+        {
+          "package_id": "31db5a70ff8b2b0fde1f1d22c1f0fa1985c29ca4ddbe3fb384f481760cf48a5d",
+          "name": "dec-namespace-3",
+          "version": "0.3.2"
+        },
+        {
+          "package_id": "d710081855d0ec97f10e210a554a9ce19db390ccee2a95bbeb840fde5d2435a5",
+          "name": "attestor-kit-3",
+          "version": "0.4.3"
+        },
+        {
+          "package_id": "1ea922688ae322a72c153fda2d3e0d7191f9a81c89d3a4cba7aa33ae9ca8e735",
+          "name": "settlement-rails-3",
+          "version": "0.2.5"
         }
       ]
     },
@@ -458,6 +754,61 @@
           "package_id": "578597487eae5e67d7f4c6e98892188e0f6339c0cdc17e91cdbc1c251759a12a",
           "name": "canton-network-token",
           "version": "0.4.0"
+        },
+        {
+          "package_id": "7c68dc90dfb386af474d8442a882f6b9117430c42de78553d56aca96683900fd",
+          "name": "cbtc-governance-3",
+          "version": "0.3.4"
+        },
+        {
+          "package_id": "53f8f4e09b84a2bfdfaa51125f243d497dd22614133ada63fd1a7c66ca4de88d",
+          "name": "governance-action-3",
+          "version": "0.1.6"
+        },
+        {
+          "package_id": "42d0f0885e295a474f6fd2fa6d96461184a4483c7b6a866b12d968ce0d5959d5",
+          "name": "governance-rewards-3",
+          "version": "0.2.0"
+        },
+        {
+          "package_id": "0225e6d8fd6dbc57388b2dca0878c2a1c9d5fb8c4f32817b0699889e1617d765",
+          "name": "utility-onboarding-3",
+          "version": "0.4.2"
+        },
+        {
+          "package_id": "e45421809f8da6df12e446b20d9376693e5accb4922f10830631fc0613f923ad",
+          "name": "utility-credential-3",
+          "version": "0.1.3"
+        },
+        {
+          "package_id": "08a935d059c78eef43db6f8200b368f901af7e048cf1f1936253c9d65301773d",
+          "name": "cbtc-bridge-3",
+          "version": "0.3.5"
+        },
+        {
+          "package_id": "adf94f782a79cc77e3b4bf6a823ae7c1f39c9e2c74b4839bf02c643ee8aebe85",
+          "name": "ibtc-registry-3",
+          "version": "0.4.6"
+        },
+        {
+          "package_id": "d1c1c1c803037a87bd9cf63a732c9051ef1b8d7c2c508aab1e79200e2cb92815",
+          "name": "splice-amulet-3",
+          "version": "0.2.1"
+        },
+        {
+          "package_id": "31db5a70ff8b2b0fde1f1d22c1f0fa1985c29ca4ddbe3fb384f481760cf48a5d",
+          "name": "dec-namespace-3",
+          "version": "0.3.2"
+        },
+        {
+          "package_id": "a1c26ac05696df1f8905a1f240e098a9ed2b09f46669acc369ad6b462cd149ed",
+          "name": "relay-core-3",
+          "version": "0.1.4"
+        },
+        {
+          "package_id": "1ea922688ae322a72c153fda2d3e0d7191f9a81c89d3a4cba7aa33ae9ca8e735",
+          "name": "settlement-rails-3",
+          "version": "0.2.5"
         }
       ]
     }
