@@ -149,10 +149,12 @@ async fn run_workflow(
                 submit_proposals(&node_config, &db, &instance_name, &add_party_config).await?;
                 copy_new_member_identity(&db, &instance_name, &add_party_config).await?;
 
-                // The topology is live; export the party's ACS for the new
-                // member and ship it with the ImportAcs command. Empty when
-                // the party has no active contracts — the new member skips.
-                let snapshot = export_party_acs(
+                // The topology is live; stage the party's ACS and ship only its
+                // manifest with the ImportAcs command. The new member pulls the
+                // bytes in ranges, so the command payload stays small however
+                // large the party is. Empty when the party has no active
+                // contracts — the new member skips.
+                let manifest = export_party_acs(
                     &node_config,
                     &db,
                     &add_party_config.replication_target(&instance_name),
@@ -162,7 +164,7 @@ async fn run_workflow(
                 // ACS — its import preflight fails fast (before disconnecting) if
                 // any are missing, instead of the import dying mid-window. Skip the
                 // ledger scan when the snapshot is empty: no contracts, no packages.
-                let package_ids = if snapshot.is_empty() {
+                let package_ids = if manifest.is_empty() {
                     Vec::new()
                 } else {
                     let party_id = add_party_config.decentralized_party_id.to_string();
@@ -170,17 +172,19 @@ async fn run_workflow(
                         .await?
                 };
                 let package_ids_payload = package_ids.join("\n").into_bytes();
+                let manifest_payload = serde_json::to_vec(&manifest)
+                    .context("Failed to serialize the ACS manifest")?;
                 let payload = utils::encode_length_prefixed(&[
                     &config_payload,
-                    &snapshot,
+                    &manifest_payload,
                     &package_ids_payload,
                 ]);
                 workflow_state.set_command_payload(payload).await;
                 workflow_state.advance_step().await;
             }
             AddPartyStep::PrepareClearOnboarding => {
-                // Swap the (potentially large) ACS payload for the bare
-                // config before the next peer-gated command.
+                // Swap the ACS manifest payload for the bare config before the
+                // next peer-gated command.
                 workflow_state
                     .set_command_payload(config_payload.clone())
                     .await;

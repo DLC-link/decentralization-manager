@@ -1,8 +1,10 @@
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
+    path::PathBuf,
     time::Duration,
 };
 
+use anyhow::Context;
 use canton_proto_rs::com::{
     daml::ledger::api::v2::{
         CumulativeFilter, EventFormat, Filters, GetActiveContractsRequest, GetLedgerEndRequest,
@@ -17,15 +19,20 @@ use canton_proto_rs::com::{
         synchronizer_connectivity_service_client::SynchronizerConnectivityServiceClient,
     },
 };
+use futures::SinkExt;
+use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use tokio::io::AsyncReadExt;
 
 use crate::{
     config::NodeConfig,
     consts::{topology_retry_delay_secs, topology_retry_max_attempts},
     error::Result,
-    noise::MAX_CHUNKED_TOTAL_SIZE,
     utils,
-    workflow::{party_replication::ReplicationTarget, storage::WorkflowStorage},
+    workflow::{
+        party_replication::{ReplicationTarget, staging},
+        storage::WorkflowStorage,
+    },
 };
 
 /// How long Canton may wait for the party's activation topology transaction
@@ -38,6 +45,45 @@ const EXPORT_ACTIVATION_TIMEOUT_SECS: i64 = 120;
 /// Canton's default 4 MiB gRPC message cap.
 const IMPORT_CHUNK_SIZE: usize = 1024 * 1024;
 
+/// Default ceiling on a staged snapshot, overridable via `DECPM_MAX_ACS_BYTES`.
+///
+/// The snapshot is streamed to disk and served in ranges, so neither side holds
+/// more than one piece in memory: this bounds *disk*, not RAM, which is why it
+/// is orders of magnitude above the old in-memory `MAX_CHUNKED_TOTAL_SIZE`. It
+/// still exists so an unexpectedly enormous party fails during the export, with
+/// the participant untouched, rather than by filling the data volume.
+const MAX_STAGED_ACS_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+
+/// How many in-flight import chunks the reader may run ahead of the gRPC
+/// stream. Bounds the reader's memory to a few `IMPORT_CHUNK_SIZE` buffers.
+const IMPORT_READAHEAD: usize = 2;
+
+fn max_staged_acs_bytes() -> u64 {
+    std::env::var("DECPM_MAX_ACS_BYTES")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(MAX_STAGED_ACS_BYTES)
+}
+
+/// What the source staged, shipped to the target in place of the snapshot.
+///
+/// The target needs the length to know when it has everything, and the digest
+/// to prove it before it disconnects a participant to import it.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AcsManifest {
+    /// Total staged bytes. Zero when the party has no active contracts.
+    pub total_len: u64,
+    /// Hex SHA-256 over the whole snapshot.
+    pub sha256: String,
+}
+
+impl AcsManifest {
+    /// True when the party had no active contracts to replicate.
+    pub fn is_empty(&self) -> bool {
+        self.total_len == 0
+    }
+}
+
 /// Source side: export the party's ACS for replication onto the target
 /// participant, via the Canton `ExportPartyAcs` admin endpoint. Canton locates
 /// the party's activation on the target after `begin_offset_exclusive` (the
@@ -45,13 +91,15 @@ const IMPORT_CHUNK_SIZE: usize = 1024 * 1024;
 /// consistent with that activation — this is what fixes the old
 /// implementation's export-at-current-ledger-end gap.
 ///
-/// Returns the raw snapshot bytes; empty when the party has no active
-/// contracts (the import side skips on empty).
+/// The snapshot is streamed straight into this run's staging file; only its
+/// [`AcsManifest`] is returned, so nothing proportional to the ACS is held in
+/// memory or shipped as a command payload. An empty manifest means the party
+/// has no active contracts (the import side skips on empty).
 pub async fn export_party_acs(
     config: &NodeConfig,
     storage: &SqlitePool,
     target: &ReplicationTarget,
-) -> Result<Vec<u8>> {
+) -> Result<AcsManifest> {
     // Logical synchronizer id — see `current_ledger_offset` for why the
     // physical id is rejected by PartyManagementService.
     let synchronizer_id =
@@ -101,12 +149,14 @@ pub async fn export_party_acs(
             }),
         });
 
-        match collect_export_stream(&mut client, request).await {
-            Ok(snapshot) => {
-                // Size cap is enforced mid-stream in `collect_export_stream`, so a
-                // returned snapshot is always within the chunked-transfer limit.
-                tracing::info!("Exported ACS snapshot: {len} bytes", len = snapshot.len());
-                return Ok(snapshot);
+        match stage_export_stream(config, target, &mut client, request).await {
+            Ok(manifest) => {
+                tracing::info!(
+                    "Exported ACS snapshot: {len} bytes (sha256 {digest})",
+                    len = manifest.total_len,
+                    digest = manifest.sha256
+                );
+                return Ok(manifest);
             }
             Err(status)
                 if status
@@ -127,28 +177,47 @@ pub async fn export_party_acs(
     anyhow::bail!("ExportPartyAcs still not ready after {max_attempts} attempts")
 }
 
-/// Run one `ExportPartyAcs` call and collect the streamed chunks.
-async fn collect_export_stream(
+/// Run one `ExportPartyAcs` call, streaming the response into this run's
+/// staging file and returning what was staged.
+///
+/// Staging errors surface as `tonic::Status` so the caller's single retry
+/// predicate still reads naturally; only `INVALID_STATE_PARTY_MANAGEMENT_ERROR`
+/// is retried, so an internal status propagates on the first attempt.
+async fn stage_export_stream(
+    config: &NodeConfig,
+    target: &ReplicationTarget,
     client: &mut PartyManagementServiceClient<tonic::transport::Channel>,
     request: tonic::Request<ExportPartyAcsRequest>,
-) -> std::result::Result<Vec<u8>, tonic::Status> {
+) -> std::result::Result<AcsManifest, tonic::Status> {
     let mut stream = client.export_party_acs(request).await?.into_inner();
-    let mut snapshot = Vec::new();
+
+    // Created only once the export is actually streaming, so a failed attempt
+    // that never produced bytes leaves no stale staging file behind. A retry
+    // truncates it, which is what makes each attempt self-contained.
+    let mut writer = staging::StagedWriter::create(&config.data_dir(), &target.instance_name)
+        .await
+        .map_err(|e| tonic::Status::internal(format!("Failed to stage ACS export: {e}")))?;
+
+    let max_bytes = max_staged_acs_bytes();
     while let Some(response) = stream.message().await? {
-        snapshot.extend_from_slice(&response.chunk);
-        // Enforce the chunked-transfer cap while streaming so an oversized party
-        // can't accumulate unbounded memory (and OOM) before the export finishes
-        // — abort as soon as the running total crosses the cap.
-        if snapshot.len() > MAX_CHUNKED_TOTAL_SIZE {
+        writer
+            .write(&response.chunk)
+            .await
+            .map_err(|e| tonic::Status::internal(format!("Failed to stage ACS export: {e}")))?;
+        if writer.staged_bytes() > max_bytes {
             return Err(tonic::Status::out_of_range(format!(
-                "Exported ACS snapshot exceeds the {MAX_CHUNKED_TOTAL_SIZE}-byte \
-                 chunked-transfer cap — the target cannot receive it over Noise. \
-                 Raise MAX_CHUNKED_TOTAL_SIZE (with a memory-bound review) to replicate \
-                 a party this large."
+                "Exported ACS snapshot exceeds the {max_bytes}-byte staging cap. \
+                 Raise DECPM_MAX_ACS_BYTES once the data volume can hold it — the \
+                 transfer itself is bounded by range size, not by total size."
             )));
         }
     }
-    Ok(snapshot)
+
+    let (total_len, sha256) = writer
+        .finish()
+        .await
+        .map_err(|e| tonic::Status::internal(format!("Failed to stage ACS export: {e}")))?;
+    Ok(AcsManifest { total_len, sha256 })
 }
 
 /// Target side: import the ACS snapshot via the Canton `ImportPartyAcs`
@@ -177,7 +246,7 @@ pub async fn import_party_acs(
     config: &NodeConfig,
     storage: &SqlitePool,
     target: &ReplicationTarget,
-    snapshot: Vec<u8>,
+    manifest: &AcsManifest,
     required_package_ids: &[String],
 ) -> Result {
     // The marker is durable (never cleared), so its presence means the
@@ -208,9 +277,24 @@ pub async fn import_party_acs(
         })?;
     }
 
-    if snapshot.is_empty() {
+    if manifest.is_empty() {
         tracing::info!("ACS snapshot is empty — nothing to import");
         return Ok(());
+    }
+
+    // The staged snapshot must be complete before anything else happens: a
+    // short file means the transfer never finished, and importing it would feed
+    // Canton a truncated ACS. Length first because it is a stat.
+    let data_dir = config.data_dir();
+    let staged = staging::staged_len(&data_dir, &target.instance_name)
+        .await?
+        .unwrap_or(0);
+    if staged != manifest.total_len {
+        anyhow::bail!(
+            "staged ACS is {staged} bytes but the source staged {expected} — the \
+             transfer is incomplete; retrying the step resumes it",
+            expected = manifest.total_len
+        );
     }
 
     // Package preflight: refuse to open the disconnect window if this participant
@@ -235,6 +319,19 @@ pub async fn import_party_acs(
             );
         }
     }
+
+    // Last gate before the participant is disconnected. Verifying the digest
+    // costs one sequential read of the snapshot, which is cheap next to
+    // disconnecting a participant to import a corrupt one.
+    let staged_digest = staging::digest(&data_dir, &target.instance_name).await?;
+    if staged_digest != manifest.sha256 {
+        anyhow::bail!(
+            "staged ACS digest {staged_digest} does not match the source's \
+             {expected} — the snapshot is corrupt and will not be imported",
+            expected = manifest.sha256
+        );
+    }
+    let snapshot_path = staging::staged_file(&data_dir, &target.instance_name);
 
     // Logical synchronizer id (see `current_ledger_offset` for the physical-id
     // pitfall) plus the party being imported.
@@ -305,7 +402,14 @@ pub async fn import_party_acs(
                 }))
                 .await?;
         }
-        run_import(config, &synchronizer_id, &party_id, snapshot).await
+        run_import(
+            config,
+            &synchronizer_id,
+            &party_id,
+            snapshot_path,
+            manifest.total_len,
+        )
+        .await
     }
     .await;
 
@@ -502,30 +606,68 @@ async fn run_import(
     config: &NodeConfig,
     synchronizer_id: &str,
     party_id: &str,
-    snapshot: Vec<u8>,
+    snapshot_path: PathBuf,
+    total_len: u64,
 ) -> Result {
     tracing::info!(
-        "Importing ACS snapshot ({len} bytes)...",
-        len = snapshot.len()
+        "Importing ACS snapshot ({total_len} bytes) from {path}...",
+        path = snapshot_path.display()
     );
 
     let mut client = PartyManagementServiceClient::new(config.admin_channel().await?);
 
-    let requests: Vec<ImportPartyAcsRequest> = snapshot
-        .chunks(IMPORT_CHUNK_SIZE)
-        .map(|chunk| ImportPartyAcsRequest {
-            acs_snapshot: chunk.to_vec(),
-            synchronizer_id: Some(synchronizer_id.to_string()),
-            workflow_id_prefix: Some("add-party-acs-import".to_string()),
-            contract_import_mode: Some(ContractImportMode::Validation as i32),
-            representative_package_id_override: None,
-            party_id: Some(party_id.to_string()),
-        })
-        .collect();
+    let (mut tx, rx) = futures::channel::mpsc::channel::<ImportPartyAcsRequest>(IMPORT_READAHEAD);
+    let synchronizer_id = synchronizer_id.to_string();
+    let party_id = party_id.to_string();
 
-    client
-        .import_party_acs(tonic::Request::new(futures::stream::iter(requests)))
-        .await?;
+    // The snapshot is read off disk as the gRPC stream consumes it, so the
+    // import holds a couple of chunks rather than the whole ACS. The reader
+    // returns its own Result: a read that fails partway would otherwise end the
+    // stream early and hand Canton a silently truncated snapshot.
+    let reader: tokio::task::JoinHandle<Result> = tokio::spawn(async move {
+        let mut file = tokio::fs::File::open(&snapshot_path)
+            .await
+            .with_context(|| format!("Failed to open staged ACS {}", snapshot_path.display()))?;
+        let mut sent = 0u64;
+        loop {
+            let mut buf = vec![0u8; IMPORT_CHUNK_SIZE];
+            let n = file
+                .read(&mut buf)
+                .await
+                .with_context(|| format!("Failed to read staged ACS at offset {sent}"))?;
+            if n == 0 {
+                break;
+            }
+            buf.truncate(n);
+            sent += n as u64;
+            let request = ImportPartyAcsRequest {
+                acs_snapshot: buf,
+                synchronizer_id: Some(synchronizer_id.clone()),
+                workflow_id_prefix: Some("add-party-acs-import".to_string()),
+                contract_import_mode: Some(ContractImportMode::Validation as i32),
+                representative_package_id_override: None,
+                party_id: Some(party_id.clone()),
+            };
+            // A closed receiver means the RPC already failed; that error is the
+            // informative one, so stop quietly and let the caller surface it.
+            if tx.send(request).await.is_err() {
+                return Ok(());
+            }
+        }
+        if sent != total_len {
+            anyhow::bail!("read {sent} bytes of a {total_len}-byte staged ACS");
+        }
+        Ok(())
+    });
+
+    let rpc = client.import_party_acs(tonic::Request::new(rx)).await;
+    let read_result = reader
+        .await
+        .context("the staged-ACS reader task did not finish")?;
+
+    // Reader first: a truncated stream explains a Canton error, not vice versa.
+    read_result?;
+    rpc?;
     Ok(())
 }
 
