@@ -10,8 +10,8 @@ use crate::{
     config::{NodeConfig, Peer},
     noise::{
         CHUNK_SIZE, MAX_CHUNK_COUNT, MAX_CHUNKED_TOTAL_SIZE, Message, MessageType,
-        NOISE_CHUNK_TIMEOUT, NOISE_REQUEST_TIMEOUT, NoiseError, NoiseKeypair, is_transient,
-        parse_flexible_uri, parse_public_key,
+        NOISE_CHUNK_TIMEOUT, NOISE_REQUEST_TIMEOUT, NoiseError, NoiseKeypair, acs_range_size,
+        is_transient, parse_flexible_uri, parse_public_key,
     },
 };
 
@@ -435,6 +435,61 @@ impl NoiseClient {
         );
 
         Ok(Message::new(command, payload))
+    }
+
+    /// Fetch the ACS range starting at `offset` from the coordinator's staged
+    /// snapshot, retrying transient failures on a fresh connection.
+    ///
+    /// Returns the bytes at `offset`. A response shorter than `acs_range_size`
+    /// means the end of the snapshot was reached — the caller stops there
+    /// rather than the coordinator tracking per-peer progress.
+    ///
+    /// # Errors
+    /// Returns an error if the coordinator cannot serve the range, or if the
+    /// response does not echo the requested offset.
+    pub async fn request_acs_range(&self, offset: u64) -> Result<Vec<u8>, NoiseError> {
+        let len = acs_range_size();
+        let mut payload = Vec::with_capacity(12);
+        payload.extend_from_slice(&offset.to_be_bytes());
+        payload.extend_from_slice(&(len as u32).to_be_bytes());
+        let message = Message::new(MessageType::GetAcsRange, payload);
+
+        let mut attempt = 1;
+        let response = loop {
+            match self
+                .send_message_with_timeout(&message, NOISE_CHUNK_TIMEOUT)
+                .await
+            {
+                Ok(r) => break r,
+                Err(e) if attempt < CHUNK_FETCH_MAX_ATTEMPTS && is_transient(&e) => {
+                    tracing::warn!(
+                        "ACS range at {offset} attempt {attempt}/{CHUNK_FETCH_MAX_ATTEMPTS} \
+                         failed: {e}; retrying"
+                    );
+                    attempt += 1;
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        };
+
+        let resp_msg = Message::from_bytes(&response).map_err(|_| NoiseError::InvalidMessage)?;
+        if resp_msg.msg_type != MessageType::AcsRange || resp_msg.payload.len() < 8 {
+            return Err(NoiseError::InvalidMessage);
+        }
+
+        // The echoed offset is what makes a retried range safe to append: a
+        // response for a different offset would otherwise be written at the
+        // wrong place and only surface as a digest mismatch at the end.
+        let mut echoed = [0u8; 8];
+        echoed.copy_from_slice(&resp_msg.payload[..8]);
+        let echoed = u64::from_be_bytes(echoed);
+        if echoed != offset {
+            tracing::warn!("ACS range response carried offset {echoed}, requested {offset}");
+            return Err(NoiseError::InvalidMessage);
+        }
+
+        Ok(resp_msg.payload[8..].to_vec())
     }
 
     /// Request a chunk, retrying transient failures (connection reset, timeout,
