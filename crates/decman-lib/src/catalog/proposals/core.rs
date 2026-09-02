@@ -45,6 +45,10 @@ mod tests {
 
     #[test]
     fn encode_snapshots() {
+        let mut settings = insta::Settings::clone_current();
+        settings.set_snapshot_path(crate::catalog::proposals::SNAPSHOT_PATH);
+        let _guard = settings.bind_to_scope();
+
         insta::assert_debug_snapshot!(
             "generic_vote",
             GenericVote {

@@ -372,17 +372,35 @@ fn minimal_option_fixtures() -> Vec<ProposalType> {
     ]
 }
 
+/// Where these snapshots live, relative to this file's directory. insta
+/// resolves a snapshot path against the directory of the file holding the
+/// assertion, so moving this module changes the path.
+const SNAPSHOT_PATH: &str = "../../snapshots";
+
+/// Bind [`SNAPSHOT_PATH`] for the calling test. The returned guard restores
+/// the previous settings when it drops, so it must stay alive for the whole
+/// test body.
+#[must_use]
+fn bind_snapshot_path() -> impl Drop {
+    let mut settings = insta::Settings::clone_current();
+    settings.set_snapshot_path(SNAPSHOT_PATH);
+    settings.bind_to_scope()
+}
+
 #[test]
 fn action_type_http_json_is_stable() {
+    let _guard = bind_snapshot_path();
     insta::assert_json_snapshot!("action_types", all_action_fixtures());
 }
 
 #[test]
 fn proposal_type_http_json_is_stable() {
+    let _guard = bind_snapshot_path();
     insta::assert_json_snapshot!("proposal_types", all_proposal_fixtures());
 }
 
 #[test]
 fn proposal_type_optional_fields_stay_omitted() {
+    let _guard = bind_snapshot_path();
     insta::assert_json_snapshot!("proposal_types_minimal", minimal_option_fixtures());
 }

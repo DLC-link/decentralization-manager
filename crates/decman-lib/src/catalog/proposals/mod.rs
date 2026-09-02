@@ -12,3 +12,11 @@ pub mod credential;
 pub mod custody;
 pub mod rewards;
 pub mod utility;
+
+/// Where the encode snapshots live, relative to the module that asserts them.
+///
+/// insta resolves a snapshot path against the directory of the file holding the
+/// assertion, so this string only works for a module that sits directly in
+/// `catalog/proposals/`. A module at another depth needs its own path.
+#[cfg(test)]
+pub(crate) const SNAPSHOT_PATH: &str = "../../../snapshots";
