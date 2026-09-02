@@ -8,16 +8,22 @@ use crate::{
     db::schema::SchemaRead,
     noise::{
         CHUNK_SIZE, MAX_PAYLOAD_SIZE, Message, MessageType, NoiseError, NoiseKeypair,
-        acs_range_size, parse_public_key, send_noise_message,
+        acs_block_size, parse_public_key, send_noise_message,
     },
     server::{
         DeclineInvitationPayload, WorkflowKind, WorkflowProgress,
         peer_status::{LastSeen, bump},
     },
     workflow::{
-        WorkflowState, add_party::AddPartyStep, change_threshold::ChangeThresholdStep,
-        contracts::ContractsStep, dars::DarsStep, kick::KickStep, onboarding::OnboardingStep,
-        party_replication::staging, state::WorkflowStep,
+        WorkflowState,
+        add_party::AddPartyStep,
+        change_threshold::ChangeThresholdStep,
+        contracts::ContractsStep,
+        dars::DarsStep,
+        kick::KickStep,
+        onboarding::OnboardingStep,
+        party_replication::pipe::{PipeBlock, encode_block},
+        state::WorkflowStep,
     },
 };
 
@@ -344,7 +350,7 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         match message.msg_type {
             MessageType::GetNextCommand => self.handle_get_next_command(peer_id).await,
             MessageType::GetChunk => self.handle_get_chunk(message.payload).await,
-            MessageType::GetAcsRange => self.handle_get_acs_range(message.payload).await,
+            MessageType::GetNextAcsBlock => self.handle_get_next_acs_block(message.payload).await,
             MessageType::KeysUpload => {
                 self.handle_peer_data(peer_id, message.payload, "keys upload")
                     .await
@@ -486,43 +492,42 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         Ok(Message::new(MessageType::Chunk, response))
     }
 
-    /// Serve a byte range of this run's staged ACS snapshot.
+    /// Serve the next block of this run's open ACS export.
     ///
-    /// Unlike `handle_get_chunk`, nothing is held in memory between calls and
-    /// nothing is cloned per request: the range is read positionally out of the
-    /// staged file. A short response means the end of the snapshot, which is
-    /// how the target learns it is done.
-    async fn handle_get_acs_range(&self, request_payload: Vec<u8>) -> Result<Message, NoiseError> {
-        if request_payload.len() < 12 {
+    /// Nothing is stored on either side: the block is read from the live Canton
+    /// export stream on demand, so the source's memory is one block regardless
+    /// of how large the party is.
+    async fn handle_get_next_acs_block(
+        &self,
+        request_payload: Vec<u8>,
+    ) -> Result<Message, NoiseError> {
+        if request_payload.len() < 8 {
             return Err(NoiseError::InvalidMessage);
         }
-        let mut offset_bytes = [0u8; 8];
-        offset_bytes.copy_from_slice(&request_payload[..8]);
-        let offset = u64::from_be_bytes(offset_bytes);
-        let requested = u32::from_be_bytes([
-            request_payload[8],
-            request_payload[9],
-            request_payload[10],
-            request_payload[11],
-        ]) as usize;
+        let mut seq_bytes = [0u8; 8];
+        seq_bytes.copy_from_slice(&request_payload[..8]);
+        let seq = u64::from_be_bytes(seq_bytes);
 
-        // Cap the peer's ask at our own range size so a buggy or hostile target
-        // cannot make us allocate an arbitrary buffer.
-        let len = requested.min(acs_range_size());
-        let instance = self.workflow_state.instance_name();
-        let bytes =
-            staging::read_range(&self.node_config.data_dir(), instance, offset, len).await?;
+        let block = self
+            .workflow_state
+            .next_acs_block(seq, acs_block_size())
+            .await?;
 
-        tracing::debug!(
-            "Serving ACS range {offset}..{end} ({served} bytes) for {instance}",
-            end = offset + bytes.len() as u64,
-            served = bytes.len()
-        );
+        if let PipeBlock::End { trailer, .. } = &block {
+            tracing::info!(
+                "ACS export exhausted at block {seq}: {total} bytes, sha256 {digest}",
+                total = trailer.total_len,
+                digest = trailer.sha256
+            );
+        }
 
-        let mut response = Vec::with_capacity(8 + bytes.len());
-        response.extend_from_slice(&offset.to_be_bytes());
-        response.extend_from_slice(&bytes);
-        Ok(Message::new(MessageType::AcsRange, response))
+        let (is_end, payload) = encode_block(&block);
+        let msg_type = if is_end {
+            MessageType::AcsBlockEnd
+        } else {
+            MessageType::AcsBlock
+        };
+        Ok(Message::new(msg_type, payload))
     }
 
     /// Handle peer data upload (keys, signatures, etc.)

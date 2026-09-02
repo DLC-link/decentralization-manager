@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
-    path::PathBuf,
+    future::Future,
     time::Duration,
 };
 
@@ -20,9 +20,8 @@ use canton_proto_rs::com::{
     },
 };
 use futures::SinkExt;
-use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
-use tokio::io::AsyncReadExt;
 
 use crate::{
     config::NodeConfig,
@@ -30,7 +29,10 @@ use crate::{
     error::Result,
     utils,
     workflow::{
-        party_replication::{ReplicationTarget, staging},
+        party_replication::{
+            ReplicationTarget,
+            pipe::{ExportSession, PipeBlock},
+        },
         storage::WorkflowStorage,
     },
 };
@@ -45,61 +47,27 @@ const EXPORT_ACTIVATION_TIMEOUT_SECS: i64 = 120;
 /// Canton's default 4 MiB gRPC message cap.
 const IMPORT_CHUNK_SIZE: usize = 1024 * 1024;
 
-/// Default ceiling on a staged snapshot, overridable via `DECPM_MAX_ACS_BYTES`.
-///
-/// The snapshot is streamed to disk and served in ranges, so neither side holds
-/// more than one piece in memory: this bounds *disk*, not RAM, which is why it
-/// is orders of magnitude above the old in-memory `MAX_CHUNKED_TOTAL_SIZE`. It
-/// still exists so an unexpectedly enormous party fails during the export, with
-/// the participant untouched, rather than by filling the data volume.
-const MAX_STAGED_ACS_BYTES: u64 = 64 * 1024 * 1024 * 1024;
-
-/// How many in-flight import chunks the reader may run ahead of the gRPC
-/// stream. Bounds the reader's memory to a few `IMPORT_CHUNK_SIZE` buffers.
+/// How many blocks may sit in the import channel ahead of Canton. Bounds the
+/// target's memory to a couple of blocks.
 const IMPORT_READAHEAD: usize = 2;
 
-fn max_staged_acs_bytes() -> u64 {
-    std::env::var("DECPM_MAX_ACS_BYTES")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(MAX_STAGED_ACS_BYTES)
-}
-
-/// What the source staged, shipped to the target in place of the snapshot.
+/// Source side: open an `ExportPartyAcs` stream for the target and wrap it in
+/// a [`ExportSession`] the transport can pull blocks from.
 ///
-/// The target needs the length to know when it has everything, and the digest
-/// to prove it before it disconnects a participant to import it.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct AcsManifest {
-    /// Total staged bytes. Zero when the party has no active contracts.
-    pub total_len: u64,
-    /// Hex SHA-256 over the whole snapshot.
-    pub sha256: String,
-}
-
-impl AcsManifest {
-    /// True when the party had no active contracts to replicate.
-    pub fn is_empty(&self) -> bool {
-        self.total_len == 0
-    }
-}
-
-/// Source side: export the party's ACS for replication onto the target
-/// participant, via the Canton `ExportPartyAcs` admin endpoint. Canton locates
+/// Nothing is read here beyond the handshake: the snapshot is never assembled,
+/// so a party of any size costs the source one block of memory. Canton locates
 /// the party's activation on the target after `begin_offset_exclusive` (the
 /// offset captured BEFORE the topology was submitted) and produces a snapshot
-/// consistent with that activation — this is what fixes the old
-/// implementation's export-at-current-ledger-end gap.
+/// consistent with that activation.
 ///
-/// The snapshot is streamed straight into this run's staging file; only its
-/// [`AcsManifest`] is returned, so nothing proportional to the ACS is held in
-/// memory or shipped as a command payload. An empty manifest means the party
-/// has no active contracts (the import side skips on empty).
-pub async fn export_party_acs(
+/// # Errors
+/// Returns an error if the export offset was never captured, or if Canton will
+/// not open the export.
+pub async fn open_export_session(
     config: &NodeConfig,
     storage: &SqlitePool,
     target: &ReplicationTarget,
-) -> Result<AcsManifest> {
+) -> Result<ExportSession> {
     // Logical synchronizer id — see `current_ledger_offset` for why the
     // physical id is rejected by PartyManagementService.
     let synchronizer_id =
@@ -120,7 +88,7 @@ pub async fn export_party_acs(
         .map_err(|e| anyhow::anyhow!("Failed to parse export offset: {e}"))?;
 
     tracing::info!(
-        "Exporting ACS of {party} for target {member} (begin offset {begin_offset_exclusive})",
+        "Opening ACS export of {party} for target {member} (begin offset {begin_offset_exclusive})",
         party = target.party_id,
         member = target.target_participant_id
     );
@@ -149,15 +117,8 @@ pub async fn export_party_acs(
             }),
         });
 
-        match stage_export_stream(config, target, &mut client, request).await {
-            Ok(manifest) => {
-                tracing::info!(
-                    "Exported ACS snapshot: {len} bytes (sha256 {digest})",
-                    len = manifest.total_len,
-                    digest = manifest.sha256
-                );
-                return Ok(manifest);
-            }
+        match client.export_party_acs(request).await {
+            Ok(response) => return Ok(ExportSession::new(response.into_inner())),
             Err(status)
                 if status
                     .message()
@@ -175,49 +136,6 @@ pub async fn export_party_acs(
     }
 
     anyhow::bail!("ExportPartyAcs still not ready after {max_attempts} attempts")
-}
-
-/// Run one `ExportPartyAcs` call, streaming the response into this run's
-/// staging file and returning what was staged.
-///
-/// Staging errors surface as `tonic::Status` so the caller's single retry
-/// predicate still reads naturally; only `INVALID_STATE_PARTY_MANAGEMENT_ERROR`
-/// is retried, so an internal status propagates on the first attempt.
-async fn stage_export_stream(
-    config: &NodeConfig,
-    target: &ReplicationTarget,
-    client: &mut PartyManagementServiceClient<tonic::transport::Channel>,
-    request: tonic::Request<ExportPartyAcsRequest>,
-) -> std::result::Result<AcsManifest, tonic::Status> {
-    let mut stream = client.export_party_acs(request).await?.into_inner();
-
-    // Created only once the export is actually streaming, so a failed attempt
-    // that never produced bytes leaves no stale staging file behind. A retry
-    // truncates it, which is what makes each attempt self-contained.
-    let mut writer = staging::StagedWriter::create(&config.data_dir(), &target.instance_name)
-        .await
-        .map_err(|e| tonic::Status::internal(format!("Failed to stage ACS export: {e}")))?;
-
-    let max_bytes = max_staged_acs_bytes();
-    while let Some(response) = stream.message().await? {
-        writer
-            .write(&response.chunk)
-            .await
-            .map_err(|e| tonic::Status::internal(format!("Failed to stage ACS export: {e}")))?;
-        if writer.staged_bytes() > max_bytes {
-            return Err(tonic::Status::out_of_range(format!(
-                "Exported ACS snapshot exceeds the {max_bytes}-byte staging cap. \
-                 Raise DECPM_MAX_ACS_BYTES once the data volume can hold it — the \
-                 transfer itself is bounded by range size, not by total size."
-            )));
-        }
-    }
-
-    let (total_len, sha256) = writer
-        .finish()
-        .await
-        .map_err(|e| tonic::Status::internal(format!("Failed to stage ACS export: {e}")))?;
-    Ok(AcsManifest { total_len, sha256 })
 }
 
 /// Target side: import the ACS snapshot via the Canton `ImportPartyAcs`
@@ -242,13 +160,17 @@ async fn stage_export_stream(
 /// - a participant that can't be brought back to a healthy connected state
 ///   yields an actionable error naming the likely orphan-row corruption instead
 ///   of a cryptic retry-abort.
-pub async fn import_party_acs(
+pub async fn import_party_acs<F, Fut>(
     config: &NodeConfig,
     storage: &SqlitePool,
     target: &ReplicationTarget,
-    manifest: &AcsManifest,
     required_package_ids: &[String],
-) -> Result {
+    mut next_block: F,
+) -> Result
+where
+    F: FnMut(u64) -> Fut,
+    Fut: Future<Output = Result<PipeBlock>>,
+{
     // The marker is durable (never cleared), so its presence means the
     // disconnect window was entered on a prior attempt of this run — the
     // participant may have been left disconnected (DecMan died mid-window) or
@@ -277,24 +199,15 @@ pub async fn import_party_acs(
         })?;
     }
 
-    if manifest.is_empty() {
+    // Pull the first block before touching the participant. It costs one
+    // block of memory and answers the only question that decides whether a
+    // disconnect is warranted at all: whether the party has any contracts.
+    let first = next_block(1).await?;
+    if let PipeBlock::End { trailer, .. } = &first
+        && trailer.total_len == 0
+    {
         tracing::info!("ACS snapshot is empty — nothing to import");
         return Ok(());
-    }
-
-    // The staged snapshot must be complete before anything else happens: a
-    // short file means the transfer never finished, and importing it would feed
-    // Canton a truncated ACS. Length first because it is a stat.
-    let data_dir = config.data_dir();
-    let staged = staging::staged_len(&data_dir, &target.instance_name)
-        .await?
-        .unwrap_or(0);
-    if staged != manifest.total_len {
-        anyhow::bail!(
-            "staged ACS is {staged} bytes but the source staged {expected} — the \
-             transfer is incomplete; retrying the step resumes it",
-            expected = manifest.total_len
-        );
     }
 
     // Package preflight: refuse to open the disconnect window if this participant
@@ -319,19 +232,6 @@ pub async fn import_party_acs(
             );
         }
     }
-
-    // Last gate before the participant is disconnected. Verifying the digest
-    // costs one sequential read of the snapshot, which is cheap next to
-    // disconnecting a participant to import a corrupt one.
-    let staged_digest = staging::digest(&data_dir, &target.instance_name).await?;
-    if staged_digest != manifest.sha256 {
-        anyhow::bail!(
-            "staged ACS digest {staged_digest} does not match the source's \
-             {expected} — the snapshot is corrupt and will not be imported",
-            expected = manifest.sha256
-        );
-    }
-    let snapshot_path = staging::staged_file(&data_dir, &target.instance_name);
 
     // Logical synchronizer id (see `current_ledger_offset` for the physical-id
     // pitfall) plus the party being imported.
@@ -402,14 +302,7 @@ pub async fn import_party_acs(
                 }))
                 .await?;
         }
-        run_import(
-            config,
-            &synchronizer_id,
-            &party_id,
-            snapshot_path,
-            manifest.total_len,
-        )
-        .await
+        run_import(config, &synchronizer_id, &party_id, first, &mut next_block).await
     }
     .await;
 
@@ -437,13 +330,6 @@ pub async fn import_party_acs(
 
     tracing::info!("ACS snapshot imported successfully");
 
-    // Reclaim the space now rather than at run cleanup: the snapshot is in the
-    // participant's ACS, so this copy is dead weight, and on a tight volume the
-    // next step may need the room. A failure to remove it must not fail a
-    // completed import.
-    if let Err(e) = staging::discard(&data_dir, &target.instance_name).await {
-        tracing::warn!("Failed to discard the staged ACS after import: {e}");
-    }
     Ok(())
 }
 
@@ -610,72 +496,104 @@ async fn local_package_ids(config: &NodeConfig) -> Result<HashSet<String>> {
 
 /// The streamed `ImportPartyAcs` call, isolated so the caller can pair it
 /// with the disconnect/reconnect bracket.
-async fn run_import(
+async fn run_import<F, Fut>(
     config: &NodeConfig,
     synchronizer_id: &str,
     party_id: &str,
-    snapshot_path: PathBuf,
-    total_len: u64,
-) -> Result {
-    tracing::info!(
-        "Importing ACS snapshot ({total_len} bytes) from {path}...",
-        path = snapshot_path.display()
-    );
+    first: PipeBlock,
+    next_block: &mut F,
+) -> Result
+where
+    F: FnMut(u64) -> Fut,
+    Fut: Future<Output = Result<PipeBlock>>,
+{
+    tracing::info!("Importing the ACS as it arrives...");
 
     let mut client = PartyManagementServiceClient::new(config.admin_channel().await?);
-
     let (mut tx, rx) = futures::channel::mpsc::channel::<ImportPartyAcsRequest>(IMPORT_READAHEAD);
-    let synchronizer_id = synchronizer_id.to_string();
-    let party_id = party_id.to_string();
 
-    // The snapshot is read off disk as the gRPC stream consumes it, so the
-    // import holds a couple of chunks rather than the whole ACS. The reader
-    // returns its own Result: a read that fails partway would otherwise end the
-    // stream early and hand Canton a silently truncated snapshot.
-    let reader: tokio::task::JoinHandle<Result> = tokio::spawn(async move {
-        let mut file = tokio::fs::File::open(&snapshot_path)
+    // Canton consumes the stream while we are still pulling blocks, so the
+    // import and the transfer overlap and neither side accumulates. The RPC
+    // runs concurrently rather than being awaited first, because the channel
+    // is bounded: awaiting it before feeding would deadlock.
+    let rpc = tokio::spawn(async move {
+        client
+            .import_party_acs(tonic::Request::new(rx))
             .await
-            .with_context(|| format!("Failed to open staged ACS {}", snapshot_path.display()))?;
-        let mut sent = 0u64;
-        loop {
-            let mut buf = vec![0u8; IMPORT_CHUNK_SIZE];
-            let n = file
-                .read(&mut buf)
-                .await
-                .with_context(|| format!("Failed to read staged ACS at offset {sent}"))?;
-            if n == 0 {
-                break;
-            }
-            buf.truncate(n);
-            sent += n as u64;
-            let request = ImportPartyAcsRequest {
-                acs_snapshot: buf,
-                synchronizer_id: Some(synchronizer_id.clone()),
-                workflow_id_prefix: Some("add-party-acs-import".to_string()),
-                contract_import_mode: Some(ContractImportMode::Validation as i32),
-                representative_package_id_override: None,
-                party_id: Some(party_id.clone()),
-            };
-            // A closed receiver means the RPC already failed; that error is the
-            // informative one, so stop quietly and let the caller surface it.
-            if tx.send(request).await.is_err() {
-                return Ok(());
-            }
-        }
-        if sent != total_len {
-            anyhow::bail!("read {sent} bytes of a {total_len}-byte staged ACS");
-        }
-        Ok(())
+            .map(|_| ())
     });
 
-    let rpc = client.import_party_acs(tonic::Request::new(rx)).await;
-    let read_result = reader
-        .await
-        .context("the staged-ACS reader task did not finish")?;
+    let synchronizer_id = synchronizer_id.to_string();
+    let party_id = party_id.to_string();
+    let build = |bytes: Vec<u8>| ImportPartyAcsRequest {
+        acs_snapshot: bytes,
+        synchronizer_id: Some(synchronizer_id.clone()),
+        workflow_id_prefix: Some("add-party-acs-import".to_string()),
+        contract_import_mode: Some(ContractImportMode::Validation as i32),
+        representative_package_id_override: None,
+        party_id: Some(party_id.clone()),
+    };
 
-    // Reader first: a truncated stream explains a Canton error, not vice versa.
-    read_result?;
-    rpc?;
+    // Hash and count what we actually feed Canton, so the source's trailer can
+    // be checked against it. Nothing is stored, so this is the only evidence
+    // that what arrived is what was exported.
+    let mut hasher = Sha256::new();
+    let mut fed = 0u64;
+    let mut block = first;
+    let mut seq = 1u64;
+    let trailer = loop {
+        match block {
+            PipeBlock::Data { bytes, .. } => {
+                hasher.update(&bytes);
+                fed += bytes.len() as u64;
+                // Re-chunk into the import stream: a transport block may be
+                // larger than Canton's inbound gRPC message cap (4 MiB by
+                // default), which the block size deliberately can be, since it
+                // is tuned against the Noise handler timeout instead.
+                let mut closed = false;
+                for chunk in bytes.chunks(IMPORT_CHUNK_SIZE) {
+                    // A closed receiver means the RPC already failed; that error
+                    // is the informative one, so stop and let the caller surface
+                    // it.
+                    if tx.send(build(chunk.to_vec())).await.is_err() {
+                        closed = true;
+                        break;
+                    }
+                }
+                if closed {
+                    break None;
+                }
+                tracing::debug!("Imported {fed} bytes so far");
+            }
+            PipeBlock::End { trailer, .. } => break Some(trailer),
+        }
+        seq += 1;
+        block = next_block(seq).await?;
+    };
+
+    // Closing the sender is what tells Canton the snapshot is complete.
+    tx.close_channel();
+    drop(tx);
+
+    let rpc_result = rpc.await.context("the ACS import task did not finish")?;
+    rpc_result?;
+
+    let Some(trailer) = trailer else {
+        anyhow::bail!("the ACS import stream closed before the export finished");
+    };
+    let digest = hex::encode(hasher.finalize());
+    if fed != trailer.total_len || digest != trailer.sha256 {
+        anyhow::bail!(
+            "the imported ACS does not match the source: fed {fed} bytes (sha256 \
+             {digest}), source exported {expected} bytes (sha256 {expected_digest}). \
+             The participant now holds an ACS that may be incomplete and needs \
+             repair before the party is used",
+            expected = trailer.total_len,
+            expected_digest = trailer.sha256
+        );
+    }
+
+    tracing::info!("Imported {fed} bytes, digest verified");
     Ok(())
 }
 

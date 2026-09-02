@@ -31,7 +31,6 @@ use crate::{
     server::{WorkflowInstance, WorkflowKind, peer_status::LastSeen},
     utils,
     workflow::{
-        party_replication::{acs::AcsManifest, staging},
         state::WorkflowStep,
         storage::{WorkflowStorage, artifact_kinds},
     },
@@ -804,41 +803,22 @@ pub async fn start_peer(
             }
             MessageType::ImportAcs => {
                 tracing::info!("Executing: Import party ACS");
-                // Current coordinators send 3 items [config, manifest, package_ids],
-                // where the manifest describes a snapshot to pull in ranges. Older
-                // coordinators put the snapshot bytes themselves in slot 1, and older
-                // still sent only 2 items (no package-id list) — both are handled
-                // below so a mixed-version rolling upgrade doesn't wedge the peer.
-                let items = match utils::decode_length_prefixed(&payload, 3) {
+                // [config, package_ids]. The snapshot is not in the payload: it
+                // is pulled block by block straight into Canton's import, so
+                // nothing proportional to the ACS is buffered or stored.
+                let items = match utils::decode_length_prefixed(&payload, 2) {
                     Ok(items) => items,
-                    Err(three_item_err) => match utils::decode_length_prefixed(&payload, 2) {
-                        Ok(mut items) => {
-                            // Log the 3-item decode error so a genuine
-                            // corruption/encoding bug is distinguishable from an
-                            // intentional legacy 2-item payload, without changing behaviour.
-                            tracing::debug!(
-                                "ImportAcs payload not in 3-item format ({three_item_err}); \
-                                 using legacy 2-item payload (package preflight skipped)"
+                    Err(e) => {
+                        tracing::error!("Failed to decode ImportAcs payload: {e}");
+                        consecutive_step_failures += 1;
+                        if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                            anyhow::bail!(
+                                "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
                             );
-                            items.push(Vec::new());
-                            items
                         }
-                        Err(e) => {
-                            // Undecodable in BOTH formats is a corruption/encoding
-                            // bug, not a legacy coordinator. Count it as a step
-                            // failure so it backs off and eventually aborts instead
-                            // of hot-looping on a payload that can never decode.
-                            tracing::error!("Failed to decode ImportAcs payload: {e}");
-                            consecutive_step_failures += 1;
-                            if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                                anyhow::bail!(
-                                    "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
-                                );
-                            }
-                            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-                            continue;
-                        }
-                    },
+                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                        continue;
+                    }
                 };
                 let Some(add_party_config) = decode_add_party_config(&items[0]) else {
                     continue;
@@ -848,57 +828,24 @@ pub async fn start_peer(
                     continue;
                 }
                 // Newline-joined package ids the party's contracts need; the
-                // import preflight checks this participant has them all.
-                let required_package_ids: Vec<String> = String::from_utf8_lossy(&items[2])
+                // import preflight checks this participant has them all before
+                // it disconnects anything.
+                let required_package_ids: Vec<String> = String::from_utf8_lossy(&items[1])
                     .lines()
                     .filter(|l| !l.is_empty())
                     .map(str::to_string)
                     .collect();
 
-                let step_result = async {
-                    // A manifest means the coordinator staged the snapshot and we
-                    // pull it in ranges. Anything else in slot 1 is a legacy
-                    // coordinator's inline snapshot: stage those bytes locally and
-                    // describe them ourselves, so everything downstream — the
-                    // completeness and digest gates, the streaming import — is the
-                    // same code on both paths.
-                    let manifest = match serde_json::from_slice::<AcsManifest>(&items[1]) {
-                        Ok(manifest) => manifest,
-                        Err(_) => {
-                            tracing::info!(
-                                "ImportAcs carried {len} inline snapshot bytes — staging \
-                                 them locally (legacy coordinator)",
-                                len = items[1].len()
-                            );
-                            let data_dir = node_config.data_dir();
-                            staging::discard(&data_dir, &instance_name).await?;
-                            if !items[1].is_empty() {
-                                staging::append(&data_dir, &instance_name, 0, &items[1]).await?;
-                            }
-                            AcsManifest {
-                                total_len: items[1].len() as u64,
-                                sha256: staging::digest(&data_dir, &instance_name).await?,
-                            }
-                        }
-                    };
-
-                    add_party::peer::fetch_staged_acs(
-                        &client,
-                        &node_config,
-                        &instance_name,
-                        &manifest,
-                    )
-                    .await?;
-
-                    party_replication::import_party_acs(
-                        &node_config,
-                        &db,
-                        &add_party_config.replication_target(&instance_name),
-                        &manifest,
-                        &required_package_ids,
-                    )
-                    .await
-                }
+                let step_result = party_replication::import_party_acs(
+                    &node_config,
+                    &db,
+                    &add_party_config.replication_target(&instance_name),
+                    &required_package_ids,
+                    |seq| {
+                        let client = &client;
+                        async move { client.request_next_acs_block(seq).await.map_err(Into::into) }
+                    },
+                )
                 .await;
 
                 if let Err(e) = step_result {

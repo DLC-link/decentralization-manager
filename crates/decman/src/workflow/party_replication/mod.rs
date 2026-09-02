@@ -21,11 +21,11 @@
 pub mod acs;
 pub mod offset;
 pub mod onboarding_flag;
-pub mod staging;
+pub mod pipe;
 
 use crate::canton_id::CantonId;
 
-pub use acs::{collect_party_package_ids, export_party_acs, import_party_acs};
+pub use acs::{collect_party_package_ids, import_party_acs, open_export_session};
 pub use offset::{capture_offset_once, current_ledger_offset};
 pub use onboarding_flag::{
     ClearOutcome, clear_onboarding_flag, has_onboarding_marker, wait_for_flag_cleared,
