@@ -30,12 +30,13 @@ use crate::{
         types::{
             AddPartyInvitePayload, AddPartyRequest, ChangeThresholdInvitePayload,
             ChangeThresholdRequest, ContractsInvitePayload, ContractsRequest, DarsInvitePayload,
-            DarsRequest, ErrorResponse, ExternalPartiesResponse, ExternalPartyInfo,
-            KickInvitePayload, KickRequest, KickResponse, KickStatus, MessageResponse,
-            MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload, OnboardingMeshErrorResponse,
-            OnboardingRequest, OnboardingResponse, OnboardingStatus, SuccessResponse,
-            WorkflowGuard, WorkflowInstance, WorkflowKind, WorkflowProgress, WorkflowResponse,
-            WorkflowRole, WorkflowRun, WorkflowRunsResponse, WorkflowStatusResponse,
+            DarsRequest, ErrorResponse, ExternalPartiesResponse, ExternalPartyHost,
+            ExternalPartyInfo, KickInvitePayload, KickRequest, KickResponse, KickStatus,
+            MessageResponse, MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload,
+            OnboardingMeshErrorResponse, OnboardingRequest, OnboardingResponse, OnboardingStatus,
+            SuccessResponse, WorkflowGuard, WorkflowInstance, WorkflowKind, WorkflowProgress,
+            WorkflowResponse, WorkflowRole, WorkflowRun, WorkflowRunsResponse,
+            WorkflowStatusResponse, permission_from_proto,
         },
     },
     utils,
@@ -3018,6 +3019,14 @@ pub async fn list_external_parties(data: web::Data<AppState>) -> impl Responder 
                     threshold: p.threshold,
                     host_count: p.host_count,
                     created_at: p.created_at,
+                    hosts: p
+                        .hosts
+                        .into_iter()
+                        .map(|h| ExternalPartyHost {
+                            participant_uid: h.participant_uid,
+                            permission: permission_from_proto(h.permission),
+                        })
+                        .collect(),
                 })
                 .collect();
             HttpResponse::Ok().json(ExternalPartiesResponse { parties })

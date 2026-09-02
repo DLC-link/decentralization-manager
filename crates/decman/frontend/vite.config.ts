@@ -9,6 +9,18 @@ import react from '@vitejs/plugin-react'
 
 const rootDir = dirname(fileURLToPath(import.meta.url))
 
+// The crate version (Cargo.toml lives one level up from the frontend). Used as
+// the build version when APP_VERSION isn't passed by build.rs — so `npm run dev`
+// and mock mode still show the real version rather than a placeholder.
+const cargoVersion = (() => {
+  try {
+    const toml = readFileSync(join(rootDir, '..', 'Cargo.toml'), 'utf8')
+    return toml.match(/^version\s*=\s*"([^"]+)"/m)?.[1] ?? null
+  } catch {
+    return null
+  }
+})()
+
 // Dev-only API mock. With `MOCK=true npm run dev`, the backend's REST endpoints
 // are served from JSON fixtures under ./mocks instead of a live node + Keycloak,
 // so the UI renders with realistic data offline. Only applied in `serve` mode;
@@ -23,7 +35,8 @@ function mockApi(): Plugin {
   // First path segment of every backend REST route (see src/api.ts callers).
   const apiPrefixes = new Set([
     'auth-config', 'auth', 'node-config', 'network-config', 'network-info',
-    'healthz', 'participants-status', 'decentralized-parties', 'operator-info', 'keys',
+    'healthz', 'participants-status', 'decentralized-parties', 'external-parties',
+    'operator-info', 'keys',
     'packages', 'invitations', 'workflows', 'governance', 'holdings',
     'instruments', 'party-config', 'services', 'contracts', 'dars',
     'onboarding', 'kick', 'credential-offers', 'token-standard-contracts',
@@ -69,16 +82,31 @@ function mockApi(): Plugin {
 }
 
 // https://vite.dev/config/
-export default defineConfig({
-  plugins: [react(), ...(process.env.MOCK === 'true' ? [mockApi()] : [])],
-  define: {
-    __BUILD_DATE__: JSON.stringify(new Date().toISOString()),
-  },
-  // `npm test`. jsdom because the hooks under test render components and touch
-  // the DOM (scroll containers); `include` keeps the runner off node_modules.
-  test: {
-    environment: 'jsdom',
-    include: ['src/**/*.test.{ts,tsx}'],
-    setupFiles: ['src/vitest.setup.ts'],
-  },
+export default defineConfig(({ command }) => {
+  // Mock mode is dev-only, and `serve` is what makes it so. The env var alone
+  // isn't enough: `__MOCK__` switches the app onto a fake login session, so a
+  // build carrying `MOCK=true` in its environment — `build.rs` shells out to
+  // `npm run build` — would ship a bundle that skips real authentication.
+  // Gating the flag here covers the plugin and the define from one place.
+  const mock = command === 'serve' && process.env.MOCK === 'true'
+
+  return {
+    plugins: [react(), ...(mock ? [mockApi()] : [])],
+    define: {
+      __BUILD_DATE__: JSON.stringify(new Date().toISOString()),
+      // Build version: APP_VERSION from build.rs (production) → Cargo.toml
+      // version (dev / mock) → "dev" only if Cargo.toml can't be read.
+      __APP_VERSION__: JSON.stringify(process.env.APP_VERSION ?? cargoVersion ?? 'dev'),
+      // True only under `MOCK=true` dev — lets the app stand up a fake login
+      // session so the full authed UI (logout, etc.) is previewable offline.
+      __MOCK__: mock,
+    },
+    // `npm test`. jsdom because the hooks under test render components and touch
+    // the DOM (scroll containers); `include` keeps the runner off node_modules.
+    test: {
+      environment: 'jsdom',
+      include: ['src/**/*.test.{ts,tsx}'],
+      setupFiles: ['src/vitest.setup.ts'],
+    },
+  }
 })

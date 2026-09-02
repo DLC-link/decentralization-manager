@@ -10,7 +10,6 @@ import {
   Button,
   Chip,
   Collapse,
-  Divider,
   IconButton,
   Table,
   TableBody,
@@ -41,7 +40,7 @@ import { GovernanceActionsDialog } from "./GovernanceActionsDialog";
 import { GovernanceAuditTrail } from "./GovernanceAuditTrail";
 import { HoldingsSection } from "./HoldingsSection";
 import { AuthSection, getAuthStatusIcon } from "./AuthSection";
-import { zebraRow } from "../styles";
+import { SURFACE2, cardTableSx, sectionCardSx, zebraRow } from "../styles";
 import { ADMIN_ACCESS, API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
 import { formatMicroseconds } from "../governanceFormat";
@@ -53,48 +52,68 @@ import type {
   PartyAuthStatus,
 } from "../types";
 
+/**
+ * One figure in the dashboard strip: a tracked-out label over the value it
+ * measures. A pill wedged between the action buttons is what these used to be —
+ * too small to read at a glance, which is the whole point of a summary.
+ */
 const StatCard = ({
   label,
   value,
+  unit,
   helpText,
   testId,
 }: {
   label: string;
-  value: number | string;
-  /// Optional plain-English explanation rendered as a tooltip on hover
-  /// of the pill's label. No inline icon — keeps the chip compact.
+  value: ReactNode;
+  /// Denominator or suffix, set beside the value at a quieter weight — "2 / 3"
+  /// says more about a threshold than "2" does.
+  unit?: string;
+  /// Optional plain-English explanation, on the label.
   helpText?: string;
   /// Optional data-testid placed on the value node for e2e selectors.
   testId?: string;
 }) => {
   const labelNode = (
     <Typography
-      variant="caption"
-      color="text.secondary"
-      sx={{ textTransform: "uppercase", letterSpacing: 0.6, fontWeight: 500 }}
+      component="span"
+      sx={{
+        fontFamily: "var(--font-mono)",
+        fontSize: "0.65rem",
+        fontWeight: 500,
+        letterSpacing: "0.12em",
+        textTransform: "uppercase",
+        color: "text.secondary",
+        whiteSpace: "nowrap",
+      }}
     >
       {label}
     </Typography>
   );
   return (
-    <Box
-      sx={(theme) => ({
-        display: "inline-flex",
-        alignItems: "baseline",
-        gap: 0.75,
-        px: 1.5,
-        py: 0.5,
-        borderRadius: 999,
-        backgroundColor:
-          theme.palette.mode === "light"
-            ? "rgba(0, 0, 0, 0.04)"
-            : "rgba(255, 255, 255, 0.06)",
-      })}
-    >
+    <Box sx={{ ...sectionCardSx, px: 2, py: 1.25, minWidth: 128, flex: "1 1 0" }}>
       {helpText ? <TextHelp text={helpText}>{labelNode}</TextHelp> : labelNode}
-      <Typography variant="body2" sx={{ fontWeight: 700 }} data-testid={testId}>
-        {value}
-      </Typography>
+      <Box sx={{ display: "flex", alignItems: "baseline", gap: 0.75, mt: 0.5 }}>
+        <Typography
+          component="span"
+          sx={{ fontSize: 22, fontWeight: 600, lineHeight: 1.1 }}
+          data-testid={testId}
+        >
+          {value}
+        </Typography>
+        {unit && (
+          <Typography
+            component="span"
+            sx={{
+              fontFamily: "var(--font-mono)",
+              fontSize: 13,
+              color: "text.secondary",
+            }}
+          >
+            {unit}
+          </Typography>
+        )}
+      </Box>
     </Box>
   );
 };
@@ -112,6 +131,19 @@ interface CollapsibleSectionProps {
   children: ReactNode;
 }
 
+/**
+ * Section titles carry more weight than the generic `subtitle2` eyebrow, and sit
+ * at full text contrast against the secondary grey of the table head below.
+ */
+const sectionTitleSx = { fontWeight: 700, color: "text.primary" };
+
+/**
+ * One section of the dashboard: a card whose header is the control that opens
+ * it. These were edge-to-edge grey bands stacked on the page, so five of them
+ * read as one undifferentiated wall and nothing told the eye where a section
+ * ended. The card's own edge does that now, and it bounds the table inside so
+ * the row rules stop with it.
+ */
 const CollapsibleSection = ({
   title,
   expanded,
@@ -120,20 +152,25 @@ const CollapsibleSection = ({
   helpText,
   children,
 }: CollapsibleSectionProps) => (
-  <>
-    <Divider />
+  <Box sx={sectionCardSx}>
     <Box
       sx={(theme) => ({
         display: "flex",
         alignItems: "center",
         cursor: "pointer",
-        py: 1,
-        px: 3,
-        backgroundColor: expanded
-          ? "transparent"
-          : theme.palette.mode === "light"
-            ? "rgba(0, 0, 0, 0.03)"
-            : "rgba(255, 255, 255, 0.04)",
+        px: 2,
+        py: 1.25,
+        // Only while open, so a shut card reads as one quiet strip and an open
+        // one gets a header its table sits under.
+        borderBottom: expanded ? "1px solid" : "none",
+        borderColor: "divider",
+        backgroundColor: expanded ? SURFACE2[theme.palette.mode] : "transparent",
+        "&:hover": {
+          backgroundColor:
+            theme.palette.mode === "light"
+              ? "rgba(0, 0, 0, 0.03)"
+              : "rgba(255, 255, 255, 0.04)",
+        },
         transition: "background-color 0.2s ease",
       })}
       onClick={onToggle}
@@ -142,23 +179,26 @@ const CollapsibleSection = ({
         fontSize="small"
         sx={{
           mr: 1,
+          color: "text.secondary",
           transform: expanded ? "rotate(180deg)" : "rotate(0deg)",
           transition: "transform 0.2s ease",
         }}
       />
       {helpText ? (
         <TextHelp text={helpText}>
-          <Typography variant="subtitle2" component="span">
+          <Typography variant="subtitle2" component="span" sx={sectionTitleSx}>
             {title}
           </Typography>
         </TextHelp>
       ) : (
-        <Typography variant="subtitle2">{title}</Typography>
+        <Typography variant="subtitle2" sx={sectionTitleSx}>
+          {title}
+        </Typography>
       )}
       {badge}
     </Box>
     <Collapse in={expanded}>{children}</Collapse>
-  </>
+  </Box>
 );
 
 interface PartyDetailProps {
@@ -295,40 +335,123 @@ export const PartyDetail = ({
     setKickDialogOpen(true);
   };
 
+  const prefix = party.party_id.split("::")[0];
+  const actions = [
+    isOwner && {
+      key: "propose",
+      icon: <UploadFileIcon fontSize="small" />,
+      label: governanceType === "core_self" ? "New Proposal" : "Deploy Contracts",
+      disabled: !ADMIN_ACCESS,
+      onClick: () => {
+        if (governanceType === "core_self" && rulesContract) {
+          setGovDialogView("proposals");
+          setEditGovContractId(rulesContract.contract_id);
+        } else {
+          setContractsDialogOpen(true);
+        }
+      },
+    },
+    isOwner && {
+      key: "threshold",
+      icon: <TuneIcon fontSize="small" />,
+      label: "Change Threshold",
+      disabled: !ADMIN_ACCESS,
+      onClick: () => setChangeThresholdDialogOpen(true),
+    },
+    isOwner &&
+      rulesContract && {
+        key: "gov",
+        icon: <EditIcon fontSize="small" />,
+        label: "Governance Actions",
+        disabled: !authStatus?.rights?.dec_party_act_as,
+        onClick: () => {
+          setGovDialogView("actions");
+          setEditGovContractId(rulesContract.contract_id);
+        },
+      },
+  ].filter(Boolean) as {
+    key: string;
+    icon: ReactNode;
+    label: string;
+    disabled: boolean;
+    onClick: () => void;
+  }[];
+
   return (
-    <Box>
-      {/* Header */}
+    <Box
+      sx={{
+        px: "var(--content-pad)",
+        pt: 2,
+        pb: 4,
+        display: "flex",
+        flexDirection: "column",
+        gap: 2,
+      }}
+    >
+      {/* Identity: the party's own name leads, its full id sits under it, and
+        * the actions gather on the right instead of competing with the figures. */}
       <Box
         sx={{
           display: "flex",
-          alignItems: "center",
-          gap: 1,
-          mb: 2,
-          px: 3,
+          alignItems: "flex-start",
+          gap: 1.5,
+          flexWrap: "wrap",
         }}
       >
         <Tooltip title="Back to parties">
-          <IconButton onClick={onBack}>
+          <IconButton onClick={onBack} sx={{ mt: 0.25, ml: "-8px" }}>
             <ArrowBackIcon />
           </IconButton>
         </Tooltip>
-        <CopyableText
-          text={party.party_id}
-          truncate={{ start: party.party_id.indexOf("::") + 18, end: 16 }}
-          variant="h6"
-        />
+        <Box sx={{ flex: 1, minWidth: 240 }}>
+          <Typography
+            sx={{ fontSize: 24, fontWeight: 600, lineHeight: 1.2 }}
+            data-testid="party-detail-title"
+          >
+            {prefix}
+          </Typography>
+          <Box sx={{ display: "flex", alignItems: "center", gap: 2, flexWrap: "wrap", mt: 0.25 }}>
+            <CopyableText
+              text={party.party_id}
+              truncate={{ start: prefix.length + 12, end: 12 }}
+              variant="body2"
+            />
+            {party.my_owner_key && (
+              <Box sx={{ display: "flex", alignItems: "center", gap: 0.75 }}>
+                <Typography variant="caption" color="text.secondary">
+                  my owner key
+                </Typography>
+                <CopyableText
+                  text={party.my_owner_key}
+                  truncate={{ start: 10, end: 8 }}
+                  variant="body2"
+                />
+              </Box>
+            )}
+          </Box>
+        </Box>
+        {actions.length > 0 && (
+          <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap" }}>
+            {actions.map((a) => (
+              <Button
+                key={a.key}
+                variant="outlined"
+                size="small"
+                color="inherit"
+                startIcon={a.icon}
+                onClick={a.onClick}
+                disabled={a.disabled}
+                sx={{ color: "text.secondary", borderColor: "divider" }}
+              >
+                {a.label}
+              </Button>
+            ))}
+          </Box>
+        )}
       </Box>
 
-      <Box
-        sx={{
-          display: "flex",
-          flexWrap: "wrap",
-          gap: 1,
-          mb: 3,
-          px: 3,
-          alignItems: "center",
-        }}
-      >
+      {/* The figures, at a size worth reading. */}
+      <Box sx={{ display: "flex", gap: 1.5, flexWrap: "wrap" }}>
         <StatCard
           label="Owners"
           value={party.owners.length}
@@ -337,90 +460,27 @@ export const PartyDetail = ({
         <StatCard
           label="Threshold"
           value={party.threshold}
-          helpText="Number of decentralized-namespace owners that must sign topology changes for this party (separate from the governance threshold below)."
+          unit={`of ${party.owners.length}`}
+          helpText="Number of decentralized-namespace owners that must sign topology changes for this party (separate from the governance threshold)."
           testId="party-threshold"
         />
         {governanceState && (
-          <>
-            <StatCard
-              label="Gov Threshold"
-              value={governanceState.threshold}
-              helpText="Number of governance-member confirmations required to execute a governance action on this party."
-            />
-            {governanceState.action_confirmation_timeout_microseconds !=
-              null && (
-              <StatCard
-                label="Action Timeout"
-                value={formatMicroseconds(
-                  governanceState.action_confirmation_timeout_microseconds,
-                )}
-                helpText="How long an unexecuted action confirmation stays valid before it expires."
-              />
+          <StatCard
+            label="Gov Threshold"
+            value={governanceState.threshold}
+            helpText="Number of governance-member confirmations required to execute a governance action on this party."
+          />
+        )}
+        {governanceState?.action_confirmation_timeout_microseconds != null && (
+          <StatCard
+            label="Action Timeout"
+            value={formatMicroseconds(
+              governanceState.action_confirmation_timeout_microseconds,
             )}
-          </>
-        )}
-        {isOwner && (
-          <Button
-            variant="outlined"
-            size="small"
-            startIcon={<UploadFileIcon />}
-            onClick={() => {
-              if (governanceType === "core_self" && rulesContract) {
-                setGovDialogView("proposals");
-                setEditGovContractId(rulesContract.contract_id);
-              } else {
-                setContractsDialogOpen(true);
-              }
-            }}
-            disabled={!ADMIN_ACCESS}
-          >
-            {governanceType === "core_self"
-              ? "New Proposal"
-              : "Deploy Contracts"}
-          </Button>
-        )}
-        {isOwner && (
-          <Button
-            variant="outlined"
-            size="small"
-            startIcon={<TuneIcon />}
-            onClick={() => setChangeThresholdDialogOpen(true)}
-            disabled={!ADMIN_ACCESS}
-          >
-            Change Threshold
-          </Button>
-        )}
-        {isOwner && rulesContract && (
-          <Button
-            variant="outlined"
-            size="small"
-            startIcon={<EditIcon />}
-            onClick={() => {
-              setGovDialogView("actions");
-              setEditGovContractId(rulesContract.contract_id);
-            }}
-            disabled={!authStatus?.rights?.dec_party_act_as}
-          >
-            Governance Actions
-          </Button>
+            helpText="How long an unexecuted action confirmation stays valid before it expires."
+          />
         )}
       </Box>
-
-      {/* Owner Key */}
-      {party.my_owner_key && (
-        <Box
-          sx={{ display: "flex", alignItems: "center", gap: 1, mb: 2, px: 3 }}
-        >
-          <Typography variant="body2" color="text.secondary">
-            <strong>My Owner Key:</strong>
-          </Typography>
-          <CopyableText
-            text={party.my_owner_key}
-            truncate={{ start: 16, end: 16 }}
-            variant="body2"
-          />
-        </Box>
-      )}
 
       {/* Authentication */}
       <CollapsibleSection
@@ -434,7 +494,7 @@ export const PartyDetail = ({
           </Box>
         }
       >
-        <Box sx={{ px: 3 }}>
+        <Box sx={{ px: "var(--content-pad)" }}>
           <AuthSection
             partyId={party.party_id}
             authStatus={authStatus}
@@ -476,7 +536,7 @@ export const PartyDetail = ({
           </>
         }
       >
-        <Box sx={{ overflowX: "auto" }}>
+        <Box sx={{ overflowX: "auto", ...cardTableSx }}>
           <Table size="small">
             <TableHead>
               <TableRow>
@@ -574,6 +634,7 @@ export const PartyDetail = ({
                 maxHeight: 180,
                 overflowY: "auto",
                 overflowX: "auto",
+                ...cardTableSx,
               }}
             >
               <Table size="small">

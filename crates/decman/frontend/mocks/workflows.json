@@ -37,7 +37,9 @@
         "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae"
       ],
       "completed_peers": [
-        "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c"
+        "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+        "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343",
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae"
       ],
       "dec_party_id": "ibtc-admin::12209688b4410a59414d40a2a541644d22ac9e85a7f9438545749f65965a495f",
       "dismissed": false,
@@ -64,7 +66,8 @@
         "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44"
       ],
       "completed_peers": [
-        "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343"
+        "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343",
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae"
       ],
       "dec_party_id": "treasury-rc7-2::1220fb3be8c3236d9258e9e1f25fc5d1a924cd368f7346a7a7ff4a82dd3eba54",
       "dismissed": false,
@@ -292,7 +295,7 @@
       "kind": "Dars",
       "role": "Peer",
       "status": "inprogress",
-      "current_step": "Done",
+      "current_step": "Finalize",
       "step_index": 3,
       "step_total": 4,
       "config_json": "{}",
@@ -302,7 +305,9 @@
         "relay-dub::12202946e81d20be83b1f31e8df7d4cc139473b6e44143a79f4d92149eb0e50a"
       ],
       "completed_peers": [
-        "canton-mum::1220649a6a537db9f061d24e3c98ef1c46cbe0605015fb2ec3d52ea6215ed0ee"
+        "canton-mum::1220649a6a537db9f061d24e3c98ef1c46cbe0605015fb2ec3d52ea6215ed0ee",
+        "bsafe-cape::122015a048f5c1a6ede86d6ec87272554bbbd23f4a342ac191dc644612f35d6a",
+        "relay-dub::12202946e81d20be83b1f31e8df7d4cc139473b6e44143a79f4d92149eb0e50a"
       ],
       "dec_party_id": "attestor-pool-us::12200756bbbb488bef27fa4c54b1042637f13d1e582644cf1d1b048308418608",
       "dismissed": false,
@@ -313,6 +318,654 @@
       "dar_filenames": [
         "cbtc-governance-0.0.11.dar",
         "governance-core-0.2.11.dar"
+      ]
+    },
+    {
+      "instance_name": "onboarding-2000",
+      "kind": "Onboarding",
+      "role": "Coordinator",
+      "status": "completed",
+      "current_step": "Done",
+      "step_index": 5,
+      "step_total": 5,
+      "config_json": "{}",
+      "expected_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "completed_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "dec_party_id": "cbtc-attestor-pool::122070884b3eb2e563698a1e51f29ea9cec1d6b9d25272be0efd76cc715b769a",
+      "dismissed": false,
+      "created_at": 1782000000,
+      "updated_at": 1782003600,
+      "dar_filenames": [
+        "cbtc-governance-0.0.3.dar",
+        "governance-core-0.2.3.dar"
+      ]
+    },
+    {
+      "instance_name": "addparty-2001",
+      "kind": "AddParty",
+      "role": "Coordinator",
+      "status": "completed",
+      "current_step": "Done",
+      "step_index": 5,
+      "step_total": 5,
+      "config_json": "{}",
+      "expected_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "completed_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "dec_party_id": "cbtc-attestor-pool::122070884b3eb2e563698a1e51f29ea9cec1d6b9d25272be0efd76cc715b769a",
+      "dismissed": false,
+      "created_at": 1782003600,
+      "updated_at": 1782007200,
+      "dar_filenames": [
+        "cbtc-governance-0.0.3.dar",
+        "governance-core-0.2.3.dar"
+      ]
+    },
+    {
+      "instance_name": "kick-2002",
+      "kind": "Kick",
+      "role": "Coordinator",
+      "status": "completed",
+      "current_step": "Done",
+      "step_index": 5,
+      "step_total": 5,
+      "config_json": "{}",
+      "expected_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "completed_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "dec_party_id": "cbtc-attestor-pool::122070884b3eb2e563698a1e51f29ea9cec1d6b9d25272be0efd76cc715b769a",
+      "dismissed": false,
+      "created_at": 1782007200,
+      "updated_at": 1782010800,
+      "dar_filenames": [
+        "cbtc-governance-0.0.3.dar",
+        "governance-core-0.2.3.dar"
+      ]
+    },
+    {
+      "instance_name": "contracts-2003",
+      "kind": "Contracts",
+      "role": "Coordinator",
+      "status": "failed",
+      "current_step": "ShareKeys",
+      "step_index": 2,
+      "step_total": 5,
+      "config_json": "{}",
+      "expected_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "completed_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "dec_party_id": "cbtc-attestor-pool::122070884b3eb2e563698a1e51f29ea9cec1d6b9d25272be0efd76cc715b769a",
+      "dismissed": false,
+      "created_at": 1782010800,
+      "updated_at": 1782014400,
+      "dar_filenames": [
+        "cbtc-governance-0.0.3.dar",
+        "governance-core-0.2.3.dar"
+      ],
+      "error": "Peer iBTC-validator-2 did not confirm within the timeout"
+    },
+    {
+      "instance_name": "changethreshold-2004",
+      "kind": "ChangeThreshold",
+      "role": "Coordinator",
+      "status": "cancelled",
+      "current_step": "ShareKeys",
+      "step_index": 2,
+      "step_total": 5,
+      "config_json": "{}",
+      "expected_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "completed_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "dec_party_id": "cbtc-attestor-pool::122070884b3eb2e563698a1e51f29ea9cec1d6b9d25272be0efd76cc715b769a",
+      "dismissed": false,
+      "created_at": 1782014400,
+      "updated_at": 1782018000,
+      "dar_filenames": [
+        "cbtc-governance-0.0.3.dar",
+        "governance-core-0.2.3.dar"
+      ]
+    },
+    {
+      "instance_name": "distributedars-2005",
+      "kind": "DistributeDars",
+      "role": "Coordinator",
+      "status": "completed",
+      "current_step": "Done",
+      "step_index": 5,
+      "step_total": 5,
+      "config_json": "{}",
+      "expected_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "completed_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "dec_party_id": "cbtc-attestor-pool::122070884b3eb2e563698a1e51f29ea9cec1d6b9d25272be0efd76cc715b769a",
+      "dismissed": false,
+      "created_at": 1782018000,
+      "updated_at": 1782021600,
+      "dar_filenames": [
+        "cbtc-governance-0.0.3.dar",
+        "governance-core-0.2.3.dar"
+      ]
+    },
+    {
+      "instance_name": "onboarding-2006",
+      "kind": "Onboarding",
+      "role": "Coordinator",
+      "status": "completed",
+      "current_step": "Done",
+      "step_index": 5,
+      "step_total": 5,
+      "config_json": "{}",
+      "expected_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "completed_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "dec_party_id": "cbtc-attestor-pool::122070884b3eb2e563698a1e51f29ea9cec1d6b9d25272be0efd76cc715b769a",
+      "dismissed": false,
+      "created_at": 1782021600,
+      "updated_at": 1782025200,
+      "dar_filenames": [
+        "cbtc-governance-0.0.3.dar",
+        "governance-core-0.2.3.dar"
+      ]
+    },
+    {
+      "instance_name": "addparty-2007",
+      "kind": "AddParty",
+      "role": "Coordinator",
+      "status": "completed",
+      "current_step": "Done",
+      "step_index": 5,
+      "step_total": 5,
+      "config_json": "{}",
+      "expected_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "completed_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "dec_party_id": "cbtc-attestor-pool::122070884b3eb2e563698a1e51f29ea9cec1d6b9d25272be0efd76cc715b769a",
+      "dismissed": false,
+      "created_at": 1782025200,
+      "updated_at": 1782028800,
+      "dar_filenames": [
+        "cbtc-governance-0.0.3.dar",
+        "governance-core-0.2.3.dar"
+      ]
+    },
+    {
+      "instance_name": "kick-2008",
+      "kind": "Kick",
+      "role": "Coordinator",
+      "status": "failed",
+      "current_step": "ShareKeys",
+      "step_index": 2,
+      "step_total": 5,
+      "config_json": "{}",
+      "expected_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "completed_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "dec_party_id": "cbtc-attestor-pool::122070884b3eb2e563698a1e51f29ea9cec1d6b9d25272be0efd76cc715b769a",
+      "dismissed": false,
+      "created_at": 1782028800,
+      "updated_at": 1782032400,
+      "dar_filenames": [
+        "cbtc-governance-0.0.3.dar",
+        "governance-core-0.2.3.dar"
+      ],
+      "error": "Peer iBTC-validator-2 did not confirm within the timeout"
+    },
+    {
+      "instance_name": "contracts-2009",
+      "kind": "Contracts",
+      "role": "Coordinator",
+      "status": "cancelled",
+      "current_step": "ShareKeys",
+      "step_index": 2,
+      "step_total": 5,
+      "config_json": "{}",
+      "expected_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "completed_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "dec_party_id": "cbtc-attestor-pool::122070884b3eb2e563698a1e51f29ea9cec1d6b9d25272be0efd76cc715b769a",
+      "dismissed": false,
+      "created_at": 1782032400,
+      "updated_at": 1782036000,
+      "dar_filenames": [
+        "cbtc-governance-0.0.3.dar",
+        "governance-core-0.2.3.dar"
+      ]
+    },
+    {
+      "instance_name": "changethreshold-2010",
+      "kind": "ChangeThreshold",
+      "role": "Coordinator",
+      "status": "completed",
+      "current_step": "Done",
+      "step_index": 5,
+      "step_total": 5,
+      "config_json": "{}",
+      "expected_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "completed_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "dec_party_id": "cbtc-attestor-pool::122070884b3eb2e563698a1e51f29ea9cec1d6b9d25272be0efd76cc715b769a",
+      "dismissed": false,
+      "created_at": 1782036000,
+      "updated_at": 1782039600,
+      "dar_filenames": [
+        "cbtc-governance-0.0.3.dar",
+        "governance-core-0.2.3.dar"
+      ]
+    },
+    {
+      "instance_name": "distributedars-2011",
+      "kind": "DistributeDars",
+      "role": "Coordinator",
+      "status": "completed",
+      "current_step": "Done",
+      "step_index": 5,
+      "step_total": 5,
+      "config_json": "{}",
+      "expected_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "completed_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "dec_party_id": "cbtc-attestor-pool::122070884b3eb2e563698a1e51f29ea9cec1d6b9d25272be0efd76cc715b769a",
+      "dismissed": false,
+      "created_at": 1782039600,
+      "updated_at": 1782043200,
+      "dar_filenames": [
+        "cbtc-governance-0.0.3.dar",
+        "governance-core-0.2.3.dar"
+      ]
+    },
+    {
+      "instance_name": "onboarding-2012",
+      "kind": "Onboarding",
+      "role": "Coordinator",
+      "status": "completed",
+      "current_step": "Done",
+      "step_index": 5,
+      "step_total": 5,
+      "config_json": "{}",
+      "expected_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "completed_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "dec_party_id": "cbtc-attestor-pool::122070884b3eb2e563698a1e51f29ea9cec1d6b9d25272be0efd76cc715b769a",
+      "dismissed": false,
+      "created_at": 1782043200,
+      "updated_at": 1782046800,
+      "dar_filenames": [
+        "cbtc-governance-0.0.3.dar",
+        "governance-core-0.2.3.dar"
+      ]
+    },
+    {
+      "instance_name": "addparty-2013",
+      "kind": "AddParty",
+      "role": "Coordinator",
+      "status": "failed",
+      "current_step": "ShareKeys",
+      "step_index": 2,
+      "step_total": 5,
+      "config_json": "{}",
+      "expected_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "completed_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "dec_party_id": "cbtc-attestor-pool::122070884b3eb2e563698a1e51f29ea9cec1d6b9d25272be0efd76cc715b769a",
+      "dismissed": false,
+      "created_at": 1782046800,
+      "updated_at": 1782050400,
+      "dar_filenames": [
+        "cbtc-governance-0.0.3.dar",
+        "governance-core-0.2.3.dar"
+      ],
+      "error": "Peer iBTC-validator-2 did not confirm within the timeout"
+    },
+    {
+      "instance_name": "kick-2014",
+      "kind": "Kick",
+      "role": "Coordinator",
+      "status": "cancelled",
+      "current_step": "ShareKeys",
+      "step_index": 2,
+      "step_total": 5,
+      "config_json": "{}",
+      "expected_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "completed_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "dec_party_id": "cbtc-attestor-pool::122070884b3eb2e563698a1e51f29ea9cec1d6b9d25272be0efd76cc715b769a",
+      "dismissed": false,
+      "created_at": 1782050400,
+      "updated_at": 1782054000,
+      "dar_filenames": [
+        "cbtc-governance-0.0.3.dar",
+        "governance-core-0.2.3.dar"
+      ]
+    },
+    {
+      "instance_name": "contracts-2015",
+      "kind": "Contracts",
+      "role": "Coordinator",
+      "status": "completed",
+      "current_step": "Done",
+      "step_index": 5,
+      "step_total": 5,
+      "config_json": "{}",
+      "expected_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "completed_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "dec_party_id": "cbtc-attestor-pool::122070884b3eb2e563698a1e51f29ea9cec1d6b9d25272be0efd76cc715b769a",
+      "dismissed": false,
+      "created_at": 1782054000,
+      "updated_at": 1782057600,
+      "dar_filenames": [
+        "cbtc-governance-0.0.3.dar",
+        "governance-core-0.2.3.dar"
+      ]
+    },
+    {
+      "instance_name": "changethreshold-2016",
+      "kind": "ChangeThreshold",
+      "role": "Coordinator",
+      "status": "completed",
+      "current_step": "Done",
+      "step_index": 5,
+      "step_total": 5,
+      "config_json": "{}",
+      "expected_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "completed_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "dec_party_id": "cbtc-attestor-pool::122070884b3eb2e563698a1e51f29ea9cec1d6b9d25272be0efd76cc715b769a",
+      "dismissed": false,
+      "created_at": 1782057600,
+      "updated_at": 1782061200,
+      "dar_filenames": [
+        "cbtc-governance-0.0.3.dar",
+        "governance-core-0.2.3.dar"
+      ]
+    },
+    {
+      "instance_name": "distributedars-2017",
+      "kind": "DistributeDars",
+      "role": "Coordinator",
+      "status": "completed",
+      "current_step": "Done",
+      "step_index": 5,
+      "step_total": 5,
+      "config_json": "{}",
+      "expected_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "completed_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "dec_party_id": "cbtc-attestor-pool::122070884b3eb2e563698a1e51f29ea9cec1d6b9d25272be0efd76cc715b769a",
+      "dismissed": false,
+      "created_at": 1782061200,
+      "updated_at": 1782064800,
+      "dar_filenames": [
+        "cbtc-governance-0.0.3.dar",
+        "governance-core-0.2.3.dar"
+      ]
+    },
+    {
+      "instance_name": "onboarding-2018",
+      "kind": "Onboarding",
+      "role": "Coordinator",
+      "status": "failed",
+      "current_step": "ShareKeys",
+      "step_index": 2,
+      "step_total": 5,
+      "config_json": "{}",
+      "expected_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "completed_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "dec_party_id": "cbtc-attestor-pool::122070884b3eb2e563698a1e51f29ea9cec1d6b9d25272be0efd76cc715b769a",
+      "dismissed": false,
+      "created_at": 1782064800,
+      "updated_at": 1782068400,
+      "dar_filenames": [
+        "cbtc-governance-0.0.3.dar",
+        "governance-core-0.2.3.dar"
+      ],
+      "error": "Peer iBTC-validator-2 did not confirm within the timeout"
+    },
+    {
+      "instance_name": "addparty-2019",
+      "kind": "AddParty",
+      "role": "Coordinator",
+      "status": "cancelled",
+      "current_step": "ShareKeys",
+      "step_index": 2,
+      "step_total": 5,
+      "config_json": "{}",
+      "expected_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "completed_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "dec_party_id": "cbtc-attestor-pool::122070884b3eb2e563698a1e51f29ea9cec1d6b9d25272be0efd76cc715b769a",
+      "dismissed": false,
+      "created_at": 1782068400,
+      "updated_at": 1782072000,
+      "dar_filenames": [
+        "cbtc-governance-0.0.3.dar",
+        "governance-core-0.2.3.dar"
+      ]
+    },
+    {
+      "instance_name": "kick-2020",
+      "kind": "Kick",
+      "role": "Coordinator",
+      "status": "completed",
+      "current_step": "Done",
+      "step_index": 5,
+      "step_total": 5,
+      "config_json": "{}",
+      "expected_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "completed_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "dec_party_id": "cbtc-attestor-pool::122070884b3eb2e563698a1e51f29ea9cec1d6b9d25272be0efd76cc715b769a",
+      "dismissed": false,
+      "created_at": 1782072000,
+      "updated_at": 1782075600,
+      "dar_filenames": [
+        "cbtc-governance-0.0.3.dar",
+        "governance-core-0.2.3.dar"
+      ]
+    },
+    {
+      "instance_name": "contracts-2021",
+      "kind": "Contracts",
+      "role": "Coordinator",
+      "status": "completed",
+      "current_step": "Done",
+      "step_index": 5,
+      "step_total": 5,
+      "config_json": "{}",
+      "expected_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "completed_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "dec_party_id": "cbtc-attestor-pool::122070884b3eb2e563698a1e51f29ea9cec1d6b9d25272be0efd76cc715b769a",
+      "dismissed": false,
+      "created_at": 1782075600,
+      "updated_at": 1782079200,
+      "dar_filenames": [
+        "cbtc-governance-0.0.3.dar",
+        "governance-core-0.2.3.dar"
+      ]
+    },
+    {
+      "instance_name": "changethreshold-2022",
+      "kind": "ChangeThreshold",
+      "role": "Coordinator",
+      "status": "completed",
+      "current_step": "Done",
+      "step_index": 5,
+      "step_total": 5,
+      "config_json": "{}",
+      "expected_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "completed_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "dec_party_id": "cbtc-attestor-pool::122070884b3eb2e563698a1e51f29ea9cec1d6b9d25272be0efd76cc715b769a",
+      "dismissed": false,
+      "created_at": 1782079200,
+      "updated_at": 1782082800,
+      "dar_filenames": [
+        "cbtc-governance-0.0.3.dar",
+        "governance-core-0.2.3.dar"
       ]
     }
   ]

@@ -1,24 +1,20 @@
-import {
-  Box,
-  Chip,
-  IconButton,
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableRow,
-  Tooltip,
-  Typography,
-} from "@mui/material";
+import { Box, IconButton, Tooltip, Typography } from "@mui/material";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import ErrorIcon from "@mui/icons-material/Error";
 import ScienceIcon from "@mui/icons-material/Science";
 import VisibilityIcon from "@mui/icons-material/Visibility";
 import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
-import { CopyableText } from "./CopyableText";
-import { zebraRow } from "../styles";
+import { PartyIdText } from "./PartyIdText";
+import { RowCard } from "./RowCard";
 import { PaginationControls } from "./Pagination";
 import { usePagination } from "../usePagination";
+import {
+  AUTH_SLOT,
+  VISIBILITY_SLOT,
+  columnSx,
+  fabGutterSx,
+  legendSx,
+} from "../styles";
 import type { DecentralizedParty, PartyAuthStatus } from "../types";
 
 interface PartyListProps {
@@ -66,80 +62,93 @@ export const PartyList = ({
 
   if (parties.length === 0) {
     return (
-      <Typography variant="body2" color="text.secondary" sx={{ textAlign: "center", py: 6 }}>
+      <Typography
+        variant="body2"
+        color="text.secondary"
+        sx={{ textAlign: "center", py: 6 }}
+      >
         No parties found
       </Typography>
     );
   }
 
   return (
-    <Box>
-      <Table size="small">
-        <TableHead>
-          <TableRow>
-            <TableCell sx={{ py: 1 }}>Party ID</TableCell>
-            <TableCell sx={{ py: 1 }} align="center">Threshold</TableCell>
-            <TableCell sx={{ py: 1 }} align="center">Owners</TableCell>
-            <TableCell sx={{ py: 1 }} align="center">Participants</TableCell>
-            <TableCell sx={{ py: 1 }} align="center">Contracts</TableCell>
-            <TableCell sx={{ py: 1 }} align="center">Auth</TableCell>
-            <TableCell sx={{ py: 1, width: 56 }} align="center" />
-          </TableRow>
-        </TableHead>
-        <TableBody>
-          {pageItems.map((party, idx) => {
+    <Box sx={{ pt: 1, flex: 1, display: "flex", flexDirection: "column" }}>
+      <Box sx={{ ...columnSx, flex: 1 }}>
+        {/* Legend — padded to line up with the cards' own 16px inset. */}
+        <Box
+          sx={{
+            display: "flex",
+            alignItems: "center",
+            gap: 2,
+            px: "16px",
+            pb: 1,
+          }}
+        >
+          <Typography
+            component="span"
+            sx={{ ...legendSx, flex: 1, minWidth: 0 }}
+          >
+            Party ID
+          </Typography>
+          <Typography
+            component="span"
+            sx={{
+              ...legendSx,
+              width: AUTH_SLOT,
+              textAlign: "right",
+              flexShrink: 0,
+            }}
+          >
+            Auth
+          </Typography>
+          <Typography
+            component="span"
+            sx={{
+              ...legendSx,
+              width: VISIBILITY_SLOT,
+              textAlign: "right",
+              flexShrink: 0,
+            }}
+          >
+            Visibility
+          </Typography>
+          <Box sx={fabGutterSx} aria-hidden />
+        </Box>
+
+        <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+          {pageItems.map((party) => {
             const auth = authStatuses.find(
               (a) => a.dec_party_id === party.party_id,
             );
             const hidden = isHidden(party.party_id);
             return (
-              <TableRow
+              <RowCard
                 key={party.party_id}
-                tabIndex={0}
-                sx={{
-                  ...zebraRow(idx),
-                  cursor: "pointer",
-                  opacity: hidden ? 0.45 : 1,
-                }}
-                onClick={() => onSelectParty(party.party_id)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") onSelectParty(party.party_id);
-                }}
+                onActivate={() => onSelectParty(party.party_id)}
+                dimmed={hidden}
+                ariaLabel={`Open party ${party.party_id}`}
               >
-                <TableCell sx={{ py: 1.5 }}>
-                  <CopyableText
-                    text={party.party_id}
-                    truncate={{
-                      start: party.party_id.indexOf("::") + 18,
-                      end: 16,
-                    }}
-                    variant="body2"
-                  />
-                </TableCell>
-                <TableCell sx={{ py: 1.5 }} align="center">
-                  {party.threshold}
-                </TableCell>
-                <TableCell sx={{ py: 1.5 }} align="center">
-                  {party.owners.length}
-                </TableCell>
-                <TableCell sx={{ py: 1.5 }} align="center">
-                  {party.participants.length}
-                </TableCell>
-                <TableCell sx={{ py: 1.5 }} align="center">
-                  {party.contracts ? (
-                    <Chip
-                      label={party.contracts.length}
-                      size="small"
-                      color={party.contracts.length > 0 ? "primary" : "default"}
-                    />
-                  ) : (
-                    "-"
-                  )}
-                </TableCell>
-                <TableCell sx={{ py: 1.5 }} align="center">
+                <PartyIdText partyId={party.party_id} />
+                <Box
+                  sx={{
+                    width: AUTH_SLOT,
+                    flexShrink: 0,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "flex-end",
+                  }}
+                >
                   <AuthStatusIcon status={auth} />
-                </TableCell>
-                <TableCell sx={{ py: 1.5 }} align="center">
+                </Box>
+                <Box
+                  sx={{
+                    width: VISIBILITY_SLOT,
+                    flexShrink: 0,
+                    display: "flex",
+                    justifyContent: "flex-end",
+                  }}
+                >
                   <Tooltip title={hidden ? "Unhide party" : "Hide party"}>
                     <IconButton
                       size="small"
@@ -156,20 +165,21 @@ export const PartyList = ({
                       )}
                     </IconButton>
                   </Tooltip>
-                </TableCell>
-              </TableRow>
+                </Box>
+                <Box sx={fabGutterSx} aria-hidden />
+              </RowCard>
             );
           })}
-        </TableBody>
-      </Table>
-      {/* Extra right padding clears the fixed Create-Party FAB (56px wide,
-        * offset 24px), which this view renders over the bottom-right corner. */}
+        </Box>
+      </Box>
+
+      {/* Outside the column: the rule runs the full width of the view, and the
+       * contents are centered, so nothing lands under the FAB. */}
       <PaginationControls
         page={page}
         pageCount={pageCount}
         total={total}
         onChange={setPage}
-        sx={{ pr: 11 }}
       />
     </Box>
   );
