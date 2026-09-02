@@ -33,8 +33,17 @@ const STAGING_DIR: &str = "acs-staging";
 const DIGEST_BUF_SIZE: usize = 1024 * 1024;
 
 /// Where staged snapshots live.
+///
+/// Defaults under the node's data dir, but `DECPM_ACS_STAGING_DIR` moves it
+/// anywhere the process can write. The snapshot is transient bulk data and the
+/// data dir is a small persistent volume sized for a SQLite file and a keypair,
+/// so pointing this at node-local scratch (a Kubernetes `emptyDir`) is usually
+/// the right call — nothing here needs to survive the pod, only the run.
 fn staging_dir(data_dir: &Path) -> PathBuf {
-    data_dir.join(STAGING_DIR)
+    match std::env::var("DECPM_ACS_STAGING_DIR") {
+        Ok(dir) if !dir.trim().is_empty() => PathBuf::from(dir.trim()),
+        _ => data_dir.join(STAGING_DIR),
+    }
 }
 
 /// The file a given replication stages into.

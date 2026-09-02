@@ -12,7 +12,9 @@ use crate::{
     utils,
     workflow::{
         kick::coordinator::split_signed_kick_pair,
-        party_replication::{collect_party_package_ids, export_party_acs, wait_for_flag_cleared},
+        party_replication::{
+            collect_party_package_ids, export_party_acs, staging, wait_for_flag_cleared,
+        },
         state::WorkflowState,
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
     },
@@ -212,6 +214,13 @@ async fn run_workflow(
                 workflow_state.advance_step().await;
             }
             AddPartyStep::PrepareClearOnboarding => {
+                // SyncAcs is done, so the source's copy has served its purpose.
+                // Dropping it here rather than at run cleanup matters on a tight
+                // volume, and this is the first point where no peer can ask for
+                // a range again.
+                if let Err(e) = staging::discard(&node_config.data_dir(), &instance_name).await {
+                    tracing::warn!("Failed to discard the staged ACS export: {e}");
+                }
                 // Swap the ACS manifest payload for the bare config before the
                 // next peer-gated command.
                 workflow_state

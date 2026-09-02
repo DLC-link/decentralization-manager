@@ -436,6 +436,14 @@ pub async fn import_party_acs(
     import_result?;
 
     tracing::info!("ACS snapshot imported successfully");
+
+    // Reclaim the space now rather than at run cleanup: the snapshot is in the
+    // participant's ACS, so this copy is dead weight, and on a tight volume the
+    // next step may need the room. A failure to remove it must not fail a
+    // completed import.
+    if let Err(e) = staging::discard(&data_dir, &target.instance_name).await {
+        tracing::warn!("Failed to discard the staged ACS after import: {e}");
+    }
     Ok(())
 }
 
