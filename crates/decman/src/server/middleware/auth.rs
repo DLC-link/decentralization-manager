@@ -143,6 +143,7 @@ where
 /// Returns an `HttpResponse` ready to return: 401 if no principal was
 /// attached to the request, 403 if `admin_role` is `Some` and the
 /// principal does not carry it.
+#[allow(clippy::result_large_err)]
 pub fn require_admin(
     req: &HttpRequest,
     admin_role: Option<&str>,
@@ -171,6 +172,7 @@ pub fn require_admin(
 ///
 /// # Errors
 /// Returns a 401 `HttpResponse` when the bearer is missing or not a configured key.
+#[allow(clippy::result_large_err)]
 pub fn require_tenant_api_key(req: &HttpRequest, state: &AppState) -> Result<(), HttpResponse> {
     if state.test_mode {
         return Ok(());

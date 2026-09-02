@@ -130,6 +130,7 @@ where
 /// registry entry is removed, so a run that never started can't leak and block
 /// future starts. On either failure returns the 409 `HttpResponse` the handler
 /// should return; on success the run is both registered and persisted.
+#[allow(clippy::result_large_err)]
 async fn register_and_persist<S, C>(
     data: &web::Data<AppState>,
     instance: &Arc<WorkflowInstance>,
