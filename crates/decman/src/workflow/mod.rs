@@ -31,6 +31,7 @@ use crate::{
     server::{WorkflowInstance, WorkflowKind, peer_status::LastSeen},
     utils,
     workflow::{
+        party_replication::{acs::AcsManifest, staging},
         state::WorkflowStep,
         storage::{WorkflowStorage, artifact_kinds},
     },
@@ -803,12 +804,11 @@ pub async fn start_peer(
             }
             MessageType::ImportAcs => {
                 tracing::info!("Executing: Import party ACS");
-                // Current coordinators send 3 items [config, snapshot, package_ids].
-                // Stay backward-compatible with an older coordinator that ships the
-                // legacy 2-item payload (config + snapshot, no package-id list):
-                // fall back to 2 items and treat the required-package set as empty
-                // (skips the preflight — the pre-fix behaviour), so a mixed-version
-                // rolling upgrade doesn't wedge the peer.
+                // Current coordinators send 3 items [config, manifest, package_ids],
+                // where the manifest describes a snapshot to pull in ranges. Older
+                // coordinators put the snapshot bytes themselves in slot 1, and older
+                // still sent only 2 items (no package-id list) — both are handled
+                // below so a mixed-version rolling upgrade doesn't wedge the peer.
                 let items = match utils::decode_length_prefixed(&payload, 3) {
                     Ok(items) => items,
                     Err(three_item_err) => match utils::decode_length_prefixed(&payload, 2) {
@@ -855,15 +855,53 @@ pub async fn start_peer(
                     .map(str::to_string)
                     .collect();
 
-                if let Err(e) = party_replication::import_party_acs(
-                    &node_config,
-                    &db,
-                    &add_party_config.replication_target(&instance_name),
-                    items[1].clone(),
-                    &required_package_ids,
-                )
-                .await
-                {
+                let step_result = async {
+                    // A manifest means the coordinator staged the snapshot and we
+                    // pull it in ranges. Anything else in slot 1 is a legacy
+                    // coordinator's inline snapshot: stage those bytes locally and
+                    // describe them ourselves, so everything downstream — the
+                    // completeness and digest gates, the streaming import — is the
+                    // same code on both paths.
+                    let manifest = match serde_json::from_slice::<AcsManifest>(&items[1]) {
+                        Ok(manifest) => manifest,
+                        Err(_) => {
+                            tracing::info!(
+                                "ImportAcs carried {len} inline snapshot bytes — staging \
+                                 them locally (legacy coordinator)",
+                                len = items[1].len()
+                            );
+                            let data_dir = node_config.data_dir();
+                            staging::discard(&data_dir, &instance_name).await?;
+                            if !items[1].is_empty() {
+                                staging::append(&data_dir, &instance_name, 0, &items[1]).await?;
+                            }
+                            AcsManifest {
+                                total_len: items[1].len() as u64,
+                                sha256: staging::digest(&data_dir, &instance_name).await?,
+                            }
+                        }
+                    };
+
+                    add_party::peer::fetch_staged_acs(
+                        &client,
+                        &node_config,
+                        &instance_name,
+                        &manifest,
+                    )
+                    .await?;
+
+                    party_replication::import_party_acs(
+                        &node_config,
+                        &db,
+                        &add_party_config.replication_target(&instance_name),
+                        &manifest,
+                        &required_package_ids,
+                    )
+                    .await
+                }
+                .await;
+
+                if let Err(e) = step_result {
                     tracing::error!("Step execution failed: {e}");
                     consecutive_step_failures += 1;
                     if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
