@@ -522,8 +522,6 @@ const App = () => {
   }, [workflowRuns, showSnackbar]);
 
   const isGovRulesTemplate = (templateId: string) =>
-    templateId.includes("VaultGovernanceRules") ||
-    templateId.includes("VaultGovernance") ||
     templateId === "Governance.Rules:GovernanceRules";
 
   const refreshPartyActions = useCallback(async () => {
@@ -543,10 +541,7 @@ const App = () => {
         ) {
           return null;
         }
-        const governanceType =
-          rulesContract.template_id === "Governance.Rules:GovernanceRules"
-            ? ("core_self" as const)
-            : ("vault" as const);
+        const governanceType = "core_self" as const;
         return { party: p, authStatus, rulesContract, governanceType };
       })
       .filter((c): c is NonNullable<typeof c> => c !== null);

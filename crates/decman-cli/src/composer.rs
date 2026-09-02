@@ -42,7 +42,6 @@ pub enum FieldKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PickerSource {
     Instruments,
-    Vaults,
     ProviderServices,
     UserServices,
     RegistrarServices,
@@ -105,8 +104,8 @@ pub struct Composer {
     pub submit: ComposerSubmit,
     pub party_id: String,
     pub party_name: String,
-    /// The party-level governance type (`core_self` / `vault`), used for the
-    /// confirm call and to refresh the approvals overlay afterwards.
+    /// The party-level governance type, used for the confirm call and to
+    /// refresh the approvals overlay afterwards.
     pub governance_type: String,
     pub rules_contract_id: String,
     pub fields: Vec<ComposerField>,
@@ -135,7 +134,7 @@ const fn opt(key: &'static str, label: &'static str) -> TypeOption {
 
 /// The governance action types offered for a party's governance type, in the
 /// same order and split the web frontend uses (`core_self` shows the four
-/// self-management actions; `vault` shows the rest).
+/// self-management actions; any other type shows the rest).
 pub fn action_types(governance_type: &str) -> Vec<TypeOption> {
     if governance_type == "core_self" {
         vec![
@@ -146,17 +145,6 @@ pub fn action_types(governance_type: &str) -> Vec<TypeOption> {
         ]
     } else {
         vec![
-            opt("vault_pause", "Pause vault"),
-            opt("vault_unpause", "Unpause vault"),
-            opt("vault_update_limits", "Update vault limits"),
-            opt("vault_update_backend", "Update vault backend"),
-            opt("vault_update_far_beneficiaries", "Update FAR beneficiaries"),
-            opt("vault_deployment", "Deploy vault"),
-            opt("yield_epoch_deployment", "Deploy yield epoch"),
-            opt(
-                "processor_deployment_request",
-                "Request processor deployment",
-            ),
             opt("utility_create_provider_request", "Create provider service"),
             opt("utility_create_user_request", "Create user service"),
             opt("utility_setup", "Setup utility"),
@@ -211,10 +199,6 @@ fn text(key: &'static str, label: &'static str) -> ComposerField {
 
 fn text_value(key: &'static str, label: &'static str, value: String) -> ComposerField {
     field(key, label, FieldKind::Text, value, false, "")
-}
-
-fn text_opt(key: &'static str, label: &'static str) -> ComposerField {
-    field(key, label, FieldKind::Text, String::new(), true, "")
 }
 
 fn int_value(
@@ -308,18 +292,6 @@ fn list_opt(key: &'static str, label: &'static str) -> ComposerField {
     )
 }
 
-/// A list field whose JSON key the API requires: blank input serializes as `[]`.
-fn list_required(key: &'static str, label: &'static str) -> ComposerField {
-    field(
-        key,
-        label,
-        FieldKind::List,
-        String::new(),
-        false,
-        "one per line",
-    )
-}
-
 fn field(
     key: &'static str,
     label: &'static str,
@@ -382,75 +354,6 @@ pub fn fields_for_action(action_type: &str, ctx: &ComposerContext) -> Vec<Compos
             3_600_000_000,
             "1 hour = 3,600,000,000 µs",
         )],
-        "vault_pause" | "vault_unpause" => {
-            vec![picker(
-                "vault_id",
-                "Vault contract id",
-                PickerSource::Vaults,
-            )]
-        }
-        "vault_update_limits" => vec![
-            picker("vault_id", "Vault contract id", PickerSource::Vaults),
-            text_opt("new_limits.max_total_deposit", "Max total deposit"),
-            text_opt("new_limits.min_deposit_amount", "Min deposit amount"),
-            text_opt("new_limits.min_withdrawal_amount", "Min withdrawal amount"),
-        ],
-        "vault_update_backend" => vec![
-            picker("vault_id", "Vault contract id", PickerSource::Vaults),
-            text("new_backend_signatory", "New backend signatory"),
-        ],
-        "vault_update_far_beneficiaries" => vec![
-            picker("vault_id", "Vault contract id", PickerSource::Vaults),
-            rows_required(
-                "new_beneficiaries",
-                "Beneficiaries (party,weight)",
-                vec!["beneficiary", "weight"],
-            ),
-        ],
-        "vault_deployment" => {
-            let mut fields = vec![
-                text("vault_rules_cid", "Vault rules cid"),
-                text("vault_name", "Vault name"),
-                text("share_symbol", "Share symbol"),
-            ];
-            fields.extend(instrument_id("asset_instrument_id", String::new()));
-            fields.extend([
-                text_opt("limits.max_total_deposit", "Max total deposit"),
-                text_opt("limits.min_deposit_amount", "Min deposit amount"),
-                text_opt("limits.min_withdrawal_amount", "Min withdrawal amount"),
-                text("vault_backend_signatory", "Backend signatory"),
-                picker(
-                    "allocation_factory_cid",
-                    "Allocation factory cid",
-                    PickerSource::TransferFactories,
-                ),
-                picker(
-                    "registrar_service_cid",
-                    "Registrar service cid",
-                    PickerSource::RegistrarServices,
-                ),
-            ]);
-            fields
-        }
-        "yield_epoch_deployment" => {
-            let mut fields = vec![
-                text("vault_rules_cid", "Vault rules cid"),
-                picker("vault_cid", "Vault contract id", PickerSource::Vaults),
-            ];
-            fields.extend(instrument_id("asset_instrument_id", String::new()));
-            fields.push(text("vault_backend_signatory", "Backend signatory"));
-            fields
-        }
-        "processor_deployment_request" => vec![
-            text("vault_processor_rules_cid", "Processor rules cid"),
-            text("vault_backend_signatory", "Backend signatory"),
-            picker(
-                "allocation_factory_cid",
-                "Burn/mint factory cid",
-                PickerSource::TransferFactories,
-            ),
-            list_required("initial_supported_vaults", "Initial supported vault cids"),
-        ],
         "utility_create_provider_request" | "utility_create_user_request" => {
             vec![text_value(
                 "operator",
@@ -865,31 +768,22 @@ mod tests {
     }
 
     #[test]
-    fn build_payload_nests_dot_paths_and_omits_optional() {
+    fn build_payload_nests_dot_paths() {
         let fields = vec![
             text_value("instrument_id.admin", "Admin", "adm::1220".to_owned()),
             text_value("instrument_id.id", "Id", "CBTC".to_owned()),
-            text_opt("limits.max_total_deposit", "Max"),
         ];
         let payload = built("transfer", fields);
         assert_eq!(payload["instrument_id"]["admin"], "adm::1220");
         assert_eq!(payload["instrument_id"]["id"], "CBTC");
-        // A declared nested-object parent is always present (required server
-        // field), but its blank optional child is omitted within it.
-        assert_eq!(payload["limits"], serde_json::json!({}));
-        assert!(payload["limits"].get("max_total_deposit").is_none());
     }
 
     #[test]
     fn build_payload_required_array_is_empty_not_absent() {
         // A required Vec field with blank input must serialize as `[]`, never absent.
-        let field = rows_required("new_beneficiaries", "Beneficiaries", vec!["beneficiary"]);
-        let payload = built("vault_update_far_beneficiaries", vec![field]);
-        assert_eq!(payload["new_beneficiaries"], serde_json::json!([]));
-
-        let field = list_required("initial_supported_vaults", "Vaults");
-        let payload = built("processor_deployment_request", vec![field]);
-        assert_eq!(payload["initial_supported_vaults"], serde_json::json!([]));
+        let field = rows_required("claims", "Claims", vec!["subject"]);
+        let payload = built("offer_free_credential", vec![field]);
+        assert_eq!(payload["claims"], serde_json::json!([]));
     }
 
     #[test]
@@ -900,7 +794,7 @@ mod tests {
             vec!["beneficiary", "weight"],
         );
         field.value = "alice::1220,0.6\nbob::1220,0.4".to_owned();
-        let payload = built("vault_update_far_beneficiaries", vec![field]);
+        let payload = built("set_provider_app_reward_beneficiaries", vec![field]);
         let Some(beneficiaries) = payload["new_beneficiaries"].as_array() else {
             panic!("new_beneficiaries is not an array");
         };
@@ -937,10 +831,14 @@ mod tests {
                 .all(|option| option.key.starts_with("governance_"))
         );
 
-        let vault = action_types("vault");
-        assert!(vault.iter().any(|option| option.key == "vault_pause"));
+        let other = action_types("other");
         assert!(
-            !vault
+            other
+                .iter()
+                .any(|option| option.key == "utility_create_provider_request")
+        );
+        assert!(
+            !other
                 .iter()
                 .any(|option| option.key.starts_with("governance_"))
         );
@@ -1042,7 +940,11 @@ mod tests {
 
     #[test]
     fn empty_required_picker_is_rejected() {
-        let field = picker("vault_id", "Vault", PickerSource::Vaults);
+        let field = picker(
+            "user_service_cid",
+            "User service",
+            PickerSource::UserServices,
+        );
         assert!(field_value(&field).is_err());
     }
 }

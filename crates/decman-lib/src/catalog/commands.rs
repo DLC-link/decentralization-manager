@@ -1,8 +1,8 @@
 //! Governance flow builders.
 //!
-//! Thirteen pure builders cover confirm, execute, expire, and cancel for
-//! all three governance kinds (vault, core self-management, core domain
-//! actions), plus the atomic two-command proposal retraction. Every
+//! Nine pure builders cover confirm, execute, expire, and cancel for both
+//! governance kinds (core self-management and core domain actions), plus the
+//! atomic two-command proposal retraction. Every
 //! builder builds one choice-argument record, wraps it in an
 //! `ExerciseCommand`, and hands the command(s) to
 //! [`commands_envelope`](crate::framework::commands::commands_envelope) —
@@ -13,7 +13,7 @@
 //! submission stay with the caller.
 
 use canton_proto_rs::com::daml::ledger::api::v2::{
-    Command, Commands, DisclosedContract, ExerciseCommand, Optional, Value, command, value,
+    Command, Commands, DisclosedContract, ExerciseCommand, Value, command,
 };
 use common::canton_id::CantonId;
 
@@ -54,34 +54,6 @@ fn confirmations_list(confirmation_cids: &[String]) -> Value {
 // ============================================================================
 // Confirm
 // ============================================================================
-
-/// `VaultGovernanceRules_ConfirmAction`: `{confirmer, action}`.
-pub fn build_confirm_vault_action(
-    rules: &TemplateId,
-    rules_cid: &str,
-    member: &CantonId,
-    governance_party: &CantonId,
-    action: &ActionType,
-    command_id: String,
-) -> Result<Commands, Error> {
-    let argument = make_record(vec![
-        field("confirmer", make_party(member)),
-        field("action", action.to_vault_proto()?),
-    ]);
-    let cmd = exercise(
-        rules,
-        rules_cid,
-        "VaultGovernanceRules_ConfirmAction",
-        argument,
-    );
-    Ok(commands_envelope(
-        command_id,
-        member,
-        governance_party,
-        vec![cmd],
-        vec![],
-    ))
-}
 
 /// `GovernanceRules_ConfirmGovernanceAction`: `{confirmer, action}`.
 pub fn build_confirm_self_action(
@@ -131,46 +103,6 @@ pub fn build_confirm_proposal(
 // ============================================================================
 // Execute
 // ============================================================================
-
-/// `VaultGovernanceRules_ExecuteConfirmedAction`:
-/// `{executor, action, confirmations, contractCid}`.
-#[allow(clippy::too_many_arguments)]
-pub fn build_execute_vault_action(
-    rules: &TemplateId,
-    rules_cid: &str,
-    member: &CantonId,
-    governance_party: &CantonId,
-    action: &ActionType,
-    confirmation_cids: &[String],
-    contract_cid: Option<&str>,
-    disclosed: Vec<DisclosedContract>,
-    command_id: String,
-) -> Result<Commands, Error> {
-    let contract_cid_value = Value {
-        sum: Some(value::Sum::Optional(Box::new(Optional {
-            value: contract_cid.map(|cid| Box::new(make_contract_id(cid))),
-        }))),
-    };
-    let argument = make_record(vec![
-        field("executor", make_party(member)),
-        field("action", action.to_vault_proto()?),
-        field("confirmations", confirmations_list(confirmation_cids)),
-        field("contractCid", contract_cid_value),
-    ]);
-    let cmd = exercise(
-        rules,
-        rules_cid,
-        "VaultGovernanceRules_ExecuteConfirmedAction",
-        argument,
-    );
-    Ok(commands_envelope(
-        command_id,
-        member,
-        governance_party,
-        vec![cmd],
-        disclosed,
-    ))
-}
 
 /// `GovernanceRules_ExecuteGovernanceAction`: `{executor, action, confirmations}`.
 #[allow(clippy::too_many_arguments)]
@@ -245,25 +177,6 @@ fn expire_argument(member: &CantonId, stale_confirmation_cid: &str) -> Value {
     ])
 }
 
-/// `VaultGovernanceRules_ExpireConfirmation`: `{member, staleConfirmationCid}`.
-pub fn build_expire_vault_confirmation(
-    rules: &TemplateId,
-    rules_cid: &str,
-    member: &CantonId,
-    governance_party: &CantonId,
-    confirmation_cid: &str,
-    command_id: String,
-) -> Commands {
-    let argument = expire_argument(member, confirmation_cid);
-    let cmd = exercise(
-        rules,
-        rules_cid,
-        "VaultGovernanceRules_ExpireConfirmation",
-        argument,
-    );
-    commands_envelope(command_id, member, governance_party, vec![cmd], vec![])
-}
-
 /// `GovernanceRules_ExpireGovernanceSelfConfirmation`: `{member, staleConfirmationCid}`.
 pub fn build_expire_self_confirmation(
     rules: &TemplateId,
@@ -305,23 +218,6 @@ pub fn build_expire_domain_confirmation(
 // ============================================================================
 // Cancel
 // ============================================================================
-
-/// `VaultGovernanceConfirmation_Cancel`: empty record.
-pub fn build_cancel_vault_confirmation(
-    confirmation: &TemplateId,
-    confirmation_cid: &str,
-    member: &CantonId,
-    governance_party: &CantonId,
-    command_id: String,
-) -> Commands {
-    let cmd = exercise(
-        confirmation,
-        confirmation_cid,
-        "VaultGovernanceConfirmation_Cancel",
-        empty_record(),
-    );
-    commands_envelope(command_id, member, governance_party, vec![cmd], vec![])
-}
 
 /// `GovernanceSelfConfirmation_Cancel`: empty record.
 pub fn build_cancel_self_confirmation(
@@ -370,9 +266,8 @@ pub fn build_cancel_domain_confirmation(
 /// `own_domain_confirmation` accepts the domain confirmation only (see
 /// [`crate::catalog::templates::domain_confirmation_template`]): the builder
 /// hardcodes the `GovernanceConfirmation_Cancel` choice, and only that
-/// template declares it. Vault and self governance have no proposal contract
-/// to retract; cancel their confirmations with
-/// [`build_cancel_vault_confirmation`] or [`build_cancel_self_confirmation`].
+/// template declares it. Self governance has no proposal contract to retract;
+/// cancel its confirmations with [`build_cancel_self_confirmation`].
 pub fn build_cancel_proposal(
     interface: &TemplateId,
     proposal_cid: &str,
@@ -410,48 +305,6 @@ mod tests {
             "{prefix}::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892"
         ))
         .unwrap()
-    }
-
-    #[test]
-    fn confirm_vault_action_builds_the_exercise() {
-        let rules = TemplateId::new(
-            "#bitsafe-vault-governance-v0-rc8",
-            "BitsafeVault.VaultGovernance",
-            "VaultGovernanceRules",
-        );
-        let action = ActionType::GovernanceSetThreshold { new_threshold: 2 };
-        let commands = build_confirm_vault_action(
-            &rules,
-            "00rules",
-            &cid("member"),
-            &cid("gov"),
-            &action,
-            "cmd-1".into(),
-        )
-        .unwrap();
-        let Some(command::Command::Exercise(ex)) = &commands.commands[0].command else {
-            panic!("expected Exercise")
-        };
-        assert_eq!(ex.choice, "VaultGovernanceRules_ConfirmAction");
-        assert_eq!(ex.contract_id, "00rules");
-        let record = extract_record(ex.choice_argument.as_ref().unwrap()).unwrap();
-        assert_eq!(record.fields[0].label, "confirmer");
-        assert_eq!(record.fields[1].label, "action");
-        // a self-only action errors instead of panicking:
-        let self_only = ActionType::GovernanceAddAdditionalProposer {
-            additional_proposer: cid("p"),
-        };
-        assert!(
-            build_confirm_vault_action(
-                &rules,
-                "00rules",
-                &cid("member"),
-                &cid("gov"),
-                &self_only,
-                "cmd-2".into(),
-            )
-            .is_err()
-        );
     }
 
     #[test]
@@ -518,7 +371,7 @@ mod tests {
         assert_eq!(solo.commands.len(), 1);
     }
 
-    /// One compact loop covering all thirteen builders: every output must
+    /// One compact loop covering all nine builders: every output must
     /// carry the same `act_as`/`read_as`/`command_id`, and its first
     /// command must exercise the choice the table names.
     #[test]
@@ -527,18 +380,8 @@ mod tests {
         let gov = cid("gov");
         let command_id = "cmd-x";
 
-        let vault_rules = TemplateId::new(
-            "#vault-governance-v1",
-            "BitsafeVault.VaultGovernance",
-            "VaultGovernanceRules",
-        );
         let core_rules =
             TemplateId::new("#governance-core-v1", "Governance.Rules", "GovernanceRules");
-        let vault_confirmation = TemplateId::new(
-            "#vault-governance-v1",
-            "BitsafeVault.VaultGovernance",
-            "VaultGovernanceConfirmation",
-        );
         let self_confirmation = TemplateId::new(
             "#governance-core-v1",
             "Governance.Rules",
@@ -558,18 +401,6 @@ mod tests {
         let no_confirmations: &[String] = &[];
 
         let cases: Vec<(&str, Commands)> = vec![
-            (
-                "VaultGovernanceRules_ConfirmAction",
-                build_confirm_vault_action(
-                    &vault_rules,
-                    "00rules",
-                    &member,
-                    &gov,
-                    &action,
-                    command_id.into(),
-                )
-                .unwrap(),
-            ),
             (
                 "GovernanceRules_ConfirmGovernanceAction",
                 build_confirm_self_action(
@@ -592,21 +423,6 @@ mod tests {
                     "00prop",
                     command_id.into(),
                 ),
-            ),
-            (
-                "VaultGovernanceRules_ExecuteConfirmedAction",
-                build_execute_vault_action(
-                    &vault_rules,
-                    "00rules",
-                    &member,
-                    &gov,
-                    &action,
-                    no_confirmations,
-                    None,
-                    vec![],
-                    command_id.into(),
-                )
-                .unwrap(),
             ),
             (
                 "GovernanceRules_ExecuteGovernanceAction",
@@ -636,17 +452,6 @@ mod tests {
                 ),
             ),
             (
-                "VaultGovernanceRules_ExpireConfirmation",
-                build_expire_vault_confirmation(
-                    &vault_rules,
-                    "00rules",
-                    &member,
-                    &gov,
-                    "00conf",
-                    command_id.into(),
-                ),
-            ),
-            (
                 "GovernanceRules_ExpireGovernanceSelfConfirmation",
                 build_expire_self_confirmation(
                     &core_rules,
@@ -665,16 +470,6 @@ mod tests {
                     &member,
                     &gov,
                     "00conf",
-                    command_id.into(),
-                ),
-            ),
-            (
-                "VaultGovernanceConfirmation_Cancel",
-                build_cancel_vault_confirmation(
-                    &vault_confirmation,
-                    "00conf",
-                    &member,
-                    &gov,
                     command_id.into(),
                 ),
             ),

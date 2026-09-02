@@ -25,7 +25,7 @@ function mockApi(): Plugin {
     'auth-config', 'auth', 'node-config', 'network-config', 'network-info',
     'healthz', 'participants-status', 'decentralized-parties', 'operator-info', 'keys',
     'packages', 'invitations', 'workflows', 'governance', 'holdings',
-    'instruments', 'party-config', 'services', 'vaults', 'contracts', 'dars',
+    'instruments', 'party-config', 'services', 'contracts', 'dars',
     'onboarding', 'kick', 'credential-offers', 'token-standard-contracts',
     'transfer-factories', 'transfer-preapprovals', 'coupon-reassignment-delegation',
   ])

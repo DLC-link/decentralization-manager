@@ -23,8 +23,6 @@ impl PackageResolver for PackageConfig {
             utility_credential,
             utility_credential_app,
             utility_registry,
-            vault,
-            vault_governance,
         } = self;
         match key {
             "governance_action" => governance_action.as_deref(),
@@ -36,8 +34,6 @@ impl PackageResolver for PackageConfig {
             "utility_credential" => utility_credential.as_deref(),
             "utility_credential_app" => utility_credential_app.as_deref(),
             "utility_registry" => utility_registry.as_deref(),
-            "vault" => vault.as_deref(),
-            "vault_governance" => vault_governance.as_deref(),
             _ => None,
         }
     }
@@ -83,7 +79,7 @@ mod tests {
 
     #[test]
     fn package_config_returns_none_for_a_none_field() {
-        assert_eq!(packages().package_ref("vault"), None);
+        assert_eq!(packages().package_ref("utility_registry"), None);
     }
 
     #[test]

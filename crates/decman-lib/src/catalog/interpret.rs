@@ -23,7 +23,7 @@ use crate::framework::record::{
     field_text, field_timestamp,
 };
 
-/// A parsed vault-governance or governance-core self-action confirmation.
+/// A parsed CBTC-governance or governance-core self-action confirmation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParsedConfirmation {
     pub contract_id: String,
@@ -49,7 +49,7 @@ pub struct ParsedDomainConfirmation {
     pub expires_at: i64,
 }
 
-/// State of a `VaultGovernanceRules` or `GovernanceRules` contract.
+/// State of a `GovernanceRules` contract.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RulesState {
     pub contract_id: String,
@@ -60,22 +60,22 @@ pub struct RulesState {
 }
 
 /// Parse a confirmation contract's action, confirming party, and timestamps
-/// off its created event. Tries the vault `ActionRequiringConfirmation`
+/// off its created event. Tries the CBTC `ActionRequiringConfirmation`
 /// shape first, then falls back to governance-core's `GovernanceSelfAction`
 /// shape. Returns `None` if the action field is absent/unrecognized, or the
 /// confirming party is missing/invalid.
 pub fn parse_confirmation(created: &CreatedEvent) -> Option<ParsedConfirmation> {
     let record = created.create_arguments.as_ref()?;
 
-    // Extract action field (this is a Variant for VaultGovernance)
+    // Extract action field (a Variant in both shapes)
     let action_value = record.fields.iter().find(|f| f.label == "action");
     let Some(action_field) = action_value.and_then(|f| f.value.as_ref()) else {
         tracing::warn!("No action field found in confirmation contract");
         return None;
     };
 
-    // Try to parse the action (vault ActionRequiringConfirmation or core GovernanceSelfAction)
-    let action = match ActionType::from_vault_proto(action_field) {
+    // Try to parse the action (ActionRequiringConfirmation or GovernanceSelfAction)
+    let action = match ActionType::from_cbtc_proto(action_field) {
         Ok(a) => a,
         Err(_) => match ActionType::from_self_proto(action_field) {
             Ok(a) => a,
@@ -200,16 +200,14 @@ pub fn parse_domain_confirmation(created: &CreatedEvent) -> Option<ParsedDomainC
     })
 }
 
-/// Extract governance rules state from a `VaultGovernanceRules` or
-/// `GovernanceRules` created event.
+/// Extract governance rules state from a `GovernanceRules` created event.
 pub fn extract_governance_state(created: &CreatedEvent) -> Option<RulesState> {
     let record = created.create_arguments.as_ref()?;
 
-    // Extract governance party (vaultManager for vault, governanceParty for core)
     let governance_party: CantonId = record
         .fields
         .iter()
-        .find(|f| f.label == "vaultManager" || f.label == "governanceParty")
+        .find(|f| f.label == "governanceParty")
         .and_then(|f| f.value.as_ref())
         .and_then(|v| match &v.sum {
             Some(value::Sum::Party(p)) => p.parse().ok(),
@@ -240,8 +238,8 @@ pub fn extract_governance_state(created: &CreatedEvent) -> Option<RulesState> {
         })
         .unwrap_or(0);
 
-    // Extract actionConfirmationTimeout
-    // VaultGovernanceRules: Optional RelTime; GovernanceRules: RelTime (non-optional)
+    // Extract actionConfirmationTimeout. Older rules contracts wrap it in an
+    // Optional; the current GovernanceRules declares it non-optional.
     let timeout_micros = record
         .fields
         .iter()
@@ -709,8 +707,21 @@ mod tests {
 
     use super::*;
     use crate::framework::encode::{
-        field, make_contract_id, make_int64, make_party, make_record, make_text,
+        field, make_contract_id, make_int64, make_party, make_record, make_text, make_variant,
     };
+
+    /// A `Governance_SetThreshold` action in the CBTC
+    /// `ActionRequiringConfirmation` shape. Hand-built because
+    /// `#cbtc-governance` owns the form and the lib has no encoder for it.
+    fn cbtc_set_threshold(new_threshold: i64) -> Value {
+        make_variant(
+            "GovernanceAction",
+            make_variant(
+                "Governance_SetThreshold",
+                make_record(vec![field("newThreshold", make_int64(new_threshold))]),
+            ),
+        )
+    }
 
     /// Valid-shape party ids (a 34-byte SHA-256 multihash namespace, hex
     /// encoded) so `CantonId::parse` succeeds.
@@ -786,10 +797,9 @@ mod tests {
     }
 
     #[test]
-    fn parses_a_vault_confirmation_with_its_action() {
-        let action = ActionType::GovernanceSetThreshold { new_threshold: 2 };
+    fn parses_a_cbtc_confirmation_with_its_action() {
         let record = record_of(vec![
-            field("action", action.to_vault_proto().expect("encodes")),
+            field("action", cbtc_set_threshold(2)),
             field("confirmingParty", make_party(ALICE)),
             field(
                 "expiresAt",
@@ -806,7 +816,7 @@ mod tests {
             parsed,
             ParsedConfirmation {
                 contract_id: "confirmation-1".to_string(),
-                action,
+                action: ActionType::GovernanceSetThreshold { new_threshold: 2 },
                 confirming_party: cid(ALICE),
                 created_at: 1_700_000_000,
                 expires_at: 2,
@@ -873,13 +883,9 @@ mod tests {
 
     #[test]
     fn missing_confirmer_skips_the_confirmation() {
-        let action = ActionType::GovernanceSetThreshold { new_threshold: 1 };
-        let vault_record = record_of(vec![field(
-            "action",
-            action.to_vault_proto().expect("encodes"),
-        )]);
-        let vault_created = created_event("confirmation-3", vault_record, 1_700_000_300);
-        assert_eq!(parse_confirmation(&vault_created), None);
+        let cbtc_record = record_of(vec![field("action", cbtc_set_threshold(1))]);
+        let cbtc_created = created_event("confirmation-3", cbtc_record, 1_700_000_300);
+        assert_eq!(parse_confirmation(&cbtc_created), None);
 
         let domain_record = record_of(vec![field(
             "actionProposalCid",
@@ -917,7 +923,7 @@ mod tests {
             },
         )]);
         let record = record_of(vec![
-            field("vaultManager", make_party(GOV)),
+            field("governanceParty", make_party(GOV)),
             field("members", wrapped_members),
             field("threshold", make_int64(2)),
             field(
@@ -964,14 +970,14 @@ mod tests {
 
     #[test]
     fn rules_state_reads_optional_and_bare_reltime() {
-        // Optional RelTime (Some) — VaultGovernanceRules shape.
+        // Optional RelTime (Some) — an older rules contract wraps it.
         let optional_timeout = Value {
             sum: Some(value::Sum::Optional(Box::new(Optional {
                 value: Some(Box::new(serialize_reltime_for_test(120_000_000))),
             }))),
         };
         let record = record_of(vec![
-            field("vaultManager", make_party(GOV)),
+            field("governanceParty", make_party(GOV)),
             field(
                 "members",
                 Value {
@@ -1008,7 +1014,7 @@ mod tests {
             sum: Some(value::Sum::Optional(Box::new(Optional { value: None }))),
         };
         let record3 = record_of(vec![
-            field("vaultManager", make_party(GOV)),
+            field("governanceParty", make_party(GOV)),
             field(
                 "members",
                 Value {
@@ -1530,8 +1536,8 @@ mod tests {
         // template names its own fields differently, still gets a card. No
         // allowlist of labels or templates may gate the pending path.
         let view = governable_action_interface_view(vec![
-            field("actionLabel", make_text("VaultPause")),
-            field("description", make_text("pause the vault")),
+            field("actionLabel", make_text("PauseTrading")),
+            field("description", make_text("pause trading")),
             field("proposer", make_party(ALICE)),
             field("governanceParty", make_party(GOV)),
         ]);
@@ -1543,7 +1549,7 @@ mod tests {
         let actions = assemble_domain_actions(HashMap::new(), infos, true, true, 2, 0);
 
         assert_eq!(actions.len(), 1);
-        assert_eq!(actions[0].action_label, "VaultPause");
+        assert_eq!(actions[0].action_label, "PauseTrading");
         assert_eq!(actions[0].confirmation_count, 0);
     }
 

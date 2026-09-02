@@ -36,7 +36,7 @@ pub use common::api::{
     RegistrarServicesResponse, ResponseSource, RightsStatus, SuccessResponse, TenantOnboardRequest,
     TenantOnboardResponse, TenantPrepareRequest, TenantPrepareResponse, TransferFactoriesResponse,
     TransferFactoryInfo, TransferPreapprovalsResponse, UserServiceInfo, UserServicesResponse,
-    VaultInfo, VaultsResponse, WorkflowResponse, WorkflowRunsResponse, WorkflowStatusResponse,
+    WorkflowResponse, WorkflowRunsResponse, WorkflowStatusResponse,
 };
 pub use common::types::{
     AuditLogEntry, AuthConfigResponse, ConnectionStatus, ContractInfo, DecentralizedParty,
@@ -45,8 +45,8 @@ pub use common::types::{
     Permission, VettedPackageInfo, WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun,
 };
 pub use decman_lib::catalog::types::{
-    AcceptTransferDetails, AppRewardBeneficiary, BillingParams, FarConfig, ServiceRequestDetails,
-    TransferProposalDetails, VaultLimits,
+    AcceptTransferDetails, AppRewardBeneficiary, BillingParams, ServiceRequestDetails,
+    TransferProposalDetails,
 };
 
 use crate::{canton_id::CantonId, noise::server::ActiveWorkflow};
@@ -649,7 +649,7 @@ pub struct GovernanceConfirmation {
 
 /// A single confirmation of a domain-action proposal (governance-core
 /// `Governance.Confirmation`). Unlike [`GovernanceConfirmation`] (which
-/// backs vault / core-self-management confirmations, each carrying its own
+/// backs core-self-management confirmations, each carrying its own
 /// real inline `action`), the on-chain `Confirmation` contract carries no
 /// action at all — only `actionProposalCid` and `actionLabel`, surfaced at
 /// the parent [`DomainGovernanceAction`] level. There is no meaningful
@@ -700,8 +700,8 @@ pub struct GovernanceResponse {
     /// The member party ID for the requesting party (used to identify own confirmations)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub member_party_id: Option<CantonId>,
-    /// Current contract id of the active GovernanceRules / VaultGovernanceRules
-    /// contract for this party. The choice exercised when confirming an action
+    /// Current contract id of the active GovernanceRules contract for this
+    /// party. The choice exercised when confirming an action
     /// is consuming, so this id changes after each confirm/execute — clients
     /// should use this field rather than a cached value to avoid
     /// `CONTRACT_NOT_FOUND` on stale ids.
@@ -860,6 +860,22 @@ fn default_audit_limit() -> i64 {
 // Chain Audit Trail Types
 // ============================================================================
 
+/// Which ledger events a chain-audit read returns.
+///
+/// `Governance` filters Canton-side to the governance packages and keeps only
+/// proposals, confirmations, executions and their outcomes. `All` drops both
+/// filters and returns every event the party witnesses, so a party whose
+/// activity lives in its own application packages — an app or oracle party
+/// that never deploys governance contracts — is not reported as having done
+/// nothing.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum AuditScope {
+    #[default]
+    Governance,
+    All,
+}
+
 /// Query parameters for the on-chain governance audit endpoint
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
 pub struct ChainAuditQuery {
@@ -876,6 +892,9 @@ pub struct ChainAuditQuery {
     /// When true, fetches fresh data from Canton and updates cache
     #[serde(default)]
     pub refresh: bool,
+    /// Which events to return: `governance` (default) or `all`.
+    #[serde(default)]
+    pub scope: AuditScope,
 }
 
 fn default_chain_audit_limit() -> usize {
@@ -1208,17 +1227,17 @@ mod tests {
     /// governance-core `Confirmation` contracts) has no real inline action —
     /// only the parent `DomainGovernanceAction.action_label` describes it —
     /// so it must never serialize an `"action"` key at all, placeholder or
-    /// otherwise. The sibling vault/self-management confirmation
+    /// otherwise. The sibling self-management confirmation
     /// (`GovernanceConfirmation`) genuinely does carry its own action and
     /// must keep serializing the real one.
     #[test]
-    fn domain_confirmation_omits_action_vault_confirmation_keeps_it() -> anyhow::Result<()> {
+    fn domain_confirmation_omits_action_self_confirmation_keeps_it() -> anyhow::Result<()> {
         let response = GovernanceResponse {
             actions: vec![GovernanceAction {
                 action_hash: "hash".to_owned(),
                 action: ActionType::GovernanceSetThreshold { new_threshold: 7 },
                 confirmations: vec![GovernanceConfirmation {
-                    contract_id: "vault-conf".to_owned(),
+                    contract_id: "self-conf".to_owned(),
                     action: ActionType::GovernanceSetThreshold { new_threshold: 7 },
                     confirming_party: test_party("m1")?,
                     created_at: 0,
@@ -1264,12 +1283,12 @@ mod tests {
         // Sanity: not just an empty object — the fields we do expect are there.
         assert_eq!(domain_confirmation["contract_id"], "domain-conf");
 
-        let vault_confirmation = &value["actions"][0]["confirmations"][0];
+        let self_confirmation = &value["actions"][0]["confirmations"][0];
         assert_eq!(
-            vault_confirmation["action"]["type"], "governance_set_threshold",
-            "vault confirmation must keep its real action: {vault_confirmation}"
+            self_confirmation["action"]["type"], "governance_set_threshold",
+            "self-management confirmation must keep its real action: {self_confirmation}"
         );
-        assert_eq!(vault_confirmation["action"]["new_threshold"], 7);
+        assert_eq!(self_confirmation["action"]["new_threshold"], 7);
 
         Ok(())
     }

@@ -100,17 +100,17 @@
         },
         {
           "contract_id": "007f2d56493eb158c4d1241276c52a14bf4a062ce157757d4b899267cdcfaa149d",
-          "template_id": "BitsafeVault.VaultProcessorRules:VaultProcessorRules",
+          "template_id": "CBTC.Governance:Confirmation",
           "package_id": "2afead2e572f4aa5fbeeba7807826720e1038b568aca06dc4eed93f4454132f2",
-          "package_name": "vault-processor",
+          "package_name": "governance-rewards-automation",
           "package_version": "0.0.8",
           "created_at": "2026-05-01T10:00:00Z"
         },
         {
           "contract_id": "00b3101a1f387b410a285c1a7dd5bfbec1afb0eb23c55b2e404ee8512809792586",
-          "template_id": "BitsafeVault.VaultRules:VaultRules",
+          "template_id": "CBTC.Governance:CBTCGovernanceRules",
           "package_id": "ebe0111794a5dc36fb73e08194e94520453fee73e1d13db5d42a045e1482b27a",
-          "package_name": "bitsafe-vault",
+          "package_name": "cbtc-governance",
           "package_version": "0.0.8",
           "created_at": "2026-05-01T10:00:00Z"
         }
@@ -120,7 +120,7 @@
       }
     },
     {
-      "party_id": "vault-rc7-2::1220fb3be8c3236d9258e9e1f25fc5d1a924cd368f7346a7a7ff4a82dd3eba54",
+      "party_id": "treasury-rc7-2::1220fb3be8c3236d9258e9e1f25fc5d1a924cd368f7346a7a7ff4a82dd3eba54",
       "threshold": 1,
       "owners": [
         "02ecc57a74bf7229aaf620b544d7fb6f5b199b20b2581752bece576a50adeea867",
@@ -165,9 +165,9 @@
         },
         {
           "contract_id": "005be4d1ea764f0991d8315d87e06dcb5c6e18350cf7c7ba32ddf62caa783edf64",
-          "template_id": "BitsafeVault.VaultRules:VaultRules",
+          "template_id": "CBTC.Governance:CBTCGovernanceRules",
           "package_id": "ebe0111794a5dc36fb73e08194e94520453fee73e1d13db5d42a045e1482b27a",
-          "package_name": "bitsafe-vault",
+          "package_name": "cbtc-governance",
           "package_version": "0.0.8",
           "created_at": "2026-05-01T10:00:00Z"
         },
@@ -314,7 +314,7 @@
       }
     },
     {
-      "party_id": "vault-yield-btc::1220425311ae37972f78e3781dcd68f64665f39e3b55688ffc060f062f0d2670",
+      "party_id": "yield-btc::1220425311ae37972f78e3781dcd68f64665f39e3b55688ffc060f062f0d2670",
       "threshold": 4,
       "owners": [
         "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e",
@@ -497,9 +497,9 @@
       "contracts": [
         {
           "contract_id": "006d0c62267137178e734b97756b2579c3e3ebb5ff792bdc307bf1a3ce56b72057",
-          "template_id": "BitsafeVault.VaultProcessorRules:VaultProcessorRules",
+          "template_id": "CBTC.Governance:Confirmation",
           "package_id": "2afead2e572f4aa5fbeeba7807826720e1038b568aca06dc4eed93f4454132f2",
-          "package_name": "vault-processor",
+          "package_name": "governance-rewards-automation",
           "package_version": "0.0.8",
           "created_at": "2026-05-01T10:00:00Z"
         },
@@ -604,7 +604,7 @@
       }
     },
     {
-      "party_id": "vault-delta-neutral::12206165f48ca9fac0fe2cfe6754855fe83331c3758a0eb58dfae2a1ea754061",
+      "party_id": "delta-neutral::12206165f48ca9fac0fe2cfe6754855fe83331c3758a0eb58dfae2a1ea754061",
       "threshold": 2,
       "owners": [
         "02d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44eef8",
@@ -665,9 +665,9 @@
         },
         {
           "contract_id": "0056fcff8068b574594922cf0be91b6971a3d9f8db0fe2691269dbbf1cb5c84e63",
-          "template_id": "BitsafeVault.VaultProcessorRules:VaultProcessorRules",
+          "template_id": "CBTC.Governance:Confirmation",
           "package_id": "2afead2e572f4aa5fbeeba7807826720e1038b568aca06dc4eed93f4454132f2",
-          "package_name": "vault-processor",
+          "package_name": "governance-rewards-automation",
           "package_version": "0.0.8",
           "created_at": "2026-05-01T10:00:00Z"
         }
@@ -755,25 +755,25 @@
       "contracts": [
         {
           "contract_id": "0047176e2153b930350321c59dc029f5945cfc0f4a72d09bd5d9bf52a629274c97",
-          "template_id": "BitsafeVault.VaultRules:VaultRules",
+          "template_id": "CBTC.Governance:CBTCGovernanceRules",
           "package_id": "ebe0111794a5dc36fb73e08194e94520453fee73e1d13db5d42a045e1482b27a",
-          "package_name": "bitsafe-vault",
+          "package_name": "cbtc-governance",
           "package_version": "0.0.8",
           "created_at": "2026-05-01T10:00:00Z"
         },
         {
           "contract_id": "00aca6dc70da78aae1539bce0f737061813006e482fd8b541198ae26dd9a9b920a",
-          "template_id": "BitsafeVault.VaultRules:VaultRules",
+          "template_id": "CBTC.Governance:CBTCGovernanceRules",
           "package_id": "ebe0111794a5dc36fb73e08194e94520453fee73e1d13db5d42a045e1482b27a",
-          "package_name": "bitsafe-vault",
+          "package_name": "cbtc-governance",
           "package_version": "0.0.8",
           "created_at": "2026-05-01T10:00:00Z"
         },
         {
           "contract_id": "00208a6716625f983bcd6a3a71a68fc87adab5b26737408d1cbed7e27ebc24ba37",
-          "template_id": "BitsafeVault.VaultProcessorRules:VaultProcessorRules",
+          "template_id": "CBTC.Governance:Confirmation",
           "package_id": "2afead2e572f4aa5fbeeba7807826720e1038b568aca06dc4eed93f4454132f2",
-          "package_name": "vault-processor",
+          "package_name": "governance-rewards-automation",
           "package_version": "0.0.8",
           "created_at": "2026-05-01T10:00:00Z"
         }
@@ -832,9 +832,9 @@
       "contracts": [
         {
           "contract_id": "00c09c7fb26ddfada442c212f6aeb144ae6c8123dd4a290d85b92a26ffcbb63619",
-          "template_id": "BitsafeVault.VaultProcessorRules:VaultProcessorRules",
+          "template_id": "CBTC.Governance:Confirmation",
           "package_id": "2afead2e572f4aa5fbeeba7807826720e1038b568aca06dc4eed93f4454132f2",
-          "package_name": "vault-processor",
+          "package_name": "governance-rewards-automation",
           "package_version": "0.0.8",
           "created_at": "2026-05-01T10:00:00Z"
         },
@@ -848,17 +848,17 @@
         },
         {
           "contract_id": "001cca7eb5f687f74a2e435b16683dd72fc67fc687506560f14ee7a45732b85385",
-          "template_id": "BitsafeVault.VaultRules:VaultRules",
+          "template_id": "CBTC.Governance:CBTCGovernanceRules",
           "package_id": "ebe0111794a5dc36fb73e08194e94520453fee73e1d13db5d42a045e1482b27a",
-          "package_name": "bitsafe-vault",
+          "package_name": "cbtc-governance",
           "package_version": "0.0.8",
           "created_at": "2026-05-01T10:00:00Z"
         },
         {
           "contract_id": "0066a505c6f2f4f5387581e5f67b7aa267973436ed28d308cbcbb9871717d9606a",
-          "template_id": "BitsafeVault.VaultRules:VaultRules",
+          "template_id": "CBTC.Governance:CBTCGovernanceRules",
           "package_id": "ebe0111794a5dc36fb73e08194e94520453fee73e1d13db5d42a045e1482b27a",
-          "package_name": "bitsafe-vault",
+          "package_name": "cbtc-governance",
           "package_version": "0.0.8",
           "created_at": "2026-05-01T10:00:00Z"
         }
@@ -868,7 +868,7 @@
       }
     },
     {
-      "party_id": "vault-processor::1220e633010b74266d40fe1634138fb0d9606288031626750fdf5978f5fffc85",
+      "party_id": "settlement-processor::1220e633010b74266d40fe1634138fb0d9606288031626750fdf5978f5fffc85",
       "threshold": 1,
       "owners": [
         "02ecc57a74bf7229aaf620b544d7fb6f5b199b20b2581752bece576a50adeea867",
@@ -987,9 +987,9 @@
         },
         {
           "contract_id": "001dc73de1878e40d62b60619eebc248494c8445a7b517090febd051c9a2f55100",
-          "template_id": "BitsafeVault.VaultRules:VaultRules",
+          "template_id": "CBTC.Governance:CBTCGovernanceRules",
           "package_id": "ebe0111794a5dc36fb73e08194e94520453fee73e1d13db5d42a045e1482b27a",
-          "package_name": "bitsafe-vault",
+          "package_name": "cbtc-governance",
           "package_version": "0.0.8",
           "created_at": "2026-05-01T10:00:00Z"
         }

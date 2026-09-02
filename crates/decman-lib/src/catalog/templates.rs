@@ -1,25 +1,12 @@
 //! Accessors for the fixed (non-payload-specific) governance template and
-//! interface ids: the vault/core rules contracts, the confirmation
-//! contracts, and the `GovernableAction` interface. Each payload's own
+//! interface ids: the governance rules contract, the confirmation contracts,
+//! and the `GovernableAction` interface. Each payload's own
 //! template id lives on its `TemplateInfo` impl instead (see
 //! `catalog::proposals`) — this module covers only the ids decman needs
 //! independent of any specific proposal payload.
 
 use crate::error::Error;
 use crate::framework::{PackageResolver, TemplateId};
-
-/// The `VaultGovernanceRules` template — the vault's governance-state
-/// contract.
-pub fn vault_rules_template(pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-    let pkg = pkgs
-        .package_ref("vault_governance")
-        .ok_or(Error::PackageNotConfigured("vault_governance"))?;
-    Ok(TemplateId::new(
-        pkg,
-        "BitsafeVault.VaultGovernance",
-        "VaultGovernanceRules",
-    ))
-}
 
 /// The `GovernanceRules` template — governance-core's governance-state
 /// contract.
@@ -30,20 +17,8 @@ pub fn governance_rules_template(pkgs: &dyn PackageResolver) -> Result<TemplateI
     Ok(TemplateId::new(pkg, "Governance.Rules", "GovernanceRules"))
 }
 
-/// The `VaultGovernanceConfirmation` template.
-pub fn vault_confirmation_template(pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-    let pkg = pkgs
-        .package_ref("vault_governance")
-        .ok_or(Error::PackageNotConfigured("vault_governance"))?;
-    Ok(TemplateId::new(
-        pkg,
-        "BitsafeVault.VaultGovernance",
-        "VaultGovernanceConfirmation",
-    ))
-}
-
 /// The `GovernanceSelfConfirmation` template — governance-core's
-/// vault-style self-management confirmations.
+/// self-management confirmations, each carrying its own inline action.
 pub fn self_confirmation_template(pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
     let pkg = pkgs
         .package_ref("governance_core")
@@ -88,13 +63,6 @@ pub fn governable_action_interface(pkgs: &dyn PackageResolver) -> Result<Templat
 /// ref.
 pub fn governance_templates(packages: &dyn PackageResolver) -> Vec<TemplateId> {
     let mut templates = Vec::new();
-    if let Some(pkg) = packages.package_ref("vault_governance") {
-        templates.push(TemplateId::new(
-            pkg,
-            "BitsafeVault.VaultGovernance",
-            "VaultGovernanceConfirmation",
-        ));
-    }
     templates.push(TemplateId::new(
         "#cbtc-governance",
         "CBTC.Governance",
@@ -115,16 +83,9 @@ pub fn governance_templates(packages: &dyn PackageResolver) -> Vec<TemplateId> {
     templates
 }
 
-/// Governance state template identifiers (tries both vault and core).
+/// Governance state template identifiers.
 pub fn governance_state_templates(packages: &dyn PackageResolver) -> Vec<TemplateId> {
     let mut templates = Vec::new();
-    if let Some(pkg) = packages.package_ref("vault_governance") {
-        templates.push(TemplateId::new(
-            pkg,
-            "BitsafeVault.VaultGovernance",
-            "VaultGovernanceRules",
-        ));
-    }
     if let Some(pkg) = packages.package_ref("governance_core") {
         templates.push(TemplateId::new(pkg, "Governance.Rules", "GovernanceRules"));
     }
@@ -190,8 +151,6 @@ mod tests {
             utility_credential: Some("#utility-credential-v0".to_string()),
             utility_credential_app: Some("#utility-credential-app-v0".to_string()),
             utility_registry: Some("#utility-registry-app-v0".to_string()),
-            vault: Some("#bitsafe-vault-v0-rc8".to_string()),
-            vault_governance: Some("#bitsafe-vault-governance-v0-rc8".to_string()),
         }
     }
 
@@ -202,14 +161,6 @@ mod tests {
             (
                 governance_rules_template(&pkgs).unwrap(),
                 "#governance-core-v1:Governance.Rules:GovernanceRules",
-            ),
-            (
-                vault_rules_template(&pkgs).unwrap(),
-                "#bitsafe-vault-governance-v0-rc8:BitsafeVault.VaultGovernance:VaultGovernanceRules",
-            ),
-            (
-                vault_confirmation_template(&pkgs).unwrap(),
-                "#bitsafe-vault-governance-v0-rc8:BitsafeVault.VaultGovernance:VaultGovernanceConfirmation",
             ),
             (
                 self_confirmation_template(&pkgs).unwrap(),

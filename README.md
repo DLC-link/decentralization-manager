@@ -20,7 +20,7 @@ A web application for managing decentralized parties in Canton blockchain networ
 - [User Guide](USER_GUIDE.md) -- Walkthrough of the web UI for day-to-day party and governance operations
 - [Custom Daml Templates](docs/CUSTOM_DAML_TEMPLATES.md) -- Authoring and deploying your own Daml governance templates
 - [Deployment Guide](docs/DEPLOYMENT_GUIDE.md) -- Deploying a node to Kubernetes from scratch: manifests, identity-provider setup, and configuration reference
-- [Use Cases](docs/USE_CASES.md) -- Vault governance, FAR rewards, multi-sig wallet, and utility service walkthroughs
+- [Use Cases](docs/USE_CASES.md) -- Joint custody governance, FAR rewards, multi-sig wallet, and utility service walkthroughs
 - [Contributing Guide](docs/CONTRIBUTING.md) -- Development setup, coding standards, commit conventions, and the PR process
 
 ## Architecture
@@ -95,7 +95,7 @@ Open http://localhost:8081 in your browser.
 ```bash
 # Build the image (forward an SSH key registered on a GitHub account;
 # replace the key path with your own)
-docker build --ssh default=$HOME/.ssh/id_ed25519 -t dec-party-manager .
+docker build --ssh default=$HOME/.ssh/id_ed25519 -f development/Dockerfile -t dec-party-manager .
 
 # Run a single instance
 docker run -p 8080:8080 -v ./data:/data \
@@ -107,6 +107,19 @@ docker run -p 8080:8080 -v ./data:/data \
   -e DECPM_CANTON_SYNCHRONIZER=global \
   -e DECPM_CANTON_NETWORK=devnet \
   dec-party-manager
+```
+
+Published releases ship that same binary as two images, `…:<tag>` and
+`…:<tag>-nonroot`; the second runs as uid 65532 and defaults `DECPM_DIR` to
+`/home/nonroot`, so its mount goes at `/home/nonroot/data` and the host
+directory has to belong to that uid. The `chown` is recursive because a `./data`
+left behind by the root image holds root-owned files — the SQLite database and
+the mode-0600 Noise key — that uid 65532 could otherwise not open:
+
+```bash
+mkdir -p ./data && sudo chown -R 65532:65532 ./data
+docker run -p 8080:8080 -v ./data:/home/nonroot/data \
+  ... public.ecr.aws/dlc-link/decentralization-manager:<tag>-nonroot
 ```
 
 ### Running Multiple Participants (Development)
@@ -433,12 +446,11 @@ The table below is a curated subset. A complete, interactive API reference is av
 | `/auth/status` | GET | Returns authentication status for configured parties |
 | `/auth/test` | POST | Tests outbound IdP authentication (Keycloak or Auth0, per party) |
 | `/governance/confirmations` | GET | Returns governance confirmations grouped by action |
-| `/governance/state` | GET | Returns governance state (VaultGovernanceRules) |
+| `/governance/state` | GET | Returns governance state (GovernanceRules) |
 | `/governance/confirm` | POST | Submits a governance confirmation |
 | `/governance/execute` | POST | Executes a confirmed governance action |
 | `/governance/expire` | POST | Expires a stale governance confirmation |
 | `/governance/cancel` | POST | Cancels a governance confirmation |
-| `/vaults` | GET | Returns deployed Vault contracts |
 | `/services/provider` | GET | Returns ProviderService contracts |
 | `/services/user` | GET | Returns UserService contracts |
 | `/services/registrar` | GET | Returns RegistrarService contracts |
@@ -786,8 +798,13 @@ TypeScript imports won't resolve.
 
 Release images are built and published by CI: pushing a `v<version>` tag (which
 must match the crate version in `crates/decman/Cargo.toml`) runs the release
-workflow, which builds the binary and pushes
-`public.ecr.aws/dlc-link/decentralization-manager:v<version>`. The root
+workflow, which builds the binary and pushes two images:
+`public.ecr.aws/dlc-link/decentralization-manager:v<version>` and
+`…:v<version>-nonroot`. They hold the same binary and differ only in runtime
+identity — uid 0 versus uid 65532, with `DECPM_DIR` defaulting to `/` and
+`/home/nonroot` respectively. One `Dockerfile` builds both; the nonroot job
+overrides `BASE_TAG`, `RUNTIME_UID` and `DECPM_DIR_DEFAULT`. See the
+[Deployment Guide](docs/DEPLOYMENT_GUIDE.md) for which to pick. The root
 `Dockerfile` is that workflow's runtime wrapper — it copies in the CI-built
 binary and does no compilation, so it is not useful for a local build.
 

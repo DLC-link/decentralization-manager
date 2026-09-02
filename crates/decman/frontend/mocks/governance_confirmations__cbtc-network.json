@@ -36,7 +36,7 @@
             "type": "governance_set_threshold",
             "new_threshold": 4
           },
-          "confirming_party": "vault-rc7-2::1220fb3be8c3236d9258e9e1f25fc5d1a924cd368f7346a7a7ff4a82dd3eba54",
+          "confirming_party": "treasury-rc7-2::1220fb3be8c3236d9258e9e1f25fc5d1a924cd368f7346a7a7ff4a82dd3eba54",
           "created_at": 1782124323,
           "expires_at": 1782214323
         }
@@ -107,15 +107,19 @@
     {
       "action_hash": "f46dd28a5499d8efef0b8fb8ee1ec1c5a5e407c9381741d576ba8deb4f59ec3f",
       "action": {
-        "type": "vault_pause",
-        "vault_id": "001353c2d31f0b619539c4f4056098f1ea30f4022e2ba5066f6be851c5ae6d5c0a"
+        "type": "utility_setup",
+        "operator": "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78",
+        "provider_service_cid": "001353c2d31f0b619539c4f4056098f1ea30f4022e2ba5066f6be851c5ae6d5c0a",
+        "user_service_cid": "00b6d1b4e34cf3f6f2ba8c6f3f00d4a35c1b2ee9f3d0aa2b1f0c9e7d6c5b4a39f8"
       },
       "confirmations": [
         {
           "contract_id": "00882ba1a000cb357e7977040c4ca3b3bec73ef6f06fd4b88dda23994a0daaa6b1",
           "action": {
-            "type": "vault_pause",
-            "vault_id": "001353c2d31f0b619539c4f4056098f1ea30f4022e2ba5066f6be851c5ae6d5c0a"
+            "type": "utility_setup",
+            "operator": "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78",
+            "provider_service_cid": "001353c2d31f0b619539c4f4056098f1ea30f4022e2ba5066f6be851c5ae6d5c0a",
+            "user_service_cid": "00b6d1b4e34cf3f6f2ba8c6f3f00d4a35c1b2ee9f3d0aa2b1f0c9e7d6c5b4a39f8"
           },
           "confirming_party": "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78",
           "created_at": 1782124323,
@@ -124,8 +128,10 @@
         {
           "contract_id": "0071e1e5a4560888eba564ca526aaa0034b3dd968c639646f2debafc697aa8d62f",
           "action": {
-            "type": "vault_pause",
-            "vault_id": "001353c2d31f0b619539c4f4056098f1ea30f4022e2ba5066f6be851c5ae6d5c0a"
+            "type": "utility_setup",
+            "operator": "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78",
+            "provider_service_cid": "001353c2d31f0b619539c4f4056098f1ea30f4022e2ba5066f6be851c5ae6d5c0a",
+            "user_service_cid": "00b6d1b4e34cf3f6f2ba8c6f3f00d4a35c1b2ee9f3d0aa2b1f0c9e7d6c5b4a39f8"
           },
           "confirming_party": "ibtc-admin::12209688b4410a59414d40a2a541644d22ac9e85a7f9438545749f65965a495f",
           "created_at": 1782124323,
@@ -134,18 +140,22 @@
         {
           "contract_id": "002b2a2ba5b61a6891ff7f6ee0611e8decd644aaaa08cb7c49c604711779b4de00",
           "action": {
-            "type": "vault_pause",
-            "vault_id": "001353c2d31f0b619539c4f4056098f1ea30f4022e2ba5066f6be851c5ae6d5c0a"
+            "type": "utility_setup",
+            "operator": "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78",
+            "provider_service_cid": "001353c2d31f0b619539c4f4056098f1ea30f4022e2ba5066f6be851c5ae6d5c0a",
+            "user_service_cid": "00b6d1b4e34cf3f6f2ba8c6f3f00d4a35c1b2ee9f3d0aa2b1f0c9e7d6c5b4a39f8"
           },
-          "confirming_party": "vault-rc7-2::1220fb3be8c3236d9258e9e1f25fc5d1a924cd368f7346a7a7ff4a82dd3eba54",
+          "confirming_party": "treasury-rc7-2::1220fb3be8c3236d9258e9e1f25fc5d1a924cd368f7346a7a7ff4a82dd3eba54",
           "created_at": 1782124323,
           "expires_at": 1782214323
         },
         {
           "contract_id": "003a94f6489e0beaa0fb5ec12e55e6f950c654a53ed33787a068b9e7d1a5133b92",
           "action": {
-            "type": "vault_pause",
-            "vault_id": "001353c2d31f0b619539c4f4056098f1ea30f4022e2ba5066f6be851c5ae6d5c0a"
+            "type": "utility_setup",
+            "operator": "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78",
+            "provider_service_cid": "001353c2d31f0b619539c4f4056098f1ea30f4022e2ba5066f6be851c5ae6d5c0a",
+            "user_service_cid": "00b6d1b4e34cf3f6f2ba8c6f3f00d4a35c1b2ee9f3d0aa2b1f0c9e7d6c5b4a39f8"
           },
           "confirming_party": "cbtc-attestor-pool::122070884b3eb2e563698a1e51f29ea9cec1d6b9d25272be0efd76cc715b769a",
           "created_at": 1782124323,

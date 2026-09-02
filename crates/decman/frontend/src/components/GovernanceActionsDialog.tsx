@@ -17,7 +17,7 @@ interface GovernanceActionsDialogProps {
   rulesContractId: string;
   defaultOperatorParty?: string;
   network?: Network;
-  governanceType: "vault" | "core_self" | "core_domain";
+  governanceType: "core_self" | "core_domain";
   onAfterAction?: () => void;
   /**
    * Which half of GovernanceSection to render:

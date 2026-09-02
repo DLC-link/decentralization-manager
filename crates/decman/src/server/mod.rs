@@ -84,10 +84,10 @@ pub(crate) use types::*;
 pub use types::{
     AcceptTransferDetails, ActionType, AppRewardBeneficiary, BillingParams, BurnRequestsResponse,
     ConfirmActionRequest, DomainConfirmation, DomainGovernanceAction, ExecuteActionRequest,
-    FarConfig, GovernanceAction, GovernanceConfirmation, GovernanceResponse, HoldingInfo,
-    HoldingsResponse, MintRequestsResponse, PendingAction, ProposalType, ProposeActionRequest,
-    ServiceRequestDetails, TokenRequestInfo, TransferInstructionInfo, TransferInstructionStatus,
-    TransferInstructionsResponse, TransferProposalDetails, VaultLimits,
+    GovernanceAction, GovernanceConfirmation, GovernanceResponse, HoldingInfo, HoldingsResponse,
+    MintRequestsResponse, PendingAction, ProposalType, ProposeActionRequest, ServiceRequestDetails,
+    TokenRequestInfo, TransferInstructionInfo, TransferInstructionStatus,
+    TransferInstructionsResponse, TransferProposalDetails,
 };
 
 /// TTL for cached chunked ListPackages payloads (per peer).
@@ -1281,7 +1281,6 @@ pub async fn start_server(
             .service(handlers::get_governance)
             .service(handlers::get_governance_state)
             .service(handlers::get_known_members)
-            .service(handlers::get_vaults_handler)
             .service(handlers::get_provider_services_handler)
             .service(handlers::get_user_services_handler)
             .service(handlers::get_credential_offers_handler)

@@ -39,6 +39,12 @@ function Auth0Bootstrap({ children }: { children: ReactNode }) {
           ...(config.auth0_audience
             ? { audience: config.auth0_audience }
             : {}),
+          // auth0-spa-js shallow-merges authorizationParams over its own
+          // defaults, so a supplied `scope` replaces "openid profile email"
+          // outright. Re-state the default so extra scopes are additive.
+          ...(config.auth0_scope
+            ? { scope: `openid profile email ${config.auth0_scope}` }
+            : {}),
         }}
       >
         {children}

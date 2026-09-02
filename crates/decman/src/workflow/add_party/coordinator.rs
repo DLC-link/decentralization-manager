@@ -12,6 +12,7 @@ use crate::{
     utils,
     workflow::{
         kick::coordinator::split_signed_kick_pair,
+        party_replication::{collect_party_package_ids, export_party_acs, wait_for_flag_cleared},
         state::WorkflowState,
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
     },
@@ -19,10 +20,7 @@ use crate::{
 
 use super::{
     AddPartyConfig, AddPartyStep, resolve_ledger_token,
-    steps::{
-        clear_onboarding::wait_for_flag_cleared, collect_party_package_ids, create_proposals,
-        export_party_acs, export_state, submit_clear_proposal, submit_proposals,
-    },
+    steps::{create_proposals, export_state, submit_clear_proposal, submit_proposals},
 };
 
 pub async fn start_coordinator(
@@ -154,8 +152,12 @@ async fn run_workflow(
                 // The topology is live; export the party's ACS for the new
                 // member and ship it with the ImportAcs command. Empty when
                 // the party has no active contracts — the new member skips.
-                let snapshot =
-                    export_party_acs(&node_config, &db, &instance_name, &add_party_config).await?;
+                let snapshot = export_party_acs(
+                    &node_config,
+                    &db,
+                    &add_party_config.replication_target(&instance_name),
+                )
+                .await?;
                 // Package ids the new member must have to validate the imported
                 // ACS — its import preflight fails fast (before disconnecting) if
                 // any are missing, instead of the import dying mid-window. Skip the

@@ -144,8 +144,6 @@ mod tests {
             utility_credential: None,
             utility_credential_app: None,
             utility_registry: None,
-            vault: None,
-            vault_governance: None,
         }
     }
 

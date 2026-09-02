@@ -33,7 +33,7 @@
       }
     },
     {
-      "dec_party_id": "vault-rc7-2::1220fb3be8c3236d9258e9e1f25fc5d1a924cd368f7346a7a7ff4a82dd3eba54",
+      "dec_party_id": "treasury-rc7-2::1220fb3be8c3236d9258e9e1f25fc5d1a924cd368f7346a7a7ff4a82dd3eba54",
       "member_party_id": "ibtc-member-fra1::1220ba3790e06fa4524e56d2f223576013c73a660055439f9046b17c621c6c1d",
       "user_id": "svc-decman@ibtc",
       "keycloak_url": "https://keycloak.dev.canton.ibtc.network/auth",
@@ -86,7 +86,7 @@
       }
     },
     {
-      "dec_party_id": "vault-yield-btc::1220425311ae37972f78e3781dcd68f64665f39e3b55688ffc060f062f0d2670",
+      "dec_party_id": "yield-btc::1220425311ae37972f78e3781dcd68f64665f39e3b55688ffc060f062f0d2670",
       "member_party_id": "ibtc-member-fra1::1220ba3790e06fa4524e56d2f223576013c73a660055439f9046b17c621c6c1d",
       "user_id": "svc-decman@ibtc",
       "keycloak_url": "https://keycloak.dev.canton.ibtc.network/auth",

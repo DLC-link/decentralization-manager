@@ -27,19 +27,15 @@ pub enum GovernanceLifecycleEvent {
 pub fn classify_choice(choice: &str) -> Option<GovernanceLifecycleEvent> {
     use GovernanceLifecycleEvent::*;
     Some(match choice {
-        "GovernanceRules_ConfirmAction"
-        | "GovernanceRules_ConfirmGovernanceAction"
-        | "VaultGovernanceRules_ConfirmAction" => Confirmed,
+        "GovernanceRules_ConfirmAction" | "GovernanceRules_ConfirmGovernanceAction" => Confirmed,
         "GovernanceRules_ExecuteConfirmedAction"
         | "GovernanceRules_ExecuteGovernanceAction"
-        | "VaultGovernanceRules_ExecuteConfirmedAction"
         | "GovernableAction_Execute" => Executed,
         "GovernanceRules_ExpireConfirmation"
-        | "GovernanceRules_ExpireGovernanceSelfConfirmation"
-        | "VaultGovernanceRules_ExpireConfirmation" => Expired,
-        "GovernanceConfirmation_Cancel"
-        | "GovernanceSelfConfirmation_Cancel"
-        | "VaultGovernanceConfirmation_Cancel" => ConfirmationCancelled,
+        | "GovernanceRules_ExpireGovernanceSelfConfirmation" => Expired,
+        "GovernanceConfirmation_Cancel" | "GovernanceSelfConfirmation_Cancel" => {
+            ConfirmationCancelled
+        }
         "GovernableAction_ProposerCancel" | "GovernableAction_Cancel" => ProposalCancelled,
         _ => return None,
     })
@@ -57,16 +53,12 @@ mod tests {
     #[test]
     fn every_builder_choice_classifies() {
         let cases = [
-            ("VaultGovernanceRules_ConfirmAction", Confirmed),
             ("GovernanceRules_ConfirmGovernanceAction", Confirmed),
             ("GovernanceRules_ConfirmAction", Confirmed),
-            ("VaultGovernanceRules_ExecuteConfirmedAction", Executed),
             ("GovernanceRules_ExecuteGovernanceAction", Executed),
             ("GovernanceRules_ExecuteConfirmedAction", Executed),
-            ("VaultGovernanceRules_ExpireConfirmation", Expired),
             ("GovernanceRules_ExpireGovernanceSelfConfirmation", Expired),
             ("GovernanceRules_ExpireConfirmation", Expired),
-            ("VaultGovernanceConfirmation_Cancel", ConfirmationCancelled),
             ("GovernanceSelfConfirmation_Cancel", ConfirmationCancelled),
             ("GovernanceConfirmation_Cancel", ConfirmationCancelled),
             ("GovernableAction_ProposerCancel", ProposalCancelled),

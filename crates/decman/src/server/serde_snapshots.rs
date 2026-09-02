@@ -28,9 +28,7 @@ use decman_lib::catalog::proposals::utility::{
 use decman_lib::catalog::types::RewardBeneficiary;
 
 use crate::canton_id::CantonId;
-use crate::server::types::{
-    ActionType, AppRewardBeneficiary, BillingParams, FarConfig, ProposalType, VaultLimits,
-};
+use crate::server::types::{ActionType, AppRewardBeneficiary, BillingParams, ProposalType};
 
 fn cid(prefix: &str) -> CantonId {
     let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
@@ -66,25 +64,8 @@ fn requirement(issuer: &str) -> PartyCredentialRequirement {
     }
 }
 
-fn far() -> FarConfig {
-    FarConfig {
-        featured_app_right_cid: "00far".into(),
-        beneficiaries: vec![AppRewardBeneficiary {
-            beneficiary: cid("b1"),
-            weight: dec("1.0"),
-        }],
-    }
-}
-
-fn limits_full() -> VaultLimits {
-    VaultLimits {
-        max_total_deposit: Some(dec("100")),
-        min_deposit_amount: Some(dec("0.1")),
-        min_withdrawal_amount: Some(dec("0.2")),
-    }
-}
-
-/// One populated instance per `ActionType` variant (21), every Option Some.
+/// One populated instance per `ActionType` variant (13). No variant carries
+/// an `Option`, so there is no minimal-form counterpart to this fixture.
 fn all_action_fixtures() -> Vec<ActionType> {
     vec![
         ActionType::GovernanceAddMember {
@@ -104,51 +85,6 @@ fn all_action_fixtures() -> Vec<ActionType> {
         },
         ActionType::GovernanceRemoveAdditionalProposer {
             additional_proposer: cid("p1"),
-        },
-        ActionType::VaultDeployment {
-            vault_rules_cid: "00vaultrules".into(),
-            vault_name: "Vault One".into(),
-            share_symbol: "V1".into(),
-            asset_instrument_id: instrument(),
-            limits: limits_full(),
-            vault_backend_signatory: cid("backend"),
-            vault_far_config: Some(far()),
-            allocation_factory_cid: "00alloc".into(),
-            registrar_service_cid: "00reg".into(),
-        },
-        ActionType::YieldEpochDeployment {
-            vault_rules_cid: "00vaultrules".into(),
-            vault_cid: "00vault".into(),
-            asset_instrument_id: instrument(),
-            vault_backend_signatory: cid("backend"),
-        },
-        ActionType::VaultPause {
-            vault_id: "00vault".into(),
-        },
-        ActionType::VaultUnpause {
-            vault_id: "00vault".into(),
-        },
-        ActionType::VaultUpdateLimits {
-            vault_id: "00vault".into(),
-            new_limits: limits_full(),
-        },
-        ActionType::VaultUpdateBackend {
-            vault_id: "00vault".into(),
-            new_backend_signatory: cid("backend2"),
-        },
-        ActionType::VaultUpdateFarBeneficiaries {
-            vault_id: "00vault".into(),
-            new_beneficiaries: vec![AppRewardBeneficiary {
-                beneficiary: cid("b1"),
-                weight: dec("1.0"),
-            }],
-        },
-        ActionType::ProcessorDeploymentRequest {
-            vault_processor_rules_cid: "00proc".into(),
-            vault_backend_signatory: cid("backend"),
-            allocation_factory_cid: "00alloc".into(),
-            processor_far_config: Some(far()),
-            initial_supported_vaults: vec!["00vault".into()],
         },
         ActionType::UtilityCreateProviderRequest {
             operator: cid("op"),
@@ -449,33 +385,4 @@ fn proposal_type_http_json_is_stable() {
 #[test]
 fn proposal_type_optional_fields_stay_omitted() {
     insta::assert_json_snapshot!("proposal_types_minimal", minimal_option_fixtures());
-}
-
-#[test]
-fn action_minimal_options_stay_omitted() {
-    let fixtures = vec![
-        ActionType::VaultDeployment {
-            vault_rules_cid: "00vaultrules".into(),
-            vault_name: "Vault One".into(),
-            share_symbol: "V1".into(),
-            asset_instrument_id: instrument(),
-            limits: VaultLimits {
-                max_total_deposit: None,
-                min_deposit_amount: None,
-                min_withdrawal_amount: None,
-            },
-            vault_backend_signatory: cid("backend"),
-            vault_far_config: None,
-            allocation_factory_cid: "00alloc".into(),
-            registrar_service_cid: "00reg".into(),
-        },
-        ActionType::ProcessorDeploymentRequest {
-            vault_processor_rules_cid: "00proc".into(),
-            vault_backend_signatory: cid("backend"),
-            allocation_factory_cid: "00alloc".into(),
-            processor_far_config: None,
-            initial_supported_vaults: vec![],
-        },
-    ];
-    insta::assert_json_snapshot!("action_types_minimal", fixtures);
 }

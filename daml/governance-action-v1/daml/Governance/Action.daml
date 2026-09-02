@@ -16,7 +16,7 @@ data GovernableActionView = GovernableActionView
       -- the on-chain proposer authorization rule (must be a member or an
       -- additional proposer of the targeting GovernanceRules contract).
     actionLabel : Text
-      -- ^ Human-readable label for display and audit (e.g., "VaultPause", "DepositComplete").
+      -- ^ Human-readable label for display and audit (e.g., "PauseTrading", "DepositComplete").
     description : Text
       -- ^ Human-readable description of the action. Recorded in the execution result contract.
   deriving (Show, Eq)

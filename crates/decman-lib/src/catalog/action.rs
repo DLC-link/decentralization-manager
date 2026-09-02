@@ -1,38 +1,31 @@
 //! `ActionType` — decman's governance action payload — and its Daml `Value`
 //! codec.
 //!
-//! The Daml side splits this one Rust enum across two closed unions: vault
-//! governance's `ActionRequiringConfirmation` and `governance-core`'s
-//! `GovernanceSelfAction`. [`ActionType::to_vault_proto`] /
-//! [`ActionType::from_vault_proto`] encode/decode the first form;
-//! [`ActionType::to_self_proto`] / [`ActionType::from_self_proto`] the
-//! second. A variant that exists in only one form returns `Error::Encode`
-//! from the other form's encoder rather than panicking.
+//! The Daml side splits this one Rust enum across two closed unions:
+//! `#cbtc-governance`'s `ActionRequiringConfirmation` and `governance-core`'s
+//! `GovernanceSelfAction`. [`ActionType::from_cbtc_proto`] decodes the first
+//! form; [`ActionType::to_self_proto`] / [`ActionType::from_self_proto`]
+//! encode and decode the second. The CBTC form is read-only here, because
+//! decman never writes a `Confirmation` contract. A variant that the self
+//! form does not carry returns `Error::Encode` from its encoder rather than
+//! panicking.
 
 use canton_proto_rs::com::daml::ledger::api::v2::{Value, value};
-use common::api::{Claim, InstrumentId};
+use common::api::Claim;
 use common::canton_id::CantonId;
 
-use crate::catalog::types::{
-    AppRewardBeneficiary, FarConfig, VaultLimits, deserialize_app_reward_beneficiary,
-    deserialize_claim, deserialize_instrument_id, deserialize_optional_far_config,
-    deserialize_reltime, deserialize_vault_limits, serialize_app_reward_beneficiary,
-    serialize_optional_far_config, serialize_vault_limits,
-};
+use crate::catalog::types::{deserialize_claim, deserialize_reltime};
 use crate::error::Error;
 use crate::framework::encode::{
-    field, make_contract_id, make_int64, make_list, make_party, make_record, make_text,
-    make_variant, serialize_claim, serialize_instrument_id, serialize_reltime,
+    field, make_int64, make_party, make_record, make_variant, serialize_reltime,
 };
 use crate::framework::record::{
     extract_contract_id, extract_int64, extract_list, extract_party_id, extract_record,
     extract_text, get_field,
 };
-use crate::framework::validate::{
-    validate_beneficiary_weights, validate_threshold, validate_timeout,
-};
+use crate::framework::validate::{validate_threshold, validate_timeout};
 
-/// Structured action types for Vault governance
+/// Structured action types for decentralized-party governance
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
@@ -58,56 +51,6 @@ pub enum ActionType {
     },
     GovernanceRemoveAdditionalProposer {
         additional_proposer: CantonId,
-    },
-
-    // Vault Deployment (2)
-    VaultDeployment {
-        vault_rules_cid: String,
-        vault_name: String,
-        share_symbol: String,
-        asset_instrument_id: InstrumentId,
-        limits: VaultLimits,
-        vault_backend_signatory: CantonId,
-        #[serde(default)]
-        vault_far_config: Option<FarConfig>,
-        allocation_factory_cid: String,
-        registrar_service_cid: String,
-    },
-    YieldEpochDeployment {
-        vault_rules_cid: String,
-        vault_cid: String,
-        asset_instrument_id: InstrumentId,
-        vault_backend_signatory: CantonId,
-    },
-
-    // Vault Operations (5)
-    VaultPause {
-        vault_id: String,
-    },
-    VaultUnpause {
-        vault_id: String,
-    },
-    VaultUpdateLimits {
-        vault_id: String,
-        new_limits: VaultLimits,
-    },
-    VaultUpdateBackend {
-        vault_id: String,
-        new_backend_signatory: CantonId,
-    },
-    VaultUpdateFarBeneficiaries {
-        vault_id: String,
-        new_beneficiaries: Vec<AppRewardBeneficiary>,
-    },
-
-    // Processor (1)
-    ProcessorDeploymentRequest {
-        vault_processor_rules_cid: String,
-        vault_backend_signatory: CantonId,
-        allocation_factory_cid: String,
-        #[serde(default)]
-        processor_far_config: Option<FarConfig>,
-        initial_supported_vaults: Vec<String>,
     },
 
     // Utility Onboarding (4)
@@ -150,323 +93,9 @@ pub enum ActionType {
 }
 
 impl ActionType {
-    /// Serialize to a Daml Value (`ActionRequiringConfirmation` variant).
-    ///
-    /// The Daml `ActionRequiringConfirmation` type uses nested variants:
-    /// - GovernanceAction(Governance_AddMemberAndSetThreshold {...})
-    /// - UtilityOnboardingAction(UtilityOnboarding_CreateProviderServiceRequest {...})
-    /// - VaultDeploymentAction({...}) - direct record, not nested
-    pub fn to_vault_proto(&self) -> Result<Value, Error> {
-        match self {
-            // Governance Actions - wrapped in GovernanceAction variant
-            ActionType::GovernanceAddMember {
-                member,
-                new_threshold,
-            } => Ok(make_variant(
-                "GovernanceAction",
-                make_variant(
-                    "Governance_AddMemberAndSetThreshold",
-                    make_record(vec![
-                        field("member", make_party(member)),
-                        field("newThreshold", make_int64(*new_threshold)),
-                    ]),
-                ),
-            )),
-
-            ActionType::GovernanceRemoveMember {
-                member,
-                new_threshold,
-            } => Ok(make_variant(
-                "GovernanceAction",
-                make_variant(
-                    "Governance_RemoveMemberAndSetThreshold",
-                    make_record(vec![
-                        field("member", make_party(member)),
-                        field("newThreshold", make_int64(*new_threshold)),
-                    ]),
-                ),
-            )),
-
-            ActionType::GovernanceSetThreshold { new_threshold } => Ok(make_variant(
-                "GovernanceAction",
-                make_variant(
-                    "Governance_SetThreshold",
-                    make_record(vec![field("newThreshold", make_int64(*new_threshold))]),
-                ),
-            )),
-
-            ActionType::GovernanceSetTimeout {
-                new_timeout_microseconds,
-            } => Ok(make_variant(
-                "GovernanceAction",
-                make_variant(
-                    "Governance_SetActionConfirmationTimeout",
-                    make_record(vec![field(
-                        "newActionConfirmationTimeout",
-                        serialize_reltime(*new_timeout_microseconds),
-                    )]),
-                ),
-            )),
-
-            // Vault Deployment Actions - VaultDeploymentAction wraps VaultGovernanceRules_DeployVault
-            ActionType::VaultDeployment {
-                vault_rules_cid,
-                vault_name,
-                share_symbol,
-                asset_instrument_id,
-                limits,
-                vault_backend_signatory,
-                vault_far_config,
-                allocation_factory_cid,
-                registrar_service_cid,
-            } => Ok(make_variant(
-                "VaultDeploymentAction",
-                make_record(vec![
-                    field("vaultRulesCid", make_contract_id(vault_rules_cid)),
-                    field("vaultName", make_text(vault_name)),
-                    field("shareSymbol", make_text(share_symbol)),
-                    field(
-                        "assetInstrumentId",
-                        serialize_instrument_id(asset_instrument_id),
-                    ),
-                    field("limits", serialize_vault_limits(limits)),
-                    field("vaultBackendSignatory", make_party(vault_backend_signatory)),
-                    field(
-                        "vaultFarConfig",
-                        serialize_optional_far_config(vault_far_config),
-                    ),
-                    field(
-                        "allocationFactoryCid",
-                        make_contract_id(allocation_factory_cid),
-                    ),
-                    field(
-                        "registrarServiceCid",
-                        make_contract_id(registrar_service_cid),
-                    ),
-                ]),
-            )),
-
-            ActionType::YieldEpochDeployment {
-                vault_rules_cid,
-                vault_cid,
-                asset_instrument_id,
-                vault_backend_signatory,
-            } => Ok(make_variant(
-                "YieldEpochDeploymentAction",
-                make_record(vec![
-                    field("vaultRulesCid", make_contract_id(vault_rules_cid)),
-                    field("vaultCid", make_contract_id(vault_cid)),
-                    field(
-                        "assetInstrumentId",
-                        serialize_instrument_id(asset_instrument_id),
-                    ),
-                    field("vaultBackendSignatory", make_party(vault_backend_signatory)),
-                ]),
-            )),
-
-            // Vault Operations - direct variants with Daml field names
-            ActionType::VaultPause { vault_id } => Ok(make_variant(
-                "VaultPauseAction",
-                make_record(vec![field("pauseVaultId", make_contract_id(vault_id))]),
-            )),
-
-            ActionType::VaultUnpause { vault_id } => Ok(make_variant(
-                "VaultUnpauseAction",
-                make_record(vec![field("unpauseVaultId", make_contract_id(vault_id))]),
-            )),
-
-            ActionType::VaultUpdateLimits {
-                vault_id,
-                new_limits,
-            } => Ok(make_variant(
-                "VaultUpdateLimitsAction",
-                make_record(vec![
-                    field("limitsVaultId", make_contract_id(vault_id)),
-                    field("newLimits", serialize_vault_limits(new_limits)),
-                ]),
-            )),
-
-            ActionType::VaultUpdateBackend {
-                vault_id,
-                new_backend_signatory,
-            } => Ok(make_variant(
-                "VaultUpdateBackendAction",
-                make_record(vec![
-                    field("backendVaultId", make_contract_id(vault_id)),
-                    field("newBackendSignatory", make_party(new_backend_signatory)),
-                ]),
-            )),
-
-            ActionType::VaultUpdateFarBeneficiaries {
-                vault_id,
-                new_beneficiaries,
-            } => Ok(make_variant(
-                "VaultUpdateFARBeneficiariesAction",
-                make_record(vec![
-                    field("farVaultId", make_contract_id(vault_id)),
-                    field(
-                        "newBeneficiaries",
-                        make_list(
-                            new_beneficiaries
-                                .iter()
-                                .map(serialize_app_reward_beneficiary)
-                                .collect(),
-                        ),
-                    ),
-                ]),
-            )),
-
-            // Processor - VaultProcessorDeploymentRequestAction wrapping params
-            ActionType::ProcessorDeploymentRequest {
-                vault_processor_rules_cid,
-                vault_backend_signatory,
-                allocation_factory_cid,
-                processor_far_config,
-                initial_supported_vaults,
-            } => Ok(make_variant(
-                "VaultProcessorDeploymentRequestAction",
-                make_record(vec![
-                    field(
-                        "vaultProcessorRulesCid",
-                        make_contract_id(vault_processor_rules_cid),
-                    ),
-                    field("vaultBackendSignatory", make_party(vault_backend_signatory)),
-                    field(
-                        "allocationFactoryCid",
-                        make_contract_id(allocation_factory_cid),
-                    ),
-                    field(
-                        "processorFarConfig",
-                        serialize_optional_far_config(processor_far_config),
-                    ),
-                    field(
-                        "initialSupportedVaults",
-                        make_list(
-                            initial_supported_vaults
-                                .iter()
-                                .map(|v| make_contract_id(v))
-                                .collect(),
-                        ),
-                    ),
-                ]),
-            )),
-
-            // Utility Onboarding - wrapped in UtilityOnboardingAction variant
-            ActionType::UtilityCreateProviderRequest { operator } => Ok(make_variant(
-                "UtilityOnboardingAction",
-                make_variant(
-                    "UtilityOnboarding_CreateProviderServiceRequest",
-                    make_record(vec![field("operator", make_party(operator))]),
-                ),
-            )),
-
-            ActionType::UtilityCreateUserRequest { operator } => Ok(make_variant(
-                "UtilityOnboardingAction",
-                make_variant(
-                    "UtilityOnboarding_CreateUserServiceRequest",
-                    make_record(vec![field("operator", make_party(operator))]),
-                ),
-            )),
-
-            ActionType::UtilitySetup {
-                operator,
-                provider_service_cid,
-                user_service_cid,
-            } => Ok(make_variant(
-                "UtilityOnboardingAction",
-                make_variant(
-                    "UtilityOnboarding_SetupUtility",
-                    make_record(vec![
-                        field("operator", make_party(operator)),
-                        field("providerServiceCid", make_contract_id(provider_service_cid)),
-                        field("userServiceCid", make_contract_id(user_service_cid)),
-                    ]),
-                ),
-            )),
-
-            ActionType::UtilityAcceptHolderServiceRequest {
-                operator,
-                provider_service_cid,
-                holder_service_request_cid,
-                holder,
-            } => Ok(make_variant(
-                "UtilityOnboardingAction",
-                make_variant(
-                    "UtilityOnboarding_AcceptHolderServiceRequest",
-                    make_record(vec![
-                        field("operator", make_party(operator)),
-                        field("providerServiceCid", make_contract_id(provider_service_cid)),
-                        field(
-                            "holderServiceRequestCid",
-                            make_contract_id(holder_service_request_cid),
-                        ),
-                        // Note: payload field is complex (HolderServiceRequest_Accept) - simplified here
-                        field("holder", make_party(holder)),
-                    ]),
-                ),
-            )),
-
-            // Credential Actions
-            ActionType::CredentialOfferFree {
-                operator,
-                user_service_cid,
-                holder,
-                id,
-                description,
-                claims,
-            } => Ok(make_variant(
-                "CredentialAction",
-                make_variant(
-                    "Credential_OfferFreeCredential",
-                    make_record(vec![
-                        field("operator", make_party(operator)),
-                        field("userServiceCid", make_contract_id(user_service_cid)),
-                        field("holder", make_party(holder)),
-                        field("id", make_text(id)),
-                        field("description", make_text(description)),
-                        field(
-                            "claims",
-                            make_list(claims.iter().map(serialize_claim).collect()),
-                        ),
-                    ]),
-                ),
-            )),
-
-            ActionType::CredentialAcceptFree {
-                operator,
-                user_service_cid,
-                credential_offer_cid,
-            } => Ok(make_variant(
-                "CredentialAction",
-                make_variant(
-                    "Credential_AcceptFreeCredential",
-                    make_record(vec![
-                        field("operator", make_party(operator)),
-                        field("userServiceCid", make_contract_id(user_service_cid)),
-                        field("credentialOfferCid", make_contract_id(credential_offer_cid)),
-                    ]),
-                ),
-            )),
-
-            // DevNet
-            ActionType::DevNetFeatureApp { amulet_rules_cid } => Ok(make_variant(
-                "DevNetFeatureAppAction",
-                make_record(vec![field(
-                    "amuletRulesCid",
-                    make_contract_id(amulet_rules_cid),
-                )]),
-            )),
-
-            ActionType::GovernanceAddAdditionalProposer { .. }
-            | ActionType::GovernanceRemoveAdditionalProposer { .. } => Err(Error::Encode(format!(
-                "ActionType {self:?} is a governance self-action, not an ActionRequiringConfirmation"
-            ))),
-        }
-    }
-
     /// Serialize to a `GovernanceSelfAction` Daml variant.
     ///
-    /// Maps the same `ActionType` variants used for vault governance to the
+    /// Maps the six member-management `ActionType` variants to the
     /// governance-core `GovernanceSelfAction` enum (different field names).
     pub fn to_self_proto(&self) -> Result<Value, Error> {
         match self {
@@ -527,13 +156,17 @@ impl ActionType {
         }
     }
 
-    /// Deserialize a Daml Value (`ActionRequiringConfirmation` variant) to an `ActionType`.
+    /// Deserialize a Daml Value (`ActionRequiringConfirmation` variant) to an
+    /// `ActionType`.
+    ///
+    /// `#cbtc-governance` writes this form onto its `Confirmation` contracts.
+    /// Decman only reads it, so there is no matching encoder.
     ///
     /// Handles nested variant structure:
     /// - GovernanceAction(Governance_AddMemberAndSetThreshold {...})
     /// - UtilityOnboardingAction(UtilityOnboarding_CreateProviderServiceRequest {...})
-    /// - VaultDeploymentAction({...}) - direct record
-    pub fn from_vault_proto(value: &Value) -> Result<Self, Error> {
+    /// - DevNetFeatureAppAction({...}) - direct record
+    pub fn from_cbtc_proto(value: &Value) -> Result<Self, Error> {
         let variant = match &value.sum {
             Some(value::Sum::Variant(v)) => v,
             _ => {
@@ -701,133 +334,6 @@ impl ActionType {
                 }
             }
 
-            // Vault Deployment Actions - direct record
-            "VaultDeploymentAction" => {
-                let record = extract_record(inner)?;
-                Ok(ActionType::VaultDeployment {
-                    vault_rules_cid: extract_contract_id(get_field(record, "vaultRulesCid")?)?,
-                    vault_name: extract_text(get_field(record, "vaultName")?)?,
-                    share_symbol: extract_text(get_field(record, "shareSymbol")?)?,
-                    asset_instrument_id: deserialize_instrument_id(get_field(
-                        record,
-                        "assetInstrumentId",
-                    )?)?,
-                    limits: deserialize_vault_limits(get_field(record, "limits")?)?,
-                    vault_backend_signatory: extract_party_id(get_field(
-                        record,
-                        "vaultBackendSignatory",
-                    )?)?,
-                    vault_far_config: deserialize_optional_far_config(get_field(
-                        record,
-                        "vaultFarConfig",
-                    )?)?,
-                    allocation_factory_cid: extract_contract_id(get_field(
-                        record,
-                        "allocationFactoryCid",
-                    )?)?,
-                    registrar_service_cid: extract_contract_id(get_field(
-                        record,
-                        "registrarServiceCid",
-                    )?)?,
-                })
-            }
-
-            "YieldEpochDeploymentAction" => {
-                let record = extract_record(inner)?;
-                Ok(ActionType::YieldEpochDeployment {
-                    vault_rules_cid: extract_contract_id(get_field(record, "vaultRulesCid")?)?,
-                    vault_cid: extract_contract_id(get_field(record, "vaultCid")?)?,
-                    asset_instrument_id: deserialize_instrument_id(get_field(
-                        record,
-                        "assetInstrumentId",
-                    )?)?,
-                    vault_backend_signatory: extract_party_id(get_field(
-                        record,
-                        "vaultBackendSignatory",
-                    )?)?,
-                })
-            }
-
-            // Vault Operations - direct record with Daml field names
-            "VaultPauseAction" => {
-                let record = extract_record(inner)?;
-                Ok(ActionType::VaultPause {
-                    vault_id: extract_contract_id(get_field(record, "pauseVaultId")?)?,
-                })
-            }
-
-            "VaultUnpauseAction" => {
-                let record = extract_record(inner)?;
-                Ok(ActionType::VaultUnpause {
-                    vault_id: extract_contract_id(get_field(record, "unpauseVaultId")?)?,
-                })
-            }
-
-            "VaultUpdateLimitsAction" => {
-                let record = extract_record(inner)?;
-                Ok(ActionType::VaultUpdateLimits {
-                    vault_id: extract_contract_id(get_field(record, "limitsVaultId")?)?,
-                    new_limits: deserialize_vault_limits(get_field(record, "newLimits")?)?,
-                })
-            }
-
-            "VaultUpdateBackendAction" => {
-                let record = extract_record(inner)?;
-                Ok(ActionType::VaultUpdateBackend {
-                    vault_id: extract_contract_id(get_field(record, "backendVaultId")?)?,
-                    new_backend_signatory: extract_party_id(get_field(
-                        record,
-                        "newBackendSignatory",
-                    )?)?,
-                })
-            }
-
-            "VaultUpdateFARBeneficiariesAction" => {
-                let record = extract_record(inner)?;
-                let beneficiaries_list = extract_list(get_field(record, "newBeneficiaries")?)?;
-                let new_beneficiaries = beneficiaries_list
-                    .elements
-                    .iter()
-                    .map(deserialize_app_reward_beneficiary)
-                    .collect::<Result<Vec<_>, Error>>()?;
-
-                Ok(ActionType::VaultUpdateFarBeneficiaries {
-                    vault_id: extract_contract_id(get_field(record, "farVaultId")?)?,
-                    new_beneficiaries,
-                })
-            }
-
-            // Processor Deployment
-            "VaultProcessorDeploymentRequestAction" => {
-                let record = extract_record(inner)?;
-                let vaults_list = extract_list(get_field(record, "initialSupportedVaults")?)?;
-                let initial_supported_vaults = vaults_list
-                    .elements
-                    .iter()
-                    .map(extract_contract_id)
-                    .collect::<Result<Vec<_>, Error>>()?;
-
-                Ok(ActionType::ProcessorDeploymentRequest {
-                    vault_processor_rules_cid: extract_contract_id(get_field(
-                        record,
-                        "vaultProcessorRulesCid",
-                    )?)?,
-                    vault_backend_signatory: extract_party_id(get_field(
-                        record,
-                        "vaultBackendSignatory",
-                    )?)?,
-                    allocation_factory_cid: extract_contract_id(get_field(
-                        record,
-                        "allocationFactoryCid",
-                    )?)?,
-                    processor_far_config: deserialize_optional_far_config(get_field(
-                        record,
-                        "processorFarConfig",
-                    )?)?,
-                    initial_supported_vaults,
-                })
-            }
-
             // DevNet
             "DevNetFeatureAppAction" => {
                 let record = extract_record(inner)?;
@@ -909,6 +415,26 @@ impl ActionType {
         }
     }
 
+    /// True for the six `GovernanceSelfAction` variants — the only actions the
+    /// inline (`core_self`) confirm/execute path can serialize.
+    ///
+    /// `ActionType` still models the utility / credential / DevNet variants
+    /// because [`ActionType::from_cbtc_proto`] parses them off CBTC
+    /// confirmations on the read path. There is no inline submit path for
+    /// them: they belong on `POST /governance/propose` as `GovernableAction`
+    /// proposals.
+    pub fn is_governance_self_action(&self) -> bool {
+        matches!(
+            self,
+            ActionType::GovernanceAddMember { .. }
+                | ActionType::GovernanceRemoveMember { .. }
+                | ActionType::GovernanceSetThreshold { .. }
+                | ActionType::GovernanceSetTimeout { .. }
+                | ActionType::GovernanceAddAdditionalProposer { .. }
+                | ActionType::GovernanceRemoveAdditionalProposer { .. }
+        )
+    }
+
     /// Validate the action's fields. Returns an error message if invalid.
     ///
     /// Catches obviously-malformed inputs (negative thresholds, non-positive
@@ -925,17 +451,6 @@ impl ActionType {
             ActionType::GovernanceSetTimeout {
                 new_timeout_microseconds,
             } => validate_timeout(*new_timeout_microseconds),
-            ActionType::VaultDeployment {
-                vault_far_config: Some(far),
-                ..
-            }
-            | ActionType::ProcessorDeploymentRequest {
-                processor_far_config: Some(far),
-                ..
-            } => validate_beneficiary_weights(&far.beneficiaries),
-            ActionType::VaultUpdateFarBeneficiaries {
-                new_beneficiaries, ..
-            } => validate_beneficiary_weights(new_beneficiaries),
             _ => Ok(()),
         }
     }
@@ -943,27 +458,16 @@ impl ActionType {
 
 #[cfg(test)]
 mod tests {
-    use canton_common::decimal::DamlDecimal;
+    use canton_proto_rs::com::daml::ledger::api::v2::RecordField;
 
     use super::*;
+    use crate::framework::encode::{make_contract_id, make_list, make_text, serialize_claim};
 
     /// Test-only helper: builds a `CantonId` with a fixed valid namespace so
     /// tests can vary just the prefix.
     fn cid(prefix: &str) -> CantonId {
         let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
         CantonId::parse(&format!("{prefix}::{ns}")).unwrap()
-    }
-
-    /// Parse a decimal literal in test fixtures, panicking on invalid input.
-    fn dec(s: &str) -> DamlDecimal {
-        DamlDecimal::parse(s).expect("valid decimal literal")
-    }
-
-    fn instrument() -> InstrumentId {
-        InstrumentId {
-            admin: "admin-party".into(),
-            id: "TOK".into(),
-        }
     }
 
     fn claim() -> Claim {
@@ -974,22 +478,10 @@ mod tests {
         }
     }
 
-    fn far() -> FarConfig {
-        FarConfig {
-            featured_app_right_cid: "00far".into(),
-            beneficiaries: vec![AppRewardBeneficiary {
-                beneficiary: cid("b1"),
-                weight: dec("1.0"),
-            }],
-        }
-    }
-
-    fn limits_full() -> VaultLimits {
-        VaultLimits {
-            max_total_deposit: Some(dec("100")),
-            min_deposit_amount: Some(dec("0.1")),
-            min_withdrawal_amount: Some(dec("0.2")),
-        }
+    /// Build a nested `ActionRequiringConfirmation` value: the outer group
+    /// variant wraps the action constructor, which wraps its field record.
+    fn cbtc_nested(outer: &str, ctor: &str, fields: Vec<RecordField>) -> Value {
+        make_variant(outer, make_variant(ctor, make_record(fields)))
     }
 
     /// Unwrap a `Variant` value into `(constructor, inner)`.
@@ -1011,103 +503,197 @@ mod tests {
         }
     }
 
-    // ---- `to_vault_proto` / `to_self_proto` wire-shape assertions ----
+    // ---- `ActionRequiringConfirmation` decode fixtures ----
     //
-    // These lock the Daml constructor names and field labels emitted for the
-    // governance actions. The labels are hand-written and consumed by the
-    // on-ledger interpreter, so a typo or a swap between the two encoders
-    // (`to_vault_proto` vs `to_self_proto`, which deliberately use
-    // *different* labels for the same action) would only surface as a
-    // runtime interpretation error far from the source. A round-trip test
-    // cannot catch a wrong-but-symmetric label; explicit label assertions
-    // can.
+    // `#cbtc-governance` owns this wire form, and decman only reads it, so
+    // these values are hand-written. The constructor names and field labels
+    // below are the contract with that package. A fixture derived from our
+    // own code would let a renamed label pass unnoticed, because both sides
+    // would rename together.
 
-    #[test]
-    fn serialize_action_add_member_shape() {
-        let action = ActionType::GovernanceAddMember {
-            member: cid("p"),
-            new_threshold: 3,
-        };
-        let value = action.to_vault_proto().unwrap();
-        let (outer, inner) = as_variant(&value);
-        assert_eq!(outer, "GovernanceAction");
-        let (ctor, record) = as_variant(inner);
-        assert_eq!(ctor, "Governance_AddMemberAndSetThreshold");
-        assert_eq!(record_labels(record), ["member", "newThreshold"]);
+    /// Every `ActionRequiringConfirmation` value decman reads off a CBTC
+    /// `Confirmation`, paired with the `ActionType` it must decode to. The
+    /// two AdditionalProposer variants are absent: only the
+    /// `GovernanceSelfAction` form carries them.
+    fn cbtc_form_fixtures() -> Vec<(Value, ActionType)> {
+        vec![
+            (
+                cbtc_nested(
+                    "GovernanceAction",
+                    "Governance_AddMemberAndSetThreshold",
+                    vec![
+                        field("member", make_party(cid("m1"))),
+                        field("newThreshold", make_int64(2)),
+                    ],
+                ),
+                ActionType::GovernanceAddMember {
+                    member: cid("m1"),
+                    new_threshold: 2,
+                },
+            ),
+            (
+                cbtc_nested(
+                    "GovernanceAction",
+                    "Governance_RemoveMemberAndSetThreshold",
+                    vec![
+                        field("member", make_party(cid("m1"))),
+                        field("newThreshold", make_int64(1)),
+                    ],
+                ),
+                ActionType::GovernanceRemoveMember {
+                    member: cid("m1"),
+                    new_threshold: 1,
+                },
+            ),
+            (
+                cbtc_nested(
+                    "GovernanceAction",
+                    "Governance_SetThreshold",
+                    vec![field("newThreshold", make_int64(3))],
+                ),
+                ActionType::GovernanceSetThreshold { new_threshold: 3 },
+            ),
+            (
+                cbtc_nested(
+                    "GovernanceAction",
+                    "Governance_SetActionConfirmationTimeout",
+                    vec![field(
+                        "newActionConfirmationTimeout",
+                        serialize_reltime(60_000_000),
+                    )],
+                ),
+                ActionType::GovernanceSetTimeout {
+                    new_timeout_microseconds: 60_000_000,
+                },
+            ),
+            (
+                cbtc_nested(
+                    "UtilityOnboardingAction",
+                    "UtilityOnboarding_CreateProviderServiceRequest",
+                    vec![field("operator", make_party(cid("op")))],
+                ),
+                ActionType::UtilityCreateProviderRequest {
+                    operator: cid("op"),
+                },
+            ),
+            (
+                cbtc_nested(
+                    "UtilityOnboardingAction",
+                    "UtilityOnboarding_CreateUserServiceRequest",
+                    vec![field("operator", make_party(cid("op")))],
+                ),
+                ActionType::UtilityCreateUserRequest {
+                    operator: cid("op"),
+                },
+            ),
+            (
+                cbtc_nested(
+                    "UtilityOnboardingAction",
+                    "UtilityOnboarding_SetupUtility",
+                    vec![
+                        field("operator", make_party(cid("op"))),
+                        field("providerServiceCid", make_contract_id("00psc")),
+                        field("userServiceCid", make_contract_id("00usc")),
+                    ],
+                ),
+                ActionType::UtilitySetup {
+                    operator: cid("op"),
+                    provider_service_cid: "00psc".into(),
+                    user_service_cid: "00usc".into(),
+                },
+            ),
+            (
+                cbtc_nested(
+                    "UtilityOnboardingAction",
+                    "UtilityOnboarding_AcceptHolderServiceRequest",
+                    vec![
+                        field("operator", make_party(cid("op"))),
+                        field("providerServiceCid", make_contract_id("00psc")),
+                        field("holderServiceRequestCid", make_contract_id("00hsr")),
+                        field("holder", make_party(cid("holder"))),
+                    ],
+                ),
+                ActionType::UtilityAcceptHolderServiceRequest {
+                    operator: cid("op"),
+                    provider_service_cid: "00psc".into(),
+                    holder_service_request_cid: "00hsr".into(),
+                    holder: cid("holder"),
+                },
+            ),
+            (
+                cbtc_nested(
+                    "CredentialAction",
+                    "Credential_OfferFreeCredential",
+                    vec![
+                        field("operator", make_party(cid("op"))),
+                        field("userServiceCid", make_contract_id("00usc")),
+                        field("holder", make_party(cid("holder"))),
+                        field("id", make_text("cred-1")),
+                        field("description", make_text("a credential")),
+                        field("claims", make_list(vec![serialize_claim(&claim())])),
+                    ],
+                ),
+                ActionType::CredentialOfferFree {
+                    operator: cid("op"),
+                    user_service_cid: "00usc".into(),
+                    holder: cid("holder"),
+                    id: "cred-1".into(),
+                    description: "a credential".into(),
+                    claims: vec![claim()],
+                },
+            ),
+            (
+                cbtc_nested(
+                    "CredentialAction",
+                    "Credential_AcceptFreeCredential",
+                    vec![
+                        field("operator", make_party(cid("op"))),
+                        field("userServiceCid", make_contract_id("00usc")),
+                        field("credentialOfferCid", make_contract_id("00offer")),
+                    ],
+                ),
+                ActionType::CredentialAcceptFree {
+                    operator: cid("op"),
+                    user_service_cid: "00usc".into(),
+                    credential_offer_cid: "00offer".into(),
+                },
+            ),
+            (
+                // DevNet carries a bare record: no nested action variant.
+                make_variant(
+                    "DevNetFeatureAppAction",
+                    make_record(vec![field("amuletRulesCid", make_contract_id("00amulet"))]),
+                ),
+                ActionType::DevNetFeatureApp {
+                    amulet_rules_cid: "00amulet".into(),
+                },
+            ),
+        ]
     }
 
     #[test]
-    fn serialize_action_set_threshold_and_timeout_shape() {
-        let threshold = ActionType::GovernanceSetThreshold { new_threshold: 2 }
-            .to_vault_proto()
-            .unwrap();
-        let (outer, inner) = as_variant(&threshold);
-        assert_eq!(outer, "GovernanceAction");
-        let (ctor, record) = as_variant(inner);
-        assert_eq!(ctor, "Governance_SetThreshold");
-        assert_eq!(record_labels(record), ["newThreshold"]);
-
-        let timeout = ActionType::GovernanceSetTimeout {
-            new_timeout_microseconds: 1_000,
+    fn cbtc_form_decodes_every_variant() {
+        for (value, expected) in cbtc_form_fixtures() {
+            assert_eq!(ActionType::from_cbtc_proto(&value).unwrap(), expected);
         }
-        .to_vault_proto()
-        .unwrap();
-        let (_, inner) = as_variant(&timeout);
-        let (ctor, record) = as_variant(inner);
-        assert_eq!(ctor, "Governance_SetActionConfirmationTimeout");
-        assert_eq!(record_labels(record), ["newActionConfirmationTimeout"]);
     }
 
     #[test]
-    fn serialize_action_utility_and_credential_and_devnet_shapes() {
-        let setup = ActionType::UtilitySetup {
-            operator: cid("p"),
-            provider_service_cid: "psc".to_string(),
-            user_service_cid: "usc".to_string(),
-        }
-        .to_vault_proto()
-        .unwrap();
-        let (outer, inner) = as_variant(&setup);
-        assert_eq!(outer, "UtilityOnboardingAction");
-        let (ctor, record) = as_variant(inner);
-        assert_eq!(ctor, "UtilityOnboarding_SetupUtility");
-        assert_eq!(
-            record_labels(record),
-            ["operator", "providerServiceCid", "userServiceCid"]
-        );
-
-        let accept = ActionType::CredentialAcceptFree {
-            operator: cid("p"),
-            user_service_cid: "usc".to_string(),
-            credential_offer_cid: "coc".to_string(),
-        }
-        .to_vault_proto()
-        .unwrap();
-        let (outer, inner) = as_variant(&accept);
-        assert_eq!(outer, "CredentialAction");
-        let (ctor, record) = as_variant(inner);
-        assert_eq!(ctor, "Credential_AcceptFreeCredential");
-        assert_eq!(
-            record_labels(record),
-            ["operator", "userServiceCid", "credentialOfferCid"]
-        );
-
-        // DevNet wraps a bare record (no nested action variant).
-        let devnet = ActionType::DevNetFeatureApp {
-            amulet_rules_cid: "arc".to_string(),
-        }
-        .to_vault_proto()
-        .unwrap();
-        let (ctor, record) = as_variant(&devnet);
-        assert_eq!(ctor, "DevNetFeatureAppAction");
-        assert_eq!(record_labels(record), ["amuletRulesCid"]);
+    fn cbtc_form_covers_every_variant_it_can_carry() {
+        // Guards against a variant added to `ActionType` without a fixture.
+        // Eleven of the thirteen variants reach this form: four
+        // member-management, four utility, two credential and one DevNet.
+        // The two AdditionalProposer variants exist only in the self form.
+        assert_eq!(cbtc_form_fixtures().len(), 11);
     }
 
     #[test]
-    fn serialize_self_action_uses_distinct_labels_from_serialize_action() {
-        // The self-management encoder maps the SAME ActionType to DIFFERENT
-        // constructor + field names than `to_vault_proto`. Pin both so the
-        // two paths can't silently converge or drift.
+    fn serialize_self_action_pins_its_own_labels() {
+        // The self-management encoder maps the same `ActionType` to different
+        // constructor and field names than the CBTC form above. The labels
+        // are hand-written and the on-ledger interpreter consumes them, so a
+        // typo would only surface as a runtime interpretation error far from
+        // the source. Pin them here.
         let add = ActionType::GovernanceAddMember {
             member: cid("p"),
             new_threshold: 3,
@@ -1182,104 +768,7 @@ mod tests {
         assert!(action.validate().is_ok());
     }
 
-    // ---- codec round trips ----
-
-    /// Every `ActionType` variant, minus the two AdditionalProposer variants
-    /// (those only exist in the self-management form).
-    fn vault_encodable_fixtures() -> Vec<ActionType> {
-        vec![
-            ActionType::GovernanceAddMember {
-                member: cid("m1"),
-                new_threshold: 2,
-            },
-            ActionType::GovernanceRemoveMember {
-                member: cid("m1"),
-                new_threshold: 1,
-            },
-            ActionType::GovernanceSetThreshold { new_threshold: 3 },
-            ActionType::GovernanceSetTimeout {
-                new_timeout_microseconds: 60_000_000,
-            },
-            ActionType::VaultDeployment {
-                vault_rules_cid: "00vaultrules".into(),
-                vault_name: "Vault One".into(),
-                share_symbol: "V1".into(),
-                asset_instrument_id: instrument(),
-                limits: limits_full(),
-                vault_backend_signatory: cid("backend"),
-                vault_far_config: Some(far()),
-                allocation_factory_cid: "00alloc".into(),
-                registrar_service_cid: "00reg".into(),
-            },
-            ActionType::YieldEpochDeployment {
-                vault_rules_cid: "00vaultrules".into(),
-                vault_cid: "00vault".into(),
-                asset_instrument_id: instrument(),
-                vault_backend_signatory: cid("backend"),
-            },
-            ActionType::VaultPause {
-                vault_id: "00vault".into(),
-            },
-            ActionType::VaultUnpause {
-                vault_id: "00vault".into(),
-            },
-            ActionType::VaultUpdateLimits {
-                vault_id: "00vault".into(),
-                new_limits: limits_full(),
-            },
-            ActionType::VaultUpdateBackend {
-                vault_id: "00vault".into(),
-                new_backend_signatory: cid("backend2"),
-            },
-            ActionType::VaultUpdateFarBeneficiaries {
-                vault_id: "00vault".into(),
-                new_beneficiaries: vec![AppRewardBeneficiary {
-                    beneficiary: cid("b1"),
-                    weight: dec("1.0"),
-                }],
-            },
-            ActionType::ProcessorDeploymentRequest {
-                vault_processor_rules_cid: "00proc".into(),
-                vault_backend_signatory: cid("backend"),
-                allocation_factory_cid: "00alloc".into(),
-                processor_far_config: Some(far()),
-                initial_supported_vaults: vec!["00vault".into()],
-            },
-            ActionType::UtilityCreateProviderRequest {
-                operator: cid("op"),
-            },
-            ActionType::UtilityCreateUserRequest {
-                operator: cid("op"),
-            },
-            ActionType::UtilitySetup {
-                operator: cid("op"),
-                provider_service_cid: "00psc".into(),
-                user_service_cid: "00usc".into(),
-            },
-            ActionType::UtilityAcceptHolderServiceRequest {
-                operator: cid("op"),
-                provider_service_cid: "00psc".into(),
-                holder_service_request_cid: "00hsr".into(),
-                holder: cid("holder"),
-            },
-            ActionType::CredentialOfferFree {
-                operator: cid("op"),
-                user_service_cid: "00usc".into(),
-                holder: cid("holder"),
-                id: "cred-1".into(),
-                description: "a credential".into(),
-                claims: vec![claim()],
-            },
-            ActionType::CredentialAcceptFree {
-                operator: cid("op"),
-                user_service_cid: "00usc".into(),
-                credential_offer_cid: "00offer".into(),
-            },
-            ActionType::DevNetFeatureApp {
-                amulet_rules_cid: "00amulet".into(),
-            },
-        ]
-    }
+    // ---- `GovernanceSelfAction` codec round trip ----
 
     /// The six member-management variants — the only ones that also exist in
     /// the `GovernanceSelfAction` (self-management) form.
@@ -1307,14 +796,6 @@ mod tests {
     }
 
     #[test]
-    fn vault_form_round_trips() {
-        for action in vault_encodable_fixtures() {
-            let value = action.to_vault_proto().unwrap();
-            assert_eq!(ActionType::from_vault_proto(&value).unwrap(), action);
-        }
-    }
-
-    #[test]
     fn self_form_round_trips() {
         for action in self_encodable_fixtures() {
             let value = action.to_self_proto().unwrap();
@@ -1322,23 +803,29 @@ mod tests {
         }
     }
 
+    /// The self encoder must reject a variant the `GovernanceSelfAction`
+    /// union does not carry. It returns `Error::Encode` rather than panicking,
+    /// so a bad request becomes a 400 and not a dead worker.
     #[test]
     fn wrong_form_is_an_error_not_a_panic() {
-        let self_only = ActionType::GovernanceAddAdditionalProposer {
-            additional_proposer: cid("p"),
+        let not_self_managed = ActionType::DevNetFeatureApp {
+            amulet_rules_cid: "00amulet".into(),
         };
-        assert!(matches!(self_only.to_vault_proto(), Err(Error::Encode(_))));
-        let vault_only = ActionType::VaultPause {
-            vault_id: "00v".into(),
+        assert!(matches!(
+            not_self_managed.to_self_proto(),
+            Err(Error::Encode(_))
+        ));
+        let utility = ActionType::UtilityCreateUserRequest {
+            operator: cid("op"),
         };
-        assert!(matches!(vault_only.to_self_proto(), Err(Error::Encode(_))));
+        assert!(matches!(utility.to_self_proto(), Err(Error::Encode(_))));
     }
 
     #[test]
     fn unknown_constructor_is_a_decode_error() {
         let bogus = make_variant("NoSuchAction", make_record(vec![]));
         assert!(matches!(
-            ActionType::from_vault_proto(&bogus),
+            ActionType::from_cbtc_proto(&bogus),
             Err(Error::Decode(_))
         ));
         assert!(matches!(

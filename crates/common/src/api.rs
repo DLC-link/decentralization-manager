@@ -48,8 +48,6 @@ pub struct PackageConfig {
     /// as a dependency but does not define its templates.
     pub utility_credential_app: Option<String>,
     pub utility_registry: Option<String>,
-    pub vault: Option<String>,
-    pub vault_governance: Option<String>,
 }
 
 // ============================================================================
@@ -820,10 +818,8 @@ pub struct InstrumentIssuerCredentials {
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub enum GovernanceType {
-    /// VaultGovernanceRules (closed-enum inline actions)
-    #[default]
-    Vault,
     /// GovernanceRules self-management (GovernanceSelfAction)
+    #[default]
     CoreSelf,
     /// GovernanceRules domain actions (GovernableAction proposals)
     CoreDomain,
@@ -899,13 +895,13 @@ pub struct CancelProposalRequest {
     pub confirmation_cid: Option<String>,
 }
 
-/// State of a VaultGovernanceRules contract
+/// State of a GovernanceRules contract
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct GovernanceState {
     pub contract_id: String,
-    pub vault_manager: CantonId,
+    pub governance_party: CantonId,
     pub members: Vec<CantonId>,
     pub threshold: i64,
     // Optional on the wire: older governance rules contracts predate this field.
@@ -930,26 +926,6 @@ pub struct GovernanceState {
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct GovernanceStateResponse {
     pub state: Option<GovernanceState>,
-}
-
-/// Information about a deployed Vault contract
-#[derive(Clone, Debug, Serialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct VaultInfo {
-    pub contract_id: String,
-    pub vault_name: String,
-    pub share_symbol: String,
-    pub is_paused: bool,
-    pub vault_manager: CantonId,
-}
-
-/// Response for the vaults endpoint
-#[derive(Serialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct VaultsResponse {
-    pub vaults: Vec<VaultInfo>,
 }
 
 /// Information about a ProviderService contract
@@ -1393,7 +1369,7 @@ pub struct ChainAuditEntry {
     /// "Module:Entity"
     pub template_id: String,
     pub package_id: String,
-    /// vault | core_self | core_domain | cbtc | unknown
+    /// core_self | core_domain | cbtc | unknown
     pub governance_type: String,
     pub action_summary: String,
     /// Exercised choice name (None for Created events)
@@ -1438,7 +1414,7 @@ mod tests {
     fn governance_state_round_trips_with_every_optional_field_omitted() -> Result<()> {
         let state = GovernanceState {
             contract_id: "00rules".to_owned(),
-            vault_manager: party("mgr")?,
+            governance_party: party("mgr")?,
             members: vec![party("m1")?],
             threshold: 2,
             action_confirmation_timeout_microseconds: None,

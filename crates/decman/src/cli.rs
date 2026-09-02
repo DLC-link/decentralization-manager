@@ -172,6 +172,11 @@ pub enum Commands {
         #[arg(long, env = "DECPM_AUTH0_AUDIENCE", hide = true)]
         auth0_audience: Option<String>,
 
+        /// Extra space-separated scopes the SPA requests. Auth0 RBAC returns a
+        /// permission in `scope` only if the client asked for it.
+        #[arg(long, env = "DECPM_AUTH0_SCOPE", hide = true)]
+        auth0_scope: Option<String>,
+
         /// Optional JWT claim containing an array of role names. Use this for
         /// provider-required namespaced custom claims; standard role carriers
         /// remain enabled when this is unset.

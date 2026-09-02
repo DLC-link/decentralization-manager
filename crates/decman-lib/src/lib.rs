@@ -60,7 +60,7 @@
 //! // Read side: a custom action's confirmations are `GovernanceConfirmation`
 //! // contracts, which carry no inline action. Decode their created events
 //! // with `parse_domain_confirmation`. (`parse_confirmation` reads only the
-//! // vault and self shapes, which embed the action, and returns `None` for
+//! // CBTC and self shapes, which embed the action, and returns `None` for
 //! // these.)
 //! let _ = parse_domain_confirmation(&Default::default());
 //!

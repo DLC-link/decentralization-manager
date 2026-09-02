@@ -49,7 +49,7 @@ use super::{
         GovernanceState, HoldingInfo, InstrumentInfo, PartyMetadata, PendingAction,
         ProviderConfigurationInfo, ProviderServiceInfo, RegistrarServiceInfo,
         RegistrarServiceRequestInfo, TokenRequestInfo, TransferFactoryInfo,
-        TransferInstructionInfo, TransferInstructionStatus, UserServiceInfo, VaultInfo,
+        TransferInstructionInfo, TransferInstructionStatus, UserServiceInfo,
     },
 };
 
@@ -99,14 +99,6 @@ fn contract_templates(packages: &PackageConfig) -> Vec<TemplateId> {
             entity_name: "GovernanceRules",
         });
     }
-    // Vault contracts (configurable package ID)
-    if let Some(ref pkg) = packages.vault_governance {
-        templates.push(TemplateId {
-            package_id: pkg.clone(),
-            module_name: "BitsafeVault.VaultGovernance",
-            entity_name: "VaultGovernanceRules",
-        });
-    }
     // Utility-Registry offer contracts produced by AllocationFactory_OfferMint /
     // AllocationFactory_OfferBurn (used by the utility-onboarding plugin).
     if let Some(ref pkg) = packages.utility_registry {
@@ -122,15 +114,6 @@ fn contract_templates(packages: &PackageConfig) -> Vec<TemplateId> {
         });
     }
     templates
-}
-
-/// Vault template identifier
-fn vault_template(packages: &PackageConfig) -> Option<TemplateId> {
-    packages.vault.as_ref().map(|pkg| TemplateId {
-        package_id: pkg.clone(),
-        module_name: "BitsafeVault.Vault",
-        entity_name: "Vault",
-    })
 }
 
 /// ProviderService template identifier
@@ -526,7 +509,7 @@ pub async fn get_governance_confirmations(
     token: Option<String>,
     packages: &PackageConfig,
 ) -> Result<(Vec<GovernanceAction>, Vec<DomainGovernanceAction>)> {
-    // Collect confirmations grouped by action hash (vault + core self-management)
+    // Collect confirmations grouped by action hash (core self-management)
     let mut confirmations_by_hash: HashMap<String, (ActionType, Vec<ParsedConfirmation>)> =
         HashMap::new();
     // Collect domain confirmations grouped by proposal CID (core domain actions)
@@ -862,14 +845,14 @@ fn compute_action_hash(action: &ActionType) -> String {
 // Governance State Query
 // ============================================================================
 
-/// Get the state of the VaultGovernanceRules contract for a party
+/// Get the state of the GovernanceRules contract for a party
 pub async fn get_governance_state(
     config: &NodeConfig,
     party_id: &CantonId,
     token: Option<String>,
     packages: &PackageConfig,
 ) -> Result<Option<GovernanceState>> {
-    // Try each governance template (vault, core) until we find a match
+    // Try each governance template until we find a match
     for template in decman_lib::catalog::templates::governance_state_templates(packages) {
         match fetch_governance_state_for_template(config, party_id, token.clone(), &template).await
         {
@@ -973,7 +956,7 @@ async fn fetch_governance_state_for_template(
         .and_then(interpret::extract_governance_state)
         .map(|rules| GovernanceState {
             contract_id: rules.contract_id,
-            vault_manager: rules.governance_party,
+            governance_party: rules.governance_party,
             members: rules.members,
             threshold: rules.threshold,
             action_confirmation_timeout_microseconds: rules.timeout_micros,
@@ -1050,85 +1033,6 @@ async fn fetch_contract_package_ref(
     }
     let id_to_name = fetch_package_id_to_name(config).await?;
     Ok(id_to_name.get(&package_id).map(|name| format!("#{name}")))
-}
-
-// ============================================================================
-// Vault Contracts Query
-// ============================================================================
-
-/// Get all Vault contracts for a party
-pub async fn get_vaults(
-    config: &NodeConfig,
-    party_id: &CantonId,
-    token: Option<String>,
-    packages: &PackageConfig,
-) -> Result<Vec<VaultInfo>> {
-    match vault_template(packages) {
-        Some(template) => fetch_vaults_for_template(config, party_id, token, &template).await,
-        None => Ok(Vec::new()),
-    }
-}
-
-/// Fetch vaults using TemplateFilter
-async fn fetch_vaults_for_template(
-    config: &NodeConfig,
-    party_id: &CantonId,
-    token: Option<String>,
-    template: &TemplateId,
-) -> Result<Vec<VaultInfo>> {
-    let event_format = party_event_format(
-        party_id,
-        vec![template_filter(
-            Identifier {
-                package_id: template.package_id.clone(),
-                module_name: template.module_name.to_string(),
-                entity_name: template.entity_name.to_string(),
-            },
-            false,
-        )],
-        true,
-    );
-
-    fetch_active_contracts_filtered(config, token, event_format, |created| {
-        extract_vault_info(&created)
-    })
-    .await
-}
-
-/// Extract VaultInfo from a Vault created event
-fn extract_vault_info(created: &CreatedEvent) -> Option<VaultInfo> {
-    let record = created.create_arguments.as_ref()?;
-
-    // Extract vaultConfig (Record with name and shareSymbol)
-    let vault_config = field_record(record, "vaultConfig")?;
-
-    let (vault_name, share_symbol) = extract_vault_config(vault_config)?;
-
-    // Extract isPaused (Bool)
-    let is_paused = match record_field(record, "isPaused") {
-        Some(value::Sum::Bool(b)) => Some(*b),
-        _ => None,
-    }
-    .unwrap_or(false);
-
-    // Extract vaultManager (Party)
-    let vault_manager: CantonId =
-        field_party(record, "vaultManager").and_then(|p| p.parse().ok())?;
-
-    Some(VaultInfo {
-        contract_id: created.contract_id.clone(),
-        vault_name,
-        share_symbol,
-        is_paused,
-        vault_manager,
-    })
-}
-
-/// Extract vault name and share symbol from VaultConfig record
-fn extract_vault_config(record: &Record) -> Option<(String, String)> {
-    let name = field_text(record, "name")?;
-    let share_symbol = field_text(record, "shareSymbol")?;
-    Some((name, share_symbol))
 }
 
 // ============================================================================
