@@ -782,7 +782,7 @@ Weights are decimal strings and must sum to exactly 1.0; `SetProviderAppRewardBe
 | Kick | 2 (remaining members) |
 | Contracts | 3 |
 | DARs | 2 |
-| Add Party | 2 (an existing member + the joiner) |
+| Add Party | 2 (an existing member + the joiner). The threshold may not count the joiner: it carries Canton's onboarding marker until its ACS import completes, and a write at threshold = post-add member count never becomes effective |
 | Change Threshold | 2 (party members) |
 
 ### Known Limitations

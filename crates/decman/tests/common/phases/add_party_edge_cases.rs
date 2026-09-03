@@ -85,7 +85,9 @@ async fn validation_rejections(f: &Fixture) -> anyhow::Result<()> {
             json!({
                 "decentralized_party_id": party_id,
                 "new_participant_id": p3_uid,
-                // Party has 2 members; post-add max is 3.
+                // The bound is the members that can sign, which excludes the
+                // one being added — a threshold that counts it is the
+                // full-threshold bug and never becomes effective.
                 "new_threshold": 4_i64,
                 "previous_threshold": 2_i64,
             }),
