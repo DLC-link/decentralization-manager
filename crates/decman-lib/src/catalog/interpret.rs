@@ -90,15 +90,14 @@ pub fn parse_confirmation(created: &CreatedEvent) -> Option<ParsedConfirmation> 
     // is missing or the party string isn't a valid CantonId — propagating
     // garbage upstream (the old code used "unknown") makes the consumer
     // fragile.
-    let Some(confirming_party_str) = record
-        .fields
-        .iter()
-        .find(|f| f.label == "confirmingParty" || f.label == "confirmer")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Party(p)) => Some(p.clone()),
-            _ => None,
-        })
+    // Two names for one field across templates: governance-core's
+    // `GovernanceConfirmation` calls it `confirmer`, the cbtc path
+    // `confirmingParty`. No template declares both, so the fallback only ever
+    // picks the one that is there. It differs from a single find-either-label
+    // only for a record carrying both with the first malformed, which the
+    // fixed template schemas do not produce.
+    let Some(confirming_party_str) =
+        field_party(record, "confirmingParty").or_else(|| field_party(record, "confirmer"))
     else {
         tracing::warn!(
             "Skipping confirmation {cid}: missing confirmingParty/confirmer field",

@@ -782,7 +782,15 @@ pub async fn propose_action(
         ),
         other => match other.grpc_payload() {
             Some(p) => build_propose(p, party_id, &member_party_id, &packages, command_id),
-            None => unreachable!("transfer variants matched above"),
+            // No variant reaches this today: `grpc_payload` returns `None`
+            // only for the two transfer variants, and both match above. A
+            // new variant that returns `None` gets a 500, not a panic.
+            None => {
+                tracing::error!("Proposal variant has no gRPC payload: {other:?}");
+                return HttpResponse::InternalServerError().json(ErrorResponse {
+                    error: "Unsupported proposal type".to_string(),
+                });
+            }
         },
     };
     // An unconfigured package is a provisioning gap, not bad input: 503 with

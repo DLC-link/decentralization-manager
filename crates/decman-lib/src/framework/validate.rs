@@ -24,10 +24,17 @@ pub fn validate_threshold(new_threshold: i64) -> Result<(), Error> {
     Ok(())
 }
 
+/// The smallest `actionConfirmationTimeout` the Daml accepts, in
+/// microseconds. `GovernanceRules` requires `actionConfirmationTimeout >=
+/// seconds 10` in its `ensure` clause, and the set-timeout choice repeats the
+/// bound. A smaller value survives a whole governance round and then fails at
+/// execution, so it must fail here instead.
+pub const MIN_TIMEOUT_MICROSECONDS: i64 = 10_000_000;
+
 pub fn validate_timeout(microseconds: i64) -> Result<(), Error> {
-    if microseconds <= 0 {
+    if microseconds < MIN_TIMEOUT_MICROSECONDS {
         return Err(Error::Validation(format!(
-            "new_timeout_microseconds must be positive, got {microseconds}"
+            "new_timeout_microseconds must be at least {MIN_TIMEOUT_MICROSECONDS} (10 seconds), got {microseconds}"
         )));
     }
     Ok(())
@@ -185,6 +192,18 @@ mod tests {
             beneficiary: cid(prefix),
             percentage: pct.parse().expect("valid decimal"),
         }
+    }
+
+    #[test]
+    fn validate_timeout_enforces_the_daml_ten_second_floor() {
+        // Below the floor: rejected, however close.
+        assert!(validate_timeout(0).is_err());
+        assert!(validate_timeout(-1).is_err());
+        assert!(validate_timeout(MIN_TIMEOUT_MICROSECONDS - 1).is_err());
+
+        // At and above the floor: accepted.
+        assert!(validate_timeout(MIN_TIMEOUT_MICROSECONDS).is_ok());
+        assert!(validate_timeout(60_000_000).is_ok());
     }
 
     #[test]
