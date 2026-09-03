@@ -50,8 +50,8 @@ use crate::{
         threshold::{ExternalPartyThresholdPayload, prepare_threshold, submit_threshold},
     },
     workflow::party_replication::{
-        clear_onboarding_flag, collect_party_package_ids, export_party_acs, import_party_acs,
-        staging, wait_for_flag_cleared,
+        clear_onboarding_flag, collect_party_package_ids, export_party_acs_to_path,
+        import_party_acs, staging, wait_for_flag_cleared,
     },
     workflow::storage::artifact_kinds,
 };
@@ -561,23 +561,39 @@ pub async fn tenant_acs_snapshot(
             (len, ids, preflight)
         }
         None => {
-            let snapshot = match export_party_acs(
+            // Streamed straight to the staging file rather than assembled in
+            // memory first: the whole point of the ranged relay is that a large
+            // party costs a file, not a resident allocation on both ends.
+            let path = staging::staging_path(&data.config, &replication.instance_name);
+            if let Err(e) = tokio::fs::create_dir_all(staging::staging_dir(&data.config)).await {
+                tracing::error!("tenant acs snapshot: staging directory failed: {e:#}");
+                return HttpResponse::InternalServerError().json(ErrorResponse {
+                    error: format!("Failed to create the ACS staging directory: {e}"),
+                });
+            }
+            let len = match export_party_acs_to_path(
                 &data.config,
                 &data.db,
                 &replication,
                 data.config.tenant_acs_max_bytes,
+                &path,
             )
             .await
             {
-                Ok(snapshot) => snapshot,
+                Ok(len) => len,
                 Err(e) => {
                     tracing::error!("tenant acs snapshot: export failed: {e:#}");
+                    // A partial file would be read as a complete snapshot by the
+                    // next range, so it goes rather than lingering.
+                    if let Err(e) = staging::discard(&data.config, &replication.instance_name).await
+                    {
+                        tracing::warn!("could not discard the partial ACS export: {e:#}");
+                    }
                     return HttpResponse::InternalServerError().json(ErrorResponse {
                         error: format!("Failed to export the party's ACS: {e}"),
                     });
                 }
             };
-            let len = snapshot.len() as u64;
 
             // No contracts means no packages to check, and the ledger scan is
             // not free.
@@ -606,15 +622,6 @@ pub async fn tenant_acs_snapshot(
                     }
                 }
             };
-
-            if let Err(e) =
-                staging::stage(&data.config, &replication.instance_name, &snapshot).await
-            {
-                tracing::error!("tenant acs snapshot: staging failed: {e:#}");
-                return HttpResponse::InternalServerError().json(ErrorResponse {
-                    error: format!("Failed to stage the exported ACS: {e}"),
-                });
-            }
             if let Err(e) = write_staged_package_ids(&data, &replication, &ids, preflight).await {
                 tracing::error!("tenant acs snapshot: package id staging failed: {e:#}");
                 return HttpResponse::InternalServerError().json(ErrorResponse {

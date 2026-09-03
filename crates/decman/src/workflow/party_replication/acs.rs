@@ -62,19 +62,7 @@ pub async fn export_party_acs(
     let synchronizer_id =
         utils::extract_synchronizer_fingerprint(&utils::get_synchronizer_id(config).await?)?;
 
-    let offset_bytes = target
-        .read_artifact(storage, target.artifacts.export_offset, None)
-        .await?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "{kind} artifact missing — the pre-topology offset was never captured",
-                kind = target.artifacts.export_offset
-            )
-        })?;
-    let begin_offset_exclusive: i64 = String::from_utf8(offset_bytes)?
-        .trim()
-        .parse()
-        .map_err(|e| anyhow::anyhow!("Failed to parse export offset: {e}"))?;
+    let begin_offset_exclusive = read_export_offset(storage, target).await?;
 
     tracing::info!(
         "Exporting ACS of {party} for target {member} (begin offset {begin_offset_exclusive})",
@@ -132,6 +120,143 @@ pub async fn export_party_acs(
     }
 
     anyhow::bail!("ExportPartyAcs still not ready after {max_attempts} attempts")
+}
+
+/// The pre-topology offset this replication captured, which both exports search
+/// forward from.
+///
+/// # Errors
+/// Returns an error if it was never captured, or is not an integer.
+async fn read_export_offset(storage: &SqlitePool, target: &ReplicationTarget) -> Result<i64> {
+    let offset_bytes = target
+        .read_artifact(storage, target.artifacts.export_offset, None)
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{kind} artifact missing — the pre-topology offset was never captured",
+                kind = target.artifacts.export_offset
+            )
+        })?;
+    String::from_utf8(offset_bytes)?
+        .trim()
+        .parse()
+        .map_err(|e| anyhow::anyhow!("Failed to parse export offset: {e}"))
+}
+
+/// Export the party's ACS straight to `path`, returning how many bytes landed.
+///
+/// The difference from [`export_party_acs`] is where the snapshot lives while it
+/// is being received. That one assembles it in a `Vec`, which the Noise path
+/// needs because it has to ship the bytes onward, but it makes the export's
+/// memory cost equal to the whole ACS. This one writes each chunk through, so a
+/// large party costs a file rather than a resident allocation.
+///
+/// The cap still applies while streaming: it stops an oversized party filling
+/// the disk, and it aborts as soon as the running total crosses it rather than
+/// after the export finishes.
+///
+/// # Errors
+/// Returns an error if the offset artefact is missing, a Canton call fails, or
+/// the file cannot be written.
+pub async fn export_party_acs_to_path(
+    config: &NodeConfig,
+    storage: &SqlitePool,
+    target: &ReplicationTarget,
+    max_bytes: usize,
+    path: &std::path::Path,
+) -> Result<u64> {
+    let synchronizer_id =
+        utils::extract_synchronizer_fingerprint(&utils::get_synchronizer_id(config).await?)?;
+    let begin_offset_exclusive = read_export_offset(storage, target).await?;
+
+    tracing::info!(
+        "Exporting ACS of {party} for target {member} to {path} (begin offset \
+         {begin_offset_exclusive})",
+        party = target.party_id,
+        member = target.target_participant_id,
+        path = path.display()
+    );
+
+    let mut client = PartyManagementServiceClient::new(config.admin_channel().await?);
+    let max_attempts = topology_retry_max_attempts();
+    let retry_delay = Duration::from_secs(topology_retry_delay_secs());
+
+    for attempt in 1..=max_attempts {
+        let request = tonic::Request::new(ExportPartyAcsRequest {
+            party_id: target.party_id.to_string(),
+            synchronizer_id: synchronizer_id.clone(),
+            target_participant_uid: target.target_participant_id.to_string(),
+            begin_offset_exclusive,
+            wait_for_activation_timeout: Some(prost_types::Duration {
+                seconds: EXPORT_ACTIVATION_TIMEOUT_SECS,
+                nanos: 0,
+            }),
+        });
+
+        match stream_export_to_path(&mut client, request, max_bytes, path).await {
+            Ok(written) => {
+                tracing::info!(
+                    "Exported ACS snapshot: {written} bytes to {}",
+                    path.display()
+                );
+                return Ok(written);
+            }
+            Err(status)
+                if status
+                    .message()
+                    .contains("INVALID_STATE_PARTY_MANAGEMENT_ERROR")
+                    && attempt < max_attempts =>
+            {
+                tracing::warn!(
+                    "ExportPartyAcs not ready (attempt {attempt}/{max_attempts}), \
+                     retrying in {retry_delay:?}: {status}"
+                );
+                tokio::time::sleep(retry_delay).await;
+            }
+            Err(status) => return Err(status.into()),
+        }
+    }
+
+    anyhow::bail!("ExportPartyAcs still not ready after {max_attempts} attempts")
+}
+
+/// Stream one `ExportPartyAcs` call into `path`, truncating whatever was there.
+///
+/// Truncating per attempt matters: a retry after a partial stream must not
+/// append to the bytes the failed attempt left behind, or the file becomes two
+/// half-snapshots spliced together.
+async fn stream_export_to_path(
+    client: &mut PartyManagementServiceClient<tonic::transport::Channel>,
+    request: tonic::Request<ExportPartyAcsRequest>,
+    max_bytes: usize,
+    path: &std::path::Path,
+) -> std::result::Result<u64, tonic::Status> {
+    let mut stream = client.export_party_acs(request).await?.into_inner();
+
+    let mut file = tokio::fs::File::create(path)
+        .await
+        .map_err(|e| tonic::Status::internal(format!("creating {}: {e}", path.display())))?;
+
+    let mut written: u64 = 0;
+    while let Some(response) = stream.message().await? {
+        written += response.chunk.len() as u64;
+        // Checked before writing, so the cap bounds the file rather than being
+        // noticed after it is already on disk.
+        if written > max_bytes as u64 {
+            return Err(tonic::Status::out_of_range(format!(
+                "Exported ACS snapshot exceeds the {max_bytes}-byte cap this caller can \
+                 carry (DECPM_TENANT_ACS_MAX_BYTES for the wallet-relayed path)."
+            )));
+        }
+        tokio::io::AsyncWriteExt::write_all(&mut file, &response.chunk)
+            .await
+            .map_err(|e| tonic::Status::internal(format!("writing {}: {e}", path.display())))?;
+    }
+    tokio::io::AsyncWriteExt::flush(&mut file)
+        .await
+        .map_err(|e| tonic::Status::internal(format!("flushing {}: {e}", path.display())))?;
+
+    Ok(written)
 }
 
 /// Run one `ExportPartyAcs` call and collect the streamed chunks.
