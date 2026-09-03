@@ -482,9 +482,18 @@ async fn raise_threshold(f: &mut Fixture, party_id: &str, seed: [u8; 32]) -> any
                     let refused: anyhow::Result<Value> = f
                         .post_json(f.p1.http, "/v0/tenant/threshold/prepare", &too_high)
                         .await;
+                    // Not merely that it failed — a transport blip or an auth
+                    // regression would satisfy that and the test would still
+                    // claim the boundary is enforced. Pin the reason.
+                    let Err(e) = refused else {
+                        anyhow::bail!(
+                            "a threshold above the host count must be refused, not written"
+                        );
+                    };
+                    let reason = format!("{e:#}");
                     anyhow::ensure!(
-                        refused.is_err(),
-                        "a threshold above the host count must be refused, not written"
+                        reason.contains("400") && reason.contains("able to confirm"),
+                        "the refusal must be the threshold bound, got: {reason}"
                     );
 
                     // Now the real raise: 2 of 3.
