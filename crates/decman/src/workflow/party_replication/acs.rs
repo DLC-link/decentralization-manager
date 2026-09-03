@@ -31,7 +31,7 @@ use crate::{
     workflow::{
         party_replication::{
             ReplicationTarget,
-            pipe::{ExportSession, PipeBlock},
+            pipe::{ExportSession, PipeBlock, PipeTrailer},
         },
         storage::WorkflowStorage,
     },
@@ -539,43 +539,55 @@ where
     // that what arrived is what was exported.
     let mut hasher = Sha256::new();
     let mut fed = 0u64;
-    let mut block = first;
-    let mut seq = 1u64;
-    let trailer = loop {
-        match block {
-            PipeBlock::Data { bytes, .. } => {
-                hasher.update(&bytes);
-                fed += bytes.len() as u64;
-                // Re-chunk into the import stream: a transport block may be
-                // larger than Canton's inbound gRPC message cap (4 MiB by
-                // default), which the block size deliberately can be, since it
-                // is tuned against the Noise handler timeout instead.
-                let mut closed = false;
-                for chunk in bytes.chunks(IMPORT_CHUNK_SIZE) {
-                    // A closed receiver means the RPC already failed; that error
-                    // is the informative one, so stop and let the caller surface
-                    // it.
-                    if tx.send(build(chunk.to_vec())).await.is_err() {
-                        closed = true;
-                        break;
-                    }
-                }
-                if closed {
-                    break None;
-                }
-                tracing::debug!("Imported {fed} bytes so far");
-            }
-            PipeBlock::End { trailer, .. } => break Some(trailer),
-        }
-        seq += 1;
-        block = next_block(seq).await?;
-    };
 
-    // Closing the sender is what tells Canton the snapshot is complete.
+    // The feeding loop's result is captured rather than propagated with `?`.
+    // Returning early here would drop the RPC's JoinHandle, and tokio detaches
+    // a dropped handle: the import would keep consuming queued requests while
+    // the caller's bracket reconnects the synchronizers, which is exactly the
+    // state Canton forbids. Every path below closes the sender and joins the
+    // task first.
+    let feed: Result<Option<PipeTrailer>> = async {
+        let mut block = first;
+        let mut seq = 1u64;
+        loop {
+            match block {
+                PipeBlock::Data { bytes, .. } => {
+                    hasher.update(&bytes);
+                    fed += bytes.len() as u64;
+                    // Re-chunk into the import stream: a transport block may be
+                    // larger than Canton's inbound gRPC message cap (4 MiB by
+                    // default), which the block size deliberately can be, since
+                    // it is tuned against the Noise handler timeout instead.
+                    for chunk in bytes.chunks(IMPORT_CHUNK_SIZE) {
+                        // A closed receiver means the RPC already failed; that
+                        // error is the informative one, so stop and let it
+                        // surface below.
+                        if tx.send(build(chunk.to_vec())).await.is_err() {
+                            return Ok(None);
+                        }
+                    }
+                    tracing::debug!("Imported {fed} bytes so far");
+                }
+                PipeBlock::End { trailer, .. } => return Ok(Some(trailer)),
+            }
+            seq += 1;
+            block = next_block(seq).await?;
+        }
+    }
+    .await;
+
+    // Closing the sender is what tells Canton the snapshot is complete, and on
+    // a failure path it is what makes the import terminate instead of waiting
+    // for more.
     tx.close_channel();
     drop(tx);
 
     let rpc_result = rpc.await.context("the ACS import task did not finish")?;
+
+    // Order matters. A fetch failure explains a truncated import, so it is
+    // reported first; the RPC error is reported next; only a clean run reaches
+    // the trailer check.
+    let trailer = feed?;
     rpc_result?;
 
     let Some(trailer) = trailer else {

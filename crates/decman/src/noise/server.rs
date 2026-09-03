@@ -350,7 +350,10 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         match message.msg_type {
             MessageType::GetNextCommand => self.handle_get_next_command(peer_id).await,
             MessageType::GetChunk => self.handle_get_chunk(message.payload).await,
-            MessageType::GetNextAcsBlock => self.handle_get_next_acs_block(message.payload).await,
+            MessageType::GetNextAcsBlock => {
+                self.handle_get_next_acs_block(peer_id, message.payload)
+                    .await
+            }
             MessageType::KeysUpload => {
                 self.handle_peer_data(peer_id, message.payload, "keys upload")
                     .await
@@ -499,6 +502,7 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
     /// of how large the party is.
     async fn handle_get_next_acs_block(
         &self,
+        peer_id: CantonId,
         request_payload: Vec<u8>,
     ) -> Result<Message, NoiseError> {
         if request_payload.len() < 8 {
@@ -510,7 +514,7 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
 
         let block = self
             .workflow_state
-            .next_acs_block(seq, acs_block_size())
+            .next_acs_block(&peer_id, seq, acs_block_size())
             .await?;
 
         if let PipeBlock::End { trailer, .. } = &block {

@@ -74,11 +74,16 @@ pub struct WorkflowState<S> {
     peer_data: RwLock<HashMap<CantonId, Vec<u8>>>,
     /// Payload data to send with the next command (e.g., proposals for signing)
     command_payload: RwLock<Vec<u8>>,
-    /// The source's open ACS export, held between block requests.
+    /// The source's open ACS export, held between block requests, with the one
+    /// participant allowed to pull from it.
     ///
     /// A live gRPC stream, so it cannot be persisted and does not survive a
     /// restart: a resumed run re-opens it and the transfer starts from block 1.
-    acs_export: Mutex<Option<ExportSession>>,
+    ///
+    /// The authorized puller is stored with the session rather than derived at
+    /// request time because this state is generic over the workflow kind and
+    /// knows nothing about add-party's config.
+    acs_export: Mutex<Option<(CantonId, ExportSession)>>,
     _p: PhantomData<()>,
 }
 
@@ -150,8 +155,13 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
     }
 
     /// Install a freshly opened export session, replacing any previous one.
-    pub async fn set_acs_export(&self, session: ExportSession) {
-        *self.acs_export.lock().await = Some(session);
+    ///
+    /// `authorized` is the only participant that may pull blocks from it: the
+    /// stream carries the party's entire active contract set and is
+    /// forward-only, so anyone else reading it would both see contracts they
+    /// are not entitled to and desynchronize the real target.
+    pub async fn set_acs_export(&self, authorized: CantonId, session: ExportSession) {
+        *self.acs_export.lock().await = Some((authorized, session));
     }
 
     /// Whether an export session is currently open.
@@ -159,19 +169,41 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
         self.acs_export.lock().await.is_some()
     }
 
-    /// Serve block `seq` from the open export session.
+    /// Serve block `seq` from the open export session to `caller`.
     ///
     /// # Errors
-    /// Returns an error if no session is open, or if the session refuses the
+    /// Returns an error if no session is open, if `caller` is not the
+    /// participant the session was opened for, or if the session refuses the
     /// sequence number (see [`ExportSession::block`]).
-    pub async fn next_acs_block(&self, seq: u64, block_size: usize) -> Result<PipeBlock> {
+    pub async fn next_acs_block(
+        &self,
+        caller: &CantonId,
+        seq: u64,
+        block_size: usize,
+    ) -> Result<PipeBlock> {
         let mut guard = self.acs_export.lock().await;
+
+        // Authenticated at the Noise layer, but any peer in the allowlist can
+        // route to this run. Only the participant being replicated onto may
+        // read the export.
+        if let Some((authorized, _)) = guard.as_ref()
+            && authorized != caller
+        {
+            anyhow::bail!(
+                "{caller} is not the target of this replication and may not read \
+                 its ACS export"
+            );
+        }
 
         // The target restarts its step from block 1, but the export is
         // forward-only: once it has served past block 1 it can never answer
         // that again. Drop the session so the coordinator's step loop re-opens
         // it, rather than failing every retry until the process restarts.
-        if seq <= 1 && guard.as_ref().is_some_and(ExportSession::served_past_first) {
+        if seq <= 1
+            && guard
+                .as_ref()
+                .is_some_and(|(_, session)| session.served_past_first())
+        {
             *guard = None;
             anyhow::bail!(
                 "ACS export restarted: the target asked for block {seq} after the \
@@ -180,7 +212,7 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
             );
         }
 
-        let session = guard.as_mut().ok_or_else(|| {
+        let (_, session) = guard.as_mut().ok_or_else(|| {
             anyhow::anyhow!(
                 "no ACS export is open on this run — the coordinator restarted, so the \
                  transfer must begin again from block 1"

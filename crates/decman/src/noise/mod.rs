@@ -280,7 +280,17 @@ impl MessageType {
 /// Bump this on any framing change; the decoder rejects mismatches with a
 /// clear error, and future versions can branch on it instead of forcing
 /// another lockstep upgrade.
-pub const WIRE_VERSION: u8 = 0xD1;
+///
+/// 0xD1 -> 0xD2: the `ImportAcs` payload dropped the inline snapshot for
+/// `[config, package_ids]` and the ACS moved to `GetNextAcsBlock`. This one had
+/// to be a version bump rather than a tolerated difference: a 0xD1 peer decodes
+/// the new two-item payload as its own legacy `[config, snapshot]`, so it would
+/// read the package-id list as ACS bytes, find them non-empty, skip the package
+/// preflight, and DISCONNECT its participant to import them — after the
+/// topology change is already live. Rejecting the frame outright keeps an old
+/// build from ever reaching that, and it fails the invite's health probe, so
+/// the run does not start at all.
+pub const WIRE_VERSION: u8 = 0xD2;
 
 /// Message structure for Noise protocol communication.
 ///
