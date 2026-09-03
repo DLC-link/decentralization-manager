@@ -111,11 +111,13 @@ pub mod artifact_kinds {
     /// new member's Onboarding marker) created by the coordinator. Empty
     /// payload doubles as the "flag already cleared — skip the sign round"
     /// marker. Length-prefixed proto when non-empty.
-    /// The assembled SyncAcs command payload (config + ACS manifest + package
-    /// ids). Persisted because the coordinator only holds it in memory: a
-    /// restart during the transfer would otherwise serve the new member an
-    /// empty payload it cannot decode, and the run would die six strikes later
-    /// with the staged snapshot intact but unreachable.
+    /// The assembled SyncAcs command payload (config + the package ids the
+    /// target's preflight needs). The ACS itself is not in it: the target pulls
+    /// the snapshot block by block straight into Canton's import.
+    ///
+    /// Persisted because the coordinator only holds it in memory, and a restart
+    /// during the transfer would otherwise serve the target an empty payload it
+    /// cannot decode.
     pub const ADD_PARTY_SYNC_ACS_COMMAND: &str = "add_party_sync_acs_command";
 
     pub const ADD_PARTY_CLEAR_PROPOSAL: &str = "add_party_clear_proposal";

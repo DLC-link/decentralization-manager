@@ -149,7 +149,6 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
         self.command_payload.read().await.clone()
     }
 
-    /// Clear the command payload
     /// Install a freshly opened export session, replacing any previous one.
     pub async fn set_acs_export(&self, session: ExportSession) {
         *self.acs_export.lock().await = Some(session);
@@ -167,6 +166,20 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
     /// sequence number (see [`ExportSession::block`]).
     pub async fn next_acs_block(&self, seq: u64, block_size: usize) -> Result<PipeBlock> {
         let mut guard = self.acs_export.lock().await;
+
+        // The target restarts its step from block 1, but the export is
+        // forward-only: once it has served past block 1 it can never answer
+        // that again. Drop the session so the coordinator's step loop re-opens
+        // it, rather than failing every retry until the process restarts.
+        if seq <= 1 && guard.as_ref().is_some_and(ExportSession::served_past_first) {
+            *guard = None;
+            anyhow::bail!(
+                "ACS export restarted: the target asked for block {seq} after the \
+                 stream had advanced, so it was discarded and will be re-opened. \
+                 Retry the transfer."
+            );
+        }
+
         let session = guard.as_mut().ok_or_else(|| {
             anyhow::anyhow!(
                 "no ACS export is open on this run — the coordinator restarted, so the \
@@ -181,6 +194,7 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
         *self.acs_export.lock().await = None;
     }
 
+    /// Clear the command payload
     pub async fn clear_command_payload(&self) {
         let mut cmd_payload = self.command_payload.write().await;
         cmd_payload.clear();
