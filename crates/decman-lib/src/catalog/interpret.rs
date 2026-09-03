@@ -11,7 +11,7 @@ use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 
 use canton_common::decimal::DamlDecimal;
-use canton_proto_rs::com::daml::ledger::api::v2::{CreatedEvent, Record, value};
+use canton_proto_rs::com::daml::ledger::api::v2::{CreatedEvent, Record};
 use common::canton_id::CantonId;
 
 use crate::catalog::action::ActionType;
@@ -19,8 +19,9 @@ use crate::catalog::types::{
     AcceptTransferDetails, ServiceRequestDetails, TransferProposalDetails,
 };
 use crate::framework::record::{
-    extract_optional_reltime, extract_party_set, extract_reltime, field_numeric, field_party,
-    field_text, field_timestamp,
+    extract_optional_reltime, extract_party_set, extract_reltime, field_contract_id, field_int64,
+    field_numeric, field_party, field_record, field_text, field_timestamp, record_has_field,
+    record_value,
 };
 
 /// A parsed CBTC-governance or governance-core self-action confirmation.
@@ -68,8 +69,7 @@ pub fn parse_confirmation(created: &CreatedEvent) -> Option<ParsedConfirmation> 
     let record = created.create_arguments.as_ref()?;
 
     // Extract action field (a Variant in both shapes)
-    let action_value = record.fields.iter().find(|f| f.label == "action");
-    let Some(action_field) = action_value.and_then(|f| f.value.as_ref()) else {
+    let Some(action_field) = record_value(record, "action") else {
         tracing::warn!("No action field found in confirmation contract");
         return None;
     };
@@ -135,41 +135,14 @@ pub fn parse_domain_confirmation(created: &CreatedEvent) -> Option<ParsedDomainC
     let record = created.create_arguments.as_ref()?;
 
     // Extract actionProposalCid (ContractId)
-    let proposal_cid = record
-        .fields
-        .iter()
-        .find(|f| f.label == "actionProposalCid")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::ContractId(cid)) => Some(cid.clone()),
-            _ => None,
-        })
-        .unwrap_or_default();
+    let proposal_cid = field_contract_id(record, "actionProposalCid").unwrap_or_default();
 
     // Extract actionLabel (Text)
-    let action_label = record
-        .fields
-        .iter()
-        .find(|f| f.label == "actionLabel")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Text(t)) => Some(t.clone()),
-            _ => None,
-        })
-        .unwrap_or_default();
+    let action_label = field_text(record, "actionLabel").unwrap_or_default();
 
     // Extract confirmer (Party). Skip the confirmation if missing or
     // malformed (see the off-chain extractor above for the same rationale).
-    let Some(confirmer_str) = record
-        .fields
-        .iter()
-        .find(|f| f.label == "confirmer")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Party(p)) => Some(p.clone()),
-            _ => None,
-        })
-    else {
+    let Some(confirmer_str) = field_party(record, "confirmer") else {
         tracing::warn!(
             "Skipping domain confirmation {cid}: missing confirmer field",
             cid = created.contract_id
@@ -203,22 +176,10 @@ pub fn parse_domain_confirmation(created: &CreatedEvent) -> Option<ParsedDomainC
 pub fn extract_governance_state(created: &CreatedEvent) -> Option<RulesState> {
     let record = created.create_arguments.as_ref()?;
 
-    let governance_party: CantonId = record
-        .fields
-        .iter()
-        .find(|f| f.label == "governanceParty")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Party(p)) => p.parse().ok(),
-            _ => None,
-        })?;
+    let governance_party: CantonId = field_party(record, "governanceParty")?.parse().ok()?;
 
     // Extract members (Set Party - stored as GenMap<Party, Unit> inside a Record)
-    let members: Vec<CantonId> = record
-        .fields
-        .iter()
-        .find(|f| f.label == "members")
-        .and_then(|f| f.value.as_ref())
+    let members: Vec<CantonId> = record_value(record, "members")
         .and_then(extract_party_set)
         .unwrap_or_default()
         .into_iter()
@@ -226,24 +187,11 @@ pub fn extract_governance_state(created: &CreatedEvent) -> Option<RulesState> {
         .collect();
 
     // Extract threshold (Int)
-    let threshold = record
-        .fields
-        .iter()
-        .find(|f| f.label == "threshold")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Int64(i)) => Some(*i),
-            _ => None,
-        })
-        .unwrap_or(0);
+    let threshold = field_int64(record, "threshold").unwrap_or(0);
 
     // Extract actionConfirmationTimeout. Older rules contracts wrap it in an
     // Optional; the current GovernanceRules declares it non-optional.
-    let timeout_micros = record
-        .fields
-        .iter()
-        .find(|f| f.label == "actionConfirmationTimeout")
-        .and_then(|f| f.value.as_ref())
+    let timeout_micros = record_value(record, "actionConfirmationTimeout")
         .and_then(|v| extract_optional_reltime(v).or_else(|| extract_reltime(v)));
 
     Some(RulesState {
@@ -313,8 +261,7 @@ fn governable_action_view(created: &CreatedEvent) -> Option<&Record> {
 /// available: a fetch without an interface filter can return contracts of any
 /// template, so something has to keep unrelated ones out of the proposal map.
 fn looks_like_governable_action(record: &Record) -> bool {
-    let has = |label: &str| record.fields.iter().any(|f| f.label == label);
-    has("governanceParty") && has("proposer")
+    record_has_field(record, "governanceParty") && record_has_field(record, "proposer")
 }
 
 /// Extract proposal info from a `GovernableAction` contract.
@@ -410,17 +357,8 @@ pub fn extract_proposal_info(
     // transfer fields. Capture it here; a caller-side post-pass resolves each
     // cid to an `AcceptTransferDetails` via a per-cid event query so the card
     // can render sender/amount/instrument.
-    let accept_transfer_instruction_cid = record
-        .and_then(|r| {
-            r.fields
-                .iter()
-                .find(|f| f.label == "transferInstructionCid")
-        })
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::ContractId(cid)) => Some(cid.clone()),
-            _ => None,
-        });
+    let accept_transfer_instruction_cid =
+        record.and_then(|r| field_contract_id(r, "transferInstructionCid"));
 
     Some((
         created.contract_id.clone(),
@@ -454,28 +392,12 @@ pub fn extract_accept_transfer_details_from_view(
         })
     })?;
     let view_record = view.view_value.as_ref()?;
-    let transfer_record = view_record
-        .fields
-        .iter()
-        .find(|f| f.label == "transfer")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Record(r)) => Some(r),
-            _ => None,
-        })?;
+    let transfer_record = field_record(view_record, "transfer")?;
     let sender: CantonId = field_party(transfer_record, "sender")?.parse().ok()?;
     let receiver: CantonId = field_party(transfer_record, "receiver")?.parse().ok()?;
     let amount =
         field_numeric(transfer_record, "amount").and_then(|s| DamlDecimal::parse(&s).ok())?;
-    let instrument_record = transfer_record
-        .fields
-        .iter()
-        .find(|f| f.label == "instrumentId")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Record(r)) => Some(r),
-            _ => None,
-        })?;
+    let instrument_record = field_record(transfer_record, "instrumentId")?;
     let instrument_admin: CantonId = field_party(instrument_record, "admin")?.parse().ok()?;
     let instrument_id = field_text(instrument_record, "id")?;
     Some(AcceptTransferDetails {
@@ -491,27 +413,11 @@ pub fn extract_accept_transfer_details_from_view(
 /// `TransferProposal`'s `transfer` field. Returns `None` for any proposal
 /// that doesn't have a `transfer` record (every non-transfer template).
 pub fn extract_transfer_proposal_details(record: &Record) -> Option<TransferProposalDetails> {
-    let transfer_record = record
-        .fields
-        .iter()
-        .find(|f| f.label == "transfer")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Record(r)) => Some(r),
-            _ => None,
-        })?;
+    let transfer_record = field_record(record, "transfer")?;
     let receiver: CantonId = field_party(transfer_record, "receiver")?.parse().ok()?;
     let amount =
         field_numeric(transfer_record, "amount").and_then(|s| DamlDecimal::parse(&s).ok())?;
-    let instrument_record = transfer_record
-        .fields
-        .iter()
-        .find(|f| f.label == "instrumentId")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Record(r)) => Some(r),
-            _ => None,
-        })?;
+    let instrument_record = field_record(transfer_record, "instrumentId")?;
     let instrument_admin: CantonId = field_party(instrument_record, "admin")?.parse().ok()?;
     let instrument_id = field_text(instrument_record, "id")?;
     Some(TransferProposalDetails {
@@ -700,7 +606,7 @@ pub fn assemble_domain_actions(
 #[cfg(test)]
 mod tests {
     use canton_proto_rs::com::daml::ledger::api::v2::{
-        GenMap, Identifier, InterfaceView, Optional, Record, RecordField, Value, gen_map,
+        GenMap, Identifier, InterfaceView, Optional, Record, RecordField, Value, gen_map, value,
     };
     use prost_types::Timestamp;
 

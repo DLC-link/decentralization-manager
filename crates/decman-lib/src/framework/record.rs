@@ -3,10 +3,11 @@
 //! Reading one field out of a Ledger API protobuf `Record` is a four-link
 //! traversal: linear search by label, unwrap `RecordField.value:
 //! Option<Value>`, unwrap `Value.sum: Option<value::Sum>`, then match the
-//! variant. [`record_field`] is that traversal, factored out once so a
-//! protobuf-shape change (e.g. an extra `Option` layer) needs fixing in one
-//! place instead of at every call site. It borrows rather than clones, so
-//! callers match on the returned `&value::Sum` without an allocation.
+//! variant. [`record_value`] does the first two links and [`record_field`]
+//! adds the third, factored out so a protobuf-shape change (e.g. an extra
+//! `Option` layer) needs fixing in one place instead of at every call site.
+//! Both borrow rather than clone, so callers match on the returned
+//! `&value::Sum` without an allocation.
 //!
 //! Two differently-shaped families of accessor build on it:
 //!
@@ -20,17 +21,16 @@
 //!   a fail-safe `bool`) and is for callers that treat a missing or
 //!   wrong-shaped field as "not present" rather than an error:
 //!   `field_optional_is_none`, `field_party`, `field_text`, `field_numeric`,
-//!   `field_timestamp`, and the Set `Party`, `GenMap`, and `RelTime`
-//!   extractors `extract_party_set`, `extract_genmap_parties`,
+//!   `field_timestamp`, `field_contract_id`, `field_int64`, `field_record`,
+//!   and the Set `Party`, `GenMap`, and `RelTime` extractors
+//!   `extract_party_set`, `extract_genmap_parties`,
 //!   `extract_optional_reltime`, and `extract_reltime`.
 //!
-//! [`record_field`] is the shared label-lookup; `field_party_id`,
-//! `field_decimal`, `field_time`, `field_optional_is_none`,
-//! `field_list_len`, and `field_party_list` traverse through it, while
-//! `get_field` and the lenient `field_party`/`field_text`/`field_numeric`/
-//! `field_timestamp` keep their own inline traversal, and the `extract_*`
-//! helpers operate on a `&Value` directly (they never see the enclosing
-//! `Record`).
+//! Every accessor in both families reaches the field through [`record_value`]
+//! or [`record_field`]. The `extract_*` helpers take a `&Value` directly and
+//! never see the enclosing `Record`, so callers pair them with
+//! [`record_value`]. [`record_has_field`] answers the separate question of
+//! whether a record declares a label at all.
 
 use canton_common::decimal::DamlDecimal;
 use canton_proto_rs::com::daml::ledger::api::v2::{List, Record, Value, value};
@@ -39,13 +39,27 @@ use common::canton_id::CantonId;
 
 use crate::error::Error;
 
-/// Return the decoded `value::Sum` for `label`, if present.
-pub fn record_field<'a>(rec: &'a Record, label: &str) -> Option<&'a value::Sum> {
+/// Return the raw `Value` for `label`, if present. This is the one place
+/// that walks a `Record`'s field list. Use it when the consumer takes a
+/// `&Value` — the `extract_*` family does — and use [`record_field`] when it
+/// takes a decoded `value::Sum`.
+pub fn record_value<'a>(rec: &'a Record, label: &str) -> Option<&'a Value> {
     rec.fields
         .iter()
         .find(|f| f.label == label)
         .and_then(|f| f.value.as_ref())
-        .and_then(|v| v.sum.as_ref())
+}
+
+/// Return true if the record declares `label`, whatever the field holds.
+/// This asks a different question from [`record_value`], which also requires
+/// a present value.
+pub fn record_has_field(rec: &Record, label: &str) -> bool {
+    rec.fields.iter().any(|f| f.label == label)
+}
+
+/// Return the decoded `value::Sum` for `label`, if present.
+pub fn record_field<'a>(rec: &'a Record, label: &str) -> Option<&'a value::Sum> {
+    record_value(rec, label).and_then(|v| v.sum.as_ref())
 }
 
 /// Read a `Party` field and parse it into a [`CantonId`].
@@ -211,60 +225,51 @@ pub fn extract_list(value: &Value) -> Result<&List, Error> {
 
 /// Look up a field by label on a `Record`, erroring if absent.
 pub fn get_field<'a>(record: &'a Record, label: &str) -> Result<&'a Value, Error> {
-    record
-        .fields
-        .iter()
-        .find(|f| f.label == label)
-        .and_then(|f| f.value.as_ref())
-        .ok_or_else(|| Error::Decode(format!("Missing field: {label}")))
+    record_value(record, label).ok_or_else(|| Error::Decode(format!("Missing field: {label}")))
 }
 
 pub fn field_party(record: &Record, label: &str) -> Option<String> {
-    record
-        .fields
-        .iter()
-        .find(|f| f.label == label)
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Party(p)) => Some(p.clone()),
-            _ => None,
-        })
+    match record_field(record, label) {
+        Some(value::Sum::Party(p)) => Some(p.clone()),
+        _ => None,
+    }
 }
 
 pub fn field_text(record: &Record, label: &str) -> Option<String> {
-    record
-        .fields
-        .iter()
-        .find(|f| f.label == label)
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Text(t)) => Some(t.clone()),
-            _ => None,
-        })
+    match record_field(record, label) {
+        Some(value::Sum::Text(t)) => Some(t.clone()),
+        _ => None,
+    }
 }
 
 pub fn field_numeric(record: &Record, label: &str) -> Option<String> {
-    record
-        .fields
-        .iter()
-        .find(|f| f.label == label)
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Numeric(n)) => Some(n.clone()),
-            _ => None,
-        })
+    match record_field(record, label) {
+        Some(value::Sum::Numeric(n)) => Some(n.clone()),
+        _ => None,
+    }
 }
 
 pub fn field_timestamp(record: &Record, label: &str) -> Option<i64> {
-    record
-        .fields
-        .iter()
-        .find(|f| f.label == label)
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::Timestamp(t)) => Some(*t),
-            _ => None,
-        })
+    match record_field(record, label) {
+        Some(value::Sum::Timestamp(t)) => Some(*t),
+        _ => None,
+    }
+}
+
+/// Read a `ContractId` field.
+pub fn field_contract_id(record: &Record, label: &str) -> Option<String> {
+    match record_field(record, label) {
+        Some(value::Sum::ContractId(cid)) => Some(cid.clone()),
+        _ => None,
+    }
+}
+
+/// Read an `Int64` field.
+pub fn field_int64(record: &Record, label: &str) -> Option<i64> {
+    match record_field(record, label) {
+        Some(value::Sum::Int64(i)) => Some(*i),
+        _ => None,
+    }
 }
 
 /// Extract a Set Party (DA.Set.Types:Set) which is stored as Record { map: GenMap<Party, Unit> }
