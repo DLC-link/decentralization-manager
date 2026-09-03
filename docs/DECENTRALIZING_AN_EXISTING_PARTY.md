@@ -177,7 +177,7 @@ one code path.
 | `package_preflight: false` | The source cannot read the party's contracts over the Ledger API, which is normal for an external party | Confirm the joiner has the party's DARs vetted **before** importing. Without it the import fails after disconnecting |
 | Import fails mid-window | The joiner disconnected and the import did not complete | The import reconnects and verifies health on its own. Retry it; the durable marker makes re-entry safe |
 | Joiner crash-loops after an import | Orphan ACS rows from an unclean shutdown | Manual repair. See `RepairCommitmentsUsingAcs` below |
-| Export refused as too large | The snapshot exceeds this path's cap | Bounded by `DECPM_TENANT_ACS_MAX_BYTES` (512 MiB by default), not by the 16 MiB Noise limit. The export still assembles the whole snapshot in memory once before staging it, so raising this is a memory commitment |
+| Export refused as too large | The snapshot exceeds this path's cap | Bounded by `DECPM_TENANT_ACS_MAX_BYTES` (512 MiB by default), not by the 16 MiB Noise limit. The export streams to disk, so this bounds a file rather than memory |
 | `400` naming an offset from import | The range's `offset` disagrees with what the joiner holds | Read `/v0/tenant/{party}/acs-progress` and resume from there. Do not retry the same range |
 | `400` about `total_size` from import | The declared size exceeds this host's cap, or the range runs past it | The joiner cannot export to check the size itself, so it bounds what it is told. Check the source and the joiner agree on the same snapshot |
 
@@ -202,13 +202,12 @@ copy per replication in flight.
 
 - **Replicate a party onto a node outside the mesh without the wallet.** The
   wallet is the transport by design.
-- **Stream the export itself.** The transfer is now ranged and resumable, and
-  neither end holds the snapshot in a request body — but neither end streams it
-  either. The source assembles it whole in memory once before staging, and the
-  joiner reads the whole staged file back into memory before handing it to
-  `import_party_acs` (which then chunks it at 1 MiB, so it could read from the
-  file instead). `DECPM_TENANT_ACS_MAX_BYTES` is therefore a memory commitment
-  on **both** nodes, not a transport limit.
+- **Stream the import.** The export streams straight to the staging file, so a
+  large party costs the source a file rather than a resident allocation. The
+  joiner does not: it reads the whole staged file into memory before handing it
+  to `import_party_acs`, which then chunks it at 1 MiB and could read from the
+  file instead. `DECPM_TENANT_ACS_MAX_BYTES` is therefore a disk bound on the
+  source and still a memory commitment on the joiner.
 - **Survive a terabyte-scale ACS.** At that size the wall is the import, not the
   transfer: Canton re-authenticates every contract while the joiner is
   disconnected, which no transport change touches. Sequencer retention and the
