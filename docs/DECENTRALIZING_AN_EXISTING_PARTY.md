@@ -40,6 +40,26 @@ namespace is local to that participant.
 local party gives it a signing key; it does not make it a decentralized-namespace
 party, and no sequence of operations will.
 
+## Two offers: co-validation or failover
+
+`add-hosts/prepare` takes a `permission`, and it is the choice between the two
+products rather than a tuning knob.
+
+| `permission` | What the partner gets | What it costs them |
+|---|---|---|
+| `confirmation` (default) | Co-validation. Several hosts confirm for the party, and the threshold can rise above 1 afterwards | The party must sign its own submissions, so their application changes |
+| `submission` | Failover hosting. Any one host can submit for the party, so uptime improves | Nothing. Their application is untouched |
+
+**Lead with `submission` when the partner cannot change their application.** It
+is also a step toward the other one: add failover hosts now, convert and raise
+the threshold later.
+
+Its limit is real, not a detail. Threshold 1 means each host acts alone — that
+is hosting redundancy, not multi-party validation. And Canton refuses a
+Submission host once the threshold is above 1 (`topology.proto`: "if threshold >
+1, must be Confirmation or Observation"), so raising the threshold means moving
+those hosts to Confirmation first.
+
 ## Adding hosts to an external party
 
 Three phases, in the order Canton forces. Do not skip ahead: the export in

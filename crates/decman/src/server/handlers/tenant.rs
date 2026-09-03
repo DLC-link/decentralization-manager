@@ -353,6 +353,7 @@ pub async fn tenant_add_hosts_prepare(
         &data.db,
         &body.party_id,
         &body.new_hosts,
+        body.permission,
         body.base_serial,
         None,
     )
