@@ -137,6 +137,37 @@ still the source participant's key, so **that node can unilaterally change the
 party's topology forever**, including removing hosts. Say this to the partner
 plainly rather than letting them infer symmetry that is not there.
 
+## What the partner's own node has to run
+
+For an **external** party the partner runs nothing. Their key is in their
+wallet, they sign hashes, and the hosting nodes do the topology work.
+
+For a **local** party they cannot avoid it. The conversion is authorized by
+their participant's namespace key, that key lives inside their Canton node's
+vault, and the only way to use it is `TopologyManagerWriteService.SignTransactions`
+over their Admin API. So something with Admin API access has to issue the write.
+
+**That something is DecMan, not a script.** The write is a versioned protobuf
+`TopologyTransaction` that Canton itself generates, then co-signs, then accepts —
+three round trips carrying binary payloads. `grpcurl` cannot realistically
+assemble them, so "Admin API access plus a short script" is not a viable
+substitute for running the binary, even briefly.
+
+The minimum is therefore:
+
+1. The partner runs DecMan against their participant's Admin API, long enough to
+   perform the conversion. It needs no ledger credential and no IdP — the whole
+   tenant path is tokenless on the Admin API.
+2. They call `local-party/adopt-key/prepare`, sign the returned hash with the key
+   they intend the party to answer to, and call `adopt-key/onboard`.
+3. After that they can stop it. Adding hosts and replicating the ACS are driven
+   by the wallet against the *hosting* nodes, not theirs.
+
+There is no `decman-cli` path for this. The CLI is an HTTP client for a DecMan
+API and holds no Canton client, so giving it one would mean a second
+implementation of the topology write. Running DecMan briefly is cheaper and has
+one code path.
+
 ## What can go wrong
 
 | Symptom | Cause | Do |
