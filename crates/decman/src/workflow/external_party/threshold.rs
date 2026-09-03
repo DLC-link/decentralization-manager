@@ -20,8 +20,7 @@ use canton_proto_rs::com::digitalasset::canton::{
         topology_mapping,
     },
     topology::admin::v30::{
-        AddTransactionsRequest, GenerateTransactionsRequest, SignTransactionsRequest,
-        generate_transactions_request,
+        AddTransactionsRequest, GenerateTransactionsRequest, generate_transactions_request,
         topology_manager_write_service_client::TopologyManagerWriteServiceClient,
     },
     version::v1::{UntypedVersionedMessage, untyped_versioned_message},
@@ -361,22 +360,13 @@ pub async fn submit_threshold(
         })
         .collect();
 
-    // Still routed through the signing call so the node's own store accepts it
-    // the same way every other topology write does; with a complete signature
-    // set this adds nothing and changes nothing.
-    let co_signed = topology::sign_transactions_with_topology_retry(
-        config,
-        SignTransactionsRequest {
-            transactions: signed,
-            signed_by: vec![],
-            store: Some(store.clone()),
-            force_flags: vec![],
-        },
-        "external-party threshold change",
-    )
-    .await
-    .map_err(AddHostsError::Canton)?
-    .transactions;
+    // Submitted as-is. Unlike an add, this host does NOT co-sign: Canton's rules
+    // want the party namespace alone for a threshold change, and for an external
+    // party that namespace is the wallet's key. Asking the node to sign fails
+    // with TOPOLOGY_NO_APPROPRIATE_SIGNING_KEY_IN_STORE, because it correctly
+    // has no key that can authorize this — the plan says the same thing in one
+    // line: "Only the wallet signs."
+    let co_signed = signed;
 
     let mut client = TopologyManagerWriteServiceClient::new(
         config

@@ -12,7 +12,7 @@
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use common::{
-    api::{TenantOnboardRequest, TenantPrepareRequest},
+    api::{HostPermission, TenantOnboardRequest, TenantPrepareRequest},
     canton_id::CantonId,
 };
 use decman_wallet::{
@@ -576,7 +576,15 @@ async fn add_hosts_prepares_on_every_host_and_submits_only_to_joiners() {
     let current = vec![host_for(&p1, 1), host_for(&p2, 2)];
     let joining = vec![host_for(&p3, 3)];
 
-    let Ok(added) = decman_wallet::add_hosts(&current, &joining, &key, "alice::1220aa", 4).await
+    let Ok(added) = decman_wallet::add_hosts(
+        &current,
+        &joining,
+        &key,
+        "alice::1220aa",
+        HostPermission::Confirmation,
+        4,
+    )
+    .await
     else {
         panic!("a consistent add-hosts must succeed");
     };
@@ -618,7 +626,15 @@ async fn add_hosts_refuses_when_hosts_disagree() {
     let current = vec![host_for(&p1, 1), host_for(&p2, 2)];
     let joining = vec![host_for(&p3, 3)];
 
-    let Err(e) = decman_wallet::add_hosts(&current, &joining, &key, "alice::1220aa", 4).await
+    let Err(e) = decman_wallet::add_hosts(
+        &current,
+        &joining,
+        &key,
+        "alice::1220aa",
+        HostPermission::Confirmation,
+        4,
+    )
+    .await
     else {
         panic!("disagreeing hosts must abort the run");
     };

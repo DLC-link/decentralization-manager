@@ -27,7 +27,9 @@ use sqlx::SqlitePool;
 
 use crate::{canton_id::CantonId, error::Result, workflow::storage::WorkflowStorage};
 
-pub use acs::{collect_party_package_ids, export_party_acs, import_party_acs};
+pub use acs::{
+    collect_party_package_ids, export_party_acs, export_party_acs_to_path, import_party_acs,
+};
 pub use offset::{capture_offset_once, current_ledger_offset};
 pub use onboarding_flag::{
     ClearOutcome, clear_onboarding_flag, has_onboarding_marker, wait_for_flag_cleared,

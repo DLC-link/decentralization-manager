@@ -40,6 +40,26 @@ namespace is local to that participant.
 local party gives it a signing key; it does not make it a decentralized-namespace
 party, and no sequence of operations will.
 
+## Two offers: co-validation or failover
+
+`add-hosts/prepare` takes a `permission`, and it is the choice between the two
+products rather than a tuning knob.
+
+| `permission` | What the partner gets | What it costs them |
+|---|---|---|
+| `confirmation` (default) | Co-validation. Several hosts confirm for the party, and the threshold can rise above 1 afterwards | The party must sign its own submissions, so their application changes |
+| `submission` | Failover hosting. Any one host can submit for the party, so uptime improves | Nothing. Their application is untouched |
+
+**Lead with `submission` when the partner cannot change their application.** It
+is also a step toward the other one: add failover hosts now, convert and raise
+the threshold later.
+
+Its limit is real, not a detail. Threshold 1 means each host acts alone — that
+is hosting redundancy, not multi-party validation. And Canton refuses a
+Submission host once the threshold is above 1 (`topology.proto`: "if threshold >
+1, must be Confirmation or Observation"), so raising the threshold means moving
+those hosts to Confirmation first.
+
 ## Adding hosts to an external party
 
 Three phases, in the order Canton forces. Do not skip ahead: the export in
@@ -117,6 +137,37 @@ still the source participant's key, so **that node can unilaterally change the
 party's topology forever**, including removing hosts. Say this to the partner
 plainly rather than letting them infer symmetry that is not there.
 
+## What the partner's own node has to run
+
+For an **external** party the partner runs nothing. Their key is in their
+wallet, they sign hashes, and the hosting nodes do the topology work.
+
+For a **local** party they cannot avoid it. The conversion is authorized by
+their participant's namespace key, that key lives inside their Canton node's
+vault, and the only way to use it is `TopologyManagerWriteService.SignTransactions`
+over their Admin API. So something with Admin API access has to issue the write.
+
+**That something is DecMan, not a script.** The write is a versioned protobuf
+`TopologyTransaction` that Canton itself generates, then co-signs, then accepts —
+three round trips carrying binary payloads. `grpcurl` cannot realistically
+assemble them, so "Admin API access plus a short script" is not a viable
+substitute for running the binary, even briefly.
+
+The minimum is therefore:
+
+1. The partner runs DecMan against their participant's Admin API, long enough to
+   perform the conversion. It needs no ledger credential and no IdP — the whole
+   tenant path is tokenless on the Admin API.
+2. They call `local-party/adopt-key/prepare`, sign the returned hash with the key
+   they intend the party to answer to, and call `adopt-key/onboard`.
+3. After that they can stop it. Adding hosts and replicating the ACS are driven
+   by the wallet against the *hosting* nodes, not theirs.
+
+There is no `decman-cli` path for this. The CLI is an HTTP client for a DecMan
+API and holds no Canton client, so giving it one would mean a second
+implementation of the topology write. Running DecMan briefly is cheaper and has
+one code path.
+
 ## What can go wrong
 
 | Symptom | Cause | Do |
@@ -128,7 +179,7 @@ plainly rather than letting them infer symmetry that is not there.
 | `package_preflight: false` | The source cannot read the party's contracts over the Ledger API, which is normal for an external party | Confirm the joiner has the party's DARs vetted **before** importing. Without it the import fails after disconnecting |
 | Import fails mid-window | The joiner disconnected and the import did not complete | The import reconnects and verifies health on its own. Retry it; the durable marker makes re-entry safe |
 | Joiner crash-loops after an import | Orphan ACS rows from an unclean shutdown | Manual repair. See `RepairCommitmentsUsingAcs` below |
-| Export refused as too large | The snapshot exceeds this path's cap | Bounded by `DECPM_TENANT_ACS_MAX_BYTES` (512 MiB by default), not by the 16 MiB Noise limit. The export still assembles the whole snapshot in memory once before staging it, so raising this is a memory commitment |
+| Export refused as too large | The snapshot exceeds this path's cap | Bounded by `DECPM_TENANT_ACS_MAX_BYTES` (512 MiB by default), not by the 16 MiB Noise limit. The export streams to disk, so this bounds a file rather than memory |
 | `400` naming an offset from import | The range's `offset` disagrees with what the joiner holds | Read `/v0/tenant/{party}/acs-progress` and resume from there. Do not retry the same range |
 | `400` about `total_size` from import | The declared size exceeds this host's cap, or the range runs past it | The joiner cannot export to check the size itself, so it bounds what it is told. Check the source and the joiner agree on the same snapshot |
 
@@ -144,11 +195,6 @@ partial import replaces one inconsistency with a different one.
 
 - **Replicate a party onto a node outside the mesh without the wallet.** The
   wallet is the transport by design.
-- **Stream the export itself.** The transfer is now ranged and resumable, and
-  neither end holds the snapshot in a request body — but the source still
-  assembles it whole in memory once before staging, so
-  `DECPM_TENANT_ACS_MAX_BYTES` remains a memory commitment on the exporting node.
-  Streaming Canton's export straight to disk would remove that.
 - **Survive a terabyte-scale ACS.** At that size the wall is the import, not the
   transfer: Canton re-authenticates every contract while the joiner is
   disconnected, which no transport change touches. Sequencer retention and the

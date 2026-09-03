@@ -269,8 +269,9 @@ pub struct NodeConfig {
     /// nothing on its own — base64 inflates by 4/3 — and a snapshot that large
     /// needs the transfer to move in bounded pieces rather than one body.
     ///
-    /// The snapshot is also assembled whole in memory, so this is a real memory
-    /// commitment on the exporting node. Raise it deliberately.
+    /// The export streams straight to disk rather than assembling the snapshot
+    /// in memory, so this bounds a file rather than an allocation. Disk, not
+    /// RAM — but still finite, so raise it deliberately.
     pub tenant_acs_max_bytes: usize,
     /// Output contracts one `Delegation_Assign` may create, which bounds the
     /// coupons per transaction (`/ beneficiary_count`). The ledger's real

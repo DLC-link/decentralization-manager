@@ -836,15 +836,23 @@ pub async fn start_add_party(
         });
     }
 
-    // Bound the new threshold by the post-add member count. The deeper
+    // Bound the new threshold by the members that can actually sign, which
+    // excludes the one being added. It carries Canton's onboarding marker until
+    // its ACS import completes, so it confirms nothing — and a P2P add at
+    // threshold = the post-add member count is the known full-threshold bug:
+    // the write never becomes effective, and the run stalls with no signal
+    // saying why.
+    //
+    // Raising the threshold to include the new member is a second step, after
+    // its marker clears, via the change-threshold workflow. The deeper
     // validation against the live DNS owner set happens in ExportState.
-    let post_add_member_count = party_member_ids.len() as i32 + 1;
-    if body.new_threshold < 1 || body.new_threshold > post_add_member_count {
+    let signing_member_count = party_member_ids.len() as i32;
+    if body.new_threshold < 1 || body.new_threshold > signing_member_count {
         return HttpResponse::BadRequest().json(ErrorResponse {
             error: format!(
-                "new_threshold must be between 1 and {post_add_member_count} \
-                 (party member count {n}, plus the new member); got {got}",
-                n = party_member_ids.len(),
+                "new_threshold must be between 1 and {signing_member_count} (the members that \
+                 can sign; the member being added cannot until its ACS import completes); got \
+                 {got}. To include it, run change-threshold once its onboarding marker clears",
                 got = body.new_threshold,
             ),
         });

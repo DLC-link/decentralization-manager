@@ -31,6 +31,12 @@
 //! The base serial comes from `GET /v0/tenant/{party}/state`, the way a real
 //! wallet learns it, rather than from the test knowing a freshly onboarded party
 //! sits at 1.
+//!
+//! The phase finishes with the threshold raise, which is Plan A's last step and
+//! the half of spike question 3 that had never run. It pins both directions: a
+//! threshold the live hosts can field is accepted, and one above them is refused
+//! before it can be written — the "forbid" half of the plan's fix-or-forbid on
+//! the full-threshold bug.
 
 use std::time::Duration;
 
@@ -415,6 +421,128 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                             "tenant-add-hosts",
                         )
                         .await
+                    })
+                }
+            },
+        )
+        .run(f)
+        .await?;
+
+    // Plan A's last step, and the half of spike question 3 that had never run.
+    raise_threshold(f, &party_id, seed).await
+}
+
+/// Raise the party's confirmation threshold once its new host is live, and pin
+/// the boundary the plan flags as a known bug.
+///
+/// This is the last step of Plan A and the half of spike question 3 that had
+/// never run: the threshold raise is a separate serial bump precisely because a
+/// marked host cannot confirm, and the plan warns of a "full-threshold bug"
+/// where a write at threshold = host count never becomes effective.
+///
+/// So it asserts both directions. A threshold the party's live hosts can field
+/// is accepted; one above them is refused before it can be written, rather than
+/// accepted and left stuck.
+async fn raise_threshold(f: &mut Fixture, party_id: &str, seed: [u8; 32]) -> anyhow::Result<()> {
+    Scenario::with_ctx(format!("raise {party_id}'s threshold"), ())
+        .when("wallet raises the threshold to 2 of 3", {
+            let party_id = party_id.to_string();
+            move |f, _| {
+                let party_id = party_id.clone();
+                Box::pin(async move {
+                    let state: Value = f
+                        .get_json(f.p1.http, &format!("/v0/tenant/{party_id}/state"))
+                        .await?;
+                    let base_serial = state
+                        .get("serial")
+                        .and_then(Value::as_u64)
+                        .context("party state missing serial")?;
+                    let hosts = state
+                        .get("host_count")
+                        .and_then(Value::as_u64)
+                        .context("party state missing host_count")?;
+                    let onboarding = state
+                        .get("onboarding_hosts")
+                        .and_then(Value::as_u64)
+                        .context("party state missing onboarding_hosts")?;
+                    anyhow::ensure!(
+                        hosts == 3 && onboarding == 0,
+                        "the raise needs three live hosts, saw {hosts} with {onboarding} marked"
+                    );
+
+                    // The full-threshold case first, because it must fail before
+                    // anything is signed. A threshold above what the live hosts
+                    // can field is the bug the plan warns about; refusing it here
+                    // is the "forbid" half of fix-or-forbid.
+                    let too_high = json!({
+                        "party_id": party_id,
+                        "new_threshold": hosts + 1,
+                        "base_serial": base_serial,
+                    });
+                    let refused: anyhow::Result<Value> = f
+                        .post_json(f.p1.http, "/v0/tenant/threshold/prepare", &too_high)
+                        .await;
+                    // Not merely that it failed — a transport blip or an auth
+                    // regression would satisfy that and the test would still
+                    // claim the boundary is enforced. Pin the reason.
+                    let Err(e) = refused else {
+                        anyhow::bail!(
+                            "a threshold above the host count must be refused, not written"
+                        );
+                    };
+                    let reason = format!("{e:#}");
+                    anyhow::ensure!(
+                        reason.contains("400") && reason.contains("able to confirm"),
+                        "the refusal must be the threshold bound, got: {reason}"
+                    );
+
+                    // Now the real raise: 2 of 3.
+                    let request = json!({
+                        "party_id": party_id,
+                        "new_threshold": 2,
+                        "base_serial": base_serial,
+                    });
+                    let prep: Value = f
+                        .post_json(f.p1.http, "/v0/tenant/threshold/prepare", &request)
+                        .await?;
+                    let signatures = sign_prepared(&prep, &seed)?;
+                    let onboard = json!({
+                        "party_id": party_id,
+                        "base_serial": base_serial,
+                        "topology_transactions": prep
+                            .get("topology_transactions")
+                            .cloned()
+                            .context("threshold prepare missing topology_transactions")?,
+                        "signatures": signatures,
+                        "signed_by": ExternalKeyPair::from_seed(seed).fingerprint(),
+                    });
+                    // A threshold change needs the party namespace alone, so one
+                    // host carries it.
+                    let _: Value = f
+                        .post_json(f.p1.http, "/v0/tenant/threshold/onboard", &onboard)
+                        .await?;
+                    Ok(())
+                })
+            }
+        })
+        .then(
+            "the party reports threshold 2 of 3",
+            Duration::from_secs(180),
+            {
+                let party_id = party_id.to_string();
+                move |f, _| {
+                    let party_id = party_id.clone();
+                    Box::pin(async move {
+                        let state: Value = f
+                            .probe_get_json(f.p1.http, &format!("/v0/tenant/{party_id}/state"))
+                            .await?;
+                        let threshold = state.get("threshold").and_then(Value::as_u64)?;
+                        let hosts = state.get("host_count").and_then(Value::as_u64)?;
+                        if threshold != 2 || hosts != 3 {
+                            return None;
+                        }
+                        info!("threshold raised to {threshold} of {hosts}");
+                        Some(Ok(()))
                     })
                 }
             },

@@ -8,9 +8,9 @@
 
 use common::{
     api::{
-        TenantAcsImportRequest, TenantAddHostsOnboardRequest, TenantAddHostsRequest,
-        TenantOnboardRequest, TenantPrepareRequest, TenantThresholdOnboardRequest,
-        TenantThresholdRequest,
+        HostPermission, TenantAcsImportRequest, TenantAddHostsOnboardRequest,
+        TenantAddHostsRequest, TenantOnboardRequest, TenantPrepareRequest,
+        TenantThresholdOnboardRequest, TenantThresholdRequest,
     },
     canton_id::CantonId,
     types::WorkflowProgress,
@@ -325,6 +325,13 @@ pub struct AddedHosts {
 /// the markers clear, because a marked host cannot confirm and so cannot count
 /// toward it.
 ///
+/// `permission` picks between the two offers. [`HostPermission::Confirmation`]
+/// is co-validation: the hosts confirm for the party and the threshold can rise
+/// afterwards. [`HostPermission::Submission`] is failover-only — any one host
+/// can submit for the party, so uptime improves with no change to the party's
+/// application, but each host acts alone and the threshold must stay 1. Canton
+/// enforces that last part, not this crate.
+///
 /// # Errors
 /// Fails before signing if `new_hosts` is empty, if any host cannot prepare, or
 /// if the hosts disagree about what to sign. A host that rejects the bundle
@@ -334,6 +341,7 @@ pub async fn add_hosts(
     new_hosts: &[WalletHost],
     key: &dyn Signer,
     party_id: &str,
+    permission: HostPermission,
     base_serial: u32,
 ) -> Result<AddedHosts> {
     if new_hosts.is_empty() {
@@ -352,6 +360,7 @@ pub async fn add_hosts(
 
     let request = TenantAddHostsRequest {
         party_id: party_id.to_string(),
+        permission,
         new_hosts: new_hosts.iter().map(|h| h.participant_id.clone()).collect(),
         base_serial,
     };

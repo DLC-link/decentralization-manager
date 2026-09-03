@@ -432,6 +432,30 @@ pub struct TenantOnboardResponse {
     pub party_id: String,
 }
 
+/// What permission a joining host gets.
+///
+/// Two shapes, and the plan calls them B1 and B2. `Confirmation` is the
+/// co-validated one: several hosts confirm for the party and the threshold can
+/// rise above 1. `Submission` is failover-only: any single host can submit for
+/// the party, so uptime improves with no change to the party's application, but
+/// each host acts alone.
+///
+/// Canton fixes the boundary between them — `topology.proto`: "if threshold > 1,
+/// must be Confirmation or Observation" — so `Submission` is available only
+/// while the threshold stays 1.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
+#[serde(rename_all = "lowercase")]
+pub enum HostPermission {
+    /// Co-validating. The default, and the only option once the threshold is
+    /// above 1.
+    #[default]
+    Confirmation,
+    /// Failover-only. Requires the party's threshold to be 1.
+    Submission,
+}
+
 /// Request to prepare an add-hosts topology for an existing external party.
 ///
 /// The wallet pins `base_serial` — the serial it read from the party's current
@@ -443,7 +467,15 @@ pub struct TenantOnboardResponse {
 pub struct TenantAddHostsRequest {
     /// Full party id (`{hint}::{fingerprint}`) of the party gaining hosts.
     pub party_id: String,
-    /// Participants to add. Each lands at Confirmation with Canton's onboarding
+    /// Permission the joining hosts get. Defaults to `Confirmation`.
+    ///
+    /// `Submission` is the failover-only offer: it needs no change to the
+    /// party's application, because the host keeps submitting on its behalf
+    /// rather than the party signing for itself. It is refused unless the
+    /// party's threshold is 1, which is Canton's rule, not ours.
+    #[serde(default)]
+    pub permission: HostPermission,
+    /// Participants to add. Each lands at `permission` with Canton's onboarding
     /// marker, and none may already host the party.
     pub new_hosts: Vec<CantonId>,
     /// The serial the wallet read from the party's current `PartyToParticipant`.

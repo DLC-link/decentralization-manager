@@ -59,12 +59,19 @@ pub async fn export_state(
         anyhow::bail!("Participant {new_participant} is already a member of {party_id}");
     }
 
-    let post_add_owner_count = namespace_def.owners.len() as i32 + 1;
+    // Excludes the member being added: it carries the onboarding marker until
+    // its ACS import completes and so cannot sign. A P2P add at threshold = the
+    // post-add owner count is the known full-threshold bug, where the write
+    // never becomes effective and the run stalls silently. Including the new
+    // member is a separate change-threshold run once its marker clears.
+    let signing_owner_count = namespace_def.owners.len() as i32;
     let new_threshold = add_party_config.new_threshold;
-    if new_threshold < 1 || new_threshold > post_add_owner_count {
+    if new_threshold < 1 || new_threshold > signing_owner_count {
         anyhow::bail!(
-            "new_threshold must be between 1 and {post_add_owner_count} \
-             (current owners + the new member); got {new_threshold}"
+            "new_threshold must be between 1 and {signing_owner_count} (the current owners, \
+             which can sign; the member being added cannot until its ACS import completes); got \
+             {new_threshold}. To include it, run change-threshold once its onboarding marker \
+             clears"
         );
     }
 

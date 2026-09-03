@@ -27,7 +27,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use crate::{config::NodeConfig, error::Result};
 
 /// Where a replication's staged snapshots live.
-fn staging_dir(config: &NodeConfig) -> PathBuf {
+pub(crate) fn staging_dir(config: &NodeConfig) -> PathBuf {
     config.data_dir().join("acs-staging")
 }
 
@@ -36,7 +36,7 @@ fn staging_dir(config: &NodeConfig) -> PathBuf {
 /// Named from the replication's instance name, which both sides derive from the
 /// (party, target) pair, so a resumed transfer finds the same file without
 /// anyone having to remember a handle.
-fn staging_path(config: &NodeConfig, instance_name: &str) -> PathBuf {
+pub(crate) fn staging_path(config: &NodeConfig, instance_name: &str) -> PathBuf {
     // The instance name embeds a party id, which contains `::` and could contain
     // path separators on a malformed input. Hashing keeps it a single flat file
     // name that cannot escape the directory.
