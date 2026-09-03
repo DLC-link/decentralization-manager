@@ -320,7 +320,7 @@ pub type OnboardingResponse = WorkflowResponse;
 pub use decman_lib::catalog::action::ActionType;
 
 /// Types of governance domain action proposals
-#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ProposalType {

@@ -55,7 +55,7 @@ mod tests {
                 description: "a vote".into(),
             }
             .to_daml_proto()
-            .unwrap()
+            .expect("payload encodes")
         );
     }
 }

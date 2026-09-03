@@ -130,7 +130,7 @@ mod tests {
         CantonId::parse(&format!(
             "{prefix}::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892"
         ))
-        .unwrap()
+        .expect("valid canton id")
     }
 
     fn test_packages() -> PackageConfig {
@@ -166,20 +166,23 @@ mod tests {
             &test_packages(),
             "cmd-2".into(),
         )
-        .unwrap();
+        .expect("propose commands build");
         let Some(command::Command::Create(create)) = &commands.commands[0].command else {
             panic!("expected a CreateCommand");
         };
         let labels: Vec<&str> = create
             .create_arguments
             .as_ref()
-            .unwrap()
+            .expect("created event carries arguments")
             .fields
             .iter()
             .map(|f| f.label.as_str())
             .collect();
         assert_eq!(labels, vec!["governanceParty", "proposer", "note"]);
-        let template = create.template_id.as_ref().unwrap();
+        let template = create
+            .template_id
+            .as_ref()
+            .expect("created event carries a template id");
         assert_eq!(template.package_id, "#fake-pkg");
     }
 
@@ -227,7 +230,7 @@ mod tests {
     fn payload_field_named_like_a_reserved_one_is_kept() {
         let record =
             proposal_create_arguments(&OneField("proposerNote"), &cid("gov"), &cid("member"))
-                .unwrap();
+                .expect("proposal arguments encode");
         let labels: Vec<&str> = record.fields.iter().map(|f| f.label.as_str()).collect();
         assert_eq!(labels, vec!["governanceParty", "proposer", "proposerNote"]);
     }

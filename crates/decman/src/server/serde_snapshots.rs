@@ -404,3 +404,42 @@ fn proposal_type_optional_fields_stay_omitted() {
     let _guard = bind_snapshot_path();
     insta::assert_json_snapshot!("proposal_types_minimal", minimal_option_fixtures());
 }
+
+// ---- Deserialize direction ----
+//
+// The snapshots above pin the serialize direction only. Both enums are
+// inbound HTTP request bodies, so the frontend depends on deserialize. A
+// round trip proves both directions at once: the internal `type` tag, every
+// field name, and every `#[serde(default)]`.
+
+#[test]
+fn proposal_type_round_trips_through_json() {
+    for proposal in all_proposal_fixtures() {
+        let json = serde_json::to_value(&proposal).expect("serialize proposal");
+        let back: ProposalType =
+            serde_json::from_value(json.clone()).expect("deserialize proposal");
+        assert_eq!(back, proposal, "round trip changed the value: {json}");
+    }
+}
+
+/// The minimal fixtures omit every optional field, which is what a frontend
+/// request body looks like. Deserializing them proves the omitted fields
+/// still take their `#[serde(default)]`.
+#[test]
+fn proposal_type_minimal_round_trips_through_json() {
+    for proposal in minimal_option_fixtures() {
+        let json = serde_json::to_value(&proposal).expect("serialize proposal");
+        let back: ProposalType =
+            serde_json::from_value(json.clone()).expect("deserialize proposal");
+        assert_eq!(back, proposal, "round trip changed the value: {json}");
+    }
+}
+
+#[test]
+fn action_type_round_trips_through_json() {
+    for action in all_action_fixtures() {
+        let json = serde_json::to_value(&action).expect("serialize action");
+        let back: ActionType = serde_json::from_value(json.clone()).expect("deserialize action");
+        assert_eq!(back, action, "round trip changed the value: {json}");
+    }
+}

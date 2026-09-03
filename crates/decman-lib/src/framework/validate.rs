@@ -182,7 +182,7 @@ mod tests {
     /// tests can vary just the prefix.
     fn cid(prefix: &str) -> CantonId {
         let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
-        CantonId::parse(&format!("{prefix}::{ns}")).unwrap()
+        CantonId::parse(&format!("{prefix}::{ns}")).expect("valid canton id")
     }
 
     /// Test-only helper: builds a `RewardBeneficiary` from a Canton-ID prefix

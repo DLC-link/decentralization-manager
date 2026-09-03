@@ -947,7 +947,7 @@ mod tests {
     /// encode-shape snapshots.
     fn cid(prefix: &str) -> CantonId {
         let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
-        CantonId::parse(&format!("{prefix}::{ns}")).unwrap()
+        CantonId::parse(&format!("{prefix}::{ns}")).expect("valid canton id")
     }
 
     fn ctx(governance_party: &CantonId, now_micros: i64) -> ValidationCtx<'_> {
@@ -978,7 +978,9 @@ mod tests {
 
         insta::assert_debug_snapshot!(
             "provision_provider_service",
-            ProvisionProviderService {}.to_daml_proto().unwrap()
+            ProvisionProviderService {}
+                .to_daml_proto()
+                .expect("payload encodes")
         );
         insta::assert_debug_snapshot!(
             "create_provider_service_request",
@@ -987,7 +989,7 @@ mod tests {
                 provider: cid("prov"),
             }
             .to_daml_proto()
-            .unwrap()
+            .expect("payload encodes")
         );
         insta::assert_debug_snapshot!(
             "create_user_service_request",
@@ -996,7 +998,7 @@ mod tests {
                 user: cid("user"),
             }
             .to_daml_proto()
-            .unwrap()
+            .expect("payload encodes")
         );
         insta::assert_debug_snapshot!(
             "create_delegated_batched_markers_proxy",
@@ -1004,7 +1006,7 @@ mod tests {
                 operator: cid("op")
             }
             .to_daml_proto()
-            .unwrap()
+            .expect("payload encodes")
         );
         insta::assert_debug_snapshot!(
             "setup_utility",
@@ -1021,7 +1023,7 @@ mod tests {
                 create_allocation_factory: false,
             }
             .to_daml_proto()
-            .unwrap()
+            .expect("payload encodes")
         );
         insta::assert_debug_snapshot!(
             "set_provider_app_reward_beneficiaries_some",
@@ -1033,7 +1035,7 @@ mod tests {
                 }]),
             }
             .to_daml_proto()
-            .unwrap()
+            .expect("payload encodes")
         );
         insta::assert_debug_snapshot!(
             "set_provider_app_reward_beneficiaries_none",
@@ -1042,7 +1044,7 @@ mod tests {
                 provider_app_reward_beneficiaries: None,
             }
             .to_daml_proto()
-            .unwrap()
+            .expect("payload encodes")
         );
         insta::assert_debug_snapshot!(
             "set_enable_result_contracts_some",
@@ -1051,7 +1053,7 @@ mod tests {
                 enable_result_contracts: Some(true),
             }
             .to_daml_proto()
-            .unwrap()
+            .expect("payload encodes")
         );
         insta::assert_debug_snapshot!(
             "set_enable_result_contracts_none",
@@ -1060,7 +1062,7 @@ mod tests {
                 enable_result_contracts: None,
             }
             .to_daml_proto()
-            .unwrap()
+            .expect("payload encodes")
         );
         insta::assert_debug_snapshot!(
             "mint",
@@ -1076,7 +1078,7 @@ mod tests {
                 description: "mint it".to_string(),
             }
             .to_daml_proto()
-            .unwrap()
+            .expect("payload encodes")
         );
         insta::assert_debug_snapshot!(
             "burn",
@@ -1092,7 +1094,7 @@ mod tests {
                 description: "burn it".to_string(),
             }
             .to_daml_proto()
-            .unwrap()
+            .expect("payload encodes")
         );
         insta::assert_debug_snapshot!(
             "accept_mint_request_some",
@@ -1103,7 +1105,7 @@ mod tests {
                 description: "accept mint".to_string(),
             }
             .to_daml_proto()
-            .unwrap()
+            .expect("payload encodes")
         );
         insta::assert_debug_snapshot!(
             "accept_mint_request_none",
@@ -1114,7 +1116,7 @@ mod tests {
                 description: "accept mint".to_string(),
             }
             .to_daml_proto()
-            .unwrap()
+            .expect("payload encodes")
         );
         insta::assert_debug_snapshot!(
             "accept_burn_request_some",
@@ -1125,7 +1127,7 @@ mod tests {
                 description: "accept burn".to_string(),
             }
             .to_daml_proto()
-            .unwrap()
+            .expect("payload encodes")
         );
         insta::assert_debug_snapshot!(
             "accept_burn_request_none",
@@ -1136,7 +1138,7 @@ mod tests {
                 description: "accept burn".to_string(),
             }
             .to_daml_proto()
-            .unwrap()
+            .expect("payload encodes")
         );
         insta::assert_debug_snapshot!(
             "create_provider_configuration",
@@ -1149,7 +1151,7 @@ mod tests {
                 holder_requirements: vec![requirement(&cid("issuer"), &[("role", "holder")])],
             }
             .to_daml_proto()
-            .unwrap()
+            .expect("payload encodes")
         );
         insta::assert_debug_snapshot!(
             "create_registrar_service_request",
@@ -1160,7 +1162,7 @@ mod tests {
                 create_allocation_factory: false,
             }
             .to_daml_proto()
-            .unwrap()
+            .expect("payload encodes")
         );
         insta::assert_debug_snapshot!(
             "onboard_registrar",
@@ -1170,7 +1172,7 @@ mod tests {
                 provider_configuration_cid: "00pcc".to_string(),
             }
             .to_daml_proto()
-            .unwrap()
+            .expect("payload encodes")
         );
         insta::assert_debug_snapshot!(
             "provision_instrument_populated",
@@ -1190,7 +1192,7 @@ mod tests {
                 initial_instrument_issuers: vec![cid("issuer")],
             }
             .to_daml_proto()
-            .unwrap()
+            .expect("payload encodes")
         );
         insta::assert_debug_snapshot!(
             "provision_instrument_empty",
@@ -1203,7 +1205,7 @@ mod tests {
                 initial_instrument_issuers: vec![],
             }
             .to_daml_proto()
-            .unwrap()
+            .expect("payload encodes")
         );
         insta::assert_debug_snapshot!(
             "onboard_instrument_issuers",
@@ -1212,7 +1214,7 @@ mod tests {
                 instrument_issuers: vec![cid("iss1"), cid("iss2")],
             }
             .to_daml_proto()
-            .unwrap()
+            .expect("payload encodes")
         );
         insta::assert_debug_snapshot!(
             "offboard_instrument_issuers",
@@ -1223,7 +1225,7 @@ mod tests {
                 }],
             }
             .to_daml_proto()
-            .unwrap()
+            .expect("payload encodes")
         );
     }
 

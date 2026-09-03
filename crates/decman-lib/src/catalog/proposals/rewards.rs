@@ -259,7 +259,7 @@ mod tests {
     /// encode-shape snapshots.
     fn cid(prefix: &str) -> CantonId {
         let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
-        CantonId::parse(&format!("{prefix}::{ns}")).unwrap()
+        CantonId::parse(&format!("{prefix}::{ns}")).expect("valid canton id")
     }
 
     fn ctx(governance_party: &CantonId, now_micros: i64) -> ValidationCtx<'_> {
@@ -402,7 +402,7 @@ mod tests {
                 prior_delegation: None,
             }
             .to_daml_proto()
-            .unwrap()
+            .expect("payload encodes")
         );
         insta::assert_debug_snapshot!(
             "setup_coupon_reassignment_delegation_with_prior",
@@ -422,7 +422,7 @@ mod tests {
                 prior_delegation: Some("00old".to_string()),
             }
             .to_daml_proto()
-            .unwrap()
+            .expect("payload encodes")
         );
         insta::assert_debug_snapshot!(
             "revoke_coupon_reassignment_delegation",
@@ -430,7 +430,7 @@ mod tests {
                 delegation: "00abc".to_string(),
             }
             .to_daml_proto()
-            .unwrap()
+            .expect("payload encodes")
         );
         insta::assert_debug_snapshot!(
             "setup_minting_delegation",
@@ -442,7 +442,7 @@ mod tests {
                 description: "collect CIP-104 rewards".to_string(),
             }
             .to_daml_proto()
-            .unwrap()
+            .expect("payload encodes")
         );
         insta::assert_debug_snapshot!(
             "accept_external_party_setup",
@@ -450,7 +450,7 @@ mod tests {
                 proposal_cid: "00abc123".to_string(),
             }
             .to_daml_proto()
-            .unwrap()
+            .expect("payload encodes")
         );
     }
 }

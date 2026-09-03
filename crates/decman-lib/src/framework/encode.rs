@@ -336,7 +336,7 @@ mod tests {
             (ContextValue::Text("hi".to_string()), "AV_Text"),
             (ContextValue::Int(42), "AV_Int"),
             (
-                ContextValue::Decimal(DamlDecimal::parse("1.5").unwrap()),
+                ContextValue::Decimal(DamlDecimal::parse("1.5").expect("valid decimal")),
                 "AV_Decimal",
             ),
             (ContextValue::Bool(true), "AV_Bool"),

@@ -171,7 +171,7 @@ mod tests {
     /// encode-shape snapshots.
     fn cid(prefix: &str) -> CantonId {
         let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
-        CantonId::parse(&format!("{prefix}::{ns}")).unwrap()
+        CantonId::parse(&format!("{prefix}::{ns}")).expect("valid canton id")
     }
 
     fn ctx(governance_party: &CantonId, now_micros: i64) -> ValidationCtx<'_> {
@@ -246,7 +246,7 @@ mod tests {
                 claims: vec![claim()],
             }
             .to_daml_proto()
-            .unwrap()
+            .expect("payload encodes")
         );
         insta::assert_debug_snapshot!(
             "offer_paid_credential_deposit_and_weight_some",
@@ -265,7 +265,7 @@ mod tests {
                 deposit_initial_amount_usd: Some("10".parse().expect("valid decimal")),
             }
             .to_daml_proto()
-            .unwrap()
+            .expect("payload encodes")
         );
         insta::assert_debug_snapshot!(
             "offer_paid_credential_deposit_and_weight_none",
@@ -284,7 +284,7 @@ mod tests {
                 deposit_initial_amount_usd: None,
             }
             .to_daml_proto()
-            .unwrap()
+            .expect("payload encodes")
         );
         insta::assert_debug_snapshot!(
             "accept_free_credential",
@@ -293,7 +293,7 @@ mod tests {
                 credential_offer_cid: "00offer".to_string(),
             }
             .to_daml_proto()
-            .unwrap()
+            .expect("payload encodes")
         );
     }
 }

@@ -467,7 +467,7 @@ mod tests {
     /// tests can vary just the prefix.
     fn cid(prefix: &str) -> CantonId {
         let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
-        CantonId::parse(&format!("{prefix}::{ns}")).unwrap()
+        CantonId::parse(&format!("{prefix}::{ns}")).expect("valid canton id")
     }
 
     fn claim() -> Claim {
@@ -674,7 +674,10 @@ mod tests {
     #[test]
     fn cbtc_form_decodes_every_variant() {
         for (value, expected) in cbtc_form_fixtures() {
-            assert_eq!(ActionType::from_cbtc_proto(&value).unwrap(), expected);
+            assert_eq!(
+                ActionType::from_cbtc_proto(&value).expect("cbtc form decodes"),
+                expected
+            );
         }
     }
 
@@ -699,7 +702,7 @@ mod tests {
             new_threshold: 3,
         }
         .to_self_proto()
-        .unwrap();
+        .expect("action encodes to the self form");
         let (ctor, record) = as_variant(&add);
         assert_eq!(ctor, "SelfAction_AddMemberAndSetThreshold");
         assert_eq!(record_labels(record), ["newMember", "newThresholdAfterAdd"]);
@@ -709,7 +712,7 @@ mod tests {
             new_threshold: 1,
         }
         .to_self_proto()
-        .unwrap();
+        .expect("action encodes to the self form");
         let (ctor, record) = as_variant(&remove);
         assert_eq!(ctor, "SelfAction_RemoveMemberAndSetThreshold");
         assert_eq!(
@@ -719,7 +722,7 @@ mod tests {
 
         let set_threshold = ActionType::GovernanceSetThreshold { new_threshold: 2 }
             .to_self_proto()
-            .unwrap();
+            .expect("action encodes to the self form");
         let (ctor, record) = as_variant(&set_threshold);
         assert_eq!(ctor, "SelfAction_SetThreshold");
         assert_eq!(record_labels(record), ["updatedThreshold"]);
@@ -798,8 +801,13 @@ mod tests {
     #[test]
     fn self_form_round_trips() {
         for action in self_encodable_fixtures() {
-            let value = action.to_self_proto().unwrap();
-            assert_eq!(ActionType::from_self_proto(&value).unwrap(), action);
+            let value = action
+                .to_self_proto()
+                .expect("action encodes to the self form");
+            assert_eq!(
+                ActionType::from_self_proto(&value).expect("self form decodes"),
+                action
+            );
         }
     }
 

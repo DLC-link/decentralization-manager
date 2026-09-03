@@ -46,15 +46,15 @@
 //! impl Validate for SetNote {} // default body: accept
 //!
 //! let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
-//! let member: CantonId = format!("member::{ns}").parse().unwrap();
-//! let governance: CantonId = format!("gov::{ns}").parse().unwrap();
+//! let member: CantonId = format!("member::{ns}").parse().expect("valid canton id");
+//! let governance: CantonId = format!("gov::{ns}").parse().expect("valid canton id");
 //!
 //! // Propose: any GrpcPayload flows through the one builder. A bare `&str`
 //! // is a `PackageResolver` too — every key resolves to it, which is enough
 //! // when an integrator's templates all live in one package.
 //! let payload = SetNote { note: "hi".into() };
 //! let commands = build_propose(&payload, &governance, &member, &"#fake-pkg", "cmd-1".into())
-//!     .unwrap();
+//!     .expect("propose commands build");
 //! assert_eq!(commands.act_as, vec![member.to_string()]);
 //!
 //! // Read side: a custom action's confirmations are `GovernanceConfirmation`

@@ -304,7 +304,7 @@ mod tests {
         CantonId::parse(&format!(
             "{prefix}::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892"
         ))
-        .unwrap()
+        .expect("valid canton id")
     }
 
     #[test]
@@ -336,14 +336,23 @@ mod tests {
         assert_eq!(first.choice, "GovernableAction_ProposerCancel");
         assert_eq!(first.contract_id, "00prop");
         assert_eq!(
-            first.template_id.as_ref().unwrap().entity_name,
+            first
+                .template_id
+                .as_ref()
+                .expect("created event carries a template id")
+                .entity_name,
             "GovernableAction"
         );
         assert!(
-            extract_record(first.choice_argument.as_ref().unwrap())
-                .unwrap()
-                .fields
-                .is_empty()
+            extract_record(
+                first
+                    .choice_argument
+                    .as_ref()
+                    .expect("exercise carries a choice argument")
+            )
+            .expect("choice argument is a record")
+            .fields
+            .is_empty()
         );
 
         // command[1]: GovernanceConfirmation_Cancel on 00conf
@@ -353,10 +362,15 @@ mod tests {
         assert_eq!(second.choice, "GovernanceConfirmation_Cancel");
         assert_eq!(second.contract_id, "00conf");
         assert!(
-            extract_record(second.choice_argument.as_ref().unwrap())
-                .unwrap()
-                .fields
-                .is_empty()
+            extract_record(
+                second
+                    .choice_argument
+                    .as_ref()
+                    .expect("exercise carries a choice argument")
+            )
+            .expect("choice argument is a record")
+            .fields
+            .is_empty()
         );
 
         // without own_confirmation, len == 1
@@ -411,7 +425,7 @@ mod tests {
                     &action,
                     command_id.into(),
                 )
-                .unwrap(),
+                .expect("commands build"),
             ),
             (
                 "GovernanceRules_ConfirmAction",
@@ -436,7 +450,7 @@ mod tests {
                     vec![],
                     command_id.into(),
                 )
-                .unwrap(),
+                .expect("commands build"),
             ),
             (
                 "GovernanceRules_ExecuteConfirmedAction",

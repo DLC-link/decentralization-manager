@@ -315,7 +315,7 @@ mod tests {
     /// encode-shape assertions/snapshots.
     fn cid(prefix: &str) -> CantonId {
         let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
-        CantonId::parse(&format!("{prefix}::{ns}")).unwrap()
+        CantonId::parse(&format!("{prefix}::{ns}")).expect("valid canton id")
     }
 
     /// Unwrap a `value::Sum::Record` reference (for descending into a nested
@@ -381,7 +381,7 @@ mod tests {
                 execute_before_micros: TRANSFER_EXECUTE_BEFORE_MICROS,
             },
         };
-        let value = wrapper.to_daml_proto().unwrap();
+        let value = wrapper.to_daml_proto().expect("payload encodes");
         let record = as_record(&value);
         assert_eq!(
             owned_labels(record),
@@ -445,7 +445,7 @@ mod tests {
             accept: &accept,
             context: None,
         };
-        let value = wrapper.to_daml_proto().unwrap();
+        let value = wrapper.to_daml_proto().expect("payload encodes");
         let record = as_record(&value);
         assert_eq!(
             owned_labels(record),
@@ -475,7 +475,7 @@ mod tests {
             accept: &accept,
             context: Some(&ctx),
         };
-        let value = wrapper.to_daml_proto().unwrap();
+        let value = wrapper.to_daml_proto().expect("payload encodes");
         let record = as_record(&value);
         let extra_args = as_record(field_value(record, "extraArgs"));
         let context = as_record(field_value(extra_args, "context"));
@@ -535,7 +535,7 @@ mod tests {
                 expected_dso: cid("dso"),
             }
             .to_daml_proto()
-            .unwrap()
+            .expect("payload encodes")
         );
         insta::assert_debug_snapshot!(
             "setup_token_preapproval",
@@ -545,7 +545,7 @@ mod tests {
                 instrument_allowances: vec![InstrumentAllowance { id: "TOK".into() }],
             }
             .to_daml_proto()
-            .unwrap()
+            .expect("payload encodes")
         );
 
         let transfer = transfer_fixture();
@@ -563,7 +563,7 @@ mod tests {
                 validity,
             }
             .to_daml_proto()
-            .unwrap()
+            .expect("payload encodes")
         );
 
         let ctx = ChoiceContext {
@@ -581,7 +581,7 @@ mod tests {
                 validity,
             }
             .to_daml_proto()
-            .unwrap()
+            .expect("payload encodes")
         );
 
         let accept = AcceptTransfer {
@@ -594,7 +594,7 @@ mod tests {
                 context: None,
             }
             .to_daml_proto()
-            .unwrap()
+            .expect("payload encodes")
         );
         insta::assert_debug_snapshot!(
             "accept_transfer_with_context_populated",
@@ -603,7 +603,7 @@ mod tests {
                 context: Some(&ctx),
             }
             .to_daml_proto()
-            .unwrap()
+            .expect("payload encodes")
         );
     }
 }

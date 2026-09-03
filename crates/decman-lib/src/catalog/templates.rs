@@ -124,7 +124,7 @@ mod tests {
     /// `template_id` assertion.
     fn cid(prefix: &str) -> CantonId {
         let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
-        CantonId::parse(&format!("{prefix}::{ns}")).unwrap()
+        CantonId::parse(&format!("{prefix}::{ns}")).expect("valid canton id")
     }
 
     fn decimal(s: &str) -> DamlDecimal {
@@ -159,19 +159,19 @@ mod tests {
         let pkgs = decman_default_packages();
         let cases = [
             (
-                governance_rules_template(&pkgs).unwrap(),
+                governance_rules_template(&pkgs).expect("template ref resolves"),
                 "#governance-core-v1:Governance.Rules:GovernanceRules",
             ),
             (
-                self_confirmation_template(&pkgs).unwrap(),
+                self_confirmation_template(&pkgs).expect("template ref resolves"),
                 "#governance-core-v1:Governance.Rules:GovernanceSelfConfirmation",
             ),
             (
-                domain_confirmation_template(&pkgs).unwrap(),
+                domain_confirmation_template(&pkgs).expect("template ref resolves"),
                 "#governance-core-v1:Governance.Confirmation:GovernanceConfirmation",
             ),
             (
-                governable_action_interface(&pkgs).unwrap(),
+                governable_action_interface(&pkgs).expect("template ref resolves"),
                 "#governance-action-v1:Governance.Action:GovernableAction",
             ),
         ];
@@ -210,7 +210,7 @@ mod tests {
                     description: "a vote".to_string(),
                 }
                 .template_id(&pkgs)
-                .unwrap()
+                .expect("template id resolves")
                 .to_string(),
                 "#governance-core-v1:Governance.GenericVote:GenericVoteProposal",
             ),
@@ -223,7 +223,7 @@ mod tests {
                     claims: vec![],
                 }
                 .template_id(&pkgs)
-                .unwrap()
+                .expect("template id resolves")
                 .to_string(),
                 "#governance-utility-credential-v1:Governance.UtilityCredential.OfferFreeCredential:OfferFreeCredential",
             ),
@@ -243,7 +243,7 @@ mod tests {
                     deposit_initial_amount_usd: None,
                 }
                 .template_id(&pkgs)
-                .unwrap()
+                .expect("template id resolves")
                 .to_string(),
                 "#governance-utility-credential-v1:Governance.UtilityCredential.OfferPaidCredential:OfferPaidCredential",
             ),
@@ -253,7 +253,7 @@ mod tests {
                     credential_offer_cid: "offer".to_string(),
                 }
                 .template_id(&pkgs)
-                .unwrap()
+                .expect("template id resolves")
                 .to_string(),
                 "#governance-utility-credential-v1:Governance.UtilityCredential.AcceptFreeCredential:AcceptFreeCredential",
             ),
@@ -263,7 +263,7 @@ mod tests {
                     expected_dso: cid("dso"),
                 }
                 .template_id(&pkgs)
-                .unwrap()
+                .expect("template id resolves")
                 .to_string(),
                 "#governance-token-custody-v1:Governance.TokenCustody.SetupCcPreapproval:SetupCcPreapprovalProposal",
             ),
@@ -274,7 +274,7 @@ mod tests {
                     instrument_allowances: vec![],
                 }
                 .template_id(&pkgs)
-                .unwrap()
+                .expect("template id resolves")
                 .to_string(),
                 "#governance-token-custody-v1:Governance.TokenCustody.SetupTokenPreapproval:SetupTokenPreapprovalProposal",
             ),
@@ -289,7 +289,7 @@ mod tests {
                     validity_window_hours: None,
                 }
                 .template_id(&pkgs)
-                .unwrap()
+                .expect("template id resolves")
                 .to_string(),
                 "#governance-token-custody-v1:Governance.TokenCustody.TransferProposal:TransferProposal",
             ),
@@ -298,7 +298,7 @@ mod tests {
                     transfer_instruction_cid: "tic".to_string(),
                 }
                 .template_id(&pkgs)
-                .unwrap()
+                .expect("template id resolves")
                 .to_string(),
                 "#governance-token-custody-v1:Governance.TokenCustody.AcceptTransfer:AcceptTransferProposal",
             ),
@@ -310,7 +310,7 @@ mod tests {
                     prior_delegation: None,
                 }
                 .template_id(&pkgs)
-                .unwrap()
+                .expect("template id resolves")
                 .to_string(),
                 "#governance-rewards-automation-v1:Governance.Rewards.SetupCouponReassignmentDelegation:SetupCouponReassignmentDelegation",
             ),
@@ -319,7 +319,7 @@ mod tests {
                     delegation: "00abc".to_string(),
                 }
                 .template_id(&pkgs)
-                .unwrap()
+                .expect("template id resolves")
                 .to_string(),
                 "#governance-rewards-automation-v1:Governance.Rewards.RevokeCouponReassignmentDelegation:RevokeCouponReassignmentDelegation",
             ),
@@ -332,7 +332,7 @@ mod tests {
                     description: "d".to_string(),
                 }
                 .template_id(&pkgs)
-                .unwrap()
+                .expect("template id resolves")
                 .to_string(),
                 "#governance-rewards-automation-v1:Governance.Rewards.SetupMintingDelegation:SetupMintingDelegation",
             ),
@@ -341,14 +341,14 @@ mod tests {
                     proposal_cid: "00abc123".to_string(),
                 }
                 .template_id(&pkgs)
-                .unwrap()
+                .expect("template id resolves")
                 .to_string(),
                 "#governance-rewards-automation-v1:Governance.Rewards.AcceptExternalPartySetup:AcceptExternalPartySetup",
             ),
             (
                 ProvisionProviderService {}
                     .template_id(&pkgs)
-                    .unwrap()
+                    .expect("template id resolves")
                     .to_string(),
                 "#governance-utility-onboarding-v1:Governance.UtilityOnboarding.ProvisionProviderService:ProvisionProviderService",
             ),
@@ -358,7 +358,7 @@ mod tests {
                     provider: cid("provider"),
                 }
                 .template_id(&pkgs)
-                .unwrap()
+                .expect("template id resolves")
                 .to_string(),
                 "#governance-utility-onboarding-v1:Governance.UtilityOnboarding.CreateProviderServiceRequest:CreateProviderServiceRequest",
             ),
@@ -368,7 +368,7 @@ mod tests {
                     user: cid("user"),
                 }
                 .template_id(&pkgs)
-                .unwrap()
+                .expect("template id resolves")
                 .to_string(),
                 "#governance-utility-onboarding-v1:Governance.UtilityOnboarding.CreateUserServiceRequest:CreateUserServiceRequest",
             ),
@@ -377,7 +377,7 @@ mod tests {
                     operator: cid("operator"),
                 }
                 .template_id(&pkgs)
-                .unwrap()
+                .expect("template id resolves")
                 .to_string(),
                 "#governance-utility-onboarding-v1:Governance.UtilityOnboarding.CreateDelegatedBatchedMarkersProxy:CreateDelegatedBatchedMarkersProxy",
             ),
@@ -391,7 +391,7 @@ mod tests {
                     create_allocation_factory: true,
                 }
                 .template_id(&pkgs)
-                .unwrap()
+                .expect("template id resolves")
                 .to_string(),
                 "#governance-utility-onboarding-v1:Governance.UtilityOnboarding.SetupUtility:SetupUtility",
             ),
@@ -401,7 +401,7 @@ mod tests {
                     provider_app_reward_beneficiaries: None,
                 }
                 .template_id(&pkgs)
-                .unwrap()
+                .expect("template id resolves")
                 .to_string(),
                 "#governance-utility-onboarding-v1:Governance.UtilityOnboarding.SetProviderAppRewardBeneficiaries:SetProviderAppRewardBeneficiaries",
             ),
@@ -411,7 +411,7 @@ mod tests {
                     enable_result_contracts: None,
                 }
                 .template_id(&pkgs)
-                .unwrap()
+                .expect("template id resolves")
                 .to_string(),
                 "#governance-utility-onboarding-v1:Governance.UtilityOnboarding.SetEnableResultContracts:SetEnableResultContracts",
             ),
@@ -425,7 +425,7 @@ mod tests {
                     description: "d".to_string(),
                 }
                 .template_id(&pkgs)
-                .unwrap()
+                .expect("template id resolves")
                 .to_string(),
                 "#governance-utility-onboarding-v1:Governance.TokenIssuance.MintProposal:MintProposal",
             ),
@@ -439,7 +439,7 @@ mod tests {
                     description: "d".to_string(),
                 }
                 .template_id(&pkgs)
-                .unwrap()
+                .expect("template id resolves")
                 .to_string(),
                 "#governance-utility-onboarding-v1:Governance.TokenIssuance.BurnProposal:BurnProposal",
             ),
@@ -451,7 +451,7 @@ mod tests {
                     description: "d".to_string(),
                 }
                 .template_id(&pkgs)
-                .unwrap()
+                .expect("template id resolves")
                 .to_string(),
                 "#governance-utility-onboarding-v1:Governance.TokenIssuance.AcceptMintRequest:AcceptMintRequest",
             ),
@@ -463,7 +463,7 @@ mod tests {
                     description: "d".to_string(),
                 }
                 .template_id(&pkgs)
-                .unwrap()
+                .expect("template id resolves")
                 .to_string(),
                 "#governance-utility-onboarding-v1:Governance.TokenIssuance.AcceptBurnRequest:AcceptBurnRequest",
             ),
@@ -474,7 +474,7 @@ mod tests {
                     holder_requirements: vec![],
                 }
                 .template_id(&pkgs)
-                .unwrap()
+                .expect("template id resolves")
                 .to_string(),
                 "#governance-utility-onboarding-v1:Governance.UtilityOnboarding.CreateProviderConfiguration:CreateProviderConfiguration",
             ),
@@ -486,7 +486,7 @@ mod tests {
                     create_allocation_factory: true,
                 }
                 .template_id(&pkgs)
-                .unwrap()
+                .expect("template id resolves")
                 .to_string(),
                 "#governance-utility-onboarding-v1:Governance.UtilityOnboarding.CreateRegistrarServiceRequest:CreateRegistrarServiceRequest",
             ),
@@ -497,7 +497,7 @@ mod tests {
                     provider_configuration_cid: "pcc".to_string(),
                 }
                 .template_id(&pkgs)
-                .unwrap()
+                .expect("template id resolves")
                 .to_string(),
                 "#governance-utility-onboarding-v1:Governance.UtilityOnboarding.OnboardRegistrar:OnboardRegistrar",
             ),
@@ -511,7 +511,7 @@ mod tests {
                     initial_instrument_issuers: vec![],
                 }
                 .template_id(&pkgs)
-                .unwrap()
+                .expect("template id resolves")
                 .to_string(),
                 "#governance-utility-onboarding-v1:Governance.UtilityOnboarding.ProvisionInstrument:ProvisionInstrument",
             ),
@@ -521,7 +521,7 @@ mod tests {
                     instrument_issuers: vec![cid("issuer")],
                 }
                 .template_id(&pkgs)
-                .unwrap()
+                .expect("template id resolves")
                 .to_string(),
                 "#governance-utility-onboarding-v1:Governance.UtilityOnboarding.OnboardInstrumentIssuers:OnboardInstrumentIssuers",
             ),
@@ -530,7 +530,7 @@ mod tests {
                     instrument_issuers: vec![],
                 }
                 .template_id(&pkgs)
-                .unwrap()
+                .expect("template id resolves")
                 .to_string(),
                 "#governance-utility-onboarding-v1:Governance.UtilityOnboarding.OffboardInstrumentIssuers:OffboardInstrumentIssuers",
             ),
