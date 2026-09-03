@@ -5,8 +5,28 @@
 //! the by-value `ActionType` enum, one struct per proposal, template
 //! accessors, flow builders, and state interpretation.
 //!
-//! The crate does no I/O. Clocks, randomness, registry contexts, and
-//! resolved package refs enter as parameters.
+//! # Purity contract
+//!
+//! Every function in this crate is pure. The crate bans four things, and a
+//! change that adds one breaks the contract:
+//!
+//! * **No I/O.** The crate opens no socket, file, or database connection.
+//! * **No transport.** The crate builds and reads Ledger API values. It never
+//!   submits them. The caller owns the gRPC channel.
+//! * **No persistence.** The crate holds no state between calls.
+//! * **No nondeterminism.** The crate reads no clock and draws no random
+//!   number. The same inputs always give the same output.
+//!
+//! Everything the four bans exclude enters as a parameter instead: the caller
+//! passes `now_micros`, the command id, the registry choice context, and the
+//! resolved package refs. That is what makes an encode testable against a
+//! fixed snapshot, and what lets an integrator drive the crate from any
+//! transport.
+//!
+//! The `Cargo.toml` dependency list is the check a reader can run. It holds
+//! `serde`, `thiserror`, `tracing`, `chrono`, the two canton crates, and this
+//! workspace's `common`. A new dependency that does I/O, keeps state, or
+//! reads a clock breaks the contract.
 //!
 //! # Quick start: a custom proposal
 //!

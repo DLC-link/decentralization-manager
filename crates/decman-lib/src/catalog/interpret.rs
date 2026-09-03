@@ -37,9 +37,9 @@ pub struct ParsedConfirmation {
     pub expires_at: i64,
 }
 
-/// A governance-core domain confirmation. The on-ledger template stores NO
-/// action — only the proposal cid and a label. DecMan's HTTP layer inserts
-/// its legacy placeholder action when mapping; the lib does not lie.
+/// A governance-core domain confirmation. The on-ledger template stores no
+/// action — only the proposal cid and a label. DecMan's `DomainConfirmation`
+/// wire DTO carries no action either, so no layer invents one.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParsedDomainConfirmation {
     pub contract_id: String,

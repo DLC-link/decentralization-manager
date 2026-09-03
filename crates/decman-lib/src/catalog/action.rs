@@ -151,7 +151,8 @@ impl ActionType {
                 )]),
             )),
             _ => Err(Error::Encode(format!(
-                "ActionType {self:?} is not a governance self-management action"
+                "ActionType {self:?} is not a governance self-management action; it has no \
+                 GovernanceSelfAction form and must be proposed as a GovernableAction"
             ))),
         }
     }

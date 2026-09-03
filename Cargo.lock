@@ -1903,7 +1903,6 @@ dependencies = [
  "insta",
  "prost-types",
  "serde",
- "serde_json",
  "thiserror 2.0.19",
  "tracing",
  "ts-rs",

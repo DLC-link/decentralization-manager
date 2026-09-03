@@ -67,7 +67,7 @@ pub fn field_party_id(rec: &Record, label: &str) -> Result<CantonId, Error> {
     match record_field(rec, label) {
         Some(value::Sum::Party(p)) => p
             .parse::<CantonId>()
-            .map_err(|_| Error::Decode(format!("field `{label}`: invalid party id `{p}`"))),
+            .map_err(|e| Error::Decode(format!("field `{label}`: invalid party id `{p}`: {e}"))),
         _ => Err(Error::Decode(format!(
             "field `{label}`: expected a Party value"
         ))),
@@ -149,9 +149,9 @@ pub fn field_party_list(rec: &Record, label: &str) -> Result<Vec<CantonId>, Erro
     list.elements
         .iter()
         .map(|elem| match elem.sum.as_ref() {
-            Some(value::Sum::Party(p)) => p
-                .parse::<CantonId>()
-                .map_err(|_| Error::Decode(format!("field `{label}`: invalid party id `{p}`"))),
+            Some(value::Sum::Party(p)) => p.parse::<CantonId>().map_err(|e| {
+                Error::Decode(format!("field `{label}`: invalid party id `{p}`: {e}"))
+            }),
             _ => Err(Error::Decode(format!(
                 "field `{label}`: element is not a Party"
             ))),
