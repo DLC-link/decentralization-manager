@@ -105,11 +105,10 @@ async fn run_workflow(
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             }
             AddPartyStep::SyncAcs => {
-                // Peer-gated like the arm above, but the payload it serves is
-                // the one thing a resumed coordinator cannot rebuild: the
-                // manifest names a staged snapshot that is still on disk, so
-                // restoring the payload is what lets the transfer carry on
-                // instead of the new member failing to decode an empty one.
+                // Peer-gated like the arm above, but two things a resumed
+                // coordinator cannot rebuild live here: the command payload,
+                // which is restored from its artifact, and the Canton export
+                // stream, which has to be re-opened.
                 if workflow_state.get_command_payload().await.is_empty()
                     && let Some(saved) = db
                         .read_artifact(

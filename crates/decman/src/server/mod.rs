@@ -1918,6 +1918,7 @@ async fn handle_incoming_connection(
                                 .unwrap());
                         }
                         MessageType::GetNextCommand
+                        | MessageType::GetNextAcsBlock
                         | MessageType::KeysUpload
                         | MessageType::DnsSignature
                         | MessageType::P2pSignatures

@@ -81,6 +81,15 @@ impl ExportSession {
         self.total_len
     }
 
+    /// Whether this session has served past the first block.
+    ///
+    /// A target that asks for block 1 again after this is retrying the step
+    /// from the top, which a forward-only stream cannot answer: the session has
+    /// to be thrown away and re-opened.
+    pub fn served_past_first(&self) -> bool {
+        self.served_seq > 1
+    }
+
     /// Serve block `seq`, reading from Canton only as far as `block_size`
     /// requires.
     ///

@@ -482,7 +482,19 @@ impl NoiseClient {
                     decode_end(&resp_msg.payload).map_err(|_| NoiseError::InvalidMessage)?;
                 PipeBlock::End { seq: got, trailer }
             }
-            _ => return Err(NoiseError::InvalidMessage),
+            // The coordinator answers a refusal with an Error frame carrying its
+            // own reason. Collapsing that into InvalidMessage is what made the
+            // first CI failure here undiagnosable, so pass it through.
+            MessageType::Error => {
+                let reason = String::from_utf8_lossy(&resp_msg.payload).to_string();
+                return Err(NoiseError::Anyhow(anyhow::anyhow!(
+                    "coordinator refused ACS block {seq}: {reason}"
+                )));
+            }
+            other => {
+                tracing::warn!("ACS block {seq} answered with unexpected {other:?}");
+                return Err(NoiseError::InvalidMessage);
+            }
         };
 
         // The echoed sequence is what proves this response belongs to the block
