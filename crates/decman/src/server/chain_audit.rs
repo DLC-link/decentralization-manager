@@ -5,6 +5,7 @@ use canton_proto_rs::com::daml::ledger::api::v2::{
     CumulativeFilter, GetLatestPrunedOffsetsRequest, GetLedgerEndRequest, Identifier, Record,
     Transaction, TransactionFormat, TransactionShape, UpdateFormat, Value, event::Event, value,
 };
+use decman_lib::catalog::lifecycle::{GovernanceLifecycleEvent, classify_choice as lifecycle_of};
 use serde_json::{Value as JsonValue, json};
 use sqlx::SqlitePool;
 
@@ -169,13 +170,14 @@ fn is_governance_entry(entry: &ChainAuditEntry) -> bool {
 /// place. The audit row does not separate a cancelled confirmation from a
 /// cancelled proposal, so both fold into "cancel".
 fn classify_choice(choice: &str) -> String {
-    use decman_lib::catalog::lifecycle::GovernanceLifecycleEvent as Event;
-
-    match decman_lib::catalog::lifecycle::classify_choice(choice) {
-        Some(Event::Confirmed) => "confirm",
-        Some(Event::Executed) => "execute",
-        Some(Event::Expired) => "expire",
-        Some(Event::ConfirmationCancelled | Event::ProposalCancelled) => "cancel",
+    match lifecycle_of(choice) {
+        Some(GovernanceLifecycleEvent::Confirmed) => "confirm",
+        Some(GovernanceLifecycleEvent::Executed) => "execute",
+        Some(GovernanceLifecycleEvent::Expired) => "expire",
+        Some(
+            GovernanceLifecycleEvent::ConfirmationCancelled
+            | GovernanceLifecycleEvent::ProposalCancelled,
+        ) => "cancel",
         None => "other",
     }
     .to_string()

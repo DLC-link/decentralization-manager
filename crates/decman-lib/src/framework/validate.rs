@@ -34,7 +34,8 @@ pub const MIN_TIMEOUT_MICROSECONDS: i64 = 10_000_000;
 pub fn validate_timeout(microseconds: i64) -> Result<(), Error> {
     if microseconds < MIN_TIMEOUT_MICROSECONDS {
         return Err(Error::Validation(format!(
-            "new_timeout_microseconds must be at least {MIN_TIMEOUT_MICROSECONDS} (10 seconds), got {microseconds}"
+            "new_timeout_microseconds must be at least {MIN_TIMEOUT_MICROSECONDS} \
+             (10 seconds), got {microseconds}"
         )));
     }
     Ok(())

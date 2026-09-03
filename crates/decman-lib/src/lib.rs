@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! Domain model and gRPC codecs for the decman on-chain governance protocol.
 //!
 //! `framework` is template-agnostic: traits, encode/record toolkits, event
