@@ -133,8 +133,9 @@ async fn run_workflow(
                          from the beginning"
                     );
                     let target = add_party_config.replication_target(&instance_name);
+                    let session = open_export_session(&node_config, &db, &target).await?;
                     workflow_state
-                        .set_acs_export(open_export_session(&node_config, &db, &target).await?)
+                        .set_acs_export(add_party_config.new_participant_id.clone(), session)
                         .await;
                 }
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -190,7 +191,9 @@ async fn run_workflow(
                 // Canton import, so the snapshot is never assembled here.
                 let target = add_party_config.replication_target(&instance_name);
                 let session = open_export_session(&node_config, &db, &target).await?;
-                workflow_state.set_acs_export(session).await;
+                workflow_state
+                    .set_acs_export(add_party_config.new_participant_id.clone(), session)
+                    .await;
 
                 // Package ids the new member must have to validate the imported
                 // ACS — its preflight fails fast (before disconnecting) if any
