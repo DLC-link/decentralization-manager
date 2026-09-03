@@ -2300,7 +2300,7 @@ mod tests {
     fn gathered_family_names() -> Vec<String> {
         prometheus::gather()
             .into_iter()
-            .map(|f| f.get_name().to_string())
+            .map(|f| f.name().to_string())
             .collect()
     }
 
@@ -2350,12 +2350,12 @@ mod tests {
         ] {
             let family = families
                 .iter()
-                .find(|f| f.get_name() == name)
+                .find(|f| f.name() == name)
                 .unwrap_or_else(|| panic!("{name} is missing from the registry"));
             let metric = family
                 .get_metric()
                 .iter()
-                .find(|m| m.get_label().iter().any(|l| l.get_value() == label))
+                .find(|m| m.get_label().iter().any(|l| l.value() == label))
                 .unwrap_or_else(|| panic!("{name} has no series for the decparty"));
             assert_eq!(
                 metric.get_counter().get_value(),
