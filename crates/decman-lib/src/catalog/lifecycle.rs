@@ -3,8 +3,10 @@
 //! An indexer that reads exercised events needs the lifecycle meaning of a
 //! choice, not its name. [`classify_choice`] maps the exact choice names of
 //! the governance protocol onto [`GovernanceLifecycleEvent`]. The names are
-//! the ones the builders in [`super::commands`] exercise, plus the two
-//! `GovernableAction` interface choices the ledger exercises downstream.
+//! the ones the builders in [`super::commands`] exercise, plus the choices
+//! the ledger exercises downstream of them: the two `GovernableAction`
+//! interface choices, and the two per-confirmation `_Expire` choices that
+//! the `GovernanceRules` expire choices exercise on the stale contract.
 
 /// The lifecycle meaning of one exercised governance choice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,7 +34,9 @@ pub fn classify_choice(choice: &str) -> Option<GovernanceLifecycleEvent> {
         | "GovernanceRules_ExecuteGovernanceAction"
         | "GovernableAction_Execute" => Executed,
         "GovernanceRules_ExpireConfirmation"
-        | "GovernanceRules_ExpireGovernanceSelfConfirmation" => Expired,
+        | "GovernanceRules_ExpireGovernanceSelfConfirmation"
+        | "GovernanceConfirmation_Expire"
+        | "GovernanceSelfConfirmation_Expire" => Expired,
         "GovernanceConfirmation_Cancel" | "GovernanceSelfConfirmation_Cancel" => {
             ConfirmationCancelled
         }
@@ -68,15 +72,24 @@ mod tests {
         }
     }
 
-    /// The `GovernableAction` interface choices have no builder: the ledger
-    /// exercises `GovernableAction_Execute` downstream of an execute, and
+    /// These choices have no builder. The ledger exercises them downstream:
+    /// `GovernableAction_Execute` follows an execute, the two `_Expire`
+    /// choices follow a `GovernanceRules` expire, and
     /// `GovernableAction_Cancel` belongs to the governance party.
     #[test]
-    fn interface_choices_classify() {
+    fn downstream_choices_classify() {
         assert_eq!(classify_choice("GovernableAction_Execute"), Some(Executed));
         assert_eq!(
             classify_choice("GovernableAction_Cancel"),
             Some(ProposalCancelled)
+        );
+        assert_eq!(
+            classify_choice("GovernanceConfirmation_Expire"),
+            Some(Expired)
+        );
+        assert_eq!(
+            classify_choice("GovernanceSelfConfirmation_Expire"),
+            Some(Expired)
         );
     }
 

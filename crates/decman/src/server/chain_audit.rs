@@ -163,19 +163,22 @@ fn is_governance_entry(entry: &ChainAuditEntry) -> bool {
     )
 }
 
+/// Map an exercised choice name onto an audit-row event type.
+///
+/// The lib owns the choice-name table, so a protocol change lands in one
+/// place. The audit row does not separate a cancelled confirmation from a
+/// cancelled proposal, so both fold into "cancel".
 fn classify_choice(choice: &str) -> String {
-    let s = if choice.contains("_Cancel") {
-        "cancel"
-    } else if choice.contains("_Expire") {
-        "expire"
-    } else if choice.contains("_Execute") {
-        "execute"
-    } else if choice.contains("_Confirm") {
-        "confirm"
-    } else {
-        "other"
-    };
-    s.to_string()
+    use decman_lib::catalog::lifecycle::GovernanceLifecycleEvent as Event;
+
+    match decman_lib::catalog::lifecycle::classify_choice(choice) {
+        Some(Event::Confirmed) => "confirm",
+        Some(Event::Executed) => "execute",
+        Some(Event::Expired) => "expire",
+        Some(Event::ConfirmationCancelled | Event::ProposalCancelled) => "cancel",
+        None => "other",
+    }
+    .to_string()
 }
 
 fn classify_created(tid: &Identifier, is_child_of_exercise: bool) -> (String, String) {
@@ -935,19 +938,39 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_choice_precedence() {
+    fn test_classify_choice_maps_every_protocol_name() {
         assert_eq!(
             classify_choice("GovernanceRules_ExecuteConfirmedAction"),
             "execute"
         );
+        assert_eq!(classify_choice("GovernableAction_Execute"), "execute");
         assert_eq!(classify_choice("GovernanceRules_ConfirmAction"), "confirm");
-        assert_eq!(classify_choice("GovernanceRules_CancelAction"), "cancel");
-        assert_eq!(classify_choice("GovernanceRules_ExpireAction"), "expire");
+        assert_eq!(
+            classify_choice("GovernanceRules_ExpireConfirmation"),
+            "expire"
+        );
+        assert_eq!(classify_choice("GovernanceConfirmation_Expire"), "expire");
+        assert_eq!(
+            classify_choice("GovernanceSelfConfirmation_Cancel"),
+            "cancel"
+        );
+        assert_eq!(classify_choice("GovernableAction_Cancel"), "cancel");
         assert_eq!(classify_choice("Archive"), "other");
+    }
 
-        // Precedence probe: a name containing BOTH `_Cancel` and `_Execute`.
-        // The if/else chain tests `_Cancel` first, so it wins. Pins ordering.
-        assert_eq!(classify_choice("Foo_Cancel_Execute"), "cancel");
+    /// The old substring matcher read `Foo_Cancel_Execute` as cancel, and
+    /// read any invented `_Expire` name as expire. The lib matches the exact
+    /// protocol names, so a name outside the protocol reads as "other".
+    #[test]
+    fn test_classify_choice_rejects_names_outside_the_protocol() {
+        for choice in [
+            "Foo_Cancel_Execute",
+            "GovernanceRules_CancelAction",
+            "GovernanceRules_ExpireAction",
+            "TransferInstruction_Accept",
+        ] {
+            assert_eq!(classify_choice(choice), "other", "{choice}");
+        }
     }
 
     #[test]
