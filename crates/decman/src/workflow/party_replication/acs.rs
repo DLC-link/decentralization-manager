@@ -1,8 +1,10 @@
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
+    future::Future,
     time::Duration,
 };
 
+use anyhow::Context;
 use canton_proto_rs::com::{
     daml::ledger::api::v2::{
         CumulativeFilter, EventFormat, Filters, GetActiveContractsRequest, GetLedgerEndRequest,
@@ -17,15 +19,22 @@ use canton_proto_rs::com::{
         synchronizer_connectivity_service_client::SynchronizerConnectivityServiceClient,
     },
 };
+use futures::SinkExt;
+use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 
 use crate::{
     config::NodeConfig,
     consts::{topology_retry_delay_secs, topology_retry_max_attempts},
     error::Result,
-    noise::MAX_CHUNKED_TOTAL_SIZE,
     utils,
-    workflow::{party_replication::ReplicationTarget, storage::WorkflowStorage},
+    workflow::{
+        party_replication::{
+            ReplicationTarget,
+            pipe::{ExportSession, PipeBlock, PipeTrailer},
+        },
+        storage::WorkflowStorage,
+    },
 };
 
 /// How long Canton may wait for the party's activation topology transaction
@@ -38,20 +47,27 @@ const EXPORT_ACTIVATION_TIMEOUT_SECS: i64 = 120;
 /// Canton's default 4 MiB gRPC message cap.
 const IMPORT_CHUNK_SIZE: usize = 1024 * 1024;
 
-/// Source side: export the party's ACS for replication onto the target
-/// participant, via the Canton `ExportPartyAcs` admin endpoint. Canton locates
+/// How many blocks may sit in the import channel ahead of Canton. Bounds the
+/// target's memory to a couple of blocks.
+const IMPORT_READAHEAD: usize = 2;
+
+/// Source side: open an `ExportPartyAcs` stream for the target and wrap it in
+/// a [`ExportSession`] the transport can pull blocks from.
+///
+/// Nothing is read here beyond the handshake: the snapshot is never assembled,
+/// so a party of any size costs the source one block of memory. Canton locates
 /// the party's activation on the target after `begin_offset_exclusive` (the
 /// offset captured BEFORE the topology was submitted) and produces a snapshot
-/// consistent with that activation — this is what fixes the old
-/// implementation's export-at-current-ledger-end gap.
+/// consistent with that activation.
 ///
-/// Returns the raw snapshot bytes; empty when the party has no active
-/// contracts (the import side skips on empty).
-pub async fn export_party_acs(
+/// # Errors
+/// Returns an error if the export offset was never captured, or if Canton will
+/// not open the export.
+pub async fn open_export_session(
     config: &NodeConfig,
     storage: &SqlitePool,
     target: &ReplicationTarget,
-) -> Result<Vec<u8>> {
+) -> Result<ExportSession> {
     // Logical synchronizer id — see `current_ledger_offset` for why the
     // physical id is rejected by PartyManagementService.
     let synchronizer_id =
@@ -72,7 +88,7 @@ pub async fn export_party_acs(
         .map_err(|e| anyhow::anyhow!("Failed to parse export offset: {e}"))?;
 
     tracing::info!(
-        "Exporting ACS of {party} for target {member} (begin offset {begin_offset_exclusive})",
+        "Opening ACS export of {party} for target {member} (begin offset {begin_offset_exclusive})",
         party = target.party_id,
         member = target.target_participant_id
     );
@@ -101,13 +117,8 @@ pub async fn export_party_acs(
             }),
         });
 
-        match collect_export_stream(&mut client, request).await {
-            Ok(snapshot) => {
-                // Size cap is enforced mid-stream in `collect_export_stream`, so a
-                // returned snapshot is always within the chunked-transfer limit.
-                tracing::info!("Exported ACS snapshot: {len} bytes", len = snapshot.len());
-                return Ok(snapshot);
-            }
+        match client.export_party_acs(request).await {
+            Ok(response) => return Ok(ExportSession::new(response.into_inner())),
             Err(status)
                 if status
                     .message()
@@ -125,30 +136,6 @@ pub async fn export_party_acs(
     }
 
     anyhow::bail!("ExportPartyAcs still not ready after {max_attempts} attempts")
-}
-
-/// Run one `ExportPartyAcs` call and collect the streamed chunks.
-async fn collect_export_stream(
-    client: &mut PartyManagementServiceClient<tonic::transport::Channel>,
-    request: tonic::Request<ExportPartyAcsRequest>,
-) -> std::result::Result<Vec<u8>, tonic::Status> {
-    let mut stream = client.export_party_acs(request).await?.into_inner();
-    let mut snapshot = Vec::new();
-    while let Some(response) = stream.message().await? {
-        snapshot.extend_from_slice(&response.chunk);
-        // Enforce the chunked-transfer cap while streaming so an oversized party
-        // can't accumulate unbounded memory (and OOM) before the export finishes
-        // — abort as soon as the running total crosses the cap.
-        if snapshot.len() > MAX_CHUNKED_TOTAL_SIZE {
-            return Err(tonic::Status::out_of_range(format!(
-                "Exported ACS snapshot exceeds the {MAX_CHUNKED_TOTAL_SIZE}-byte \
-                 chunked-transfer cap — the target cannot receive it over Noise. \
-                 Raise MAX_CHUNKED_TOTAL_SIZE (with a memory-bound review) to replicate \
-                 a party this large."
-            )));
-        }
-    }
-    Ok(snapshot)
 }
 
 /// Target side: import the ACS snapshot via the Canton `ImportPartyAcs`
@@ -173,13 +160,17 @@ async fn collect_export_stream(
 /// - a participant that can't be brought back to a healthy connected state
 ///   yields an actionable error naming the likely orphan-row corruption instead
 ///   of a cryptic retry-abort.
-pub async fn import_party_acs(
+pub async fn import_party_acs<F, Fut>(
     config: &NodeConfig,
     storage: &SqlitePool,
     target: &ReplicationTarget,
-    snapshot: Vec<u8>,
     required_package_ids: &[String],
-) -> Result {
+    mut next_block: F,
+) -> Result
+where
+    F: FnMut(u64) -> Fut,
+    Fut: Future<Output = Result<PipeBlock>>,
+{
     // The marker is durable (never cleared), so its presence means the
     // disconnect window was entered on a prior attempt of this run — the
     // participant may have been left disconnected (DecMan died mid-window) or
@@ -208,7 +199,13 @@ pub async fn import_party_acs(
         })?;
     }
 
-    if snapshot.is_empty() {
+    // Pull the first block before touching the participant. It costs one
+    // block of memory and answers the only question that decides whether a
+    // disconnect is warranted at all: whether the party has any contracts.
+    let first = next_block(1).await?;
+    if let PipeBlock::End { trailer, .. } = &first
+        && trailer.total_len == 0
+    {
         tracing::info!("ACS snapshot is empty — nothing to import");
         return Ok(());
     }
@@ -305,7 +302,7 @@ pub async fn import_party_acs(
                 }))
                 .await?;
         }
-        run_import(config, &synchronizer_id, &party_id, snapshot).await
+        run_import(config, &synchronizer_id, &party_id, first, &mut next_block).await
     }
     .await;
 
@@ -332,6 +329,7 @@ pub async fn import_party_acs(
     import_result?;
 
     tracing::info!("ACS snapshot imported successfully");
+
     Ok(())
 }
 
@@ -498,34 +496,116 @@ async fn local_package_ids(config: &NodeConfig) -> Result<HashSet<String>> {
 
 /// The streamed `ImportPartyAcs` call, isolated so the caller can pair it
 /// with the disconnect/reconnect bracket.
-async fn run_import(
+async fn run_import<F, Fut>(
     config: &NodeConfig,
     synchronizer_id: &str,
     party_id: &str,
-    snapshot: Vec<u8>,
-) -> Result {
-    tracing::info!(
-        "Importing ACS snapshot ({len} bytes)...",
-        len = snapshot.len()
-    );
+    first: PipeBlock,
+    next_block: &mut F,
+) -> Result
+where
+    F: FnMut(u64) -> Fut,
+    Fut: Future<Output = Result<PipeBlock>>,
+{
+    tracing::info!("Importing the ACS as it arrives...");
 
     let mut client = PartyManagementServiceClient::new(config.admin_channel().await?);
+    let (mut tx, rx) = futures::channel::mpsc::channel::<ImportPartyAcsRequest>(IMPORT_READAHEAD);
 
-    let requests: Vec<ImportPartyAcsRequest> = snapshot
-        .chunks(IMPORT_CHUNK_SIZE)
-        .map(|chunk| ImportPartyAcsRequest {
-            acs_snapshot: chunk.to_vec(),
-            synchronizer_id: Some(synchronizer_id.to_string()),
-            workflow_id_prefix: Some("add-party-acs-import".to_string()),
-            contract_import_mode: Some(ContractImportMode::Validation as i32),
-            representative_package_id_override: None,
-            party_id: Some(party_id.to_string()),
-        })
-        .collect();
+    // Canton consumes the stream while we are still pulling blocks, so the
+    // import and the transfer overlap and neither side accumulates. The RPC
+    // runs concurrently rather than being awaited first, because the channel
+    // is bounded: awaiting it before feeding would deadlock.
+    let rpc = tokio::spawn(async move {
+        client
+            .import_party_acs(tonic::Request::new(rx))
+            .await
+            .map(|_| ())
+    });
 
-    client
-        .import_party_acs(tonic::Request::new(futures::stream::iter(requests)))
-        .await?;
+    let synchronizer_id = synchronizer_id.to_string();
+    let party_id = party_id.to_string();
+    let build = |bytes: Vec<u8>| ImportPartyAcsRequest {
+        acs_snapshot: bytes,
+        synchronizer_id: Some(synchronizer_id.clone()),
+        workflow_id_prefix: Some("add-party-acs-import".to_string()),
+        contract_import_mode: Some(ContractImportMode::Validation as i32),
+        representative_package_id_override: None,
+        party_id: Some(party_id.clone()),
+    };
+
+    // Hash and count what we actually feed Canton, so the source's trailer can
+    // be checked against it. Nothing is stored, so this is the only evidence
+    // that what arrived is what was exported.
+    let mut hasher = Sha256::new();
+    let mut fed = 0u64;
+
+    // The feeding loop's result is captured rather than propagated with `?`.
+    // Returning early here would drop the RPC's JoinHandle, and tokio detaches
+    // a dropped handle: the import would keep consuming queued requests while
+    // the caller's bracket reconnects the synchronizers, which is exactly the
+    // state Canton forbids. Every path below closes the sender and joins the
+    // task first.
+    let feed: Result<Option<PipeTrailer>> = async {
+        let mut block = first;
+        let mut seq = 1u64;
+        loop {
+            match block {
+                PipeBlock::Data { bytes, .. } => {
+                    hasher.update(&bytes);
+                    fed += bytes.len() as u64;
+                    // Re-chunk into the import stream: a transport block may be
+                    // larger than Canton's inbound gRPC message cap (4 MiB by
+                    // default), which the block size deliberately can be, since
+                    // it is tuned against the Noise handler timeout instead.
+                    for chunk in bytes.chunks(IMPORT_CHUNK_SIZE) {
+                        // A closed receiver means the RPC already failed; that
+                        // error is the informative one, so stop and let it
+                        // surface below.
+                        if tx.send(build(chunk.to_vec())).await.is_err() {
+                            return Ok(None);
+                        }
+                    }
+                    tracing::debug!("Imported {fed} bytes so far");
+                }
+                PipeBlock::End { trailer, .. } => return Ok(Some(trailer)),
+            }
+            seq += 1;
+            block = next_block(seq).await?;
+        }
+    }
+    .await;
+
+    // Closing the sender is what tells Canton the snapshot is complete, and on
+    // a failure path it is what makes the import terminate instead of waiting
+    // for more.
+    tx.close_channel();
+    drop(tx);
+
+    let rpc_result = rpc.await.context("the ACS import task did not finish")?;
+
+    // Order matters. A fetch failure explains a truncated import, so it is
+    // reported first; the RPC error is reported next; only a clean run reaches
+    // the trailer check.
+    let trailer = feed?;
+    rpc_result?;
+
+    let Some(trailer) = trailer else {
+        anyhow::bail!("the ACS import stream closed before the export finished");
+    };
+    let digest = hex::encode(hasher.finalize());
+    if fed != trailer.total_len || digest != trailer.sha256 {
+        anyhow::bail!(
+            "the imported ACS does not match the source: fed {fed} bytes (sha256 \
+             {digest}), source exported {expected} bytes (sha256 {expected_digest}). \
+             The participant now holds an ACS that may be incomplete and needs \
+             repair before the party is used",
+            expected = trailer.total_len,
+            expected_digest = trailer.sha256
+        );
+    }
+
+    tracing::info!("Imported {fed} bytes, digest verified");
     Ok(())
 }
 

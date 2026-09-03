@@ -8,15 +8,21 @@ use crate::{
     db::schema::SchemaRead,
     noise::{
         CHUNK_SIZE, MAX_PAYLOAD_SIZE, Message, MessageType, NoiseError, NoiseKeypair,
-        parse_public_key, send_noise_message,
+        acs_block_size, parse_public_key, send_noise_message,
     },
     server::{
         DeclineInvitationPayload, WorkflowKind, WorkflowProgress,
         peer_status::{LastSeen, bump},
     },
     workflow::{
-        WorkflowState, add_party::AddPartyStep, change_threshold::ChangeThresholdStep,
-        contracts::ContractsStep, dars::DarsStep, kick::KickStep, onboarding::OnboardingStep,
+        WorkflowState,
+        add_party::AddPartyStep,
+        change_threshold::ChangeThresholdStep,
+        contracts::ContractsStep,
+        dars::DarsStep,
+        kick::KickStep,
+        onboarding::OnboardingStep,
+        party_replication::pipe::{PipeBlock, encode_block},
         state::WorkflowStep,
     },
 };
@@ -344,6 +350,10 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         match message.msg_type {
             MessageType::GetNextCommand => self.handle_get_next_command(peer_id).await,
             MessageType::GetChunk => self.handle_get_chunk(message.payload).await,
+            MessageType::GetNextAcsBlock => {
+                self.handle_get_next_acs_block(peer_id, message.payload)
+                    .await
+            }
             MessageType::KeysUpload => {
                 self.handle_peer_data(peer_id, message.payload, "keys upload")
                     .await
@@ -483,6 +493,45 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         response.extend_from_slice(chunk_data);
 
         Ok(Message::new(MessageType::Chunk, response))
+    }
+
+    /// Serve the next block of this run's open ACS export.
+    ///
+    /// Nothing is stored on either side: the block is read from the live Canton
+    /// export stream on demand, so the source's memory is one block regardless
+    /// of how large the party is.
+    async fn handle_get_next_acs_block(
+        &self,
+        peer_id: CantonId,
+        request_payload: Vec<u8>,
+    ) -> Result<Message, NoiseError> {
+        if request_payload.len() < 8 {
+            return Err(NoiseError::InvalidMessage);
+        }
+        let mut seq_bytes = [0u8; 8];
+        seq_bytes.copy_from_slice(&request_payload[..8]);
+        let seq = u64::from_be_bytes(seq_bytes);
+
+        let block = self
+            .workflow_state
+            .next_acs_block(&peer_id, seq, acs_block_size())
+            .await?;
+
+        if let PipeBlock::End { trailer, .. } = &block {
+            tracing::info!(
+                "ACS export exhausted at block {seq}: {total} bytes, sha256 {digest}",
+                total = trailer.total_len,
+                digest = trailer.sha256
+            );
+        }
+
+        let (is_end, payload) = encode_block(&block);
+        let msg_type = if is_end {
+            MessageType::AcsBlockEnd
+        } else {
+            MessageType::AcsBlock
+        };
+        Ok(Message::new(msg_type, payload))
     }
 
     /// Handle peer data upload (keys, signatures, etc.)

@@ -13,6 +13,7 @@ use crate::{
         NOISE_CHUNK_TIMEOUT, NOISE_REQUEST_TIMEOUT, NoiseError, NoiseKeypair, is_transient,
         parse_flexible_uri, parse_public_key,
     },
+    workflow::party_replication::pipe::{PipeBlock, decode_data, decode_end},
 };
 
 /// Max attempts to fetch a single chunk (each on a fresh connection) before the
@@ -435,6 +436,78 @@ impl NoiseClient {
         );
 
         Ok(Message::new(command, payload))
+    }
+
+    /// Fetch block `seq` of the coordinator's open ACS export.
+    ///
+    /// Retries transient failures on a fresh connection. The coordinator
+    /// replays the block it served last, so a retry of the same `seq` is safe;
+    /// anything further out of step fails the run, because an export stream
+    /// cannot rewind.
+    ///
+    /// # Errors
+    /// Returns an error if the block cannot be fetched, or if the response does
+    /// not carry the sequence number that was asked for.
+    pub async fn request_next_acs_block(&self, seq: u64) -> Result<PipeBlock, NoiseError> {
+        let message = Message::new(MessageType::GetNextAcsBlock, seq.to_be_bytes().to_vec());
+
+        let mut attempt = 1;
+        let response = loop {
+            match self
+                .send_message_with_timeout(&message, NOISE_CHUNK_TIMEOUT)
+                .await
+            {
+                Ok(r) => break r,
+                Err(e) if attempt < CHUNK_FETCH_MAX_ATTEMPTS && is_transient(&e) => {
+                    tracing::warn!(
+                        "ACS block {seq} attempt {attempt}/{CHUNK_FETCH_MAX_ATTEMPTS} \
+                         failed: {e}; retrying"
+                    );
+                    attempt += 1;
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        };
+
+        let resp_msg = Message::from_bytes(&response).map_err(|_| NoiseError::InvalidMessage)?;
+        let block = match resp_msg.msg_type {
+            MessageType::AcsBlock => {
+                let (got, bytes) =
+                    decode_data(&resp_msg.payload).map_err(|_| NoiseError::InvalidMessage)?;
+                PipeBlock::Data { seq: got, bytes }
+            }
+            MessageType::AcsBlockEnd => {
+                let (got, trailer) =
+                    decode_end(&resp_msg.payload).map_err(|_| NoiseError::InvalidMessage)?;
+                PipeBlock::End { seq: got, trailer }
+            }
+            // The coordinator answers a refusal with an Error frame carrying its
+            // own reason. Collapsing that into InvalidMessage is what made the
+            // first CI failure here undiagnosable, so pass it through.
+            MessageType::Error => {
+                let reason = String::from_utf8_lossy(&resp_msg.payload).to_string();
+                return Err(NoiseError::Anyhow(anyhow::anyhow!(
+                    "coordinator refused ACS block {seq}: {reason}"
+                )));
+            }
+            other => {
+                tracing::warn!("ACS block {seq} answered with unexpected {other:?}");
+                return Err(NoiseError::InvalidMessage);
+            }
+        };
+
+        // The echoed sequence is what proves this response belongs to the block
+        // we asked for: a stale one fed into the import stream would land at the
+        // wrong position, and there is no copy to check it against afterwards.
+        let got = match &block {
+            PipeBlock::Data { seq, .. } | PipeBlock::End { seq, .. } => *seq,
+        };
+        if got != seq {
+            tracing::warn!("ACS block response carried seq {got}, requested {seq}");
+            return Err(NoiseError::InvalidMessage);
+        }
+        Ok(block)
     }
 
     /// Request a chunk, retrying transient failures (connection reset, timeout,

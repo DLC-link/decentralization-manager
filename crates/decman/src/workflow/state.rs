@@ -12,13 +12,15 @@ use std::{
 };
 
 use sqlx::SqlitePool;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::{
     canton_id::CantonId,
     db::schema::{Commitable, SchemaWrite},
+    error::Result,
     noise::MessageType,
     server::{WorkflowKind, WorkflowProgress},
+    workflow::party_replication::pipe::{ExportSession, PipeBlock},
 };
 
 /// Trait for workflow steps. Implementations are small `Copy` enums per
@@ -72,6 +74,16 @@ pub struct WorkflowState<S> {
     peer_data: RwLock<HashMap<CantonId, Vec<u8>>>,
     /// Payload data to send with the next command (e.g., proposals for signing)
     command_payload: RwLock<Vec<u8>>,
+    /// The source's open ACS export, held between block requests, with the one
+    /// participant allowed to pull from it.
+    ///
+    /// A live gRPC stream, so it cannot be persisted and does not survive a
+    /// restart: a resumed run re-opens it and the transfer starts from block 1.
+    ///
+    /// The authorized puller is stored with the session rather than derived at
+    /// request time because this state is generic over the workflow kind and
+    /// knows nothing about add-party's config.
+    acs_export: Mutex<Option<(CantonId, ExportSession)>>,
     _p: PhantomData<()>,
 }
 
@@ -96,6 +108,7 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
             completed_peers: RwLock::new(HashSet::new()),
             peer_data: RwLock::new(HashMap::new()),
             command_payload: RwLock::new(Vec::new()),
+            acs_export: Mutex::new(None),
             _p: PhantomData,
         })
     }
@@ -121,6 +134,7 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
             completed_peers: RwLock::new(completed_peers.into_iter().collect()),
             peer_data: RwLock::new(HashMap::new()),
             command_payload: RwLock::new(Vec::new()),
+            acs_export: Mutex::new(None),
             _p: PhantomData,
         })
     }
@@ -138,6 +152,78 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
     /// Get payload data to send with command (clones the data)
     pub async fn get_command_payload(&self) -> Vec<u8> {
         self.command_payload.read().await.clone()
+    }
+
+    /// Install a freshly opened export session, replacing any previous one.
+    ///
+    /// `authorized` is the only participant that may pull blocks from it: the
+    /// stream carries the party's entire active contract set and is
+    /// forward-only, so anyone else reading it would both see contracts they
+    /// are not entitled to and desynchronize the real target.
+    pub async fn set_acs_export(&self, authorized: CantonId, session: ExportSession) {
+        *self.acs_export.lock().await = Some((authorized, session));
+    }
+
+    /// Whether an export session is currently open.
+    pub async fn has_acs_export(&self) -> bool {
+        self.acs_export.lock().await.is_some()
+    }
+
+    /// Serve block `seq` from the open export session to `caller`.
+    ///
+    /// # Errors
+    /// Returns an error if no session is open, if `caller` is not the
+    /// participant the session was opened for, or if the session refuses the
+    /// sequence number (see [`ExportSession::block`]).
+    pub async fn next_acs_block(
+        &self,
+        caller: &CantonId,
+        seq: u64,
+        block_size: usize,
+    ) -> Result<PipeBlock> {
+        let mut guard = self.acs_export.lock().await;
+
+        // Authenticated at the Noise layer, but any peer in the allowlist can
+        // route to this run. Only the participant being replicated onto may
+        // read the export.
+        if let Some((authorized, _)) = guard.as_ref()
+            && authorized != caller
+        {
+            anyhow::bail!(
+                "{caller} is not the target of this replication and may not read \
+                 its ACS export"
+            );
+        }
+
+        // The target restarts its step from block 1, but the export is
+        // forward-only: once it has served past block 1 it can never answer
+        // that again. Drop the session so the coordinator's step loop re-opens
+        // it, rather than failing every retry until the process restarts.
+        if seq <= 1
+            && guard
+                .as_ref()
+                .is_some_and(|(_, session)| session.served_past_first())
+        {
+            *guard = None;
+            anyhow::bail!(
+                "ACS export restarted: the target asked for block {seq} after the \
+                 stream had advanced, so it was discarded and will be re-opened. \
+                 Retry the transfer."
+            );
+        }
+
+        let (_, session) = guard.as_mut().ok_or_else(|| {
+            anyhow::anyhow!(
+                "no ACS export is open on this run — the coordinator restarted, so the \
+                 transfer must begin again from block 1"
+            )
+        })?;
+        session.block(seq, block_size).await
+    }
+
+    /// Drop the export session, closing the Canton stream.
+    pub async fn clear_acs_export(&self) {
+        *self.acs_export.lock().await = None;
     }
 
     /// Clear the command payload

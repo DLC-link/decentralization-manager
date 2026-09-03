@@ -141,6 +141,12 @@ pub enum MessageType {
     GetChunk = 0x0301,
     /// Chunk data response - payload contains: [chunk_index (4 bytes)] [chunk_data (variable)]
     Chunk = 0x0302,
+    /// Request the next block of the source's open ACS export - payload contains: [seq (8 bytes)]
+    GetNextAcsBlock = 0x0305,
+    /// ACS block response - payload contains: [seq (8 bytes)] [bytes (variable)]
+    AcsBlock = 0x0306,
+    /// Final ACS block - payload contains: [seq (8 bytes)] [total (8 bytes)] [sha256 hex]
+    AcsBlockEnd = 0x0307,
 }
 
 /// Maximum payload size sent inline in a single message before the chunked
@@ -168,6 +174,30 @@ pub const MAX_CHUNKED_TOTAL_SIZE: usize = 16 * 1024 * 1024;
 /// Hard ceiling on the chunk count for a chunked response. Equal to
 /// `MAX_CHUNKED_TOTAL_SIZE / CHUNK_SIZE` rounded up.
 pub const MAX_CHUNK_COUNT: usize = MAX_CHUNKED_TOTAL_SIZE.div_ceil(CHUNK_SIZE);
+
+/// Bytes served per `GetNextAcsBlock`. Default; the live value is read via
+/// [`acs_block_size`].
+///
+/// Bounded from above by `NOISE_HANDLER_TIMEOUT`, which caps the *whole*
+/// server response including the body — a range that cannot transfer inside it
+/// is killed mid-body however many times it is retried. 4 MiB moves in ~17s on
+/// a 2 Mbit/s link, which leaves headroom against the 45s budget. Bounded from
+/// below by round trips: the fixed per-range cost is a TCP connect plus a Noise
+/// handshake (measured at 0.30 ms) plus two RTTs, so on a high-latency link
+/// fewer, larger ranges finish sooner.
+pub const ACS_BLOCK_SIZE: usize = 4 * 1024 * 1024;
+
+/// Bytes to request per ACS block, overridable via `DECPM_ACS_BLOCK_BYTES`.
+/// Clamped to `[64 KiB, MAX_CHUNKED_TOTAL_SIZE]` so a mistyped value cannot
+/// stall every block against the handler timeout or shrink to a per-byte
+/// round trip.
+pub fn acs_block_size() -> usize {
+    std::env::var("DECPM_ACS_BLOCK_BYTES")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(ACS_BLOCK_SIZE)
+        .clamp(64 * 1024, MAX_CHUNKED_TOTAL_SIZE)
+}
 
 impl TryFrom<u16> for MessageType {
     type Error = anyhow::Error;
@@ -228,6 +258,9 @@ impl TryFrom<u16> for MessageType {
             0x0300 => Ok(Self::ChunkedCommand),
             0x0301 => Ok(Self::GetChunk),
             0x0302 => Ok(Self::Chunk),
+            0x0305 => Ok(Self::GetNextAcsBlock),
+            0x0306 => Ok(Self::AcsBlock),
+            0x0307 => Ok(Self::AcsBlockEnd),
             _ => Err(anyhow::anyhow!("Unknown message type: 0x{value:04x}")),
         }
     }
@@ -247,7 +280,17 @@ impl MessageType {
 /// Bump this on any framing change; the decoder rejects mismatches with a
 /// clear error, and future versions can branch on it instead of forcing
 /// another lockstep upgrade.
-pub const WIRE_VERSION: u8 = 0xD1;
+///
+/// 0xD1 -> 0xD2: the `ImportAcs` payload dropped the inline snapshot for
+/// `[config, package_ids]` and the ACS moved to `GetNextAcsBlock`. This one had
+/// to be a version bump rather than a tolerated difference: a 0xD1 peer decodes
+/// the new two-item payload as its own legacy `[config, snapshot]`, so it would
+/// read the package-id list as ACS bytes, find them non-empty, skip the package
+/// preflight, and DISCONNECT its participant to import them — after the
+/// topology change is already live. Rejecting the frame outright keeps an old
+/// build from ever reaching that, and it fails the invite's health probe, so
+/// the run does not start at all.
+pub const WIRE_VERSION: u8 = 0xD2;
 
 /// Message structure for Noise protocol communication.
 ///
