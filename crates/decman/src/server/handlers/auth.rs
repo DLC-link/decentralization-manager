@@ -792,6 +792,7 @@ mod tests {
             bootstrap_mu: Arc::new(Mutex::new(())),
             test_mode,
             refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
+            discovery_completed: Arc::new(RwLock::new(HashMap::new())),
             http_client: reqwest::Client::new(),
         })
     }

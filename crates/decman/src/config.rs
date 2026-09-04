@@ -498,6 +498,12 @@ pub struct CantonConfig {
     /// TLS for the Ledger API channel.
     #[serde(default)]
     pub ledger_api_tls: CantonTlsConfig,
+    /// Whether party discovery may fall back to an unfiltered
+    /// `list_party_to_participant` read when this node knows no party to query
+    /// for. `None` decides from [`CantonConfig::network`]: allowed everywhere
+    /// but MainNet, whose topology store is too large to read whole.
+    #[serde(default)]
+    pub topology_discovery_scan: Option<bool>,
 }
 
 impl Default for CantonConfig {
@@ -511,6 +517,7 @@ impl Default for CantonConfig {
             network: Network::Devnet,
             admin_api_tls: CantonTlsConfig::default(),
             ledger_api_tls: CantonTlsConfig::default(),
+            topology_discovery_scan: None,
         }
     }
 }
@@ -572,6 +579,21 @@ impl NodeConfig {
             "ledger",
         )
         .await
+    }
+
+    /// Whether party discovery may read every `PartyToParticipant` mapping on
+    /// the synchronizer to find parties this node has no local record of.
+    ///
+    /// Canton only pushes `filter_party` and `filter_namespace` down to the
+    /// topology store; `filter_participant` is applied in memory afterwards.
+    /// So a participant-scoped query with no party filter loads every party on
+    /// the synchronizer, which on MainNet takes minutes and returns nothing
+    /// useful. Small networks pay almost nothing for it and rely on it to
+    /// discover a party during onboarding, so it stays on there.
+    pub fn allows_topology_discovery_scan(&self) -> bool {
+        self.canton
+            .topology_discovery_scan
+            .unwrap_or(!matches!(self.canton.network, Network::Mainnet))
     }
 
     /// Get the synchronizer name
@@ -886,6 +908,30 @@ mod tls_tests {
                 "unhelpful error: {message}"
             );
         }
+    }
+
+    /// The scan is the expensive fallback, so MainNet must not opt into it by
+    /// accident, and an operator must still be able to.
+    #[test]
+    fn only_small_networks_scan_topology_by_default() {
+        let mut config = NodeConfig::default();
+        for network in [Network::Devnet, Network::Testnet] {
+            config.canton.network = network;
+            assert!(
+                config.allows_topology_discovery_scan(),
+                "{network:?} should still discover by scan"
+            );
+        }
+
+        config.canton.network = Network::Mainnet;
+        assert!(!config.allows_topology_discovery_scan());
+
+        config.canton.topology_discovery_scan = Some(true);
+        assert!(config.allows_topology_discovery_scan());
+
+        config.canton.network = Network::Devnet;
+        config.canton.topology_discovery_scan = Some(false);
+        assert!(!config.allows_topology_discovery_scan());
     }
 }
 

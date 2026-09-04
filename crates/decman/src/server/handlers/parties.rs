@@ -52,6 +52,81 @@ use crate::{
     utils,
 };
 
+/// How long a completed party discovery answers requests before another one
+/// runs, whether it found parties or not.
+const PARTIES_CACHE_TTL_SECS: i64 = 60;
+
+/// Deadline for a single topology read.
+///
+/// Canton applies no deadline of its own, so a read the participant cannot
+/// answer quickly holds the request open indefinitely, well past any gateway
+/// timeout in front of it, and every retry stacks another one on the
+/// participant.
+const TOPOLOGY_READ_TIMEOUT: Duration = Duration::from_secs(60);
+
+fn now_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or_default()
+}
+
+/// Longest accepted `prefix`. A prefix narrows a Canton party id, so a longer
+/// one filters nothing, and the value keys an in-memory map.
+const MAX_PREFIX_LEN: usize = 128;
+
+/// Cap on distinct prefixes tracked in `AppState::discovery_completed`.
+const MAX_TRACKED_PREFIXES: usize = 1024;
+
+/// Whether a completed discovery still answers for a prefix.
+///
+/// `None` means no discovery has completed for it in this process. A timestamp
+/// ahead of `now` is not fresh: the clock moved backwards after it was written,
+/// and treating a negative age as fresh would pin the answer indefinitely.
+fn discovery_is_fresh(completed_at: Option<i64>, now: i64) -> bool {
+    completed_at.is_some_and(|at| (0..=PARTIES_CACHE_TTL_SECS).contains(&(now - at)))
+}
+
+/// Record that a discovery completed for `prefix`.
+///
+/// Only an empty result is recorded. That is the one case the `dec_parties`
+/// cache cannot represent, and recording a non-empty result would let a
+/// request arriving before the cache write answer empty for the whole TTL.
+///
+/// Expired entries go on the way in and the map is capped, because `prefix`
+/// comes from the request.
+pub(crate) async fn record_discovery(
+    completed: &Arc<tokio::sync::RwLock<HashMap<String, i64>>>,
+    prefix: &str,
+    parties: &[DecentralizedParty],
+) {
+    if !parties.is_empty() {
+        return;
+    }
+
+    let now = now_secs();
+    let mut completed = completed.write().await;
+    completed.retain(|_, at| discovery_is_fresh(Some(*at), now));
+    if completed.len() >= MAX_TRACKED_PREFIXES {
+        completed.clear();
+    }
+    completed.insert(prefix.to_string(), now);
+}
+
+/// Run one topology read under [`TOPOLOGY_READ_TIMEOUT`].
+async fn bounded_read<T>(
+    what: &str,
+    read: impl std::future::Future<Output = std::result::Result<T, tonic::Status>>,
+) -> Result<T> {
+    match tokio::time::timeout(TOPOLOGY_READ_TIMEOUT, read).await {
+        Ok(result) => Ok(result?),
+        Err(_) => anyhow::bail!(
+            "{what} did not answer within {secs}s",
+            secs = TOPOLOGY_READ_TIMEOUT.as_secs()
+        ),
+    }
+}
+
 /// Query parameters for decentralized parties endpoint
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
 pub struct PartiesQuery {
@@ -82,6 +157,12 @@ pub async fn get_decentralized_parties(
     let prefix = query.prefix.clone().unwrap_or_default();
     let force_refresh = query.refresh.unwrap_or(false);
 
+    if prefix.len() > MAX_PREFIX_LEN {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: format!("prefix must be at most {MAX_PREFIX_LEN} characters"),
+        });
+    }
+
     // Try to load from DB cache first (unless caller explicitly demanded fresh)
     let cached = if force_refresh {
         Ok(None)
@@ -91,12 +172,8 @@ pub async fn get_decentralized_parties(
     if let Ok(Some((mut response, updated_at))) = cached {
         response.source = ResponseSource::Cache;
 
-        // Only refresh if cache is stale (older than 60 seconds)
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-        let is_stale = (now - updated_at) > 60;
+        // Only refresh if the cache is stale
+        let is_stale = (now_secs() - updated_at) > PARTIES_CACHE_TTL_SECS;
 
         if is_stale {
             // Atomic check+insert to avoid duplicate spawns
@@ -135,19 +212,56 @@ pub async fn get_decentralized_parties(
         return HttpResponse::Ok().json(response);
     }
 
-    // No cache — do the full Canton query (first request is slow)
+    // No cached rows. A party this node is not a member of and a party that
+    // does not exist leave the same empty table, so the cache alone cannot
+    // tell "never fetched" from "fetched, found nothing". Answering from a
+    // recent completed discovery is what stops a node with no party from
+    // re-running that query on every single request.
+    let completed_at = data.discovery_completed.read().await.get(&prefix).copied();
+    if !force_refresh && discovery_is_fresh(completed_at, now_secs()) {
+        return HttpResponse::Ok().json(DecentralizedPartiesResponse {
+            parties: Vec::new(),
+            source: ResponseSource::Cache,
+            refreshing: data.refreshing_prefixes.read().await.contains(&prefix),
+        });
+    }
+
+    // Single-flight. A cold cache used to let every concurrent request start
+    // its own discovery, so one page load could put several full topology
+    // reads on the participant at once.
+    if !data
+        .refreshing_prefixes
+        .write()
+        .await
+        .insert(prefix.clone())
+    {
+        return HttpResponse::Ok().json(DecentralizedPartiesResponse {
+            parties: Vec::new(),
+            source: ResponseSource::Cache,
+            refreshing: true,
+        });
+    }
+
     let auth = data.auth.read().await.clone();
     let party_creds = data.party_credentials.read().await.clone();
-    match fetch_decentralized_parties(
+    let fetched = fetch_decentralized_parties(
         &data.config,
         &data.db,
         Some(prefix.as_str()).filter(|s| !s.is_empty()),
         auth,
         &party_creds,
     )
-    .await
-    {
+    .await;
+
+    // The claim covered the expensive part and is released here whatever the
+    // outcome: a failure has to be retryable, and the background pass below
+    // takes its own claim. Nothing downstream of this point can strand it.
+    data.refreshing_prefixes.write().await.remove(&prefix);
+
+    match fetched {
         Ok(response) => {
+            record_discovery(&data.discovery_completed, &prefix, &response.parties).await;
+
             // Cache + resolve owner keys in background. Mirrors
             // `refresh_and_cache_parties` so a cold cache reaches the same
             // post-resolved state on the next request. Dedup against
@@ -195,6 +309,8 @@ async fn refresh_and_cache_parties(data: &web::Data<AppState>, prefix: &str) {
     .await
     {
         Ok(response) => {
+            record_discovery(&data.discovery_completed, prefix, &response.parties).await;
+
             if let Err(e) = store_parties_to_db(&data.db, prefix, &response.parties).await {
                 tracing::warn!("Failed to cache parties: {e}");
                 return;
@@ -775,15 +891,6 @@ pub async fn fetch_decentralized_parties(
     auth: Option<WorkflowAuth>,
     party_credentials: &[PartyCredentials],
 ) -> Result<DecentralizedPartiesResponse> {
-    let channel = config.admin_channel().await?;
-
-    let mut topology_client = TopologyManagerReadServiceClient::new(channel.clone())
-        .max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
-    let mut vault_client =
-        VaultServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
-
-    let synchronizer_id = utils::get_synchronizer_id(config).await?;
-
     let workflow_runs = db.get_visible_workflow_runs().await?;
     let cached_parties = db.get_dec_parties_by_prefix("").await?;
     let known_party_ids = known_party_filters(
@@ -801,26 +908,54 @@ pub async fn fetch_decentralized_parties(
         .collect();
 
     // Prefer exact IDs from every local source. Only a node that knows no
-    // matching party at all uses participant-scoped discovery; Canton applies
-    // that participant filter after loading topology rows, so this fallback is
-    // intentionally limited to bootstrap/onboarding.
-    let party_filters: Vec<Option<String>> = if !has_local_party_knowledge {
-        vec![prefix_filter.map(str::to_string)]
-    } else {
+    // matching party at all needs discovery, and Canton applies the
+    // participant filter after loading topology rows, so discovery is only
+    // cheap when a prefix narrows it server-side. With neither, the read
+    // covers every party on the synchronizer.
+    let party_filters: Vec<Option<String>> = if has_local_party_knowledge {
         exact_party_filters.into_iter().map(Some).collect()
+    } else if prefix_filter.is_some() {
+        vec![prefix_filter.map(str::to_string)]
+    } else if config.allows_topology_discovery_scan() {
+        vec![None]
+    } else {
+        tracing::warn!(
+            "Skipping decentralized-party discovery: this node knows no party to \
+             query for, and the unfiltered topology read that would find one is \
+             disabled on this network because it loads every party on the \
+             synchronizer. Configure party credentials, request a prefix, or set \
+             DECPM_CANTON_TOPOLOGY_DISCOVERY_SCAN=true to allow it."
+        );
+        return Ok(DecentralizedPartiesResponse {
+            parties: Vec::new(),
+            source: ResponseSource::Live,
+            refreshing: false,
+        });
     };
 
+    let channel = config.admin_channel().await?;
+
+    let mut topology_client = TopologyManagerReadServiceClient::new(channel.clone())
+        .max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
+    let mut vault_client =
+        VaultServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
+
+    let synchronizer_id = utils::get_synchronizer_id(config).await?;
     let participant_id = config.participant_id().to_string();
     let mut p2p_by_namespace = HashMap::new();
     for party_filter in party_filters {
-        let response = topology_client
-            .list_party_to_participant(tonic::Request::new(build_party_to_participant_request(
-                &synchronizer_id,
-                party_filter.as_deref(),
-                &participant_id,
-            )))
-            .await?
-            .into_inner();
+        let response = bounded_read(
+            "list_party_to_participant",
+            topology_client.list_party_to_participant(tonic::Request::new(
+                build_party_to_participant_request(
+                    &synchronizer_id,
+                    party_filter.as_deref(),
+                    &participant_id,
+                ),
+            )),
+        )
+        .await?
+        .into_inner();
 
         for result in response.results {
             let Some(P2pItem::V30(party_mapping)) = result.item else {
@@ -842,23 +977,27 @@ pub async fn fetch_decentralized_parties(
     namespaces.sort();
     let mut dns_results = Vec::new();
     for namespace in namespaces {
-        let response = topology_client
-            .list_decentralized_namespace_definition(tonic::Request::new(
+        let response = bounded_read(
+            "list_decentralized_namespace_definition",
+            topology_client.list_decentralized_namespace_definition(tonic::Request::new(
                 build_decentralized_namespace_request(&synchronizer_id, &namespace),
-            ))
-            .await?
-            .into_inner();
+            )),
+        )
+        .await?
+        .into_inner();
         dns_results.extend(response.results);
     }
 
     // Get namespace keys only after completing the scoped topology lookup.
-    let keys_response = vault_client
-        .list_my_keys(tonic::Request::new(ListMyKeysRequest {
+    let keys_response = bounded_read(
+        "list_my_keys",
+        vault_client.list_my_keys(tonic::Request::new(ListMyKeysRequest {
             filters: None,
             base_request: None,
-        }))
-        .await?
-        .into_inner();
+        })),
+    )
+    .await?
+    .into_inner();
 
     let mut namespace_key_fingerprints = HashMap::new();
     for key_meta in keys_response.private_keys_metadata {
@@ -1346,13 +1485,15 @@ async fn get_local_namespace_fingerprints(config: &NodeConfig) -> Result<HashSet
     let mut vault_client =
         VaultServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
 
-    let keys_response = vault_client
-        .list_my_keys(tonic::Request::new(ListMyKeysRequest {
+    let keys_response = bounded_read(
+        "list_my_keys",
+        vault_client.list_my_keys(tonic::Request::new(ListMyKeysRequest {
             filters: None,
             base_request: None,
-        }))
-        .await?
-        .into_inner();
+        })),
+    )
+    .await?
+    .into_inner();
 
     let mut fingerprints = HashSet::new();
     for key_meta in keys_response.private_keys_metadata {
@@ -1374,6 +1515,153 @@ mod tests {
     use http::StatusCode;
 
     use super::*;
+    use crate::{config::Network, db::MIGRATOR};
+
+    /// The MainNet fault this guards: with no party known locally and no
+    /// prefix to narrow the query, discovery read every `PartyToParticipant`
+    /// mapping on the synchronizer, which takes minutes and returns nothing
+    /// useful. Nothing listens on the configured admin port here, so a fetch
+    /// that still talks to Canton fails: answering empty proves the skip
+    /// happens before the channel is opened.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn mainnet_discovery_skips_the_unfiltered_scan(pool: SqlitePool) -> anyhow::Result<()> {
+        let config = closed_admin_api(Network::Mainnet);
+
+        let response = fetch_decentralized_parties(&config, &pool, None, None, &[]).await?;
+
+        assert!(response.parties.is_empty());
+        Ok(())
+    }
+
+    /// A small network keeps the fallback: its topology store is small enough
+    /// to read whole, and onboarding relies on it to find a party before any
+    /// local record of one exists. With nothing listening it must fail rather
+    /// than answer empty.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn small_networks_still_discover_by_scan(pool: SqlitePool) {
+        for network in [Network::Devnet, Network::Testnet] {
+            let config = closed_admin_api(network);
+
+            let result = fetch_decentralized_parties(&config, &pool, None, None, &[]).await;
+
+            assert!(result.is_err(), "{network:?} must still attempt discovery");
+        }
+    }
+
+    /// A prefix is pushed down to the topology store, so it stays allowed on
+    /// MainNet — and it is the escape hatch for an operator whose node holds
+    /// no party yet.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_prefix_keeps_mainnet_discovery_allowed(pool: SqlitePool) {
+        let config = closed_admin_api(Network::Mainnet);
+
+        let result = fetch_decentralized_parties(&config, &pool, Some("cbtc"), None, &[]).await;
+
+        assert!(result.is_err(), "a prefixed query must still reach Canton");
+    }
+
+    /// An operator can put the scan back, however large the network.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn mainnet_scans_when_the_operator_asks_for_it(pool: SqlitePool) {
+        let mut config = closed_admin_api(Network::Mainnet);
+        config.canton.topology_discovery_scan = Some(true);
+
+        let result = fetch_decentralized_parties(&config, &pool, None, None, &[]).await;
+
+        assert!(result.is_err(), "an enabled scan must reach Canton");
+    }
+
+    /// Nothing can listen on port 1, so any attempt to reach Canton fails
+    /// instead of finding a participant a developer happens to be running.
+    fn closed_admin_api(network: Network) -> NodeConfig {
+        let mut config = NodeConfig::default();
+        config.canton.network = network;
+        config.canton.admin_api_host = "127.0.0.1".to_string();
+        config.canton.admin_api_port = 1;
+        config
+    }
+
+    /// A party this node does not belong to leaves no cached rows, so without
+    /// a record of the completed discovery every request re-ran it. The
+    /// boundary matters: the TTL second itself still answers from the record.
+    #[test]
+    fn a_completed_discovery_answers_until_the_ttl_passes() {
+        let now = 1_000_000;
+
+        assert!(!discovery_is_fresh(None, now));
+        assert!(discovery_is_fresh(Some(now), now));
+        assert!(discovery_is_fresh(Some(now - PARTIES_CACHE_TTL_SECS), now));
+        assert!(!discovery_is_fresh(
+            Some(now - PARTIES_CACHE_TTL_SECS - 1),
+            now
+        ));
+    }
+
+    /// A backwards clock jump must not pin the answer. A negative age would
+    /// satisfy a plain `<= TTL` and hold the record forever.
+    #[test]
+    fn a_timestamp_from_the_future_is_not_fresh() {
+        let now = 1_000_000;
+
+        assert!(!discovery_is_fresh(Some(now + 1), now));
+        assert!(!discovery_is_fresh(Some(now + 86_400), now));
+    }
+
+    /// Only an empty result is recorded. A non-empty one is served from
+    /// `dec_parties`, and recording it would make a request that arrives
+    /// before that write answer empty for the whole TTL.
+    #[tokio::test]
+    async fn only_an_empty_discovery_is_recorded() -> anyhow::Result<()> {
+        let completed = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+
+        record_discovery(&completed, "cbtc", &[a_party()?]).await;
+        assert!(
+            completed.read().await.is_empty(),
+            "a non-empty discovery must not be recorded"
+        );
+
+        record_discovery(&completed, "cbtc", &[]).await;
+        assert!(completed.read().await.contains_key("cbtc"));
+        Ok(())
+    }
+
+    /// `prefix` comes from the request, so the map has to stay bounded whoever
+    /// is asking.
+    #[tokio::test]
+    async fn recording_drops_expired_entries_and_stays_bounded() {
+        let completed = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+        let stale = now_secs() - PARTIES_CACHE_TTL_SECS - 1;
+        completed.write().await.insert("expired".to_string(), stale);
+
+        record_discovery(&completed, "fresh", &[]).await;
+
+        let seen = completed.read().await;
+        assert!(!seen.contains_key("expired"), "expired entry survived");
+        assert!(seen.contains_key("fresh"));
+        drop(seen);
+
+        for index in 0..MAX_TRACKED_PREFIXES + 1 {
+            record_discovery(&completed, &format!("prefix-{index}"), &[]).await;
+        }
+        assert!(
+            completed.read().await.len() <= MAX_TRACKED_PREFIXES,
+            "the map grew past its cap"
+        );
+    }
+
+    fn a_party() -> anyhow::Result<DecentralizedParty> {
+        Ok(DecentralizedParty {
+            party_id: CantonId::parse(
+                "cbtc::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+            )?,
+            threshold: 1,
+            owners: Vec::new(),
+            my_owner_key: None,
+            participants: Vec::new(),
+            contracts: Vec::new(),
+            local_metadata: None,
+        })
+    }
 
     #[test]
     fn peer_error_kind_mapping_known_variants() {

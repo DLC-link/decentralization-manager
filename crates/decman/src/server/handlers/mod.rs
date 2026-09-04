@@ -30,7 +30,7 @@ pub(crate) use invitations::{accept_invitation, decline_invitation, get_invitati
 pub(crate) use keys::get_key_status;
 pub(crate) use parties::{
     compare_peer_packages, fetch_decentralized_parties, get_decentralized_parties,
-    get_participants_status, get_vetted_packages, resolve_owner_keys_from_peers,
+    get_participants_status, get_vetted_packages, record_discovery, resolve_owner_keys_from_peers,
     store_parties_to_db,
 };
 pub(crate) use party_config::{discover_member_party, get_party_config, save_party_config};

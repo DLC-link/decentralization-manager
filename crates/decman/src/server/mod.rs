@@ -141,6 +141,13 @@ pub struct AppState {
     pub test_mode: bool,
     /// Prefixes currently being refreshed from Canton (deduplication)
     pub refreshing_prefixes: Arc<RwLock<HashSet<String>>>,
+    /// Unix seconds of the last completed Canton discovery, per prefix.
+    ///
+    /// A prefix with no parties leaves no rows in `dec_parties`, so the cached
+    /// rows alone cannot tell "never fetched" from "fetched, found nothing".
+    /// Without this a node with no party re-ran the whole discovery query on
+    /// every request.
+    pub discovery_completed: Arc<RwLock<HashMap<String, i64>>>,
     /// Shared `reqwest::Client` for the proxy-style handlers (`/network-info`,
     /// `/operator-info`, `/token-standard-contracts`). Constructed once at
     /// startup so its connection pool / keep-alives are reused across
@@ -173,6 +180,7 @@ impl AppState {
             bootstrap_mu: Arc::new(Mutex::new(())),
             test_mode: true,
             refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
+            discovery_completed: Arc::new(RwLock::new(HashMap::new())),
             http_client: reqwest::Client::new(),
         }))
     }
@@ -1031,6 +1039,7 @@ pub async fn start_server(
         // `--insecure` (or tests). See the `insecure` binding above.
         test_mode: insecure,
         refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
+        discovery_completed: Arc::new(RwLock::new(HashMap::new())),
         http_client,
     });
 
@@ -1115,6 +1124,7 @@ pub async fn start_server(
     let sync_db = db.clone();
     let sync_auth = app_state.auth.clone();
     let sync_party_creds = app_state.party_credentials.clone();
+    let sync_completed = app_state.discovery_completed.clone();
     tokio::spawn(async move {
         // Delay to let Canton stabilize after startup
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -1133,6 +1143,8 @@ pub async fn start_server(
         .await
         {
             Ok(response) => {
+                handlers::record_discovery(&sync_completed, "", &response.parties).await;
+
                 if let Err(e) = handlers::store_parties_to_db(&sync_db, "", &response.parties).await
                 {
                     tracing::warn!("Failed to cache parties on startup: {e}");
