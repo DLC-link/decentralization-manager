@@ -912,12 +912,20 @@ pub async fn fetch_decentralized_parties(
     // and `list_packages` is a whole-participant Admin API read. Building them
     // per party meant one full package inventory in flight per hosted party.
     let packages = default_package_config();
-    let package_versions = match fetch_package_versions(config).await {
-        Ok(map) => map,
-        Err(e) => {
-            tracing::warn!("Failed to load package versions from Admin API: {e}");
-            HashMap::new()
+    // Only when some party can use it. With no auth and no test mode every
+    // per-party read below is skipped, so fetching a whole-participant
+    // inventory would be pure waste — and it was never fetched on that path
+    // before, when `get_contracts` fetched it for itself.
+    let package_versions = if auth.is_some() || test_mode {
+        match fetch_package_versions(config).await {
+            Ok(map) => map,
+            Err(e) => {
+                tracing::warn!("Failed to load package versions from Admin API: {e}");
+                HashMap::new()
+            }
         }
+    } else {
+        HashMap::new()
     };
 
     // Fetch contracts and metadata for all parties, at most
