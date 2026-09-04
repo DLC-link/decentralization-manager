@@ -232,21 +232,9 @@ pub async fn get_contracts(
     party_id: &CantonId,
     token: Option<String>,
     packages: &PackageConfig,
+    package_versions: &HashMap<String, String>,
 ) -> Result<Vec<ContractInfo>> {
     let mut contracts = Vec::new();
-
-    // Build a {package_id → version} map once per request from the
-    // participant Admin API. The Ledger API itself only returns
-    // `package_name` on each created event — version metadata lives on the
-    // Admin PackageService. Failure to load is non-fatal: contracts simply
-    // ship with an empty version string.
-    let package_versions = match fetch_package_versions(config).await {
-        Ok(map) => map,
-        Err(e) => {
-            tracing::warn!("Failed to load package versions from Admin API: {e}");
-            HashMap::new()
-        }
-    };
 
     {
         // One query per template, so a package missing from this participant
@@ -258,7 +246,7 @@ pub async fn get_contracts(
                 party_id,
                 token.clone(),
                 t,
-                &package_versions,
+                package_versions,
                 &mut contracts,
             )
             .await
@@ -346,9 +334,14 @@ pub(crate) fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
     }
 }
 
-/// Load `(package_id → version)` from the participant's Admin PackageService.
-/// One call per request — small map (~hundreds of rows), no caching needed.
-async fn fetch_package_versions(config: &NodeConfig) -> Result<HashMap<String, String>> {
+/// A `{package_id → version}` map from the participant's Admin PackageService.
+///
+/// The Ledger API returns only `package_name` on a created event; version
+/// metadata lives on the Admin `PackageService`. This is a whole-participant
+/// read, identical for every party, so a caller reading many parties must fetch
+/// it **once** and pass it to each [`get_contracts`] call — one inventory in
+/// flight per party is what OOMKilled a node (#415).
+pub(crate) async fn fetch_package_versions(config: &NodeConfig) -> Result<HashMap<String, String>> {
     let mut client = PackageServiceClient::new(config.admin_channel().await?);
     let response = client
         .list_packages(tonic::Request::new(ListPackagesRequest {
