@@ -532,7 +532,7 @@ Most variables have a default that's only useful for local development (loopback
 | `DECPM_CANTON_LEDGER_TLS_CLIENT_KEY` | unset | optional | |
 | `DECPM_CANTON_LEDGER_TLS_DOMAIN` | unset | optional | |
 | `DECPM_CANTON_NETWORK` | `devnet` | **yes** | `mainnet`, `testnet`, or `devnet` |
-| `DECPM_CANTON_TOPOLOGY_DISCOVERY_SCAN` | off on `mainnet`, on elsewhere | optional | Lets party discovery read every `PartyToParticipant` mapping on the synchronizer when the node knows no party to query for. Canton filters by participant only after loading those rows, so on MainNet the read returns nothing after minutes and loads the participant heavily. Turn it on only on a small network |
+| `DECPM_CANTON_TOPOLOGY_DISCOVERY_SCAN` | off on `mainnet`, on elsewhere | optional | Lets party discovery read every `PartyToParticipant` mapping on the synchronizer when the node knows no party to query for. Canton filters by participant only after loading those rows, so on `mainnet` the read takes minutes, returns nothing useful, and loads the participant heavily. Turn it on only on a small network. |
 | `DECPM_KEYCLOAK_URL` | unset | **yes**¹ | Keycloak server URL for frontend auth |
 | `DECPM_KEYCLOAK_REALM` | unset | **yes**¹ | Keycloak realm |
 | `DECPM_KEYCLOAK_CLIENT_ID` | unset | **yes**¹ | Keycloak client used by the SPA |
