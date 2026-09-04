@@ -41,7 +41,7 @@ use crate::{
         AppState,
         health::classify_health_reply,
         package_inventory::fetch_vetted_packages,
-        queries::{get_contracts, get_party_metadata, sort_contracts},
+        queries::{fetch_package_versions, get_contracts, get_party_metadata, sort_contracts},
         types::{
             ConnectionStatus, ContractInfo, DecentralizedPartiesResponse, DecentralizedParty,
             ErrorResponse, PackageInfo, ParticipantInfo, ParticipantStatus,
@@ -51,6 +51,18 @@ use crate::{
     },
     utils,
 };
+
+/// How many parties [`fetch_decentralized_parties`] reads at once.
+///
+/// The read used to await one future per hosted party together, so peak memory
+/// scaled with the number of parties: each in-flight future holds an ACS read's
+/// results and its gRPC buffers. A node hosting 213 parties ran 213 of those
+/// concurrently and was OOMKilled at a 2Gi limit (#415). Bounding the
+/// concurrency makes the peak track this number instead.
+///
+/// Small on purpose: the work is dominated by waiting on the participant, and
+/// the node shares a 500m CPU limit with everything else it serves.
+const PARTY_READ_CONCURRENCY: usize = 8;
 
 /// Query parameters for decentralized parties endpoint
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
@@ -158,9 +170,13 @@ pub async fn get_decentralized_parties(
                 .write()
                 .await
                 .insert(prefix.clone());
+            // Serialise first, then hand the parties themselves to the task.
+            // Cloning them instead meant a second full copy of every party and
+            // its contracts alive at once, on top of the response body (#415).
+            let body = HttpResponse::Ok().json(&response);
             if spawned {
                 let data = data.clone();
-                let parties = response.parties.clone();
+                let parties = response.parties;
                 tokio::spawn(async move {
                     if let Err(e) = store_parties_to_db(&data.db, &prefix, &parties).await {
                         tracing::warn!("Failed to cache parties: {e}");
@@ -170,7 +186,7 @@ pub async fn get_decentralized_parties(
                     data.refreshing_prefixes.write().await.remove(&prefix);
                 });
             }
-            HttpResponse::Ok().json(response)
+            body
         }
         Err(e) => {
             tracing::error!("Failed to fetch decentralized parties: {e}");
@@ -892,12 +908,27 @@ pub async fn fetch_decentralized_parties(
     // Check if we're in test mode (mock auth)
     let test_mode = matches!(auth, Some(WorkflowAuth::Mock(_)));
 
-    // Fetch contracts and metadata in parallel for all parties
-    let futures: Vec<_> = my_parties
-        .into_iter()
-        .map(|(item, my_owner_key, p2p)| {
+    // Hoisted out of the per-party futures: both are the same for every party,
+    // and `list_packages` is a whole-participant Admin API read. Building them
+    // per party meant one full package inventory in flight per hosted party.
+    let packages = default_package_config();
+    let package_versions = match fetch_package_versions(config).await {
+        Ok(map) => map,
+        Err(e) => {
+            tracing::warn!("Failed to load package versions from Admin API: {e}");
+            HashMap::new()
+        }
+    };
+
+    // Fetch contracts and metadata for all parties, at most
+    // `PARTY_READ_CONCURRENCY` at a time.
+    let parties = utils::bounded_ordered(
+        PARTY_READ_CONCURRENCY,
+        my_parties.into_iter().map(|(item, my_owner_key, p2p)| {
             let config = config.clone();
             let auth = auth.clone();
+            let packages = &packages;
+            let package_versions = &package_versions;
             let party_id_str = p2p.party.clone();
             async move {
                 let party_id = CantonId::parse(&p2p.party)?;
@@ -917,12 +948,11 @@ pub async fn fetch_decentralized_parties(
                     None => None,
                 };
 
-                let packages = default_package_config();
                 let token_clone = token.clone();
                 let (contracts, local_metadata) = if token.is_some() || test_mode {
                     tokio::join!(
                         async {
-                            get_contracts(&config, &party_id, token, &packages)
+                            get_contracts(&config, &party_id, token, packages, package_versions)
                                 .await
                                 .unwrap_or_else(|e| {
                                     tracing::warn!(
@@ -971,11 +1001,9 @@ pub async fn fetch_decentralized_parties(
                     local_metadata,
                 })
             }
-        })
-        .collect();
-
-    let results = futures::future::join_all(futures).await;
-    let parties: Vec<_> = results.into_iter().filter_map(|r| r.ok()).collect();
+        }),
+    )
+    .await;
 
     Ok(DecentralizedPartiesResponse {
         parties,
