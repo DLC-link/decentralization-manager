@@ -11,13 +11,15 @@
 //! executes each periodic reassignment directly — no per-round voting. This
 //! module holds that automation:
 //!
-//! * [`active_created_records`] — the one shared **decoded** ACS read. Unlike
+//! * [`for_each_active_created`] — the one shared **decoded** ACS read. Unlike
 //!   `queries::query_contracts_by_template` (cid + base64 blob, no fields) and
 //!   `queries::get_contracts` (metadata only), this issues a direct
 //!   `StateServiceClient` `GetActiveContracts` — modeled on
-//!   `queries::fetch_proposal_infos` — and returns the decoded create-arguments
+//!   `queries::fetch_proposal_infos` — and visits the decoded create-arguments
 //!   `Record` (template reads) or the decoded interface-view `Record`
-//!   (interface reads).
+//!   (interface reads), one contract at a time. Callers fold each record into
+//!   their own type as it arrives; a coupon ACS does not fit in memory as
+//!   `Record`s (#413).
 //! * [`active_delegation`] — reads the decparty's active
 //!   `CouponReassignmentDelegation` (its cid, authorized `assigners`, and how
 //!   many beneficiaries the split names, to size a chunk); the split's contents
@@ -74,7 +76,7 @@ pub(crate) struct Module<'a>(pub &'a str);
 /// A Daml template or interface name, e.g. `RewardCouponV2`.
 pub(crate) struct Entity<'a>(pub &'a str);
 
-/// What an [`active_created_records`] read selects.
+/// What a [`for_each_active_created`] read selects.
 ///
 /// One value rather than four positional arguments, and the two same-typed
 /// halves are wrapped: `package_id`, module and entity were all `&str`, so a
@@ -124,19 +126,28 @@ impl<'a> ContractFilter<'a> {
     }
 }
 
-/// A single decoded `GetActiveContracts` read.
+/// A single decoded `GetActiveContracts` read, handed to `visit` one contract
+/// at a time.
 ///
 /// For `interface_view = false` this uses a `TemplateFilter` (or, under
 /// `test_mode`, a `WildcardFilter` with in-memory template matching, since mock
-/// auth lacks `TemplateFilter` permission) and returns each created event's
+/// auth lacks `TemplateFilter` permission) and visits each created event's
 /// `create_arguments` `Record`. For `interface_view = true` it uses an
-/// `InterfaceFilter { include_interface_view: true }` and returns the decoded
+/// `InterfaceFilter { include_interface_view: true }` and visits the decoded
 /// interface-view `Record`. Field labels are populated because the request is
 /// `verbose`.
 ///
-/// Each entry is `(contract_id, created-event offset, Record)`. The offset
+/// `visit` receives `(contract_id, created-event offset, &Record)`. The offset
 /// orders contracts by creation, which [`active_delegation`] uses to pick the
-/// newest of several.
+/// newest of several. An `Err` from `visit` ends the read and propagates.
+///
+/// **Streaming is the point.** A verbose `Record` carries every field label as
+/// well as its values, and a decparty's coupon ACS is unbounded, so collecting
+/// the records first and narrowing afterwards makes peak memory track the whole
+/// ACS rather than the result. That OOMKilled a devnet node at a 2Gi limit
+/// every few minutes (#413). Each `Record` is dropped as soon as `visit`
+/// returns, so a caller that folds into its own target type — a
+/// [`CouponInfo`], a party id, a running `min` — holds only that.
 ///
 /// `implementer` applies to interface reads only: `Some((module, entity))`
 /// keeps a contract only if that concrete template created it. An interface
@@ -144,13 +155,17 @@ impl<'a> ContractFilter<'a> {
 /// consumer needs a specific one — see [`unassigned_coupons`].
 ///
 /// Modeled on `queries::fetch_proposal_infos`.
-pub(crate) async fn active_created_records(
+pub(crate) async fn for_each_active_created<F>(
     config: &NodeConfig,
     party_id: &CantonId,
     token: Option<String>,
     test_mode: bool,
     filter: ContractFilter<'_>,
-) -> anyhow::Result<Vec<(String, i64, Record)>> {
+    mut visit: F,
+) -> anyhow::Result<()>
+where
+    F: FnMut(&str, i64, &Record) -> anyhow::Result<()>,
+{
     let ContractFilter {
         package_id,
         module,
@@ -190,7 +205,6 @@ pub(crate) async fn active_created_records(
         .await?
         .into_inner();
 
-    let mut out = Vec::new();
     while let Some(response) = stream.message().await? {
         if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
             && let Some(created) = active.created_event
@@ -213,8 +227,8 @@ pub(crate) async fn active_created_records(
                 }) else {
                     continue;
                 };
-                if let Some(rec) = view.view_value.clone() {
-                    out.push((created.contract_id.clone(), created.offset, rec));
+                if let Some(rec) = view.view_value.as_ref() {
+                    visit(&created.contract_id, created.offset, rec)?;
                 }
             } else {
                 // Wildcard (test mode) returns every template; keep only the
@@ -228,13 +242,45 @@ pub(crate) async fn active_created_records(
                 {
                     continue;
                 }
-                if let Some(rec) = created.create_arguments.clone() {
-                    out.push((created.contract_id.clone(), created.offset, rec));
+                if let Some(rec) = created.create_arguments.as_ref() {
+                    visit(&created.contract_id, created.offset, rec)?;
                 }
             }
         }
     }
 
+    Ok(())
+}
+
+/// Collect a **bounded** read into memory: every entry as
+/// `(contract_id, created-event offset, Record)`.
+///
+/// Only for a read whose result size is bounded by construction — a
+/// per-decparty template read such as `CouponReassignmentDelegation`, where the
+/// ledger holds one contract and the propose-time guard keeps it that way.
+/// Anything that scales with a decparty's activity must use
+/// [`for_each_active_created`] and fold as it streams; see its docs for why
+/// (#413).
+async fn bounded_created_records(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    test_mode: bool,
+    filter: ContractFilter<'_>,
+) -> anyhow::Result<Vec<(String, i64, Record)>> {
+    let mut out = Vec::new();
+    for_each_active_created(
+        config,
+        party_id,
+        token,
+        test_mode,
+        filter,
+        |cid, offset, rec| {
+            out.push((cid.to_string(), offset, rec.clone()));
+            Ok(())
+        },
+    )
+    .await?;
     Ok(out)
 }
 
@@ -298,7 +344,7 @@ pub(crate) async fn active_delegation(
         return Ok(None);
     };
 
-    let records = active_created_records(
+    let records = bounded_created_records(
         config,
         decparty,
         Some(token.to_string()),
@@ -340,7 +386,7 @@ pub(crate) async fn active_delegations(
         return Ok(Vec::new());
     };
 
-    let records = active_created_records(
+    let records = bounded_created_records(
         config,
         decparty,
         Some(token.to_string()),
@@ -377,7 +423,8 @@ async fn delegated_decparties(
     let Some(package_id) = packages.governance_rewards.as_deref() else {
         return Ok(HashSet::new());
     };
-    let records = active_created_records(
+    let mut decparties = HashSet::new();
+    for_each_active_created(
         config,
         member,
         Some(token.to_string()),
@@ -387,15 +434,18 @@ async fn delegated_decparties(
             Module("Governance.Rewards.CouponReassignmentDelegation"),
             Entity("CouponReassignmentDelegation"),
         ),
+        |_, _, rec| {
+            // A delegation that names no decparty we can decode is not
+            // enablement for anyone, so it is skipped rather than failing the
+            // whole read: one bad contract must not silence every good one.
+            if let Ok(decparty) = field_party_id(rec, "decparty") {
+                decparties.insert(decparty);
+            }
+            Ok(())
+        },
     )
     .await?;
-    // A delegation that names no decparty we can decode is not enablement for
-    // anyone, so it is skipped rather than failing the whole read: one bad
-    // contract must not silence every good one.
-    Ok(records
-        .iter()
-        .filter_map(|(_, _, rec)| field_party_id(rec, "decparty").ok())
-        .collect())
+    Ok(decparties)
 }
 
 /// Pick the delegation a decparty should act on (pure): of those naming
@@ -480,8 +530,45 @@ pub(crate) async fn unassigned_coupons(
     test_mode: bool,
     packages: &PackageConfig,
 ) -> anyhow::Result<Vec<CouponInfo>> {
+    let mut coupons = Vec::new();
+    for_each_unassigned_coupon(
+        config,
+        decparty,
+        dso,
+        token,
+        test_mode,
+        packages,
+        |coupon| {
+            coupons.push(coupon);
+            Ok(())
+        },
+    )
+    .await?;
+    Ok(coupons)
+}
+
+/// The streaming half of [`unassigned_coupons`]: decode each `RewardCoupon`
+/// interface view as it arrives and hand the unassigned ones to `visit`.
+///
+/// The decode and the unassigned/dso/provider filter happen per record, so the
+/// verbose `Record` is dropped before the next one is read and only what
+/// `visit` keeps survives. A caller that needs no list at all — see
+/// [`read_oldest_expiry`], which wants one `min` — then allocates nothing per
+/// coupon. Collecting the records first is what OOMKilled a node (#413).
+async fn for_each_unassigned_coupon<F>(
+    config: &NodeConfig,
+    decparty: &CantonId,
+    dso: &CantonId,
+    token: Option<String>,
+    test_mode: bool,
+    packages: &PackageConfig,
+    mut visit: F,
+) -> anyhow::Result<()>
+where
+    F: FnMut(CouponInfo) -> anyhow::Result<()>,
+{
     let _ = packages; // the interface is resolved by name-alias, not PackageConfig.
-    let records = active_created_records(
+    for_each_active_created(
         config,
         decparty,
         token,
@@ -492,13 +579,14 @@ pub(crate) async fn unassigned_coupons(
             Entity("RewardCoupon"),
         )
         .implemented_by(Module("Splice.Amulet"), Entity("RewardCouponV2")),
+        |cid, _, rec| {
+            if let Some(coupon) = parse_unassigned_coupon(cid, rec, decparty, dso)? {
+                visit(coupon)?;
+            }
+            Ok(())
+        },
     )
-    .await?;
-
-    records
-        .iter()
-        .filter_map(|(cid, _, rec)| parse_unassigned_coupon(cid, rec, decparty, dso).transpose())
-        .collect()
+    .await
 }
 
 /// Decode one `RewardCoupon` interface-view record into a [`CouponInfo`], or
@@ -684,17 +772,19 @@ fn is_assignable(c: &CouponInfo, now: DateTime<Utc>, expiry_margin: chrono::Dura
 /// batch size, because a sweep assigns all of it in successive chunked
 /// transactions (see [`chunk_size`] and [`run_reassign_once`]); the chunk size
 /// bounds one transaction, not a sweep's work.
+///
+/// Takes the coupons by value and moves each cid out rather than cloning it: on
+/// a decparty with a large backlog the caller has no use for the list
+/// afterwards, and holding a second copy of every cid was part of what put the
+/// sweep's peak over a node's memory limit (#413).
 pub(crate) fn select_assignable(
-    coupons: &[CouponInfo],
+    mut coupons: Vec<CouponInfo>,
     now: DateTime<Utc>,
     expiry_margin: chrono::Duration,
 ) -> Vec<String> {
-    let mut selected: Vec<&CouponInfo> = coupons
-        .iter()
-        .filter(|c| is_assignable(c, now, expiry_margin))
-        .collect();
-    selected.sort_by_key(|c| c.expires_at);
-    selected.into_iter().map(|c| c.cid.clone()).collect()
+    coupons.retain(|c| is_assignable(c, now, expiry_margin));
+    coupons.sort_by_key(|c| c.expires_at);
+    coupons.into_iter().map(|c| c.cid).collect()
 }
 
 /// How many coupons one `Delegation_Assign` may carry (pure).
@@ -844,11 +934,26 @@ pub(crate) async fn submit_delegation_assign(
 /// for weeks), so including it would pin the gauge to a corpse instead of the
 /// backlog a responder can still act on.
 fn oldest_expiry(coupons: &[CouponInfo], now: DateTime<Utc>) -> Option<DateTime<Utc>> {
-    coupons
-        .iter()
-        .map(|c| c.expires_at)
-        .filter(|&expires_at| expires_at > now)
-        .min()
+    coupons.iter().fold(None, |oldest, c| {
+        fold_oldest_expiry(oldest, c.expires_at, now)
+    })
+}
+
+/// [`oldest_expiry`]'s rule for one coupon (pure), so a streaming read can hold
+/// a running minimum instead of a list — see [`read_oldest_expiry`]. Folding in
+/// any order gives the same answer as [`oldest_expiry`] over the whole set.
+fn fold_oldest_expiry(
+    oldest: Option<DateTime<Utc>>,
+    expires_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    if expires_at <= now {
+        return oldest;
+    }
+    Some(match oldest {
+        Some(current) => current.min(expires_at),
+        None => expires_at,
+    })
 }
 
 /// One reassign sweep for a decparty under the delegation model: read the
@@ -888,7 +993,8 @@ pub(crate) async fn run_reassign_once(
     .await?;
     let now = Utc::now();
     let oldest = oldest_expiry(&coupons, now);
-    let assignable = select_assignable(&coupons, now, expiry_margin);
+    let visible = coupons.len();
+    let assignable = select_assignable(coupons, now, expiry_margin);
     if assignable.is_empty() {
         // `visible` is what the ACS read returned, so it separates "coupons
         // present but none assignable yet" from "nothing visible at all".
@@ -897,11 +1003,7 @@ pub(crate) async fn run_reassign_once(
         // coupons carry providerIsObserver = false (design §4): such a coupon
         // is absent from the ACS entirely, so both report 0. Telling those
         // apart needs a signal this node does not hold.
-        tracing::debug!(
-            %decparty,
-            visible = coupons.len(),
-            "no assignable coupons this tick"
-        );
+        tracing::debug!(%decparty, visible, "no assignable coupons this tick");
         return Ok(oldest);
     }
 
@@ -1554,6 +1656,14 @@ async fn run_once_for_party(
 /// refresh faster than the sweep cadence: the sweep interval is sized to fill a
 /// `Delegation_Assign` chunk, which is a transaction-cost choice, and detection
 /// should not inherit it.
+///
+/// The live/expired cutoff is `read_started_at`, one instant for the whole
+/// stream, so every coupon is judged against the same clock. A coupon that
+/// expires *during* the read therefore still counts, and the reported countdown
+/// reaches this node slightly negative rather than the coupon vanishing from
+/// the gauge — the honest signal for one just lost, and the next read drops it.
+/// Only a coupon that has already been dead for a while is excluded, which is
+/// what the rule is for (see [`oldest_expiry`]).
 async fn read_oldest_expiry(
     config: &NodeConfig,
     decparty: &CantonId,
@@ -1562,16 +1672,22 @@ async fn read_oldest_expiry(
     test_mode: bool,
     packages: &PackageConfig,
 ) -> anyhow::Result<Option<DateTime<Utc>>> {
-    let coupons = unassigned_coupons(
+    let read_started_at = Utc::now();
+    let mut oldest = None;
+    for_each_unassigned_coupon(
         config,
         decparty,
         dso,
         Some(token.to_string()),
         test_mode,
         packages,
+        |coupon| {
+            oldest = fold_oldest_expiry(oldest, coupon.expires_at, read_started_at);
+            Ok(())
+        },
     )
     .await?;
-    Ok(oldest_expiry(&coupons, Utc::now()))
+    Ok(oldest)
 }
 
 #[cfg(test)]
@@ -1887,7 +2003,7 @@ mod tests {
             // chunk -> excluded.
             coupon("expiring", "2026-07-20T12:00:30Z"),
         ];
-        let got = select_assignable(&coupons, now, chrono::Duration::minutes(2));
+        let got = select_assignable(coupons, now, chrono::Duration::minutes(2));
         assert_eq!(got, vec!["mid".to_string(), "young".to_string()]);
     }
 
@@ -1899,7 +2015,7 @@ mod tests {
         // expiry is well past any minting comfort but safely assignable.
         let now = dt("2026-07-20T12:00:00Z");
         let coupons = vec![coupon("late", "2026-07-20T12:30:00Z")];
-        let got = select_assignable(&coupons, now, chrono::Duration::minutes(2));
+        let got = select_assignable(coupons, now, chrono::Duration::minutes(2));
         assert_eq!(got, vec!["late".to_string()]);
     }
 
@@ -1912,7 +2028,7 @@ mod tests {
             .map(|i| coupon(&format!("c{i}"), "2026-07-20T20:00:00Z"))
             .collect();
         assert_eq!(
-            select_assignable(&coupons, now, chrono::Duration::hours(2)).len(),
+            select_assignable(coupons, now, chrono::Duration::hours(2)).len(),
             500
         );
     }
@@ -2795,6 +2911,46 @@ mod tests {
             coupon("dead-2", "2026-07-18T00:00:00Z"),
         ];
         assert_eq!(oldest_expiry(&coupons, now), None);
+    }
+
+    #[test]
+    fn folding_expiries_one_at_a_time_matches_reading_the_whole_pile() {
+        // `read_oldest_expiry` never holds the pile: it folds each coupon as the
+        // ACS streams past. This pins that fold to the same answer the collected
+        // read gives, in either arrival order, so the two paths cannot drift.
+        let now = dt("2026-07-20T12:00:00Z");
+        let coupons = vec![
+            coupon("dead", "2026-07-19T00:00:00Z"),
+            coupon("late", "2026-07-24T00:00:00Z"),
+            coupon("soon", "2026-07-21T00:00:00Z"),
+        ];
+        let expected = oldest_expiry(&coupons, now);
+        assert_eq!(expected, Some(dt("2026-07-21T00:00:00Z")));
+
+        let fold = |order: &[&CouponInfo]| {
+            order
+                .iter()
+                .fold(None, |acc, c| fold_oldest_expiry(acc, c.expires_at, now))
+        };
+        let forward: Vec<&CouponInfo> = coupons.iter().collect();
+        let backward: Vec<&CouponInfo> = coupons.iter().rev().collect();
+        assert_eq!(fold(&forward), expected);
+        assert_eq!(fold(&backward), expected);
+    }
+
+    #[test]
+    fn folding_an_expired_coupon_leaves_the_running_oldest_alone() {
+        // An already-expired coupon can sit active for weeks, so it must not
+        // become the gauge's answer — not even when it arrives first.
+        let now = dt("2026-07-20T12:00:00Z");
+        let live = dt("2026-07-21T00:00:00Z");
+        let dead = dt("2026-07-19T00:00:00Z");
+        assert_eq!(fold_oldest_expiry(None, dead, now), None);
+        assert_eq!(fold_oldest_expiry(Some(live), dead, now), Some(live));
+        assert_eq!(
+            fold_oldest_expiry(fold_oldest_expiry(None, dead, now), live, now),
+            Some(live)
+        );
     }
 
     #[test]
