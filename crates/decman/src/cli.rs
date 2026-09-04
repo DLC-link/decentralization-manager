@@ -135,12 +135,6 @@ pub enum Commands {
         #[arg(long, env = "DECPM_CANTON_NETWORK")]
         canton_network: Option<Network>,
 
-        /// Let party discovery read every PartyToParticipant mapping on the
-        /// synchronizer when this node knows no party to query for. Off on
-        /// mainnet by default, where that read is prohibitively expensive.
-        #[arg(long, env = "DECPM_CANTON_TOPOLOGY_DISCOVERY_SCAN")]
-        canton_topology_discovery_scan: Option<bool>,
-
         // Keycloak (top-level, for frontend gating)
         /// Keycloak server URL for frontend auth
         #[arg(long, env = "DECPM_KEYCLOAK_URL")]
