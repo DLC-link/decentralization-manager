@@ -1656,6 +1656,14 @@ async fn run_once_for_party(
 /// refresh faster than the sweep cadence: the sweep interval is sized to fill a
 /// `Delegation_Assign` chunk, which is a transaction-cost choice, and detection
 /// should not inherit it.
+///
+/// The live/expired cutoff is `read_started_at`, one instant for the whole
+/// stream, so every coupon is judged against the same clock. A coupon that
+/// expires *during* the read therefore still counts, and the reported countdown
+/// reaches this node slightly negative rather than the coupon vanishing from
+/// the gauge — the honest signal for one just lost, and the next read drops it.
+/// Only a coupon that has already been dead for a while is excluded, which is
+/// what the rule is for (see [`oldest_expiry`]).
 async fn read_oldest_expiry(
     config: &NodeConfig,
     decparty: &CantonId,
@@ -1664,7 +1672,7 @@ async fn read_oldest_expiry(
     test_mode: bool,
     packages: &PackageConfig,
 ) -> anyhow::Result<Option<DateTime<Utc>>> {
-    let now = Utc::now();
+    let read_started_at = Utc::now();
     let mut oldest = None;
     for_each_unassigned_coupon(
         config,
@@ -1674,7 +1682,7 @@ async fn read_oldest_expiry(
         test_mode,
         packages,
         |coupon| {
-            oldest = fold_oldest_expiry(oldest, coupon.expires_at, now);
+            oldest = fold_oldest_expiry(oldest, coupon.expires_at, read_started_at);
             Ok(())
         },
     )
