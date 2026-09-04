@@ -111,9 +111,21 @@ pub(crate) async fn record_discovery(
     let now = now_secs();
     let mut completed = completed.write().await;
     completed.retain(|_, at| discovery_is_fresh(Some(*at), now));
-    if completed.len() >= MAX_TRACKED_PREFIXES {
-        completed.clear();
+
+    // Evict the oldest rather than clearing: `prefix` is request-controlled,
+    // and clearing would let a stream of unique prefixes flush the entries
+    // real ones depend on, putting their discovery back on the participant.
+    while completed.len() >= MAX_TRACKED_PREFIXES {
+        let Some(oldest) = completed
+            .iter()
+            .min_by_key(|(_, at)| **at)
+            .map(|(prefix, _)| prefix.clone())
+        else {
+            break;
+        };
+        completed.remove(&oldest);
     }
+
     completed.insert(prefix.to_string(), now);
 }
 
@@ -253,40 +265,34 @@ pub async fn get_decentralized_parties(
     )
     .await;
 
-    // The claim covered the expensive part and is released here whatever the
-    // outcome: a failure has to be retryable, and the background pass below
-    // takes its own claim. Nothing downstream of this point can strand it.
-    data.refreshing_prefixes.write().await.remove(&prefix);
-
     match fetched {
         Ok(response) => {
+            // Record and cache while the claim still stands. Releasing first
+            // left a window where a request that had not yet seen either could
+            // claim the prefix and start the same read again, and a waiting
+            // request could be answered from a cache the write had not reached.
             record_discovery(&data.discovery_completed, &prefix, &response.parties).await;
+            let cached = store_parties_to_db(&data.db, &prefix, &response.parties).await;
+            if let Err(e) = &cached {
+                tracing::warn!("Failed to cache parties: {e}");
+            }
+            data.refreshing_prefixes.write().await.remove(&prefix);
 
-            // Cache + resolve owner keys in background. Mirrors
-            // `refresh_and_cache_parties` so a cold cache reaches the same
-            // post-resolved state on the next request. Dedup against
-            // `refreshing_prefixes` so concurrent cold-cache requests don't
-            // each fan out their own Noise resolution pass.
-            let spawned = data
-                .refreshing_prefixes
-                .write()
-                .await
-                .insert(prefix.clone());
-            if spawned {
+            // Owner-key resolution fans out to every peer over Noise, so it
+            // stays off the request path. It reads what was just cached, so it
+            // only runs when that write landed.
+            if cached.is_ok() && !response.parties.is_empty() {
                 let data = data.clone();
                 let parties = response.parties.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = store_parties_to_db(&data.db, &prefix, &parties).await {
-                        tracing::warn!("Failed to cache parties: {e}");
-                    } else {
-                        resolve_owner_keys_from_peers(&data.config, &data.db, &parties).await;
-                    }
-                    data.refreshing_prefixes.write().await.remove(&prefix);
+                    resolve_owner_keys_from_peers(&data.config, &data.db, &parties).await;
                 });
             }
             HttpResponse::Ok().json(response)
         }
         Err(e) => {
+            // Nothing landed, so free the prefix for the next request to retry.
+            data.refreshing_prefixes.write().await.remove(&prefix);
             tracing::error!("Failed to fetch decentralized parties: {e}");
             HttpResponse::InternalServerError().json(ErrorResponse {
                 error: format!("Failed to fetch decentralized parties: {e}"),
@@ -1687,6 +1693,35 @@ mod tests {
         record_discovery(&completed, "cbtc", &[]).await;
         assert!(completed.read().await.contains_key("cbtc"));
         Ok(())
+    }
+
+    /// Eviction has to take the oldest entry, not the whole map: `prefix` is
+    /// request-controlled, so clearing would let a stream of unique prefixes
+    /// flush the entry a real prefix depends on.
+    #[tokio::test]
+    async fn a_full_map_evicts_the_oldest_entry() {
+        let completed = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+        let now = now_secs();
+
+        // All fresh, so nothing is dropped for age. The oldest is the one
+        // eviction must choose.
+        for index in 0..MAX_TRACKED_PREFIXES {
+            completed
+                .write()
+                .await
+                .insert(format!("prefix-{index}"), now - (index as i64 % 5));
+        }
+        completed
+            .write()
+            .await
+            .insert("oldest".to_string(), now - 6);
+
+        record_discovery(&completed, "newcomer", &[]).await;
+
+        let seen = completed.read().await;
+        assert!(!seen.contains_key("oldest"), "the oldest entry survived");
+        assert!(seen.contains_key("newcomer"));
+        assert!(seen.len() > 1, "the map was cleared instead of trimmed");
     }
 
     /// `prefix` comes from the request, so the map has to stay bounded whoever
