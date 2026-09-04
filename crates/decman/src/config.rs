@@ -672,6 +672,65 @@ async fn client_tls_config(tls: &CantonTlsConfig, label: &str) -> Result<ClientT
     Ok(config)
 }
 
+/// How long the reachability probe in [`connect_advice`] waits.
+const TCP_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Whether a plain TCP connect to `uri` succeeds.
+///
+/// tonic reports a refused connection and a TLS mismatch through the same
+/// opaque transport error, and reading its source chain only works while its
+/// internals keep exposing one. A TCP connect is direct evidence instead: if
+/// even that fails, nothing is listening and TLS cannot be the problem.
+async fn tcp_reachable(uri: &tonic::transport::Uri) -> bool {
+    let Some(host) = uri.host() else {
+        return true;
+    };
+    let port = uri.port_u16().unwrap_or(match uri.scheme_str() {
+        Some("https") => 443,
+        _ => 80,
+    });
+
+    matches!(
+        tokio::time::timeout(
+            TCP_PROBE_TIMEOUT,
+            tokio::net::TcpStream::connect((host, port)),
+        )
+        .await,
+        Ok(Ok(_))
+    )
+}
+
+/// What to tell the operator about a failed connect.
+///
+/// A TLS mismatch and an unreachable endpoint need opposite fixes, so the two
+/// have to stay apart in the message. #260 was a real mismatch, but the same
+/// hint on a refused connection points at the wrong knob: when nothing is
+/// listening, no TLS setting changes the outcome.
+fn connect_advice(reachable: bool, tls_enabled: bool, label: &str) -> String {
+    if !reachable {
+        return format!(
+            "nothing accepts TCP connections there. The {label} API is down, \
+             still starting up, or the host and port are wrong. TLS settings \
+             play no part in this failure"
+        );
+    }
+
+    let upper = label.to_uppercase();
+    if tls_enabled {
+        format!(
+            "TLS is enabled for the {label} API. If the endpoint actually serves \
+             plaintext h2c, unset DECPM_CANTON_{upper}_TLS; if it serves TLS under a \
+             private CA, point DECPM_CANTON_{upper}_TLS_CA_CERT at that CA"
+        )
+    } else {
+        format!(
+            "the {label} API channel is plaintext. If the endpoint serves TLS it closes \
+             the connection on the first bytes, which looks exactly like this; set \
+             DECPM_CANTON_{upper}_TLS=true"
+        )
+    }
+}
+
 /// Connect a channel to `url`, applying `tls`.
 ///
 /// The error path is the point of this function as much as the happy path:
@@ -688,24 +747,13 @@ async fn connect_channel(url: &str, tls: &CantonTlsConfig, label: &str) -> Resul
             .with_context(|| format!("applying TLS settings to the {label} API channel"))?;
     }
 
-    endpoint.connect().await.map_err(|e| {
-        let hint = if tls.enabled {
-            format!(
-                "TLS is enabled for the {label} API. If the endpoint actually serves \
-                 plaintext h2c, unset DECPM_CANTON_{upper}_TLS; if it serves TLS under a \
-                 private CA, point DECPM_CANTON_{upper}_TLS_CA_CERT at that CA",
-                upper = label.to_uppercase()
-            )
-        } else {
-            format!(
-                "the {label} API channel is plaintext. If the endpoint serves TLS it closes \
-                 the connection on the first bytes, which looks exactly like this; set \
-                 DECPM_CANTON_{upper}_TLS=true",
-                upper = label.to_uppercase()
-            )
-        };
-        anyhow::Error::new(e).context(format!("connecting to {url}: {hint}"))
-    })
+    let error = match endpoint.connect().await {
+        Ok(channel) => return Ok(channel),
+        Err(error) => error,
+    };
+
+    let hint = connect_advice(tcp_reachable(endpoint.uri()).await, tls.enabled, label);
+    Err(anyhow::Error::new(error).context(format!("connecting to {url}: {hint}")))
 }
 
 #[cfg(test)]
@@ -769,43 +817,75 @@ mod tls_tests {
     }
 
     /// #260's reported symptom: a plaintext client against a TLS endpoint
-    /// fails with a bare transport error naming nothing. The connect error
-    /// must point at the knob that fixes it.
-    #[tokio::test]
-    async fn a_plaintext_failure_points_at_the_tls_flag() {
-        let tls = CantonTlsConfig::default();
+    /// fails with a bare transport error naming nothing. The advice must point
+    /// at the knob that fixes it. The server accepts the TCP connection and
+    /// then drops it on the h2 preface, so the failure arrives as a reset or a
+    /// broken pipe rather than as a connect error.
+    #[test]
+    fn a_plaintext_failure_points_at_the_tls_flag() {
+        let advice = connect_advice(true, false, "admin");
 
-        let message = match connect_channel(CLOSED, &tls, "admin").await {
-            Ok(_) => panic!("nothing listens on port 1"),
-            Err(e) => format!("{e:#}"),
-        };
         assert!(
-            message.contains("DECPM_CANTON_ADMIN_TLS=true"),
-            "unhelpful error: {message}"
+            advice.contains("DECPM_CANTON_ADMIN_TLS=true"),
+            "unhelpful advice: {advice}"
         );
     }
 
     /// And the mirror case, so an operator who turned TLS on against a
     /// plaintext endpoint is not left guessing either.
-    #[tokio::test]
-    async fn a_tls_failure_points_back_at_plaintext_and_the_ca() {
-        let tls = CantonTlsConfig {
-            enabled: true,
-            ..Default::default()
-        };
+    #[test]
+    fn a_tls_failure_points_back_at_plaintext_and_the_ca() {
+        let advice = connect_advice(true, true, "ledger");
 
-        let message = match connect_channel("https://127.0.0.1:1", &tls, "ledger").await {
-            Ok(_) => panic!("nothing listens on port 1"),
-            Err(e) => format!("{e:#}"),
-        };
         assert!(
-            message.contains("unset DECPM_CANTON_LEDGER_TLS"),
-            "unhelpful error: {message}"
+            advice.contains("unset DECPM_CANTON_LEDGER_TLS"),
+            "unhelpful advice: {advice}"
         );
         assert!(
-            message.contains("DECPM_CANTON_LEDGER_TLS_CA_CERT"),
-            "unhelpful error: {message}"
+            advice.contains("DECPM_CANTON_LEDGER_TLS_CA_CERT"),
+            "unhelpful advice: {advice}"
         );
+    }
+
+    /// The regression this pairs with: an unreachable endpoint has nothing to
+    /// do with TLS, so saying otherwise points at the wrong knob. A refused
+    /// connection must not name the flag in either direction.
+    #[tokio::test]
+    async fn a_refused_connection_does_not_blame_tls() {
+        for (tls, label, flag) in [
+            (
+                CantonTlsConfig::default(),
+                "admin",
+                "DECPM_CANTON_ADMIN_TLS",
+            ),
+            (
+                CantonTlsConfig {
+                    enabled: true,
+                    ..Default::default()
+                },
+                "ledger",
+                "DECPM_CANTON_LEDGER_TLS",
+            ),
+        ] {
+            let url = if tls.enabled {
+                "https://127.0.0.1:1"
+            } else {
+                CLOSED
+            };
+
+            let message = match connect_channel(url, &tls, label).await {
+                Ok(_) => panic!("nothing listens on port 1"),
+                Err(e) => format!("{e:#}"),
+            };
+            assert!(
+                !message.contains(flag),
+                "a refused connection blamed TLS: {message}"
+            );
+            assert!(
+                message.contains("nothing accepts TCP connections there"),
+                "unhelpful error: {message}"
+            );
+        }
     }
 }
 
