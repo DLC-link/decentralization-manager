@@ -56,6 +56,10 @@ use crate::{
 /// runs, whether it found parties or not.
 const PARTIES_CACHE_TTL_SECS: i64 = 60;
 
+/// How long a request waits on another request's in-flight discovery before it
+/// answers without data.
+const SINGLE_FLIGHT_WAIT: Duration = Duration::from_secs(3);
+
 /// Deadline for a single topology read.
 ///
 /// Canton applies no deadline of its own, so a read the participant cannot
@@ -235,11 +239,7 @@ pub async fn get_decentralized_parties(
         .await
         .insert(prefix.clone())
     {
-        return HttpResponse::Ok().json(DecentralizedPartiesResponse {
-            parties: Vec::new(),
-            source: ResponseSource::Cache,
-            refreshing: true,
-        });
+        return await_in_flight_discovery(&data, &prefix).await;
     }
 
     let auth = data.auth.read().await.clone();
@@ -293,6 +293,37 @@ pub async fn get_decentralized_parties(
             })
         }
     }
+}
+
+/// Answer a request whose prefix another request is already discovering.
+///
+/// Waits [`SINGLE_FLIGHT_WAIT`] for that discovery to land, which covers an
+/// ordinary scoped query, and stops early once the cache holds rows or a
+/// discovery has completed and found nothing. Answering an empty list straight
+/// away reads as "no parties" in a client that does not act on `refreshing`.
+async fn await_in_flight_discovery(data: &web::Data<AppState>, prefix: &str) -> HttpResponse {
+    let deadline = tokio::time::Instant::now() + SINGLE_FLIGHT_WAIT;
+
+    while tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        if let Ok(Some((mut response, _))) = load_cached_parties(&data.db, prefix).await {
+            response.source = ResponseSource::Cache;
+            response.refreshing = data.refreshing_prefixes.read().await.contains(prefix);
+            return HttpResponse::Ok().json(response);
+        }
+
+        let completed_at = data.discovery_completed.read().await.get(prefix).copied();
+        if discovery_is_fresh(completed_at, now_secs()) {
+            break;
+        }
+    }
+
+    HttpResponse::Ok().json(DecentralizedPartiesResponse {
+        parties: Vec::new(),
+        source: ResponseSource::Cache,
+        refreshing: data.refreshing_prefixes.read().await.contains(prefix),
+    })
 }
 
 /// Background task: fetch from Canton, store to DB, then resolve owner keys from peers
@@ -901,18 +932,22 @@ pub async fn fetch_decentralized_parties(
         cached_parties.into_iter().map(|party| party.party_id),
         None,
     );
-    let has_local_party_knowledge = !known_party_ids.is_empty();
     let exact_party_filters: Vec<_> = known_party_ids
         .into_iter()
         .filter(|party_id| prefix_filter.is_none_or(|prefix| party_id.starts_with(prefix)))
         .collect();
 
-    // Prefer exact IDs from every local source. Only a node that knows no
-    // matching party at all needs discovery, and Canton applies the
-    // participant filter after loading topology rows, so discovery is only
-    // cheap when a prefix narrows it server-side. With neither, the read
-    // covers every party on the synchronizer.
-    let party_filters: Vec<Option<String>> = if has_local_party_knowledge {
+    // Prefer exact IDs from every local source. A node with no exact ID for
+    // what was asked needs discovery, and Canton applies the participant
+    // filter after loading topology rows, so discovery is only cheap when a
+    // prefix narrows it server-side. With neither, the read covers every party
+    // on the synchronizer.
+    //
+    // Keying this on the filters rather than on "knows any party at all"
+    // matters for a node that holds one party and is asked about another
+    // prefix: it has to discover under that prefix instead of issuing no query
+    // and reporting nothing.
+    let party_filters: Vec<Option<String>> = if !exact_party_filters.is_empty() {
         exact_party_filters.into_iter().map(Some).collect()
     } else if prefix_filter.is_some() {
         vec![prefix_filter.map(str::to_string)]
@@ -1546,6 +1581,23 @@ mod tests {
 
             assert!(result.is_err(), "{network:?} must still attempt discovery");
         }
+    }
+
+    /// A node that holds one party and is asked about a different prefix has
+    /// no exact ID to use, so it must discover under that prefix rather than
+    /// issue no query at all and report nothing.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_known_party_does_not_mask_another_prefix(pool: SqlitePool) -> anyhow::Result<()> {
+        let config = closed_admin_api(Network::Mainnet);
+        store_parties_to_db(&pool, "cbtc", &[a_party()?]).await?;
+
+        let result = fetch_decentralized_parties(&config, &pool, Some("other"), None, &[]).await;
+
+        assert!(
+            result.is_err(),
+            "an unmatched prefix must still be queried against Canton"
+        );
+        Ok(())
     }
 
     /// A prefix is pushed down to the topology store, so it stays allowed on
