@@ -828,15 +828,92 @@ pub async fn store_parties_to_db(
     Commitable::commit(tx).await
 }
 
+/// The `filter_party` value that selects every party in `namespace`.
+///
+/// Canton splits `filter_party` on `::`, drops the empty identifier half, and
+/// compiles the namespace half into the store query as `namespace LIKE 'ns%'`.
+/// That makes a namespace lookup as cheap as an exact party id, and it is what
+/// lets a node find a party it holds no local record of without reading every
+/// party on the synchronizer.
+fn namespace_party_filter(namespace: &str) -> String {
+    format!("::{namespace}")
+}
+
+/// This node's namespace signing-key fingerprints, from the local vault.
+async fn my_namespace_fingerprints(
+    vault_client: &mut VaultServiceClient<tonic::transport::Channel>,
+) -> Result<HashSet<String>> {
+    let response = bounded_read(
+        "list_my_keys",
+        vault_client.list_my_keys(tonic::Request::new(ListMyKeysRequest {
+            filters: None,
+            base_request: None,
+        })),
+    )
+    .await?
+    .into_inner();
+
+    let mut fingerprints = HashSet::new();
+    for key_meta in response.private_keys_metadata {
+        if let Some(private_key_metadata::PublicKeyWithName::V30(pub_key_with_name)) =
+            &key_meta.public_key_with_name
+            && let Some(pub_key) = &pub_key_with_name.public_key
+            && let Some(public_key::Key::SigningPublicKey(signing_key)) = &pub_key.key
+            && signing_key.usage.contains(&1)
+        {
+            // SigningKeyUsage::Namespace = 1
+            fingerprints.insert(utils::compute_fingerprint(signing_key));
+        }
+    }
+
+    Ok(fingerprints)
+}
+
+/// The decentralized namespaces this node owns a namespace key in.
+///
+/// This is the discovery step for a node that holds no local record of its
+/// parties. It goes through the namespaces rather than the parties because a
+/// party is only selectable by an in-memory participant filter, while a
+/// namespace is a store-level predicate.
+async fn owned_decentralized_namespaces(
+    topology_client: &mut TopologyManagerReadServiceClient<tonic::transport::Channel>,
+    synchronizer_id: &str,
+    my_fingerprints: &HashSet<String>,
+) -> Result<Vec<String>> {
+    let response = bounded_read(
+        "list_decentralized_namespace_definition",
+        topology_client.list_decentralized_namespace_definition(tonic::Request::new(
+            build_decentralized_namespace_request(synchronizer_id, ""),
+        )),
+    )
+    .await?
+    .into_inner();
+
+    let mut namespaces: Vec<_> = response
+        .results
+        .into_iter()
+        .filter_map(|result| {
+            let item = result.item?;
+            item.owners
+                .iter()
+                .any(|owner| my_fingerprints.contains(owner))
+                .then_some(item.decentralized_namespace)
+        })
+        .collect();
+    namespaces.sort();
+    namespaces.dedup();
+
+    Ok(namespaces)
+}
+
 /// Build the `list_party_to_participant` request used to discover this node's
 /// decentralized parties.
 ///
-/// Exact `filter_party` values are the scalable path. Canton 3.5.12 pushes that
-/// filter into the topology store, while `filter_participant` is applied only
-/// after the store query. The participant filter still protects correctness,
-/// but an empty or prefix-only party filter can load the synchronizer-wide
-/// result before post-filtering and is reserved for the no-local-knowledge
-/// onboarding fallback.
+/// `filter_party` is the only scalable filter here. Canton splits it on `::`
+/// and compiles both halves into the store query, while `filter_participant`
+/// and `filter_signed_key` are applied in memory after every party has been
+/// loaded. So every caller must pass a party filter: an exact id, or
+/// [`namespace_party_filter`] for a whole namespace.
 fn build_party_to_participant_request(
     synchronizer_id: &str,
     party_filter: Option<&str>,
@@ -861,16 +938,17 @@ fn build_party_to_participant_request(
     }
 }
 
-/// Build a decentralized-namespace query for one exact namespace.
+/// Build a decentralized-namespace query, for one namespace or for all of them.
 ///
-/// An empty namespace enumerates the entire synchronizer. That is prohibitively
-/// expensive on mainnet, so callers must first discover the locally relevant
-/// party IDs and query their namespaces individually.
+/// An empty namespace enumerates every decentralized namespace on the
+/// synchronizer. Canton pushes the mapping type into the store query, so that
+/// reads one small slice of the topology store rather than all of it: a
+/// synchronizer holds a handful of decentralized namespaces against a
+/// `PartyToParticipant` mapping for every party on it.
 fn build_decentralized_namespace_request(
     synchronizer_id: &str,
     namespace: &str,
 ) -> ListDecentralizedNamespaceDefinitionRequest {
-    debug_assert!(!namespace.is_empty());
     ListDecentralizedNamespaceDefinitionRequest {
         base_query: Some(BaseQuery {
             store: Some(StoreId {
@@ -937,37 +1015,6 @@ pub async fn fetch_decentralized_parties(
         .filter(|party_id| prefix_filter.is_none_or(|prefix| party_id.starts_with(prefix)))
         .collect();
 
-    // Prefer exact IDs from every local source. A node with no exact ID for
-    // what was asked needs discovery, and Canton applies the participant
-    // filter after loading topology rows, so discovery is only cheap when a
-    // prefix narrows it server-side. With neither, the read covers every party
-    // on the synchronizer.
-    //
-    // Keying this on the filters rather than on "knows any party at all"
-    // matters for a node that holds one party and is asked about another
-    // prefix: it has to discover under that prefix instead of issuing no query
-    // and reporting nothing.
-    let party_filters: Vec<Option<String>> = if !exact_party_filters.is_empty() {
-        exact_party_filters.into_iter().map(Some).collect()
-    } else if prefix_filter.is_some() {
-        vec![prefix_filter.map(str::to_string)]
-    } else if config.allows_topology_discovery_scan() {
-        vec![None]
-    } else {
-        tracing::warn!(
-            "Skipping decentralized-party discovery: this node knows no party to \
-             query for, and the unfiltered topology read that would find one is \
-             disabled on this network because it loads every party on the \
-             synchronizer. Configure party credentials, request a prefix, or set \
-             DECPM_CANTON_TOPOLOGY_DISCOVERY_SCAN=true to allow it."
-        );
-        return Ok(DecentralizedPartiesResponse {
-            parties: Vec::new(),
-            source: ResponseSource::Live,
-            refreshing: false,
-        });
-    };
-
     let channel = config.admin_channel().await?;
 
     let mut topology_client = TopologyManagerReadServiceClient::new(channel.clone())
@@ -977,6 +1024,34 @@ pub async fn fetch_decentralized_parties(
 
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
     let participant_id = config.participant_id().to_string();
+
+    // Wanted twice: to discover which namespaces this node owns a key in, and
+    // to pick each party's `my_owner_key` below.
+    let namespace_key_fingerprints = my_namespace_fingerprints(&mut vault_client).await?;
+
+    // Prefer exact IDs from every local source. A node with no exact ID for
+    // what was asked has to discover, and discovery goes through the
+    // decentralized namespaces rather than the parties: a namespace is a
+    // store-level predicate, while a participant-scoped party query is filtered
+    // in memory only after every party on the synchronizer has been loaded.
+    //
+    // Keying this on the filters rather than on "knows any party at all"
+    // matters for a node that holds one party and is asked about another
+    // prefix: it has to discover instead of issuing no query and reporting
+    // nothing.
+    let party_filters: Vec<String> = if !exact_party_filters.is_empty() {
+        exact_party_filters
+    } else {
+        owned_decentralized_namespaces(
+            &mut topology_client,
+            &synchronizer_id,
+            &namespace_key_fingerprints,
+        )
+        .await?
+        .iter()
+        .map(|namespace| namespace_party_filter(namespace))
+        .collect()
+    };
     let mut p2p_by_namespace = HashMap::new();
     for party_filter in party_filters {
         let response = bounded_read(
@@ -984,7 +1059,7 @@ pub async fn fetch_decentralized_parties(
             topology_client.list_party_to_participant(tonic::Request::new(
                 build_party_to_participant_request(
                     &synchronizer_id,
-                    party_filter.as_deref(),
+                    Some(party_filter.as_str()),
                     &participant_id,
                 ),
             )),
@@ -1023,31 +1098,6 @@ pub async fn fetch_decentralized_parties(
         dns_results.extend(response.results);
     }
 
-    // Get namespace keys only after completing the scoped topology lookup.
-    let keys_response = bounded_read(
-        "list_my_keys",
-        vault_client.list_my_keys(tonic::Request::new(ListMyKeysRequest {
-            filters: None,
-            base_request: None,
-        })),
-    )
-    .await?
-    .into_inner();
-
-    let mut namespace_key_fingerprints = HashMap::new();
-    for key_meta in keys_response.private_keys_metadata {
-        if let Some(private_key_metadata::PublicKeyWithName::V30(pub_key_with_name)) =
-            &key_meta.public_key_with_name
-            && let Some(pub_key) = &pub_key_with_name.public_key
-            && let Some(public_key::Key::SigningPublicKey(signing_key)) = &pub_key.key
-            && signing_key.usage.contains(&1)
-        {
-            // SigningKeyUsage::Namespace = 1
-            let fingerprint = utils::compute_fingerprint(signing_key);
-            namespace_key_fingerprints.insert(fingerprint, true);
-        }
-    }
-
     // Filter to parties where this participant is a member
     let my_parties: Vec<_> = dns_results
         .into_iter()
@@ -1056,9 +1106,14 @@ pub async fn fetch_decentralized_parties(
             let my_owner_key = item
                 .owners
                 .iter()
-                .find(|owner| namespace_key_fingerprints.contains_key(*owner))
+                .find(|owner| namespace_key_fingerprints.contains(*owner))
                 .cloned()?;
             let p2p = p2p_by_namespace.get(&item.decentralized_namespace)?;
+            // Namespace-scoped discovery does not know about the requested
+            // prefix, so apply it to the party the namespace resolved to.
+            if !prefix_filter.is_none_or(|prefix| p2p.party.starts_with(prefix)) {
+                return None;
+            }
             Some((item, my_owner_key, p2p.clone()))
         })
         .collect();
@@ -1515,34 +1570,10 @@ async fn fetch_peer_packages(
 /// Query the local participant's vault for namespace key fingerprints.
 /// Returns a set of fingerprints that identify this node as an owner.
 async fn get_local_namespace_fingerprints(config: &NodeConfig) -> Result<HashSet<String>> {
-    let channel = config.admin_channel().await?;
+    let mut vault_client = VaultServiceClient::new(config.admin_channel().await?)
+        .max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
 
-    let mut vault_client =
-        VaultServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
-
-    let keys_response = bounded_read(
-        "list_my_keys",
-        vault_client.list_my_keys(tonic::Request::new(ListMyKeysRequest {
-            filters: None,
-            base_request: None,
-        })),
-    )
-    .await?
-    .into_inner();
-
-    let mut fingerprints = HashSet::new();
-    for key_meta in keys_response.private_keys_metadata {
-        if let Some(private_key_metadata::PublicKeyWithName::V30(pub_key_with_name)) =
-            &key_meta.public_key_with_name
-            && let Some(pub_key) = &pub_key_with_name.public_key
-            && let Some(public_key::Key::SigningPublicKey(signing_key)) = &pub_key.key
-            && signing_key.usage.contains(&1)
-        {
-            fingerprints.insert(utils::compute_fingerprint(signing_key));
-        }
-    }
-
-    Ok(fingerprints)
+    my_namespace_fingerprints(&mut vault_client).await
 }
 
 #[cfg(test)]
@@ -1552,34 +1583,19 @@ mod tests {
     use super::*;
     use crate::{config::Network, db::MIGRATOR};
 
-    /// The MainNet fault this guards: with no party known locally and no
-    /// prefix to narrow the query, discovery read every `PartyToParticipant`
-    /// mapping on the synchronizer, which takes minutes and returns nothing
-    /// useful. Nothing listens on the configured admin port here, so a fetch
-    /// that still talks to Canton fails: answering empty proves the skip
-    /// happens before the channel is opened.
+    /// Discovery is the same query on every network, because it reads the
+    /// decentralized-namespace mappings rather than every party. MainNet used
+    /// to be the size problem, so it must not be treated as a special case
+    /// again: with nothing listening, every network has to fail rather than
+    /// quietly answer empty.
     #[sqlx::test(migrator = "MIGRATOR")]
-    async fn mainnet_discovery_skips_the_unfiltered_scan(pool: SqlitePool) -> anyhow::Result<()> {
-        let config = closed_admin_api(Network::Mainnet);
-
-        let response = fetch_decentralized_parties(&config, &pool, None, None, &[]).await?;
-
-        assert!(response.parties.is_empty());
-        Ok(())
-    }
-
-    /// A small network keeps the fallback: its topology store is small enough
-    /// to read whole, and onboarding relies on it to find a party before any
-    /// local record of one exists. With nothing listening it must fail rather
-    /// than answer empty.
-    #[sqlx::test(migrator = "MIGRATOR")]
-    async fn small_networks_still_discover_by_scan(pool: SqlitePool) {
-        for network in [Network::Devnet, Network::Testnet] {
+    async fn every_network_discovers_the_same_way(pool: SqlitePool) {
+        for network in [Network::Devnet, Network::Testnet, Network::Mainnet] {
             let config = closed_admin_api(network);
 
             let result = fetch_decentralized_parties(&config, &pool, None, None, &[]).await;
 
-            assert!(result.is_err(), "{network:?} must still attempt discovery");
+            assert!(result.is_err(), "{network:?} must attempt discovery");
         }
     }
 
@@ -1600,27 +1616,23 @@ mod tests {
         Ok(())
     }
 
-    /// A prefix is pushed down to the topology store, so it stays allowed on
-    /// MainNet — and it is the escape hatch for an operator whose node holds
-    /// no party yet.
-    #[sqlx::test(migrator = "MIGRATOR")]
-    async fn a_prefix_keeps_mainnet_discovery_allowed(pool: SqlitePool) {
-        let config = closed_admin_api(Network::Mainnet);
+    /// The whole fix rests on this string. Canton splits `filter_party` on
+    /// `::` and compiles the namespace half into the store query, so an empty
+    /// identifier half asks for every party in one namespace and nothing else.
+    /// Drop the separator and it becomes an identifier prefix that matches no
+    /// party at all.
+    #[test]
+    fn a_namespace_filter_leaves_the_identifier_half_empty() {
+        let namespace = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
 
-        let result = fetch_decentralized_parties(&config, &pool, Some("cbtc"), None, &[]).await;
+        let filter = namespace_party_filter(namespace);
 
-        assert!(result.is_err(), "a prefixed query must still reach Canton");
-    }
-
-    /// An operator can put the scan back, however large the network.
-    #[sqlx::test(migrator = "MIGRATOR")]
-    async fn mainnet_scans_when_the_operator_asks_for_it(pool: SqlitePool) {
-        let mut config = closed_admin_api(Network::Mainnet);
-        config.canton.topology_discovery_scan = Some(true);
-
-        let result = fetch_decentralized_parties(&config, &pool, None, None, &[]).await;
-
-        assert!(result.is_err(), "an enabled scan must reach Canton");
+        assert_eq!(filter, format!("::{namespace}"));
+        let (identifier, matched_namespace) = filter
+            .split_once("::")
+            .expect("the filter must carry the separator Canton splits on");
+        assert!(identifier.is_empty(), "identifier half must not narrow");
+        assert_eq!(matched_namespace, namespace);
     }
 
     /// Nothing can listen on port 1, so any attempt to reach Canton fails
