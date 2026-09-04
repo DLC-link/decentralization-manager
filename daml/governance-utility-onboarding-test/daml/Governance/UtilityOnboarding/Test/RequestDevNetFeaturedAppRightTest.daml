@@ -1,0 +1,91 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Tests for the RequestDevNetFeaturedAppRight onboarding action.
+module Governance.UtilityOnboarding.Test.RequestDevNetFeaturedAppRightTest where
+
+import Daml.Script
+
+import Splice.Amulet (FeaturedAppRight(..))
+import Splice.AmuletRules (AmuletRules)
+
+import Governance.Action (GovernableAction)
+import Governance.Rules
+
+import Governance.UtilityOnboarding.RequestDevNetFeaturedAppRight
+import Governance.UtilityOnboarding.TestUtils
+
+import TestHarness
+
+data Fixture = Fixture
+  with
+    parties : OnboardingTestParties
+    rulesCid : ContractId GovernanceRules
+    amuletRulesCid : ContractId AmuletRules
+  deriving (Eq, Show)
+
+given_governance_with_amulet_rules : Bool -> Script Fixture
+given_governance_with_amulet_rules isDevNet = do
+  parties <- allocateOnboardingTestParties
+  rulesCid <- createTestGovernance parties
+  amuletRulesCid <- createTestAmuletRules parties isDevNet
+  pure Fixture with ..
+
+propose : Fixture -> Script (ContractId GovernableAction)
+propose f = do
+  proposalCid <- submit f.parties.member1 $ createCmd RequestDevNetFeaturedAppRight with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    amuletRulesCid = f.amuletRulesCid
+  pure (toInterfaceContractId proposalCid)
+
+-- | The (dso, provider) pairs of every FeaturedAppRight the governance party sees.
+featuredAppRightParties : Fixture -> Script [(Party, Party)]
+featuredAppRightParties f = do
+  rights <- query @FeaturedAppRight f.parties.governanceParty
+  pure $ map (\(_, right) -> (right.dso, right.provider)) rights
+
+-- * Happy path
+
+when_confirmed_and_executed : Fixture -> Script ()
+when_confirmed_and_executed f = do
+  proposalCid <- propose f
+  _ <- confirmAndExecute f.parties f.rulesCid proposalCid
+    [f.parties.member1, f.parties.member2] f.parties.member1
+  pure ()
+
+then_featured_app_right_granted : Fixture -> () -> Script Failures
+then_featured_app_right_granted f _ = do
+  rights <- featuredAppRightParties f
+  pure $ shouldBe "FeaturedAppRight (dso, provider)"
+    [(f.parties.dso, f.parties.governanceParty)] rights
+
+test_when_devnet_then_featured_app_right_granted = script do
+  run Test with
+    given = given_governance_with_amulet_rules True
+    when = when_confirmed_and_executed
+    then_ = then_featured_app_right_granted
+
+-- * Not DevNet
+
+when_confirmed_and_execute_attempted : Fixture -> Script ()
+when_confirmed_and_execute_attempted f = do
+  proposalCid <- propose f
+  confirmationCids <- submitConfirmations f.parties.governanceParty f.rulesCid proposalCid
+    [f.parties.member1, f.parties.member2]
+  submitMustFail (memberContext f.parties.member1 f.parties.governanceParty <> readAs f.parties.dso) $
+    exerciseCmd f.rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor = f.parties.member1
+      actionProposalCid = proposalCid
+      confirmations = confirmationCids
+
+then_no_featured_app_right : Fixture -> () -> Script Failures
+then_no_featured_app_right f _ = do
+  rights <- featuredAppRightParties f
+  pure $ shouldBe "FeaturedAppRight (dso, provider)" [] rights
+
+test_when_not_devnet_then_execute_rejected = script do
+  run Test with
+    given = given_governance_with_amulet_rules False
+    when = when_confirmed_and_execute_attempted
+    then_ = then_no_featured_app_right
