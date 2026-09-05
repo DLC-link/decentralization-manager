@@ -8,6 +8,13 @@ import DA.Set as Set hiding (filter)
 import DA.Time (minutes)
 import Daml.Script
 
+import Splice.AmuletConfig (AmuletConfig(..), PackageConfig(..), TransferConfig(..), USD)
+import Splice.AmuletRules (AmuletRules(..))
+import Splice.DecentralizedSynchronizer
+  (AmuletDecentralizedSynchronizerConfig(..), BaseRateTrafficLimits(..), SynchronizerFeesConfig(..))
+import Splice.Fees (FixedFee(..), RatePerRound(..), SteppedRate(..))
+import Splice.Issuance (IssuanceConfig(..))
+import Splice.Schedule (Schedule(..))
 import Utility.Registry.App.V0.Service.AllocationFactory (AllocationFactory)
 import Utility.Registry.App.V0.Service.Provider (ProviderService(..))
 import Utility.Registry.App.V0.Service.Registrar (RegistrarService)
@@ -128,3 +135,65 @@ setupUtilityForTest parties rulesCid = do
   _ <- confirmAndExecute parties rulesCid proposalInterfaceCid
     [parties.member1, parties.member2] parties.member1
   resolveSetupArtifacts parties
+
+-- | Create an AmuletRules contract signed by the test DSO. `isDevNet` is the
+-- only field the onboarding actions read; the config just has to pass the
+-- template's `ensure` clause.
+createTestAmuletRules : OnboardingTestParties -> Bool -> Script (ContractId AmuletRules)
+createTestAmuletRules parties isDevNet =
+  submit parties.dso $ createCmd AmuletRules with
+    dso = parties.dso
+    configSchedule = Schedule with
+      initialValue = testAmuletConfig
+      futureValues = []
+    isDevNet
+    contractStateSchemaVersion = None
+
+-- | Minimal AmuletConfig accepted by `validAmuletConfig`. Values follow the
+-- Splice defaults; `featuredAppActivityMarkerAmount` must equal
+-- `extraFeaturedAppRewardAmount`.
+testAmuletConfig : AmuletConfig USD
+testAmuletConfig = AmuletConfig with
+  transferConfig = TransferConfig with
+    createFee = FixedFee with fee = 0.0
+    holdingFee = RatePerRound with rate = 0.0000190259
+    transferFee = SteppedRate with initialRate = 0.0; steps = []
+    lockHolderFee = FixedFee with fee = 0.0
+    extraFeaturedAppRewardAmount = 1.0
+    maxNumInputs = 100
+    maxNumOutputs = 100
+    maxNumLockHolders = 50
+  issuanceCurve = Schedule with
+    initialValue = IssuanceConfig with
+      amuletToIssuePerYear = 40000000000.0
+      validatorRewardPercentage = 0.05
+      appRewardPercentage = 0.15
+      validatorRewardCap = 0.2
+      featuredAppRewardCap = 100.0
+      unfeaturedAppRewardCap = 0.6
+      optValidatorFaucetCap = Some 2.85
+      optDevelopmentFundPercentage = None
+    futureValues = []
+  decentralizedSynchronizer = AmuletDecentralizedSynchronizerConfig with
+    requiredSynchronizers = Set.fromList ["global-synchronizer"]
+    activeSynchronizer = "global-synchronizer"
+    fees = SynchronizerFeesConfig with
+      baseRateTrafficLimits = BaseRateTrafficLimits with
+        burstAmount = 400000
+        burstWindow = minutes 20
+      extraTrafficPrice = 1.0
+      readVsWriteScalingFactor = 4
+      minTopupAmount = 200000
+  tickDuration = minutes 10
+  packageConfig = PackageConfig with
+    amulet = "0.1.19"
+    amuletNameService = "0.1.19"
+    dsoGovernance = "0.1.19"
+    validatorLifecycle = "0.1.19"
+    wallet = "0.1.19"
+    walletPayments = "0.1.19"
+  transferPreapprovalFee = None
+  featuredAppActivityMarkerAmount = Some 1.0
+  optDevelopmentFundManager = None
+  externalPartyConfigStateTickDuration = None
+  rewardConfig = None

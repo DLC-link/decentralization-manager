@@ -1,0 +1,34 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Granular onboarding action: RequestDevNetFeaturedAppRight
+module Governance.UtilityOnboarding.RequestDevNetFeaturedAppRight where
+
+import Splice.AmuletRules (AmuletRules, AmuletRules_DevNet_FeatureApp(..))
+
+import Governance.Action
+
+-- | Self-grants a FeaturedAppRight to the governance party on DevNet.
+-- `AmuletRules_DevNet_FeatureApp` refuses when the AmuletRules contract is
+-- not flagged `isDevNet`, so this action is unusable on TestNet and MainNet.
+-- There, the DSO grants the right through its own governance vote.
+template RequestDevNetFeaturedAppRight
+  with
+    governanceParty : Party
+    proposer : Party
+    amuletRulesCid : ContractId AmuletRules
+  where
+    signatory proposer
+    observer governanceParty
+
+    interface instance GovernableAction for RequestDevNetFeaturedAppRight where
+      view = GovernableActionView with
+        governanceParty
+        proposer
+        actionLabel = "RequestDevNetFeaturedAppRight"
+        description = "Self-grant a DevNet FeaturedAppRight to the governance party via AmuletRules_DevNet_FeatureApp."
+
+      executeImpl = do
+        _ <- exercise amuletRulesCid AmuletRules_DevNet_FeatureApp with
+          provider = governanceParty
+        pure ()

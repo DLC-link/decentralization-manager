@@ -656,6 +656,7 @@ The governance party bootstraps itself as a utility-registry provider and regist
 | `SetProviderAppRewardBeneficiaries` | `SetProviderAppRewardBeneficiaries` | Set the provider-app reward beneficiaries on an `InstrumentConfiguration` |
 | `SetEnableResultContracts` | `SetEnableResultContracts` | Toggle result-contract emission on a `RegistrarService` |
 | `CreateDelegatedBatchedMarkersProxy` | `CreateDelegatedBatchedMarkersProxy` | Authorize the operator to create batched activity markers on behalf of the governance party |
+| `RequestDevNetFeaturedAppRight` | `RequestDevNetFeaturedAppRight` | Self-grant a `FeaturedAppRight` to the governance party by exercising `AmuletRules_DevNet_FeatureApp`. DevNet only: the choice refuses when `AmuletRules.isDevNet` is false |
 
 **Token issuance:**
 
