@@ -1,0 +1,80 @@
+---
+source: crates/decman/src/server/serde_snapshots.rs
+expression: minimal_option_fixtures()
+---
+[
+  {
+    "type": "setup_token_preapproval",
+    "operator": "op::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+    "instrument_admin": "iadmin::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+    "instrument_allowances": []
+  },
+  {
+    "type": "transfer",
+    "transfer_factory_cid": "",
+    "expected_admin": "iadmin::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+    "receiver": "recv::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+    "amount": "1",
+    "instrument_id": {
+      "admin": "admin-party",
+      "id": "TOK"
+    },
+    "input_holding_cids": [],
+    "validity_window_hours": null
+  },
+  {
+    "type": "set_provider_app_reward_beneficiaries",
+    "instrument_configuration_cid": "00icc",
+    "provider_app_reward_beneficiaries": null
+  },
+  {
+    "type": "setup_coupon_reassignment_delegation",
+    "dso": "dso::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+    "assigners": [
+      "m1::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892"
+    ],
+    "new_beneficiaries": [
+      {
+        "beneficiary": "a::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+        "percentage": "1.0"
+      }
+    ],
+    "prior_delegation": null
+  },
+  {
+    "type": "set_enable_result_contracts",
+    "registrar_service_cid": "00rsc",
+    "enable_result_contracts": null
+  },
+  {
+    "type": "offer_paid_credential",
+    "user_service_cid": "00usc",
+    "holder": "holder::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+    "id": "cred-2",
+    "description": "paid cred",
+    "claims": [],
+    "billing_params": {
+      "fee_per_day_usd": "1.5",
+      "billing_period_minutes": 60,
+      "deposit_target_amount_usd": "30",
+      "holder_activity_weight": null
+    },
+    "deposit_initial_amount_usd": null
+  },
+  {
+    "type": "accept_mint_request",
+    "mint_request_cid": "00mr",
+    "instrument_configuration_cid": "00icc",
+    "issuer_credential_cids": [],
+    "description": "accept mint"
+  },
+  {
+    "type": "provision_instrument",
+    "registrar_service_cid": "00rsc",
+    "instrument_id_text": "uuid-2",
+    "additional_identifiers": [],
+    "issuer_requirements": [],
+    "holder_requirements": [],
+    "initial_instrument_issuers": []
+  }
+]

@@ -1,0 +1,27 @@
+---
+source: crates/decman-lib/src/catalog/proposals/core.rs
+expression: "GenericVote { description: \"a vote\".into(), }.to_daml_proto().unwrap()"
+---
+Value {
+    sum: Some(
+        Record(
+            Record {
+                record_id: None,
+                fields: [
+                    RecordField {
+                        label: "description",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    Text(
+                                        "a vote",
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                ],
+            },
+        ),
+    ),
+}

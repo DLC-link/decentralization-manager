@@ -1,0 +1,78 @@
+---
+source: crates/decman/src/server/serde_snapshots.rs
+expression: all_action_fixtures()
+---
+[
+  {
+    "type": "governance_add_member",
+    "member": "m1::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+    "new_threshold": 2
+  },
+  {
+    "type": "governance_remove_member",
+    "member": "m1::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+    "new_threshold": 1
+  },
+  {
+    "type": "governance_set_threshold",
+    "new_threshold": 3
+  },
+  {
+    "type": "governance_set_timeout",
+    "new_timeout_microseconds": 60000000
+  },
+  {
+    "type": "governance_add_additional_proposer",
+    "additional_proposer": "p1::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892"
+  },
+  {
+    "type": "governance_remove_additional_proposer",
+    "additional_proposer": "p1::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892"
+  },
+  {
+    "type": "utility_create_provider_request",
+    "operator": "op::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892"
+  },
+  {
+    "type": "utility_create_user_request",
+    "operator": "op::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892"
+  },
+  {
+    "type": "utility_setup",
+    "operator": "op::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+    "provider_service_cid": "00psc",
+    "user_service_cid": "00usc"
+  },
+  {
+    "type": "utility_accept_holder_service_request",
+    "operator": "op::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+    "provider_service_cid": "00psc",
+    "holder_service_request_cid": "00hsr",
+    "holder": "holder::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892"
+  },
+  {
+    "type": "credential_offer_free",
+    "operator": "op::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+    "user_service_cid": "00usc",
+    "holder": "holder::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+    "id": "cred-1",
+    "description": "a credential",
+    "claims": [
+      {
+        "subject": "subj",
+        "property": "prop",
+        "value": "val"
+      }
+    ]
+  },
+  {
+    "type": "credential_accept_free",
+    "operator": "op::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+    "user_service_cid": "00usc",
+    "credential_offer_cid": "00offer"
+  },
+  {
+    "type": "dev_net_feature_app",
+    "amulet_rules_cid": "00amulet"
+  }
+]

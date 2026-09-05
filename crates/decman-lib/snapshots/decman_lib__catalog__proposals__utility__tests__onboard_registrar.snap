@@ -1,0 +1,51 @@
+---
+source: crates/decman-lib/src/catalog/proposals/utility.rs
+expression: "OnboardRegistrar\n{\n    provider_service_cid: \"00psc\".to_string(), registrar_service_request_cid:\n    \"00rsrc\".to_string(), provider_configuration_cid: \"00pcc\".to_string(),\n}.to_daml_proto().unwrap()"
+---
+Value {
+    sum: Some(
+        Record(
+            Record {
+                record_id: None,
+                fields: [
+                    RecordField {
+                        label: "providerServiceCid",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    ContractId(
+                                        "00psc",
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "registrarServiceRequestCid",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    ContractId(
+                                        "00rsrc",
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "providerConfigurationCid",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    ContractId(
+                                        "00pcc",
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                ],
+            },
+        ),
+    ),
+}

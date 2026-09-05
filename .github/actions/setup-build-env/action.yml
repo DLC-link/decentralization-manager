@@ -1,9 +1,11 @@
 name: Setup build environment
-description: Install system deps, configure git auth for private deps, and cache cargo + npm artifacts.
+description: Install system deps and cache cargo + npm artifacts.
 
 inputs:
   github-token:
-    description: Token used to fetch private git dependencies over HTTPS
+    description: >-
+      Token for a future private git dependency. Every git dependency is
+      public today, so no step reads it.
     required: true
   extra-packages:
     description: Additional apt packages to install (space-separated)
@@ -49,20 +51,6 @@ runs:
       uses: actions/setup-node@v5
       with:
         node-version: '22'
-
-    # Fetch private git dependencies (e.g. canton-lib) over HTTPS using the
-    # workflow GITHUB_TOKEN instead of a bot SSH deploy key — same approach as
-    # the cargo-deny job. `CARGO_NET_GIT_FETCH_WITH_CLI=true` makes cargo shell
-    # out to git, so this insteadOf rewrite is honored for dependency fetches.
-    - name: Configure git auth for private deps
-      shell: bash
-      env:
-        GH_TOKEN: ${{ inputs.github-token }}
-      run: |
-        git config --global \
-          url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "git@github.com:"
-        git config --global --add \
-          url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "ssh://git@github.com/"
 
     # Cargo registry/git caches are owned by Swatinem/rust-cache@v2 in
     # the calling workflow. Don't double-cache CARGO_HOME here — the two

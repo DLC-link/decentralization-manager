@@ -171,16 +171,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      # Authenticate the private `common` git dependency over HTTPS using the
-      # workflow GITHUB_TOKEN instead of a bot SSH deploy key. cargo-deny runs
-      # on the host (not the action's Docker container) so this git credential
-      # config is visible to cargo's dependency fetch.
-      - name: Configure git auth for private deps
-        run: |
-          git config --global \
-            url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "git@github.com:"
-          git config --global --add \
-            url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "ssh://git@github.com/"
       - name: Install cargo-deny
         run: |
           VERSION=0.19.8

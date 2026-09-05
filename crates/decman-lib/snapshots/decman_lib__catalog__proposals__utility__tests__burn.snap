@@ -1,0 +1,199 @@
+---
+source: crates/decman-lib/src/catalog/proposals/utility.rs
+expression: "Burn\n{\n    allocation_factory_cid: \"00alloc\".to_string(), instrument_id: InstrumentId\n    { admin: \"admin::ns\".to_string(), id: \"instr-1\".to_string(), },\n    instrument_configuration_cid: \"00icc\".to_string(), holder: cid(\"holder\"),\n    amount: \"1.5\".parse().expect(\"valid decimal\"), description:\n    \"burn it\".to_string(),\n}.to_daml_proto().unwrap()"
+---
+Value {
+    sum: Some(
+        Record(
+            Record {
+                record_id: None,
+                fields: [
+                    RecordField {
+                        label: "allocationFactoryCid",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    ContractId(
+                                        "00alloc",
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "instrumentId",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    Record(
+                                        Record {
+                                            record_id: None,
+                                            fields: [
+                                                RecordField {
+                                                    label: "admin",
+                                                    value: Some(
+                                                        Value {
+                                                            sum: Some(
+                                                                Party(
+                                                                    "admin::ns",
+                                                                ),
+                                                            ),
+                                                        },
+                                                    ),
+                                                },
+                                                RecordField {
+                                                    label: "id",
+                                                    value: Some(
+                                                        Value {
+                                                            sum: Some(
+                                                                Text(
+                                                                    "instr-1",
+                                                                ),
+                                                            ),
+                                                        },
+                                                    ),
+                                                },
+                                            ],
+                                        },
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "instrumentConfigurationCid",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    ContractId(
+                                        "00icc",
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "holder",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    Party(
+                                        "holder::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "amount",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    Numeric(
+                                        "1.5",
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "description",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    Text(
+                                        "burn it",
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "requestedAt",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    Timestamp(
+                                        0,
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "executeBefore",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    Timestamp(
+                                        9223372036854775,
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "meta",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    Record(
+                                        Record {
+                                            record_id: None,
+                                            fields: [
+                                                RecordField {
+                                                    label: "values",
+                                                    value: Some(
+                                                        Value {
+                                                            sum: Some(
+                                                                TextMap(
+                                                                    TextMap {
+                                                                        entries: [],
+                                                                    },
+                                                                ),
+                                                            ),
+                                                        },
+                                                    ),
+                                                },
+                                            ],
+                                        },
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "extraArgsMeta",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    Record(
+                                        Record {
+                                            record_id: None,
+                                            fields: [
+                                                RecordField {
+                                                    label: "values",
+                                                    value: Some(
+                                                        Value {
+                                                            sum: Some(
+                                                                TextMap(
+                                                                    TextMap {
+                                                                        entries: [],
+                                                                    },
+                                                                ),
+                                                            ),
+                                                        },
+                                                    ),
+                                                },
+                                            ],
+                                        },
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                ],
+            },
+        ),
+    ),
+}

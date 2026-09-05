@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     sync::{Arc, RwLock as StdRwLock},
 };
 
@@ -26,25 +26,27 @@ pub use common::api::{
     DiscoverMemberPartyRequest, DiscoverMemberPartyResponse, ErrorResponse,
     ExpireConfirmationRequest, ExternalPartiesResponse, ExternalPartyHost, ExternalPartyInfo,
     GovernanceState, GovernanceStateResponse, GovernanceType, GrantRightsRequest,
-    GrantRightsResponse, InstrumentAllowance, InstrumentId, InstrumentIdentifier, InstrumentInfo,
-    InstrumentIssuerCredentials, InstrumentsResponse, InvitationActionRequest, KeyStatusResponse,
-    KickInvitePayload, KickRequest, KnownMember, KnownMembersResponse, MessageResponse,
-    MissingEdgeKind, MissingPeerEdge, NetworkInfo, OnboardingInvitePayload,
+    GrantRightsResponse, InstrumentInfo, InstrumentsResponse, InvitationActionRequest,
+    KeyStatusResponse, KickInvitePayload, KickRequest, KnownMember, KnownMembersResponse,
+    MessageResponse, MissingEdgeKind, MissingPeerEdge, NetworkInfo, OnboardingInvitePayload,
     OnboardingMeshErrorResponse, OnboardingRequest, OperatorInfo, PartyAuthStatus,
-    PartyConfigRequest, PartyConfigResponse, PartyCredentialRequirement,
-    PendingInvitationsResponse, ProviderConfigurationInfo, ProviderConfigurationsResponse,
-    ProviderServiceInfo, ProviderServicesResponse, RegistrarServiceInfo,
-    RegistrarServiceRequestInfo, RegistrarServiceRequestsResponse, RegistrarServicesResponse,
-    ResponseSource, RightsStatus, SuccessResponse, TenantOnboardRequest, TenantOnboardResponse,
-    TenantPrepareRequest, TenantPrepareResponse, TransferFactoriesResponse, TransferFactoryInfo,
-    TransferPreapprovalsResponse, UserServiceInfo, UserServicesResponse, WorkflowResponse,
-    WorkflowRunsResponse, WorkflowStatusResponse,
+    PartyConfigRequest, PartyConfigResponse, PendingInvitationsResponse, ProviderConfigurationInfo,
+    ProviderConfigurationsResponse, ProviderServiceInfo, ProviderServicesResponse,
+    RegistrarServiceInfo, RegistrarServiceRequestInfo, RegistrarServiceRequestsResponse,
+    RegistrarServicesResponse, ResponseSource, RightsStatus, SuccessResponse, TenantOnboardRequest,
+    TenantOnboardResponse, TenantPrepareRequest, TenantPrepareResponse, TransferFactoriesResponse,
+    TransferFactoryInfo, TransferPreapprovalsResponse, UserServiceInfo, UserServicesResponse,
+    WorkflowResponse, WorkflowRunsResponse, WorkflowStatusResponse,
 };
 pub use common::types::{
     AuditLogEntry, AuthConfigResponse, ConnectionStatus, ContractInfo, DecentralizedParty,
     InvitationType, PackageInfo, ParticipantInfo, ParticipantStatus, ParticipantsStatusResponse,
     PartyMetadata, PeerErrorKind, PeerPackageComparison, PeerPackageResult, PendingInvitation,
     Permission, VettedPackageInfo, WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun,
+};
+pub use decman_lib::catalog::types::{
+    AcceptTransferDetails, AppRewardBeneficiary, BillingParams, ServiceRequestDetails,
+    TransferProposalDetails,
 };
 
 use crate::{canton_id::CantonId, noise::server::ActiveWorkflow};
@@ -315,510 +317,123 @@ pub type OnboardingResponse = WorkflowResponse;
 // Governance Types (Structured Actions)
 // ============================================================================
 
-/// Featured App Right beneficiary
-#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct AppRewardBeneficiary {
-    pub beneficiary: CantonId,
-    #[schema(value_type = String)]
-    #[cfg_attr(feature = "typegen", ts(type = "string"))]
-    pub weight: DamlDecimal,
-}
-
-/// A CIP-104 reward-coupon beneficiary assignment.
-#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct RewardBeneficiary {
-    pub beneficiary: CantonId,
-    #[schema(value_type = String)]
-    #[cfg_attr(feature = "typegen", ts(type = "string"))]
-    pub percentage: DamlDecimal,
-}
-
-/// Structured action types for decentralized-party governance
-#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ActionType {
-    // Governance (4)
-    GovernanceAddMember {
-        member: CantonId,
-        new_threshold: i64,
-    },
-    GovernanceRemoveMember {
-        member: CantonId,
-        new_threshold: i64,
-    },
-    GovernanceSetThreshold {
-        new_threshold: i64,
-    },
-    GovernanceSetTimeout {
-        new_timeout_microseconds: i64,
-    },
-    GovernanceAddAdditionalProposer {
-        additional_proposer: CantonId,
-    },
-    GovernanceRemoveAdditionalProposer {
-        additional_proposer: CantonId,
-    },
-
-    // Utility Onboarding (4)
-    UtilityCreateProviderRequest {
-        operator: CantonId,
-    },
-    UtilityCreateUserRequest {
-        operator: CantonId,
-    },
-    UtilitySetup {
-        operator: CantonId,
-        provider_service_cid: String,
-        user_service_cid: String,
-    },
-    UtilityAcceptHolderServiceRequest {
-        operator: CantonId,
-        provider_service_cid: String,
-        holder_service_request_cid: String,
-        holder: CantonId,
-    },
-    // Credential Actions (2)
-    CredentialOfferFree {
-        operator: CantonId,
-        user_service_cid: String,
-        holder: CantonId,
-        id: String,
-        description: String,
-        claims: Vec<Claim>,
-    },
-    CredentialAcceptFree {
-        operator: CantonId,
-        user_service_cid: String,
-        credential_offer_cid: String,
-    },
-
-    // DevNet (1)
-    DevNetFeatureApp {
-        amulet_rules_cid: String,
-    },
-}
-
-impl ActionType {
-    /// True for the six `GovernanceSelfAction` variants — the only actions the
-    /// inline (`core_self`) confirm/execute path can serialize.
-    ///
-    /// `ActionType` still models the utility / credential / DevNet variants
-    /// because `deserialize_action` parses them off CBTC confirmations on the
-    /// read path. There is no inline submit path for them: they belong on
-    /// `POST /governance/propose` as `GovernableAction` proposals.
-    pub fn is_governance_self_action(&self) -> bool {
-        matches!(
-            self,
-            ActionType::GovernanceAddMember { .. }
-                | ActionType::GovernanceRemoveMember { .. }
-                | ActionType::GovernanceSetThreshold { .. }
-                | ActionType::GovernanceSetTimeout { .. }
-                | ActionType::GovernanceAddAdditionalProposer { .. }
-                | ActionType::GovernanceRemoveAdditionalProposer { .. }
-        )
-    }
-
-    /// Validate the action's fields. Returns an error message if invalid.
-    ///
-    /// Catches obviously-malformed inputs (negative thresholds, non-positive
-    /// timeouts) before they reach Canton's Daml checks. Canton rejects bad
-    /// values too, but here we surface a clear 400 rather than a generic
-    /// submission error after the proposal contract is already on the wire.
-    pub fn validate(&self) -> Result<(), String> {
-        match self {
-            ActionType::GovernanceAddMember { new_threshold, .. }
-            | ActionType::GovernanceRemoveMember { new_threshold, .. }
-            | ActionType::GovernanceSetThreshold { new_threshold } => {
-                validate_threshold(*new_threshold)
-            }
-            ActionType::GovernanceSetTimeout {
-                new_timeout_microseconds,
-            } => validate_timeout(*new_timeout_microseconds),
-            _ => Ok(()),
-        }
-    }
-}
-
-fn validate_threshold(new_threshold: i64) -> Result<(), String> {
-    if new_threshold < 1 {
-        return Err(format!(
-            "new_threshold must be at least 1, got {new_threshold}"
-        ));
-    }
-    Ok(())
-}
-
-fn validate_timeout(microseconds: i64) -> Result<(), String> {
-    if microseconds <= 0 {
-        return Err(format!(
-            "new_timeout_microseconds must be positive, got {microseconds}"
-        ));
-    }
-    Ok(())
-}
-
-fn validate_unique_issuers(issuers: &[CantonId], field: &str) -> Result<(), String> {
-    let mut seen = HashSet::new();
-    for issuer in issuers {
-        if !seen.insert(issuer) {
-            return Err(format!("{field} must not list {issuer} more than once"));
-        }
-    }
-    Ok(())
-}
-
-/// Mirrors the Daml `selfIssuedRequirementsHaveClaims` guard. A requirement the
-/// governance party issues itself must name at least one claim. The mint
-/// refuses a claimless self-issued credential, because it attests for nobody.
-/// Requirements from other issuers are out of scope: those credentials arrive
-/// out of band.
-fn validate_self_issued_requirements_have_claims(
-    requirements: &[PartyCredentialRequirement],
-    governance_party: &CantonId,
-    field: &str,
-) -> Result<(), String> {
-    for requirement in requirements {
-        if requirement.issuer == *governance_party && requirement.required_claims.is_empty() {
-            return Err(format!(
-                "{field}: a requirement issued by the governance party must list at least one required claim"
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Reject an epoch-microsecond instant that is not in the future.
-///
-/// The on-ledger `executeImpl` asserts the same thing, but only at execute
-/// time — after a full propose/confirm round has been spent on a value that
-/// could never have worked.
-fn validate_future_micros(micros: i64, field: &str) -> Result<(), String> {
-    if micros <= 0 {
-        return Err(format!("{field} must be positive, got {micros}"));
-    }
-    let now_micros = Utc::now().timestamp_micros();
-    if micros <= now_micros {
-        return Err(format!(
-            "{field} must be in the future, got {micros} (now {now_micros})"
-        ));
-    }
-    Ok(())
-}
-
-fn validate_positive_amount(amount: &DamlDecimal, field: &str) -> Result<(), String> {
-    // `DamlDecimal` itself doesn't implement `PartialOrd`; compare via the
-    // inner `rust_decimal::Decimal` returned by `value()` against a parsed
-    // zero so we don't need a direct dep on `rust_decimal`.
-    let zero = "0"
-        .parse::<DamlDecimal>()
-        .expect("'0' is a valid DamlDecimal")
-        .value();
-    if amount.value() <= zero {
-        return Err(format!("{field} must be strictly positive, got {amount}"));
-    }
-    Ok(())
-}
-
-fn validate_beneficiary_weights(beneficiaries: &[AppRewardBeneficiary]) -> Result<(), String> {
-    if beneficiaries.is_empty() {
-        return Ok(());
-    }
-    let sum: DamlDecimal = beneficiaries.iter().map(|b| b.weight).sum();
-    let one: DamlDecimal = "1".parse().expect("'1' is a valid DamlDecimal");
-    if sum != one {
-        return Err(format!(
-            "FAR beneficiary weights must sum to exactly 1.0, got {sum}"
-        ));
-    }
-    Ok(())
-}
-
-/// Billing parameters for a paid credential.
-/// Mirrors `Utility.Credential.App.V0.Types.BillingParams`.
-#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct BillingParams {
-    /// The daily fee for the credential in USD (corresponds to RatePerDay record).
-    #[schema(value_type = String)]
-    #[cfg_attr(feature = "typegen", ts(type = "string"))]
-    pub fee_per_day_usd: DamlDecimal,
-    /// Duration between fee charges, in minutes.
-    pub billing_period_minutes: i64,
-    /// Target deposit amount in USD.
-    #[schema(value_type = String)]
-    #[cfg_attr(feature = "typegen", ts(type = "string"))]
-    pub deposit_target_amount_usd: DamlDecimal,
-    /// Holder's weight on the activity marker (0.0 - 1.0). None means 0.
-    #[serde(default)]
-    #[schema(value_type = Option<String>)]
-    #[cfg_attr(feature = "typegen", ts(type = "string"))]
-    pub holder_activity_weight: Option<DamlDecimal>,
-}
+pub use decman_lib::catalog::action::ActionType;
 
 /// Types of governance domain action proposals
-#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ProposalType {
     /// Set up Canton Coin TransferPreapproval
-    SetupCcPreapproval {
-        provider: CantonId,
-        expected_dso: CantonId,
-    },
+    SetupCcPreapproval(decman_lib::catalog::proposals::custody::SetupCcPreapproval),
     /// Set up utility token TransferPreapproval
-    SetupTokenPreapproval {
-        operator: CantonId,
-        instrument_admin: CantonId,
-        #[serde(default)]
-        instrument_allowances: Vec<InstrumentAllowance>,
-    },
+    SetupTokenPreapproval(decman_lib::catalog::proposals::custody::SetupTokenPreapproval),
     /// Transfer tokens via a TransferFactory
-    Transfer {
-        transfer_factory_cid: String,
-        expected_admin: CantonId,
-        receiver: CantonId,
-        #[schema(value_type = String)]
-        #[cfg_attr(feature = "typegen", ts(type = "string"))]
-        amount: DamlDecimal,
-        instrument_id: InstrumentId,
-        #[serde(default)]
-        input_holding_cids: Vec<String>,
-        /// How long the transfer (and, for two-step transfers, the resulting
-        /// offer) stays valid, in hours. `None` uses the default window. A
-        /// bounded window lets an unaccepted offer expire and release escrow.
-        #[serde(default)]
-        validity_window_hours: Option<u32>,
-    },
+    Transfer(decman_lib::catalog::proposals::custody::Transfer),
     /// Accept an incoming token transfer
-    AcceptTransfer { transfer_instruction_cid: String },
+    AcceptTransfer(decman_lib::catalog::proposals::custody::AcceptTransfer),
     /// Generic text-based vote (no on-chain effect beyond recording the result)
-    GenericVote { description: String },
+    GenericVote(decman_lib::catalog::proposals::core::GenericVote),
     /// Provision a Utility-Registry `ProviderService` with
     /// `operator = proposer` and `provider = governanceParty`. Produces the
     /// ProviderService cid consumed by `SetupUtility`.
-    ProvisionProviderService,
+    ProvisionProviderService(decman_lib::catalog::proposals::utility::ProvisionProviderService),
     /// Run the full Utility-Registry onboarding in one vote. Flags control
     /// whether a `TransferRule` / `AllocationFactory` are created during the
     /// `RegistrarServiceRequest` accept.
-    SetupUtility {
-        provider_service_cid: String,
-        operator: CantonId,
-        instrument_id_text: String,
-        #[serde(default)]
-        additional_identifiers: Vec<InstrumentIdentifier>,
-        create_transfer_rule: bool,
-        create_allocation_factory: bool,
-    },
+    SetupUtility(decman_lib::catalog::proposals::utility::SetupUtility),
     /// Create a `ProviderServiceRequest` for a given `operator` and `provider`.
-    CreateProviderServiceRequest {
-        operator: CantonId,
-        provider: CantonId,
-    },
+    CreateProviderServiceRequest(
+        decman_lib::catalog::proposals::utility::CreateProviderServiceRequest,
+    ),
     /// Create a `UserServiceRequest` for a given `operator` and `user`.
-    CreateUserServiceRequest { operator: CantonId, user: CantonId },
+    CreateUserServiceRequest(decman_lib::catalog::proposals::utility::CreateUserServiceRequest),
     /// Set the provider-app reward beneficiaries on an `InstrumentConfiguration`.
     /// `providerAppRewardBeneficiaries = None` clears the current setting.
-    SetProviderAppRewardBeneficiaries {
-        instrument_configuration_cid: String,
-        #[serde(default)]
-        provider_app_reward_beneficiaries: Option<Vec<AppRewardBeneficiary>>,
-    },
+    SetProviderAppRewardBeneficiaries(
+        decman_lib::catalog::proposals::utility::SetProviderAppRewardBeneficiaries,
+    ),
     /// Create (or replace) the decparty's on-ledger CouponReassignmentDelegation.
     /// `prior_delegation` is the cid of the delegation being replaced (None for the first).
-    SetupCouponReassignmentDelegation {
-        /// The DSO whose coupons the delegation may assign. Fixed by this vote
-        /// so the automation can tell the decparty's real coupons from ones a
-        /// stranger minted naming itself `dso`.
-        dso: CantonId,
-        assigners: Vec<CantonId>,
-        /// The split, baked into the delegation and enforced in DAML. Two
-        /// things surprise proposers, and both reject the vote at execute:
-        ///
-        /// 1. The percentages must sum to **exactly** 1.0, compared as exact
-        ///    Decimal. An even 3-way split is therefore not expressible —
-        ///    `0.3333333333` three times is not 1.0. Balance the last entry by
-        ///    hand (`0.3333333333`, `0.3333333333`, `0.3333333334`).
-        /// 2. Nothing is implicitly left to the decparty. To keep a remainder
-        ///    for itself, the decparty must appear here as its own beneficiary
-        ///    with an explicit percentage.
-        new_beneficiaries: Vec<RewardBeneficiary>,
-        #[serde(default)]
-        prior_delegation: Option<String>,
-    },
+    SetupCouponReassignmentDelegation(
+        decman_lib::catalog::proposals::rewards::SetupCouponReassignmentDelegation,
+    ),
     /// Revoke (archive) the decparty's CouponReassignmentDelegation.
-    RevokeCouponReassignmentDelegation { delegation: String },
+    RevokeCouponReassignmentDelegation(
+        decman_lib::catalog::proposals::rewards::RevokeCouponReassignmentDelegation,
+    ),
     /// Toggle result-contract emission on a `RegistrarService`.
-    SetEnableResultContracts {
-        registrar_service_cid: String,
-        #[serde(default)]
-        enable_result_contracts: Option<bool>,
-    },
+    SetEnableResultContracts(decman_lib::catalog::proposals::utility::SetEnableResultContracts),
     /// Authorize the `operator` to create batched activity markers on behalf
     /// of the governance party via a `DelegatedBatchedMarkersProxy`.
-    CreateDelegatedBatchedMarkersProxy { operator: CantonId },
+    CreateDelegatedBatchedMarkersProxy(
+        decman_lib::catalog::proposals::utility::CreateDelegatedBatchedMarkersProxy,
+    ),
     /// Delegate minting of the governance party's CIP-104 reward coupons to a
     /// validator node's `delegate` party via a `MintingDelegationProposal`.
     /// The delegation beneficiary is always the governance party; the delegate
     /// accepts the proposal out-of-band via the wallet API.
-    SetupMintingDelegation {
-        delegate: CantonId,
-        dso: CantonId,
-        /// Delegation expiry as microseconds since epoch.
-        expires_at_micros: i64,
-        /// Auto-merge target for the beneficiary's amulets. Must be positive.
-        amulet_merge_limit: i64,
-        description: String,
-    },
+    SetupMintingDelegation(decman_lib::catalog::proposals::rewards::SetupMintingDelegation),
     /// Accept a validator-created `ExternalPartySetupProposal` on behalf of the
     /// governance party, creating its `ValidatorRight` + `TransferPreapproval`.
     /// This is the missing prerequisite that makes the validator's built-in
     /// `MintingDelegationCollectRewardsTrigger` start collecting the party's
     /// CIP-104 reward coupons via the established `MintingDelegation`.
-    AcceptExternalPartySetup {
-        /// Contract id of the ExternalPartySetupProposal to accept (from the
-        /// validator's POST /v0/admin/external-party/setup-proposal).
-        proposal_cid: String,
-    },
+    AcceptExternalPartySetup(decman_lib::catalog::proposals::rewards::AcceptExternalPartySetup),
     /// Offer a mint of `amount` tokens to `recipient` via
     /// `AllocationFactory_OfferMint`. The resulting `MintOffer` is accepted
     /// later by the recipient, outside this plugin.
-    Mint {
-        allocation_factory_cid: String,
-        instrument_id: InstrumentId,
-        instrument_configuration_cid: String,
-        recipient: CantonId,
-        #[schema(value_type = String)]
-        #[cfg_attr(feature = "typegen", ts(type = "string"))]
-        amount: DamlDecimal,
-        description: String,
-    },
+    Mint(decman_lib::catalog::proposals::utility::Mint),
     /// Offer a free credential to a holder via the governance party's
     /// `UserService`. Wraps `UserService_OfferFreeCredential` from the
     /// Utility Credential App.
-    OfferFreeCredential {
-        user_service_cid: String,
-        holder: CantonId,
-        id: String,
-        description: String,
-        claims: Vec<Claim>,
-    },
+    OfferFreeCredential(decman_lib::catalog::proposals::credential::OfferFreeCredential),
     /// Offer a paid credential to a holder via the governance party's
     /// `UserService`. Wraps `UserService_OfferPaidCredential`.
-    OfferPaidCredential {
-        user_service_cid: String,
-        holder: CantonId,
-        id: String,
-        description: String,
-        claims: Vec<Claim>,
-        billing_params: BillingParams,
-        #[serde(default)]
-        #[schema(value_type = Option<String>)]
-        #[cfg_attr(feature = "typegen", ts(type = "string"))]
-        deposit_initial_amount_usd: Option<DamlDecimal>,
-    },
+    OfferPaidCredential(decman_lib::catalog::proposals::credential::OfferPaidCredential),
     /// Accept a free credential offered to the governance party. Wraps
     /// `UserService_AcceptFreeCredentialOffer`.
-    AcceptFreeCredential {
-        user_service_cid: String,
-        credential_offer_cid: String,
-    },
+    AcceptFreeCredential(decman_lib::catalog::proposals::credential::AcceptFreeCredential),
     /// Offer a burn of `amount` tokens held by `holder` via
     /// `AllocationFactory_OfferBurn`. Holdings are supplied by the holder at
     /// `BurnOffer_Accept` time, not here.
-    Burn {
-        allocation_factory_cid: String,
-        instrument_id: InstrumentId,
-        instrument_configuration_cid: String,
-        holder: CantonId,
-        #[schema(value_type = String)]
-        #[cfg_attr(feature = "typegen", ts(type = "string"))]
-        amount: DamlDecimal,
-        description: String,
-    },
+    Burn(decman_lib::catalog::proposals::utility::Burn),
     /// Accept a holder-initiated `MintRequest` via `MintRequest_Accept`. The
     /// `MintRequest` must already exist on-ledger (typically created by the
     /// holder by exercising `AllocationFactory_RequestMint`).
-    AcceptMintRequest {
-        mint_request_cid: String,
-        instrument_configuration_cid: String,
-        /// Credential contract ids proving the mint holder meets the
-        /// instrument's issuer requirements. Empty for instruments without
-        /// issuer requirements.
-        #[serde(default)]
-        issuer_credential_cids: Vec<String>,
-        description: String,
-    },
+    AcceptMintRequest(decman_lib::catalog::proposals::utility::AcceptMintRequest),
     /// Accept a holder-initiated `BurnRequest` via `BurnRequest_Accept`. The
     /// `BurnRequest` must already exist on-ledger (typically created by the
     /// holder by exercising `AllocationFactory_RequestBurn`).
-    AcceptBurnRequest {
-        burn_request_cid: String,
-        instrument_configuration_cid: String,
-        /// Credential contract ids proving the burn holder meets the
-        /// instrument's issuer requirements. Empty for instruments without
-        /// issuer requirements.
-        #[serde(default)]
-        issuer_credential_cids: Vec<String>,
-        description: String,
-    },
+    AcceptBurnRequest(decman_lib::catalog::proposals::utility::AcceptBurnRequest),
     /// Create the provider decparty's `ProviderConfiguration` with
     /// credential requirements for registrars and holders. Executed once by
     /// the provider decparty at platform setup.
-    CreateProviderConfiguration {
-        provider_service_cid: String,
-        #[serde(default)]
-        registrar_requirements: Vec<PartyCredentialRequirement>,
-        #[serde(default)]
-        holder_requirements: Vec<PartyCredentialRequirement>,
-    },
+    CreateProviderConfiguration(
+        decman_lib::catalog::proposals::utility::CreateProviderConfiguration,
+    ),
     /// Create a `RegistrarServiceRequest` asking `provider` for registrar
     /// service, with the governance party as the registrar. The provider
     /// accepts later via `OnboardRegistrar` on its own decparty.
-    CreateRegistrarServiceRequest {
-        operator: CantonId,
-        provider: CantonId,
-        create_transfer_rule: bool,
-        create_allocation_factory: bool,
-    },
+    CreateRegistrarServiceRequest(
+        decman_lib::catalog::proposals::utility::CreateRegistrarServiceRequest,
+    ),
     /// Accept a `RegistrarServiceRequest` on the provider decparty: mint the
     /// registrar credentials the governance party can self-issue against the
     /// `ProviderConfiguration`'s registrar requirements, then accept the
     /// request in the same vote.
-    OnboardRegistrar {
-        provider_service_cid: String,
-        registrar_service_request_cid: String,
-        provider_configuration_cid: String,
-    },
+    OnboardRegistrar(decman_lib::catalog::proposals::utility::OnboardRegistrar),
     /// Create an `InstrumentConfiguration` on the registrar decparty and
     /// credential the initial instrument issuers against its issuer
     /// requirements. Executed once per instrument.
-    ProvisionInstrument {
-        registrar_service_cid: String,
-        instrument_id_text: String,
-        #[serde(default)]
-        additional_identifiers: Vec<InstrumentIdentifier>,
-        #[serde(default)]
-        issuer_requirements: Vec<PartyCredentialRequirement>,
-        #[serde(default)]
-        holder_requirements: Vec<PartyCredentialRequirement>,
-        #[serde(default)]
-        initial_instrument_issuers: Vec<CantonId>,
-    },
+    ProvisionInstrument(decman_lib::catalog::proposals::utility::ProvisionInstrument),
     /// Credential new instrument issuers against an existing
     /// `InstrumentConfiguration`'s issuer requirements.
-    OnboardInstrumentIssuers {
-        instrument_configuration_cid: String,
-        instrument_issuers: Vec<CantonId>,
-    },
+    OnboardInstrumentIssuers(decman_lib::catalog::proposals::utility::OnboardInstrumentIssuers),
     /// Revoke the credentials the governance party issued for instrument
     /// issuers, removing their issuing privileges. Each row names one issuer
     /// and lists that issuer's credentials.
-    OffboardInstrumentIssuers {
-        instrument_issuers: Vec<InstrumentIssuerCredentials>,
-    },
+    OffboardInstrumentIssuers(decman_lib::catalog::proposals::utility::OffboardInstrumentIssuers),
 }
 
 impl ProposalType {
@@ -829,186 +444,87 @@ impl ProposalType {
     ///
     /// **Propose-path only.** The single production caller is
     /// `handlers::governance::propose_action`, and one arm
-    /// ([`validate_future_micros`]) reads the clock. Re-using this to
+    /// (`decman_lib::framework::validate::validate_future_micros`) reads the
+    /// clock. Re-using this to
     /// re-validate an already-stored proposal would reject it for nothing but
     /// having aged, so a new call site needs to split the time-dependent arms
     /// out first.
     pub fn validate(&self, governance_party: &CantonId) -> Result<(), String> {
-        match self {
-            ProposalType::Transfer {
-                amount,
-                validity_window_hours,
-                ..
-            } => {
-                validate_positive_amount(amount, "amount")?;
-                if *validity_window_hours == Some(0) {
-                    return Err("validity_window_hours must be greater than 0".to_string());
-                }
-                Ok(())
-            }
-            ProposalType::Mint { amount, .. } | ProposalType::Burn { amount, .. } => {
-                validate_positive_amount(amount, "amount")
-            }
-            ProposalType::OfferPaidCredential {
-                deposit_initial_amount_usd: Some(d),
-                ..
-            } => validate_positive_amount(d, "deposit_initial_amount_usd"),
-            ProposalType::SetupMintingDelegation {
-                expires_at_micros,
-                amulet_merge_limit,
-                ..
-            } => {
-                if *amulet_merge_limit <= 0 {
-                    return Err("amulet_merge_limit must be greater than 0".to_string());
-                }
-                validate_future_micros(*expires_at_micros, "expires_at_micros")
-            }
-            ProposalType::AcceptExternalPartySetup { proposal_cid } => {
-                if proposal_cid.trim().is_empty() {
-                    return Err("proposal_cid must not be empty".to_string());
-                }
-                Ok(())
-            }
-            ProposalType::SetProviderAppRewardBeneficiaries {
-                provider_app_reward_beneficiaries: Some(beneficiaries),
-                ..
-            } => validate_beneficiary_weights(beneficiaries),
-            // Mirrors the template's `ensure` guard: onboarding zero issuers
-            // does no work, and a duplicated issuer would mint two
-            // credentials sharing one id. Reject both with a 400 before the
-            // ledger sees the proposal.
-            ProposalType::OnboardInstrumentIssuers {
-                instrument_issuers, ..
-            } => {
-                if instrument_issuers.is_empty() {
-                    return Err("instrument_issuers must not be empty".to_string());
-                }
-                validate_unique_issuers(instrument_issuers, "instrument_issuers")
-            }
-            ProposalType::ProvisionInstrument {
-                initial_instrument_issuers,
-                issuer_requirements,
-                ..
-            } => {
-                validate_self_issued_requirements_have_claims(
-                    issuer_requirements,
-                    governance_party,
-                    "issuer_requirements",
-                )?;
-                validate_unique_issuers(initial_instrument_issuers, "initial_instrument_issuers")
-            }
-            ProposalType::CreateProviderConfiguration {
-                registrar_requirements,
-                ..
-            } => validate_self_issued_requirements_have_claims(
-                registrar_requirements,
-                governance_party,
-                "registrar_requirements",
-            ),
-            ProposalType::OffboardInstrumentIssuers { instrument_issuers } => {
-                if instrument_issuers.is_empty() {
-                    return Err("instrument_issuers must not be empty".to_string());
-                }
-                let mut seen_parties = HashSet::new();
-                let mut seen_cids = HashSet::new();
-                for row in instrument_issuers {
-                    if row.credential_cids.is_empty() {
-                        return Err(format!(
-                            "credential_cids must not be empty for issuer {}",
-                            row.instrument_issuer
-                        ));
-                    }
-                    if !seen_parties.insert(&row.instrument_issuer) {
-                        return Err(format!(
-                            "duplicate instrument issuer not allowed: {}",
-                            row.instrument_issuer
-                        ));
-                    }
-                    for cid in &row.credential_cids {
-                        if !seen_cids.insert(cid) {
-                            return Err(format!("duplicate credential cid not allowed: {cid}"));
-                        }
-                    }
-                }
-                Ok(())
-            }
-            ProposalType::SetupCouponReassignmentDelegation {
-                assigners,
-                new_beneficiaries,
-                ..
-            } => {
-                if assigners.is_empty() {
-                    return Err("assigners must not be empty".to_string());
-                }
-                let mut seen = std::collections::HashSet::new();
-                for a in assigners {
-                    if !seen.insert(a) {
-                        return Err(format!("duplicate assigner not allowed: {a}"));
-                    }
-                }
-                validate_reward_beneficiaries(new_beneficiaries)
-            }
-            ProposalType::RevokeCouponReassignmentDelegation { delegation } => {
-                if delegation.trim().is_empty() {
-                    return Err("delegation must not be empty".to_string());
-                }
-                Ok(())
-            }
-            _ => Ok(()),
-        }
+        let ctx = decman_lib::framework::ValidationCtx {
+            governance_party,
+            now_micros: Utc::now().timestamp_micros(),
+        };
+        let payload: &dyn decman_lib::framework::Validate = match self {
+            Self::SetupCcPreapproval(p) => p,
+            Self::SetupTokenPreapproval(p) => p,
+            Self::Transfer(p) => p,
+            Self::AcceptTransfer(p) => p,
+            Self::GenericVote(p) => p,
+            Self::ProvisionProviderService(p) => p,
+            Self::SetupUtility(p) => p,
+            Self::CreateProviderServiceRequest(p) => p,
+            Self::CreateUserServiceRequest(p) => p,
+            Self::SetProviderAppRewardBeneficiaries(p) => p,
+            Self::SetupCouponReassignmentDelegation(p) => p,
+            Self::RevokeCouponReassignmentDelegation(p) => p,
+            Self::SetEnableResultContracts(p) => p,
+            Self::CreateDelegatedBatchedMarkersProxy(p) => p,
+            Self::SetupMintingDelegation(p) => p,
+            Self::AcceptExternalPartySetup(p) => p,
+            Self::Mint(p) => p,
+            Self::OfferFreeCredential(p) => p,
+            Self::OfferPaidCredential(p) => p,
+            Self::AcceptFreeCredential(p) => p,
+            Self::Burn(p) => p,
+            Self::AcceptMintRequest(p) => p,
+            Self::AcceptBurnRequest(p) => p,
+            Self::CreateProviderConfiguration(p) => p,
+            Self::CreateRegistrarServiceRequest(p) => p,
+            Self::OnboardRegistrar(p) => p,
+            Self::ProvisionInstrument(p) => p,
+            Self::OnboardInstrumentIssuers(p) => p,
+            Self::OffboardInstrumentIssuers(p) => p,
+        };
+        payload.validate(&ctx).map_err(|e| e.to_string())
     }
-}
 
-/// Validates a `new_beneficiaries` list (e.g.
-/// `SetupCouponReassignmentDelegation::new_beneficiaries`): non-empty,
-/// <= 20 entries, no duplicate beneficiary, each percentage in (0.0, 1.0],
-/// summing to exactly 1.0.
-///
-/// The uniqueness rule mirrors the on-ledger `RewardCoupon_AssignBeneficiaries`
-/// impl (`require "Beneficaries are unique"`); catching it here means a
-/// duplicated split is rejected at propose time rather than passing the vote
-/// and then failing every `Delegation_Assign`, which would leave a permanently
-/// unusable delegation.
-///
-/// `DamlDecimal` addition is exact (no float rounding), so an exact `==`
-/// against `1.0` is sufficient here — no epsilon tolerance is needed.
-fn validate_reward_beneficiaries(beneficiaries: &[RewardBeneficiary]) -> Result<(), String> {
-    if beneficiaries.is_empty() {
-        return Err("new_beneficiaries must not be empty".to_string());
-    }
-    if beneficiaries.len() > 20 {
-        return Err("at most 20 beneficiaries per coupon".to_string());
-    }
-    let one = DamlDecimal::parse("1").map_err(|e| e.to_string())?;
-    let mut seen = std::collections::HashSet::new();
-    for b in beneficiaries {
-        if b.percentage.value() <= DamlDecimal::ZERO.value() || b.percentage.value() > one.value() {
-            return Err(format!(
-                "each percentage must be in (0.0, 1.0], got {}",
-                b.percentage
-            ));
+    /// The generic propose payload — `None` for the two transfer variants,
+    /// which need runtime context (the registry choice context, the validity
+    /// window, and the on-chain sender party) and so go through their
+    /// wrapper structs (`TransferWithContext` /
+    /// `AcceptTransferWithContext`) rather than the payload itself.
+    pub fn grpc_payload(&self) -> Option<&dyn decman_lib::framework::GrpcPayload> {
+        match self {
+            Self::Transfer(_) | Self::AcceptTransfer(_) => None,
+            Self::SetupCcPreapproval(p) => Some(p),
+            Self::SetupTokenPreapproval(p) => Some(p),
+            Self::GenericVote(p) => Some(p),
+            Self::ProvisionProviderService(p) => Some(p),
+            Self::SetupUtility(p) => Some(p),
+            Self::CreateProviderServiceRequest(p) => Some(p),
+            Self::CreateUserServiceRequest(p) => Some(p),
+            Self::SetProviderAppRewardBeneficiaries(p) => Some(p),
+            Self::SetupCouponReassignmentDelegation(p) => Some(p),
+            Self::RevokeCouponReassignmentDelegation(p) => Some(p),
+            Self::SetEnableResultContracts(p) => Some(p),
+            Self::CreateDelegatedBatchedMarkersProxy(p) => Some(p),
+            Self::SetupMintingDelegation(p) => Some(p),
+            Self::AcceptExternalPartySetup(p) => Some(p),
+            Self::Mint(p) => Some(p),
+            Self::OfferFreeCredential(p) => Some(p),
+            Self::OfferPaidCredential(p) => Some(p),
+            Self::AcceptFreeCredential(p) => Some(p),
+            Self::Burn(p) => Some(p),
+            Self::AcceptMintRequest(p) => Some(p),
+            Self::AcceptBurnRequest(p) => Some(p),
+            Self::CreateProviderConfiguration(p) => Some(p),
+            Self::CreateRegistrarServiceRequest(p) => Some(p),
+            Self::OnboardRegistrar(p) => Some(p),
+            Self::ProvisionInstrument(p) => Some(p),
+            Self::OnboardInstrumentIssuers(p) => Some(p),
+            Self::OffboardInstrumentIssuers(p) => Some(p),
         }
-        if !seen.insert(&b.beneficiary) {
-            return Err(format!(
-                "duplicate beneficiary not allowed: {}",
-                b.beneficiary
-            ));
-        }
     }
-    let sum: DamlDecimal = beneficiaries.iter().map(|b| b.percentage).sum();
-    if sum != one {
-        // Say how to fix it. The comparison is exact Decimal, so an even 3-way
-        // split does not exist and nothing is implicitly left to the decparty —
-        // both are things a proposer discovers at execute otherwise.
-        return Err(format!(
-            "reward beneficiary percentages must sum to exactly 1.0, got {sum}. \
-             The sum is compared as exact Decimal, so balance the last entry by \
-             hand rather than repeating a rounded share. To leave a remainder to \
-             the decparty, list the decparty itself as a beneficiary — nothing is \
-             implicit"
-        ));
-    }
-    Ok(())
 }
 
 /// Request to propose a governance domain action (creates proposal contract)
@@ -1082,55 +598,6 @@ pub struct DomainGovernanceAction {
     /// card, where the proposal contract is no longer readable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<i64>,
-}
-
-/// Operator + counterparty parties extracted from a service-request proposal
-/// (`CreateUserServiceRequest` / `CreateProviderServiceRequest`). Surfaced
-/// inside `DomainGovernanceAction` so the pending-approval card can render who
-/// the request onboards. Exactly one of `user` / `provider` is set, matching
-/// the proposal kind.
-#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct ServiceRequestDetails {
-    /// Operator party — present on both request kinds.
-    pub operator: CantonId,
-    /// User party — present for `CreateUserServiceRequest`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub user: Option<CantonId>,
-    /// Provider party — present for `CreateProviderServiceRequest`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<CantonId>,
-}
-
-/// Recipient/amount/instrument extracted from a `TransferProposal`'s
-/// `transfer` field. Surfaced inside `DomainGovernanceAction` so the
-/// notification queue card shows the meaningful parameters of the proposal.
-#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct TransferProposalDetails {
-    pub receiver: CantonId,
-    #[schema(value_type = String)]
-    #[cfg_attr(feature = "typegen", ts(type = "string"))]
-    pub amount: DamlDecimal,
-    pub instrument_admin: CantonId,
-    pub instrument_id: String,
-}
-
-/// Sender/receiver/amount/instrument extracted from the `TransferInstruction`
-/// referenced by an `AcceptTransferProposal`. Surfaced inside
-/// `DomainGovernanceAction` so the pending-approval card for an Accept can
-/// render who's transferring what to whom — the proposal contract itself
-/// only carries the `TransferInstruction` cid, not these fields.
-#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct AcceptTransferDetails {
-    pub sender: CantonId,
-    pub receiver: CantonId,
-    #[schema(value_type = String)]
-    #[cfg_attr(feature = "typegen", ts(type = "string"))]
-    pub amount: DamlDecimal,
-    pub instrument_admin: CantonId,
-    pub instrument_id: String,
 }
 
 /// Request to submit a confirmation for an action with structured type
@@ -1473,7 +940,25 @@ pub fn chain_audit_entry_from_row(row: crate::db::rows::ChainAuditCacheRow) -> C
 
 #[cfg(test)]
 mod tests {
-    use common::api::RequiredClaim;
+    use common::api::InstrumentId;
+    use decman_lib::catalog::proposals::core::GenericVote;
+    use decman_lib::catalog::proposals::credential::{
+        AcceptFreeCredential, OfferFreeCredential, OfferPaidCredential,
+    };
+    use decman_lib::catalog::proposals::custody::{
+        AcceptTransfer, SetupCcPreapproval, SetupTokenPreapproval, Transfer,
+    };
+    use decman_lib::catalog::proposals::rewards::{
+        AcceptExternalPartySetup, RevokeCouponReassignmentDelegation,
+        SetupCouponReassignmentDelegation, SetupMintingDelegation,
+    };
+    use decman_lib::catalog::proposals::utility::{
+        AcceptBurnRequest, AcceptMintRequest, Burn, CreateDelegatedBatchedMarkersProxy,
+        CreateProviderConfiguration, CreateProviderServiceRequest, CreateRegistrarServiceRequest,
+        CreateUserServiceRequest, Mint, OffboardInstrumentIssuers, OnboardInstrumentIssuers,
+        OnboardRegistrar, ProvisionInstrument, ProvisionProviderService, SetEnableResultContracts,
+        SetProviderAppRewardBeneficiaries, SetupUtility,
+    };
     use serde_json::Value;
     use sqlx::SqlitePool;
 
@@ -1669,325 +1154,6 @@ mod tests {
         assert_eq!(dec_party.as_str().unwrap(), dec_party_id_str);
     }
 
-    #[test]
-    fn action_threshold_rejects_zero_and_negative() {
-        let action = ActionType::GovernanceSetThreshold { new_threshold: 0 };
-        assert!(action.validate().is_err());
-        let action = ActionType::GovernanceSetThreshold { new_threshold: -3 };
-        assert!(action.validate().is_err());
-        let action = ActionType::GovernanceSetThreshold { new_threshold: 1 };
-        assert!(action.validate().is_ok());
-    }
-
-    #[test]
-    fn action_threshold_rejects_in_add_remove_member() {
-        let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
-        let member = CantonId::parse(&format!("member::{ns}")).unwrap();
-        let action = ActionType::GovernanceAddMember {
-            member: member.clone(),
-            new_threshold: 0,
-        };
-        assert!(action.validate().is_err());
-        let action = ActionType::GovernanceRemoveMember {
-            member,
-            new_threshold: -1,
-        };
-        assert!(action.validate().is_err());
-    }
-
-    #[test]
-    fn action_timeout_rejects_zero_and_negative() {
-        let action = ActionType::GovernanceSetTimeout {
-            new_timeout_microseconds: 0,
-        };
-        assert!(action.validate().is_err());
-        let action = ActionType::GovernanceSetTimeout {
-            new_timeout_microseconds: -1_000_000,
-        };
-        assert!(action.validate().is_err());
-        let action = ActionType::GovernanceSetTimeout {
-            new_timeout_microseconds: 60_000_000,
-        };
-        assert!(action.validate().is_ok());
-    }
-
-    #[test]
-    fn proposal_transfer_rejects_non_positive_amount() {
-        let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
-        let to = CantonId::parse(&format!("recv::{ns}")).unwrap();
-        let admin = CantonId::parse(&format!("admin::{ns}")).unwrap();
-        let mk = |amount: &str, window: Option<u32>| ProposalType::Transfer {
-            transfer_factory_cid: "tf".to_string(),
-            expected_admin: admin.clone(),
-            receiver: to.clone(),
-            amount: amount.parse().expect("valid decimal"),
-            instrument_id: InstrumentId {
-                admin: "a".into(),
-                id: "i".into(),
-            },
-            input_holding_cids: Vec::new(),
-            validity_window_hours: window,
-        };
-        assert!(mk("0", None).validate(&cid("gov")).is_err());
-        assert!(mk("-1.5", None).validate(&cid("gov")).is_err());
-        assert!(mk("0.0001", None).validate(&cid("gov")).is_ok());
-        // A custom (positive) window is accepted; a zero-hour window is rejected.
-        assert!(mk("1.0", Some(48)).validate(&cid("gov")).is_ok());
-        assert!(mk("1.0", Some(0)).validate(&cid("gov")).is_err());
-    }
-
-    #[test]
-    fn proposal_onboard_instrument_issuers_rejects_empty_issuer_list() {
-        // Mirrors the template's `ensure not (null instrumentIssuers)` so the
-        // rejection surfaces as a 400 before the ledger sees the proposal.
-        let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
-        let issuer = CantonId::parse(&format!("issuer::{ns}")).unwrap();
-        let mk = |issuers: Vec<CantonId>| ProposalType::OnboardInstrumentIssuers {
-            instrument_configuration_cid: "icc".to_string(),
-            instrument_issuers: issuers,
-        };
-        assert!(mk(Vec::new()).validate(&cid("gov")).is_err());
-        assert!(mk(vec![issuer]).validate(&cid("gov")).is_ok());
-    }
-
-    #[test]
-    fn proposal_offboard_instrument_issuers_validates_rows() {
-        // Mirrors the template's four ensure guards.
-        let gov = cid("gov");
-        let issuer_a = cid("issuer-a");
-        let issuer_b = cid("issuer-b");
-        let row = |issuer: CantonId, cids: Vec<&str>| InstrumentIssuerCredentials {
-            instrument_issuer: issuer,
-            credential_cids: cids.into_iter().map(str::to_string).collect(),
-        };
-        let mk = |rows: Vec<InstrumentIssuerCredentials>| ProposalType::OffboardInstrumentIssuers {
-            instrument_issuers: rows,
-        };
-
-        // No rows: revokes nothing.
-        assert!(mk(vec![]).validate(&gov).is_err());
-        // A row with no cids: revokes nothing.
-        assert!(
-            mk(vec![row(issuer_a.clone(), vec![])])
-                .validate(&gov)
-                .is_err()
-        );
-        // The same party in two rows.
-        assert!(
-            mk(vec![
-                row(issuer_a.clone(), vec!["cred-1"]),
-                row(issuer_a.clone(), vec!["cred-2"]),
-            ])
-            .validate(&gov)
-            .is_err()
-        );
-        // The same cid in two rows.
-        assert!(
-            mk(vec![
-                row(issuer_a.clone(), vec!["cred-1"]),
-                row(issuer_b.clone(), vec!["cred-1"]),
-            ])
-            .validate(&gov)
-            .is_err()
-        );
-        // The same cid twice inside one row.
-        assert!(
-            mk(vec![row(issuer_a.clone(), vec!["cred-1", "cred-1"])])
-                .validate(&gov)
-                .is_err()
-        );
-        // Two issuers, distinct cids.
-        assert!(
-            mk(vec![
-                row(issuer_a, vec!["cred-1", "cred-2"]),
-                row(issuer_b, vec!["cred-3"]),
-            ])
-            .validate(&gov)
-            .is_ok()
-        );
-    }
-
-    #[test]
-    fn proposal_onboard_instrument_issuers_rejects_duplicate_issuers() {
-        // Mirrors the template's `ensure unique instrumentIssuers`: a
-        // duplicated issuer would mint two credentials sharing one id, so
-        // the rejection surfaces as a 400 before the ledger sees it.
-        let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
-        let issuer_a = CantonId::parse(&format!("issuer-a::{ns}")).unwrap();
-        let issuer_b = CantonId::parse(&format!("issuer-b::{ns}")).unwrap();
-        let mk = |issuers: Vec<CantonId>| ProposalType::OnboardInstrumentIssuers {
-            instrument_configuration_cid: "icc".to_string(),
-            instrument_issuers: issuers,
-        };
-        assert!(
-            mk(vec![issuer_a.clone(), issuer_a.clone()])
-                .validate(&cid("gov"))
-                .is_err()
-        );
-        assert!(mk(vec![issuer_a, issuer_b]).validate(&cid("gov")).is_ok());
-    }
-
-    #[test]
-    fn proposal_provision_instrument_rejects_duplicate_initial_issuers() {
-        // Mirrors the template's `ensure unique initialInstrumentIssuers`.
-        // An empty list stays legal: issuers can be onboarded later.
-        let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
-        let issuer_a = CantonId::parse(&format!("issuer-a::{ns}")).unwrap();
-        let issuer_b = CantonId::parse(&format!("issuer-b::{ns}")).unwrap();
-        let mk = |issuers: Vec<CantonId>| ProposalType::ProvisionInstrument {
-            registrar_service_cid: "rsc".to_string(),
-            instrument_id_text: "uuid-1".to_string(),
-            additional_identifiers: vec![],
-            issuer_requirements: vec![],
-            holder_requirements: vec![],
-            initial_instrument_issuers: issuers,
-        };
-        assert!(
-            mk(vec![issuer_a.clone(), issuer_a.clone()])
-                .validate(&cid("gov"))
-                .is_err()
-        );
-        assert!(mk(vec![issuer_a, issuer_b]).validate(&cid("gov")).is_ok());
-        assert!(mk(Vec::new()).validate(&cid("gov")).is_ok());
-    }
-
-    #[test]
-    fn proposal_create_provider_configuration_rejects_claimless_self_issued_requirement() {
-        // Mirrors the template's `selfIssuedRequirementsHaveClaims`. The frontend
-        // prefills a new requirement row as the governance party with no claims,
-        // so the default UI path trips this.
-        let gov = cid("gov");
-        let mk = |issuer: CantonId, claims: Vec<RequiredClaim>| {
-            ProposalType::CreateProviderConfiguration {
-                provider_service_cid: "psc".to_string(),
-                registrar_requirements: vec![PartyCredentialRequirement {
-                    issuer,
-                    required_claims: claims,
-                }],
-                holder_requirements: vec![],
-            }
-        };
-        let claim = RequiredClaim {
-            property: "role".to_string(),
-            value: "registrar".to_string(),
-        };
-        // Self-issued and claimless: rejected.
-        assert!(mk(gov.clone(), vec![]).validate(&gov).is_err());
-        // Self-issued with a claim: accepted.
-        assert!(mk(gov.clone(), vec![claim]).validate(&gov).is_ok());
-        // Issued by another party and claimless: accepted, matching the Daml.
-        assert!(mk(cid("other"), vec![]).validate(&gov).is_ok());
-    }
-
-    #[test]
-    fn proposal_provision_instrument_rejects_claimless_self_issued_requirement() {
-        // The same guard on the other template that carries it in Daml.
-        let gov = cid("gov");
-        let mk = |issuer: CantonId, claims: Vec<RequiredClaim>| ProposalType::ProvisionInstrument {
-            registrar_service_cid: "rsc".to_string(),
-            instrument_id_text: "uuid-1".to_string(),
-            additional_identifiers: vec![],
-            issuer_requirements: vec![PartyCredentialRequirement {
-                issuer,
-                required_claims: claims,
-            }],
-            holder_requirements: vec![],
-            initial_instrument_issuers: vec![],
-        };
-        let claim = RequiredClaim {
-            property: "role".to_string(),
-            value: "instrument-issuer".to_string(),
-        };
-        assert!(mk(gov.clone(), vec![]).validate(&gov).is_err());
-        assert!(mk(gov.clone(), vec![claim]).validate(&gov).is_ok());
-        assert!(mk(cid("other"), vec![]).validate(&gov).is_ok());
-    }
-
-    /// Test-only helper: builds a `CantonId` with a fixed valid namespace so
-    /// tests can vary just the prefix.
-    fn cid(prefix: &str) -> CantonId {
-        let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
-        CantonId::parse(&format!("{prefix}::{ns}")).unwrap()
-    }
-
-    /// Test-only helper: builds a `RewardBeneficiary` from a Canton-ID prefix
-    /// and a decimal percentage string.
-    fn rb(prefix: &str, pct: &str) -> RewardBeneficiary {
-        RewardBeneficiary {
-            beneficiary: cid(prefix),
-            percentage: pct.parse().expect("valid decimal"),
-        }
-    }
-
-    #[test]
-    fn setup_delegation_validate() {
-        // Reuse the `rb` helper from the neighboring set_reward_split_validate
-        // test; `rb(..).beneficiary` yields a CantonId (there is no dedicated
-        // party-id helper). Note: `rb`'s prefix is combined with a fixed
-        // namespace via `cid()`, so the prefix must be a plain string (no
-        // embedded "::") -- unlike the brief's example.
-        let execs = vec![rb("m1", "1.0").beneficiary, rb("m2", "1.0").beneficiary];
-        let ok = ProposalType::SetupCouponReassignmentDelegation {
-            dso: rb("dso", "1.0").beneficiary,
-            assigners: execs.clone(),
-            new_beneficiaries: vec![rb("a", "0.8"), rb("b", "0.2")],
-            prior_delegation: None,
-        };
-        assert!(ok.validate(&cid("gov")).is_ok());
-        let no_exec = ProposalType::SetupCouponReassignmentDelegation {
-            dso: rb("dso", "1.0").beneficiary,
-            assigners: vec![],
-            new_beneficiaries: vec![rb("a", "1.0")],
-            prior_delegation: None,
-        };
-        assert!(no_exec.validate(&cid("gov")).is_err());
-        let bad_sum = ProposalType::SetupCouponReassignmentDelegation {
-            dso: rb("dso", "1.0").beneficiary,
-            assigners: execs,
-            new_beneficiaries: vec![rb("a", "0.5")],
-            prior_delegation: None,
-        };
-        assert!(bad_sum.validate(&cid("gov")).is_err());
-        let revoke = ProposalType::RevokeCouponReassignmentDelegation {
-            delegation: "00abc".into(),
-        };
-        assert!(revoke.validate(&cid("gov")).is_ok());
-        // An empty delegation cid is rejected at the boundary (not left to fail
-        // only at ledger submission).
-        let revoke_empty = ProposalType::RevokeCouponReassignmentDelegation {
-            delegation: "  ".into(),
-        };
-        assert!(revoke_empty.validate(&cid("gov")).is_err());
-    }
-
-    #[test]
-    fn validate_reward_beneficiaries_edge_cases() {
-        // Empty is rejected.
-        assert!(validate_reward_beneficiaries(&[]).is_err());
-
-        // Per-percentage bound is (0.0, 1.0]: 0.0, negative, and > 1.0 all reject.
-        assert!(validate_reward_beneficiaries(&[rb("a", "0.0"), rb("b", "1.0")]).is_err());
-        assert!(validate_reward_beneficiaries(&[rb("a", "-0.5"), rb("b", "1.5")]).is_err());
-        assert!(validate_reward_beneficiaries(&[rb("a", "1.5")]).is_err());
-
-        // A single 1.0 (upper bound inclusive) is accepted.
-        assert!(validate_reward_beneficiaries(&[rb("a", "1.0")]).is_ok());
-
-        // Duplicate beneficiary is rejected even when percentages are otherwise valid.
-        assert!(validate_reward_beneficiaries(&[rb("dup", "0.5"), rb("dup", "0.5")]).is_err());
-
-        // Count boundary: exactly 20 (each 0.05, summing to 1.0) is accepted; 21 rejects.
-        let twenty: Vec<RewardBeneficiary> =
-            (0..20).map(|i| rb(&format!("b{i}"), "0.05")).collect();
-        assert!(validate_reward_beneficiaries(&twenty).is_ok());
-        let twenty_one: Vec<RewardBeneficiary> =
-            (0..21).map(|i| rb(&format!("b{i}"), "0.05")).collect();
-        assert!(validate_reward_beneficiaries(&twenty_one).is_err());
-
-        // Valid two-way split.
-        assert!(validate_reward_beneficiaries(&[rb("a", "0.8"), rb("b", "0.2")]).is_ok());
-    }
-
     fn test_party(prefix: &str) -> anyhow::Result<CantonId> {
         CantonId::parse(&format!("{prefix}::1220{}", "ab".repeat(32)))
     }
@@ -2143,51 +1309,193 @@ mod tests {
         Ok(())
     }
 
-    fn minting_delegation(
-        expires_at_micros: i64,
-        amulet_merge_limit: i64,
-    ) -> anyhow::Result<ProposalType> {
-        Ok(ProposalType::SetupMintingDelegation {
-            delegate: test_party("delegate")?,
-            dso: test_party("dso")?,
-            expires_at_micros,
-            amulet_merge_limit,
-            description: "test".to_string(),
-        })
+    /// One minimal instance per `ProposalType` variant, in declaration order.
+    /// Field values are placeholders — this only exercises which variants
+    /// `grpc_payload` treats as `Some`/`None`, not the payload contents (see
+    /// `serde_snapshots.rs` for the fully-populated wire-shape fixtures).
+    fn one_of_each_proposal_type() -> Vec<ProposalType> {
+        let instrument_id = || InstrumentId {
+            admin: "admin-party".into(),
+            id: "TOK".into(),
+        };
+        vec![
+            ProposalType::SetupCcPreapproval(SetupCcPreapproval {
+                provider: test_party("prov").unwrap(),
+                expected_dso: test_party("dso").unwrap(),
+            }),
+            ProposalType::SetupTokenPreapproval(SetupTokenPreapproval {
+                operator: test_party("op").unwrap(),
+                instrument_admin: test_party("iadmin").unwrap(),
+                instrument_allowances: vec![],
+            }),
+            ProposalType::Transfer(Transfer {
+                transfer_factory_cid: "00tf".into(),
+                expected_admin: test_party("iadmin").unwrap(),
+                receiver: test_party("recv").unwrap(),
+                amount: "1".parse().unwrap(),
+                instrument_id: instrument_id(),
+                input_holding_cids: vec![],
+                validity_window_hours: None,
+            }),
+            ProposalType::AcceptTransfer(AcceptTransfer {
+                transfer_instruction_cid: "00ti".into(),
+            }),
+            ProposalType::GenericVote(GenericVote {
+                description: "a vote".into(),
+            }),
+            ProposalType::ProvisionProviderService(ProvisionProviderService {}),
+            ProposalType::SetupUtility(SetupUtility {
+                provider_service_cid: "00psc".into(),
+                operator: test_party("op").unwrap(),
+                instrument_id_text: "uuid-1".into(),
+                additional_identifiers: vec![],
+                create_transfer_rule: true,
+                create_allocation_factory: true,
+            }),
+            ProposalType::CreateProviderServiceRequest(CreateProviderServiceRequest {
+                operator: test_party("op").unwrap(),
+                provider: test_party("prov").unwrap(),
+            }),
+            ProposalType::CreateUserServiceRequest(CreateUserServiceRequest {
+                operator: test_party("op").unwrap(),
+                user: test_party("user").unwrap(),
+            }),
+            ProposalType::SetProviderAppRewardBeneficiaries(SetProviderAppRewardBeneficiaries {
+                instrument_configuration_cid: "00icc".into(),
+                provider_app_reward_beneficiaries: None,
+            }),
+            ProposalType::SetupCouponReassignmentDelegation(SetupCouponReassignmentDelegation {
+                dso: test_party("dso").unwrap(),
+                assigners: vec![],
+                new_beneficiaries: vec![],
+                prior_delegation: None,
+            }),
+            ProposalType::RevokeCouponReassignmentDelegation(RevokeCouponReassignmentDelegation {
+                delegation: "00deleg".into(),
+            }),
+            ProposalType::SetEnableResultContracts(SetEnableResultContracts {
+                registrar_service_cid: "00rsc".into(),
+                enable_result_contracts: None,
+            }),
+            ProposalType::CreateDelegatedBatchedMarkersProxy(CreateDelegatedBatchedMarkersProxy {
+                operator: test_party("op").unwrap(),
+            }),
+            ProposalType::SetupMintingDelegation(SetupMintingDelegation {
+                delegate: test_party("delegate").unwrap(),
+                dso: test_party("dso").unwrap(),
+                expires_at_micros: 4_000_000_000_000_000,
+                amulet_merge_limit: 10,
+                description: "delegate minting".into(),
+            }),
+            ProposalType::AcceptExternalPartySetup(AcceptExternalPartySetup {
+                proposal_cid: "00eps".into(),
+            }),
+            ProposalType::Mint(Mint {
+                allocation_factory_cid: "00alloc".into(),
+                instrument_id: instrument_id(),
+                instrument_configuration_cid: "00icc".into(),
+                recipient: test_party("recv").unwrap(),
+                amount: "5".parse().unwrap(),
+                description: "mint".into(),
+            }),
+            ProposalType::OfferFreeCredential(OfferFreeCredential {
+                user_service_cid: "00usc".into(),
+                holder: test_party("holder").unwrap(),
+                id: "cred-1".into(),
+                description: "free cred".into(),
+                claims: vec![],
+            }),
+            ProposalType::OfferPaidCredential(OfferPaidCredential {
+                user_service_cid: "00usc".into(),
+                holder: test_party("holder").unwrap(),
+                id: "cred-2".into(),
+                description: "paid cred".into(),
+                claims: vec![],
+                billing_params: BillingParams {
+                    fee_per_day_usd: "1.5".parse().unwrap(),
+                    billing_period_minutes: 60,
+                    deposit_target_amount_usd: "30".parse().unwrap(),
+                    holder_activity_weight: None,
+                },
+                deposit_initial_amount_usd: None,
+            }),
+            ProposalType::AcceptFreeCredential(AcceptFreeCredential {
+                user_service_cid: "00usc".into(),
+                credential_offer_cid: "00offer".into(),
+            }),
+            ProposalType::Burn(Burn {
+                allocation_factory_cid: "00alloc".into(),
+                instrument_id: instrument_id(),
+                instrument_configuration_cid: "00icc".into(),
+                holder: test_party("holder").unwrap(),
+                amount: "3".parse().unwrap(),
+                description: "burn".into(),
+            }),
+            ProposalType::AcceptMintRequest(AcceptMintRequest {
+                mint_request_cid: "00mr".into(),
+                instrument_configuration_cid: "00icc".into(),
+                issuer_credential_cids: vec![],
+                description: "accept mint".into(),
+            }),
+            ProposalType::AcceptBurnRequest(AcceptBurnRequest {
+                burn_request_cid: "00br".into(),
+                instrument_configuration_cid: "00icc".into(),
+                issuer_credential_cids: vec![],
+                description: "accept burn".into(),
+            }),
+            ProposalType::CreateProviderConfiguration(CreateProviderConfiguration {
+                provider_service_cid: "00psc".into(),
+                registrar_requirements: vec![],
+                holder_requirements: vec![],
+            }),
+            ProposalType::CreateRegistrarServiceRequest(CreateRegistrarServiceRequest {
+                operator: test_party("op").unwrap(),
+                provider: test_party("prov").unwrap(),
+                create_transfer_rule: false,
+                create_allocation_factory: true,
+            }),
+            ProposalType::OnboardRegistrar(OnboardRegistrar {
+                provider_service_cid: "00psc".into(),
+                registrar_service_request_cid: "00rsr".into(),
+                provider_configuration_cid: "00pcc".into(),
+            }),
+            ProposalType::ProvisionInstrument(ProvisionInstrument {
+                registrar_service_cid: "00rsc".into(),
+                instrument_id_text: "uuid-2".into(),
+                additional_identifiers: vec![],
+                issuer_requirements: vec![],
+                holder_requirements: vec![],
+                initial_instrument_issuers: vec![],
+            }),
+            ProposalType::OnboardInstrumentIssuers(OnboardInstrumentIssuers {
+                instrument_configuration_cid: "00icc".into(),
+                instrument_issuers: vec![],
+            }),
+            ProposalType::OffboardInstrumentIssuers(OffboardInstrumentIssuers {
+                instrument_issuers: vec![],
+            }),
+        ]
     }
 
+    /// Guards the split the payload-projection macro used to generate: every
+    /// `ProposalType` variant carries a `GrpcPayload` except `Transfer` and
+    /// `AcceptTransfer`, which need runtime context and go through wrapper
+    /// structs instead (see `grpc_payload`'s doc comment). A variant landing
+    /// in the wrong match arm — Transfer wrongly returning `Some`, or a
+    /// plain variant wrongly returning `None` — fails this test instead of
+    /// surfacing as a silent gap deep in `propose_action`.
     #[test]
-    fn setup_minting_delegation_rejects_a_non_future_expiry() -> anyhow::Result<()> {
-        let hour_micros = 3_600_000_000i64;
-        let now = Utc::now().timestamp_micros();
-
-        // An expiry in the future is the only accepted shape.
-        assert!(
-            minting_delegation(now + hour_micros, 10)?
-                .validate(&cid("gov"))
-                .is_ok()
-        );
-
-        // Zero and negative are the raw-caller mistakes the DAML assert would
-        // otherwise catch only at execute time, after a full governance round.
-        assert!(minting_delegation(0, 10)?.validate(&cid("gov")).is_err());
-        assert!(minting_delegation(-1, 10)?.validate(&cid("gov")).is_err());
-
-        // Positive but already past is the same waste, and `> 0` alone misses it.
-        assert!(
-            minting_delegation(now - hour_micros, 10)?
-                .validate(&cid("gov"))
-                .is_err()
-        );
-
-        // The pre-existing amulet_merge_limit guard still fires when the expiry
-        // is valid, so the new arm did not displace it.
-        assert!(
-            minting_delegation(now + hour_micros, 0)?
-                .validate(&cid("gov"))
-                .is_err()
-        );
-
-        Ok(())
+    fn grpc_payload_is_none_only_for_transfer_and_accept_transfer() {
+        for proposal in one_of_each_proposal_type() {
+            let is_transfer_variant = matches!(
+                proposal,
+                ProposalType::Transfer(_) | ProposalType::AcceptTransfer(_)
+            );
+            assert_eq!(
+                proposal.grpc_payload().is_none(),
+                is_transfer_variant,
+                "{proposal:?}: grpc_payload() Some/None must match transfer-variant status"
+            );
+        }
     }
 }
