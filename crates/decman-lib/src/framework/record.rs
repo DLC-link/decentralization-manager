@@ -16,7 +16,10 @@
 //!   `field_time`, `field_list_len`, `field_party_list`, `extract_party`,
 //!   `extract_party_id`, `extract_text`, `extract_int64`, `extract_numeric`,
 //!   `extract_contract_id`, `extract_record`, `extract_list`, and `get_field`.
-//!   Every error is `Error::Decode`.
+//!   Every error is `Error::Decode`. An accessor that parses a value keeps
+//!   the parse error as the chained source, so `std::error::Error::source`
+//!   reaches the real cause. An accessor that finds the wrong shape has no
+//!   deeper cause and reports `None`.
 //! * The **lenient** family returns `Option` (or, for `field_optional_is_none`,
 //!   a fail-safe `bool`) and is for callers that treat a missing or
 //!   wrong-shaped field as "not present" rather than an error:
@@ -67,8 +70,8 @@ pub fn field_party_id(rec: &Record, label: &str) -> Result<CantonId, Error> {
     match record_field(rec, label) {
         Some(value::Sum::Party(p)) => p
             .parse::<CantonId>()
-            .map_err(|e| Error::Decode(format!("field `{label}`: invalid party id `{p}`: {e}"))),
-        _ => Err(Error::Decode(format!(
+            .map_err(|e| Error::decode_from(format!("field `{label}`: invalid party id `{p}`"), e)),
+        _ => Err(Error::decode(format!(
             "field `{label}`: expected a Party value"
         ))),
     }
@@ -78,8 +81,8 @@ pub fn field_party_id(rec: &Record, label: &str) -> Result<CantonId, Error> {
 pub fn field_decimal(rec: &Record, label: &str) -> Result<DamlDecimal, Error> {
     match record_field(rec, label) {
         Some(value::Sum::Numeric(n)) => DamlDecimal::parse(n)
-            .map_err(|e| Error::Decode(format!("field `{label}`: invalid decimal `{n}`: {e}"))),
-        _ => Err(Error::Decode(format!(
+            .map_err(|e| Error::decode_from(format!("field `{label}`: invalid decimal `{n}`"), e)),
+        _ => Err(Error::decode(format!(
             "field `{label}`: expected a Numeric value"
         ))),
     }
@@ -91,13 +94,13 @@ pub fn field_time(rec: &Record, label: &str) -> Result<DateTime<Utc>, Error> {
     let micros = match record_field(rec, label) {
         Some(value::Sum::Timestamp(t)) => *t,
         _ => {
-            return Err(Error::Decode(format!(
+            return Err(Error::decode(format!(
                 "field `{label}`: expected a Time value"
             )));
         }
     };
     DateTime::from_timestamp_micros(micros).ok_or_else(|| {
-        Error::Decode(format!(
+        Error::decode(format!(
             "field `{label}`: timestamp {micros} micros is out of range"
         ))
     })
@@ -116,7 +119,7 @@ pub fn field_optional_is_none(rec: &Record, label: &str) -> bool {
 pub fn field_list_len(rec: &Record, label: &str) -> Result<usize, Error> {
     match record_field(rec, label) {
         Some(value::Sum::List(l)) => Ok(l.elements.len()),
-        _ => Err(Error::Decode(format!(
+        _ => Err(Error::decode(format!(
             "field `{label}`: expected a List value"
         ))),
     }
@@ -141,7 +144,7 @@ pub fn field_party_list(rec: &Record, label: &str) -> Result<Vec<CantonId>, Erro
     let list = match record_field(rec, label) {
         Some(value::Sum::List(l)) => l,
         _ => {
-            return Err(Error::Decode(format!(
+            return Err(Error::decode(format!(
                 "field `{label}`: expected a List value"
             )));
         }
@@ -150,9 +153,9 @@ pub fn field_party_list(rec: &Record, label: &str) -> Result<Vec<CantonId>, Erro
         .iter()
         .map(|elem| match elem.sum.as_ref() {
             Some(value::Sum::Party(p)) => p.parse::<CantonId>().map_err(|e| {
-                Error::Decode(format!("field `{label}`: invalid party id `{p}`: {e}"))
+                Error::decode_from(format!("field `{label}`: invalid party id `{p}`"), e)
             }),
-            _ => Err(Error::Decode(format!(
+            _ => Err(Error::decode(format!(
                 "field `{label}`: element is not a Party"
             ))),
         })
@@ -163,7 +166,7 @@ pub fn field_party_list(rec: &Record, label: &str) -> Result<Vec<CantonId>, Erro
 pub fn extract_party(value: &Value) -> Result<String, Error> {
     match &value.sum {
         Some(value::Sum::Party(p)) => Ok(p.clone()),
-        _ => Err(Error::Decode("Expected Party value".to_string())),
+        _ => Err(Error::decode("Expected Party value")),
     }
 }
 
@@ -172,14 +175,14 @@ pub fn extract_party_id(value: &Value) -> Result<CantonId, Error> {
     let party_str = extract_party(value)?;
     party_str
         .parse()
-        .map_err(|_| Error::Decode("Failed to parse party as CantonId".to_string()))
+        .map_err(|e| Error::decode_from(format!("invalid party id `{party_str}`"), e))
 }
 
 /// Read a `Text` value.
 pub fn extract_text(value: &Value) -> Result<String, Error> {
     match &value.sum {
         Some(value::Sum::Text(t)) => Ok(t.clone()),
-        _ => Err(Error::Decode("Expected Text value".to_string())),
+        _ => Err(Error::decode("Expected Text value")),
     }
 }
 
@@ -187,7 +190,7 @@ pub fn extract_text(value: &Value) -> Result<String, Error> {
 pub fn extract_int64(value: &Value) -> Result<i64, Error> {
     match &value.sum {
         Some(value::Sum::Int64(n)) => Ok(*n),
-        _ => Err(Error::Decode("Expected Int64 value".to_string())),
+        _ => Err(Error::decode("Expected Int64 value")),
     }
 }
 
@@ -195,7 +198,7 @@ pub fn extract_int64(value: &Value) -> Result<i64, Error> {
 pub fn extract_numeric(value: &Value) -> Result<String, Error> {
     match &value.sum {
         Some(value::Sum::Numeric(n)) => Ok(n.clone()),
-        _ => Err(Error::Decode("Expected Numeric value".to_string())),
+        _ => Err(Error::decode("Expected Numeric value")),
     }
 }
 
@@ -203,7 +206,7 @@ pub fn extract_numeric(value: &Value) -> Result<String, Error> {
 pub fn extract_contract_id(value: &Value) -> Result<String, Error> {
     match &value.sum {
         Some(value::Sum::ContractId(c)) => Ok(c.clone()),
-        _ => Err(Error::Decode("Expected ContractId value".to_string())),
+        _ => Err(Error::decode("Expected ContractId value")),
     }
 }
 
@@ -211,7 +214,7 @@ pub fn extract_contract_id(value: &Value) -> Result<String, Error> {
 pub fn extract_record(value: &Value) -> Result<&Record, Error> {
     match &value.sum {
         Some(value::Sum::Record(r)) => Ok(r),
-        _ => Err(Error::Decode("Expected Record value".to_string())),
+        _ => Err(Error::decode("Expected Record value")),
     }
 }
 
@@ -219,13 +222,13 @@ pub fn extract_record(value: &Value) -> Result<&Record, Error> {
 pub fn extract_list(value: &Value) -> Result<&List, Error> {
     match &value.sum {
         Some(value::Sum::List(l)) => Ok(l),
-        _ => Err(Error::Decode("Expected List value".to_string())),
+        _ => Err(Error::decode("Expected List value")),
     }
 }
 
 /// Look up a field by label on a `Record`, erroring if absent.
 pub fn get_field<'a>(record: &'a Record, label: &str) -> Result<&'a Value, Error> {
-    record_value(record, label).ok_or_else(|| Error::Decode(format!("Missing field: {label}")))
+    record_value(record, label).ok_or_else(|| Error::decode(format!("Missing field: {label}")))
 }
 
 pub fn field_party(record: &Record, label: &str) -> Option<String> {
@@ -372,6 +375,44 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    /// A malformed party keeps the parse error as the chained source, so a
+    /// caller that walks `std::error::Error::source` reaches the real cause.
+    /// A shape mismatch has no deeper cause and reports `None`.
+    #[test]
+    fn a_failed_parse_chains_its_cause() {
+        use std::error::Error as _;
+
+        let rec = record(vec![("owner", Some(value::Sum::Party("nope".to_string())))]);
+        let err = field_party_id(&rec, "owner").expect_err("a bad party must fail");
+
+        assert_eq!(err.to_string(), "field `owner`: invalid party id `nope`");
+        let cause = err.source().expect("the parse error is the source");
+        assert!(
+            !cause.to_string().is_empty(),
+            "the chained cause must say something"
+        );
+
+        // A wrong-shaped field has nothing underneath it.
+        let rec = record(vec![("owner", Some(value::Sum::Int64(1)))]);
+        let err = field_party_id(&rec, "owner").expect_err("a non-Party must fail");
+        assert!(err.source().is_none(), "a shape mismatch has no cause");
+    }
+
+    /// `extract_party_id` used to throw its cause away. It now names the
+    /// offending value and keeps the parse error underneath.
+    #[test]
+    fn extract_party_id_chains_its_cause() {
+        use std::error::Error as _;
+
+        let value = Value {
+            sum: Some(value::Sum::Party("nope".to_string())),
+        };
+        let err = extract_party_id(&value).expect_err("a bad party must fail");
+
+        assert_eq!(err.to_string(), "invalid party id `nope`");
+        assert!(err.source().is_some(), "the parse error is the source");
     }
 
     /// A field present with `value: None` (the middle `Option` layer empty) —

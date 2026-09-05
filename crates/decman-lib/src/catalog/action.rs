@@ -171,7 +171,7 @@ impl ActionType {
         let variant = match &value.sum {
             Some(value::Sum::Variant(v)) => v,
             _ => {
-                return Err(Error::Decode(
+                return Err(Error::decode(
                     "Expected Variant value for action".to_string(),
                 ));
             }
@@ -180,7 +180,7 @@ impl ActionType {
         let inner = variant
             .value
             .as_ref()
-            .ok_or_else(|| Error::Decode("Variant has no inner value".to_string()))?;
+            .ok_or_else(|| Error::decode("Variant has no inner value"))?;
 
         match variant.constructor.as_str() {
             // Governance Actions - nested variant structure
@@ -188,14 +188,15 @@ impl ActionType {
                 let inner_variant = match &inner.sum {
                     Some(value::Sum::Variant(v)) => v,
                     _ => {
-                        return Err(Error::Decode(
+                        return Err(Error::decode(
                             "Expected nested Variant for GovernanceAction".to_string(),
                         ));
                     }
                 };
-                let inner_value = inner_variant.value.as_ref().ok_or_else(|| {
-                    Error::Decode("GovernanceAction inner variant has no value".to_string())
-                })?;
+                let inner_value = inner_variant
+                    .value
+                    .as_ref()
+                    .ok_or_else(|| Error::decode("GovernanceAction inner variant has no value"))?;
                 let record = extract_record(inner_value)?;
 
                 match inner_variant.constructor.as_str() {
@@ -219,7 +220,7 @@ impl ActionType {
                             new_timeout_microseconds: microseconds,
                         })
                     }
-                    other => Err(Error::Decode(format!(
+                    other => Err(Error::decode(format!(
                         "Unknown GovernanceAction constructor: {other}"
                     ))),
                 }
@@ -230,13 +231,13 @@ impl ActionType {
                 let inner_variant = match &inner.sum {
                     Some(value::Sum::Variant(v)) => v,
                     _ => {
-                        return Err(Error::Decode(
+                        return Err(Error::decode(
                             "Expected nested Variant for UtilityOnboardingAction".to_string(),
                         ));
                     }
                 };
                 let inner_value = inner_variant.value.as_ref().ok_or_else(|| {
-                    Error::Decode("UtilityOnboardingAction inner variant has no value".to_string())
+                    Error::decode("UtilityOnboardingAction inner variant has no value")
                 })?;
                 let record = extract_record(inner_value)?;
 
@@ -276,7 +277,7 @@ impl ActionType {
                             holder: extract_party_id(get_field(record, "holder")?)?,
                         })
                     }
-                    other => Err(Error::Decode(format!(
+                    other => Err(Error::decode(format!(
                         "Unknown UtilityOnboardingAction constructor: {other}"
                     ))),
                 }
@@ -287,14 +288,15 @@ impl ActionType {
                 let inner_variant = match &inner.sum {
                     Some(value::Sum::Variant(v)) => v,
                     _ => {
-                        return Err(Error::Decode(
+                        return Err(Error::decode(
                             "Expected nested Variant for CredentialAction".to_string(),
                         ));
                     }
                 };
-                let inner_value = inner_variant.value.as_ref().ok_or_else(|| {
-                    Error::Decode("CredentialAction inner variant has no value".to_string())
-                })?;
+                let inner_value = inner_variant
+                    .value
+                    .as_ref()
+                    .ok_or_else(|| Error::decode("CredentialAction inner variant has no value"))?;
                 let record = extract_record(inner_value)?;
 
                 match inner_variant.constructor.as_str() {
@@ -329,7 +331,7 @@ impl ActionType {
                             "credentialOfferCid",
                         )?)?,
                     }),
-                    other => Err(Error::Decode(format!(
+                    other => Err(Error::decode(format!(
                         "Unknown CredentialAction constructor: {other}"
                     ))),
                 }
@@ -343,7 +345,7 @@ impl ActionType {
                 })
             }
 
-            other => Err(Error::Decode(format!(
+            other => Err(Error::decode(format!(
                 "Unknown action constructor: {other}"
             ))),
         }
@@ -354,18 +356,19 @@ impl ActionType {
         let variant = match &value.sum {
             Some(value::Sum::Variant(v)) => v,
             _ => {
-                return Err(Error::Decode(
+                return Err(Error::decode(
                     "Expected Variant value for GovernanceSelfAction".to_string(),
                 ));
             }
         };
 
-        let inner = variant.value.as_ref().ok_or_else(|| {
-            Error::Decode("GovernanceSelfAction variant has no inner value".to_string())
-        })?;
+        let inner = variant
+            .value
+            .as_ref()
+            .ok_or_else(|| Error::decode("GovernanceSelfAction variant has no inner value"))?;
 
         let record = extract_record(inner)
-            .map_err(|_| Error::Decode("Expected GovernanceSelfAction record".to_string()))?;
+            .map_err(|e| Error::decode_from("Expected GovernanceSelfAction record", e))?;
         let constructor = &variant.constructor;
 
         match constructor.as_str() {
@@ -410,7 +413,7 @@ impl ActionType {
                     additional_proposer,
                 })
             }
-            other => Err(Error::Decode(format!(
+            other => Err(Error::decode(format!(
                 "Unknown GovernanceSelfAction constructor: {other}"
             ))),
         }
@@ -835,11 +838,11 @@ mod tests {
         let bogus = make_variant("NoSuchAction", make_record(vec![]));
         assert!(matches!(
             ActionType::from_cbtc_proto(&bogus),
-            Err(Error::Decode(_))
+            Err(Error::Decode { .. })
         ));
         assert!(matches!(
             ActionType::from_self_proto(&bogus),
-            Err(Error::Decode(_))
+            Err(Error::Decode { .. })
         ));
     }
 }
