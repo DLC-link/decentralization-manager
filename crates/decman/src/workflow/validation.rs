@@ -380,12 +380,19 @@ impl PeerExpectations {
     /// accepted file is missing, or if a file's content does not hash to the
     /// value the invitation pinned.
     pub fn check_dars(&self, files: &[(String, Vec<u8>)]) -> Result {
+        // An invitation that named no DARs authorizes no DARs. Only the hash
+        // list is treated leniently for an older coordinator — `dar_filenames`
+        // has been on the invite since the workflow existed, so an empty one
+        // paired with actual DAR bytes is a coordinator installing code the
+        // operator never saw, not a version skew.
         if self.dar_filenames.is_empty() {
-            tracing::warn!(
-                "accepted Dars invitation listed no filenames; skipping the DAR content \
-                 check (the coordinator predates the field)"
+            if files.is_empty() {
+                return Ok(());
+            }
+            anyhow::bail!(
+                "coordinator sent {count} DAR(s) but the accepted invitation named none",
+                count = files.len()
             );
-            return Ok(());
         }
 
         // Both sides are compared as sets, so a repeated name would collapse and
@@ -1152,6 +1159,24 @@ mod tests {
                 .is_err()
         );
         Ok(())
+    }
+
+    /// The hole this closes: an invitation naming no DARs, accepted as
+    /// harmless, followed by DAR bytes the peer would have uploaded and vetted
+    /// without any check at all.
+    #[test]
+    fn rejects_dars_no_invitation_named() -> Result {
+        let a = canton_id("p1", 1)?;
+        let expectations = expectations(vec![a.clone()], a);
+        assert!(expectations.dar_filenames.is_empty());
+        assert!(
+            expectations
+                .check_dars(&[("surprise.dar".to_string(), b"arbitrary-code".to_vec())])
+                .is_err()
+        );
+        // Nothing accepted and nothing sent stays fine — that is a Dars run
+        // with no files, not a bypass.
+        expectations.check_dars(&[])
     }
 
     /// An older coordinator sends filenames but no hashes: the filename check
