@@ -13,6 +13,7 @@ use canton_proto_rs::com::digitalasset::canton::{
         },
         v30::public_key,
     },
+    protocol::v30::{DecentralizedNamespaceDefinition, PartyToParticipant},
     topology::admin::v30::{
         BaseQuery, ListDecentralizedNamespaceDefinitionRequest, ListNamespaceDelegationRequest,
         ListPartyToParticipantRequest, StoreId, Synchronizer, base_query,
@@ -104,13 +105,13 @@ const MAX_PREFIX_LEN: usize = 128;
 /// Cap on distinct prefixes tracked in `AppState::discovery_completed`.
 const MAX_TRACKED_PREFIXES: usize = 1024;
 
-/// Whether a completed discovery still answers for a prefix.
+/// Whether something recorded at `at` is still within the cache TTL.
 ///
-/// `None` means no discovery has completed for it in this process. A timestamp
-/// ahead of `now` is not fresh: the clock moved backwards after it was written,
-/// and treating a negative age as fresh would pin the answer indefinitely.
-fn discovery_is_fresh(completed_at: Option<i64>, now: i64) -> bool {
-    completed_at.is_some_and(|at| (0..=PARTIES_CACHE_TTL_SECS).contains(&(now - at)))
+/// `None` is never fresh. Neither is a timestamp ahead of `now`: the clock
+/// moved backwards after it was written, and treating a negative age as fresh
+/// would pin the answer until the clock caught up.
+fn is_within_ttl(at: Option<i64>, now: i64) -> bool {
+    at.is_some_and(|at| (0..=PARTIES_CACHE_TTL_SECS).contains(&(now - at)))
 }
 
 /// Record that a discovery completed for `prefix`.
@@ -138,7 +139,7 @@ pub(crate) async fn record_discovery(
         return;
     }
 
-    completed.retain(|_, at| discovery_is_fresh(Some(*at), now));
+    completed.retain(|_, at| is_within_ttl(Some(*at), now));
 
     // Evict the oldest rather than clearing: `prefix` is request-controlled,
     // and clearing would let a stream of unique prefixes flush the entries
@@ -155,6 +156,20 @@ pub(crate) async fn record_discovery(
     }
 
     completed.insert(prefix.to_string(), now);
+}
+
+/// Run one fallible call under [`TOPOLOGY_READ_TIMEOUT`].
+async fn bounded_call<T>(
+    what: &str,
+    call: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    match tokio::time::timeout(TOPOLOGY_READ_TIMEOUT, call).await {
+        Ok(result) => result,
+        Err(_) => anyhow::bail!(
+            "{what} did not answer within {secs}s",
+            secs = TOPOLOGY_READ_TIMEOUT.as_secs()
+        ),
+    }
 }
 
 /// Run one topology read under [`TOPOLOGY_READ_TIMEOUT`].
@@ -209,7 +224,13 @@ pub struct PartyReadOpts {
     params(PartiesQuery),
     responses(
         (status = 200, description = "Decentralized parties", body = DecentralizedPartiesResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
+        (status = 400, description = "Prefix too long", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+        (
+            status = 503,
+            description = "Too many discoveries in flight; retry",
+            body = ErrorResponse
+        )
     )
 )]
 #[get("/decentralized-parties")]
@@ -242,8 +263,9 @@ pub async fn get_decentralized_parties(
     if let Ok(Some((mut response, updated_at))) = cached {
         response.source = ResponseSource::Cache;
 
-        // Only refresh if the cache is stale
-        let is_stale = (now_secs() - updated_at) > PARTIES_CACHE_TTL_SECS;
+        // Only refresh if the cache is stale. A row stamped ahead of the clock
+        // counts as stale too, so a backwards correction cannot pin old rows.
+        let is_stale = !is_within_ttl(Some(updated_at), now_secs());
 
         if is_stale {
             // Atomic check+insert to avoid duplicate spawns
@@ -288,7 +310,7 @@ pub async fn get_decentralized_parties(
     // recent completed discovery is what stops a node with no party from
     // re-running that query on every single request.
     let completed_at = data.discovery_completed.read().await.get(&prefix).copied();
-    if !force_refresh && discovery_is_fresh(completed_at, now_secs()) {
+    if !force_refresh && is_within_ttl(completed_at, now_secs()) {
         return HttpResponse::Ok().json(DecentralizedPartiesResponse {
             parties: Vec::new(),
             source: ResponseSource::Cache,
@@ -296,16 +318,10 @@ pub async fn get_decentralized_parties(
         });
     }
 
-    // Bound total discovery before claiming anything: a burst of distinct
-    // prefixes would otherwise start one discovery each, which per-prefix
-    // single-flight below does nothing about.
-    let Ok(_permit) = Arc::clone(&data.discovery_permits).try_acquire_owned() else {
-        return await_in_flight_discovery(&data, &prefix, !force_refresh).await;
-    };
-
-    // Single-flight. A cold cache used to let every concurrent request start
-    // its own discovery, so one page load could put several full topology
-    // reads on the participant at once.
+    // Single-flight, and it comes first: a duplicate request must not hold a
+    // discovery permit while it waits on the winner. A cold cache used to let
+    // every concurrent request start its own discovery, so one page load could
+    // put several full topology reads on the participant at once.
     if !data
         .refreshing_prefixes
         .write()
@@ -314,6 +330,22 @@ pub async fn get_decentralized_parties(
     {
         return await_in_flight_discovery(&data, &prefix, !force_refresh).await;
     }
+
+    // Bound total discovery: the prefix comes from the request, so distinct
+    // values would each start their own. Waiting briefly rides out a burst.
+    let Ok(Ok(_permit)) = tokio::time::timeout(
+        SINGLE_FLIGHT_WAIT,
+        Arc::clone(&data.discovery_permits).acquire_owned(),
+    )
+    .await
+    else {
+        // Capacity ran out, which says nothing about this prefix. Answering an
+        // empty list would read as "no parties", so report the overload.
+        data.refreshing_prefixes.write().await.remove(&prefix);
+        return HttpResponse::ServiceUnavailable().json(ErrorResponse {
+            error: "party discovery is at capacity, retry shortly".to_string(),
+        });
+    };
 
     let auth = data.auth.read().await.clone();
     let party_creds = data.party_credentials.read().await.clone();
@@ -403,7 +435,7 @@ async fn await_in_flight_discovery(
             }
 
             let completed_at = data.discovery_completed.read().await.get(prefix).copied();
-            if discovery_is_fresh(completed_at, now_secs()) {
+            if is_within_ttl(completed_at, now_secs()) {
                 break;
             }
         }
@@ -1024,6 +1056,47 @@ async fn owned_decentralized_namespaces(
     Ok(namespaces)
 }
 
+/// Pair each decentralized namespace this node owns a key in with every party
+/// in it, dropping any party the requested prefix excludes.
+///
+/// A namespace is derived from its owner set alone, so two parties with the
+/// same owners share one and a namespace-scoped query returns both. Keeping one
+/// party per namespace silently dropped the other, and left a prefix query
+/// answering empty depending on which of them arrived last.
+fn pair_namespaces_with_parties(
+    namespace_definitions: Vec<DecentralizedNamespaceDefinition>,
+    parties_by_namespace: &HashMap<String, Vec<PartyToParticipant>>,
+    my_fingerprints: &HashSet<String>,
+    prefix_filter: Option<&str>,
+) -> Vec<(DecentralizedNamespaceDefinition, String, PartyToParticipant)> {
+    let mut paired = Vec::new();
+
+    for definition in namespace_definitions {
+        let Some(my_owner_key) = definition
+            .owners
+            .iter()
+            .find(|owner| my_fingerprints.contains(*owner))
+            .cloned()
+        else {
+            continue;
+        };
+        let Some(parties) = parties_by_namespace.get(&definition.decentralized_namespace) else {
+            continue;
+        };
+
+        for party in parties {
+            // Namespace-scoped discovery does not know about the requested
+            // prefix, so apply it to each party the namespace resolved to.
+            if !prefix_filter.is_none_or(|prefix| party.party.starts_with(prefix)) {
+                continue;
+            }
+            paired.push((definition.clone(), my_owner_key.clone(), party.clone()));
+        }
+    }
+
+    paired
+}
+
 /// Build the `list_party_to_participant` request used to discover this node's
 /// decentralized parties.
 ///
@@ -1141,7 +1214,10 @@ pub async fn fetch_decentralized_parties(
     let mut vault_client =
         VaultServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
 
-    let synchronizer_id = utils::get_synchronizer_id(config).await?;
+    // Its own Admin API call on a cold process-wide cache, so it carries the
+    // same deadline as the reads that follow it.
+    let synchronizer_id =
+        bounded_call("get_synchronizer_id", utils::get_synchronizer_id(config)).await?;
     let participant_id = config.participant_id().to_string();
 
     // Wanted twice: to discover which namespaces this node owns a key in, and
@@ -1171,7 +1247,13 @@ pub async fn fetch_decentralized_parties(
         .map(|namespace| namespace_party_filter(namespace))
         .collect()
     };
-    let mut p2p_by_namespace = HashMap::new();
+    // Keyed to a list: a decentralized namespace is derived from its owner set
+    // alone (`compute_decentralized_namespace`), so two parties with the same
+    // owners share one, and a namespace-wide filter returns both.
+    let mut p2p_by_namespace: HashMap<String, Vec<_>> = HashMap::new();
+    // An exact party filter is an identifier *prefix* once Canton has split off
+    // the namespace, so two filters can return the same party.
+    let mut seen_parties: HashSet<String> = HashSet::new();
     for party_filter in party_filters {
         let response = bounded_read(
             "list_party_to_participant",
@@ -1196,7 +1278,13 @@ pub async fn fetch_decentralized_parties(
             if namespace.is_empty() {
                 continue;
             }
-            p2p_by_namespace.insert(namespace.to_string(), party_mapping);
+            if !seen_parties.insert(party_mapping.party.clone()) {
+                continue;
+            }
+            p2p_by_namespace
+                .entry(namespace.to_string())
+                .or_default()
+                .push(party_mapping);
         }
     }
 
@@ -1217,25 +1305,16 @@ pub async fn fetch_decentralized_parties(
         dns_results.extend(response.results);
     }
 
-    // Filter to parties where this participant is a member
-    let my_parties: Vec<_> = dns_results
-        .into_iter()
-        .filter_map(|result| {
-            let item = result.item?;
-            let my_owner_key = item
-                .owners
-                .iter()
-                .find(|owner| namespace_key_fingerprints.contains(*owner))
-                .cloned()?;
-            let p2p = p2p_by_namespace.get(&item.decentralized_namespace)?;
-            // Namespace-scoped discovery does not know about the requested
-            // prefix, so apply it to the party the namespace resolved to.
-            if !prefix_filter.is_none_or(|prefix| p2p.party.starts_with(prefix)) {
-                return None;
-            }
-            Some((item, my_owner_key, p2p.clone()))
-        })
-        .collect();
+    // Filter to parties where this participant is a member.
+    let my_parties = pair_namespaces_with_parties(
+        dns_results
+            .into_iter()
+            .filter_map(|result| result.item)
+            .collect(),
+        &p2p_by_namespace,
+        &namespace_key_fingerprints,
+        prefix_filter,
+    );
 
     // Stable order, so a paged caller sees each party once across requests.
     let mut my_parties = my_parties;
@@ -1873,13 +1952,10 @@ mod tests {
     fn a_completed_discovery_answers_until_the_ttl_passes() {
         let now = 1_000_000;
 
-        assert!(!discovery_is_fresh(None, now));
-        assert!(discovery_is_fresh(Some(now), now));
-        assert!(discovery_is_fresh(Some(now - PARTIES_CACHE_TTL_SECS), now));
-        assert!(!discovery_is_fresh(
-            Some(now - PARTIES_CACHE_TTL_SECS - 1),
-            now
-        ));
+        assert!(!is_within_ttl(None, now));
+        assert!(is_within_ttl(Some(now), now));
+        assert!(is_within_ttl(Some(now - PARTIES_CACHE_TTL_SECS), now));
+        assert!(!is_within_ttl(Some(now - PARTIES_CACHE_TTL_SECS - 1), now));
     }
 
     /// A backwards clock jump must not pin the answer. A negative age would
@@ -1888,8 +1964,8 @@ mod tests {
     fn a_timestamp_from_the_future_is_not_fresh() {
         let now = 1_000_000;
 
-        assert!(!discovery_is_fresh(Some(now + 1), now));
-        assert!(!discovery_is_fresh(Some(now + 86_400), now));
+        assert!(!is_within_ttl(Some(now + 1), now));
+        assert!(!is_within_ttl(Some(now + 86_400), now));
     }
 
     /// Only an empty result is recorded. A non-empty one is served from
@@ -1908,6 +1984,87 @@ mod tests {
         record_discovery(&completed, "cbtc", &[]).await;
         assert!(completed.read().await.contains_key("cbtc"));
         Ok(())
+    }
+
+    /// Two parties with the same owners share one decentralized namespace, so
+    /// a namespace-scoped query returns both. Reporting one of them silently
+    /// loses a party the node is a member of.
+    #[test]
+    fn a_shared_namespace_reports_every_party_in_it() {
+        let namespace = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
+        let mine = "1220aaaa";
+        let definition = DecentralizedNamespaceDefinition {
+            decentralized_namespace: namespace.to_string(),
+            threshold: 1,
+            owners: vec![mine.to_string(), "1220bbbb".to_string()],
+        };
+        let parties_by_namespace = HashMap::from([(
+            namespace.to_string(),
+            vec![
+                a_mapping(&format!("alpha::{namespace}")),
+                a_mapping(&format!("beta::{namespace}")),
+            ],
+        )]);
+        let mut fingerprints = HashSet::new();
+        fingerprints.insert(mine.to_string());
+
+        let paired = pair_namespaces_with_parties(
+            vec![definition.clone()],
+            &parties_by_namespace,
+            &fingerprints,
+            None,
+        );
+
+        let found: Vec<_> = paired.iter().map(|(_, _, p2p)| p2p.party.clone()).collect();
+        assert_eq!(
+            found,
+            vec![format!("alpha::{namespace}"), format!("beta::{namespace}")]
+        );
+        assert!(paired.iter().all(|(_, key, _)| key == mine));
+
+        // The prefix narrows within the namespace, and picks the party by name
+        // rather than by whichever mapping arrived last.
+        let filtered = pair_namespaces_with_parties(
+            vec![definition],
+            &parties_by_namespace,
+            &fingerprints,
+            Some("beta"),
+        );
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].2.party, format!("beta::{namespace}"));
+    }
+
+    /// A namespace this node owns no key in is somebody else's party.
+    #[test]
+    fn a_namespace_without_my_key_is_skipped() {
+        let namespace = "1220dddd";
+        let definition = DecentralizedNamespaceDefinition {
+            decentralized_namespace: namespace.to_string(),
+            threshold: 1,
+            owners: vec!["1220bbbb".to_string()],
+        };
+        let parties_by_namespace = HashMap::from([(
+            namespace.to_string(),
+            vec![a_mapping(&format!("theirs::{namespace}"))],
+        )]);
+
+        let paired = pair_namespaces_with_parties(
+            vec![definition],
+            &parties_by_namespace,
+            &HashSet::from(["1220aaaa".to_string()]),
+            None,
+        );
+
+        assert!(paired.is_empty());
+    }
+
+    fn a_mapping(party: &str) -> PartyToParticipant {
+        PartyToParticipant {
+            party: party.to_string(),
+            threshold: 1,
+            participants: Vec::new(),
+            party_signing_keys: None,
+        }
     }
 
     /// A discovery that finds parties has to clear a standing empty mark. If
