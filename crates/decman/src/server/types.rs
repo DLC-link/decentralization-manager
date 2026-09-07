@@ -1105,6 +1105,7 @@ mod tests {
             coordinator_name: None,
             expected_peers: vec![peer_a.clone(), peer_b.clone()],
             completed_peers: vec![peer_a],
+            connected_peers: vec![peer_b],
             dec_party_id: Some(CantonId::parse(&dec_party_id_str).unwrap()),
             prefix: None,
             participants: Vec::new(),
@@ -1143,6 +1144,17 @@ mod tests {
             .expect("completed_peers must be a JSON array");
         assert_eq!(completed.len(), 1);
         assert!(completed[0].is_string());
+
+        let connected = json
+            .get("connected_peers")
+            .and_then(Value::as_array)
+            .expect("connected_peers must be a JSON array");
+        assert_eq!(connected.len(), 1);
+        assert!(
+            connected[0].is_string(),
+            "connected_peers entry must be a string, got {}",
+            connected[0]
+        );
 
         // dec_party_id (Option<CantonId>) must serialize as a plain string,
         // not as a nested object with prefix/namespace fields.

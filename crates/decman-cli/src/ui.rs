@@ -10,7 +10,8 @@ use ratatui::widgets::{
 
 use common::types::{
     ConnectionStatus, DecentralizedParty, PackageInfo, PeerErrorKind, PeerPackageComparison,
-    PendingInvitation, Permission, VettedPackageInfo, WorkflowProgress, WorkflowRun,
+    PendingInvitation, Permission, VettedPackageInfo, WAITING_FOR_PEERS_STEP, WorkflowProgress,
+    WorkflowRole, WorkflowRun,
 };
 
 use crate::api::{
@@ -2456,6 +2457,27 @@ fn detail_kv(label: &str, value: String) -> Line<'static> {
     Line::from(vec![detail_label(label), Span::raw(value)])
 }
 
+/// The peer count for a run's detail popup, or `None` when there is nothing
+/// truthful to show. Coordinator-only: a peer-side row never learns what the
+/// other peers did, so its counter would sit at 0 for the whole run. While the
+/// coordinator waits, the peers that joined are the progress — a waiting step
+/// carries no command, so nothing completes it — and from the next step on it
+/// is the peers that completed the current one.
+fn peers_progress(run: &WorkflowRun) -> Option<String> {
+    if run.role != WorkflowRole::Coordinator || run.expected_peers.is_empty() {
+        return None;
+    }
+    let (done, label) = if run.current_step == WAITING_FOR_PEERS_STEP {
+        (run.connected_peers.len(), "joined")
+    } else {
+        (run.completed_peers.len(), "done")
+    };
+    Some(format!(
+        "{done}/{total} {label}",
+        total = run.expected_peers.len()
+    ))
+}
+
 /// An indented detail value line (for list items).
 fn detail_item(value: String) -> Line<'static> {
     Line::from(vec![
@@ -2512,15 +2534,8 @@ fn run_detail_lines(run: &WorkflowRun) -> Vec<Line<'static>> {
         lines.push(detail_kv("Participants", String::new()));
         lines.extend(run.participants.iter().map(|p| detail_item(p.to_string())));
     }
-    if !run.completed_peers.is_empty() || !run.expected_peers.is_empty() {
-        lines.push(detail_kv(
-            "Peers",
-            format!(
-                "{done}/{total} done",
-                done = run.completed_peers.len(),
-                total = run.expected_peers.len()
-            ),
-        ));
+    if let Some(peers) = peers_progress(run) {
+        lines.push(detail_kv("Peers", peers));
     }
     if !run.package_names.is_empty() {
         lines.push(detail_kv("Packages", run.package_names.join(", ")));
@@ -2766,6 +2781,7 @@ mod tests {
                 coordinator_name: None,
                 expected_peers: Vec::new(),
                 completed_peers: Vec::new(),
+                connected_peers: Vec::new(),
                 dec_party_id: None,
                 prefix: None,
                 participants: Vec::new(),
@@ -2794,6 +2810,7 @@ mod tests {
                 coordinator_name: None,
                 expected_peers: Vec::new(),
                 completed_peers: Vec::new(),
+                connected_peers: Vec::new(),
                 dec_party_id: None,
                 prefix: None,
                 participants: Vec::new(),
@@ -3248,6 +3265,51 @@ mod tests {
     }
 
     #[test]
+    fn peers_progress_counts_joins_while_waiting_then_completions() {
+        let mut run = WorkflowRun {
+            instance_name: "beth-network-creation".to_owned(),
+            kind: WorkflowKind::Onboarding,
+            role: WorkflowRole::Coordinator,
+            status: WorkflowProgress::InProgress,
+            current_step: WAITING_FOR_PEERS_STEP.to_owned(),
+            step_index: 0,
+            step_total: 7,
+            config_json: String::new(),
+            coordinator_pubkey: None,
+            coordinator_instance: None,
+            coordinator_name: None,
+            expected_peers: vec![canton_id("p1"), canton_id("p2"), canton_id("p3")],
+            completed_peers: vec![canton_id("p1")],
+            connected_peers: vec![canton_id("p1"), canton_id("p2")],
+            dec_party_id: None,
+            prefix: Some("beth-network".to_owned()),
+            participants: Vec::new(),
+            previous_threshold: None,
+            new_threshold: None,
+            kicked_participant: None,
+            added_participant: None,
+            package_names: Vec::new(),
+            dar_filenames: Vec::new(),
+            error: None,
+            dismissed: false,
+            created_at: 0,
+            updated_at: 0,
+        };
+
+        // Waiting: the joins are the progress. Reporting `completed_peers` here
+        // is what showed a zero to an operator whose peers had accepted.
+        assert_eq!(peers_progress(&run).as_deref(), Some("2/3 joined"));
+
+        // Past the gate, completions of the current step take over.
+        run.current_step = "SignDns".to_owned();
+        assert_eq!(peers_progress(&run).as_deref(), Some("1/3 done"));
+
+        // A peer-side row has no such knowledge, so it shows no count at all.
+        run.role = WorkflowRole::Peer;
+        assert_eq!(peers_progress(&run), None);
+    }
+
+    #[test]
     fn feed_detail_popup_renders_run_fields_and_error() {
         let run = WorkflowRun {
             instance_name: "onboarding-treasury-abc".to_owned(),
@@ -3263,6 +3325,7 @@ mod tests {
             coordinator_name: None,
             expected_peers: Vec::new(),
             completed_peers: Vec::new(),
+            connected_peers: Vec::new(),
             dec_party_id: None,
             prefix: Some("treasury".to_owned()),
             participants: Vec::new(),

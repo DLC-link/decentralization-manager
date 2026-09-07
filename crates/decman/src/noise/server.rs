@@ -95,6 +95,20 @@ impl ActiveWorkflow {
             Self::ChangeThreshold(s) => s.handle_command(peer_id, message).await,
         }
     }
+
+    /// The peers that have joined this run. `WaitingForPeers` gates on this
+    /// set rather than on `completed_peers`, so it is the join progress the
+    /// runs API reports while a run waits for its invitees.
+    pub async fn connected_peers(&self) -> HashSet<CantonId> {
+        match self {
+            Self::Onboarding(s) => s.workflow_state.connected_peers().await,
+            Self::Kick(s) => s.workflow_state.connected_peers().await,
+            Self::Contracts(s) => s.workflow_state.connected_peers().await,
+            Self::Dars(s) => s.workflow_state.connected_peers().await,
+            Self::AddParty(s) => s.workflow_state.connected_peers().await,
+            Self::ChangeThreshold(s) => s.workflow_state.connected_peers().await,
+        }
+    }
 }
 
 /// Peer quorum: `m - 1` (the coordinator signs itself), clamped to
