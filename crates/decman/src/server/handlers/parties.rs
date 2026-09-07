@@ -144,15 +144,21 @@ pub(crate) async fn record_discovery(
     // Evict the oldest rather than clearing: `prefix` is request-controlled,
     // and clearing would let a stream of unique prefixes flush the entries
     // real ones depend on, putting their discovery back on the participant.
-    while completed.len() >= MAX_TRACKED_PREFIXES {
-        let Some(oldest) = completed
-            .iter()
-            .min_by_key(|(_, at)| **at)
-            .map(|(prefix, _)| prefix.clone())
-        else {
-            break;
-        };
-        completed.remove(&oldest);
+    //
+    // Only when this prefix is new. Re-stamping one already tracked does not
+    // grow the map, so it must not cost another prefix its place: repeated
+    // refreshes of a single prefix would otherwise drain the rest.
+    if !completed.contains_key(prefix) {
+        while completed.len() >= MAX_TRACKED_PREFIXES {
+            let Some(oldest) = completed
+                .iter()
+                .min_by_key(|(_, at)| **at)
+                .map(|(prefix, _)| prefix.clone())
+            else {
+                break;
+            };
+            completed.remove(&oldest);
+        }
     }
 
     completed.insert(prefix.to_string(), now);
@@ -2136,6 +2142,18 @@ mod tests {
         assert!(!seen.contains_key("oldest"), "the oldest entry survived");
         assert!(seen.contains_key("newcomer"));
         assert!(seen.len() > 1, "the map was cleared instead of trimmed");
+        drop(seen);
+
+        // Re-stamping a tracked prefix does not grow the map, so it must not
+        // evict anyone. Repeated refreshes of one prefix would drain the rest.
+        let before: Vec<String> = completed.read().await.keys().cloned().collect();
+        record_discovery(&completed, "newcomer", &[]).await;
+        let after: Vec<String> = completed.read().await.keys().cloned().collect();
+        assert_eq!(
+            before.len(),
+            after.len(),
+            "re-stamping an existing prefix evicted another"
+        );
     }
 
     /// `prefix` comes from the request, so the map has to stay bounded whoever
