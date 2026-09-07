@@ -473,15 +473,29 @@ const InvitationCard = ({
               >
                 DARs ({invitation.dar_filenames.length})
               </Typography>
-              <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
-                {invitation.dar_filenames.map((filename) => (
-                  <Chip
-                    key={filename}
-                    size="small"
-                    variant="outlined"
-                    label={filename}
-                  />
-                ))}
+              {/* The peer refuses any DAR whose bytes do not hash to the
+                  value pinned here, so this is the operator accepting the
+                  content rather than just the name. Shown in full so it can be
+                  compared against a published release hash before accepting. */}
+              <Box sx={{ display: "flex", flexDirection: "column", gap: 0.5 }}>
+                {invitation.dar_filenames.map((filename, index) => {
+                  const hash = invitation.dar_hashes?.[index];
+                  return (
+                    <Box
+                      key={filename}
+                      sx={{ display: "flex", alignItems: "baseline", gap: 1 }}
+                    >
+                      <Chip size="small" variant="outlined" label={filename} />
+                      <Typography
+                        variant="caption"
+                        color={hash ? "text.secondary" : "warning.main"}
+                        sx={{ fontFamily: "monospace", wordBreak: "break-all" }}
+                      >
+                        {hash ? `sha256:${hash}` : "no hash pinned"}
+                      </Typography>
+                    </Box>
+                  );
+                })}
               </Box>
             </Box>
           )}
