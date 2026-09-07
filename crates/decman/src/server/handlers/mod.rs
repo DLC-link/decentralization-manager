@@ -30,7 +30,8 @@ pub(crate) use governance::{get_party_credentials, packages};
 pub(crate) use invitations::{accept_invitation, decline_invitation, get_invitations};
 pub(crate) use keys::get_key_status;
 pub(crate) use parties::{
-    clear_acs_import_quarantine, compare_peer_packages, fetch_decentralized_parties,
+    MAX_CONCURRENT_DISCOVERIES, clear_acs_import_quarantine, compare_peer_packages,
+    fetch_decentralized_parties,
     get_decentralized_parties, get_participants_status, get_vetted_packages, record_discovery,
     resolve_owner_keys_from_peers, store_parties_to_db,
 };

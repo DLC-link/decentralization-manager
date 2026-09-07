@@ -51,7 +51,7 @@ use canton_proto_rs::com::digitalasset::canton::{
 };
 use hyper::{Body, Response, StatusCode};
 use sqlx::SqlitePool;
-use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio::sync::{Mutex, RwLock, Semaphore, mpsc};
 use tokio_noise::handshakes::nn_psk2::Responder;
 use utoipa_actix_web::AppExt;
 use utoipa_swagger_ui::SwaggerUi;
@@ -143,6 +143,10 @@ pub struct AppState {
     pub test_mode: bool,
     /// Prefixes currently being refreshed from Canton (deduplication)
     pub refreshing_prefixes: Arc<RwLock<HashSet<String>>>,
+    /// Bounds how many Canton discoveries run at once, across every prefix.
+    /// `refreshing_prefixes` deduplicates one prefix; this bounds the total,
+    /// which matters because the prefix comes from the request.
+    pub discovery_permits: Arc<Semaphore>,
     /// Unix seconds of the last completed Canton discovery, per prefix.
     ///
     /// A prefix with no parties leaves no rows in `dec_parties`, so the cached
@@ -182,6 +186,9 @@ impl AppState {
             bootstrap_mu: Arc::new(Mutex::new(())),
             test_mode: true,
             refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
+            discovery_permits: Arc::new(Semaphore::new(
+                crate::server::handlers::MAX_CONCURRENT_DISCOVERIES,
+            )),
             discovery_completed: Arc::new(RwLock::new(HashMap::new())),
             http_client: reqwest::Client::new(),
         }))
@@ -1044,6 +1051,9 @@ pub async fn start_server(
         // `--insecure` (or tests). See the `insecure` binding above.
         test_mode: insecure,
         refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
+        discovery_permits: Arc::new(Semaphore::new(
+            crate::server::handlers::MAX_CONCURRENT_DISCOVERIES,
+        )),
         discovery_completed: Arc::new(RwLock::new(HashMap::new())),
         http_client,
     });
