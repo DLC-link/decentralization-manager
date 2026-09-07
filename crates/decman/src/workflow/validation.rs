@@ -225,9 +225,12 @@ impl PeerExpectations {
                 found = party.prefix
             ),
             Some(_) => {}
-            None => tracing::warn!(
-                "accepted onboarding invitation carried no party prefix; skipping the \
-                 prefix check on the P2P proposal"
+            // `prefix` is required on every onboarding invite, so an absent one
+            // means the invite never parsed — leaving the coordinator to choose
+            // the party's prefix.
+            None => anyhow::bail!(
+                "accepted onboarding invitation carries no party prefix, so the proposed \
+                 party cannot be checked against it"
             ),
         }
 
@@ -245,6 +248,7 @@ impl PeerExpectations {
         }
 
         self.check_p2p_membership(&mapping)?;
+        self.check_onboarding_markers(&mapping)?;
         self.check_p2p_thresholds(&mapping)?;
         self.check_own_daml_key(storage, instance_name, &mapping)
             .await
@@ -326,6 +330,7 @@ impl PeerExpectations {
             );
         }
         self.check_p2p_membership(&mapping)?;
+        self.check_onboarding_markers(&mapping)?;
         self.check_p2p_thresholds(&mapping)?;
 
         tracing::info!(
@@ -515,6 +520,17 @@ impl PeerExpectations {
             if !hosts.insert(id.clone()) {
                 anyhow::bail!("P2P proposal lists participant {id} twice");
             }
+            // Every proposal this tool builds hosts at Confirmation. Submission
+            // would let that participant submit for the party directly, so a
+            // silent upgrade is a change to who can act, not a detail.
+            if participant.permission != enums::ParticipantPermission::Confirmation as i32 {
+                anyhow::bail!(
+                    "P2P proposal hosts {id} with permission {permission}, not Confirmation",
+                    permission = enums::ParticipantPermission::try_from(participant.permission)
+                        .map(|p| p.as_str_name().to_string())
+                        .unwrap_or_else(|_| format!("unknown ({})", participant.permission))
+                );
+            }
         }
 
         if hosts != self.members {
@@ -547,6 +563,29 @@ impl PeerExpectations {
             && !hosts.contains(added)
         {
             anyhow::bail!("P2P proposal does not host {added}, the participant being added");
+        }
+        Ok(())
+    }
+
+    /// The onboarding marker decides who is still importing an ACS. Dropping it
+    /// activates the new member before its import finishes; moving it to an
+    /// existing host suspends that host instead. So exactly the accepted new
+    /// participant carries it, and on a run that adds nobody, no one does.
+    ///
+    /// Not applied to the clearing proposal, whose purpose is to remove the
+    /// marker — [`check_clear_onboarding`](Self::check_clear_onboarding)
+    /// requires its absence instead.
+    fn check_onboarding_markers(&self, mapping: &PartyToParticipant) -> Result {
+        for participant in &mapping.participants {
+            let id = CantonId::parse(&participant.participant_uid)?;
+            let expected = self.new_participant.as_ref() == Some(&id);
+            if participant.onboarding.is_some() != expected {
+                anyhow::bail!(
+                    "P2P proposal marks {id} as onboarding: {found}, but the accepted \
+                     invitation calls for {expected}",
+                    found = participant.onboarding.is_some()
+                );
+            }
         }
         Ok(())
     }
@@ -588,13 +627,22 @@ impl PeerExpectations {
                 anyhow::bail!("proposed threshold {threshold} differs from the accepted {expected}")
             }
             Some(_) => Ok(()),
-            None => {
+            // Only the onboarding invite's threshold is optional on the wire
+            // (`Option<i32>`, absent from coordinators that predate it). Kick,
+            // add-party and change-threshold all require it, so an absent one
+            // there would let the coordinator pick any in-range value.
+            None if self.kind == WorkflowKind::Onboarding => {
                 tracing::warn!(
-                    "accepted invitation carried no threshold; only the range check was \
-                     applied to the proposed {threshold}"
+                    "accepted onboarding invitation carried no threshold; only the range \
+                     check was applied to the proposed {threshold}"
                 );
                 Ok(())
             }
+            None => anyhow::bail!(
+                "accepted {kind:?} invitation carries no threshold, so the proposed \
+                 {threshold} cannot be checked against it",
+                kind = self.kind
+            ),
         }
     }
 
@@ -1016,6 +1064,100 @@ mod tests {
 
     /// A stripped `party_signing_keys` is not a missing threshold — it is a
     /// mapping that would leave the party unable to authorize anything.
+    /// Submission permission lets a participant submit for the party directly.
+    /// Every proposal this tool builds hosts at Confirmation, so an upgrade is
+    /// a change to who can act, not a formatting detail.
+    #[test]
+    fn rejects_a_host_upgraded_to_submission() -> Result {
+        let (a, b) = (canton_id("p1", 1)?, canton_id("p2", 2)?);
+        let expectations = expectations(vec![a.clone(), b.clone()], a.clone());
+        let mut mapping = p2p("dec::x", &[a, b], 2);
+        mapping.participants[1].permission = enums::ParticipantPermission::Submission as i32;
+        assert!(expectations.check_p2p_membership(&mapping).is_err());
+        Ok(())
+    }
+
+    /// Dropping the marker activates the new member before its ACS import
+    /// finishes; moving it to an existing host suspends that host instead.
+    #[test]
+    fn rejects_a_misplaced_onboarding_marker() -> Result {
+        let (a, b, joining) = (
+            canton_id("p1", 1)?,
+            canton_id("p2", 2)?,
+            canton_id("p3", 3)?,
+        );
+        let mut expectations = expectations(vec![a.clone(), b.clone(), joining.clone()], a.clone());
+        expectations.new_participant = Some(joining.clone());
+
+        // Marker on the wrong host.
+        let mut moved = p2p("dec::x", &[a.clone(), b.clone(), joining.clone()], 2);
+        moved.participants[1].onboarding = Some(hosting_participant::Onboarding::default());
+        assert!(expectations.check_onboarding_markers(&moved).is_err());
+
+        // Marker missing entirely.
+        let dropped = p2p("dec::x", &[a.clone(), b.clone(), joining.clone()], 2);
+        assert!(expectations.check_onboarding_markers(&dropped).is_err());
+
+        // Marker exactly where the invitation puts it.
+        let mut correct = p2p("dec::x", &[a, b, joining], 2);
+        correct.participants[2].onboarding = Some(hosting_participant::Onboarding::default());
+        expectations.check_onboarding_markers(&correct)
+    }
+
+    /// A run that adds nobody must not introduce an onboarding marker either.
+    #[test]
+    fn rejects_an_onboarding_marker_on_a_run_that_adds_nobody() -> Result {
+        let (a, b) = (canton_id("p1", 1)?, canton_id("p2", 2)?);
+        let expectations = expectations(vec![a.clone(), b.clone()], a.clone());
+        assert!(expectations.new_participant.is_none());
+        let mut mapping = p2p("dec::x", &[a, b], 2);
+        mapping.participants[0].onboarding = Some(hosting_participant::Onboarding::default());
+        assert!(expectations.check_onboarding_markers(&mapping).is_err());
+        Ok(())
+    }
+
+    /// Only the onboarding invite's threshold is optional on the wire. For the
+    /// other kinds an absent one would let the coordinator pick any in-range
+    /// value.
+    #[test]
+    fn rejects_an_absent_threshold_except_for_onboarding() -> Result {
+        let a = canton_id("p1", 1)?;
+        let mut expectations = expectations(vec![a.clone()], a);
+        expectations.threshold = None;
+
+        expectations.kind = WorkflowKind::Kick;
+        assert!(expectations.check_threshold(2, 3).is_err());
+        expectations.kind = WorkflowKind::AddParty;
+        assert!(expectations.check_threshold(2, 3).is_err());
+
+        expectations.kind = WorkflowKind::Onboarding;
+        expectations.check_threshold(2, 3)
+    }
+
+    /// The prefix is required on every onboarding invite, so an absent one
+    /// means the invite never parsed — and the coordinator would name the party.
+    #[tokio::test]
+    async fn rejects_an_onboarding_p2p_when_no_prefix_was_accepted() -> Result {
+        let a = canton_id("p1", 1)?;
+        let mut expectations = expectations(vec![a.clone()], a.clone());
+        expectations.kind = WorkflowKind::Onboarding;
+        assert!(expectations.prefix.is_none());
+
+        let payload = encode_proposal(topology_mapping::Mapping::PartyToParticipant(p2p(
+            &canton_id("anything", 5)?.to_string(),
+            &[a],
+            1,
+        )));
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await?;
+        assert!(
+            expectations
+                .check_onboarding_p2p(&pool, "run", &payload, None)
+                .await
+                .is_err()
+        );
+        Ok(())
+    }
+
     #[test]
     fn rejects_a_proposal_with_no_party_signing_keys() -> Result {
         let (a, b) = (canton_id("p1", 1)?, canton_id("p2", 2)?);

@@ -899,8 +899,16 @@ pub async fn start_peer(
                 let Some(add_party_config) = decode_add_party_config(&payload) else {
                     continue;
                 };
-                if let Err(e) =
-                    expectations.check_dec_party(&add_party_config.decentralized_party_id)
+                // Both the party and the new member are pinned before
+                // `is_new_member` reads `new_participant_id` to decide this
+                // node's role: naming this peer there would otherwise make it
+                // take the new member's part in a run it joined as an existing
+                // member.
+                if let Err(e) = expectations
+                    .check_dec_party(&add_party_config.decentralized_party_id)
+                    .and_then(|()| {
+                        expectations.check_new_participant(&add_party_config.new_participant_id)
+                    })
                 {
                     tracing::error!("Refusing the coordinator's add-party config: {e}");
                     consecutive_step_failures += 1;
@@ -1079,8 +1087,16 @@ pub async fn start_peer(
                 let Some(add_party_config) = decode_add_party_config(&items[0]) else {
                     continue;
                 };
-                if let Err(e) =
-                    expectations.check_dec_party(&add_party_config.decentralized_party_id)
+                // Both the party and the new member are pinned before
+                // `is_new_member` reads `new_participant_id` to decide this
+                // node's role: naming this peer there would otherwise make it
+                // take the new member's part in a run it joined as an existing
+                // member.
+                if let Err(e) = expectations
+                    .check_dec_party(&add_party_config.decentralized_party_id)
+                    .and_then(|()| {
+                        expectations.check_new_participant(&add_party_config.new_participant_id)
+                    })
                 {
                     tracing::error!("Refusing the coordinator's ACS import: {e}");
                     consecutive_step_failures += 1;
@@ -1133,8 +1149,16 @@ pub async fn start_peer(
                 let Some(add_party_config) = decode_add_party_config(&payload) else {
                     continue;
                 };
-                if let Err(e) =
-                    expectations.check_dec_party(&add_party_config.decentralized_party_id)
+                // Both the party and the new member are pinned before
+                // `is_new_member` reads `new_participant_id` to decide this
+                // node's role: naming this peer there would otherwise make it
+                // take the new member's part in a run it joined as an existing
+                // member.
+                if let Err(e) = expectations
+                    .check_dec_party(&add_party_config.decentralized_party_id)
+                    .and_then(|()| {
+                        expectations.check_new_participant(&add_party_config.new_participant_id)
+                    })
                 {
                     tracing::error!("Refusing the coordinator's clearing request: {e}");
                     consecutive_step_failures += 1;
