@@ -536,7 +536,28 @@ pub async fn start_peer(
                     .read_artifact(&instance_name, artifact_kinds::ACCEPTED_DNS_NAMESPACE, None)
                     .await
                 {
-                    Ok(recorded) => recorded.and_then(|bytes| String::from_utf8(bytes).ok()),
+                    // Nothing recorded is the mixed-version case. Bytes that
+                    // are not valid UTF-8 are not: something WAS recorded and
+                    // cannot be read back, so treating it as absent would drop
+                    // the cross-check on corrupt state.
+                    Ok(None) => None,
+                    Ok(Some(bytes)) => match String::from_utf8(bytes) {
+                        Ok(namespace) => Some(namespace),
+                        Err(e) => {
+                            tracing::error!(
+                                "Refusing to sign P2P: the recorded DNS namespace is not \
+                                 readable, so the cross-check cannot be applied: {e}"
+                            );
+                            consecutive_step_failures += 1;
+                            if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                                anyhow::bail!(
+                                    "Aborting peer: the recorded DNS namespace is corrupt: {e}"
+                                );
+                            }
+                            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                            continue;
+                        }
+                    },
                     Err(e) => {
                         tracing::error!(
                             "Refusing to sign P2P: cannot read the DNS namespace this run \
