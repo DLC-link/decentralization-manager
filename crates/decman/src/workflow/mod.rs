@@ -431,6 +431,22 @@ pub async fn start_peer(
                     }
                 };
 
+                // The prefix names the vault keys this step creates or reuses,
+                // so it is pinned before any key material is touched.
+                if let Err(e) =
+                    expectations.check_onboarding_config(&onboarding_config.party_id_prefix)
+                {
+                    tracing::error!("Refusing the coordinator's onboarding config: {e}");
+                    consecutive_step_failures += 1;
+                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                        anyhow::bail!(
+                            "Aborting peer: onboarding config does not match the accepted invitation: {e}"
+                        );
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    continue;
+                }
+
                 if let Err(e) =
                     onboarding::generate_keys(&node_config, &db, &instance_name, &onboarding_config)
                         .await

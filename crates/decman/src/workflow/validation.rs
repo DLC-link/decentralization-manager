@@ -138,6 +138,35 @@ impl PeerExpectations {
         })
     }
 
+    /// Validate the onboarding config the coordinator sends before this node
+    /// generates keys.
+    ///
+    /// `generate_keys` derives the vault key names from `party_id_prefix`, so
+    /// an unchecked prefix lets a coordinator have this node create keys under
+    /// a name the operator never accepted — or reuse the keys already sitting
+    /// under another party's prefix, and authorize a namespace delegation for
+    /// it. The prefix is pinned before any of that happens.
+    ///
+    /// # Errors
+    ///
+    /// Errors if the prefix differs from the accepted one, or if the accepted
+    /// invitation carries none.
+    pub fn check_onboarding_config(&self, party_id_prefix: &str) -> Result {
+        let accepted = self.prefix.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "accepted onboarding invitation carries no party prefix, so the \
+                 coordinator's config cannot be checked against it"
+            )
+        })?;
+        if accepted != party_id_prefix {
+            anyhow::bail!(
+                "coordinator asked for keys under prefix {party_id_prefix} but the accepted \
+                 invitation names {accepted}"
+            );
+        }
+        Ok(())
+    }
+
     /// Validate the DNS proposal of an onboarding run.
     ///
     /// The party does not exist yet, so there is no party id to pin against.
@@ -171,7 +200,15 @@ impl PeerExpectations {
             );
         }
 
-        let own_namespace = self.own_namespace(storage, instance_name).await?;
+        let own_namespace = self
+            .own_namespace(storage, instance_name)
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "this node's public keys are not on the {instance_name} run, so the DNS \
+                     proposal cannot be checked against them"
+                )
+            })?;
         if !owners.contains(&own_namespace) {
             anyhow::bail!(
                 "DNS proposal does not include this node's namespace {own_namespace} \
@@ -234,17 +271,24 @@ impl PeerExpectations {
             ),
         }
 
-        match dns_namespace {
-            Some(namespace) if namespace != party.namespace.to_hex() => anyhow::bail!(
+        // The command gate checks the workflow kind, not the step order, so a
+        // coordinator can send SignP2p before SignDns. Absent therefore means
+        // "this run has not signed a DNS proposal", which the coordinator
+        // controls — not "an older build did not record it". Treating it as
+        // legacy let a coordinator skip DNS and have the peer sign a party
+        // with any namespace whose prefix happened to match.
+        let Some(namespace) = dns_namespace else {
+            anyhow::bail!(
+                "no DNS namespace recorded for {instance_name}: this run has not signed a \
+                 DNS proposal, so the P2P proposal cannot be pinned to one"
+            );
+        };
+        if namespace != party.namespace.to_hex() {
+            anyhow::bail!(
                 "P2P proposal targets namespace {found} but this node signed DNS for \
                  {namespace}",
                 found = party.namespace.to_hex()
-            ),
-            Some(_) => {}
-            None => tracing::warn!(
-                "no signed DNS namespace on record for {instance_name}; skipping the \
-                 namespace cross-check on the P2P proposal"
-            ),
+            );
         }
 
         self.check_p2p_membership(&mapping)?;
@@ -310,14 +354,19 @@ impl PeerExpectations {
         // a party it can no longer authorize changes to. The lookup itself is
         // best-effort — a party onboarded before the identity table existed may
         // have no local record — but a namespace we *can* resolve must be there.
-        match self.own_namespace(storage, instance_name).await {
-            Ok(own_namespace) if !namespace_def.owners.contains(&own_namespace) => anyhow::bail!(
-                "DNS proposal drops this node's namespace {own_namespace} from the owner set"
-            ),
-            Ok(_) => {}
-            Err(e) => tracing::warn!(
-                "cannot resolve this node's namespace ({e}); skipping the owner-set \
-                 membership check on the DNS proposal"
+        // A lookup or decode failure is an error, not a legacy party: letting
+        // it through would hand a coordinator this peer's signature on a
+        // proposal that drops its own namespace.
+        match self.own_namespace(storage, instance_name).await? {
+            Some(own_namespace) if !namespace_def.owners.contains(&own_namespace) => {
+                anyhow::bail!(
+                    "DNS proposal drops this node's namespace {own_namespace} from the owner set"
+                )
+            }
+            Some(_) => {}
+            None => tracing::warn!(
+                "this node's keys are unrecorded for this party (onboarded before the \
+                 identity table existed); skipping the owner-set membership check"
             ),
         }
 
@@ -654,7 +703,15 @@ impl PeerExpectations {
         instance_name: &str,
         mapping: &PartyToParticipant,
     ) -> Result {
-        let keys = self.own_keys(storage, instance_name).await?;
+        let keys = self
+            .own_keys(storage, instance_name)
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "this node's public keys are not on the {instance_name} run, so the P2P \
+                     proposal cannot be checked against them"
+                )
+            })?;
         let own_daml_fingerprint = utils::compute_fingerprint(&keys[1]);
         let signing_keys = mapping
             .party_signing_keys
@@ -677,9 +734,15 @@ impl PeerExpectations {
     /// This node's namespace fingerprint for the run: from the keys it
     /// generated during onboarding, falling back to the long-lived identity
     /// row when the run's artefacts are already gone.
-    async fn own_namespace(&self, storage: &SqlitePool, instance_name: &str) -> Result<String> {
-        let keys = self.own_keys(storage, instance_name).await?;
-        Ok(utils::compute_fingerprint(&keys[0]))
+    async fn own_namespace(
+        &self,
+        storage: &SqlitePool,
+        instance_name: &str,
+    ) -> Result<Option<String>> {
+        Ok(self
+            .own_keys(storage, instance_name)
+            .await?
+            .map(|keys| utils::compute_fingerprint(&keys[0])))
     }
 
     /// This node's `[namespace_key, daml_key]` bundle.
@@ -687,9 +750,9 @@ impl PeerExpectations {
         &self,
         storage: &SqlitePool,
         instance_name: &str,
-    ) -> Result<Vec<SigningPublicKey>> {
+    ) -> Result<Option<Vec<SigningPublicKey>>> {
         let self_id = self.self_id.to_string();
-        let payload = match storage
+        let stored = match storage
             .read_artifact(
                 instance_name,
                 artifact_kinds::PEER_PUBLIC_KEYS,
@@ -697,24 +760,24 @@ impl PeerExpectations {
             )
             .await?
         {
-            Some(payload) => payload,
-            None => {
-                let dec_party_id = self.dec_party_id.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "this node's public keys are not on the {instance_name} run and \
-                         there is no dec party to look them up under"
-                    )
-                })?;
-                storage
-                    .read_identity(dec_party_id, identity_kinds::PEER_PUBLIC_KEYS, &self_id)
-                    .await?
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "this node's public keys are unknown for {dec_party_id}, so the \
-                             proposal cannot be checked against them"
-                        )
-                    })?
-            }
+            Some(payload) => Some(payload),
+            // No run artefact and no dec party to look under, or no identity
+            // row for one: the keys are genuinely unrecorded. That is the
+            // pre-identity-table party, and the only case a caller may treat
+            // leniently. A read that *fails*, or a payload that will not
+            // decode, is an error and stays one.
+            None => match self.dec_party_id.as_ref() {
+                Some(dec_party_id) => {
+                    storage
+                        .read_identity(dec_party_id, identity_kinds::PEER_PUBLIC_KEYS, &self_id)
+                        .await?
+                }
+                None => None,
+            },
+        };
+
+        let Some(payload) = stored else {
+            return Ok(None);
         };
 
         let keys = decode_keys_payload(&payload)?;
@@ -724,7 +787,7 @@ impl PeerExpectations {
                 count = keys.len()
             );
         }
-        Ok(keys)
+        Ok(Some(keys))
     }
 }
 
@@ -1132,6 +1195,61 @@ mod tests {
 
         expectations.kind = WorkflowKind::Onboarding;
         expectations.check_threshold(2, 3)
+    }
+
+    /// `generate_keys` derives the vault key names from the prefix, so an
+    /// unchecked one lets a coordinator have this node create keys under a name
+    /// the operator never accepted — or reuse the keys already sitting under
+    /// another party's prefix.
+    #[test]
+    fn rejects_key_generation_under_an_unaccepted_prefix() -> Result {
+        let a = canton_id("p1", 1)?;
+        let mut expectations = expectations(vec![a.clone()], a);
+        expectations.kind = WorkflowKind::Onboarding;
+        expectations.prefix = Some("treasury".to_string());
+
+        assert!(
+            expectations
+                .check_onboarding_config("someone-elses-party")
+                .is_err()
+        );
+        expectations.check_onboarding_config("treasury")?;
+
+        // No accepted prefix at all is not a licence to pick one.
+        expectations.prefix = None;
+        assert!(expectations.check_onboarding_config("treasury").is_err());
+        Ok(())
+    }
+
+    /// The command gate checks the workflow kind, not the step order, so a
+    /// coordinator can send SignP2p before SignDns. With no namespace recorded
+    /// the peer must refuse rather than fall back to the prefix check.
+    #[tokio::test]
+    async fn rejects_a_p2p_proposal_before_any_dns_was_signed() -> Result {
+        let a = canton_id("p1", 1)?;
+        let mut expectations = expectations(vec![a.clone()], a.clone());
+        expectations.kind = WorkflowKind::Onboarding;
+        expectations.prefix = Some("treasury".to_string());
+
+        let party = format!("treasury::{}", canton_id("x", 9)?.namespace.to_hex());
+        let payload = encode_proposal(topology_mapping::Mapping::PartyToParticipant(p2p(
+            &party,
+            &[a],
+            1,
+        )));
+
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await?;
+        let error = expectations
+            .check_onboarding_p2p(&pool, "run", &payload, None)
+            .await
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(
+            error.contains("has not signed a DNS proposal"),
+            "unexpected error: {error}"
+        );
+        Ok(())
     }
 
     /// The prefix is required on every onboarding invite, so an absent one
