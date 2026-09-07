@@ -857,6 +857,13 @@ pub async fn start_peer(
                     expectations.check_dec_party(&add_party_config.decentralized_party_id)
                 {
                     tracing::error!("Refusing the coordinator's add-party config: {e}");
+                    consecutive_step_failures += 1;
+                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                        anyhow::bail!(
+                            "Aborting peer: the add-party config does not match the accepted invitation: {e}"
+                        );
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     continue;
                 }
                 if !is_new_member(&node_config, &add_party_config) {
@@ -1030,6 +1037,13 @@ pub async fn start_peer(
                     expectations.check_dec_party(&add_party_config.decentralized_party_id)
                 {
                     tracing::error!("Refusing the coordinator's ACS import: {e}");
+                    consecutive_step_failures += 1;
+                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                        anyhow::bail!(
+                            "Aborting peer: the ACS import does not match the accepted invitation: {e}"
+                        );
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     continue;
                 }
                 if !is_new_member(&node_config, &add_party_config) {
@@ -1077,6 +1091,13 @@ pub async fn start_peer(
                     expectations.check_dec_party(&add_party_config.decentralized_party_id)
                 {
                     tracing::error!("Refusing the coordinator's clearing request: {e}");
+                    consecutive_step_failures += 1;
+                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                        anyhow::bail!(
+                            "Aborting peer: the clearing request does not match the accepted invitation: {e}"
+                        );
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     continue;
                 }
                 if !is_new_member(&node_config, &add_party_config) {
