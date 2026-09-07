@@ -220,11 +220,34 @@ everything that follows (`workflow::validation::PeerExpectations`).
 
 Any mismatch fails the step. Repeated mismatches abort the peer run.
 
-**Known limits.** A coordinator on an older version may send an invitation
-without the DAR hashes; the peer then checks filenames only and logs a warning,
-so a network mid-upgrade keeps working. Governance confirm/execute is not
-covered here and does not need to be: the peer builds those commands locally
-and the Daml layer re-validates them against the on-ledger proposal.
+**What this does not cover.** The checks bound what a coordinator can obtain a
+signature for; they do not make the coordinator trustworthy. Three gaps remain,
+and they are load-bearing enough to state rather than imply:
+
+- **A peer cannot verify the other members' namespaces or signing keys.** It
+  only ever sends its own key bundle to the coordinator and never sees the
+  others', so it can confirm that it was not excluded but not that the rest of
+  the owner set and key set belong to the members named in the invitation. A
+  DNS proposal needs `threshold` signatures rather than all of them, so a
+  namespace or key belonging to a member that does not sign this round can be
+  substituted without any signer noticing. Closable for kick / add-party /
+  change-threshold by comparing against the current on-chain state
+  (DLC-link/decentralization-manager#420, #422); not closable for onboarding
+  without a protocol change, because no on-chain state exists yet.
+- **The contracts workflow constrains who a transaction acts as, not what it
+  does.** The peer recomputes the hash and pins `act_as` to the accepted dec
+  party, so it can only ever authorize the transaction it can read — but the
+  accepted package names are never compared against the transaction's nodes, so
+  any create or exercise acting as that party passes
+  (DLC-link/decentralization-manager#423).
+- **An older coordinator may send an invitation without the DAR hashes.** The
+  peer then checks filenames only and logs a warning, so a network mid-upgrade
+  keeps working. This is the only leniency left for an absent field, alongside
+  the onboarding threshold; every other absent pin fails closed.
+
+Governance confirm/execute is not covered here and does not need to be: the peer
+builds those commands locally and the Daml layer re-validates them against the
+on-ledger proposal.
 
 ## Communication Protocol
 
