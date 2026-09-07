@@ -278,7 +278,12 @@ pub async fn get_decentralized_parties(
                 let data = data.clone();
                 let prefix = prefix.clone();
                 tokio::spawn(async move {
-                    refresh_and_cache_parties(&data, &prefix).await;
+                    // Shares the discovery bound: a background refresh is the
+                    // same Canton read as a cold one. Skipped rather than
+                    // queued, because the cached rows already answered.
+                    if let Ok(_permit) = Arc::clone(&data.discovery_permits).try_acquire_owned() {
+                        refresh_and_cache_parties(&data, &prefix).await;
+                    }
                     data.refreshing_prefixes.write().await.remove(&prefix);
                 });
             }
@@ -318,22 +323,16 @@ pub async fn get_decentralized_parties(
         });
     }
 
-    // Single-flight, and it comes first: a duplicate request must not hold a
-    // discovery permit while it waits on the winner. A cold cache used to let
-    // every concurrent request start its own discovery, so one page load could
-    // put several full topology reads on the participant at once.
-    if !data
-        .refreshing_prefixes
-        .write()
-        .await
-        .insert(prefix.clone())
-    {
+    // Three steps, in this order for a reason. Reading the claim first keeps a
+    // duplicate request from ever holding a permit while it waits. Taking the
+    // permit before claiming keeps the claim set bounded by the permit count,
+    // since `prefix` comes from the request and a burst of distinct values
+    // would otherwise each add an entry and sit there.
+    if data.refreshing_prefixes.read().await.contains(&prefix) {
         return await_in_flight_discovery(&data, &prefix, !force_refresh).await;
     }
 
-    // Bound total discovery: the prefix comes from the request, so distinct
-    // values would each start their own. Waiting briefly rides out a burst.
-    let Ok(Ok(_permit)) = tokio::time::timeout(
+    let Ok(Ok(permit)) = tokio::time::timeout(
         SINGLE_FLIGHT_WAIT,
         Arc::clone(&data.discovery_permits).acquire_owned(),
     )
@@ -341,11 +340,22 @@ pub async fn get_decentralized_parties(
     else {
         // Capacity ran out, which says nothing about this prefix. Answering an
         // empty list would read as "no parties", so report the overload.
-        data.refreshing_prefixes.write().await.remove(&prefix);
         return HttpResponse::ServiceUnavailable().json(ErrorResponse {
             error: "party discovery is at capacity, retry shortly".to_string(),
         });
     };
+
+    // The read above was not a claim, so settle it under the write lock.
+    if !data
+        .refreshing_prefixes
+        .write()
+        .await
+        .insert(prefix.clone())
+    {
+        drop(permit);
+        return await_in_flight_discovery(&data, &prefix, !force_refresh).await;
+    }
+    let _permit = permit;
 
     let auth = data.auth.read().await.clone();
     let party_creds = data.party_credentials.read().await.clone();
@@ -409,51 +419,65 @@ pub async fn get_decentralized_parties(
 /// longer claimed means its result is already visible here.
 ///
 /// `accept_cached` is false for a caller that asked to bypass the cache. Such a
-/// caller must not be handed the rows that were there before the refresh
-/// started, so it waits for the running discovery instead of answering from
-/// them. Answering an empty list straight away is also wrong: it reads as "no
-/// parties" in a client that does not act on `refreshing`.
+/// caller may only be served rows the running discovery rewrote, which a moved
+/// `updated_at` is the evidence for. Waiting is not evidence on its own: the
+/// claim also clears when the discovery fails. When freshness cannot be
+/// established it gets a retryable 503, never the rows from before its
+/// refresh. A caller that did not ask to bypass takes cached rows gladly, and
+/// an empty list only as the last answer, since that reads as "no parties" in a
+/// client that does not act on `refreshing`.
 async fn await_in_flight_discovery(
     data: &web::Data<AppState>,
     prefix: &str,
     accept_cached: bool,
 ) -> HttpResponse {
-    let deadline = tokio::time::Instant::now() + SINGLE_FLIGHT_WAIT;
-
-    while tokio::time::Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        if !data.refreshing_prefixes.read().await.contains(prefix) {
-            break;
-        }
-
-        if accept_cached {
-            if let Ok(Some((mut response, _))) = load_cached_parties(&data.db, prefix).await {
+    let stamp_at_entry = match load_cached_parties(&data.db, prefix).await {
+        Ok(Some((mut response, updated_at))) => {
+            if accept_cached {
                 response.source = ResponseSource::Cache;
                 response.refreshing = true;
                 return HttpResponse::Ok().json(response);
             }
-
-            let completed_at = data.discovery_completed.read().await.get(prefix).copied();
-            if is_within_ttl(completed_at, now_secs()) {
-                break;
-            }
+            Some(updated_at)
         }
-    }
+        _ => None,
+    };
 
-    let refreshing = data.refreshing_prefixes.read().await.contains(prefix);
-    match load_cached_parties(&data.db, prefix).await {
-        Ok(Some((mut response, _))) => {
+    let deadline = tokio::time::Instant::now() + SINGLE_FLIGHT_WAIT;
+    while tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        if let Ok(Some((mut response, updated_at))) = load_cached_parties(&data.db, prefix).await
+            && (accept_cached || Some(updated_at) != stamp_at_entry)
+        {
             response.source = ResponseSource::Cache;
-            response.refreshing = refreshing;
-            HttpResponse::Ok().json(response)
+            response.refreshing = data.refreshing_prefixes.read().await.contains(prefix);
+            return HttpResponse::Ok().json(response);
         }
-        _ => HttpResponse::Ok().json(DecentralizedPartiesResponse {
-            parties: Vec::new(),
-            source: ResponseSource::Cache,
-            refreshing,
-        }),
+
+        // An empty discovery writes no rows, so its mark is the only evidence
+        // that it finished. It also means there is nothing fresher coming.
+        let completed_at = data.discovery_completed.read().await.get(prefix).copied();
+        if is_within_ttl(completed_at, now_secs()) {
+            break;
+        }
+
+        if !data.refreshing_prefixes.read().await.contains(prefix) {
+            break;
+        }
     }
+
+    if !accept_cached {
+        return HttpResponse::ServiceUnavailable().json(ErrorResponse {
+            error: "a refresh for this prefix is still in flight, retry shortly".to_string(),
+        });
+    }
+
+    HttpResponse::Ok().json(DecentralizedPartiesResponse {
+        parties: Vec::new(),
+        source: ResponseSource::Cache,
+        refreshing: data.refreshing_prefixes.read().await.contains(prefix),
+    })
 }
 
 /// Background task: fetch from Canton, store to DB, then resolve owner keys from peers

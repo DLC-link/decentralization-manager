@@ -672,6 +672,9 @@ async fn client_tls_config(tls: &CantonTlsConfig, label: &str) -> Result<ClientT
     Ok(config)
 }
 
+/// How long a gRPC channel may take to establish before it is a failure.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// How long the reachability probe in [`connect_advice`] waits.
 const TCP_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
@@ -740,6 +743,11 @@ fn connect_advice(reachable: bool, tls_enabled: bool, label: &str) -> String {
 async fn connect_channel(url: &str, tls: &CantonTlsConfig, label: &str) -> Result<Channel> {
     let mut endpoint = Endpoint::from_shared(url.to_string())
         .with_context(|| format!("{url} is not a valid {label} API endpoint"))?;
+
+    // Bound connection establishment. Without this a black-holed address hangs
+    // on the OS TCP timeout, which outlives any deadline a caller puts around
+    // the call it is trying to make.
+    endpoint = endpoint.connect_timeout(CONNECT_TIMEOUT);
 
     if tls.enabled {
         endpoint = endpoint
