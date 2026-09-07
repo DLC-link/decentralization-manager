@@ -1217,8 +1217,10 @@ pub async fn fetch_decentralized_parties(
     // Only when some party can use it. With no auth and no test mode every
     // per-party read below is skipped, so fetching a whole-participant
     // inventory would be pure waste — and it was never fetched on that path
-    // before, when `get_contracts` fetched it for itself.
-    let package_versions = if auth.is_some() || test_mode {
+    // before, when `get_contracts` fetched it for itself. A node that holds no
+    // party reads nothing either, which is the ordinary state of one that has
+    // not been onboarded yet.
+    let package_versions = if !my_parties.is_empty() && (auth.is_some() || test_mode) {
         match fetch_package_versions(config).await {
             Ok(map) => map,
             Err(e) => {
