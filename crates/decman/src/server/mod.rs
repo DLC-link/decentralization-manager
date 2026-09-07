@@ -1139,7 +1139,7 @@ pub async fn start_server(
     let sync_db = db.clone();
     let sync_auth = app_state.auth.clone();
     let sync_party_creds = app_state.party_credentials.clone();
-    let sync_completed = app_state.discovery_completed.clone();
+    let sync_gate = handlers::DiscoveryGate::of(&app_state);
     tokio::spawn(async move {
         // Delay to let Canton stabilize after startup
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -1148,36 +1148,32 @@ pub async fn start_server(
         let auth_snapshot = sync_auth.read().await.clone();
         let creds_snapshot = sync_party_creds.read().await.clone();
 
-        match handlers::fetch_decentralized_parties(
+        // Through the same gate as the request paths: a direct call would
+        // duplicate an in-flight discovery for the empty prefix and put both
+        // results into the cache in an undefined order.
+        match handlers::discover_and_cache(
+            &sync_gate,
             &sync_config,
             &sync_db,
-            None,
+            "",
             auth_snapshot,
             &creds_snapshot,
             Default::default(),
         )
         .await
         {
-            Ok(response) => {
-                handlers::record_discovery(&sync_completed, "", &response.parties).await;
-
-                if let Err(e) = handlers::store_parties_to_db(&sync_db, "", &response.parties).await
-                {
-                    tracing::warn!("Failed to cache parties on startup: {e}");
-                } else {
-                    tracing::info!(
-                        "Cached {} decentralized parties from Canton",
-                        response.parties.len()
-                    );
-                    handlers::resolve_owner_keys_from_peers(
-                        &sync_config,
-                        &sync_db,
-                        &response.parties,
-                    )
+            handlers::Discovery::Done(response) => {
+                tracing::info!(
+                    "Cached {} decentralized parties from Canton",
+                    response.parties.len()
+                );
+                handlers::resolve_owner_keys_from_peers(&sync_config, &sync_db, &response.parties)
                     .await;
-                }
             }
-            Err(e) => {
+            handlers::Discovery::InFlight | handlers::Discovery::AtCapacity => {
+                tracing::info!("Startup sync skipped: a discovery is already running");
+            }
+            handlers::Discovery::Failed(e) => {
                 tracing::warn!("Background Canton sync failed on startup: {e}");
             }
         }

@@ -10,9 +10,7 @@ use anyhow::Context;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use sqlx::SqlitePool;
 
-use super::parties::{
-    fetch_decentralized_parties, resolve_owner_keys_from_peers, store_parties_to_db,
-};
+use super::parties::resolve_owner_keys_from_peers;
 use crate::{
     canton_id::{CantonId, validate_party_id_prefix},
     config::{NetworkConfig, NodeConfig},
@@ -1710,6 +1708,7 @@ pub async fn start_onboarding(
     *onboarding_state.invited_peers.write().await = peer_ids.clone();
     let party_credentials = data.party_credentials.clone();
     let auth_lock = data.auth.clone();
+    let discovery_gate = super::DiscoveryGate::of(&data);
     let last_seen = data.last_seen.clone();
     let instance_for_task = instance_name.clone();
 
@@ -1786,24 +1785,17 @@ pub async fn start_onboarding(
                 let bg_db = db.clone();
                 let bg_auth = auth_lock.clone();
                 let bg_creds = party_credentials.clone();
+                let bg_gate = discovery_gate.clone();
                 tokio::spawn(async move {
                     let auth = bg_auth.read().await.clone();
                     let creds = bg_creds.read().await.clone();
-                    match fetch_decentralized_parties(
-                        &bg_config,
-                        &bg_db,
-                        None,
-                        auth,
-                        &creds,
-                        Default::default(),
-                    )
-                    .await
+                    // Through the shared gate: a direct discovery slips the
+                    // concurrency bound and races the cache write against a
+                    // request for the same prefix.
+                    match super::discover_and_cache(&bg_gate, &bg_config, &bg_db, "", auth, &creds)
+                        .await
                     {
-                        Ok(resp) => {
-                            if let Err(e) = store_parties_to_db(&bg_db, "", &resp.parties).await {
-                                tracing::warn!("Failed to cache parties after onboarding: {e}");
-                                return;
-                            }
+                        super::Discovery::Done(resp) => {
                             resolve_owner_keys_from_peers(&bg_config, &bg_db, &resp.parties).await;
                             // Audit: report any participants whose owner_key
                             // is still NULL after resolve. Not fatal — Noise
@@ -1833,7 +1825,12 @@ pub async fn start_onboarding(
                                 }
                             }
                         }
-                        Err(e) => tracing::warn!("Failed to refresh parties after onboarding: {e}"),
+                        super::Discovery::InFlight | super::Discovery::AtCapacity => {
+                            tracing::debug!("Post-onboarding refresh skipped: already running");
+                        }
+                        super::Discovery::Failed(e) => {
+                            tracing::warn!("Failed to refresh parties after onboarding: {e}");
+                        }
                     }
                 });
             }
@@ -2256,6 +2253,7 @@ pub async fn start_contracts(
     let db = data.db.clone();
     let workflow_auth = data.auth.read().await.clone();
     let auth_lock = data.auth.clone();
+    let discovery_gate = super::DiscoveryGate::of(&data);
     let contracts_state_clone = instance.http.clone();
     let instance_for_coord = instance.clone();
     let workflows = data.workflows.clone();
@@ -2334,30 +2332,21 @@ pub async fn start_contracts(
                 let bg_db = db.clone();
                 let bg_auth = auth_lock.clone();
                 let bg_creds = party_credentials.clone();
+                let bg_gate = discovery_gate.clone();
                 tokio::spawn(async move {
                     let auth = bg_auth.read().await.clone();
                     let creds = bg_creds.read().await.clone();
-                    match fetch_decentralized_parties(
-                        &bg_config,
-                        &bg_db,
-                        None,
-                        auth,
-                        &creds,
-                        Default::default(),
-                    )
-                    .await
+                    // Through the shared gate, as above.
+                    match super::discover_and_cache(&bg_gate, &bg_config, &bg_db, "", auth, &creds)
+                        .await
                     {
-                        Ok(resp) => {
-                            if let Err(e) = store_parties_to_db(&bg_db, "", &resp.parties).await {
-                                tracing::warn!(
-                                    "Failed to cache parties after contract deployment: {e}"
-                                );
-                            } else {
-                                resolve_owner_keys_from_peers(&bg_config, &bg_db, &resp.parties)
-                                    .await;
-                            }
+                        super::Discovery::Done(resp) => {
+                            resolve_owner_keys_from_peers(&bg_config, &bg_db, &resp.parties).await;
                         }
-                        Err(e) => {
+                        super::Discovery::InFlight | super::Discovery::AtCapacity => {
+                            tracing::debug!("Post-contracts refresh skipped: already running");
+                        }
+                        super::Discovery::Failed(e) => {
                             tracing::warn!(
                                 "Failed to refresh parties after contract deployment: {e}"
                             );

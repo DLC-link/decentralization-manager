@@ -126,7 +126,7 @@ fn is_within_ttl(at: Option<i64>, now: i64) -> bool {
 ///
 /// Expired entries go on the way in and the map is capped, because `prefix`
 /// comes from the request.
-pub(crate) async fn record_discovery(
+async fn record_discovery(
     completed: &Arc<tokio::sync::RwLock<HashMap<String, i64>>>,
     prefix: &str,
     parties: &[DecentralizedParty],
@@ -162,6 +162,108 @@ pub(crate) async fn record_discovery(
     }
 
     completed.insert(prefix.to_string(), now);
+}
+
+/// The shared bound every discovery runs under.
+///
+/// Cloned out of [`AppState`] so a background task can carry it without the
+/// whole state. Calling [`fetch_decentralized_parties`] directly skips the
+/// bound: two discoveries for one prefix then write the cache in an undefined
+/// order, and the advertised concurrency cap stops meaning anything.
+#[derive(Clone)]
+pub(crate) struct DiscoveryGate {
+    claims: Arc<tokio::sync::RwLock<HashSet<String>>>,
+    permits: Arc<tokio::sync::Semaphore>,
+    completed: Arc<tokio::sync::RwLock<HashMap<String, i64>>>,
+}
+
+impl DiscoveryGate {
+    /// The gate the HTTP paths and every background task share.
+    pub(crate) fn of(state: &AppState) -> Self {
+        Self {
+            claims: state.refreshing_prefixes.clone(),
+            permits: state.discovery_permits.clone(),
+            completed: state.discovery_completed.clone(),
+        }
+    }
+}
+
+/// What a guarded discovery did.
+pub(crate) enum Discovery {
+    /// It ran, and the cache now holds this.
+    Done(DecentralizedPartiesResponse),
+    /// Another discovery for this prefix was already running.
+    InFlight,
+    /// Every discovery permit was taken.
+    AtCapacity,
+    /// Canton refused or timed out.
+    Failed(anyhow::Error),
+}
+
+/// Run one discovery for `prefix`, under the per-prefix claim and the global
+/// bound, and leave the result recorded and cached.
+///
+/// Every entry point goes through here: the request path, the stale-cache
+/// refresh, the startup sync and the post-workflow refreshes.
+///
+/// Three steps, in this order for a reason. Reading the claim first keeps a
+/// duplicate from ever holding a permit while it waits. Taking the permit
+/// before claiming keeps the claim set bounded by the permit count, since
+/// `prefix` can come from a request and a burst of distinct values would
+/// otherwise each add an entry and sit there. Recording and caching before the
+/// release closes the window where a request that had seen neither could claim
+/// the prefix and repeat the read.
+pub(crate) async fn discover_and_cache(
+    gate: &DiscoveryGate,
+    config: &NodeConfig,
+    db: &SqlitePool,
+    prefix: &str,
+    auth: Option<WorkflowAuth>,
+    party_credentials: &[PartyCredentials],
+) -> Discovery {
+    if gate.claims.read().await.contains(prefix) {
+        return Discovery::InFlight;
+    }
+
+    let Ok(Ok(permit)) = tokio::time::timeout(
+        SINGLE_FLIGHT_WAIT,
+        Arc::clone(&gate.permits).acquire_owned(),
+    )
+    .await
+    else {
+        return Discovery::AtCapacity;
+    };
+
+    // The read above was not a claim, so settle it under the write lock.
+    if !gate.claims.write().await.insert(prefix.to_string()) {
+        drop(permit);
+        return Discovery::InFlight;
+    }
+    let _permit = permit;
+
+    let fetched = fetch_decentralized_parties(
+        config,
+        db,
+        Some(prefix).filter(|prefix| !prefix.is_empty()),
+        auth,
+        party_credentials,
+        PartyReadOpts::default(),
+    )
+    .await;
+
+    let outcome = match fetched {
+        Ok(response) => {
+            record_discovery(&gate.completed, prefix, &response.parties).await;
+            if let Err(e) = store_parties_to_db(db, prefix, &response.parties).await {
+                tracing::warn!("Failed to cache parties for prefix '{prefix}': {e}");
+            }
+            Discovery::Done(response)
+        }
+        Err(e) => Discovery::Failed(e),
+    };
+
+    gate.claims.write().await.remove(prefix);
+    outcome
 }
 
 /// Run one fallible call under [`TOPOLOGY_READ_TIMEOUT`].
@@ -274,25 +376,13 @@ pub async fn get_decentralized_parties(
         let is_stale = !is_within_ttl(Some(updated_at), now_secs());
 
         if is_stale {
-            // Atomic check+insert to avoid duplicate spawns
-            let spawned = data
-                .refreshing_prefixes
-                .write()
-                .await
-                .insert(prefix.clone());
-            if spawned {
-                let data = data.clone();
-                let prefix = prefix.clone();
-                tokio::spawn(async move {
-                    // Shares the discovery bound: a background refresh is the
-                    // same Canton read as a cold one. Skipped rather than
-                    // queued, because the cached rows already answered.
-                    if let Ok(_permit) = Arc::clone(&data.discovery_permits).try_acquire_owned() {
-                        refresh_and_cache_parties(&data, &prefix).await;
-                    }
-                    data.refreshing_prefixes.write().await.remove(&prefix);
-                });
-            }
+            // `discover_and_cache` owns the claim, so a second spawn for the
+            // same prefix finds it in flight and does nothing.
+            let data = data.clone();
+            let prefix = prefix.clone();
+            tokio::spawn(async move {
+                refresh_and_cache_parties(&data, &prefix).await;
+            });
         }
 
         response.refreshing = is_stale && data.refreshing_prefixes.read().await.contains(&prefix);
@@ -329,75 +419,29 @@ pub async fn get_decentralized_parties(
         });
     }
 
-    // Three steps, in this order for a reason. Reading the claim first keeps a
-    // duplicate request from ever holding a permit while it waits. Taking the
-    // permit before claiming keeps the claim set bounded by the permit count,
-    // since `prefix` comes from the request and a burst of distinct values
-    // would otherwise each add an entry and sit there.
-    if data.refreshing_prefixes.read().await.contains(&prefix) {
-        return await_in_flight_discovery(&data, &prefix, !force_refresh).await;
-    }
-
-    let Ok(Ok(permit)) = tokio::time::timeout(
-        SINGLE_FLIGHT_WAIT,
-        Arc::clone(&data.discovery_permits).acquire_owned(),
-    )
-    .await
-    else {
-        // Capacity ran out, which says nothing about this prefix. Answering an
-        // empty list would read as "no parties", so report the overload.
-        return HttpResponse::ServiceUnavailable().json(ErrorResponse {
-            error: "party discovery is at capacity, retry shortly".to_string(),
-        });
-    };
-
-    // The read above was not a claim, so settle it under the write lock.
-    if !data
-        .refreshing_prefixes
-        .write()
-        .await
-        .insert(prefix.clone())
-    {
-        drop(permit);
-        return await_in_flight_discovery(&data, &prefix, !force_refresh).await;
-    }
-    let _permit = permit;
-
     let auth = data.auth.read().await.clone();
     let party_creds = data.party_credentials.read().await.clone();
-    let fetched = fetch_decentralized_parties(
+    let discovered = discover_and_cache(
+        &DiscoveryGate::of(&data),
         &data.config,
         &data.db,
-        Some(prefix.as_str()).filter(|s| !s.is_empty()),
+        &prefix,
         auth,
         &party_creds,
         opts,
     )
     .await;
 
-    match fetched {
-        Ok(response) => {
-            // Record and cache while the claim still stands. Releasing first
-            // left a window where a request that had not yet seen either could
-            // claim the prefix and start the same read again, and a waiting
-            // request could be answered from a cache the write had not reached.
-            record_discovery(&data.discovery_completed, &prefix, &response.parties).await;
-            let cached = store_parties_to_db(&data.db, &prefix, &response.parties).await;
-            if let Err(e) = &cached {
-                tracing::warn!("Failed to cache parties: {e}");
-            }
-            data.refreshing_prefixes.write().await.remove(&prefix);
-
+    match discovered {
+        Discovery::Done(response) => {
             // Serialise first, then hand the parties themselves to the task.
             // Cloning them instead meant a second full copy of every party and
             // its contracts alive at once, on top of the response body (#415).
             let body = HttpResponse::Ok().json(&response);
 
             // Owner-key resolution fans out to every peer over Noise, so it
-            // stays off the request path. It reads what was just cached, so it
-            // only runs when that write landed. It needs no claim of its own:
-            // the claim above covered the read and the cache write.
-            if cached.is_ok() && !response.parties.is_empty() {
+            // stays off the request path.
+            if !response.parties.is_empty() {
                 let data = data.clone();
                 let parties = response.parties;
                 tokio::spawn(async move {
@@ -406,9 +450,13 @@ pub async fn get_decentralized_parties(
             }
             body
         }
-        Err(e) => {
-            // Nothing landed, so free the prefix for the next request to retry.
-            data.refreshing_prefixes.write().await.remove(&prefix);
+        Discovery::InFlight => await_in_flight_discovery(&data, &prefix, !force_refresh).await,
+        // Capacity says nothing about this prefix, and an empty list would
+        // read as "no parties", so report the overload.
+        Discovery::AtCapacity => HttpResponse::ServiceUnavailable().json(ErrorResponse {
+            error: "party discovery is at capacity, retry shortly".to_string(),
+        }),
+        Discovery::Failed(e) => {
             tracing::error!("Failed to fetch decentralized parties: {e}");
             HttpResponse::InternalServerError().json(ErrorResponse {
                 error: format!("Failed to fetch decentralized parties: {e}"),
@@ -486,30 +534,29 @@ async fn await_in_flight_discovery(
     })
 }
 
-/// Background task: fetch from Canton, store to DB, then resolve owner keys from peers
+/// Background task: discover, cache, then resolve owner keys from peers.
 async fn refresh_and_cache_parties(data: &web::Data<AppState>, prefix: &str) {
     let auth = data.auth.read().await.clone();
     let party_creds = data.party_credentials.read().await.clone();
-    match fetch_decentralized_parties(
+
+    match discover_and_cache(
+        &DiscoveryGate::of(data),
         &data.config,
         &data.db,
-        Some(prefix).filter(|s| !s.is_empty()),
+        prefix,
         auth,
         &party_creds,
         PartyReadOpts::default(),
     )
     .await
     {
-        Ok(response) => {
-            record_discovery(&data.discovery_completed, prefix, &response.parties).await;
-
-            if let Err(e) = store_parties_to_db(&data.db, prefix, &response.parties).await {
-                tracing::warn!("Failed to cache parties: {e}");
-                return;
-            }
+        Discovery::Done(response) => {
             resolve_owner_keys_from_peers(&data.config, &data.db, &response.parties).await;
         }
-        Err(e) => {
+        Discovery::InFlight | Discovery::AtCapacity => {
+            tracing::debug!("Skipped background refresh for prefix '{prefix}'");
+        }
+        Discovery::Failed(e) => {
             tracing::warn!("Background refresh failed for prefix '{prefix}': {e}");
         }
     }
@@ -928,7 +975,7 @@ async fn load_cached_parties(
 }
 
 /// Store parties into the dec_party tables
-pub async fn store_parties_to_db(
+async fn store_parties_to_db(
     db: &SqlitePool,
     prefix: &str,
     parties: &[DecentralizedParty],
@@ -1213,8 +1260,11 @@ fn known_party_filters(
     parties
 }
 
-/// Fetch decentralized parties from Canton topology and ledger APIs
-pub async fn fetch_decentralized_parties(
+/// Fetch decentralized parties from Canton topology and ledger APIs.
+///
+/// Private on purpose: [`discover_and_cache`] is the only way in, so no caller
+/// can start a discovery outside the per-prefix claim and the global bound.
+async fn fetch_decentralized_parties(
     config: &NodeConfig,
     db: &SqlitePool,
     prefix_filter: Option<&str>,
