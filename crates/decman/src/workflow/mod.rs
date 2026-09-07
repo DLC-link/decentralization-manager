@@ -455,6 +455,10 @@ pub async fn start_peer(
                     // Remember the namespace we authorized so the P2P
                     // proposal that follows can be pinned to the same party.
                     Ok(namespace) => {
+                        // The P2P proposal is pinned to this namespace in the
+                        // next step. Signing DNS without recording it would
+                        // leave that cross-check silently disabled, so a write
+                        // failure fails the step instead.
                         if let Err(e) = db
                             .write_artifact(
                                 &instance_name,
@@ -464,7 +468,18 @@ pub async fn start_peer(
                             )
                             .await
                         {
-                            tracing::warn!("Failed to record the signed DNS namespace: {e}");
+                            tracing::error!(
+                                "Refusing to sign DNS: the accepted namespace could not be \
+                                 recorded, so the P2P cross-check would be lost: {e}"
+                            );
+                            consecutive_step_failures += 1;
+                            if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                                anyhow::bail!(
+                                    "Aborting peer: cannot record the accepted DNS namespace: {e}"
+                                );
+                            }
+                            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                            continue;
                         }
                     }
                     Err(e) => {
@@ -511,11 +526,32 @@ pub async fn start_peer(
                     tracing::error!("No P2P proposal payload received from coordinator");
                     continue;
                 }
-                let signed_namespace = db
+                // Absent means the DNS step ran on a build that did not record
+                // the namespace yet — the mixed-version case, which degrades to
+                // the prefix check with a warning inside check_onboarding_p2p.
+                // A read error is different: it hides whether a namespace was
+                // recorded at all, so it fails the step rather than skipping
+                // the cross-check.
+                let signed_namespace = match db
                     .read_artifact(&instance_name, artifact_kinds::ACCEPTED_DNS_NAMESPACE, None)
                     .await
-                    .unwrap_or_default()
-                    .and_then(|bytes| String::from_utf8(bytes).ok());
+                {
+                    Ok(recorded) => recorded.and_then(|bytes| String::from_utf8(bytes).ok()),
+                    Err(e) => {
+                        tracing::error!(
+                            "Refusing to sign P2P: cannot read the DNS namespace this run \
+                             accepted, so the cross-check cannot be applied: {e}"
+                        );
+                        consecutive_step_failures += 1;
+                        if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                            anyhow::bail!(
+                                "Aborting peer: cannot read the accepted DNS namespace: {e}"
+                            );
+                        }
+                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                        continue;
+                    }
+                };
                 if let Err(e) = expectations
                     .check_onboarding_p2p(
                         &db,
