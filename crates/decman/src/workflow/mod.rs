@@ -367,6 +367,13 @@ pub async fn start_peer(
                         Ok(files) => files,
                         Err(e) => {
                             tracing::error!("Failed to decode DARs from coordinator: {e}");
+                            consecutive_step_failures += 1;
+                            if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                                anyhow::bail!(
+                                    "Aborting peer: coordinator's DAR payload will not decode: {e}"
+                                );
+                            }
+                            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                             continue;
                         }
                     }
@@ -388,8 +395,16 @@ pub async fn start_peer(
 
                 if let Err(e) = contracts::upload_dars_from_bytes(&node_config, dar_files).await {
                     tracing::error!("Step execution failed: {e}");
+                    consecutive_step_failures += 1;
+                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                        anyhow::bail!(
+                            "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
+                        );
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     continue;
                 }
+                consecutive_step_failures = 0;
                 if let Err(e) = client.send_status(b"UploadDars completed".to_vec()).await {
                     tracing::error!("Failed to send completion status: {e}");
                 }
@@ -446,6 +461,11 @@ pub async fn start_peer(
                 tracing::info!("Executing: Sign DNS proposal");
                 if payload.is_empty() {
                     tracing::error!("No DNS proposal payload received from coordinator");
+                    consecutive_step_failures += 1;
+                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                        anyhow::bail!("Aborting peer: coordinator sent no DNS proposal to check");
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     continue;
                 }
                 match expectations
@@ -524,6 +544,11 @@ pub async fn start_peer(
                 tracing::info!("Executing: Sign P2P proposals");
                 if payload.is_empty() {
                     tracing::error!("No P2P proposal payload received from coordinator");
+                    consecutive_step_failures += 1;
+                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                        anyhow::bail!("Aborting peer: coordinator sent no P2P proposal to check");
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     continue;
                 }
                 // Absent means the DNS step ran on a build that did not record
