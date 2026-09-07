@@ -284,15 +284,23 @@ impl PeerExpectations {
                 expected = dec_party_id.namespace.to_hex()
             );
         }
-        if namespace_def.owners.len() != self.members.len() {
+        // Canton treats the owners as a set, so a repeated namespace would keep
+        // the vector length the invitation expects while shrinking the real
+        // owner set — and with it the number of distinct signatures the
+        // threshold represents.
+        let owners: BTreeSet<&String> = namespace_def.owners.iter().collect();
+        if owners.len() != namespace_def.owners.len() {
+            anyhow::bail!("DNS proposal repeats an owner namespace");
+        }
+        if owners.len() != self.members.len() {
             anyhow::bail!(
                 "DNS proposal has {found} owners but the accepted invitation names \
                  {expected} members",
-                found = namespace_def.owners.len(),
+                found = owners.len(),
                 expected = self.members.len()
             );
         }
-        self.check_threshold(namespace_def.threshold, namespace_def.owners.len())?;
+        self.check_threshold(namespace_def.threshold, owners.len())?;
 
         // Losing our namespace from the owner set would leave this node hosting
         // a party it can no longer authorize changes to. The lookup itself is
@@ -380,8 +388,17 @@ impl PeerExpectations {
             return Ok(());
         }
 
+        // Both sides are compared as sets, so a repeated name would collapse and
+        // mask a missing or extra file. Refuse the ambiguity rather than pick a
+        // reading of it.
         let accepted: BTreeSet<&str> = self.dar_filenames.iter().map(String::as_str).collect();
+        if accepted.len() != self.dar_filenames.len() {
+            anyhow::bail!("accepted invitation names the same DAR twice");
+        }
         let received: BTreeSet<&str> = files.iter().map(|(name, _)| name.as_str()).collect();
+        if received.len() != files.len() {
+            anyhow::bail!("coordinator sent the same DAR filename twice");
+        }
         if let Some(unexpected) = received.difference(&accepted).next() {
             anyhow::bail!("coordinator sent DAR {unexpected}, which the invitation did not name");
         }
@@ -389,12 +406,23 @@ impl PeerExpectations {
             anyhow::bail!("coordinator did not send DAR {missing} named by the invitation");
         }
 
-        if self.dar_hashes.len() != self.dar_filenames.len() {
+        // Only a wholly absent hash list means "coordinator predates the field".
+        // A partial one cannot be matched up with the filenames, so treating it
+        // as legacy would silently drop the content pin.
+        if self.dar_hashes.is_empty() {
             tracing::warn!(
                 "accepted Dars invitation carried no DAR hashes; the filenames match but \
                  the content cannot be pinned (the coordinator predates the field)"
             );
             return Ok(());
+        }
+        if self.dar_hashes.len() != self.dar_filenames.len() {
+            anyhow::bail!(
+                "accepted invitation carries {hashes} DAR hash(es) for {names} filename(s), \
+                 so the content cannot be pinned",
+                hashes = self.dar_hashes.len(),
+                names = self.dar_filenames.len()
+            );
         }
 
         for (filename, data) in files {
@@ -997,6 +1025,90 @@ mod tests {
         let payload = encode_proposal(topology_mapping::Mapping::PartyToParticipant(mapping));
 
         assert!(expectations.check_clear_onboarding(&payload).is_err());
+        Ok(())
+    }
+
+    /// Canton reads the owners as a set, so a repeated namespace keeps the
+    /// length the invitation expects while shrinking the real owner set — and
+    /// the threshold then stands for fewer distinct signatures than agreed.
+    #[tokio::test]
+    async fn rejects_duplicate_dns_owners() -> Result {
+        let (a, b) = (canton_id("p1", 1)?, canton_id("p2", 2)?);
+        let party = canton_id("dec", 7)?;
+        let mut expectations = expectations(vec![a.clone(), b.clone()], a.clone());
+        expectations.dec_party_id = Some(party.clone());
+
+        let dns = encode_proposal(topology_mapping::Mapping::DecentralizedNamespaceDefinition(
+            DecentralizedNamespaceDefinition {
+                decentralized_namespace: party.namespace.to_hex(),
+                threshold: 2,
+                // Two entries, one distinct owner.
+                owners: vec!["same".to_string(), "same".to_string()],
+            },
+        ));
+        let p2p_payload = encode_proposal(topology_mapping::Mapping::PartyToParticipant(p2p(
+            &party.to_string(),
+            &[a, b],
+            2,
+        )));
+
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await?;
+        let error = expectations
+            .check_party_proposals(&pool, "run", &dns, &p2p_payload)
+            .await
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(
+            error.contains("repeats an owner"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    /// A repeated filename collapses in the set comparison and would mask a
+    /// missing or extra file, so the ambiguity is refused outright.
+    #[test]
+    fn rejects_duplicate_dar_filenames() -> Result {
+        let a = canton_id("p1", 1)?;
+        let mut expectations = expectations(vec![a.clone()], a);
+        expectations.dar_filenames = vec!["gov.dar".to_string(), "gov.dar".to_string()];
+        expectations.dar_hashes = vec![hash_dar(b"gov-bytes"), hash_dar(b"gov-bytes")];
+        assert!(
+            expectations
+                .check_dars(&[("gov.dar".to_string(), b"gov-bytes".to_vec())])
+                .is_err()
+        );
+
+        expectations.dar_filenames = vec!["a.dar".to_string(), "b.dar".to_string()];
+        expectations.dar_hashes = vec![hash_dar(b"a"), hash_dar(b"b")];
+        assert!(
+            expectations
+                .check_dars(&[
+                    ("a.dar".to_string(), b"a".to_vec()),
+                    ("a.dar".to_string(), b"a".to_vec()),
+                ])
+                .is_err()
+        );
+        Ok(())
+    }
+
+    /// Only a wholly absent hash list means "older coordinator". A partial one
+    /// cannot be lined up with the filenames, so it must not read as legacy.
+    #[test]
+    fn rejects_a_partial_dar_hash_list() -> Result {
+        let a = canton_id("p1", 1)?;
+        let mut expectations = expectations(vec![a.clone()], a);
+        expectations.dar_filenames = vec!["a.dar".to_string(), "b.dar".to_string()];
+        expectations.dar_hashes = vec![hash_dar(b"a")];
+        assert!(
+            expectations
+                .check_dars(&[
+                    ("a.dar".to_string(), b"a".to_vec()),
+                    ("b.dar".to_string(), b"b".to_vec()),
+                ])
+                .is_err()
+        );
         Ok(())
     }
 
