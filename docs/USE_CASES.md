@@ -219,13 +219,32 @@ Omitting `provider_app_reward_beneficiaries` clears the current setting.
 
 Registering as a featured app in the Amulet ecosystem is the prerequisite for
 holding the `FeaturedAppRight` contract that backs the reward beneficiaries
-above.
+above. On DevNet, Splice lets any provider grant itself that right through
+`AmuletRules_DevNet_FeatureApp`. The `request_dev_net_featured_app_right`
+domain proposal puts that call behind a committee vote:
 
-> **Not currently submittable through DecMan.** `dev_net_feature_app` exists
-> only as an inline `ActionType`, and the inline path now carries governance
-> self-management actions only. There is no `GovernableAction` proposal for it
-> yet, so register the featured app outside DecMan (Canton admin console /
-> deployment tooling) until one is added.
+```json
+{
+  "party_id": "joint-custody::1220...",
+  "rules_contract_id": "<governance-rules-cid>",
+  "proposal": {
+    "type": "request_dev_net_featured_app_right",
+    "amulet_rules_cid": "<amulet-rules-cid>"
+  }
+}
+```
+
+`amulet_rules_cid` is the DSO's current `AmuletRules` contract. `GET
+/network-info` returns it, and the UI prefills the field from that endpoint.
+At execute time DecMan fetches the same contract from the DSO scan API and
+discloses it on the submission, because only the DSO can see `AmuletRules`.
+If the DSO has replaced its `AmuletRules` since the proposal was created, the
+execute is rejected with both contract ids; cancel the proposal and propose
+again.
+
+> **DevNet only.** `AmuletRules_DevNet_FeatureApp` refuses when the network's
+> `AmuletRules` is not flagged `isDevNet`. On TestNet and MainNet the DSO
+> grants a `FeaturedAppRight` through its own governance vote.
 
 ## Multi-Signature Wallet
 

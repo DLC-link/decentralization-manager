@@ -906,6 +906,19 @@ pub fn build_proposal_create_args(
                 ],
             },
         ),
+        ProposalType::RequestDevNetFeaturedAppRight { amulet_rules_cid } => (
+            ProposalPackage::GovernanceUtilityOnboarding,
+            "Governance.UtilityOnboarding.RequestDevNetFeaturedAppRight",
+            "RequestDevNetFeaturedAppRight",
+            Record {
+                record_id: None,
+                fields: vec![
+                    field("governanceParty", make_party(governance_party)),
+                    field("proposer", make_party(proposer)),
+                    field("amuletRulesCid", make_contract_id(amulet_rules_cid)),
+                ],
+            },
+        ),
         ProposalType::SetupMintingDelegation {
             delegate,
             dso,
@@ -1898,6 +1911,25 @@ mod tests {
             labels,
             ["governanceParty", "proposer", "provider", "expectedDso"]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn build_proposal_request_dev_net_featured_app_right_shape() -> Result {
+        let proposal = ProposalType::RequestDevNetFeaturedAppRight {
+            amulet_rules_cid: "00amulet".to_owned(),
+        };
+        let (package, module, entity, record) =
+            build_proposal_create_args("gov", "proposer", &proposal, None, None)?;
+
+        assert_eq!(package, ProposalPackage::GovernanceUtilityOnboarding);
+        assert_eq!(
+            module,
+            "Governance.UtilityOnboarding.RequestDevNetFeaturedAppRight"
+        );
+        assert_eq!(entity, "RequestDevNetFeaturedAppRight");
+        let labels: Vec<&str> = record.fields.iter().map(|f| f.label.as_str()).collect();
+        assert_eq!(labels, ["governanceParty", "proposer", "amuletRulesCid"]);
         Ok(())
     }
 

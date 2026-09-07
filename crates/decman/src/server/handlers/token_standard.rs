@@ -10,6 +10,7 @@
 use std::collections::HashSet;
 
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
+use anyhow::Context as _;
 use serde::Deserialize;
 
 use super::governance::{get_party_token, packages};
@@ -599,6 +600,49 @@ pub async fn get_transfer_factories_handler(
     }
 }
 
+/// The DSO's current `AmuletRules` contract, as the DSO scan API reports it.
+pub(crate) struct AmuletRulesContract {
+    pub dso: CantonId,
+    pub contract_id: String,
+    /// Base64 created-event blob, ready to disclose on a submission.
+    pub created_event_blob: String,
+}
+
+/// Fetch the DSO party id and the current `AmuletRules` contract from the DSO
+/// scan API.
+pub(crate) async fn fetch_amulet_rules(
+    http_client: &reqwest::Client,
+    config: &NodeConfig,
+) -> anyhow::Result<AmuletRulesContract> {
+    fn text_at<'a>(json: &'a serde_json::Value, pointer: &str) -> anyhow::Result<&'a str> {
+        json.pointer(pointer)
+            .and_then(|v| v.as_str())
+            .with_context(|| format!("Unexpected response format from DSO API: missing {pointer}"))
+    }
+
+    let url = config.canton.network.dso_url();
+    let res = http_client
+        .get(url)
+        .send()
+        .await
+        .context("Failed to reach DSO API")?;
+    if !res.status().is_success() {
+        let status = res.status();
+        let body = res.text().await.unwrap_or_default();
+        anyhow::bail!("DSO API returned {status}: {body}");
+    }
+    let json: serde_json::Value = res.json().await.context("Failed to parse DSO response")?;
+    let dso = text_at(&json, "/dso_party_id")?
+        .parse::<CantonId>()
+        .map_err(|e| anyhow::anyhow!("Invalid DSO party ID: {e}"))?;
+    Ok(AmuletRulesContract {
+        dso,
+        contract_id: text_at(&json, "/amulet_rules/contract/contract_id")?.to_string(),
+        created_event_blob: text_at(&json, "/amulet_rules/contract/created_event_blob")?
+            .to_string(),
+    })
+}
+
 /// Pull the DSO party id and AmuletRules contract id from the DSO API. Returns
 /// `None` (with a logged warning) on any failure so callers can degrade
 /// gracefully — the only consumer is `/transfer-factories`, which omits CC
@@ -607,28 +651,13 @@ async fn fetch_amulet_rules_factory(
     http_client: &reqwest::Client,
     config: &NodeConfig,
 ) -> Option<(CantonId, String)> {
-    let url = config.canton.network.dso_url();
-    let res = match http_client.get(url).send().await {
-        Ok(res) if res.status().is_success() => res,
-        Ok(res) => {
-            tracing::warn!("DSO API returned {} fetching AmuletRules", res.status());
-            return None;
-        }
+    match fetch_amulet_rules(http_client, config).await {
+        Ok(rules) => Some((rules.dso, rules.contract_id)),
         Err(e) => {
-            tracing::warn!("Failed to reach DSO API for AmuletRules: {e}");
-            return None;
+            tracing::warn!("Failed to fetch AmuletRules from the DSO API: {e:#}");
+            None
         }
-    };
-    let json: serde_json::Value = res
-        .json()
-        .await
-        .inspect_err(|e| tracing::warn!("Failed to parse DSO response: {e}"))
-        .ok()?;
-    let dso = json.pointer("/dso_party_id").and_then(|v| v.as_str())?;
-    let cid = json
-        .pointer("/amulet_rules/contract/contract_id")
-        .and_then(|v| v.as_str())?;
-    Some((dso.parse().ok()?, cid.to_string()))
+    }
 }
 
 /// Get token-standard `Holding` contracts owned by a party, aggregated by
@@ -726,53 +755,18 @@ pub async fn get_packages() -> impl Responder {
 )]
 #[get("/network-info")]
 pub async fn get_network_info(data: web::Data<AppState>) -> impl Responder {
-    let url = data.config.canton.network.dso_url();
-
-    match data.http_client.get(url).send().await {
-        Ok(res) if res.status().is_success() => match res.json::<serde_json::Value>().await {
-            Ok(json) => {
-                let dso_party = json.pointer("/dso_party_id").and_then(|v| v.as_str());
-                let contract_id = json
-                    .pointer("/amulet_rules/contract/contract_id")
-                    .and_then(|v| v.as_str());
-                let blob = json
-                    .pointer("/amulet_rules/contract/created_event_blob")
-                    .and_then(|v| v.as_str());
-
-                match (dso_party, contract_id, blob) {
-                    (Some(dso), Some(cid), Some(blob)) => match dso.parse::<CantonId>() {
-                        Ok(dso_id) => HttpResponse::Ok().json(NetworkInfo {
-                            dso_party_id: dso_id,
-                            amulet_rules_cid: cid.to_string(),
-                            amulet_rules_blob: blob.to_string(),
-                        }),
-                        Err(e) => HttpResponse::BadGateway().json(ErrorResponse {
-                            error: format!("Invalid DSO party ID: {e}"),
-                        }),
-                    },
-                    _ => {
-                        tracing::warn!("Unexpected DSO API response format");
-                        HttpResponse::BadGateway().json(ErrorResponse {
-                            error: "Unexpected response format from DSO API".to_string(),
-                        })
-                    }
-                }
-            }
-            Err(e) => HttpResponse::BadGateway().json(ErrorResponse {
-                error: format!("Failed to parse DSO response: {e}"),
-            }),
-        },
-        Ok(res) => {
-            let status = res.status();
-            let body = res.text().await.unwrap_or_default();
-            tracing::error!("DSO API returned {status}: {body}");
+    match fetch_amulet_rules(&data.http_client, &data.config).await {
+        Ok(rules) => HttpResponse::Ok().json(NetworkInfo {
+            dso_party_id: rules.dso,
+            amulet_rules_cid: rules.contract_id,
+            amulet_rules_blob: rules.created_event_blob,
+        }),
+        Err(e) => {
+            tracing::warn!("Failed to fetch network info from the DSO API: {e:#}");
             HttpResponse::BadGateway().json(ErrorResponse {
-                error: format!("DSO API returned {status}: {body}"),
+                error: format!("{e:#}"),
             })
         }
-        Err(e) => HttpResponse::BadGateway().json(ErrorResponse {
-            error: format!("Failed to reach DSO API: {e}"),
-        }),
     }
 }
 

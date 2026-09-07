@@ -659,6 +659,14 @@ pub enum ProposalType {
     /// Authorize the `operator` to create batched activity markers on behalf
     /// of the governance party via a `DelegatedBatchedMarkersProxy`.
     CreateDelegatedBatchedMarkersProxy { operator: CantonId },
+    /// Self-grant a `FeaturedAppRight` to the governance party on DevNet by
+    /// exercising `AmuletRules_DevNet_FeatureApp`. The choice refuses on any
+    /// network whose `AmuletRules` is not flagged `isDevNet`.
+    RequestDevNetFeaturedAppRight {
+        /// The DSO's current `AmuletRules` contract, as `GET /network-info`
+        /// reports it. The execute path discloses that contract.
+        amulet_rules_cid: String,
+    },
     /// Delegate minting of the governance party's CIP-104 reward coupons to a
     /// validator node's `delegate` party via a `MintingDelegationProposal`.
     /// The delegation beneficiary is always the governance party; the delegate
