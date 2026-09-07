@@ -1,0 +1,39 @@
+---
+source: crates/decman-lib/src/catalog/proposals/rewards.rs
+expression: "AcceptExternalPartySetup\n{ proposal_cid: \"00abc123\".to_string(), }.to_daml_proto().unwrap()"
+---
+Value {
+    sum: Some(
+        Record(
+            Record {
+                record_id: None,
+                fields: [
+                    RecordField {
+                        label: "proposalCid",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    ContractId(
+                                        "00abc123",
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "description",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    Text(
+                                        "Accept external party setup (ValidatorRight + TransferPreapproval) for proposal 00abc123",
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                ],
+            },
+        ),
+    ),
+}

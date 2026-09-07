@@ -1,0 +1,27 @@
+---
+source: crates/decman-lib/src/catalog/proposals/utility.rs
+expression: "CreateDelegatedBatchedMarkersProxy\n{ operator: cid(\"op\") }.to_daml_proto().unwrap()"
+---
+Value {
+    sum: Some(
+        Record(
+            Record {
+                record_id: None,
+                fields: [
+                    RecordField {
+                        label: "operator",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    Party(
+                                        "op::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                ],
+            },
+        ),
+    ),
+}

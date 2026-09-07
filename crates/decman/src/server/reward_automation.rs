@@ -35,11 +35,15 @@
 
 use anyhow::{Context, anyhow};
 use canton_proto_rs::com::daml::ledger::api::v2::{
-    Command, Commands, ExerciseCommand, GetActiveContractsRequest, GetLedgerEndRequest, Identifier,
-    Record, SubmitAndWaitRequest, Value, command, command_service_client::CommandServiceClient,
+    Command, ExerciseCommand, GetActiveContractsRequest, GetLedgerEndRequest, Identifier, Record,
+    SubmitAndWaitRequest, Value, command, command_service_client::CommandServiceClient,
     get_active_contracts_response::ContractEntry, value,
 };
 use chrono::{DateTime, Utc};
+use decman_lib::framework::commands::commands_envelope;
+use decman_lib::framework::encode::{
+    field, make_contract_id, make_extra_args, make_list, make_party, make_text_map,
+};
 use prometheus::{GaugeVec, IntCounter, IntCounterVec};
 
 use crate::{
@@ -53,9 +57,6 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 use super::AppState;
-use super::action_serializer::{
-    field, make_contract_id, make_extra_args, make_list, make_party, make_text_map,
-};
 use super::event_filters::{
     interface_filter, party_event_format, template_filter, wildcard_filter,
 };
@@ -894,25 +895,15 @@ pub(crate) async fn submit_delegation_assign(
             choice_argument: Some(choice_argument),
         })),
     };
-    // act_as = [assigner], read_as = [decparty]. Remaining fields mirror
-    // `execute_confirm_action` (governance.rs:2203-2217).
-    let commands = Commands {
-        workflow_id: String::new(),
-        user_id: String::new(),
-        command_id: uuid::Uuid::new_v4().to_string(),
-        commands: vec![cmd],
-        deduplication_period: None,
-        min_ledger_time_abs: None,
-        min_ledger_time_rel: None,
-        act_as: vec![assigner.to_string()],
-        read_as: vec![decparty.to_string()],
-        submission_id: String::new(),
-        disclosed_contracts: vec![],
-        synchronizer_id: String::new(),
-        package_id_selection_preference: vec![],
-        prefetch_contract_keys: vec![],
-        taps_max_passes: None,
-    };
+    // act_as = [assigner], read_as = [decparty] — the shared governance
+    // envelope, with the assigner (not a governance member) in the actor slot.
+    let commands = commands_envelope(
+        uuid::Uuid::new_v4().to_string(),
+        assigner,
+        decparty,
+        vec![cmd],
+        vec![],
+    );
     let mut req = tonic::Request::new(SubmitAndWaitRequest {
         commands: Some(commands),
     });
@@ -1694,7 +1685,8 @@ async fn read_oldest_expiry(
 mod tests {
     use std::sync::Arc;
 
-    use super::super::types::RewardBeneficiary;
+    use decman_lib::catalog::types::RewardBeneficiary;
+
     use super::*;
     use crate::auth::{AuthRegistry, WorkflowAuth};
     use crate::config::{KeycloakConfig, PartyCredentials};

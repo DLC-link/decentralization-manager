@@ -548,9 +548,9 @@ mod tests {
     const DEC_PARTY: &str = "Test01::1220c5deadbeef";
     const DSO: &str = "DSO::1220ffaabbcc";
 
-    // ---- Small `Value` constructors (mirrors action_serializer.rs:26-94, which
-    // are module-private). Kept local so the parser tests can build the proto
-    // `Record` inputs they exercise. ----
+    // ---- Small `Value` constructors (mirrors the ones in
+    // `decman_lib::framework::encode`). Kept local so the parser tests can
+    // build the proto `Record` inputs they exercise. ----
 
     fn party(s: &str) -> Value {
         Value {

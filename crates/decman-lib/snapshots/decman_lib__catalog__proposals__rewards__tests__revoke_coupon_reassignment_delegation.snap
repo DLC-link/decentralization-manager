@@ -1,0 +1,27 @@
+---
+source: crates/decman-lib/src/catalog/proposals/rewards.rs
+expression: "RevokeCouponReassignmentDelegation\n{ delegation: \"00abc\".to_string(), }.to_daml_proto().unwrap()"
+---
+Value {
+    sum: Some(
+        Record(
+            Record {
+                record_id: None,
+                fields: [
+                    RecordField {
+                        label: "delegation",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    ContractId(
+                                        "00abc",
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                ],
+            },
+        ),
+    ),
+}

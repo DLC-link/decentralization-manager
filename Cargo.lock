@@ -1239,7 +1239,7 @@ dependencies = [
 [[package]]
 name = "canton-proto-rs"
 version = "3.4.0"
-source = "git+ssh://git@github.com/DLC-link/canton-lib?rev=651ea5221b4794f55bd152e9f3e762a92af69afd#651ea5221b4794f55bd152e9f3e762a92af69afd"
+source = "git+https://github.com/DLC-link/canton-lib?rev=651ea5221b4794f55bd152e9f3e762a92af69afd#651ea5221b4794f55bd152e9f3e762a92af69afd"
 dependencies = [
  "prost",
  "prost-types",
@@ -1441,7 +1441,7 @@ dependencies = [
 [[package]]
 name = "common"
 version = "0.6.1"
-source = "git+ssh://git@github.com/DLC-link/canton-lib?rev=651ea5221b4794f55bd152e9f3e762a92af69afd#651ea5221b4794f55bd152e9f3e762a92af69afd"
+source = "git+https://github.com/DLC-link/canton-lib?rev=651ea5221b4794f55bd152e9f3e762a92af69afd#651ea5221b4794f55bd152e9f3e762a92af69afd"
 dependencies = [
  "canton-api-client",
  "rust_decimal",
@@ -1470,6 +1470,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ca0197aee26d1ae37445ee532fefce43251d24cc7c166799f4d46817f1d3973"
 dependencies = [
  "crossbeam-utils",
+]
+
+[[package]]
+name = "console"
+version = "0.16.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fe5f465a4f6fee88fad41b85d990f84c835335e85b5d9e6e63e0d06d28cba7c"
+dependencies = [
+ "encode_unicode",
+ "libc",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1815,6 +1826,7 @@ dependencies = [
  "clap",
  "common 0.1.0",
  "common 0.6.1",
+ "decman-lib",
  "decman-wallet",
  "dotenvy",
  "ed25519-dalek",
@@ -1823,6 +1835,7 @@ dependencies = [
  "http 0.2.12",
  "hyper 0.14.32",
  "hyper-noise",
+ "insta",
  "jsonwebtoken",
  "keycloak",
  "mime_guess",
@@ -1876,6 +1889,23 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "decman-lib"
+version = "0.1.0"
+dependencies = [
+ "canton-proto-rs",
+ "chrono",
+ "common 0.1.0",
+ "common 0.6.1",
+ "insta",
+ "prost-types",
+ "serde",
+ "thiserror 2.0.20",
+ "tracing",
+ "ts-rs",
+ "utoipa",
 ]
 
 [[package]]
@@ -2108,6 +2138,12 @@ dependencies = [
  "subtle",
  "zeroize",
 ]
+
+[[package]]
+name = "encode_unicode"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0"
 
 [[package]]
 name = "encoding_rs"
@@ -3044,6 +3080,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "insta"
+version = "1.48.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86f0f8fee8c926415c58d6ae43a08523a26faccb2323f5e6b644fe7dd4ef6b82"
+dependencies = [
+ "console",
+ "once_cell",
+ "serde",
+ "similar",
+ "tempfile",
+]
+
+[[package]]
 name = "instability"
 version = "0.3.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3186,7 +3235,7 @@ dependencies = [
 [[package]]
 name = "keycloak"
 version = "0.6.1"
-source = "git+ssh://git@github.com/DLC-link/canton-lib?rev=651ea5221b4794f55bd152e9f3e762a92af69afd#651ea5221b4794f55bd152e9f3e762a92af69afd"
+source = "git+https://github.com/DLC-link/canton-lib?rev=651ea5221b4794f55bd152e9f3e762a92af69afd#651ea5221b4794f55bd152e9f3e762a92af69afd"
 dependencies = [
  "base64 0.22.1",
  "reqwest 0.12.28",
@@ -4552,7 +4601,7 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 [[package]]
 name = "registry"
 version = "0.6.1"
-source = "git+ssh://git@github.com/DLC-link/canton-lib?rev=651ea5221b4794f55bd152e9f3e762a92af69afd#651ea5221b4794f55bd152e9f3e762a92af69afd"
+source = "git+https://github.com/DLC-link/canton-lib?rev=651ea5221b4794f55bd152e9f3e762a92af69afd#651ea5221b4794f55bd152e9f3e762a92af69afd"
 dependencies = [
  "common 0.6.1",
  "reqwest 0.12.28",
@@ -5293,6 +5342,12 @@ name = "simdutf8"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
+
+[[package]]
+name = "similar"
+version = "2.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
 name = "simple_asn1"

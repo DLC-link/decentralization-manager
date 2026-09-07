@@ -1,0 +1,95 @@
+---
+source: crates/decman-lib/src/catalog/proposals/utility.rs
+expression: "AcceptBurnRequest\n{\n    burn_request_cid: \"00brc\".to_string(), instrument_configuration_cid:\n    \"00icc\".to_string(), issuer_credential_cids: vec![], description:\n    \"accept burn\".to_string(),\n}.to_daml_proto().unwrap()"
+---
+Value {
+    sum: Some(
+        Record(
+            Record {
+                record_id: None,
+                fields: [
+                    RecordField {
+                        label: "burnRequestCid",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    ContractId(
+                                        "00brc",
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "instrumentConfigurationCid",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    ContractId(
+                                        "00icc",
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "description",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    Text(
+                                        "accept burn",
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "extraArgsMeta",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    Record(
+                                        Record {
+                                            record_id: None,
+                                            fields: [
+                                                RecordField {
+                                                    label: "values",
+                                                    value: Some(
+                                                        Value {
+                                                            sum: Some(
+                                                                TextMap(
+                                                                    TextMap {
+                                                                        entries: [],
+                                                                    },
+                                                                ),
+                                                            ),
+                                                        },
+                                                    ),
+                                                },
+                                            ],
+                                        },
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "issuerCredentialCids",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    Optional(
+                                        Optional {
+                                            value: None,
+                                        },
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                ],
+            },
+        ),
+    ),
+}

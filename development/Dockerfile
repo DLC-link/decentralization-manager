@@ -19,12 +19,16 @@ COPY crates/decman/frontend/package.json crates/decman/frontend/package-lock.jso
 RUN cd crates/decman/frontend && npm ci
 
 # Workspace manifest + the sibling crates the backend depends on / the
-# workspace must resolve. `common` and `decman-cli` are copied wholesale (small,
-# no node_modules); the backend crate is copied selectively so the host's
-# frontend/node_modules is never pulled in.
+# workspace must resolve. `common`, `decman-cli`, `decman-lib` and
+# `decman-wallet` are copied wholesale (small, no node_modules); the backend
+# crate is copied selectively so the host's frontend/node_modules is never
+# pulled in. Cargo loads every workspace member's manifest even for
+# `-p decman`, so a member left out here fails the build.
 COPY Cargo.toml Cargo.lock ./
 COPY crates/common ./crates/common
 COPY crates/decman-cli ./crates/decman-cli
+COPY crates/decman-lib ./crates/decman-lib
+COPY crates/decman-wallet ./crates/decman-wallet
 COPY crates/decman/Cargo.toml crates/decman/build.rs ./crates/decman/
 COPY crates/decman/migrations ./crates/decman/migrations
 COPY crates/decman/src ./crates/decman/src

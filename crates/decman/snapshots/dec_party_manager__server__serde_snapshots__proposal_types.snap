@@ -1,0 +1,293 @@
+---
+source: crates/decman/src/server/serde_snapshots.rs
+expression: all_proposal_fixtures()
+---
+[
+  {
+    "type": "setup_cc_preapproval",
+    "provider": "prov::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+    "expected_dso": "dso::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892"
+  },
+  {
+    "type": "setup_token_preapproval",
+    "operator": "op::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+    "instrument_admin": "iadmin::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+    "instrument_allowances": [
+      {
+        "id": "TOK"
+      }
+    ]
+  },
+  {
+    "type": "transfer",
+    "transfer_factory_cid": "00tf",
+    "expected_admin": "iadmin::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+    "receiver": "recv::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+    "amount": "12.5",
+    "instrument_id": {
+      "admin": "admin-party",
+      "id": "TOK"
+    },
+    "input_holding_cids": [
+      "00hold"
+    ],
+    "validity_window_hours": 48
+  },
+  {
+    "type": "accept_transfer",
+    "transfer_instruction_cid": "00ti"
+  },
+  {
+    "type": "generic_vote",
+    "description": "a vote"
+  },
+  {
+    "type": "provision_provider_service"
+  },
+  {
+    "type": "setup_utility",
+    "provider_service_cid": "00psc",
+    "operator": "op::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+    "instrument_id_text": "uuid-1",
+    "additional_identifiers": [
+      {
+        "source": "src::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+        "id": "ident",
+        "scheme": "scheme"
+      }
+    ],
+    "create_transfer_rule": true,
+    "create_allocation_factory": true
+  },
+  {
+    "type": "create_provider_service_request",
+    "operator": "op::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+    "provider": "prov::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892"
+  },
+  {
+    "type": "create_user_service_request",
+    "operator": "op::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+    "user": "user::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892"
+  },
+  {
+    "type": "set_provider_app_reward_beneficiaries",
+    "instrument_configuration_cid": "00icc",
+    "provider_app_reward_beneficiaries": [
+      {
+        "beneficiary": "b1::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+        "weight": "1.0"
+      }
+    ]
+  },
+  {
+    "type": "setup_coupon_reassignment_delegation",
+    "dso": "dso::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+    "assigners": [
+      "m1::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+      "m2::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892"
+    ],
+    "new_beneficiaries": [
+      {
+        "beneficiary": "a::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+        "percentage": "0.8"
+      },
+      {
+        "beneficiary": "b::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+        "percentage": "0.2"
+      }
+    ],
+    "prior_delegation": "00prior"
+  },
+  {
+    "type": "revoke_coupon_reassignment_delegation",
+    "delegation": "00deleg"
+  },
+  {
+    "type": "set_enable_result_contracts",
+    "registrar_service_cid": "00rsc",
+    "enable_result_contracts": true
+  },
+  {
+    "type": "create_delegated_batched_markers_proxy",
+    "operator": "op::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892"
+  },
+  {
+    "type": "setup_minting_delegation",
+    "delegate": "delegate::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+    "dso": "dso::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+    "expires_at_micros": 4000000000000000,
+    "amulet_merge_limit": 10,
+    "description": "delegate minting"
+  },
+  {
+    "type": "accept_external_party_setup",
+    "proposal_cid": "00eps"
+  },
+  {
+    "type": "mint",
+    "allocation_factory_cid": "00alloc",
+    "instrument_id": {
+      "admin": "admin-party",
+      "id": "TOK"
+    },
+    "instrument_configuration_cid": "00icc",
+    "recipient": "recv::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+    "amount": "5",
+    "description": "mint"
+  },
+  {
+    "type": "offer_free_credential",
+    "user_service_cid": "00usc",
+    "holder": "holder::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+    "id": "cred-1",
+    "description": "free cred",
+    "claims": [
+      {
+        "subject": "subj",
+        "property": "prop",
+        "value": "val"
+      }
+    ]
+  },
+  {
+    "type": "offer_paid_credential",
+    "user_service_cid": "00usc",
+    "holder": "holder::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+    "id": "cred-2",
+    "description": "paid cred",
+    "claims": [
+      {
+        "subject": "subj",
+        "property": "prop",
+        "value": "val"
+      }
+    ],
+    "billing_params": {
+      "fee_per_day_usd": "1.5",
+      "billing_period_minutes": 60,
+      "deposit_target_amount_usd": "30",
+      "holder_activity_weight": "0.5"
+    },
+    "deposit_initial_amount_usd": "10"
+  },
+  {
+    "type": "accept_free_credential",
+    "user_service_cid": "00usc",
+    "credential_offer_cid": "00offer"
+  },
+  {
+    "type": "burn",
+    "allocation_factory_cid": "00alloc",
+    "instrument_id": {
+      "admin": "admin-party",
+      "id": "TOK"
+    },
+    "instrument_configuration_cid": "00icc",
+    "holder": "holder::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+    "amount": "3",
+    "description": "burn"
+  },
+  {
+    "type": "accept_mint_request",
+    "mint_request_cid": "00mr",
+    "instrument_configuration_cid": "00icc",
+    "issuer_credential_cids": [
+      "00cred"
+    ],
+    "description": "accept mint"
+  },
+  {
+    "type": "accept_burn_request",
+    "burn_request_cid": "00br",
+    "instrument_configuration_cid": "00icc",
+    "issuer_credential_cids": [
+      "00cred"
+    ],
+    "description": "accept burn"
+  },
+  {
+    "type": "create_provider_configuration",
+    "provider_service_cid": "00psc",
+    "registrar_requirements": [
+      {
+        "issuer": "gov::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+        "required_claims": [
+          {
+            "property": "role",
+            "value": "issuer"
+          }
+        ]
+      }
+    ],
+    "holder_requirements": [
+      {
+        "issuer": "other::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+        "required_claims": [
+          {
+            "property": "role",
+            "value": "issuer"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "type": "create_registrar_service_request",
+    "operator": "op::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+    "provider": "prov::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+    "create_transfer_rule": false,
+    "create_allocation_factory": true
+  },
+  {
+    "type": "onboard_registrar",
+    "provider_service_cid": "00psc",
+    "registrar_service_request_cid": "00rsr",
+    "provider_configuration_cid": "00pcc"
+  },
+  {
+    "type": "provision_instrument",
+    "registrar_service_cid": "00rsc",
+    "instrument_id_text": "uuid-2",
+    "additional_identifiers": [
+      {
+        "source": "src::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+        "id": "ident",
+        "scheme": "scheme"
+      }
+    ],
+    "issuer_requirements": [
+      {
+        "issuer": "gov::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+        "required_claims": [
+          {
+            "property": "role",
+            "value": "issuer"
+          }
+        ]
+      }
+    ],
+    "holder_requirements": [],
+    "initial_instrument_issuers": [
+      "iss1::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892"
+    ]
+  },
+  {
+    "type": "onboard_instrument_issuers",
+    "instrument_configuration_cid": "00icc",
+    "instrument_issuers": [
+      "iss1::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+      "iss2::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892"
+    ]
+  },
+  {
+    "type": "offboard_instrument_issuers",
+    "instrument_issuers": [
+      {
+        "instrument_issuer": "iss1::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+        "credential_cids": [
+          "00cred"
+        ]
+      }
+    ]
+  }
+]
