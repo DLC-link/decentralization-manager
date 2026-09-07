@@ -626,6 +626,42 @@ mod tests {
         Ok(())
     }
 
+    /// A chain where every node names the same child twice is a DAG, not a
+    /// cycle, so the path guard lets it through. Without memoisation it costs
+    /// 2^depth work — this shape would not finish in the lifetime of the
+    /// universe, so the test completing at all is the assertion.
+    #[test]
+    fn hashes_a_doubling_dag_without_exponential_work() -> Result {
+        const LEVELS: usize = 64;
+
+        let mut nodes = Vec::with_capacity(LEVELS + 1);
+        for level in 0..LEVELS {
+            nodes.push(node(
+                &level.to_string(),
+                v1::node::NodeType::Rollback(Rollback {
+                    // The same child twice: 2^LEVELS paths through the tree,
+                    // but only LEVELS distinct nodes to hash.
+                    children: vec![(level + 1).to_string(), (level + 1).to_string()],
+                }),
+            ));
+        }
+        nodes.push(node(
+            &LEVELS.to_string(),
+            v1::node::NodeType::Create(create_node("2.1", CONTRACT_ID_1)),
+        ));
+
+        let transaction = DamlTransaction {
+            version: "2.1".to_string(),
+            roots: vec!["0".to_string()],
+            nodes,
+            node_seeds: vec![seed(LEVELS as i32, SEED_CREATE)?],
+        };
+
+        let hasher = nodes::NodeHasher::new(HashingScheme::V2, &transaction)?;
+        assert_eq!(hasher.hash_node_id("0")?.len(), 32);
+        Ok(())
+    }
+
     #[test]
     fn rejects_a_missing_node() -> Result {
         let mut prepared = prepared(HashingScheme::V2)?;

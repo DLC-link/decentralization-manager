@@ -4,7 +4,10 @@
 //! (`community/base/.../protocol/hash/`), cross-checked against the reference
 //! Python implementations Canton ships with the interactive-submission example.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+};
 
 use canton_proto_rs::com::daml::ledger::api::v2::interactive::{
     DamlTransaction, GlobalKeyWithMaintainers,
@@ -43,6 +46,14 @@ pub(super) struct NodeHasher<'a> {
     scheme: HashingScheme,
     nodes: HashMap<&'a str, &'a Node>,
     seeds: HashMap<String, &'a [u8]>,
+    /// Completed node hashes, keyed by node id.
+    ///
+    /// A node's hash depends only on the node and the subtree below it, so it
+    /// is the same every time it is referenced. Without this, a transaction
+    /// whose nodes each name the same child twice costs 2^depth work — the
+    /// depth limit alone caps that at 2^100, which an untrusted coordinator
+    /// could use to stall a peer inside hash verification.
+    memo: RefCell<HashMap<String, [u8; 32]>>,
 }
 
 impl<'a> NodeHasher<'a> {
@@ -75,6 +86,7 @@ impl<'a> NodeHasher<'a> {
             scheme,
             nodes,
             seeds,
+            memo: RefCell::new(HashMap::new()),
         })
     }
 
@@ -94,6 +106,12 @@ impl<'a> NodeHasher<'a> {
         if depth > MAX_NODE_DEPTH {
             anyhow::bail!("transaction tree exceeds the {MAX_NODE_DEPTH} level depth limit");
         }
+        if let Some(hash) = self.memo.borrow().get(node_id) {
+            return Ok(*hash);
+        }
+        // The path set still guards recursion, so a genuine cycle is reported
+        // rather than served from the memo: a node only reaches the memo once
+        // its whole subtree has been hashed without revisiting it.
         if !path.insert(node_id.to_string()) {
             anyhow::bail!("transaction tree references node {node_id} cyclically");
         }
@@ -103,7 +121,9 @@ impl<'a> NodeHasher<'a> {
             .ok_or_else(|| anyhow::anyhow!("transaction references missing node {node_id}"))?;
         let encoded = self.encode_node(node, node_id, depth, path)?;
         path.remove(node_id);
-        Ok(sha256(&encoded))
+        let hash = sha256(&encoded);
+        self.memo.borrow_mut().insert(node_id.to_string(), hash);
+        Ok(hash)
     }
 
     /// Hash a create node that is not part of the transaction tree — the
@@ -114,6 +134,7 @@ impl<'a> NodeHasher<'a> {
             scheme,
             nodes: HashMap::new(),
             seeds: HashMap::new(),
+            memo: RefCell::new(HashMap::new()),
         };
         let mut encoder = hasher.new_node_encoder();
         hasher.encode_create(&mut encoder, create, None)?;
