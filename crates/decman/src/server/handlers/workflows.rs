@@ -2513,10 +2513,13 @@ pub async fn start_dars(
             .iter()
             .map(|f| f.filename.clone())
             .collect();
-        // Pin the content, not just the name: the invitation the operator
-        // sees carries the hash of the exact bytes the peers will be asked to
-        // upload and vet.
-        let dar_hashes: Vec<String> = dars_config
+        // Pin the content, not just the name: the invitation the operator sees
+        // carries the hash of the exact bytes the peers will be asked to upload
+        // and vet. An empty hash list is the wire signal for "coordinator
+        // predates the field", which makes peers fall back to checking
+        // filenames only — so a DAR we cannot decode has to fail the run rather
+        // than quietly downgrade every peer's check.
+        let dar_hashes: std::result::Result<Vec<String>, _> = dars_config
             .dar_files
             .iter()
             .map(|f| {
@@ -2524,23 +2527,23 @@ pub async fn start_dars(
                     .decode(&f.data)
                     .map(|bytes| workflow::validation::hash_dar(&bytes))
             })
-            .collect::<std::result::Result<_, _>>()
-            .unwrap_or_else(|e| {
-                tracing::warn!(
-                    "Could not hash the DARs for the invitation ({e}); peers will only be \
-                     able to check filenames"
-                );
-                Vec::new()
-            });
-        let invite_result = send_dars_invites(
-            &config,
-            &db,
-            &peer_ids,
-            &dar_filenames,
-            &dar_hashes,
-            &dars_config.instance_name,
-        )
-        .await;
+            .collect();
+        let invite_result = match dar_hashes {
+            Ok(dar_hashes) => {
+                send_dars_invites(
+                    &config,
+                    &db,
+                    &peer_ids,
+                    &dar_filenames,
+                    &dar_hashes,
+                    &dars_config.instance_name,
+                )
+                .await
+            }
+            Err(e) => Err(anyhow::anyhow!(
+                "Could not hash the DARs for the invitation: {e}"
+            )),
+        };
         if let Err(e) = invite_result {
             tracing::error!("Failed to send DARs invites: {e}");
             let mut status = dars_state_clone.status.write().await;
