@@ -99,6 +99,7 @@ where
         coordinator_name: None,
         expected_peers: invitees.to_vec(),
         completed_peers: Vec::new(),
+        connected_peers: Vec::new(),
         dec_party_id,
         prefix: None,
         participants: Vec::new(),
@@ -2986,16 +2987,22 @@ pub async fn list_workflows(data: web::Data<AppState>) -> impl Responder {
         .map(|p| (p.public_key, p.name))
         .collect();
 
-    let resolved: Vec<WorkflowRun> = runs
-        .into_iter()
-        .map(|mut r| {
-            if let Some(pk) = r.coordinator_pubkey.as_deref() {
-                r.coordinator_name = pubkey_to_name.get(pk).cloned();
-            }
-            enrich_from_config_json(&mut r);
-            r
-        })
-        .collect();
+    let mut resolved: Vec<WorkflowRun> = Vec::with_capacity(runs.len());
+    for mut r in runs {
+        if let Some(pk) = r.coordinator_pubkey.as_deref() {
+            r.coordinator_name = pubkey_to_name.get(pk).cloned();
+        }
+        enrich_from_config_json(&mut r);
+        // Who has joined lives only in the live coordinator's `WorkflowState`;
+        // the row itself carries no such column. Merge it in so a run parked on
+        // WaitingForPeers can show real progress instead of a permanent zero.
+        if let Some(active) = data.workflows.route(&r.instance_name) {
+            let mut joined: Vec<CantonId> = active.connected_peers().await.into_iter().collect();
+            joined.sort();
+            r.connected_peers = joined;
+        }
+        resolved.push(r);
+    }
 
     HttpResponse::Ok().json(WorkflowRunsResponse { runs: resolved })
 }
@@ -3707,6 +3714,7 @@ mod tests {
             coordinator_name: None,
             expected_peers,
             completed_peers: Vec::new(),
+            connected_peers: Vec::new(),
             dec_party_id: None,
             prefix: None,
             participants: Vec::new(),

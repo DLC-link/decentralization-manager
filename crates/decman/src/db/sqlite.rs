@@ -2248,6 +2248,7 @@ mod tests {
                 CantonId::parse(&format!("b::{TEST_NS}")).unwrap(),
             ],
             completed_peers: Vec::new(),
+            connected_peers: Vec::new(),
             dec_party_id: None,
             prefix: None,
             participants: Vec::new(),

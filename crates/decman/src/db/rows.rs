@@ -421,6 +421,7 @@ impl WorkflowRunRow {
             coordinator_name: None,
             expected_peers,
             completed_peers,
+            connected_peers: Vec::new(),
             dec_party_id,
             // `prefix` + `participants` + thresholds + package/dar names are
             // derived from `config_json` at the API layer; the DB doesn't store
