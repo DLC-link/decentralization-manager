@@ -469,14 +469,17 @@ impl PeerExpectations {
                  is for {expected}"
             ),
             Some(_) => Ok(()),
-            None => {
-                tracing::warn!(
-                    "accepted {kind:?} invitation carried no dec party id; skipping the \
-                     party check on the coordinator's config",
-                    kind = self.kind
-                );
-                Ok(())
-            }
+            // Every invitation kind that reaches this check carries the dec
+            // party as a required field, so an absent one is not version skew —
+            // it means the invite never parsed and the peer cannot say what its
+            // operator agreed to. `check_party_proposals` already refuses that;
+            // this refuses it too rather than accepting whatever party the
+            // coordinator names.
+            None => anyhow::bail!(
+                "accepted {kind:?} invitation carries no dec party id, so the coordinator's \
+                 config cannot be checked against it",
+                kind = self.kind
+            ),
         }
     }
 
@@ -493,13 +496,13 @@ impl PeerExpectations {
                  {expected}"
             ),
             Some(_) => Ok(()),
-            None => {
-                tracing::warn!(
-                    "accepted add-party invitation named no new participant; skipping the \
-                     check on the coordinator's config"
-                );
-                Ok(())
-            }
+            // `new_participant` is required on every add-party invite, so an
+            // absent one means the invite never parsed — not that it predates
+            // the field. Without it the coordinator would pick who joins.
+            None => anyhow::bail!(
+                "accepted add-party invitation names no new participant, so the coordinator's \
+                 choice cannot be checked against it"
+            ),
         }
     }
 
@@ -559,13 +562,16 @@ impl PeerExpectations {
             Some(signing_keys) => {
                 self.check_threshold(i32::try_from(signing_keys.threshold)?, self.members.len())
             }
-            None => {
-                tracing::warn!(
-                    "P2P proposal carries no party signing keys, so their threshold cannot \
-                     be checked"
-                );
-                Ok(())
-            }
+            // Signing a mapping with no party signing keys does not merely
+            // leave a threshold unchecked — it submits a party that can no
+            // longer authorize anything. Every mapping this tool produces
+            // carries them (onboarding sets them, and the kick / add-party /
+            // change-threshold / clearing proposals all derive from the current
+            // on-chain mapping), so an absent set is a stripped proposal.
+            None => anyhow::bail!(
+                "P2P proposal carries no party signing keys, which would leave the party \
+                 unable to authorize anything"
+            ),
         }
     }
 
@@ -1008,6 +1014,43 @@ mod tests {
         Ok(())
     }
 
+    /// A stripped `party_signing_keys` is not a missing threshold — it is a
+    /// mapping that would leave the party unable to authorize anything.
+    #[test]
+    fn rejects_a_proposal_with_no_party_signing_keys() -> Result {
+        let (a, b) = (canton_id("p1", 1)?, canton_id("p2", 2)?);
+        let expectations = expectations(vec![a.clone(), b.clone()], a.clone());
+        let mapping = p2p("dec::x", &[a, b], 2);
+        assert!(mapping.party_signing_keys.is_none());
+        assert!(expectations.check_p2p_thresholds(&mapping).is_err());
+        Ok(())
+    }
+
+    /// The party is required on every invitation kind that reaches this check,
+    /// so an absent one means the invite never parsed — the peer cannot say
+    /// what it agreed to and must not accept the coordinator's word for it.
+    #[test]
+    fn rejects_a_config_when_no_party_was_accepted() -> Result {
+        let a = canton_id("p1", 1)?;
+        let expectations = expectations(vec![a.clone()], a);
+        assert!(expectations.dec_party_id.is_none());
+        assert!(expectations.check_dec_party(&canton_id("any", 4)?).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_an_add_party_config_when_no_participant_was_accepted() -> Result {
+        let a = canton_id("p1", 1)?;
+        let expectations = expectations(vec![a.clone()], a);
+        assert!(expectations.new_participant.is_none());
+        assert!(
+            expectations
+                .check_new_participant(&canton_id("any", 4)?)
+                .is_err()
+        );
+        Ok(())
+    }
+
     #[test]
     fn accepts_matching_hosting_and_signing_thresholds() -> Result {
         let (a, b) = (canton_id("p1", 1)?, canton_id("p2", 2)?);
@@ -1028,10 +1071,21 @@ mod tests {
         expectations.dec_party_id = Some(party.clone());
 
         let mut mapping = p2p(&party.to_string(), &[a, b], 2);
+        // Keep the mapping otherwise valid so the assertion below is about the
+        // onboarding flag, not about an earlier check tripping first.
+        mapping.party_signing_keys = Some(SigningKeysWithThreshold {
+            keys: Vec::new(),
+            threshold: 2,
+        });
         mapping.participants[1].onboarding = Some(hosting_participant::Onboarding::default());
         let payload = encode_proposal(topology_mapping::Mapping::PartyToParticipant(mapping));
 
-        assert!(expectations.check_clear_onboarding(&payload).is_err());
+        let error = expectations
+            .check_clear_onboarding(&payload)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(error.contains("still flags"), "unexpected error: {error}");
         Ok(())
     }
 
