@@ -14,10 +14,18 @@
 //! * The wallet pins the base serial in the request. Without it, two hosts that
 //!   read head state a moment apart would build different transactions and the
 //!   comparison would fail for a reason that is not an attack.
-//! * The threshold does not move here. Raising it is a separate serial bump,
-//!   because a new host does not count toward the threshold until its marker
-//!   clears — bundling the two would let the party's active hosts fall below its
-//!   own threshold mid-flight.
+//! * The threshold does not move here. Not because it cannot: the decparty
+//!   add-party flow writes a marked new member and a new threshold in one serial
+//!   bump, and Canton takes it. The only hard rule is that the threshold must
+//!   not exceed the hosts that can actually confirm, and a marked host cannot
+//!   (`party_replication.proto` defines the flag being cleared as the point the
+//!   party starts participating in transactions there). The known
+//!   full-threshold bug is that rule broken from the other side.
+//!
+//!   Splitting it is about rollback rather than safety: if the raise lands with
+//!   the add and the ACS replication then fails, the party sits at a threshold
+//!   its live hosts may not meet until someone does another bump. Kept separate,
+//!   raising is a cheap last step once the marker has cleared.
 
 use anyhow::Context;
 use canton_proto_rs::com::digitalasset::canton::{

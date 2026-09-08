@@ -2,7 +2,7 @@
   "packages": [
     {
       "package_id": "0151eb410fe627f3178d6810b20ac306fe2fdcbfba08c4ed9c659f6b3d48926c",
-      "name": "bitsafe-vault",
+      "name": "cbtc-governance",
       "version": "0.0.8"
     },
     {
@@ -32,7 +32,7 @@
     },
     {
       "package_id": "88b4bb6c9d5ac3db5813594f442192c82b096f240dde203e954cde5f710eaeff",
-      "name": "vault-governance",
+      "name": "governance-utility-onboarding",
       "version": "0.0.8"
     },
     {
@@ -77,7 +77,7 @@
     },
     {
       "package_id": "0d65c351b1a6637537d2045ecb21407d0d21d514e8582024b7a7346fcebd132c",
-      "name": "vault-processor",
+      "name": "governance-rewards-automation",
       "version": "0.0.8"
     },
     {

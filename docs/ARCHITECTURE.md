@@ -42,7 +42,7 @@ The system defaults to a majority threshold for both topology changes and govern
 | Operation | Threshold |
 |-----------|-----------|
 | Topology changes (DNS/P2P) | `ceil(n/2)` of namespace owners must sign by default (bare majority for even `n`); set at creation and adjustable via the change-threshold workflow |
-| Governance actions | Configurable per `GovernanceRules` or `VaultGovernanceRules` contract |
+| Governance actions | Configurable per `GovernanceRules` contract |
 
 ### Key Types
 
@@ -110,10 +110,11 @@ The application communicates with Canton via gRPC using the following services:
 |---------|---------|
 | `TopologyManagerReadService` | Query DNS, P2P, and other topology mappings |
 | `TopologyManagerWriteService` | Submit topology proposals and authorize transactions |
-| `VaultManagerService` | Manage key vaults (generate keys, sign, export) |
+| `VaultService` | Manage key vaults (generate keys, sign, export) |
 | `IdentityInitializationService` | Query participant ID |
-| `SynchronizerConnectivityService` | Discover synchronizer IDs |
-| `PackageService` | Upload DAR files |
+| `SynchronizerConnectivityService` | Discover synchronizer IDs, disconnect and reconnect during ACS import |
+| `PackageService` | Upload DAR files, list vetted packages |
+| `PartyManagementService` (`canton.admin.participant.v30`) | Offline party replication: `ExportPartyAcs`, `ImportPartyAcs`, `GetHighestOffsetByTimestamp`, `ClearPartyOnboardingFlag` |
 
 **Ledger API services:**
 | Service | Purpose |
@@ -121,8 +122,10 @@ The application communicates with Canton via gRPC using the following services:
 | `CommandService` | Submit and execute Daml commands |
 | `StateService` | Query active contracts |
 | `UserManagementService` | Query user rights |
-| `PartyManagementService` | Query party metadata and annotations |
+| `PartyManagementService` (`ledger.api.v2.admin`) | Query party metadata and annotations |
 | `InteractiveSubmissionService` | Prepare and execute multi-party interactive submissions |
+| `UpdateService` | Read transaction updates by offset |
+| `EventQueryService` | Look up create/archive events for a contract |
 
 ### Workflow Engine
 
@@ -173,6 +176,79 @@ Coordinator                           Peer
     |--- Disconnect --------------------->|
 ```
 
+### Coordinator / Peer Trust Model
+
+A coordinator drives the protocol; a peer executes what it is told. The two are
+not equally trusted, and the boundary matters because a peer's Canton
+participant holds keys that can authorize topology changes for the
+decentralized party.
+
+**What the coordinator is trusted for.** Sequencing the run: deciding which
+step happens when, aggregating signatures, and submitting the result. It also
+builds the payloads — the topology proposals, the DAR bytes, the prepared
+ledger submissions.
+
+**What the coordinator is not trusted for.** The *content* of those payloads. A
+coordinator that is compromised, or simply running modified code, can put
+anything in them. The Noise channel proves who the coordinator is, not that
+what it sends is what the peer's operator agreed to.
+
+**Where the peer's consent lives.** The invitation. The operator sees the
+party, the members, the threshold, the participant being added or removed and
+the DAR filenames and hashes, and accepts once per run. That invitation is
+persisted on the peer's `workflow_runs` row and is the reference for
+everything that follows (`workflow::validation::PeerExpectations`).
+
+**What the peer checks before it signs or installs anything:**
+
+- The command belongs to the accepted workflow kind. A Contracts invitation
+  cannot be used to drive a kick.
+- Topology proposals decode to the expected mapping kind, target the accepted
+  party, carry exactly the accepted member set, keep this node's namespace
+  among the owners, and use the accepted threshold. For onboarding — where the
+  party does not exist yet — the peer instead checks that the decentralized
+  namespace really is the hash of the proposed owner set, and that the P2P
+  proposal is for the namespace it signed in the DNS step.
+- Prepared ledger submissions are re-hashed locally from the transaction that
+  accompanies them (`canton_hash`), so a signature can only ever authorize the
+  transaction the peer can inspect, and that transaction must act as the
+  accepted party. A hashing scheme this node cannot reproduce is refused
+  rather than signed blind.
+- DAR files match the filenames *and* the SHA-256 hashes named in the
+  invitation, so a coordinator cannot get different code vetted under an
+  accepted name.
+
+Any mismatch fails the step. Repeated mismatches abort the peer run.
+
+**What this does not cover.** The checks bound what a coordinator can obtain a
+signature for; they do not make the coordinator trustworthy. Three gaps remain,
+and they are load-bearing enough to state rather than imply:
+
+- **A peer cannot verify the other members' namespaces or signing keys.** It
+  only ever sends its own key bundle to the coordinator and never sees the
+  others', so it can confirm that it was not excluded but not that the rest of
+  the owner set and key set belong to the members named in the invitation. A
+  DNS proposal needs `threshold` signatures rather than all of them, so a
+  namespace or key belonging to a member that does not sign this round can be
+  substituted without any signer noticing. Closable for kick / add-party /
+  change-threshold by comparing against the current on-chain state
+  (DLC-link/decentralization-manager#420, #422); not closable for onboarding
+  without a protocol change, because no on-chain state exists yet.
+- **The contracts workflow constrains who a transaction acts as, not what it
+  does.** The peer recomputes the hash and pins `act_as` to the accepted dec
+  party, so it can only ever authorize the transaction it can read — but the
+  accepted package names are never compared against the transaction's nodes, so
+  any create or exercise acting as that party passes
+  (DLC-link/decentralization-manager#423).
+- **An older coordinator may send an invitation without the DAR hashes.** The
+  peer then checks filenames only and logs a warning, so a network mid-upgrade
+  keeps working. This is the only leniency left for an absent field, alongside
+  the onboarding threshold; every other absent pin fails closed.
+
+Governance confirm/execute is not covered here and does not need to be: the peer
+builds those commands locally and the Daml layer re-validates them against the
+on-ledger proposal.
+
 ## Communication Protocol
 
 ### Wire Format
@@ -190,7 +266,7 @@ Minimum message size: 6 bytes (type + length with zero payload).
 
 ### Message Categories
 
-**Commands (0x0001 - 0x000F):** Sent by coordinator to peers.
+**Commands (0x0001 - 0x000F, 0x0020 - 0x002F):** Sent by coordinator to peers.
 
 | Code | Name | Payload | Description |
 |------|------|---------|-------------|
@@ -209,6 +285,12 @@ Minimum message size: 6 bytes (type + length with zero payload).
 | 0x000D | ListPeers | (empty) | Request a peer's known-peer list |
 | 0x000E | RequestMemberParty | (empty) | Request a peer's member party |
 | 0x000F | Health | (empty) | Health probe |
+| 0x0020 | GenerateAddPartyKeys | JSON add-party config | New member generates its namespace + Daml keys (others skip) |
+| 0x0021 | SignAddParty | Config + add-party proposals | Sign the add-party DNS + P2P proposals |
+| 0x0022 | ImportAcs | ACS snapshot | New member imports the party's ACS (others skip) |
+| 0x0023 | ClearOnboardingFlag | JSON clear config | New member drives `ClearPartyOnboardingFlag` (others skip) |
+| 0x0024 | SignClearOnboarding | Clearing proposal or skip marker | Sign the onboarding-flag clearing proposal |
+| 0x0025 | SignChangeThreshold | Config + threshold proposals | Sign the change-threshold DNS + P2P proposals |
 
 **Invites (0x0010 - 0x001F):** Sent during heartbeat to invite peers.
 
@@ -221,6 +303,8 @@ Minimum message size: 6 bytes (type + length with zero payload).
 | 0x0014 | CancelInvite | Cancel a previously sent invitation |
 | 0x0015 | RetryWorkflow | Coordinator tells peers to retry a failed run |
 | 0x0016 | DeclineInvitation | Peer declines an invitation (frees coordinator's run) |
+| 0x0017 | InviteAddParty | Invite to add a new member to a decentralized party |
+| 0x0018 | InviteChangeThreshold | Invite to change a decentralized party's threshold |
 
 **Responses (0x0100 - 0x01FF):** Replies from coordinator or peer.
 
@@ -247,8 +331,13 @@ Minimum message size: 6 bytes (type + length with zero payload).
 | 0x0203 | P2pSignatures | Signed P2P proposals |
 | 0x0204 | SubmissionSignatures | Signed ledger submissions |
 | 0x0205 | KickSignatures | Signed kick proposals |
+| 0x0206 | AddPartyKeysUpload | New member's generated keys + participant id |
+| 0x0207 | AddPartySignatures | Signed add-party DNS + P2P pair |
+| 0x0208 | AddPartyClearSignatures | Signed onboarding-flag clearing proposal |
+| 0x0209 | AddPartyClearProposal | The clearing proposal the new member authored |
+| 0x020A | ChangeThresholdSignatures | Signed change-threshold DNS + P2P pair |
 
-**Chunked Transfer (0x0300 - 0x03FF):** For payloads exceeding 1 KB.
+**Chunked Transfer (0x0300 - 0x03FF):** For payloads exceeding 1 MiB.
 
 | Code | Name | Payload | Description |
 |------|------|---------|-------------|
@@ -256,7 +345,7 @@ Minimum message size: 6 bytes (type + length with zero payload).
 | 0x0301 | GetChunk | chunk_index(4B) | Request specific chunk |
 | 0x0302 | Chunk | chunk_index(4B) + chunk_data(var) | Chunk data response |
 
-Chunk size: 1024 bytes. Chunking is required for payloads exceeding `MAX_PAYLOAD_SIZE` (1024 bytes).
+Chunk size: 1 MiB (`CHUNK_SIZE`). Chunking is required for payloads exceeding `MAX_PAYLOAD_SIZE` (1 MiB). An assembled chunked response is capped at 16 MiB (`MAX_CHUNKED_TOTAL_SIZE`).
 
 ### Security
 
@@ -284,8 +373,8 @@ Creates a new decentralized party with multiple hosting participants.
 | 8 | Complete | All | Disconnect peers, workflow finished |
 
 **Canton API calls:**
-- `VaultManagerService.GenerateKey` -- Generate namespace and signing keys (step 2)
-- `VaultManagerService.ExportKeyPair` -- Export public keys for proposal creation (step 2)
+- `VaultService.GenerateKey` -- Generate namespace and signing keys (step 2)
+- `VaultService.ExportKeyPair` -- Export public keys for proposal creation (step 2)
 - `TopologyManagerWriteService.Authorize` -- Sign topology proposals (steps 4, 6)
 - `TopologyManagerWriteService.AddTransactions` -- Submit signed proposals (steps 5, 7)
 
@@ -353,6 +442,97 @@ Uploads DAR packages to all participants without deploying contracts.
 
 **Minimum participants:** 2
 
+### Add Party (Add a Host to an Existing Decentralized Party)
+
+Adds a hosting participant to a decentralized party that already exists, and
+replicates the party's active contracts to it. The party keeps transacting on
+its existing hosts throughout: Canton's `HostingParticipant.Onboarding` marker
+suspends it only on the joining node.
+
+**Steps:**
+
+| # | Step | Actor | Description |
+|---|------|-------|-------------|
+| 1 | WaitingForPeers | Coordinator | Wait for the existing members and the joiner to connect |
+| 2 | GenerateNewMemberKeys | New member | Generate namespace + Daml signing keys and upload the public halves |
+| 3 | ExportState | Coordinator | Read the current DNS + P2P state, validate the add, capture the ledger offset |
+| 4 | CreateProposals | Coordinator | Build the updated DNS + P2P proposals, with the joiner marked `Onboarding` |
+| 5 | SignProposals | All | Every member signs both proposals with its namespace key |
+| 6 | SubmitProposals | Coordinator | Submit DNS then P2P, then export the party's ACS |
+| 7 | SyncAcs | New member | Disconnect from the synchronizer, import the ACS, reconnect (skipped when the ACS is empty) |
+| 8 | PrepareClearOnboarding | Coordinator | Swap the command payload for the clear-flag phase |
+| 9 | ProposeClearOnboarding | New member | Author the `ClearPartyOnboardingFlag` transaction past Canton's safe time |
+| 10 | PrepareClearSign | Coordinator | Turn the authored proposal into a signing round (or a skip marker) |
+| 11 | SignClearOnboarding | All | Every member signs the clearing proposal |
+| 12 | SubmitClearOnboarding | Coordinator | Submit it and wait for the marker to drop |
+| 13 | Complete | All | Disconnect peers, workflow finished |
+
+**Canton API calls:**
+- `VaultService.GenerateKey` / `ExportKeyPair` -- New member's keys (step 2)
+- `TopologyManagerWriteService.Authorize` / `AddTransactions` -- Proposals (steps 5, 6, 11, 12)
+- `PartyManagementService.GetHighestOffsetByTimestamp` -- Capture the export offset (step 3)
+- `PartyManagementService.ExportPartyAcs` -- Export the snapshot, scoped to the joiner (step 6)
+- `SynchronizerConnectivityService.DisconnectSynchronizer` / `ReconnectSynchronizers` -- Bracket the import (step 7)
+- `PartyManagementService.ImportPartyAcs` -- Import the snapshot (step 7)
+- `PackageService.ListPackages` -- Preflight the joiner's vetted packages before the import (step 7)
+- `PartyManagementService.ClearPartyOnboardingFlag` -- Clear the marker (steps 9, 12)
+
+**Minimum participants:** 2 (an existing member + the joiner)
+
+**Restriction:** the workflow requires a `DecentralizedNamespaceDefinition` and a
+Noise quorum of member nodes. It cannot add a host to a local party or to an
+external party. It fails at `ExportState` for any other party type.
+
+### Change Threshold
+
+Changes the signing threshold of an existing decentralized party's namespace.
+
+**Steps:**
+
+| # | Step | Actor | Description |
+|---|------|-------|-------------|
+| 1 | WaitingForPeers | Coordinator | Wait for the party's members to connect |
+| 2 | ExportState | Coordinator | Read the current DNS state and validate the new threshold |
+| 3 | CreateProposals | Coordinator | Build the new-threshold DNS + P2P proposals |
+| 4 | SignProposals | All | Every member signs the proposals |
+| 5 | Submit | Coordinator | Submit the change and wait for propagation |
+| 6 | Complete | All | Disconnect peers |
+
+**Canton API calls:**
+- `TopologyManagerWriteService.Authorize` -- Sign the proposals (step 4)
+- `TopologyManagerWriteService.AddTransactions` -- Submit the change (step 5)
+
+**Minimum participants:** 2 (party members)
+
+### External Party Onboarding (Tenant API)
+
+Creates a **co-validated** party: hosted on several participants at once but
+controlled by a single Ed25519 key its owner holds. This is not a Noise
+workflow. It is stateless HTTP, driven by the wallet, with Canton itself as the
+only coordination store.
+
+**Steps:**
+
+| # | Step | Actor | Description |
+|---|------|-------|-------------|
+| 1 | prepare | Wallet -> every host | `POST /v0/tenant/prepare`. Each host independently builds the serial-1 `PartyToParticipant` and returns it with the hash to sign |
+| 2 | compare | Wallet | Require every host's bytes to be identical; reject the onboarding otherwise |
+| 3 | sign | Wallet | Sign the hashes locally. The private key never leaves the wallet process |
+| 4 | onboard | Wallet -> every host | `POST /v0/tenant/onboard`. Each host re-validates the bytes, co-signs with its own topology key, and submits |
+| 5 | poll | Wallet | `GET /v0/tenant/{party}/status` on every host until each reports the party hosted |
+
+Canton promotes the mapping once every host has authorized. The party's signing
+key rides inside the mapping as `party_signing_keys`, so the party transacts
+through `InteractiveSubmissionService` rather than plain submission.
+
+**Authentication:** the `/v0/tenant/` prefix uses a separate tenant API key and
+bypasses the operator JWT. Read-only `/external-parties` lists the external
+parties a node hosts.
+
+**Scope:** this flow replicates identity only, never state. It creates a new
+party; it cannot decentralize a party that already holds contracts. See
+[crates/decman-wallet/README.md](../crates/decman-wallet/README.md).
+
 ## Governance System
 
 The governance system provides multi-party approval workflows built on Daml smart contracts. It uses a **modular, interface-based architecture** where a single `GovernanceRules` contract handles consensus logic (threshold validation, confirmation lifecycle) while domain-specific actions are defined as separate templates implementing the `GovernableAction` interface.
@@ -365,8 +545,6 @@ The system is split into the following Daml packages:
 | `governance-token-custody` | Token transfer and preapproval actions |
 | `governance-utility-onboarding` | Utility-registry onboarding actions and token mint / burn |
 | `governance-utility-credential` | Credential domain: offer/accept free and paid credentials |
-
-A legacy `VaultGovernanceRules` contract (from the `bitsafe-vault-governance` package) is also supported for backward compatibility with existing vault deployments.
 
 ### GovernableAction Interface
 
@@ -551,6 +729,7 @@ The governance party bootstraps itself as a utility-registry provider and regist
 | `SetProviderAppRewardBeneficiaries` | `SetProviderAppRewardBeneficiaries` | Set the provider-app reward beneficiaries on an `InstrumentConfiguration` |
 | `SetEnableResultContracts` | `SetEnableResultContracts` | Toggle result-contract emission on a `RegistrarService` |
 | `CreateDelegatedBatchedMarkersProxy` | `CreateDelegatedBatchedMarkersProxy` | Authorize the operator to create batched activity markers on behalf of the governance party |
+| `RequestDevNetFeaturedAppRight` | `RequestDevNetFeaturedAppRight` | Self-grant a `FeaturedAppRight` to the governance party by exercising `AmuletRules_DevNet_FeatureApp`. DevNet only: the choice refuses when `AmuletRules.isDevNet` is false. Only the DSO sees `AmuletRules`, so the execute submission must disclose it. DecMan's execute handler fetches the current `AmuletRules` from the DSO scan API and discloses it automatically |
 
 **Token issuance:**
 
@@ -563,93 +742,12 @@ The governance party bootstraps itself as a utility-registry provider and regist
 
 **Prerequisite.** `SetupUtility` consumes an existing `ProviderService` for the governance party. Use `ProvisionProviderService` to create one through the governance flow — direct creation of `ProviderService` via `POST /contracts` or a multi-party daml-script submit fails on Canton when the governance party is externally signed, because `ProviderService` has two signatories (`operator, provider`).
 
-### Legacy: VaultGovernanceRules
-
-The `VaultGovernanceRules` contract (from `BitsafeVault.VaultGovernance`, package `#bitsafe-vault-governance-v0-rc8`) is the original governance primitive used for vault operations. It remains supported for backward compatibility with existing vault deployments.
-
-```
-VaultGovernanceRules {
-    vaultManager : Party            -- The decentralized party
-    members      : [Party]          -- Member parties authorized to vote
-    threshold    : Int              -- Minimum confirmations required
-    actionConfirmationTimeout : Optional RelTime  -- Auto-expiry for stale confirmations
-}
-```
-
-Unlike the modular `GovernanceRules`, `VaultGovernanceRules` uses a monolithic design where all action types are encoded as variants of a closed `ActionRequiringConfirmation` enum. Confirmations are matched by value equality rather than `ContractId`.
-
-Choices on `VaultGovernanceRules`:
-- `VaultGovernanceRules_ConfirmAction` -- Submit a confirmation for an action
-- `VaultGovernanceRules_ExecuteConfirmedAction` -- Execute when threshold is met
-- `VaultGovernanceRules_ExpireConfirmation` -- Remove a stale confirmation
-
-#### Vault Action Types
-
-The vault governance system supports 21 action types across 7 categories:
-
-**Governance (6 actions):**
-
-| Action | Parameters | Description |
-|--------|------------|-------------|
-| `GovernanceAddMember` | member, new_threshold | Add a new governance member |
-| `GovernanceRemoveMember` | member, new_threshold | Remove a governance member |
-| `GovernanceSetThreshold` | new_threshold | Change the approval threshold |
-| `GovernanceSetTimeout` | new_timeout_microseconds | Set confirmation expiry timeout |
-| `GovernanceAddAdditionalProposer` | additional_proposer | Grant propose-only rights to a non-member party |
-| `GovernanceRemoveAdditionalProposer` | additional_proposer | Revoke propose-only rights from a party |
-
-**Vault Deployment (2 actions):**
-
-| Action | Parameters | Description |
-|--------|------------|-------------|
-| `VaultDeployment` | vault_rules_cid, vault_name, share_symbol, asset_instrument_id, limits, vault_backend_signatory, vault_far_config, allocation_factory_cid, registrar_service_cid | Deploy a new BitsafeVault |
-| `YieldEpochDeployment` | vault_rules_cid, vault_cid, asset_instrument_id, vault_backend_signatory | Deploy a yield epoch |
-
-**Vault Operations (5 actions):**
-
-| Action | Parameters | Description |
-|--------|------------|-------------|
-| `VaultPause` | vault_id | Pause vault operations |
-| `VaultUnpause` | vault_id | Resume vault operations |
-| `VaultUpdateLimits` | vault_id, new_limits | Update deposit/withdrawal limits |
-| `VaultUpdateBackend` | vault_id, new_backend_signatory | Change backend signatory |
-| `VaultUpdateFarBeneficiaries` | vault_id, new_beneficiaries | Update FAR reward distribution |
-
-**Processor (1 action):**
-
-| Action | Parameters | Description |
-|--------|------------|-------------|
-| `ProcessorDeploymentRequest` | vault_processor_rules_cid, vault_backend_signatory, allocation_factory_cid, processor_far_config, initial_supported_vaults | Deploy a vault processor |
-
-**Utility Onboarding (4 actions):**
-
-| Action | Parameters | Description |
-|--------|------------|-------------|
-| `UtilityCreateProviderRequest` | operator | Create a ProviderService |
-| `UtilityCreateUserRequest` | operator | Create a UserService |
-| `UtilitySetup` | operator, provider_service_cid, user_service_cid | Link provider and user services |
-| `UtilityAcceptHolderServiceRequest` | operator, provider_service_cid, holder_service_request_cid, holder | Accept a holder service request |
-
-**Credentials (2 actions):**
-
-| Action | Parameters | Description |
-|--------|------------|-------------|
-| `CredentialOfferFree` | operator, user_service_cid, holder, id, description, claims | Offer a free credential |
-| `CredentialAcceptFree` | operator, user_service_cid, credential_offer_cid | Accept a free credential |
-
-**DevNet (1 action):**
-
-| Action | Parameters | Description |
-|--------|------------|-------------|
-| `DevNetFeatureApp` | amulet_rules_cid | Register as featured app in Amulet ecosystem |
-
 ### Featured App Rewards (FAR)
 
-FAR is a reward distribution mechanism for featured application participants in the Amulet ecosystem:
+FAR is a reward distribution mechanism for featured application participants in the Amulet ecosystem. The beneficiaries live on the governance party's `InstrumentConfiguration`:
 
 ```json
 {
-    "featured_app_right_cid": "<contract-id>",
     "beneficiaries": [
         { "beneficiary": "party::1220abc...", "weight": "0.50" },
         { "beneficiary": "party::1220def...", "weight": "0.30" },
@@ -658,17 +756,14 @@ FAR is a reward distribution mechanism for featured application participants in 
 }
 ```
 
-FAR configuration is used in:
-- `VaultDeployment` -- initial FAR setup for a new vault
-- `ProcessorDeploymentRequest` -- FAR for processor rewards
-- `VaultUpdateFarBeneficiaries` -- update beneficiaries and weights for an existing vault
+Weights are decimal strings and must sum to exactly 1.0; `SetProviderAppRewardBeneficiaries` is the governance proposal that sets or clears them. `DevNetFeatureApp` registers the party as a featured app on DevNet, which is the prerequisite for holding the `FeaturedAppRight` the rewards are paid against.
 
 ## Technical Constraints
 
 ### Infrastructure Requirements
 
 - **Canton Admin API access required**: The application needs access to privileged Admin API endpoints (topology management, key vaults, package upload). This is not the public Ledger API -- it requires high node-level privileges.
-- **6 Admin API services used**: TopologyManagerRead, TopologyManagerWrite, VaultManager, IdentityInitialization, SynchronizerConnectivity, PackageService
+- **7 Admin API services used**: TopologyManagerRead, TopologyManagerWrite, Vault, IdentityInitialization, SynchronizerConnectivity, PackageService, PartyManagement
 - **Canton protocol version**: 35 (hardcoded for key export and topology operations)
 - **Network ports**: TCP 8080 (HTTP server) + TCP 9000 (Noise P2P)
 
@@ -677,7 +772,7 @@ FAR configuration is used in:
 - **Topology propagation delay**: 30 seconds after the effective time of a topology change before it can be used. Without this wait, transactions may be rejected with `LOCAL_VERDICT_TIMEOUT`.
 - **Topology retry settings**: 30 attempts with 2-second delays when polling for topology state changes
 - **Heartbeat interval**: 5-second ping cycle for peer connectivity monitoring
-- **Noise timeouts**: 10-second request timeout, 30-second handshake timeout (configurable), 120-second message timeout (configurable)
+- **Noise timeouts**: 10-second request timeout, 25-second chunk-fetch timeout, 45-second handler timeout, 30-second handshake timeout (configurable), 120-second message timeout (configurable)
 
 ### Participant Minimums
 
@@ -687,13 +782,16 @@ FAR configuration is used in:
 | Kick | 2 (remaining members) |
 | Contracts | 3 |
 | DARs | 2 |
+| Add Party | 2 (an existing member + the joiner) |
+| Change Threshold | 2 (party members) |
 
 ### Known Limitations
 
-- **ACS sync for existing contracts**: Adding a new member to a party that already has active contracts requires Active Contract Set (ACS) export/import. This operation requires Canton's repair mode, which necessitates a participant restart. If the party has no active contracts, ACS sync is not needed.
-- **No external party support**: All members must run the DecMan application on their own Canton participant node. There is no API for external parties to join without running the software.
-- **Single workflow at a time**: The Noise listener is paused during active workflows. Only one workflow can run concurrently per node.
-- **Coordinator single point of progress**: If the coordinator goes offline during a workflow, the workflow cannot continue. Peers will retry 3 times before aborting.
+- **ACS sync for existing contracts**: Adding a new member to a party that already has active contracts requires Active Contract Set (ACS) export/import. The add-party workflow does this with Canton offline party replication (`ExportPartyAcs` / `ImportPartyAcs` plus the `HostingParticipant.Onboarding` marker), so no repair mode and no participant restart are needed. The importing node does disconnect from the synchronizer for the duration of the import, which briefly pauses that node; the party keeps transacting on its other hosts. If the party has no active contracts, the workflow skips the sync.
+- **Add-party is decentralized-party only**: The workflow requires a `DecentralizedNamespaceDefinition` and a Noise quorum of member nodes. It cannot add a host to a local or an already-onboarded external party. See [Canton Party Replication](CANTON_PARTY_REPLICATION.md).
+- **External parties are onboarded fresh, not decentralized in place**: The tenant API creates a co-validated party from a key the wallet already holds. It replicates identity only, never state, so it cannot take over a party that already holds contracts.
+- **ACS transfer size**: The snapshot travels over the Noise chunked-transfer path, which caps an assembled response at 16 MiB (`MAX_CHUNKED_TOTAL_SIZE`). A party with a large ACS exceeds this.
+- **Coordinator single point of progress**: A workflow makes no progress while its coordinator is offline. The run is persisted, so the coordinator resumes it on restart; peers retry 3 times before aborting.
 
 ### Daml Package Dependencies
 
@@ -705,8 +803,6 @@ The system depends on the following Daml packages:
 | `#governance-token-custody-<version>` | TransferProposal, AcceptTransferProposal, preapproval proposals |
 | `#governance-utility-onboarding-<version>` | SetupUtility, six granular onboarding proposals, MintProposal, BurnProposal |
 | `#governance-utility-credential-<version>` | Credential domain: offer/accept free and paid credentials |
-| `#bitsafe-vault-governance-v0-rc8` | Legacy VaultGovernanceRules contract templates |
-| `#bitsafe-vault-v0-rc8` | VaultRules and Vault contract templates |
 | `#utility-registry-app-v0` | ProviderService, UserService, AllocationFactory |
 | `#utility-credential-app-v0` | Credential offer/accept templates |
 | `#utility-commercials-v0` | DelegatedBatchedMarkersProxy (required by `CreateDelegatedBatchedMarkersProxy`) |

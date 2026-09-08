@@ -1,0 +1,540 @@
+{
+  "parties": [
+    {
+      "party_id": "alice-wallet::1220f3a9c41d7e2b58cd06ba4e7719fd3c85a2e0b6417d9fc38e5a1b7c04d29e6f31",
+      "fingerprint": "1220f3a9c41d7e2b58cd06ba4e7719fd3c85a2e0b6417d9fc38e5a1b7c04d29e6f31",
+      "host_count": 4,
+      "threshold": 3,
+      "created_at": "2026-07-14T09:12:00Z",
+      "hosts": [
+        {
+          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445a1c07be2d9143f8b6c2e5a0d7f36a9fc28e7198a7d",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "iBTC-validator-2::1220a9fbb47c14e3d2085b6c9a4f713de60825c1fb9d3ae47c0e9f9c494dde7809c",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "iBTC-validator-3::1220668444ed3207fa9c15b8e3d40726ba9f18cd5e02c7a4136f6c5aad373ef343",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "cn-validator-07::122061982afe660b3d47c9051fa8e2d7360bc94185ef2a7d0c6e22200b9541e7bae",
+          "permission": "observation"
+        }
+      ]
+    },
+    {
+      "party_id": "bob-treasury::1220a7d1e4835b09fc26e7a4d05138bb6c94f2e70d8a15c3fb9e46072d18a5c3e90b",
+      "fingerprint": "1220a7d1e4835b09fc26e7a4d05138bb6c94f2e70d8a15c3fb9e46072d18a5c3e90b",
+      "host_count": 4,
+      "threshold": 3,
+      "created_at": "2026-07-22T16:45:00Z",
+      "hosts": [
+        {
+          "participant_uid": "iBTC-validator-2::1220a9fbb47c14e3d2085b6c9a4f713de60825c1fb9d3ae47c0e9f9c494dde7809c",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "iBTC-validator-3::1220668444ed3207fa9c15b8e3d40726ba9f18cd5e02c7a4136f6c5aad373ef343",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "cn-validator-07::122061982afe660b3d47c9051fa8e2d7360bc94185ef2a7d0c6e22200b9541e7bae",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "relay-zrh::1220d118f9988a6c2904b7e35fd0a21c8b64097fe5d3a2c71be8a447225fa7c44",
+          "permission": "observation"
+        }
+      ]
+    },
+    {
+      "party_id": "carol-desk::12205c8b03fa1d47e69208d5b7c4130ae6f9d21847b0e3c5fa927d61840bce35a712",
+      "fingerprint": "12205c8b03fa1d47e69208d5b7c4130ae6f9d21847b0e3c5fa927d61840bce35a712",
+      "host_count": 2,
+      "threshold": 2,
+      "created_at": "2026-08-03T11:30:00Z",
+      "hosts": [
+        {
+          "participant_uid": "iBTC-validator-3::1220668444ed3207fa9c15b8e3d40726ba9f18cd5e02c7a4136f6c5aad373ef343",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "cn-validator-07::122061982afe660b3d47c9051fa8e2d7360bc94185ef2a7d0c6e22200b9541e7bae",
+          "permission": "confirmation"
+        }
+      ]
+    },
+    {
+      "party_id": "dave-custody::12208e14b7d0c9a35f62e4180da7b539c6207fe4a1b83d95c0e7f2648a1db07c4e59",
+      "fingerprint": "12208e14b7d0c9a35f62e4180da7b539c6207fe4a1b83d95c0e7f2648a1db07c4e59",
+      "host_count": 1,
+      "threshold": 1,
+      "created_at": "2026-08-11T08:05:00Z",
+      "hosts": [
+        {
+          "participant_uid": "cn-validator-07::122061982afe660b3d47c9051fa8e2d7360bc94185ef2a7d0c6e22200b9541e7bae",
+          "permission": "confirmation"
+        }
+      ]
+    },
+    {
+      "party_id": "erin-desk::1220c081dcce511f3dd5d774f530b8c086cf7e2345e285238bd9d12683640881",
+      "fingerprint": "1220c081dcce511f3dd5d774f530b8c086cf7e2345e285238bd9d12683640881",
+      "host_count": 1,
+      "threshold": 1,
+      "created_at": "2026-07-01T06:15:00Z",
+      "hosts": [
+        {
+          "participant_uid": "relay-zrh::1220d118f9988a6c2904b7e35fd0a21c8b64097fe5d3a2c71be8a447225fa7c44",
+          "permission": "confirmation"
+        }
+      ]
+    },
+    {
+      "party_id": "frank-wallet::1220ead4d636e1dd581d809cfad8cf71c057e05761cafe8f66a152544f8cc714",
+      "fingerprint": "1220ead4d636e1dd581d809cfad8cf71c057e05761cafe8f66a152544f8cc714",
+      "host_count": 2,
+      "threshold": 1,
+      "created_at": "2026-07-02T07:15:00Z",
+      "hosts": [
+        {
+          "participant_uid": "bsafe-tok3::122010f3a78eb9d8c7421e05fb63d92a8c4071fe25d6b3a09b5c65dd9e0b2a3e9",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445a1c07be2d9143f8b6c2e5a0d7f36a9fc28e7198a7d",
+          "permission": "confirmation"
+        }
+      ]
+    },
+    {
+      "party_id": "grace-custody::1220e82efc9e6ae6bb65e5adb580d6122adf8836fab28a7e9a69caa3a0b46a59",
+      "fingerprint": "1220e82efc9e6ae6bb65e5adb580d6122adf8836fab28a7e9a69caa3a0b46a59",
+      "host_count": 3,
+      "threshold": 2,
+      "created_at": "2026-07-03T08:15:00Z",
+      "hosts": [
+        {
+          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445a1c07be2d9143f8b6c2e5a0d7f36a9fc28e7198a7d",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "iBTC-validator-2::1220a9fbb47c14e3d2085b6c9a4f713de60825c1fb9d3ae47c0e9f9c494dde7809c",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "iBTC-validator-3::1220668444ed3207fa9c15b8e3d40726ba9f18cd5e02c7a4136f6c5aad373ef343",
+          "permission": "observation"
+        }
+      ]
+    },
+    {
+      "party_id": "heidi-treasury::12202e75f00606a487ad60bdc5280387e6671031b09a1a5c47314b4516dcd188",
+      "fingerprint": "12202e75f00606a487ad60bdc5280387e6671031b09a1a5c47314b4516dcd188",
+      "host_count": 4,
+      "threshold": 2,
+      "created_at": "2026-07-04T09:15:00Z",
+      "hosts": [
+        {
+          "participant_uid": "iBTC-validator-2::1220a9fbb47c14e3d2085b6c9a4f713de60825c1fb9d3ae47c0e9f9c494dde7809c",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "iBTC-validator-3::1220668444ed3207fa9c15b8e3d40726ba9f18cd5e02c7a4136f6c5aad373ef343",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "cn-validator-07::122061982afe660b3d47c9051fa8e2d7360bc94185ef2a7d0c6e22200b9541e7bae",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "relay-zrh::1220d118f9988a6c2904b7e35fd0a21c8b64097fe5d3a2c71be8a447225fa7c44",
+          "permission": "observation"
+        }
+      ]
+    },
+    {
+      "party_id": "ivan-desk::12209043506e3ca3dcf52eb7c9d08b7d12ef00ab2382ecf78cf9ab7d5204e2dd",
+      "fingerprint": "12209043506e3ca3dcf52eb7c9d08b7d12ef00ab2382ecf78cf9ab7d5204e2dd",
+      "host_count": 1,
+      "threshold": 1,
+      "created_at": "2026-07-05T10:15:00Z",
+      "hosts": [
+        {
+          "participant_uid": "iBTC-validator-3::1220668444ed3207fa9c15b8e3d40726ba9f18cd5e02c7a4136f6c5aad373ef343",
+          "permission": "confirmation"
+        }
+      ]
+    },
+    {
+      "party_id": "judy-wallet::1220d364bdd6a615db3dc9da637836dfd0778e7af36a3b038bc14b24f22c6c18",
+      "fingerprint": "1220d364bdd6a615db3dc9da637836dfd0778e7af36a3b038bc14b24f22c6c18",
+      "host_count": 2,
+      "threshold": 1,
+      "created_at": "2026-07-06T11:15:00Z",
+      "hosts": [
+        {
+          "participant_uid": "cn-validator-07::122061982afe660b3d47c9051fa8e2d7360bc94185ef2a7d0c6e22200b9541e7bae",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "relay-zrh::1220d118f9988a6c2904b7e35fd0a21c8b64097fe5d3a2c71be8a447225fa7c44",
+          "permission": "confirmation"
+        }
+      ]
+    },
+    {
+      "party_id": "karl-custody::1220175bd83e224fa285943832200c623eff296cc052739763892528975412fe",
+      "fingerprint": "1220175bd83e224fa285943832200c623eff296cc052739763892528975412fe",
+      "host_count": 3,
+      "threshold": 2,
+      "created_at": "2026-07-07T12:15:00Z",
+      "hosts": [
+        {
+          "participant_uid": "relay-zrh::1220d118f9988a6c2904b7e35fd0a21c8b64097fe5d3a2c71be8a447225fa7c44",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "bsafe-tok3::122010f3a78eb9d8c7421e05fb63d92a8c4071fe25d6b3a09b5c65dd9e0b2a3e9",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445a1c07be2d9143f8b6c2e5a0d7f36a9fc28e7198a7d",
+          "permission": "observation"
+        }
+      ]
+    },
+    {
+      "party_id": "liam-treasury::12200bde3fa69b4a52cdd237d5c808fa7e87dac02a3a08ae34513208e17c55d5",
+      "fingerprint": "12200bde3fa69b4a52cdd237d5c808fa7e87dac02a3a08ae34513208e17c55d5",
+      "host_count": 4,
+      "threshold": 2,
+      "created_at": "2026-07-08T13:15:00Z",
+      "hosts": [
+        {
+          "participant_uid": "bsafe-tok3::122010f3a78eb9d8c7421e05fb63d92a8c4071fe25d6b3a09b5c65dd9e0b2a3e9",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445a1c07be2d9143f8b6c2e5a0d7f36a9fc28e7198a7d",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "iBTC-validator-2::1220a9fbb47c14e3d2085b6c9a4f713de60825c1fb9d3ae47c0e9f9c494dde7809c",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "iBTC-validator-3::1220668444ed3207fa9c15b8e3d40726ba9f18cd5e02c7a4136f6c5aad373ef343",
+          "permission": "observation"
+        }
+      ]
+    },
+    {
+      "party_id": "mona-desk::1220f755940e5a230c15f513ee70e862af0f73a8d122cba71e191a5a70a49bec",
+      "fingerprint": "1220f755940e5a230c15f513ee70e862af0f73a8d122cba71e191a5a70a49bec",
+      "host_count": 1,
+      "threshold": 1,
+      "created_at": "2026-07-09T14:15:00Z",
+      "hosts": [
+        {
+          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445a1c07be2d9143f8b6c2e5a0d7f36a9fc28e7198a7d",
+          "permission": "confirmation"
+        }
+      ]
+    },
+    {
+      "party_id": "nina-wallet::12208d5f7576eb9aee5d355b1c18fd98f0978bce550ad9c540e13945e4cc5610",
+      "fingerprint": "12208d5f7576eb9aee5d355b1c18fd98f0978bce550ad9c540e13945e4cc5610",
+      "host_count": 2,
+      "threshold": 1,
+      "created_at": "2026-07-10T15:15:00Z",
+      "hosts": [
+        {
+          "participant_uid": "iBTC-validator-2::1220a9fbb47c14e3d2085b6c9a4f713de60825c1fb9d3ae47c0e9f9c494dde7809c",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "iBTC-validator-3::1220668444ed3207fa9c15b8e3d40726ba9f18cd5e02c7a4136f6c5aad373ef343",
+          "permission": "confirmation"
+        }
+      ]
+    },
+    {
+      "party_id": "oscar-custody::1220954d83de949719a57d6ffec01b5f631f4fcc55f218afbca9ef07ddf42f18",
+      "fingerprint": "1220954d83de949719a57d6ffec01b5f631f4fcc55f218afbca9ef07ddf42f18",
+      "host_count": 3,
+      "threshold": 2,
+      "created_at": "2026-07-11T16:15:00Z",
+      "hosts": [
+        {
+          "participant_uid": "iBTC-validator-3::1220668444ed3207fa9c15b8e3d40726ba9f18cd5e02c7a4136f6c5aad373ef343",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "cn-validator-07::122061982afe660b3d47c9051fa8e2d7360bc94185ef2a7d0c6e22200b9541e7bae",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "relay-zrh::1220d118f9988a6c2904b7e35fd0a21c8b64097fe5d3a2c71be8a447225fa7c44",
+          "permission": "observation"
+        }
+      ]
+    },
+    {
+      "party_id": "peggy-treasury::122060a55f4656a0adeda40936688cbc26a71fb273da42f1b1714370fc1c4c5a",
+      "fingerprint": "122060a55f4656a0adeda40936688cbc26a71fb273da42f1b1714370fc1c4c5a",
+      "host_count": 4,
+      "threshold": 2,
+      "created_at": "2026-07-12T17:15:00Z",
+      "hosts": [
+        {
+          "participant_uid": "cn-validator-07::122061982afe660b3d47c9051fa8e2d7360bc94185ef2a7d0c6e22200b9541e7bae",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "relay-zrh::1220d118f9988a6c2904b7e35fd0a21c8b64097fe5d3a2c71be8a447225fa7c44",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "bsafe-tok3::122010f3a78eb9d8c7421e05fb63d92a8c4071fe25d6b3a09b5c65dd9e0b2a3e9",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445a1c07be2d9143f8b6c2e5a0d7f36a9fc28e7198a7d",
+          "permission": "observation"
+        }
+      ]
+    },
+    {
+      "party_id": "quinn-desk::122011a0a7ae8464cb35f6b163101d795b2ffd844ec2847a3f39d865df449e34",
+      "fingerprint": "122011a0a7ae8464cb35f6b163101d795b2ffd844ec2847a3f39d865df449e34",
+      "host_count": 1,
+      "threshold": 1,
+      "created_at": "2026-07-13T06:15:00Z",
+      "hosts": [
+        {
+          "participant_uid": "relay-zrh::1220d118f9988a6c2904b7e35fd0a21c8b64097fe5d3a2c71be8a447225fa7c44",
+          "permission": "confirmation"
+        }
+      ]
+    },
+    {
+      "party_id": "rupert-wallet::1220b1acfd16e634917d144724b832a520b7cbb986aaa71c86012c5f276c4084",
+      "fingerprint": "1220b1acfd16e634917d144724b832a520b7cbb986aaa71c86012c5f276c4084",
+      "host_count": 2,
+      "threshold": 1,
+      "created_at": "2026-07-14T07:15:00Z",
+      "hosts": [
+        {
+          "participant_uid": "bsafe-tok3::122010f3a78eb9d8c7421e05fb63d92a8c4071fe25d6b3a09b5c65dd9e0b2a3e9",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445a1c07be2d9143f8b6c2e5a0d7f36a9fc28e7198a7d",
+          "permission": "confirmation"
+        }
+      ]
+    },
+    {
+      "party_id": "sybil-custody::122017ebff7e6e8520c5177d1b60f311973f5bbdbb92cf0fa5c92ce97494eb30",
+      "fingerprint": "122017ebff7e6e8520c5177d1b60f311973f5bbdbb92cf0fa5c92ce97494eb30",
+      "host_count": 3,
+      "threshold": 2,
+      "created_at": "2026-07-15T08:15:00Z",
+      "hosts": [
+        {
+          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445a1c07be2d9143f8b6c2e5a0d7f36a9fc28e7198a7d",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "iBTC-validator-2::1220a9fbb47c14e3d2085b6c9a4f713de60825c1fb9d3ae47c0e9f9c494dde7809c",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "iBTC-validator-3::1220668444ed3207fa9c15b8e3d40726ba9f18cd5e02c7a4136f6c5aad373ef343",
+          "permission": "observation"
+        }
+      ]
+    },
+    {
+      "party_id": "trent-treasury::12209fb34ee67e6f990d1159e7087fd4dec74c708d7ac76ebe91192566bc72a0",
+      "fingerprint": "12209fb34ee67e6f990d1159e7087fd4dec74c708d7ac76ebe91192566bc72a0",
+      "host_count": 4,
+      "threshold": 2,
+      "created_at": "2026-07-16T09:15:00Z",
+      "hosts": [
+        {
+          "participant_uid": "iBTC-validator-2::1220a9fbb47c14e3d2085b6c9a4f713de60825c1fb9d3ae47c0e9f9c494dde7809c",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "iBTC-validator-3::1220668444ed3207fa9c15b8e3d40726ba9f18cd5e02c7a4136f6c5aad373ef343",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "cn-validator-07::122061982afe660b3d47c9051fa8e2d7360bc94185ef2a7d0c6e22200b9541e7bae",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "relay-zrh::1220d118f9988a6c2904b7e35fd0a21c8b64097fe5d3a2c71be8a447225fa7c44",
+          "permission": "observation"
+        }
+      ]
+    },
+    {
+      "party_id": "uma-desk::1220af0c8b4eba311a55d3b827b03cc9174fb8a59c62deb8f059b4479de4583e",
+      "fingerprint": "1220af0c8b4eba311a55d3b827b03cc9174fb8a59c62deb8f059b4479de4583e",
+      "host_count": 1,
+      "threshold": 1,
+      "created_at": "2026-07-17T10:15:00Z",
+      "hosts": [
+        {
+          "participant_uid": "iBTC-validator-3::1220668444ed3207fa9c15b8e3d40726ba9f18cd5e02c7a4136f6c5aad373ef343",
+          "permission": "confirmation"
+        }
+      ]
+    },
+    {
+      "party_id": "victor-wallet::12200d3554b66daac49d0bc67d58290c60d7b5a4884a53515b21c818ba0c6afd",
+      "fingerprint": "12200d3554b66daac49d0bc67d58290c60d7b5a4884a53515b21c818ba0c6afd",
+      "host_count": 2,
+      "threshold": 1,
+      "created_at": "2026-07-18T11:15:00Z",
+      "hosts": [
+        {
+          "participant_uid": "cn-validator-07::122061982afe660b3d47c9051fa8e2d7360bc94185ef2a7d0c6e22200b9541e7bae",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "relay-zrh::1220d118f9988a6c2904b7e35fd0a21c8b64097fe5d3a2c71be8a447225fa7c44",
+          "permission": "confirmation"
+        }
+      ]
+    },
+    {
+      "party_id": "wendy-custody::1220091f4b1e80e1b7e5ac8788004780db5fa1a8f1324fff1ee9f7755b3477cf",
+      "fingerprint": "1220091f4b1e80e1b7e5ac8788004780db5fa1a8f1324fff1ee9f7755b3477cf",
+      "host_count": 3,
+      "threshold": 2,
+      "created_at": "2026-07-19T12:15:00Z",
+      "hosts": [
+        {
+          "participant_uid": "relay-zrh::1220d118f9988a6c2904b7e35fd0a21c8b64097fe5d3a2c71be8a447225fa7c44",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "bsafe-tok3::122010f3a78eb9d8c7421e05fb63d92a8c4071fe25d6b3a09b5c65dd9e0b2a3e9",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445a1c07be2d9143f8b6c2e5a0d7f36a9fc28e7198a7d",
+          "permission": "observation"
+        }
+      ]
+    },
+    {
+      "party_id": "xavier-treasury::12206ff00e86fc7f142da951e7a8174ca6e74262771a786d5bb1e0ce215c0a2d",
+      "fingerprint": "12206ff00e86fc7f142da951e7a8174ca6e74262771a786d5bb1e0ce215c0a2d",
+      "host_count": 4,
+      "threshold": 2,
+      "created_at": "2026-07-20T13:15:00Z",
+      "hosts": [
+        {
+          "participant_uid": "bsafe-tok3::122010f3a78eb9d8c7421e05fb63d92a8c4071fe25d6b3a09b5c65dd9e0b2a3e9",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445a1c07be2d9143f8b6c2e5a0d7f36a9fc28e7198a7d",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "iBTC-validator-2::1220a9fbb47c14e3d2085b6c9a4f713de60825c1fb9d3ae47c0e9f9c494dde7809c",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "iBTC-validator-3::1220668444ed3207fa9c15b8e3d40726ba9f18cd5e02c7a4136f6c5aad373ef343",
+          "permission": "observation"
+        }
+      ]
+    },
+    {
+      "party_id": "yara-desk::122053813eee1e4ff97500503c501c59e36fb374ba0205ab317990a7ac843c93",
+      "fingerprint": "122053813eee1e4ff97500503c501c59e36fb374ba0205ab317990a7ac843c93",
+      "host_count": 1,
+      "threshold": 1,
+      "created_at": "2026-07-21T14:15:00Z",
+      "hosts": [
+        {
+          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445a1c07be2d9143f8b6c2e5a0d7f36a9fc28e7198a7d",
+          "permission": "confirmation"
+        }
+      ]
+    },
+    {
+      "party_id": "zane-wallet::1220a0e07c56fdc587bd150125f877d6b0f724f759ea72abc041441a9cac9901",
+      "fingerprint": "1220a0e07c56fdc587bd150125f877d6b0f724f759ea72abc041441a9cac9901",
+      "host_count": 2,
+      "threshold": 1,
+      "created_at": "2026-07-22T15:15:00Z",
+      "hosts": [
+        {
+          "participant_uid": "iBTC-validator-2::1220a9fbb47c14e3d2085b6c9a4f713de60825c1fb9d3ae47c0e9f9c494dde7809c",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "iBTC-validator-3::1220668444ed3207fa9c15b8e3d40726ba9f18cd5e02c7a4136f6c5aad373ef343",
+          "permission": "confirmation"
+        }
+      ]
+    },
+    {
+      "party_id": "alice-ops::122086cf66bec074df055ab744a090b52f7f69f5f6d2b8c628097b5391d4097b",
+      "fingerprint": "122086cf66bec074df055ab744a090b52f7f69f5f6d2b8c628097b5391d4097b",
+      "host_count": 3,
+      "threshold": 2,
+      "created_at": "2026-07-23T16:15:00Z",
+      "hosts": [
+        {
+          "participant_uid": "iBTC-validator-3::1220668444ed3207fa9c15b8e3d40726ba9f18cd5e02c7a4136f6c5aad373ef343",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "cn-validator-07::122061982afe660b3d47c9051fa8e2d7360bc94185ef2a7d0c6e22200b9541e7bae",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "relay-zrh::1220d118f9988a6c2904b7e35fd0a21c8b64097fe5d3a2c71be8a447225fa7c44",
+          "permission": "observation"
+        }
+      ]
+    },
+    {
+      "party_id": "bob-ops::1220ac439e265e971f4d4f193848cc2b7f0756f030ba1c3588d15c132bfcd88a",
+      "fingerprint": "1220ac439e265e971f4d4f193848cc2b7f0756f030ba1c3588d15c132bfcd88a",
+      "host_count": 4,
+      "threshold": 2,
+      "created_at": "2026-07-24T17:15:00Z",
+      "hosts": [
+        {
+          "participant_uid": "cn-validator-07::122061982afe660b3d47c9051fa8e2d7360bc94185ef2a7d0c6e22200b9541e7bae",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "relay-zrh::1220d118f9988a6c2904b7e35fd0a21c8b64097fe5d3a2c71be8a447225fa7c44",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "bsafe-tok3::122010f3a78eb9d8c7421e05fb63d92a8c4071fe25d6b3a09b5c65dd9e0b2a3e9",
+          "permission": "confirmation"
+        },
+        {
+          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445a1c07be2d9143f8b6c2e5a0d7f36a9fc28e7198a7d",
+          "permission": "observation"
+        }
+      ]
+    }
+  ]
+}

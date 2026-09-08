@@ -192,6 +192,17 @@ pub trait Commitable {
         participants: &[DecPartyParticipantRow],
     ) -> Result;
 
+    /// Remove a single participant from a decentralized party.
+    ///
+    /// Targeted so callers that know exactly which member left do not have to
+    /// read every row and write it back: that pattern reverts a `permission`
+    /// change made by a concurrent `/decentralized-parties` refresh.
+    async fn delete_dec_party_participant(
+        &mut self,
+        party_id: &CantonId,
+        participant_uid: &str,
+    ) -> Result;
+
     /// Replace all contracts for a decentralized party
     async fn replace_dec_party_contracts(
         &mut self,

@@ -16,9 +16,9 @@
                 const isDark =
                     mode === "dark" ||
                     (mode === "auto" && prefersDark) ||
-                    (!mode && prefersDark);
+                    !mode; // dark-first: no saved preference defaults to dark
                 if (isDark) {
-                    document.documentElement.style.backgroundColor = "#1a1a1a";
+                    document.documentElement.style.backgroundColor = "#0f0e0d";
                     document.documentElement.classList.add("dark");
                 }
             })();

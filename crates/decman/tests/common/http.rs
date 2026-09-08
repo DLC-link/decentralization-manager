@@ -131,6 +131,25 @@ impl Fixture {
         }
     }
 
+    pub async fn get_text(&self, port: u16, path: &str) -> anyhow::Result<String> {
+        let url = format!("http://localhost:{port}{path}");
+        let res = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .with_context(|| format!("GET {url}"))?;
+        let status = res.status();
+        let body = res
+            .text()
+            .await
+            .with_context(|| format!("read body GET {url}"))?;
+        if !status.is_success() {
+            anyhow::bail!("GET {url} returned {status}: {body}");
+        }
+        Ok(body)
+    }
+
     pub async fn put_json<B, R>(&self, port: u16, path: &str, body: &B) -> anyhow::Result<R>
     where
         B: Serialize + ?Sized,

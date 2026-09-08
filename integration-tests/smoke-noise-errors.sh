@@ -34,6 +34,7 @@ start_nodes() {
     local canton_ledger_ports=($P1_CANTON_LEDGER $P2_CANTON_LEDGER $P3_CANTON_LEDGER)
     local canton_admin_ports=($P1_CANTON_ADMIN $P2_CANTON_ADMIN $P3_CANTON_ADMIN)
     local noise_ports=($P1_NOISE $P2_NOISE $P3_NOISE)
+    local metrics_ports=($P1_METRICS $P2_METRICS $P3_METRICS)
 
     mkdir -p "$LOG_DIR"
 
@@ -46,6 +47,7 @@ start_nodes() {
         DECPM_CANTON_LEDGER_HOST=127.0.0.1 \
         DECPM_CANTON_LEDGER_PORT="${canton_ledger_ports[$idx]}" \
         DECPM_CANTON_NETWORK=devnet \
+        DECPM_METRICS_PORT="${metrics_ports[$idx]}" \
         DECPM_NOISE_PORT="${noise_ports[$idx]}" \
         DECPM_PORT="${http_ports[$idx]}" \
         "$BINARY" -d "$DEV_DIR/participant-$i" serve \

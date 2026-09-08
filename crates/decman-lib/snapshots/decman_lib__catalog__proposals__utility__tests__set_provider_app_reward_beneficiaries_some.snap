@@ -1,0 +1,87 @@
+---
+source: crates/decman-lib/src/catalog/proposals/utility.rs
+expression: "SetProviderAppRewardBeneficiaries\n{\n    instrument_configuration_cid: \"00icc\".to_string(),\n    provider_app_reward_beneficiaries:\n    Some(vec![AppRewardBeneficiary\n    {\n        beneficiary: cid(\"b1\"), weight: \"1.0\".parse().expect(\"valid decimal\"),\n    }]),\n}.to_daml_proto().unwrap()"
+---
+Value {
+    sum: Some(
+        Record(
+            Record {
+                record_id: None,
+                fields: [
+                    RecordField {
+                        label: "instrumentConfigurationCid",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    ContractId(
+                                        "00icc",
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "providerAppRewardBeneficiaries",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    Optional(
+                                        Optional {
+                                            value: Some(
+                                                Value {
+                                                    sum: Some(
+                                                        List(
+                                                            List {
+                                                                elements: [
+                                                                    Value {
+                                                                        sum: Some(
+                                                                            Record(
+                                                                                Record {
+                                                                                    record_id: None,
+                                                                                    fields: [
+                                                                                        RecordField {
+                                                                                            label: "beneficiary",
+                                                                                            value: Some(
+                                                                                                Value {
+                                                                                                    sum: Some(
+                                                                                                        Party(
+                                                                                                            "b1::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+                                                                                                        ),
+                                                                                                    ),
+                                                                                                },
+                                                                                            ),
+                                                                                        },
+                                                                                        RecordField {
+                                                                                            label: "weight",
+                                                                                            value: Some(
+                                                                                                Value {
+                                                                                                    sum: Some(
+                                                                                                        Numeric(
+                                                                                                            "1.0",
+                                                                                                        ),
+                                                                                                    ),
+                                                                                                },
+                                                                                            ),
+                                                                                        },
+                                                                                    ],
+                                                                                },
+                                                                            ),
+                                                                        ),
+                                                                    },
+                                                                ],
+                                                            },
+                                                        ),
+                                                    ),
+                                                },
+                                            ),
+                                        },
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                ],
+            },
+        ),
+    ),
+}

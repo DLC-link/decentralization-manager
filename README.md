@@ -20,7 +20,7 @@ A web application for managing decentralized parties in Canton blockchain networ
 - [User Guide](USER_GUIDE.md) -- Walkthrough of the web UI for day-to-day party and governance operations
 - [Custom Daml Templates](docs/CUSTOM_DAML_TEMPLATES.md) -- Authoring and deploying your own Daml governance templates
 - [Deployment Guide](docs/DEPLOYMENT_GUIDE.md) -- Deploying a node to Kubernetes from scratch: manifests, identity-provider setup, and configuration reference
-- [Use Cases](docs/USE_CASES.md) -- Vault governance, FAR rewards, multi-sig wallet, and utility service walkthroughs
+- [Use Cases](docs/USE_CASES.md) -- Joint custody governance, FAR rewards, multi-sig wallet, and utility service walkthroughs
 - [Contributing Guide](docs/CONTRIBUTING.md) -- Development setup, coding standards, commit conventions, and the PR process
 
 ## Architecture
@@ -95,7 +95,7 @@ Open http://localhost:8081 in your browser.
 ```bash
 # Build the image (forward an SSH key registered on a GitHub account;
 # replace the key path with your own)
-docker build --ssh default=$HOME/.ssh/id_ed25519 -t dec-party-manager .
+docker build --ssh default=$HOME/.ssh/id_ed25519 -f development/Dockerfile -t dec-party-manager .
 
 # Run a single instance
 docker run -p 8080:8080 -v ./data:/data \
@@ -107,6 +107,19 @@ docker run -p 8080:8080 -v ./data:/data \
   -e DECPM_CANTON_SYNCHRONIZER=global \
   -e DECPM_CANTON_NETWORK=devnet \
   dec-party-manager
+```
+
+Published releases ship that same binary as two images, `…:<tag>` and
+`…:<tag>-nonroot`; the second runs as uid 65532 and defaults `DECPM_DIR` to
+`/home/nonroot`, so its mount goes at `/home/nonroot/data` and the host
+directory has to belong to that uid. The `chown` is recursive because a `./data`
+left behind by the root image holds root-owned files — the SQLite database and
+the mode-0600 Noise key — that uid 65532 could otherwise not open:
+
+```bash
+mkdir -p ./data && sudo chown -R 65532:65532 ./data
+docker run -p 8080:8080 -v ./data:/home/nonroot/data \
+  ... public.ecr.aws/dlc-link/decentralization-manager:<tag>-nonroot
 ```
 
 ### Running Multiple Participants (Development)
@@ -149,6 +162,7 @@ The database file path can be overridden with the `--db` CLI flag.
 | `DECPM_DIR` | Root directory for persistent data (`--dir`/`-d`) | `.` |
 | `DECPM_HOST` | Host address to bind the HTTP/UI server to | `0.0.0.0` |
 | `DECPM_PORT` | Port for the HTTP/UI server | `8080` |
+| `DECPM_METRICS_PORT` | Port serving Prometheus metrics at `/metrics`, separate from the HTTP/UI port (`0` disables it) | `9464` |
 | `DECPM_DB_PATH` | SQLite database path override (CLI flag `--db`) | _(defaults to `{dir}/data/decpm.db`)_ |
 | `DECPM_DB_ENCRYPTION_KEY` | Encryption key for secrets stored in the database | _(none)_ |
 | `DECPM_ADMIN_ROLE` | Role name that gates sensitive endpoints (unset skips the role check) | _(none)_ |
@@ -191,6 +205,10 @@ The database file path can be overridden with the `--db` CLI flag.
 | `DECPM_NOISE_RETRY_TIMEOUT_SEC` | Per-attempt timeout for the bounded peer-Noise retry wrapper, in seconds | `5` |
 | `DECPM_NOISE_RETRY_MAX_ATTEMPTS` | Total attempts (initial + retries) for the bounded peer-Noise retry wrapper | `2` |
 | `DECPM_NOISE_RETRY_BACKOFF_MS` | Backoff between attempts of the bounded peer-Noise retry wrapper, in milliseconds | `250` |
+| `DECPM_REWARD_AUTOMATION_INTERVAL_SECS` | How often the CIP-104 reward automation sweeps each decparty for unassigned coupons, in seconds. Enablement is on-ledger, so this sets cadence only | `300` |
+| `DECPM_REWARD_EXPIRY_READ_INTERVAL_SECS` | How often the automation re-reads the backlog purely to refresh `decman_reward_oldest_unassigned_expires_in_seconds`, in seconds, when no sweep is due. Both expiry alert rules read that gauge, so this bounds how stale their input can get. A sweep reads the ledger too, so the gauge refreshes at whichever interval is shorter | `3600` |
+| `DECPM_REWARD_MAX_CREATES` | Output contracts one `Delegation_Assign` may create, which bounds the coupons per transaction. Lower it if assigns start failing | `100` |
+| `DECPM_REWARD_MIN_EXPIRY_MARGIN_SECS` | Time a coupon must have left before expiry to be assigned, in seconds. Guards against a coupon expiring mid-submission | `120` |
 
 All environment variables can also be passed as CLI arguments (e.g., `--canton-admin-host`).
 
@@ -428,12 +446,11 @@ The table below is a curated subset. A complete, interactive API reference is av
 | `/auth/status` | GET | Returns authentication status for configured parties |
 | `/auth/test` | POST | Tests outbound IdP authentication (Keycloak or Auth0, per party) |
 | `/governance/confirmations` | GET | Returns governance confirmations grouped by action |
-| `/governance/state` | GET | Returns governance state (VaultGovernanceRules) |
+| `/governance/state` | GET | Returns governance state (GovernanceRules) |
 | `/governance/confirm` | POST | Submits a governance confirmation |
 | `/governance/execute` | POST | Executes a confirmed governance action |
 | `/governance/expire` | POST | Expires a stale governance confirmation |
 | `/governance/cancel` | POST | Cancels a governance confirmation |
-| `/vaults` | GET | Returns deployed Vault contracts |
 | `/services/provider` | GET | Returns ProviderService contracts |
 | `/services/user` | GET | Returns UserService contracts |
 | `/services/registrar` | GET | Returns RegistrarService contracts |
@@ -444,6 +461,14 @@ The table below is a curated subset. A complete, interactive API reference is av
 | `/dars/distribute` | POST | Distributes DARs across all participants |
 | `/dars/distribute/status` | GET | Returns DARs distribution workflow progress |
 | `/packages/vetted` | GET | Returns packages uploaded on this node |
+| `/external-parties` | GET | Lists the external (co-validated) parties this node hosts |
+| `/v0/tenant/prepare` | POST | Wallet-facing: builds an external party's onboarding topology and returns the hash to sign |
+| `/v0/tenant/onboard` | POST | Wallet-facing: validates the wallet's signed topology, co-signs, and submits it |
+| `/v0/tenant/{party}/status` | GET | Wallet-facing: reports whether this host has the party hosted yet |
+
+The `/v0/tenant/*` endpoints are the tenant API. They authenticate with a
+separate tenant API key rather than the operator JWT, and are driven by
+[`decman-wallet`](crates/decman-wallet/README.md).
 
 ## Development
 
@@ -514,18 +539,20 @@ dec-party-manager INFO chatter and Canton/Noise convergence warnings.
 
 The suite is organised into two layers:
 
-- **Phases** — top-level workflow chunks, one file in `tests/common/phases/`
-  per phase (`create_dec_party`, `distribute_dars`, `deploy_gov_core`,
-  `token_custody`, `utility_onboarding`, `generic_vote`, `kick`). Each
-  phase corresponds 1:1 to one of the original bash scripts and is logged
-  as `INFO Phase: <name>`.
+- **Phases** — top-level workflow chunks, one file per phase in
+  [`crates/decman/tests/common/phases/`](crates/decman/tests/common/phases/).
+  [`crates/decman/tests/governance_workflows.rs`](crates/decman/tests/governance_workflows.rs)
+  runs them in order, and each is logged as `INFO Phase: <name>`. The set
+  covers the governance arc (`create_dec_party`, `distribute_dars`,
+  `deploy_gov_core`, `token_custody`, `utility_onboarding`, `generic_vote`,
+  `kick`), the add-party and external-party flows, and the chaos phases
+  (restart / resume, cancel cascades, concurrent workflows).
 - **Scenarios** — Given-When-Then story arcs built with the
-  [`Scenario`](tests/common/scenario.rs) DSL. Each scenario has its own
-  header, indented step trace, and completion line. A phase runs **one or
-  more scenarios**: six of the seven phases run a single scenario;
-  `utility_onboarding` runs eight (four propose-confirm-execute cycles —
-  ProvisionProviderService, SetupUtility, Mint, Burn — plus four
-  side-effect assertion scenarios), for **14 scenarios total**.
+  [`Scenario`](crates/decman/tests/common/scenario.rs) DSL. Each scenario has
+  its own header, indented step trace, and completion line. A phase runs one
+  or more scenarios: most run a single one, while `utility_onboarding` runs
+  eight (four propose-confirm-execute cycles — ProvisionProviderService,
+  SetupUtility, Mint, Burn — plus four side-effect assertion scenarios).
 
 A scenario may omit `Given` and/or `When` and contain only `Then`s.
 That happens when the action has already been taken by an earlier
@@ -771,8 +798,13 @@ TypeScript imports won't resolve.
 
 Release images are built and published by CI: pushing a `v<version>` tag (which
 must match the crate version in `crates/decman/Cargo.toml`) runs the release
-workflow, which builds the binary and pushes
-`public.ecr.aws/dlc-link/decentralization-manager:v<version>`. The root
+workflow, which builds the binary and pushes two images:
+`public.ecr.aws/dlc-link/decentralization-manager:v<version>` and
+`…:v<version>-nonroot`. They hold the same binary and differ only in runtime
+identity — uid 0 versus uid 65532, with `DECPM_DIR` defaulting to `/` and
+`/home/nonroot` respectively. One `Dockerfile` builds both; the nonroot job
+overrides `BASE_TAG`, `RUNTIME_UID` and `DECPM_DIR_DEFAULT`. See the
+[Deployment Guide](docs/DEPLOYMENT_GUIDE.md) for which to pick. The root
 `Dockerfile` is that workflow's runtime wrapper — it copies in the CI-built
 binary and does no compilation, so it is not useful for a local build.
 

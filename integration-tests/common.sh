@@ -127,7 +127,7 @@ check_prerequisites() {
 # ports and the e2e would time out 60s into the first invitation accept.
 # Failing fast here turns that into an instant, actionable error.
 check_decman_ports_free() {
-    local ports=("$P1_HTTP" "$P2_HTTP" "$P3_HTTP" "$P1_NOISE" "$P2_NOISE" "$P3_NOISE")
+    local ports=("$P1_HTTP" "$P2_HTTP" "$P3_HTTP" "$P1_NOISE" "$P2_NOISE" "$P3_NOISE" "$P1_METRICS" "$P2_METRICS" "$P3_METRICS")
     local busy=()
 
     for p in "${ports[@]}"; do
@@ -171,6 +171,7 @@ start_nodes() {
     local canton_ledger_ports=($P1_CANTON_LEDGER $P2_CANTON_LEDGER $P3_CANTON_LEDGER)
     local canton_admin_ports=($P1_CANTON_ADMIN $P2_CANTON_ADMIN $P3_CANTON_ADMIN)
     local noise_ports=($P1_NOISE $P2_NOISE $P3_NOISE)
+    local metrics_ports=($P1_METRICS $P2_METRICS $P3_METRICS)
 
     for i in 1 2 3; do
         local idx=$((i - 1))
@@ -185,6 +186,7 @@ start_nodes() {
         DECPM_CANTON_LEDGER_HOST=127.0.0.1 \
         DECPM_CANTON_LEDGER_PORT="${canton_ledger_ports[$idx]}" \
         DECPM_CANTON_NETWORK=devnet \
+        DECPM_METRICS_PORT="${metrics_ports[$idx]}" \
         DECPM_NOISE_PORT="${noise_ports[$idx]}" \
         DECPM_PORT="${http_ports[$idx]}" \
         DECPM_REWARD_AUTOMATION_INTERVAL_SECS=15 \

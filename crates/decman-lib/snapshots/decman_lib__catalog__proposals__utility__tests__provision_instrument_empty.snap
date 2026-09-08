@@ -1,0 +1,95 @@
+---
+source: crates/decman-lib/src/catalog/proposals/utility.rs
+expression: "ProvisionInstrument\n{\n    registrar_service_cid: \"00rsc\".to_string(), instrument_id_text:\n    \"uuid-1\".to_string(), additional_identifiers: vec![], issuer_requirements:\n    vec![], holder_requirements: vec![], initial_instrument_issuers: vec![],\n}.to_daml_proto().unwrap()"
+---
+Value {
+    sum: Some(
+        Record(
+            Record {
+                record_id: None,
+                fields: [
+                    RecordField {
+                        label: "registrarServiceCid",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    ContractId(
+                                        "00rsc",
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "instrumentIdText",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    Text(
+                                        "uuid-1",
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "additionalIdentifiers",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    List(
+                                        List {
+                                            elements: [],
+                                        },
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "issuerRequirements",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    List(
+                                        List {
+                                            elements: [],
+                                        },
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "holderRequirements",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    List(
+                                        List {
+                                            elements: [],
+                                        },
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "initialInstrumentIssuers",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    List(
+                                        List {
+                                            elements: [],
+                                        },
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                ],
+            },
+        ),
+    ),
+}

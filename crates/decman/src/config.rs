@@ -117,6 +117,12 @@ pub struct Auth0Config {
     /// return a backend-validatable JWT rather than a userinfo-scoped token.
     #[serde(default)]
     pub audience: Option<String>,
+    /// Extra space-separated scopes the SPA requests on top of the default
+    /// `openid profile email`. Auth0 RBAC returns a permission in `scope` only
+    /// when the client asked for it, so an admin role granted as a
+    /// resource-server scope needs naming here to reach the token.
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 /// Per-party Auth0 M2M credentials. Used to mint outbound access tokens the
@@ -254,6 +260,12 @@ pub struct NodeConfig {
     /// automation loop. Enablement is on-ledger (presence of a
     /// `CouponReassignmentDelegation`), so this only controls cadence. Default 300s.
     pub reward_automation_interval_secs: u64,
+    /// How often (seconds) to re-read the backlog purely to refresh the expiry
+    /// gauge, when no sweep is due. A sweep reads the ledger anyway, so the gauge
+    /// refreshes at whichever of the two intervals is shorter. Separating them lets
+    /// the sweep interval stay long enough to fill a `Delegation_Assign` chunk
+    /// without making the expiry signal that stale. Default 3600s.
+    pub reward_expiry_read_interval_secs: u64,
     /// Output contracts one `Delegation_Assign` may create, which bounds the
     /// coupons per transaction (`/ beneficiary_count`). The ledger's real
     /// ceiling for this transaction shape is unmeasured — configurable so it can
@@ -269,6 +281,9 @@ pub struct NodeConfig {
     /// try, so this should be a small submission-latency allowance rather than
     /// a generous window. Default 120s.
     pub reward_min_expiry_margin_secs: u64,
+    /// Port serving Prometheus metrics at `/metrics`, on its own listener rather
+    /// than the API port. 0 serves no metrics. Default 9464.
+    pub metrics_port: u16,
     /// Top-level Keycloak config for frontend website gating
     pub keycloak: Option<KeycloakConfig>,
     /// Top-level Auth0 config for frontend website gating (mutually exclusive
@@ -300,8 +315,10 @@ impl Default for NodeConfig {
             timeouts: Timeouts::default(),
             noise_retry: NoiseRetryConfig::default(),
             reward_automation_interval_secs: 300,
+            reward_expiry_read_interval_secs: 3600,
             reward_max_creates: 100,
             reward_min_expiry_margin_secs: 120,
+            metrics_port: 9464,
             keycloak: None,
             auth0: None,
             insecure: false,
@@ -436,8 +453,6 @@ pub fn default_package_config() -> PackageConfig {
         utility_credential: Some("#utility-credential-v0".to_string()),
         utility_credential_app: Some("#utility-credential-app-v0".to_string()),
         utility_registry: Some("#utility-registry-app-v0".to_string()),
-        vault: Some("#bitsafe-vault-v0-rc8".to_string()),
-        vault_governance: Some("#bitsafe-vault-governance-v0-rc8".to_string()),
     }
 }
 
@@ -501,6 +516,10 @@ impl Default for CantonConfig {
 }
 
 impl NodeConfig {
+    pub fn has_top_level_idp(&self) -> bool {
+        self.keycloak.is_some() || self.auth0.is_some()
+    }
+
     /// Create a NodeConfig with the given root directory
     pub fn with_root_dir<P: AsRef<Path>>(mut self, root_dir: P) -> Self {
         self.root_dir = root_dir.as_ref().to_path_buf();
@@ -882,6 +901,42 @@ mod tests {
         }
     }
 
+    fn auth0_config() -> Auth0Config {
+        Auth0Config {
+            domain: "tenant.eu.auth0.com".to_string(),
+            client_id: "spa-client-id".to_string(),
+            audience: Some("https://decman-api.example".to_string()),
+            scope: None,
+        }
+    }
+
+    #[test]
+    fn has_top_level_idp_is_false_when_neither_provider_is_set() {
+        assert!(!NodeConfig::default().has_top_level_idp());
+    }
+
+    #[test]
+    fn has_top_level_idp_accepts_a_keycloak_only_node() {
+        let config = NodeConfig {
+            keycloak: Some(KeycloakConfig::default()),
+            auth0: None,
+            ..NodeConfig::default()
+        };
+
+        assert!(config.has_top_level_idp());
+    }
+
+    #[test]
+    fn has_top_level_idp_accepts_an_auth0_only_node() {
+        let config = NodeConfig {
+            keycloak: None,
+            auth0: Some(auth0_config()),
+            ..NodeConfig::default()
+        };
+
+        assert!(config.has_top_level_idp());
+    }
+
     #[test]
     fn test_default_package_config() {
         let packages = default_package_config();
@@ -920,11 +975,6 @@ mod tests {
         assert_eq!(
             packages.utility_registry.as_deref(),
             Some("#utility-registry-app-v0"),
-        );
-        assert_eq!(packages.vault.as_deref(), Some("#bitsafe-vault-v0-rc8"));
-        assert_eq!(
-            packages.vault_governance.as_deref(),
-            Some("#bitsafe-vault-governance-v0-rc8"),
         );
     }
 }

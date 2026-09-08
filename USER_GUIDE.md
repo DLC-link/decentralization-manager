@@ -17,7 +17,7 @@ public, so no special repository access is needed):
 
 ```bash
 # Build the image (replace the key path with your own GitHub-registered key)
-docker build --ssh default=$HOME/.ssh/id_ed25519 -t dec-party-manager .
+docker build --ssh default=$HOME/.ssh/id_ed25519 -f development/Dockerfile -t dec-party-manager .
 
 # Run
 docker run -p 8080:8080 -p 9000:9000 -v ./data:/data \
@@ -36,6 +36,36 @@ Then open the web UI at `http://localhost:8080`.
 
 The `-v ./data:/data` mount persists the SQLite database (peers, party
 credentials) and the auto-generated Noise keypair across restarts.
+
+`/` is the image's default `DECPM_DIR`, and the app writes `$DECPM_DIR/data` —
+so that is the directory to mount. Point the mount somewhere else and pass
+`-e DECPM_DIR=<parent>` to match, or the container writes inside its own
+filesystem and the data disappears with it.
+
+### Nonroot image
+
+Every release is published twice — `…:<tag>` and `…:<tag>-nonroot`. Both hold
+the same binary; the second runs as uid 65532 rather than root, which is the
+one to deploy where a policy forbids root containers.
+
+Its `DECPM_DIR` defaults to `/home/nonroot`, because uid 65532 cannot create
+`/data`. So the mount moves with it, and the host directory has to belong to
+that uid — a bind mount keeps the host's ownership, and without the `chown` the
+first write fails.
+
+Make it recursive. A `./data` carried over from the root image holds root-owned
+files — the SQLite database and the mode-0600 Noise key — and uid 65532 cannot
+open those, so a non-recursive `chown` fixes the first write and then fails on
+the second start:
+
+```bash
+mkdir -p ./data && sudo chown -R 65532:65532 ./data
+docker run -p 8080:8080 -p 9000:9000 -v ./data:/home/nonroot/data \
+  ... public.ecr.aws/dlc-link/decentralization-manager:<tag>-nonroot
+```
+
+Nothing else changes: same ports, same env vars, same entrypoint. For
+Kubernetes, see the [Deployment Guide](docs/DEPLOYMENT_GUIDE.md).
 
 ## Configuration
 

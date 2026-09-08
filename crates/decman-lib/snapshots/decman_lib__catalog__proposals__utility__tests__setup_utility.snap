@@ -1,0 +1,137 @@
+---
+source: crates/decman-lib/src/catalog/proposals/utility.rs
+expression: "SetupUtility\n{\n    provider_service_cid: \"00psc\".to_string(), operator: cid(\"op\"),\n    instrument_id_text: \"uuid-1\".to_string(), additional_identifiers:\n    vec![InstrumentIdentifier\n    {\n        source: cid(\"src\"), id: \"TICK\".to_string(), scheme:\n        \"Ticker\".to_string(),\n    }], create_transfer_rule: true, create_allocation_factory: false,\n}.to_daml_proto().unwrap()"
+---
+Value {
+    sum: Some(
+        Record(
+            Record {
+                record_id: None,
+                fields: [
+                    RecordField {
+                        label: "providerServiceCid",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    ContractId(
+                                        "00psc",
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "operator",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    Party(
+                                        "op::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "instrumentIdText",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    Text(
+                                        "uuid-1",
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "additionalIdentifiers",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    List(
+                                        List {
+                                            elements: [
+                                                Value {
+                                                    sum: Some(
+                                                        Record(
+                                                            Record {
+                                                                record_id: None,
+                                                                fields: [
+                                                                    RecordField {
+                                                                        label: "source",
+                                                                        value: Some(
+                                                                            Value {
+                                                                                sum: Some(
+                                                                                    Party(
+                                                                                        "src::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+                                                                                    ),
+                                                                                ),
+                                                                            },
+                                                                        ),
+                                                                    },
+                                                                    RecordField {
+                                                                        label: "id",
+                                                                        value: Some(
+                                                                            Value {
+                                                                                sum: Some(
+                                                                                    Text(
+                                                                                        "TICK",
+                                                                                    ),
+                                                                                ),
+                                                                            },
+                                                                        ),
+                                                                    },
+                                                                    RecordField {
+                                                                        label: "scheme",
+                                                                        value: Some(
+                                                                            Value {
+                                                                                sum: Some(
+                                                                                    Text(
+                                                                                        "Ticker",
+                                                                                    ),
+                                                                                ),
+                                                                            },
+                                                                        ),
+                                                                    },
+                                                                ],
+                                                            },
+                                                        ),
+                                                    ),
+                                                },
+                                            ],
+                                        },
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "createTransferRule",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    Bool(
+                                        true,
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "createAllocationFactory",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    Bool(
+                                        false,
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                ],
+            },
+        ),
+    ),
+}

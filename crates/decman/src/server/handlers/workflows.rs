@@ -7,6 +7,7 @@ use std::{
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 
 use anyhow::Context;
+use base64::{Engine, engine::general_purpose::STANDARD};
 use sqlx::SqlitePool;
 
 use super::parties::{
@@ -30,12 +31,13 @@ use crate::{
         types::{
             AddPartyInvitePayload, AddPartyRequest, ChangeThresholdInvitePayload,
             ChangeThresholdRequest, ContractsInvitePayload, ContractsRequest, DarsInvitePayload,
-            DarsRequest, ErrorResponse, ExternalPartiesResponse, ExternalPartyInfo,
-            KickInvitePayload, KickRequest, KickResponse, KickStatus, MessageResponse,
-            MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload, OnboardingMeshErrorResponse,
-            OnboardingRequest, OnboardingResponse, OnboardingStatus, SuccessResponse,
-            WorkflowGuard, WorkflowInstance, WorkflowKind, WorkflowProgress, WorkflowResponse,
-            WorkflowRole, WorkflowRun, WorkflowRunsResponse, WorkflowStatusResponse,
+            DarsRequest, ErrorResponse, ExternalPartiesResponse, ExternalPartyHost,
+            ExternalPartyInfo, KickInvitePayload, KickRequest, KickResponse, KickStatus,
+            MessageResponse, MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload,
+            OnboardingMeshErrorResponse, OnboardingRequest, OnboardingResponse, OnboardingStatus,
+            SuccessResponse, WorkflowGuard, WorkflowInstance, WorkflowKind, WorkflowProgress,
+            WorkflowResponse, WorkflowRole, WorkflowRun, WorkflowRunsResponse,
+            WorkflowStatusResponse, permission_from_proto,
         },
     },
     utils,
@@ -98,6 +100,7 @@ where
         coordinator_name: None,
         expected_peers: invitees.to_vec(),
         completed_peers: Vec::new(),
+        connected_peers: Vec::new(),
         dec_party_id,
         prefix: None,
         participants: Vec::new(),
@@ -129,6 +132,7 @@ where
 /// registry entry is removed, so a run that never started can't leak and block
 /// future starts. On either failure returns the 409 `HttpResponse` the handler
 /// should return; on success the run is both registered and persisted.
+#[allow(clippy::result_large_err)]
 async fn register_and_persist<S, C>(
     data: &web::Data<AppState>,
     instance: &Arc<WorkflowInstance>,
@@ -1764,7 +1768,8 @@ pub async fn start_onboarding(
                 tokio::spawn(async move {
                     let auth = bg_auth.read().await.clone();
                     let creds = bg_creds.read().await.clone();
-                    match fetch_decentralized_parties(&bg_config, None, auth, &creds).await {
+                    match fetch_decentralized_parties(&bg_config, &bg_db, None, auth, &creds).await
+                    {
                         Ok(resp) => {
                             if let Err(e) = store_parties_to_db(&bg_db, "", &resp.parties).await {
                                 tracing::warn!("Failed to cache parties after onboarding: {e}");
@@ -2303,7 +2308,8 @@ pub async fn start_contracts(
                 tokio::spawn(async move {
                     let auth = bg_auth.read().await.clone();
                     let creds = bg_creds.read().await.clone();
-                    match fetch_decentralized_parties(&bg_config, None, auth, &creds).await {
+                    match fetch_decentralized_parties(&bg_config, &bg_db, None, auth, &creds).await
+                    {
                         Ok(resp) => {
                             if let Err(e) = store_parties_to_db(&bg_db, "", &resp.parties).await {
                                 tracing::warn!(
@@ -2508,14 +2514,37 @@ pub async fn start_dars(
             .iter()
             .map(|f| f.filename.clone())
             .collect();
-        let invite_result = send_dars_invites(
-            &config,
-            &db,
-            &peer_ids,
-            &dar_filenames,
-            &dars_config.instance_name,
-        )
-        .await;
+        // Pin the content, not just the name: the invitation the operator sees
+        // carries the hash of the exact bytes the peers will be asked to upload
+        // and vet. An empty hash list is the wire signal for "coordinator
+        // predates the field", which makes peers fall back to checking
+        // filenames only — so a DAR we cannot decode has to fail the run rather
+        // than quietly downgrade every peer's check.
+        let dar_hashes: std::result::Result<Vec<String>, _> = dars_config
+            .dar_files
+            .iter()
+            .map(|f| {
+                STANDARD
+                    .decode(&f.data)
+                    .map(|bytes| workflow::validation::hash_dar(&bytes))
+            })
+            .collect();
+        let invite_result = match dar_hashes {
+            Ok(dar_hashes) => {
+                send_dars_invites(
+                    &config,
+                    &db,
+                    &peer_ids,
+                    &dar_filenames,
+                    &dar_hashes,
+                    &dars_config.instance_name,
+                )
+                .await
+            }
+            Err(e) => Err(anyhow::anyhow!(
+                "Could not hash the DARs for the invitation: {e}"
+            )),
+        };
         if let Err(e) = invite_result {
             tracing::error!("Failed to send DARs invites: {e}");
             let mut status = dars_state_clone.status.write().await;
@@ -2606,6 +2635,7 @@ async fn send_dars_invites(
     db: &SqlitePool,
     peer_ids: &[CantonId],
     dar_filenames: &[String],
+    dar_hashes: &[String],
     instance_name: &str,
 ) -> Result {
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
@@ -2613,6 +2643,7 @@ async fn send_dars_invites(
 
     let payload = DarsInvitePayload {
         dar_filenames: dar_filenames.to_vec(),
+        dar_hashes: dar_hashes.to_vec(),
         // Carry the member set so the peer card shows the same participant
         // list the coordinator shows.
         participants: peer_ids.to_vec(),
@@ -2982,16 +3013,22 @@ pub async fn list_workflows(data: web::Data<AppState>) -> impl Responder {
         .map(|p| (p.public_key, p.name))
         .collect();
 
-    let resolved: Vec<WorkflowRun> = runs
-        .into_iter()
-        .map(|mut r| {
-            if let Some(pk) = r.coordinator_pubkey.as_deref() {
-                r.coordinator_name = pubkey_to_name.get(pk).cloned();
-            }
-            enrich_from_config_json(&mut r);
-            r
-        })
-        .collect();
+    let mut resolved: Vec<WorkflowRun> = Vec::with_capacity(runs.len());
+    for mut r in runs {
+        if let Some(pk) = r.coordinator_pubkey.as_deref() {
+            r.coordinator_name = pubkey_to_name.get(pk).cloned();
+        }
+        enrich_from_config_json(&mut r);
+        // Who has joined lives only in the live coordinator's `WorkflowState`;
+        // the row itself carries no such column. Merge it in so a run parked on
+        // WaitingForPeers can show real progress instead of a permanent zero.
+        if let Some(active) = data.workflows.route(&r.instance_name) {
+            let mut joined: Vec<CantonId> = active.connected_peers().await.into_iter().collect();
+            joined.sort();
+            r.connected_peers = joined;
+        }
+        resolved.push(r);
+    }
 
     HttpResponse::Ok().json(WorkflowRunsResponse { runs: resolved })
 }
@@ -3016,6 +3053,14 @@ pub async fn list_external_parties(data: web::Data<AppState>) -> impl Responder 
                     threshold: p.threshold,
                     host_count: p.host_count,
                     created_at: p.created_at,
+                    hosts: p
+                        .hosts
+                        .into_iter()
+                        .map(|h| ExternalPartyHost {
+                            participant_uid: h.participant_uid,
+                            permission: permission_from_proto(h.permission),
+                        })
+                        .collect(),
                 })
                 .collect();
             HttpResponse::Ok().json(ExternalPartiesResponse { parties })
@@ -3695,6 +3740,7 @@ mod tests {
             coordinator_name: None,
             expected_peers,
             completed_peers: Vec::new(),
+            connected_peers: Vec::new(),
             dec_party_id: None,
             prefix: None,
             participants: Vec::new(),

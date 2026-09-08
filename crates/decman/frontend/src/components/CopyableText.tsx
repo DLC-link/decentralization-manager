@@ -9,17 +9,28 @@ interface CopyableTextProps {
     start: number;
     end: number;
   };
+  /** On large screens (lg+), show the full text instead of truncating. */
+  expandOnWide?: boolean;
   variant?: "h6" | "body1" | "body2" | "caption";
 }
 
-export const CopyableText = ({ text, truncate, variant = "body1" }: CopyableTextProps) => {
+export const CopyableText = ({
+  text,
+  truncate,
+  expandOnWide = false,
+  variant = "body1",
+}: CopyableTextProps) => {
   const { showSnackbar } = useSnackbar();
   const theme = useTheme();
   const isSmall = useMediaQuery(theme.breakpoints.down("sm"));
   const isMedium = useMediaQuery(theme.breakpoints.down("md"));
+  const isWide = useMediaQuery(theme.breakpoints.up("lg"));
 
   const getDisplayText = () => {
     if (!truncate) return text;
+
+    // Wide screens have room for the full value — no need to truncate.
+    if (expandOnWide && isWide) return text;
 
     // Adjust truncation based on screen size
     let start = truncate.start;
@@ -45,7 +56,7 @@ export const CopyableText = ({ text, truncate, variant = "body1" }: CopyableText
   return (
     <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
       <Tooltip title={text}>
-        <Typography variant={variant} sx={{ fontFamily: "monospace" }}>
+        <Typography variant={variant} sx={{ fontFamily: "var(--font-mono)" }}>
           {getDisplayText()}
         </Typography>
       </Tooltip>
