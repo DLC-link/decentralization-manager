@@ -256,7 +256,29 @@ pub(crate) async fn discover_and_cache(
     prefix: &str,
     auth: Option<WorkflowAuth>,
     party_credentials: &[PartyCredentials],
+    opts: PartyReadOpts,
 ) -> Discovery {
+    // A targeted read answers a different question from the cached snapshot,
+    // so it neither claims the prefix nor writes the cache: single-flighting
+    // the two together would hand a windowed request the whole cached list.
+    // It still takes a permit, because it is a Canton read, and a heavier one
+    // when it pulls contracts.
+    if !opts.is_cacheable() {
+        let Ok(Ok(_permit)) = tokio::time::timeout(
+            SINGLE_FLIGHT_WAIT,
+            Arc::clone(&gate.permits).acquire_owned(),
+        )
+        .await
+        else {
+            return Discovery::AtCapacity;
+        };
+
+        return match budgeted_fetch(config, db, prefix, auth, party_credentials, opts).await {
+            Ok(response) => Discovery::Done(response),
+            Err(e) => Discovery::Failed(e),
+        };
+    }
+
     if gate.claims.read().await.contains(prefix) {
         return Discovery::InFlight;
     }
@@ -298,25 +320,7 @@ pub(crate) async fn discover_and_cache(
     }
     let _permit = permit;
 
-    let fetched = match tokio::time::timeout(
-        DISCOVERY_BUDGET,
-        fetch_decentralized_parties(
-            config,
-            db,
-            Some(prefix).filter(|prefix| !prefix.is_empty()),
-            auth,
-            party_credentials,
-            PartyReadOpts::default(),
-        ),
-    )
-    .await
-    {
-        Ok(fetched) => fetched,
-        Err(_) => Err(anyhow::anyhow!(
-            "discovery for prefix '{prefix}' exceeded {secs}s",
-            secs = DISCOVERY_BUDGET.as_secs()
-        )),
-    };
+    let fetched = budgeted_fetch(config, db, prefix, auth, party_credentials, opts).await;
 
     let outcome = match fetched {
         Ok(response) => {
@@ -354,6 +358,36 @@ pub(crate) async fn discover_and_cache(
 
     gate.claims.write().await.remove(prefix);
     outcome
+}
+
+/// One discovery under [`DISCOVERY_BUDGET`].
+async fn budgeted_fetch(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    prefix: &str,
+    auth: Option<WorkflowAuth>,
+    party_credentials: &[PartyCredentials],
+    opts: PartyReadOpts,
+) -> Result<DecentralizedPartiesResponse> {
+    match tokio::time::timeout(
+        DISCOVERY_BUDGET,
+        fetch_decentralized_parties(
+            config,
+            db,
+            Some(prefix).filter(|prefix| !prefix.is_empty()),
+            auth,
+            party_credentials,
+            opts,
+        ),
+    )
+    .await
+    {
+        Ok(fetched) => fetched,
+        Err(_) => anyhow::bail!(
+            "discovery for prefix '{prefix}' exceeded {secs}s",
+            secs = DISCOVERY_BUDGET.as_secs()
+        ),
+    }
 }
 
 /// Run one fallible call under [`TOPOLOGY_READ_TIMEOUT`].
@@ -414,6 +448,18 @@ pub struct PartyReadOpts {
     pub include_contracts: bool,
     /// `(offset, limit)`. `None` reads every party this participant hosts.
     pub page: Option<(usize, usize)>,
+}
+
+impl PartyReadOpts {
+    /// Whether a read of this shape belongs in the cache.
+    ///
+    /// `dec_parties` holds the whole list without contracts, so only that
+    /// shape may be written to it, marked as a completed discovery, or counted
+    /// as one. A window or a contract-bearing read would otherwise be served
+    /// back later as if it were everything.
+    fn is_cacheable(&self) -> bool {
+        !self.include_contracts && self.page.is_none()
+    }
 }
 
 /// Get decentralized parties the current participant is a member of
@@ -507,6 +553,7 @@ pub async fn get_decentralized_parties(
     if !force_refresh && is_within_ttl(completed_at, now_secs()) {
         return HttpResponse::Ok().json(DecentralizedPartiesResponse {
             parties: Vec::new(),
+            total: 0,
             source: ResponseSource::Cache,
             refreshing: data.refreshing_prefixes.read().await.contains(&prefix),
         });
@@ -640,6 +687,7 @@ async fn await_in_flight_discovery(
         }
         _ => HttpResponse::Ok().json(DecentralizedPartiesResponse {
             parties: Vec::new(),
+            total: 0,
             source: ResponseSource::Cache,
             refreshing,
         }),
@@ -2204,7 +2252,15 @@ mod tests {
         for network in [Network::Devnet, Network::Testnet, Network::Mainnet] {
             let config = closed_admin_api(network);
 
-            let result = fetch_decentralized_parties(&config, &pool, None, None, &[]).await;
+            let result = fetch_decentralized_parties(
+                &config,
+                &pool,
+                None,
+                None,
+                &[],
+                PartyReadOpts::default(),
+            )
+            .await;
 
             assert!(result.is_err(), "{network:?} must attempt discovery");
         }
@@ -2218,7 +2274,15 @@ mod tests {
         let config = closed_admin_api(Network::Mainnet);
         store_parties_to_db(&pool, "cbtc", &[a_party()?]).await?;
 
-        let result = fetch_decentralized_parties(&config, &pool, Some("other"), None, &[]).await;
+        let result = fetch_decentralized_parties(
+            &config,
+            &pool,
+            Some("other"),
+            None,
+            &[],
+            PartyReadOpts::default(),
+        )
+        .await;
 
         assert!(
             result.is_err(),

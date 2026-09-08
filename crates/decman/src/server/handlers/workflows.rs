@@ -1792,8 +1792,16 @@ pub async fn start_onboarding(
                     // Through the shared gate: a direct discovery slips the
                     // concurrency bound and races the cache write against a
                     // request for the same prefix.
-                    match super::discover_and_cache(&bg_gate, &bg_config, &bg_db, "", auth, &creds)
-                        .await
+                    match super::discover_and_cache(
+                        &bg_gate,
+                        &bg_config,
+                        &bg_db,
+                        "",
+                        auth,
+                        &creds,
+                        Default::default(),
+                    )
+                    .await
                     {
                         super::Discovery::Done(resp) => {
                             resolve_owner_keys_from_peers(&bg_config, &bg_db, &resp.parties).await;
@@ -2339,8 +2347,16 @@ pub async fn start_contracts(
                     let auth = bg_auth.read().await.clone();
                     let creds = bg_creds.read().await.clone();
                     // Through the shared gate, as above.
-                    match super::discover_and_cache(&bg_gate, &bg_config, &bg_db, "", auth, &creds)
-                        .await
+                    match super::discover_and_cache(
+                        &bg_gate,
+                        &bg_config,
+                        &bg_db,
+                        "",
+                        auth,
+                        &creds,
+                        Default::default(),
+                    )
+                    .await
                     {
                         super::Discovery::Done(resp) => {
                             resolve_owner_keys_from_peers(&bg_config, &bg_db, &resp.parties).await;
