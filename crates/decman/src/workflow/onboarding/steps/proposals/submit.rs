@@ -17,7 +17,7 @@ use crate::{
     canton_id::CantonId,
     config::NodeConfig,
     consts::{
-        TOPOLOGY_PROPAGATION_DELAY_SECS, topology_retry_delay_secs, topology_retry_max_attempts,
+        topology_propagation_delay_secs, topology_retry_delay_secs, topology_retry_max_attempts,
     },
     error::Result,
     utils,
@@ -294,7 +294,7 @@ pub async fn submit_final_proposals(
         tracing::info!("P2P mapping is already effective");
     }
 
-    let propagation_delay = time::Duration::from_secs(TOPOLOGY_PROPAGATION_DELAY_SECS);
+    let propagation_delay = time::Duration::from_secs(topology_propagation_delay_secs());
     tracing::info!("Waiting {propagation_delay:?} for Canton to propagate topology updates...");
     time::sleep(propagation_delay).await;
     tracing::info!("Topology propagation wait complete");

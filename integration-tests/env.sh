@@ -15,6 +15,11 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 # Resolve project root (parent of integration-tests/)
 SCRIPT_DIR="${SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 
+# Localnet's Canton is a single container, so topology settles in under a
+# second and the 30s production default is pure sleep. devnet.env.sh
+# deliberately does NOT set this — devnet is a real network.
+export DECPM_TOPOLOGY_PROPAGATION_DELAY_SECS=3
+
 # Localnet
 LOCALNET_VERSION="0.6.12"
 LOCALNET_BUNDLE_URL="https://github.com/digital-asset/decentralized-canton-sync/releases/download/v${LOCALNET_VERSION}/${LOCALNET_VERSION}_splice-node.tar.gz"
@@ -97,6 +102,20 @@ cleanup() {
                 kill -9 "$pid" 2>/dev/null || true
             fi
         done < "$DEV_DIR/restarted-pids"
+    fi
+
+    # run.sh may still have `docker compose up --wait` in flight (it backgrounds
+    # the bring-up to overlap it with the build). Reap it first: stop_localnet's
+    # `down -v` racing a live `up` leaves half-created containers and volumes
+    # behind, which fails the next run's port checks.
+    if [ -n "${CANTON_BRINGUP_PID:-}" ] && kill -0 "$CANTON_BRINGUP_PID" 2>/dev/null; then
+        echo "Waiting for the background Canton bring-up to stop..."
+        kill "$CANTON_BRINGUP_PID" 2>/dev/null || true
+        wait "$CANTON_BRINGUP_PID" 2>/dev/null || true
+    fi
+    if [ -n "${CANTON_BRINGUP_LOG:-}" ] && [ -f "$CANTON_BRINGUP_LOG" ]; then
+        cat "$CANTON_BRINGUP_LOG"
+        rm -f "$CANTON_BRINGUP_LOG"
     fi
 
     # Stop localnet

@@ -101,7 +101,25 @@ pub const CANTON_PROTOCOL_VERSION: i32 = 35;
 /// After topology becomes effective, Canton needs time to propagate updates
 /// to the sequencer's topology state. Without this wait, transactions may be
 /// rejected with LOCAL_VERDICT_TIMEOUT.
+///
+/// Default value; the actual delay is read via
+/// [`topology_propagation_delay_secs`].
 pub const TOPOLOGY_PROPAGATION_DELAY_SECS: u64 = 30;
+
+/// Post-submission topology propagation wait, configurable via the
+/// `DECPM_TOPOLOGY_PROPAGATION_DELAY_SECS` env var. Defaults to
+/// [`TOPOLOGY_PROPAGATION_DELAY_SECS`] (30) when unset or unparseable.
+///
+/// The 30s default is sized for a real multi-node synchronizer, where the
+/// sequencer's topology state settles well after the transaction becomes
+/// effective. A single-container localnet settles in under a second, so the
+/// integration-test harness lowers it.
+pub fn topology_propagation_delay_secs() -> u64 {
+    std::env::var("DECPM_TOPOLOGY_PROPAGATION_DELAY_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(TOPOLOGY_PROPAGATION_DELAY_SECS)
+}
 
 // Base directory names (relative to root directory)
 /// Data directory name (contains the Noise key, SQLite database, and DARs)

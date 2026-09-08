@@ -7,7 +7,8 @@
 //!   flag that is `true` while the background `refresh_and_cache_parties`
 //!   task is in progress;
 //! - the server's 60s staleness threshold (see
-//!   `src/server/handlers/parties.rs:79`).
+//!   `src/server/handlers/parties.rs:79`), which this phase crosses by
+//!   backdating `dec_party.updated_at` rather than by waiting it out.
 //!
 //! If the server later makes refreshes synchronous or removes the
 //! `refreshing` flag, this phase must be rewritten to trigger a refresh
@@ -20,7 +21,7 @@ use common::{api::DecentralizedPartiesResponse, canton_id::CantonId};
 use tokio::time::sleep;
 use tracing::info;
 
-use crate::common::{Fixture, scenario::Scenario};
+use crate::common::{Fixture, db, scenario::Scenario};
 
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: owner_key_resilience");
@@ -69,17 +70,27 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             "P1's cache is force-refreshed and the refresh completes",
             |f, _| {
                 Box::pin(async move {
-                    // Wait out the server's 60s staleness window so the next GET
-                    // reliably triggers `refresh_and_cache_parties`. The previous
-                    // phase's `/decentralized-parties` GETs reset `updated_at`,
-                    // so without this wait the cache is too fresh and the
-                    // refresh never fires in test timing (suite total ~3min).
-                    sleep(Duration::from_secs(61)).await;
-
                     let prefix = f.party_prefix()?.to_string();
                     let path = format!("/decentralized-parties?prefix={prefix}");
 
-                    // The 61s sleep above guarantees the next stale-cache GET
+                    // Age the cache past the server's 60s staleness window so
+                    // the next GET triggers `refresh_and_cache_parties`. The
+                    // earlier phases' `/decentralized-parties` GETs keep
+                    // resetting `updated_at`, so the cache is otherwise too
+                    // fresh for the refresh to fire at all.
+                    let aged = db::backdate_dec_party_cache(
+                        &f.db_path(1),
+                        &prefix,
+                        Duration::from_secs(120),
+                    )
+                    .await?;
+                    anyhow::ensure!(
+                        aged > 0,
+                        "no dec_party cache rows for prefix {prefix} — nothing to make stale, \
+                         so the refresh under test would never fire"
+                    );
+
+                    // The backdate above guarantees the next stale-cache GET
                     // triggers `refresh_and_cache_parties`. We don't insist on
                     // observing `refreshing == true` because the spawned task
                     // can complete between polls on a fast localnet, leaving

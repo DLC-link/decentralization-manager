@@ -32,7 +32,7 @@ use crate::{
     canton_id::CantonId,
     config::NodeConfig,
     consts::{
-        TOPOLOGY_PROPAGATION_DELAY_SECS, topology_retry_delay_secs, topology_retry_max_attempts,
+        topology_propagation_delay_secs, topology_retry_delay_secs, topology_retry_max_attempts,
     },
     error::Result,
     utils,
@@ -501,7 +501,7 @@ where
     confirm_p2p().await?;
     tracing::info!("P2P {label} confirmed in topology");
 
-    let propagation_delay = Duration::from_secs(TOPOLOGY_PROPAGATION_DELAY_SECS);
+    let propagation_delay = Duration::from_secs(topology_propagation_delay_secs());
     tracing::info!("Waiting {propagation_delay:?} for Canton to propagate topology updates...");
     tokio::time::sleep(propagation_delay).await;
 

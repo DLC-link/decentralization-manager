@@ -139,8 +139,26 @@ pub async fn wait_for_exit(pid: u32, deadline: Duration) -> Result<()> {
     }
 }
 
+/// Readiness signal after the port is bound: `/healthz` answering 200.
+///
+/// A bound TCP port only proves the listener exists. This proves actix has a
+/// worker actually serving requests, which is what the caller is about to do.
+/// The handler does no I/O, so a 200 is cheap and never blocks on Canton.
+async fn healthz_ok(http_port: u16) -> bool {
+    let url = format!("http://127.0.0.1:{http_port}/healthz");
+    match reqwest::Client::new()
+        .get(&url)
+        .timeout(Duration::from_secs(2))
+        .send()
+        .await
+    {
+        Ok(r) => r.status().is_success(),
+        Err(_) => false,
+    }
+}
+
 /// Block (with deadline) until the HTTP listener port is accepting TCP
-/// connections.
+/// connections AND `/healthz` answers 200.
 ///
 /// HTTP-only by design — the Noise *invite* listener's bound state is not
 /// a reliable signal that DecMan is healthy after a chaos restart. DecMan's
@@ -162,18 +180,20 @@ pub async fn wait_for_exit(pid: u32, deadline: Duration) -> Result<()> {
 pub async fn wait_for_server(http_port: u16, deadline: Duration) -> Result<()> {
     let start = Instant::now();
     loop {
-        if TcpStream::connect(("127.0.0.1", http_port)).await.is_ok() {
-            // Settle delay so a freshly-respawned DecMan has time to finish
-            // any in-flight workflow-resume work before the next test
-            // step starts pounding it. Bash harness used 5s here; chaos
-            // phases can restart multiple nodes back-to-back, so we use
-            // a longer settle to keep the next phase's peer-mesh
-            // pre-flight green.
-            sleep(Duration::from_secs(8)).await;
+        if TcpStream::connect(("127.0.0.1", http_port)).await.is_ok() && healthz_ok(http_port).await
+        {
+            // Short settle on top of the readiness probe. This was a blind 8s
+            // standing in for two things: DecMan finishing bootstrap, which
+            // `/healthz` now answers precisely, and the Noise mesh
+            // re-converging, which is not this function's job —
+            // `chaos::post_onboarding` retries a 422 peer-mesh pre-flight 12
+            // times and `ensure_nodes_healthy` repairs a node that never came
+            // back.
+            sleep(Duration::from_secs(1)).await;
             return Ok(());
         }
         if start.elapsed() >= deadline {
-            anyhow::bail!("http port {http_port} not bound after {deadline:?}");
+            anyhow::bail!("http port {http_port} not serving /healthz after {deadline:?}");
         }
         sleep(Duration::from_millis(200)).await;
     }
