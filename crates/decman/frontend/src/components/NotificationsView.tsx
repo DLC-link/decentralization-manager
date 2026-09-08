@@ -473,15 +473,29 @@ const InvitationCard = ({
               >
                 DARs ({invitation.dar_filenames.length})
               </Typography>
-              <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
-                {invitation.dar_filenames.map((filename) => (
-                  <Chip
-                    key={filename}
-                    size="small"
-                    variant="outlined"
-                    label={filename}
-                  />
-                ))}
+              {/* The peer refuses any DAR whose bytes do not hash to the
+                  value pinned here, so this is the operator accepting the
+                  content rather than just the name. Shown in full so it can be
+                  compared against a published release hash before accepting. */}
+              <Box sx={{ display: "flex", flexDirection: "column", gap: 0.5 }}>
+                {invitation.dar_filenames.map((filename, index) => {
+                  const hash = invitation.dar_hashes?.[index];
+                  return (
+                    <Box
+                      key={filename}
+                      sx={{ display: "flex", alignItems: "baseline", gap: 1 }}
+                    >
+                      <Chip size="small" variant="outlined" label={filename} />
+                      <Typography
+                        variant="caption"
+                        color={hash ? "text.secondary" : "warning.main"}
+                        sx={{ fontFamily: "monospace", wordBreak: "break-all" }}
+                      >
+                        {hash ? `sha256:${hash}` : "no hash pinned"}
+                      </Typography>
+                    </Box>
+                  );
+                })}
               </Box>
             </Box>
           )}
@@ -1530,6 +1544,22 @@ const WorkflowRunCard = ({
     }
   };
 
+  // Only the coordinator knows what the other peers did: a peer-side row never
+  // gets a count and would show a permanent 0. While the coordinator waits, the
+  // peers that joined are the progress — nothing "completes" a step that
+  // carries no command — and from the next step on it is the peers that
+  // completed the current one.
+  const showsPeerCount =
+    isInProgress &&
+    run.role === "Coordinator" &&
+    (run.expected_peers?.length ?? 0) > 0;
+  const waitingForPeers = run.current_step === "WaitingForPeers";
+  const peerCountLine = showsPeerCount
+    ? waitingForPeers
+      ? `${run.connected_peers?.length ?? 0} of ${run.expected_peers.length} peers joined`
+      : `${run.completed_peers?.length ?? 0} of ${run.expected_peers.length} peers responded`
+    : null;
+
   const fromLine = run.role === "Coordinator"
     ? "started by you"
     : run.coordinator_name
@@ -1682,17 +1712,9 @@ const WorkflowRunCard = ({
       title={run.prefix ? `${run.kind} · ${run.prefix}` : run.kind}
       facts={
         <>
-          {(fromLine ||
-            (isInProgress && (run.expected_peers?.length ?? 0) > 0)) && (
+          {(fromLine || peerCountLine) && (
             <Typography sx={{ fontSize: 13, color: "text.secondary" }}>
-              {[
-                fromLine,
-                isInProgress && (run.expected_peers?.length ?? 0) > 0
-                  ? `${run.completed_peers?.length ?? 0} of ${run.expected_peers.length} peers responded`
-                  : null,
-              ]
-                .filter(Boolean)
-                .join(" · ")}
+              {[fromLine, peerCountLine].filter(Boolean).join(" · ")}
             </Typography>
           )}
           {isInProgress && run.step_total > 0 && (

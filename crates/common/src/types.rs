@@ -353,6 +353,12 @@ impl std::str::FromStr for WorkflowRole {
     }
 }
 
+/// `current_step` of the first step of every workflow kind, where the
+/// coordinator waits for its invitees to join. Progress on this step is
+/// [`WorkflowRun::connected_peers`], not `completed_peers` — nothing completes
+/// a step that carries no command.
+pub const WAITING_FOR_PEERS_STEP: &str = "WaitingForPeers";
+
 /// A single persisted workflow run — control-plane state for either the
 /// coordinator side or an peer side. The matching artefacts live in
 /// `workflow_artifacts` and are looked up by `instance_name`.
@@ -386,6 +392,13 @@ pub struct WorkflowRun {
     pub coordinator_name: Option<String>,
     pub expected_peers: Vec<CantonId>,
     pub completed_peers: Vec<CantonId>,
+    /// Peers that have joined this run — the set the `WaitingForPeers` gate
+    /// counts, and the only progress a run has to show before its first
+    /// peer-gated step. Live in-memory state merged in by the API layer from
+    /// the workflow registry (not a DB column), so it is empty for a run this
+    /// node does not currently coordinate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connected_peers: Vec<CantonId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dec_party_id: Option<CantonId>,
     /// Dec party prefix associated with this run (e.g. "UAT"). Populated by
@@ -496,6 +509,10 @@ pub struct PendingInvitation {
     /// Dars-only: filenames the coordinator is distributing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dar_filenames: Vec<String>,
+    /// Dars-only: SHA-256 of each DAR, index-aligned with `dar_filenames`.
+    /// Recorded at accept time so the peer can pin the content it agreed to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dar_hashes: Vec<String>,
     /// Kick-only: the participant being removed from the party.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kicked_participant: Option<CantonId>,

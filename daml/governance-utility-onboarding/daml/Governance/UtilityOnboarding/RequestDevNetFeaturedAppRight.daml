@@ -12,6 +12,12 @@ import Governance.Action
 -- `AmuletRules_DevNet_FeatureApp` refuses when the AmuletRules contract is
 -- not flagged `isDevNet`, so this action is unusable on TestNet and MainNet.
 -- There, the DSO grants the right through its own governance vote.
+--
+-- Only the DSO can see `AmuletRules`, so the execute submission must carry
+-- it as a disclosed contract. Without that, the exercise fails on visibility
+-- before it reaches the `isDevNet` check. DecMan's execute handler fetches
+-- the current `AmuletRules` from the DSO scan API and discloses it; a raw
+-- ledger submission must do the same.
 template RequestDevNetFeaturedAppRight
   with
     governanceParty : Party

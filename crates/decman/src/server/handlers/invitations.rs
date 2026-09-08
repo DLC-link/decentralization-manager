@@ -120,6 +120,7 @@ pub(crate) async fn insert_peer_run(
             "prefix": invitation.prefix,
             "participants": invitation.participants,
             "dar_filenames": invitation.dar_filenames,
+            "dar_hashes": invitation.dar_hashes,
             "participant_id": invitation.kicked_participant,
             "new_participant_id": invitation.new_participant,
             "new_threshold": invitation.new_threshold,
@@ -136,6 +137,7 @@ pub(crate) async fn insert_peer_run(
         // invite (all four kinds send one).
         expected_peers: invitation.participants.clone(),
         completed_peers: Vec::new(),
+        connected_peers: Vec::new(),
         // Kick + contracts invites carry the target dec party; others don't.
         dec_party_id: invitation.dec_party_id.clone(),
         prefix: None,

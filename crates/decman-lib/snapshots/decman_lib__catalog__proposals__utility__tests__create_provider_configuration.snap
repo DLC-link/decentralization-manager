@@ -1,0 +1,238 @@
+---
+source: crates/decman-lib/src/catalog/proposals/utility.rs
+expression: "CreateProviderConfiguration\n{\n    provider_service_cid: \"00psc\".to_string(), registrar_requirements:\n    vec![requirement(&cid(\"issuer\"),\n    &[(\"role\", \"registrar\"), (\"kyc\", \"passed\")],)], holder_requirements:\n    vec![requirement(&cid(\"issuer\"), &[(\"role\", \"holder\")])],\n}.to_daml_proto().unwrap()"
+---
+Value {
+    sum: Some(
+        Record(
+            Record {
+                record_id: None,
+                fields: [
+                    RecordField {
+                        label: "providerServiceCid",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    ContractId(
+                                        "00psc",
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "registrarRequirements",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    List(
+                                        List {
+                                            elements: [
+                                                Value {
+                                                    sum: Some(
+                                                        Record(
+                                                            Record {
+                                                                record_id: None,
+                                                                fields: [
+                                                                    RecordField {
+                                                                        label: "issuer",
+                                                                        value: Some(
+                                                                            Value {
+                                                                                sum: Some(
+                                                                                    Party(
+                                                                                        "issuer::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+                                                                                    ),
+                                                                                ),
+                                                                            },
+                                                                        ),
+                                                                    },
+                                                                    RecordField {
+                                                                        label: "requiredClaims",
+                                                                        value: Some(
+                                                                            Value {
+                                                                                sum: Some(
+                                                                                    List(
+                                                                                        List {
+                                                                                            elements: [
+                                                                                                Value {
+                                                                                                    sum: Some(
+                                                                                                        Record(
+                                                                                                            Record {
+                                                                                                                record_id: None,
+                                                                                                                fields: [
+                                                                                                                    RecordField {
+                                                                                                                        label: "_1",
+                                                                                                                        value: Some(
+                                                                                                                            Value {
+                                                                                                                                sum: Some(
+                                                                                                                                    Text(
+                                                                                                                                        "role",
+                                                                                                                                    ),
+                                                                                                                                ),
+                                                                                                                            },
+                                                                                                                        ),
+                                                                                                                    },
+                                                                                                                    RecordField {
+                                                                                                                        label: "_2",
+                                                                                                                        value: Some(
+                                                                                                                            Value {
+                                                                                                                                sum: Some(
+                                                                                                                                    Text(
+                                                                                                                                        "registrar",
+                                                                                                                                    ),
+                                                                                                                                ),
+                                                                                                                            },
+                                                                                                                        ),
+                                                                                                                    },
+                                                                                                                ],
+                                                                                                            },
+                                                                                                        ),
+                                                                                                    ),
+                                                                                                },
+                                                                                                Value {
+                                                                                                    sum: Some(
+                                                                                                        Record(
+                                                                                                            Record {
+                                                                                                                record_id: None,
+                                                                                                                fields: [
+                                                                                                                    RecordField {
+                                                                                                                        label: "_1",
+                                                                                                                        value: Some(
+                                                                                                                            Value {
+                                                                                                                                sum: Some(
+                                                                                                                                    Text(
+                                                                                                                                        "kyc",
+                                                                                                                                    ),
+                                                                                                                                ),
+                                                                                                                            },
+                                                                                                                        ),
+                                                                                                                    },
+                                                                                                                    RecordField {
+                                                                                                                        label: "_2",
+                                                                                                                        value: Some(
+                                                                                                                            Value {
+                                                                                                                                sum: Some(
+                                                                                                                                    Text(
+                                                                                                                                        "passed",
+                                                                                                                                    ),
+                                                                                                                                ),
+                                                                                                                            },
+                                                                                                                        ),
+                                                                                                                    },
+                                                                                                                ],
+                                                                                                            },
+                                                                                                        ),
+                                                                                                    ),
+                                                                                                },
+                                                                                            ],
+                                                                                        },
+                                                                                    ),
+                                                                                ),
+                                                                            },
+                                                                        ),
+                                                                    },
+                                                                ],
+                                                            },
+                                                        ),
+                                                    ),
+                                                },
+                                            ],
+                                        },
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "holderRequirements",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    List(
+                                        List {
+                                            elements: [
+                                                Value {
+                                                    sum: Some(
+                                                        Record(
+                                                            Record {
+                                                                record_id: None,
+                                                                fields: [
+                                                                    RecordField {
+                                                                        label: "issuer",
+                                                                        value: Some(
+                                                                            Value {
+                                                                                sum: Some(
+                                                                                    Party(
+                                                                                        "issuer::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+                                                                                    ),
+                                                                                ),
+                                                                            },
+                                                                        ),
+                                                                    },
+                                                                    RecordField {
+                                                                        label: "requiredClaims",
+                                                                        value: Some(
+                                                                            Value {
+                                                                                sum: Some(
+                                                                                    List(
+                                                                                        List {
+                                                                                            elements: [
+                                                                                                Value {
+                                                                                                    sum: Some(
+                                                                                                        Record(
+                                                                                                            Record {
+                                                                                                                record_id: None,
+                                                                                                                fields: [
+                                                                                                                    RecordField {
+                                                                                                                        label: "_1",
+                                                                                                                        value: Some(
+                                                                                                                            Value {
+                                                                                                                                sum: Some(
+                                                                                                                                    Text(
+                                                                                                                                        "role",
+                                                                                                                                    ),
+                                                                                                                                ),
+                                                                                                                            },
+                                                                                                                        ),
+                                                                                                                    },
+                                                                                                                    RecordField {
+                                                                                                                        label: "_2",
+                                                                                                                        value: Some(
+                                                                                                                            Value {
+                                                                                                                                sum: Some(
+                                                                                                                                    Text(
+                                                                                                                                        "holder",
+                                                                                                                                    ),
+                                                                                                                                ),
+                                                                                                                            },
+                                                                                                                        ),
+                                                                                                                    },
+                                                                                                                ],
+                                                                                                            },
+                                                                                                        ),
+                                                                                                    ),
+                                                                                                },
+                                                                                            ],
+                                                                                        },
+                                                                                    ),
+                                                                                ),
+                                                                            },
+                                                                        ),
+                                                                    },
+                                                                ],
+                                                            },
+                                                        ),
+                                                    ),
+                                                },
+                                            ],
+                                        },
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                ],
+            },
+        ),
+    ),
+}

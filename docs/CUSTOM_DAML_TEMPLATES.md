@@ -18,7 +18,7 @@ A custom template is fully supported by DecMan when:
 4. It can be confirmed via `POST /governance/confirm` with `governance_type: "core_domain"` (no DecMan code change needed — confirmation works on the `ContractId GovernableAction` produced by step 3).
 5. It can be executed via `POST /governance/execute` with `governance_type: "core_domain"`, producing a `GovernanceExecutionResult` audit record.
 
-Anything beyond that — for example a bespoke proposal type wired into `POST /governance/propose` — requires a server-side change in `crates/decman/src/server/action_serializer.rs` and is out of scope for a "custom" template.
+Anything beyond that — for example a bespoke proposal type wired into `POST /governance/propose` — requires a server-side change and is out of scope for a "custom" template: a payload struct with its `TemplateInfo` / `DamlProtoEncode` / `Validate` impls under `crates/decman-lib/src/catalog/proposals/`, plus a matching `ProposalType` variant (and its `validate` / `grpc_payload` arms) in `crates/decman/src/server/types.rs`.
 
 > **One `GovernanceRules` handles every custom action.** You do **not** deploy a new `GovernanceRules` per new template. A single instance bound to a `governanceParty` matches *any* `ContractId GovernableAction` whose view's `governanceParty` field equals its own — regardless of the underlying template's package, module, or entity name. Custom templates extend an existing governance domain at zero infrastructure cost; the engine is universal.
 

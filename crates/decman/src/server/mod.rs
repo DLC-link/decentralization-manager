@@ -7,7 +7,6 @@
 //! handles inbound peer messages (invites, signing, health, cancellation)
 //! independently of any coordinator-driven workflow.
 
-mod action_serializer;
 mod assets;
 mod audit;
 mod chain_audit;
@@ -21,6 +20,9 @@ mod record;
 mod reward_automation;
 mod transfer_context;
 mod types;
+
+#[cfg(test)]
+mod serde_snapshots;
 
 pub(crate) mod health;
 pub(crate) mod peer_status;
@@ -539,6 +541,7 @@ impl WorkflowTriggers {
         let mut prefix = None;
         let mut participants = Vec::new();
         let mut dar_filenames = Vec::new();
+        let mut dar_hashes = Vec::new();
         let mut kicked_participant = None;
         let mut new_participant = None;
         let mut new_threshold = None;
@@ -556,6 +559,7 @@ impl WorkflowTriggers {
             }
             InvitationMeta::Dars(p) => {
                 dar_filenames = p.dar_filenames;
+                dar_hashes = p.dar_hashes;
                 participants = p.participants;
                 workflow_instance = p.workflow_instance;
             }
@@ -613,6 +617,7 @@ impl WorkflowTriggers {
             prefix,
             participants,
             dar_filenames,
+            dar_hashes,
             kicked_participant,
             new_participant,
             new_threshold,

@@ -1,0 +1,120 @@
+---
+source: crates/decman-lib/src/catalog/proposals/utility.rs
+expression: "AcceptMintRequest\n{\n    mint_request_cid: \"00mrc\".to_string(), instrument_configuration_cid:\n    \"00icc\".to_string(), issuer_credential_cids:\n    vec![\"00cred1\".to_string(), \"00cred2\".to_string()], description:\n    \"accept mint\".to_string(),\n}.to_daml_proto().unwrap()"
+---
+Value {
+    sum: Some(
+        Record(
+            Record {
+                record_id: None,
+                fields: [
+                    RecordField {
+                        label: "mintRequestCid",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    ContractId(
+                                        "00mrc",
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "instrumentConfigurationCid",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    ContractId(
+                                        "00icc",
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "description",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    Text(
+                                        "accept mint",
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "extraArgsMeta",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    Record(
+                                        Record {
+                                            record_id: None,
+                                            fields: [
+                                                RecordField {
+                                                    label: "values",
+                                                    value: Some(
+                                                        Value {
+                                                            sum: Some(
+                                                                TextMap(
+                                                                    TextMap {
+                                                                        entries: [],
+                                                                    },
+                                                                ),
+                                                            ),
+                                                        },
+                                                    ),
+                                                },
+                                            ],
+                                        },
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "issuerCredentialCids",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    Optional(
+                                        Optional {
+                                            value: Some(
+                                                Value {
+                                                    sum: Some(
+                                                        List(
+                                                            List {
+                                                                elements: [
+                                                                    Value {
+                                                                        sum: Some(
+                                                                            ContractId(
+                                                                                "00cred1",
+                                                                            ),
+                                                                        ),
+                                                                    },
+                                                                    Value {
+                                                                        sum: Some(
+                                                                            ContractId(
+                                                                                "00cred2",
+                                                                            ),
+                                                                        ),
+                                                                    },
+                                                                ],
+                                                            },
+                                                        ),
+                                                    ),
+                                                },
+                                            ),
+                                        },
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                ],
+            },
+        ),
+    ),
+}

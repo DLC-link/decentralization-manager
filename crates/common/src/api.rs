@@ -492,6 +492,13 @@ pub struct DeclineInvitationPayload {
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct DarsInvitePayload {
     pub dar_filenames: Vec<String>,
+    /// SHA-256 of each DAR's content, hex encoded and index-aligned with
+    /// `dar_filenames`. A peer pins the accepted content with these, so a
+    /// coordinator cannot get a different DAR vetted under an accepted name.
+    /// Empty from a coordinator that predates the field; the peer then falls
+    /// back to checking filenames only.
+    #[serde(default)]
+    pub dar_hashes: Vec<String>,
     /// The member set (selected peers) this distribution targets, so the peer
     /// card can render the same participant list the coordinator shows.
     #[serde(default)]
@@ -776,7 +783,7 @@ pub struct GrantRightsResponse {
 // ============================================================================
 
 /// Instrument identifier (admin + id)
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct InstrumentId {
@@ -785,7 +792,7 @@ pub struct InstrumentId {
 }
 
 /// Credential claim (subject, property, value)
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct Claim {
@@ -797,7 +804,7 @@ pub struct Claim {
 /// One claim a `PartyCredentialRequirement` demands: a credential's claims
 /// must contain this `(property, value)` pair. The Daml side is a
 /// `DA.Types:Tuple2 Text Text`; the wire shape names the halves instead.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct RequiredClaim {
@@ -807,7 +814,7 @@ pub struct RequiredClaim {
 
 /// A credential requirement on a party: `issuer` must have issued the party
 /// a credential whose claims contain every entry of `required_claims`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct PartyCredentialRequirement {
@@ -818,7 +825,7 @@ pub struct PartyCredentialRequirement {
 
 /// One offboarded instrument issuer and the credentials to revoke for it. The
 /// Daml side checks that every claim on each credential names this issuer.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct InstrumentIssuerCredentials {
@@ -841,7 +848,7 @@ pub enum GovernanceType {
 }
 
 /// Instrument allowance for token preapproval
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct InstrumentAllowance {
@@ -852,7 +859,7 @@ pub struct InstrumentAllowance {
 /// Mirrors `Utility.Registry.Holding.V0.Types.InstrumentIdentifier` — used to
 /// record standard market symbols (e.g. Ticker, ISIN) alongside the primary
 /// `instrument_id_text` UUID.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct InstrumentIdentifier {

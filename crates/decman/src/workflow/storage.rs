@@ -39,6 +39,10 @@ pub mod artifact_kinds {
     /// path after the workflow finishes so it can return the new party id to
     /// the UI without round-tripping through the file system.
     pub const PARTY_ID: &str = "party_id";
+    /// Decentralized namespace a peer validated and signed in the onboarding
+    /// SignDns step. Plaintext UTF-8 hex. Read back in SignP2p so the two
+    /// proposals a peer signs are pinned to the same party.
+    pub const ACCEPTED_DNS_NAMESPACE: &str = "accepted_dns_namespace";
 
     // Contracts (workflow_artifacts during a run)
     pub const PREPARED_SUBMISSION: &str = "prepared_submission";

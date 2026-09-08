@@ -76,6 +76,12 @@ async fn upload_dar_bytes(
         .unwrap_or(filename)
         .to_string();
 
+    // `expected_main_package_id` is left unset: a peer already pins the whole
+    // DAR by SHA-256 against the hash in its accepted invitation
+    // (`workflow::validation::PeerExpectations::check_dars`) before it gets
+    // here, which covers every package in the file rather than just the main
+    // one. Deriving the main package id locally would need a DAR (zip) parser
+    // this crate does not carry.
     let request = tonic::Request::new(UploadDarRequest {
         dars: vec![UploadDarData {
             bytes: dar_data,
