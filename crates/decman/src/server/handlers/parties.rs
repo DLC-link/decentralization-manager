@@ -16,9 +16,10 @@ use canton_proto_rs::com::digitalasset::canton::{
     protocol::v30::{DecentralizedNamespaceDefinition, PartyToParticipant},
     topology::admin::v30::{
         BaseQuery, ListDecentralizedNamespaceDefinitionRequest, ListNamespaceDelegationRequest,
-        ListPartyToParticipantRequest, StoreId, Synchronizer, base_query,
+        ListPartiesRequest, ListPartyToParticipantRequest, StoreId, Synchronizer, base_query,
         list_namespace_delegation_response::result::Item as NsDelegationItem,
         list_party_to_participant_response::result::Item as P2pItem, store_id, synchronizer,
+        topology_aggregation_service_client::TopologyAggregationServiceClient,
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
     },
 };
@@ -1055,15 +1056,74 @@ async fn store_parties_to_db(
     Commitable::commit(tx).await
 }
 
-/// The `filter_party` value that selects every party in `namespace`.
+/// Most parties `ListParties` returns for one participant.
 ///
-/// Canton splits `filter_party` on `::`, drops the empty identifier half, and
-/// compiles the namespace half into the store query as `namespace LIKE 'ns%'`.
-/// That makes a namespace lookup as cheap as an exact party id, and it is what
-/// lets a node find a party it holds no local record of without reading every
-/// party on the synchronizer.
-fn namespace_party_filter(namespace: &str) -> String {
-    format!("::{namespace}")
+/// The RPC takes a limit and offers no cursor, so this truncates rather than
+/// pages. It sits far above any realistic number of parties on one
+/// participant; a node holding more would discover the first
+/// `MAX_HOSTED_PARTIES` of them, and the exact-ID path covers the rest as soon
+/// as one is known locally.
+const MAX_HOSTED_PARTIES: i32 = 5_000;
+
+/// The full IDs of the decentralized parties this node hosts, found without
+/// reading every party on the synchronizer.
+///
+/// There is no way to ask Canton for a party by namespace.
+/// `listPartyToParticipant` re-filters its own result with
+/// `partyId.startsWith(filter_party)` against the unsplit string, and a party
+/// ID can never begin with the `::` delimiter, so a namespace-only filter
+/// matches nothing however the store reads it. `ListParties` takes a
+/// participant filter, which is the question discovery actually asks, and
+/// answers with full party IDs the exact-filter path can use.
+async fn discover_hosted_party_ids(
+    aggregation_client: &mut TopologyAggregationServiceClient<tonic::transport::Channel>,
+    participant_id: &str,
+    owned_namespaces: &HashSet<String>,
+) -> Result<Vec<String>> {
+    if owned_namespaces.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let response = bounded_read(
+        "list_parties",
+        aggregation_client.list_parties(tonic::Request::new(ListPartiesRequest {
+            as_of: None,
+            limit: MAX_HOSTED_PARTIES,
+            synchronizer_ids: Vec::new(),
+            filter_party: String::new(),
+            filter_participant: participant_id.to_string(),
+        })),
+    )
+    .await?
+    .into_inner();
+
+    Ok(parties_in_namespaces(
+        response.results.into_iter().map(|result| result.party),
+        owned_namespaces,
+    ))
+}
+
+/// Keep the party IDs whose namespace is one of `namespaces`.
+///
+/// `ListParties` answers with every party the participant hosts, decentralized
+/// or not, so the namespace is what separates the ones this node is a member of
+/// from the ordinary parties it also hosts.
+fn parties_in_namespaces(
+    parties: impl IntoIterator<Item = String>,
+    namespaces: &HashSet<String>,
+) -> Vec<String> {
+    let mut party_ids: Vec<String> = parties
+        .into_iter()
+        .filter(|party| {
+            party
+                .rsplit_once("::")
+                .is_some_and(|(hint, namespace)| !hint.is_empty() && namespaces.contains(namespace))
+        })
+        .collect();
+    party_ids.sort();
+    party_ids.dedup();
+
+    party_ids
 }
 
 /// This node's namespace signing-key fingerprints, from the local vault.
@@ -1106,7 +1166,7 @@ async fn owned_decentralized_namespaces(
     topology_client: &mut TopologyManagerReadServiceClient<tonic::transport::Channel>,
     synchronizer_id: &str,
     my_fingerprints: &HashSet<String>,
-) -> Result<Vec<String>> {
+) -> Result<Vec<DecentralizedNamespaceDefinition>> {
     let response = bounded_read(
         "list_decentralized_namespace_definition",
         topology_client.list_decentralized_namespace_definition(tonic::Request::new(
@@ -1116,7 +1176,7 @@ async fn owned_decentralized_namespaces(
     .await?
     .into_inner();
 
-    let mut namespaces: Vec<_> = response
+    let mut owned: Vec<_> = response
         .results
         .into_iter()
         .filter_map(|result| {
@@ -1124,13 +1184,13 @@ async fn owned_decentralized_namespaces(
             item.owners
                 .iter()
                 .any(|owner| my_fingerprints.contains(owner))
-                .then_some(item.decentralized_namespace)
+                .then_some(item)
         })
         .collect();
-    namespaces.sort();
-    namespaces.dedup();
+    owned.sort_by(|a, b| a.decentralized_namespace.cmp(&b.decentralized_namespace));
+    owned.dedup_by(|a, b| a.decentralized_namespace == b.decentralized_namespace);
 
-    Ok(namespaces)
+    Ok(owned)
 }
 
 /// Pair each decentralized namespace this node owns a key in with every party
@@ -1291,6 +1351,8 @@ async fn fetch_decentralized_parties(
 
     let mut topology_client = TopologyManagerReadServiceClient::new(channel.clone())
         .max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
+    let mut aggregation_client = TopologyAggregationServiceClient::new(channel.clone())
+        .max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
     let mut vault_client =
         VaultServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
 
@@ -1305,27 +1367,33 @@ async fn fetch_decentralized_parties(
     let namespace_key_fingerprints = my_namespace_fingerprints(&mut vault_client).await?;
 
     // Prefer exact IDs from every local source. A node with no exact ID for
-    // what was asked has to discover, and discovery goes through the
-    // decentralized namespaces rather than the parties: a namespace is a
-    // store-level predicate, while a participant-scoped party query is filtered
-    // in memory only after every party on the synchronizer has been loaded.
+    // what was asked has to discover: the decentralized namespaces it owns a
+    // key in, then the parties its own participant hosts. Both are narrow
+    // reads, unlike a participant-scoped party query, which Canton filters in
+    // memory only after loading every party on the synchronizer.
     //
     // Keying this on the filters rather than on "knows any party at all"
     // matters for a node that holds one party and is asked about another
     // prefix: it has to discover instead of issuing no query and reporting
     // nothing.
+    let mut discovered_definitions = Vec::new();
     let party_filters: Vec<String> = if !exact_party_filters.is_empty() {
         exact_party_filters
     } else {
-        owned_decentralized_namespaces(
+        discovered_definitions = owned_decentralized_namespaces(
             &mut topology_client,
             &synchronizer_id,
             &namespace_key_fingerprints,
         )
-        .await?
-        .iter()
-        .map(|namespace| namespace_party_filter(namespace))
-        .collect()
+        .await?;
+
+        let owned_namespaces: HashSet<String> = discovered_definitions
+            .iter()
+            .map(|definition| definition.decentralized_namespace.clone())
+            .collect();
+
+        discover_hosted_party_ids(&mut aggregation_client, &participant_id, &owned_namespaces)
+            .await?
     };
     // Keyed to a list: a decentralized namespace is derived from its owner set
     // alone (`compute_decentralized_namespace`), so two parties with the same
@@ -1368,11 +1436,19 @@ async fn fetch_decentralized_parties(
         }
     }
 
-    // Query only the exact decentralized namespaces belonging to locally
-    // hosted parties. Never issue an empty namespace filter on this path.
-    let mut namespaces: Vec<_> = p2p_by_namespace.keys().cloned().collect();
+    // Discovery already read these, so only the exact-ID path pays for them.
+    let mut definitions = discovered_definitions;
+    let already_known: HashSet<String> = definitions
+        .iter()
+        .map(|definition| definition.decentralized_namespace.clone())
+        .collect();
+
+    let mut namespaces: Vec<_> = p2p_by_namespace
+        .keys()
+        .filter(|namespace| !already_known.contains(*namespace))
+        .cloned()
+        .collect();
     namespaces.sort();
-    let mut dns_results = Vec::new();
     for namespace in namespaces {
         let response = bounded_read(
             "list_decentralized_namespace_definition",
@@ -1382,15 +1458,17 @@ async fn fetch_decentralized_parties(
         )
         .await?
         .into_inner();
-        dns_results.extend(response.results);
+        definitions.extend(
+            response
+                .results
+                .into_iter()
+                .filter_map(|result| result.item),
+        );
     }
 
     // Filter to parties where this participant is a member.
     let my_parties = pair_namespaces_with_parties(
-        dns_results
-            .into_iter()
-            .filter_map(|result| result.item)
-            .collect(),
+        definitions,
         &p2p_by_namespace,
         &namespace_key_fingerprints,
         prefix_filter,
@@ -1996,23 +2074,39 @@ mod tests {
         Ok(())
     }
 
-    /// The whole fix rests on this string. Canton splits `filter_party` on
-    /// `::` and compiles the namespace half into the store query, so an empty
-    /// identifier half asks for every party in one namespace and nothing else.
-    /// Drop the separator and it becomes an identifier prefix that matches no
-    /// party at all.
+    /// `ListParties` answers with every party the participant hosts, so the
+    /// namespace is the only thing separating a decentralized party this node
+    /// is a member of from an ordinary party it happens to host.
     #[test]
-    fn a_namespace_filter_leaves_the_identifier_half_empty() {
-        let namespace = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
+    fn only_parties_in_an_owned_namespace_are_discovered() {
+        let mine = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
+        let theirs = "1220d5010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5893";
+        let owned = HashSet::from([mine.to_string()]);
 
-        let filter = namespace_party_filter(namespace);
+        let found = parties_in_namespaces(
+            [
+                format!("beta::{mine}"),
+                format!("alpha::{mine}"),
+                // Same namespace twice: `ListParties` reports a party once per
+                // participant that hosts it.
+                format!("alpha::{mine}"),
+                // Someone else's decentralized party, and an ordinary party on
+                // this participant's own namespace.
+                format!("outsider::{theirs}"),
+                format!("plain::{theirs}"),
+                // Malformed, and a namespace with no identifier half, which
+                // Canton would never mint.
+                "no-delimiter".to_string(),
+                format!("::{mine}"),
+            ],
+            &owned,
+        );
 
-        assert_eq!(filter, format!("::{namespace}"));
-        let (identifier, matched_namespace) = filter
-            .split_once("::")
-            .expect("the filter must carry the separator Canton splits on");
-        assert!(identifier.is_empty(), "identifier half must not narrow");
-        assert_eq!(matched_namespace, namespace);
+        assert_eq!(
+            found,
+            vec![format!("alpha::{mine}"), format!("beta::{mine}")],
+            "expected the owned namespace's parties, sorted and deduplicated"
+        );
     }
 
     /// Nothing can listen on port 1, so any attempt to reach Canton fails
