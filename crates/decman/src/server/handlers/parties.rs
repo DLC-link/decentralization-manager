@@ -1199,20 +1199,40 @@ async fn discover_hosted_party_ids(
     // Unscoped, this asks across every synchronizer the participant is
     // connected to, and those parties eat the result budget while the reads
     // around it are scoped to this one.
+    let synchronizer_ids = match logical_synchronizer_id(synchronizer_id) {
+        Some(id) => vec![id.to_string()],
+        None => {
+            tracing::warn!(
+                "Cannot read a logical synchronizer ID out of '{synchronizer_id}', so party \
+                 discovery asks across every connected synchronizer. Parties from the others \
+                 count against the {MAX_HOSTED_PARTIES} result budget."
+            );
+            Vec::new()
+        }
+    };
+
     let response = bounded_read(
         "list_parties",
         aggregation_client.list_parties(tonic::Request::new(ListPartiesRequest {
             as_of: None,
             limit: MAX_HOSTED_PARTIES,
-            synchronizer_ids: logical_synchronizer_id(synchronizer_id)
-                .map(|id| vec![id.to_string()])
-                .unwrap_or_default(),
+            synchronizer_ids,
             filter_party: String::new(),
             filter_participant: participant_id.to_string(),
         })),
     )
     .await?
     .into_inner();
+
+    // The RPC truncates at the limit and says nothing, so a full page is the
+    // only signal that parties were left behind.
+    if response.results.len() == MAX_HOSTED_PARTIES as usize {
+        tracing::warn!(
+            "ListParties returned the full {MAX_HOSTED_PARTIES}-party limit for this \
+             participant, so discovery may have missed some. Any party already known locally \
+             is unaffected, since those are queried by exact ID."
+        );
+    }
 
     Ok(parties_in_namespaces(
         response.results.into_iter().map(|result| result.party),
