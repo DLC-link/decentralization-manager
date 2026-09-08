@@ -521,7 +521,6 @@ pub async fn get_governance_confirmations(
     // can't tell orphans apart from "we just couldn't read the proposals", so
     // we skip orphan-marking below to avoid surfacing a flood of false
     // orphans to the user.
-    let mut proposal_infos_complete = true;
     // Whether `domain_confirmations` reflects every active on-ledger
     // `Governance.Confirmation:GovernanceConfirmation` contract for this party.
     // (The Rust value carrying each one is a `DomainConfirmation`; the Daml
@@ -567,14 +566,16 @@ pub async fn get_governance_confirmations(
         }
     }
     // Fetch proposal infos via GovernableAction interface query
-    if let Err(e) =
-        fetch_proposal_infos(config, party_id, token, packages, &mut proposal_infos).await
-    {
-        // Warn, not debug: this drops every unconfirmed card from the page,
-        // and the operator needs to know why the queue looks empty.
-        tracing::warn!("Could not fetch proposal infos: {e}");
-        proposal_infos_complete = false;
-    }
+    let proposal_infos_complete =
+        match fetch_proposal_infos(config, party_id, token, packages, &mut proposal_infos).await {
+            Ok(complete) => complete,
+            Err(e) => {
+                // Warn, not debug: this drops every unconfirmed card from the page,
+                // and the operator needs to know why the queue looks empty.
+                tracing::warn!("Could not fetch proposal infos: {e}");
+                false
+            }
+        };
 
     let now_seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -782,6 +783,14 @@ async fn resolve_accept_transfer_details(
     Ok(())
 }
 
+/// Most proposals one approvals read keeps in memory.
+///
+/// The read holds a `ProposalInfo` per proposal, so without a bound the page
+/// costs memory proportional to a party's whole open-proposal history rather
+/// than to what it displays. A party with 26k of them OOMKilled a node at 4Gi
+/// (#424). Exceeding this marks the result incomplete instead of failing.
+const MAX_PROPOSALS_RETAINED: usize = 2_000;
+
 /// Fetch proposal infos via GovernableAction interface query.
 ///
 /// Queries active contracts implementing GovernableAction and extracts the
@@ -793,9 +802,9 @@ async fn fetch_proposal_infos(
     token: Option<String>,
     packages: &PackageConfig,
     proposal_infos: &mut HashMap<String, ProposalInfo>,
-) -> Result {
+) -> Result<bool> {
     let Ok(template) = decman_lib::catalog::templates::governable_action_interface(packages) else {
-        return Ok(());
+        return Ok(true);
     };
 
     let event_format = party_event_format(
@@ -804,12 +813,24 @@ async fn fetch_proposal_infos(
         true,
     );
 
+    let mut complete = true;
     for_each_active_contract(config, token.clone(), event_format, |created| {
+        if proposal_infos.len() >= MAX_PROPOSALS_RETAINED {
+            complete = false;
+            return;
+        }
         if let Some((proposal_cid, info)) = interpret::extract_proposal_info(&created, party_id) {
             proposal_infos.insert(proposal_cid, info);
         }
     })
     .await?;
+    if !complete {
+        tracing::warn!(
+            %party_id,
+            retained = MAX_PROPOSALS_RETAINED,
+            "the party has more open proposals than one approvals read retains;              the page is marked incomplete"
+        );
+    }
 
     // Resolve the linked `TransferInstruction` for any
     // `AcceptTransferProposal`s we just captured so the notification card has
@@ -818,7 +839,7 @@ async fn fetch_proposal_infos(
     // a client-creation failure, which we let propagate.
     resolve_accept_transfer_details(config, party_id, token, proposal_infos).await?;
 
-    Ok(())
+    Ok(complete)
 }
 
 /// Compute a deterministic hash of an action for grouping confirmations
