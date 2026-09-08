@@ -26,6 +26,7 @@ use sqlx::SqlitePool;
 use crate::{
     config::NodeConfig,
     consts::{topology_retry_delay_secs, topology_retry_max_attempts},
+    db::schema::{SchemaRead, SchemaWrite},
     error::Result,
     utils,
     workflow::{
@@ -209,17 +210,19 @@ where
     // top of it is not something the proto sanctions, so refuse rather than
     // guess. Checked before anything else so no export is pulled and nothing is
     // disconnected.
-    if storage
-        .read_artifact(&target.instance_name, target.artifacts.import_partial, None)
+    //
+    // Keyed by party and participant, not by run: a fresh add-party would
+    // otherwise not see it, and that is the operator's most natural next move.
+    if let Some(reason) = storage
+        .get_acs_import_quarantine(&target.party_id, &target.target_participant_id)
         .await?
-        .is_some()
     {
         anyhow::bail!(
-            "a previous attempt fed part of the ACS to this participant before failing — \
-             refusing to import again on top of it. Repair the participant \
-             (RepairCommitmentsUsingAcs, or restore it) and clear the '{kind}' artifact \
-             for this run once it is clean.",
-            kind = target.artifacts.import_partial
+            "{participant} is quarantined for {party}: {reason}. Repair the participant \
+             (RepairCommitmentsUsingAcs, or restore it), then lift the quarantine with \
+             DELETE /acs-import-quarantine before replicating again.",
+            participant = target.target_participant_id,
+            party = target.party_id
         );
     }
 
@@ -641,21 +644,25 @@ where
             }
             // Cancelling means Canton was never told the snapshot was complete,
             // but it may still have committed what it had already processed,
-            // and there is no way to ask. Record that so the retry refuses.
+            // and there is no way to ask. Record that against the participant so
+            // any later run refuses, not just a retry of this one.
+            let reason = format!(
+                "an ACS transfer failed after {fed} bytes had already reached Canton; the \
+                 import was cancelled rather than closed, so Canton was not told the \
+                 snapshot was complete, but this participant may hold part of the ACS"
+            );
             storage
-                .write_artifact(
-                    &target.instance_name,
-                    target.artifacts.import_partial,
-                    None,
-                    b"1",
+                .quarantine_acs_import(
+                    &target.party_id,
+                    &target.target_participant_id,
+                    &reason,
+                    fed,
                 )
                 .await?;
             return Err(fetch_err.context(format!(
-                "the ACS transfer failed after {fed} bytes had already reached Canton. \
-                 The import was cancelled rather than closed, so Canton was not told the \
-                 snapshot was complete, but this participant may hold part of the ACS and \
-                 needs repair (RepairCommitmentsUsingAcs) or a restore before the party is \
-                 used. add-party will refuse to import again until that is done"
+                "{reason}. It needs repair (RepairCommitmentsUsingAcs) or a restore before \
+                 this party is used, and replication is now refused for this participant \
+                 until the quarantine is lifted"
             )));
         }
     };

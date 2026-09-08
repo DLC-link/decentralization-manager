@@ -1247,6 +1247,7 @@ pub async fn start_server(
             .service(handlers::get_participants_status)
             .service(handlers::compare_peer_packages)
             .service(handlers::get_vetted_packages)
+            .service(handlers::clear_acs_import_quarantine)
             .service(handlers::start_kick)
             .service(handlers::get_kick_status)
             .service(handlers::cancel_kick)

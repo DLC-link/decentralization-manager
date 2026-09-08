@@ -39,6 +39,18 @@ pub trait SchemaRead {
     /// Get cached decentralized parties by prefix
     async fn get_dec_parties_by_prefix(&self, prefix: &str) -> Result<Vec<DecPartyRow>>;
 
+    /// Whether this participant is quarantined for `party_id` — a previous
+    /// transfer fed part of the ACS to it before failing, and Canton cannot say
+    /// how much landed. Returns the recorded reason.
+    ///
+    /// Keyed by party and participant rather than by workflow run: the fact
+    /// outlives the run that discovered it, and a fresh add-party must see it.
+    async fn get_acs_import_quarantine(
+        &self,
+        party_id: &CantonId,
+        participant_id: &CantonId,
+    ) -> Result<Option<String>>;
+
     /// Get owner keys for a decentralized party
     async fn get_dec_party_owners(&self, party_id: &CantonId) -> Result<Vec<String>>;
 
@@ -162,6 +174,24 @@ pub trait SchemaWrite {
 
     /// Begin a new database transaction
     async fn begin_transaction(&self) -> Result<Self::Transaction>;
+
+    /// Record that `participant_id` holds an unknown fraction of `party_id`'s
+    /// ACS. Idempotent: re-recording keeps the first reason.
+    async fn quarantine_acs_import(
+        &self,
+        party_id: &CantonId,
+        participant_id: &CantonId,
+        reason: &str,
+        bytes_imported: u64,
+    ) -> Result<()>;
+
+    /// Lift the quarantine, once an operator has repaired or restored the
+    /// participant. Returns whether a row was actually removed.
+    async fn clear_acs_import_quarantine(
+        &self,
+        party_id: &CantonId,
+        participant_id: &CantonId,
+    ) -> Result<bool>;
 }
 
 /// A transaction that can be committed

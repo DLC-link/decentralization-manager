@@ -120,12 +120,6 @@ pub mod artifact_kinds {
     /// cannot decode.
     pub const ADD_PARTY_SYNC_ACS_COMMAND: &str = "add_party_sync_acs_command";
 
-    /// Written when a transfer failed *after* bytes had already been fed to
-    /// Canton's import. Durable and never cleared automatically: the
-    /// participant may hold part of an ACS, and Canton offers no way to ask how
-    /// much, so the next attempt refuses rather than importing on top of it.
-    pub const ADD_PARTY_ACS_IMPORT_PARTIAL: &str = "add_party_acs_import_partial";
-
     /// Unsigned onboarding-flag clearing proposal (P2P update without the
     /// new member's Onboarding marker) created by the coordinator. Empty
     /// payload doubles as the "flag already cleared — skip the sign round"
