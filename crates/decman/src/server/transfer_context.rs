@@ -365,7 +365,7 @@ pub async fn maybe_fetch_for_proposal_event(
     };
 
     if is_accept_transfer {
-        let transfer_instruction_cid = record_field(&create_args, "transferInstructionCid")
+        let transfer_instruction_cid = record_field(create_args, "transferInstructionCid")
             .and_then(|s| match s {
                 value::Sum::ContractId(cid) => Some(cid.clone()),
                 _ => None,
@@ -388,7 +388,7 @@ pub async fn maybe_fetch_for_proposal_event(
     // so the executor's submission can exercise TransferFactory_Transfer. Only
     // needed for shared-instrument transfers (e.g. CBTC); for utility tokens the
     // factory lives in the dec party's own ACS and no extra disclosure is needed.
-    let transfer = transfer_record_from_proposal(&create_args)?;
+    let transfer = transfer_record_from_proposal(create_args)?;
     let instrument_admin: CantonId = transfer
         .instrument_id
         .admin
