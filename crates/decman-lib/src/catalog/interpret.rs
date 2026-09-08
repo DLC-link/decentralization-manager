@@ -203,6 +203,31 @@ pub fn extract_governance_state(created: &CreatedEvent) -> Option<RulesState> {
     })
 }
 
+/// Longest proposal description retained by [`extract_proposal_info`].
+///
+/// The approvals list keeps one [`ProposalInfo`] per proposal, so an unbounded
+/// field here scales with a party's entire proposal history rather than with
+/// what the page shows. A party carrying 26k proposals of padded text OOMKilled
+/// a node at 4Gi (#424). The full text stays on the ledger and in the
+/// execution result; this is the card's preview.
+pub const DESCRIPTION_PREVIEW_BYTES: usize = 4096;
+
+/// Truncate `text` to at most [`DESCRIPTION_PREVIEW_BYTES`], on a character
+/// boundary, marking it when shortened.
+fn description_preview(text: String) -> String {
+    if text.len() <= DESCRIPTION_PREVIEW_BYTES {
+        return text;
+    }
+    let end = (0..=DESCRIPTION_PREVIEW_BYTES)
+        .rev()
+        .find(|i| text.is_char_boundary(*i))
+        .unwrap_or(0);
+    let mut out = String::with_capacity(end + 3);
+    out.push_str(&text[..end]);
+    out.push('…');
+    out
+}
+
 /// Per-proposal info pulled out of a `GovernableAction` contract. `description`
 /// and `action_label` come from the interface view, which every proposal
 /// implements; `transfer` is populated only for `TransferProposal` templates so
@@ -314,7 +339,8 @@ pub fn extract_proposal_info(
 
     let description = view
         .and_then(|v| field_text(v, "description"))
-        .or_else(|| record.and_then(|r| field_text(r, "description")));
+        .or_else(|| record.and_then(|r| field_text(r, "description")))
+        .map(description_preview);
 
     // Read from the view first for the same reason the label and description
     // do: the interface declares `proposer`, so the view always carries it,

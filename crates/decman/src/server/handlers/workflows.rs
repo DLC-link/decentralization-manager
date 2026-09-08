@@ -1768,7 +1768,15 @@ pub async fn start_onboarding(
                 tokio::spawn(async move {
                     let auth = bg_auth.read().await.clone();
                     let creds = bg_creds.read().await.clone();
-                    match fetch_decentralized_parties(&bg_config, &bg_db, None, auth, &creds).await
+                    match fetch_decentralized_parties(
+                        &bg_config,
+                        &bg_db,
+                        None,
+                        auth,
+                        &creds,
+                        Default::default(),
+                    )
+                    .await
                     {
                         Ok(resp) => {
                             if let Err(e) = store_parties_to_db(&bg_db, "", &resp.parties).await {
@@ -2308,7 +2316,15 @@ pub async fn start_contracts(
                 tokio::spawn(async move {
                     let auth = bg_auth.read().await.clone();
                     let creds = bg_creds.read().await.clone();
-                    match fetch_decentralized_parties(&bg_config, &bg_db, None, auth, &creds).await
+                    match fetch_decentralized_parties(
+                        &bg_config,
+                        &bg_db,
+                        None,
+                        auth,
+                        &creds,
+                        Default::default(),
+                    )
+                    .await
                     {
                         Ok(resp) => {
                             if let Err(e) = store_parties_to_db(&bg_db, "", &resp.parties).await {

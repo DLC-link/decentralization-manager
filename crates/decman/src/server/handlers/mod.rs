@@ -20,7 +20,8 @@ pub(crate) use config::{
 pub(crate) use governance::{
     cancel_confirmation, cancel_proposal, confirm_action, execute_action, expire_confirmation,
     get_coupon_reassignment_delegation, get_governance, get_governance_audit,
-    get_governance_chain_audit, get_governance_state, get_known_members, propose_action,
+    get_governance_chain_audit, get_governance_state, get_known_members, get_proposals_page,
+    propose_action,
 };
 // Crate-internal governance helpers reused by the reward-automation module,
 // re-exported here so they are reachable through the private `governance`
