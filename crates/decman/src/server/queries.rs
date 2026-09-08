@@ -602,7 +602,6 @@ pub async fn get_governance_confirmations(
             .filter_map(|cid| cached.1.get(cid).map(|v| (cid.clone(), v.clone()))),
     );
 
-
     let now_seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -715,31 +714,33 @@ async fn fetch_governance_for_template(
         event_format,
         Some(MAX_CONFIRMATIONS_SCANNED),
         |created| {
-        if created.template_id.as_ref().is_some_and(|t| {
-            t.module_name == "Governance.Confirmation" && t.entity_name == "GovernanceConfirmation"
-        }) {
-            // Domain confirmations carry no inline action — they group by the
-            // proposal cid they reference, labelled by whichever confirmation
-            // for that proposal arrived first.
-            if let Some(parsed) = interpret::parse_domain_confirmation(&created) {
-                domain_confirmations
-                    .entry(parsed.proposal_cid.clone())
-                    .or_insert_with(|| (parsed.action_label.clone(), Vec::new()))
+            if created.template_id.as_ref().is_some_and(|t| {
+                t.module_name == "Governance.Confirmation"
+                    && t.entity_name == "GovernanceConfirmation"
+            }) {
+                // Domain confirmations carry no inline action — they group by the
+                // proposal cid they reference, labelled by whichever confirmation
+                // for that proposal arrived first.
+                if let Some(parsed) = interpret::parse_domain_confirmation(&created) {
+                    domain_confirmations
+                        .entry(parsed.proposal_cid.clone())
+                        .or_insert_with(|| (parsed.action_label.clone(), Vec::new()))
+                        .1
+                        .push(parsed);
+                }
+            } else if let Some(parsed) = interpret::parse_confirmation(&created) {
+                // By-value confirmations group by a deterministic hash of the
+                // action they carry — the hash is decman's, not the lib's.
+                let action_hash = compute_action_hash(&parsed.action);
+                let action = parsed.action.clone();
+                confirmations_by_hash
+                    .entry(action_hash)
+                    .or_insert_with(|| (action, Vec::new()))
                     .1
                     .push(parsed);
             }
-        } else if let Some(parsed) = interpret::parse_confirmation(&created) {
-            // By-value confirmations group by a deterministic hash of the
-            // action they carry — the hash is decman's, not the lib's.
-            let action_hash = compute_action_hash(&parsed.action);
-            let action = parsed.action.clone();
-            confirmations_by_hash
-                .entry(action_hash)
-                .or_insert_with(|| (action, Vec::new()))
-                .1
-                .push(parsed);
-        }
-    })
+        },
+    )
     .await?;
 
     Ok(())
@@ -897,9 +898,15 @@ async fn cached_domain_confirmations(
     for t in &decman_lib::catalog::templates::governance_templates(packages) {
         // A template this participant lacks means "no confirmations of that
         // kind", not a failed read.
-        if let Err(e) =
-            fetch_governance_for_template(config, party_id, token.clone(), t, &mut by_hash, &mut domain)
-                .await
+        if let Err(e) = fetch_governance_for_template(
+            config,
+            party_id,
+            token.clone(),
+            t,
+            &mut by_hash,
+            &mut domain,
+        )
+        .await
         {
             tracing::debug!(%party_id, "confirmation read skipped {}:{}: {e}", t.module, t.entity);
         }
@@ -936,13 +943,8 @@ pub async fn page_proposal_summaries(
     );
 
     let token_for_counts = token.clone();
-    let (summaries, next) = page_active_contracts(
-        config,
-        token,
-        event_format,
-        limit,
-        cursor,
-        |created| {
+    let (summaries, next) =
+        page_active_contracts(config, token, event_format, limit, cursor, |created| {
             interpret::extract_proposal_info(&created, party_id).map(|(cid, info)| {
                 ProposalSummary {
                     proposal_cid: cid,
@@ -954,9 +956,8 @@ pub async fn page_proposal_summaries(
                     created_at: info.created_at,
                 }
             })
-        },
-    )
-    .await?;
+        })
+        .await?;
 
     let now_seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)

@@ -42,8 +42,8 @@ use crate::{
         health::classify_health_reply,
         package_inventory::fetch_vetted_packages,
         queries::{
-            contract_templates_all, fetch_package_versions, get_contracts,
-            get_party_metadata, rules_templates, sort_contracts,
+            contract_templates_all, fetch_package_versions, get_contracts, get_party_metadata,
+            rules_templates, sort_contracts,
         },
         types::{
             ConnectionStatus, ContractInfo, DecentralizedPartiesResponse, DecentralizedParty,
@@ -1009,15 +1009,18 @@ pub async fn fetch_decentralized_parties(
                     tokio::join!(
                         async {
                             get_contracts(
-                                &config, &party_id, token, packages, package_versions, templates,
+                                &config,
+                                &party_id,
+                                token,
+                                packages,
+                                package_versions,
+                                templates,
                             )
-                                .await
-                                .unwrap_or_else(|e| {
-                                    tracing::warn!(
-                                        "Failed to get contracts for {party_id_str}: {e}"
-                                    );
-                                    Vec::new()
-                                })
+                            .await
+                            .unwrap_or_else(|e| {
+                                tracing::warn!("Failed to get contracts for {party_id_str}: {e}");
+                                Vec::new()
+                            })
                         },
                         async {
                             get_party_metadata(&config, &party_id, token_clone)

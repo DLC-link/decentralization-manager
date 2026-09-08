@@ -141,7 +141,9 @@ where
         ),
     };
 
-    let page_size = FETCH_CHUNK.min(limit.try_into().unwrap_or(FETCH_CHUNK)).max(1);
+    let page_size = FETCH_CHUNK
+        .min(limit.try_into().unwrap_or(FETCH_CHUNK))
+        .max(1);
     let mut kept: Vec<T> = Vec::new();
 
     loop {
@@ -178,7 +180,13 @@ where
         page_token = Some(next.clone());
 
         if kept.len() >= limit {
-            return Ok((kept, Some(AcsCursor { offset, page_token: next })));
+            return Ok((
+                kept,
+                Some(AcsCursor {
+                    offset,
+                    page_token: next,
+                }),
+            ));
         }
     }
 }
