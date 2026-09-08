@@ -29,6 +29,15 @@ export DECPM_TOPOLOGY_PROPAGATION_DELAY_SECS=3
 # the 48s/109s/219s spread this phase showed across runs.
 export DECPM_REWARD_AUTOMATION_INTERVAL_SECS=3
 
+# The peer's coordinator-poll cadence, which quantizes every multi-step
+# workflow: 100% of the suite's waits >=2s floored to an even second on the 2s
+# default, and "onboarding reaches completed" was exactly 22.0s (11 polls) in
+# five runs out of five. 500ms rather than something smaller because each poll
+# is a fresh Noise connection, and this runner is CPU-sensitive enough that
+# handshake pressure has stalled the mesh before. devnet keeps the 2s default —
+# there a coordinator step is a real Canton round trip.
+export DECPM_PEER_WAIT_POLL_DELAY_MS=500
+
 # Localnet
 LOCALNET_VERSION="0.6.12"
 LOCALNET_BUNDLE_URL="https://github.com/digital-asset/decentralized-canton-sync/releases/download/v${LOCALNET_VERSION}/${LOCALNET_VERSION}_splice-node.tar.gz"
