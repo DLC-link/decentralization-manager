@@ -39,6 +39,19 @@ pub const NOISE_CHUNK_TIMEOUT: Duration = Duration::from_secs(25);
 /// Kept comfortably above `NOISE_CHUNK_TIMEOUT`.
 pub const NOISE_HANDLER_TIMEOUT: Duration = Duration::from_secs(45);
 
+/// Per-request timeout for one ACS block fetch.
+///
+/// `NOISE_CHUNK_TIMEOUT` (25s) was sized for a 1 MiB chunk that "transfers in
+/// well under a second" and is far too tight for an ACS block: at 25s a 4 MiB
+/// block needs 1.4 Mbit/s sustained just to arrive, and `RequestTimeout` is
+/// transient, so a link below that burns three attempts and a step strike on
+/// every block without ever making progress.
+///
+/// 40s sits under the server's `NOISE_HANDLER_TIMEOUT` backstop, so the client
+/// still gives up first and retries on a fresh connection, and it is the budget
+/// [`acs_block_size`] is clamped against.
+pub const NOISE_ACS_BLOCK_TIMEOUT: Duration = Duration::from_secs(40);
+
 /// Message types for the Noise protocol communication
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[repr(u16)]
@@ -178,25 +191,32 @@ pub const MAX_CHUNK_COUNT: usize = MAX_CHUNKED_TOTAL_SIZE.div_ceil(CHUNK_SIZE);
 /// Bytes served per `GetNextAcsBlock`. Default; the live value is read via
 /// [`acs_block_size`].
 ///
-/// Bounded from above by `NOISE_HANDLER_TIMEOUT`, which caps the *whole*
-/// server response including the body — a range that cannot transfer inside it
-/// is killed mid-body however many times it is retried. 4 MiB moves in ~17s on
-/// a 2 Mbit/s link, which leaves headroom against the 45s budget. Bounded from
-/// below by round trips: the fixed per-range cost is a TCP connect plus a Noise
-/// handshake (measured at 0.30 ms) plus two RTTs, so on a high-latency link
-/// fewer, larger ranges finish sooner.
+/// Bounded from above by `NOISE_ACS_BLOCK_TIMEOUT`, the *client's* per-block
+/// budget, which is the binding one — the server's `NOISE_HANDLER_TIMEOUT` is
+/// only a backstop behind it. A block that cannot transfer inside that budget
+/// times out identically on every retry, so the block size implies a floor on
+/// usable bandwidth: 4 MiB in 40s is ~0.84 Mbit/s, and the 8 MiB ceiling below
+/// is ~1.7 Mbit/s. Bounded from below by round trips: the fixed per-block cost
+/// is a TCP connect plus a Noise handshake (measured at 0.30 ms) plus two RTTs,
+/// so on a high-latency link fewer, larger blocks finish sooner.
 pub const ACS_BLOCK_SIZE: usize = 4 * 1024 * 1024;
 
+/// Ceiling for [`acs_block_size`], set by what fits in
+/// `NOISE_ACS_BLOCK_TIMEOUT` on a link we are willing to call usable
+/// (~1.7 Mbit/s). Deliberately below `MAX_CHUNKED_TOTAL_SIZE`: that constant
+/// bounds an in-memory assembly, not a per-request transfer budget.
+pub const MAX_ACS_BLOCK_SIZE: usize = 8 * 1024 * 1024;
+
 /// Bytes to request per ACS block, overridable via `DECPM_ACS_BLOCK_BYTES`.
-/// Clamped to `[64 KiB, MAX_CHUNKED_TOTAL_SIZE]` so a mistyped value cannot
-/// stall every block against the handler timeout or shrink to a per-byte
-/// round trip.
+/// Clamped to `[64 KiB, MAX_ACS_BLOCK_SIZE]` so a mistyped value cannot stall
+/// every block against `NOISE_ACS_BLOCK_TIMEOUT` or shrink to a per-byte round
+/// trip.
 pub fn acs_block_size() -> usize {
     std::env::var("DECPM_ACS_BLOCK_BYTES")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(ACS_BLOCK_SIZE)
-        .clamp(64 * 1024, MAX_CHUNKED_TOTAL_SIZE)
+        .clamp(64 * 1024, MAX_ACS_BLOCK_SIZE)
 }
 
 impl TryFrom<u16> for MessageType {

@@ -221,6 +221,15 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
         session.block(seq, block_size).await
     }
 
+    /// Bytes the open export session has served so far, or 0 when none is open.
+    pub async fn acs_export_served(&self) -> u64 {
+        self.acs_export
+            .lock()
+            .await
+            .as_ref()
+            .map_or(0, |(_, session)| session.served_bytes())
+    }
+
     /// Drop the export session, closing the Canton stream.
     pub async fn clear_acs_export(&self) {
         *self.acs_export.lock().await = None;

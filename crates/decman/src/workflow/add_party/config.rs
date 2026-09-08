@@ -18,6 +18,7 @@ pub const ADD_PARTY_REPLICATION_ARTIFACTS: ReplicationArtifacts = ReplicationArt
     export_offset: artifact_kinds::ADD_PARTY_EXPORT_OFFSET,
     pre_activation_offset: artifact_kinds::ADD_PARTY_PRE_ACTIVATION_OFFSET,
     import_inflight: artifact_kinds::ADD_PARTY_ACS_IMPORT_INFLIGHT,
+    import_partial: artifact_kinds::ADD_PARTY_ACS_IMPORT_PARTIAL,
 };
 
 /// Configuration for the add-party workflow (adding a new member to an

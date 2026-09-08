@@ -47,6 +47,11 @@ const EXPORT_ACTIVATION_TIMEOUT_SECS: i64 = 120;
 /// Canton's default 4 MiB gRPC message cap.
 const IMPORT_CHUNK_SIZE: usize = 1024 * 1024;
 
+/// Log import progress every this many bytes. The participant is disconnected
+/// from every synchronizer for the whole import, so an operator watching a
+/// multi-hour transfer needs to see it moving.
+const PROGRESS_EVERY_BYTES: u64 = 256 * 1024 * 1024;
+
 /// How many blocks may sit in the import channel ahead of Canton. Bounds the
 /// target's memory to a couple of blocks.
 const IMPORT_READAHEAD: usize = 2;
@@ -199,6 +204,25 @@ where
         })?;
     }
 
+    // A previous attempt fed part of the ACS to Canton before failing. Canton
+    // offers no way to ask how much landed, and importing the whole snapshot on
+    // top of it is not something the proto sanctions, so refuse rather than
+    // guess. Checked before anything else so no export is pulled and nothing is
+    // disconnected.
+    if storage
+        .read_artifact(&target.instance_name, target.artifacts.import_partial, None)
+        .await?
+        .is_some()
+    {
+        anyhow::bail!(
+            "a previous attempt fed part of the ACS to this participant before failing — \
+             refusing to import again on top of it. Repair the participant \
+             (RepairCommitmentsUsingAcs, or restore it) and clear the '{kind}' artifact \
+             for this run once it is clean.",
+            kind = target.artifacts.import_partial
+        );
+    }
+
     // Pull the first block before touching the participant. It costs one
     // block of memory and answers the only question that decides whether a
     // disconnect is warranted at all: whether the party has any contracts.
@@ -302,7 +326,16 @@ where
                 }))
                 .await?;
         }
-        run_import(config, &synchronizer_id, &party_id, first, &mut next_block).await
+        run_import(
+            config,
+            storage,
+            target,
+            &synchronizer_id,
+            &party_id,
+            first,
+            &mut next_block,
+        )
+        .await
     }
     .await;
 
@@ -498,6 +531,8 @@ async fn local_package_ids(config: &NodeConfig) -> Result<HashSet<String>> {
 /// with the disconnect/reconnect bracket.
 async fn run_import<F, Fut>(
     config: &NodeConfig,
+    storage: &SqlitePool,
+    target: &ReplicationTarget,
     synchronizer_id: &str,
     party_id: &str,
     first: PipeBlock,
@@ -539,6 +574,7 @@ where
     // that what arrived is what was exported.
     let mut hasher = Sha256::new();
     let mut fed = 0u64;
+    let mut logged = 0u64;
 
     // The feeding loop's result is captured rather than propagated with `?`.
     // Returning early here would drop the RPC's JoinHandle, and tokio detaches
@@ -566,7 +602,13 @@ where
                             return Ok(None);
                         }
                     }
-                    tracing::debug!("Imported {fed} bytes so far");
+                    if fed / PROGRESS_EVERY_BYTES != logged {
+                        logged = fed / PROGRESS_EVERY_BYTES;
+                        tracing::info!(
+                            "ACS import progress: {mib} MiB fed to Canton (block {seq})",
+                            mib = fed / (1024 * 1024)
+                        );
+                    }
                 }
                 PipeBlock::End { trailer, .. } => return Ok(Some(trailer)),
             }
@@ -576,19 +618,47 @@ where
     }
     .await;
 
-    // Closing the sender is what tells Canton the snapshot is complete, and on
-    // a failure path it is what makes the import terminate instead of waiting
-    // for more.
-    tx.close_channel();
-    drop(tx);
+    // How the stream ENDS is a protocol signal, not just cleanup. ImportPartyAcs
+    // "assumes the provided snapshot contains the complete and untampered ACS",
+    // so closing the sender says "that was all of it". On a fetch failure that
+    // would be a lie, and Canton would commit a partial ACS as though it were
+    // whole. Cancel the RPC instead, so the stream breaks rather than ending.
+    let trailer = match feed {
+        Ok(trailer) => {
+            tx.close_channel();
+            drop(tx);
+            let rpc_result = rpc.await.context("the ACS import task did not finish")?;
+            rpc_result?;
+            trailer
+        }
+        Err(fetch_err) => {
+            rpc.abort();
+            let _ = rpc.await;
+            drop(tx);
 
-    let rpc_result = rpc.await.context("the ACS import task did not finish")?;
-
-    // Order matters. A fetch failure explains a truncated import, so it is
-    // reported first; the RPC error is reported next; only a clean run reaches
-    // the trailer check.
-    let trailer = feed?;
-    rpc_result?;
+            if fed == 0 {
+                return Err(fetch_err);
+            }
+            // Cancelling means Canton was never told the snapshot was complete,
+            // but it may still have committed what it had already processed,
+            // and there is no way to ask. Record that so the retry refuses.
+            storage
+                .write_artifact(
+                    &target.instance_name,
+                    target.artifacts.import_partial,
+                    None,
+                    b"1",
+                )
+                .await?;
+            return Err(fetch_err.context(format!(
+                "the ACS transfer failed after {fed} bytes had already reached Canton. \
+                 The import was cancelled rather than closed, so Canton was not told the \
+                 snapshot was complete, but this participant may hold part of the ACS and \
+                 needs repair (RepairCommitmentsUsingAcs) or a restore before the party is \
+                 used. add-party will refuse to import again until that is done"
+            )));
+        }
+    };
 
     let Some(trailer) = trailer else {
         anyhow::bail!("the ACS import stream closed before the export finished");

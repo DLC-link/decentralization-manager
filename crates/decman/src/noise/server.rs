@@ -27,6 +27,11 @@ use crate::{
     },
 };
 
+/// How often the source logs ACS export progress, in blocks. The target is
+/// disconnected from every synchronizer for the whole transfer, so both sides
+/// need to show movement in production logs.
+const ACS_PROGRESS_EVERY_BLOCKS: u64 = 64;
+
 /// Whether an outgoing command should carry the workflow's `command_payload`.
 ///
 /// `Disconnect` is a pure control signal marking the end of a workflow and
@@ -531,6 +536,14 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
             .next_acs_block(&peer_id, seq, acs_block_size())
             .await?;
 
+        if let PipeBlock::Data { .. } = &block
+            && seq.is_multiple_of(ACS_PROGRESS_EVERY_BLOCKS)
+        {
+            tracing::info!(
+                "ACS export progress: block {seq}, {mib} MiB served",
+                mib = self.workflow_state.acs_export_served().await / (1024 * 1024)
+            );
+        }
         if let PipeBlock::End { trailer, .. } = &block {
             tracing::info!(
                 "ACS export exhausted at block {seq}: {total} bytes, sha256 {digest}",

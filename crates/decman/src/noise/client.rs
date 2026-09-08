@@ -9,9 +9,9 @@ use tokio_noise::handshakes::nn_psk2::Initiator;
 use crate::{
     config::{NodeConfig, Peer},
     noise::{
-        CHUNK_SIZE, MAX_CHUNK_COUNT, MAX_CHUNKED_TOTAL_SIZE, Message, MessageType,
-        NOISE_CHUNK_TIMEOUT, NOISE_REQUEST_TIMEOUT, NoiseError, NoiseKeypair, is_transient,
-        parse_flexible_uri, parse_public_key,
+        CHUNK_SIZE, MAX_ACS_BLOCK_SIZE, MAX_CHUNK_COUNT, MAX_CHUNKED_TOTAL_SIZE, Message,
+        MessageType, NOISE_ACS_BLOCK_TIMEOUT, NOISE_CHUNK_TIMEOUT, NOISE_REQUEST_TIMEOUT,
+        NoiseError, NoiseKeypair, is_transient, parse_flexible_uri, parse_public_key,
     },
     workflow::party_replication::pipe::{PipeBlock, decode_data, decode_end},
 };
@@ -454,7 +454,7 @@ impl NoiseClient {
         let mut attempt = 1;
         let response = loop {
             match self
-                .send_message_with_timeout(&message, NOISE_CHUNK_TIMEOUT)
+                .send_message_with_timeout(&message, NOISE_ACS_BLOCK_TIMEOUT)
                 .await
             {
                 Ok(r) => break r,
@@ -473,6 +473,17 @@ impl NoiseClient {
         let resp_msg = Message::from_bytes(&response).map_err(|_| NoiseError::InvalidMessage)?;
         let block = match resp_msg.msg_type {
             MessageType::AcsBlock => {
+                // The source picks the block size from its own configuration,
+                // so bound what we will accept — same reasoning as
+                // MAX_CHUNKED_TOTAL_SIZE on the chunked path, which exists so a
+                // buggy or hostile peer cannot dictate our allocation.
+                if resp_msg.payload.len() > MAX_ACS_BLOCK_SIZE + 8 {
+                    tracing::warn!(
+                        "ACS block {seq} is {len} bytes, above the {MAX_ACS_BLOCK_SIZE} ceiling",
+                        len = resp_msg.payload.len()
+                    );
+                    return Err(NoiseError::InvalidMessage);
+                }
                 let (got, bytes) =
                     decode_data(&resp_msg.payload).map_err(|_| NoiseError::InvalidMessage)?;
                 PipeBlock::Data { seq: got, bytes }

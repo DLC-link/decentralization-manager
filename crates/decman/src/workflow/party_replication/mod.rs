@@ -49,6 +49,10 @@ pub struct ReplicationArtifacts {
     /// disconnect so a retry after a crash knows the participant was left
     /// mid-window and recovers it before touching anything.
     pub import_inflight: &'static str,
+    /// Unscoped, durable, never cleared. Written when a transfer failed after
+    /// bytes had reached Canton, so a retry refuses instead of importing on top
+    /// of a partially populated ACS.
+    pub import_partial: &'static str,
 }
 
 /// One replication: which party moves onto which participant, and where this
