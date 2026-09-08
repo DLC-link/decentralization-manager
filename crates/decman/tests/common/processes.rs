@@ -144,9 +144,13 @@ pub async fn wait_for_exit(pid: u32, deadline: Duration) -> Result<()> {
 /// A bound TCP port only proves the listener exists. This proves actix has a
 /// worker actually serving requests, which is what the caller is about to do.
 /// The handler does no I/O, so a 200 is cheap and never blocks on Canton.
-async fn healthz_ok(http_port: u16) -> bool {
+///
+/// Takes the client rather than building one: the caller polls this every
+/// 200ms, and a fresh `Client` per attempt rebuilds a connection pool and TLS
+/// config each time.
+async fn healthz_ok(client: &reqwest::Client, http_port: u16) -> bool {
     let url = format!("http://127.0.0.1:{http_port}/healthz");
-    match reqwest::Client::new()
+    match client
         .get(&url)
         .timeout(Duration::from_secs(2))
         .send()
@@ -179,8 +183,10 @@ async fn healthz_ok(http_port: u16) -> bool {
 /// recovered from disk.
 pub async fn wait_for_server(http_port: u16, deadline: Duration) -> Result<()> {
     let start = Instant::now();
+    let client = reqwest::Client::new();
     loop {
-        if TcpStream::connect(("127.0.0.1", http_port)).await.is_ok() && healthz_ok(http_port).await
+        if TcpStream::connect(("127.0.0.1", http_port)).await.is_ok()
+            && healthz_ok(&client, http_port).await
         {
             // Short settle on top of the readiness probe. This was a blind 8s
             // standing in for two things: DecMan finishing bootstrap, which

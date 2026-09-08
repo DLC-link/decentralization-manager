@@ -378,6 +378,26 @@ pub async fn backdate_dec_party_cache(
     Ok(res.rows_affected())
 }
 
+/// Newest `updated_at` across the prefix's `dec_party` cache rows — the same
+/// value the handler's staleness check reads. Paired with
+/// [`backdate_dec_party_cache`] it proves a refresh actually ran and wrote,
+/// which observing the `refreshing` flag cannot: the spawned task can start
+/// and finish between two polls.
+pub async fn dec_party_cache_updated_at(
+    db_path: &Path,
+    prefix: &str,
+) -> anyhow::Result<Option<i64>> {
+    let pool = open(db_path).await?;
+    let v: Option<i64> =
+        sqlx::query_scalar("SELECT MAX(updated_at) FROM dec_party WHERE prefix = ?1")
+            .bind(prefix)
+            .fetch_one(&pool)
+            .await
+            .context("dec_party_cache_updated_at")?;
+    pool.close().await;
+    Ok(v)
+}
+
 pub async fn count_dec_party_identity(db_path: &Path, dec_party_id: &str) -> anyhow::Result<i64> {
     let pool = open(db_path).await?;
     let n: i64 =

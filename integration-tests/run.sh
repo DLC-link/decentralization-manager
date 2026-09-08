@@ -165,7 +165,7 @@ CANTON_BRINGUP_PID=""
 CANTON_BRINGUP_LOG=""
 if [ "$TARGET" = "localnet" ]; then
     log_phase "Starting Canton ($TARGET) in the background"
-    CANTON_BRINGUP_LOG="$(mktemp)"
+    CANTON_BRINGUP_LOG="$(mktemp "${TMPDIR:-/tmp}/decman-it-canton-bringup-XXXXXX")"
     ( download_localnet && start_localnet ) >"$CANTON_BRINGUP_LOG" 2>&1 &
     CANTON_BRINGUP_PID=$!
 fi

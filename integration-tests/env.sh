@@ -114,12 +114,32 @@ cleanup() {
     fi
 
     # run.sh may still have `docker compose up --wait` in flight (it backgrounds
-    # the bring-up to overlap it with the build). Reap it first: stop_localnet's
+    # the bring-up to overlap it with the build). Settle it first: stop_localnet's
     # `down -v` racing a live `up` leaves half-created containers and volumes
     # behind, which fails the next run's port checks.
+    #
+    # Deliberately NOT a plain `kill` on the pid: that pid is the subshell
+    # wrapper, and `docker compose` is its child. Killing the wrapper orphans
+    # compose and `down -v` still races a live `up` — the very thing this
+    # guards. Signalling a process group is not an option either: a background
+    # job in a non-interactive shell shares the script's own group (verified),
+    # so `kill -- -$pid` would target this script.
+    #
+    # So: let it finish, bounded, and only then take down the whole subtree.
     if [ -n "${CANTON_BRINGUP_PID:-}" ] && kill -0 "$CANTON_BRINGUP_PID" 2>/dev/null; then
-        echo "Waiting for the background Canton bring-up to stop..."
-        kill "$CANTON_BRINGUP_PID" 2>/dev/null || true
+        echo "Letting the background Canton bring-up settle before teardown..."
+        _bringup_waited=0
+        while kill -0 "$CANTON_BRINGUP_PID" 2>/dev/null && [ "$_bringup_waited" -lt 240 ]; do
+            sleep 1
+            _bringup_waited=$((_bringup_waited + 1))
+        done
+        if kill -0 "$CANTON_BRINGUP_PID" 2>/dev/null; then
+            echo "Bring-up overstayed ${_bringup_waited}s; terminating it and its compose child"
+            pkill -P "$CANTON_BRINGUP_PID" 2>/dev/null || true
+            sleep 2
+            pkill -9 -P "$CANTON_BRINGUP_PID" 2>/dev/null || true
+            kill -9 "$CANTON_BRINGUP_PID" 2>/dev/null || true
+        fi
         wait "$CANTON_BRINGUP_PID" 2>/dev/null || true
     fi
     if [ -n "${CANTON_BRINGUP_LOG:-}" ] && [ -f "$CANTON_BRINGUP_LOG" ]; then
