@@ -20,6 +20,15 @@ SCRIPT_DIR="${SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 # deliberately does NOT set this — devnet is a real network.
 export DECPM_TOPOLOGY_PROPAGATION_DELAY_SECS=3
 
+# The reward-automation tick. Exported, not passed as a command prefix like
+# common.sh's other node env, because the chaos phases respawn nodes from the
+# Rust harness (tests/common/processes.rs), which inherits this process's
+# environment. A prefix-only value silently left every respawned node on the
+# 300s production default, so `coupon_reassignment` — which runs after the
+# chaos block — waited on whichever tick that node happened to be on. That is
+# the 48s/109s/219s spread this phase showed across runs.
+export DECPM_REWARD_AUTOMATION_INTERVAL_SECS=3
+
 # Localnet
 LOCALNET_VERSION="0.6.12"
 LOCALNET_BUNDLE_URL="https://github.com/digital-asset/decentralized-canton-sync/releases/download/v${LOCALNET_VERSION}/${LOCALNET_VERSION}_splice-node.tar.gz"
