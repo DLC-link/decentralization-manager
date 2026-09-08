@@ -6,7 +6,7 @@
     },
     {
       "participant_uid": "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
-      "member_party_id": "vault-rc7-2::1220fb3be8c3236d9258e9e1f25fc5d1a924cd368f7346a7a7ff4a82dd3eba54"
+      "member_party_id": "treasury-rc7-2::1220fb3be8c3236d9258e9e1f25fc5d1a924cd368f7346a7a7ff4a82dd3eba54"
     },
     {
       "participant_uid": "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343",
@@ -22,7 +22,7 @@
     },
     {
       "participant_uid": "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9",
-      "member_party_id": "vault-yield-btc::1220425311ae37972f78e3781dcd68f64665f39e3b55688ffc060f062f0d2670"
+      "member_party_id": "yield-btc::1220425311ae37972f78e3781dcd68f64665f39e3b55688ffc060f062f0d2670"
     }
   ]
 }

@@ -753,6 +753,21 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         Ok(())
     }
 
+    async fn delete_dec_party_participant(
+        &mut self,
+        party_id: &CantonId,
+        participant_uid: &str,
+    ) -> Result {
+        sqlx::query(
+            "DELETE FROM dec_party_participant WHERE dec_party_id = ? AND participant_uid = ?",
+        )
+        .bind(party_id.to_string())
+        .bind(participant_uid)
+        .execute(&mut **self)
+        .await?;
+        Ok(())
+    }
+
     async fn replace_dec_party_contracts(
         &mut self,
         party_id: &CantonId,
@@ -874,6 +889,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 prefix,
                 participants,
                 dar_filenames,
+                dar_hashes,
                 kicked_participant,
                 new_participant,
                 new_threshold,
@@ -881,7 +897,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 dec_party_id,
                 package_names,
                 workflow_instance
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ",
         )
         .bind(&row.id)
@@ -891,6 +907,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         .bind(&row.prefix)
         .bind(&row.participants)
         .bind(&row.dar_filenames)
+        .bind(&row.dar_hashes)
         .bind(&row.kicked_participant)
         .bind(&row.new_participant)
         .bind(row.new_threshold)
@@ -1205,6 +1222,7 @@ mod tests {
             InvitationType, PendingInvitation, WorkflowKind, WorkflowProgress, WorkflowRole,
             WorkflowRun,
         },
+        workflow::storage::WorkflowStorage,
     };
 
     use super::{MIGRATION_CHECKSUM_REPAIRS, MIGRATOR, repair_migration_checksums};
@@ -1248,8 +1266,6 @@ mod tests {
                 utility_credential: None,
                 utility_credential_app: None,
                 utility_registry: None,
-                vault: None,
-                vault_governance: None,
             },
         }
     }
@@ -1726,9 +1742,9 @@ mod tests {
             DecPartyContractRow {
                 dec_party_id: party_id_str.clone(),
                 contract_id: "contract-2".to_string(),
-                template_id: "Vault:Vault".to_string(),
-                package_id: "#vault".to_string(),
-                package_name: "vault".to_string(),
+                template_id: "CBTC.Governance:CBTCGovernanceRules".to_string(),
+                package_id: "#cbtc-governance".to_string(),
+                package_name: "cbtc-governance".to_string(),
                 package_version: "0.1.0".to_string(),
                 created_at: "2026-04-28T11:08:00.000000Z".to_string(),
             },
@@ -1836,7 +1852,7 @@ mod tests {
         .bind(event_type)
         .bind(party_id)
         .bind("member::1220aa")
-        .bind("vault")
+        .bind("core_self")
         .bind("governance_add_member")
         .bind(r#"{"type":"governance_add_member"}"#)
         .bind(status)
@@ -2065,6 +2081,7 @@ mod tests {
                 CantonId::parse(&format!("node2::{TEST_NS}")).unwrap(),
             ],
             dar_filenames: Vec::new(),
+            dar_hashes: Vec::new(),
             kicked_participant: None,
             new_participant: None,
             new_threshold: None,
@@ -2082,6 +2099,7 @@ mod tests {
             prefix: None,
             participants: Vec::new(),
             dar_filenames: Vec::new(),
+            dar_hashes: Vec::new(),
             kicked_participant: Some(CantonId::parse(&format!("kicked::{TEST_NS}")).unwrap()),
             new_participant: None,
             new_threshold: Some(2),
@@ -2105,6 +2123,7 @@ mod tests {
             prefix: None,
             participants: Vec::new(),
             dar_filenames: vec!["app.dar".to_string(), "lib.dar".to_string()],
+            dar_hashes: Vec::new(),
             kicked_participant: None,
             new_participant: None,
             new_threshold: None,
@@ -2165,6 +2184,7 @@ mod tests {
                 CantonId::parse(&format!("node2::{TEST_NS}")).unwrap(),
             ],
             dar_filenames: Vec::new(),
+            dar_hashes: Vec::new(),
             kicked_participant: None,
             new_participant: None,
             new_threshold: None,
@@ -2234,6 +2254,7 @@ mod tests {
                 CantonId::parse(&format!("b::{TEST_NS}")).unwrap(),
             ],
             completed_peers: Vec::new(),
+            connected_peers: Vec::new(),
             dec_party_id: None,
             prefix: None,
             participants: Vec::new(),
@@ -2296,6 +2317,13 @@ mod tests {
         assert_eq!(loaded.step_index, 3);
         assert_eq!(loaded.completed_peers, completed);
 
+        // Onboarding resolves its party ID during the workflow. Persisting it
+        // on the run must survive the terminal cleanup below so exact topology
+        // discovery can still include the newly-created party.
+        let dec_party_id = CantonId::parse(&format!("party-a::{TEST_NS}")).unwrap();
+        pool.write_run_party_id(&run.instance_name, &dec_party_id)
+            .await?;
+
         // Seed an artefact so we can verify the terminal-state cleanup wipes it.
         let mut tx = pool.begin_transaction().await?;
         tx.write_workflow_artifact(&run.instance_name, "dns_proto", None, b"some-bytes")
@@ -2320,6 +2348,7 @@ mod tests {
         let visible = pool.get_visible_workflow_runs().await?;
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].status, WorkflowProgress::Completed);
+        assert_eq!(visible[0].dec_party_id.as_ref(), Some(&dec_party_id));
 
         // Dismiss → vanishes from feed.
         let mut tx = pool.begin_transaction().await?;
@@ -2739,6 +2768,7 @@ mod tests {
             prefix: Some("my-party".to_string()),
             participants: Vec::new(),
             dar_filenames: Vec::new(),
+            dar_hashes: Vec::new(),
             kicked_participant: None,
             new_participant: None,
             new_threshold: None,
@@ -2756,6 +2786,7 @@ mod tests {
             prefix: None,
             participants: Vec::new(),
             dar_filenames: vec!["app.dar".to_string()],
+            dar_hashes: Vec::new(),
             kicked_participant: None,
             new_participant: None,
             new_threshold: None,

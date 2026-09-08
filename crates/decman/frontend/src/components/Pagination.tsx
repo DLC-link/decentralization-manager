@@ -6,12 +6,16 @@ import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 import { PAGE_SIZE } from "../constants";
 
 // Numerics are monospaced so page numbers and ranges don't reflow as digits
-// change width. Matches the `monospace` stack used for ids and amounts
-// elsewhere in the app.
-const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
+// change width. Uses the design system's mono token (Roboto Mono) so page
+// numbers match the ids and amounts in the rows above.
+const MONO = "var(--font-mono)";
 
 /**
- * Footer bar the table sits on: top rule, range on the left, controls right.
+ * Footer bar the table sits on: top rule spanning the container, with the range
+ * and the page controls centered on it as a single group.
+ *
+ * The bar fills the width so its rule closes off the rows above, but its
+ * contents travel together rather than being pushed into opposite corners.
  *
  * Horizontal padding is overridable because the containers this drops into pad
  * their content differently — the bar has to line up with the rows above it.
@@ -19,12 +23,14 @@ const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
 const footerSx = {
   display: "flex",
   alignItems: "center",
-  justifyContent: "space-between",
+  justifyContent: "center",
   flexWrap: "wrap",
-  gap: 1.5,
+  gap: 2,
   px: 2,
   py: 1.25,
-  mt: 0.5,
+  // Flush against the rows: its top rule is what closes the list off, and any
+  // margin leaves the bar looking detached from the table it belongs to.
+  mt: 0,
   borderTop: 1,
   borderColor: "divider",
   // Pinned to the bottom of whatever scrolls. Pages differ in height — the
@@ -44,6 +50,7 @@ const rangeSx = {
   letterSpacing: "0.02em",
   color: "text.secondary",
   fontVariantNumeric: "tabular-nums",
+  whiteSpace: "nowrap" as const,
 };
 
 /**

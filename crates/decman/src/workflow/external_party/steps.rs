@@ -636,6 +636,17 @@ pub struct HostedExternalParty {
     /// When the mapping became effective, RFC 3339. `None` if Canton did not
     /// report it.
     pub created_at: Option<String>,
+    /// The participants the mapping names, in the order it lists them.
+    pub hosts: Vec<HostedExternalPartyHost>,
+}
+
+/// One participant named by a hosted external party's mapping. `permission` is
+/// the raw Canton `ParticipantPermission` discriminant: mapping it to the wire
+/// enum is the server's job (see `server::types::permission_from_proto`), which
+/// keeps the proto dependency out of the wire DTOs.
+pub struct HostedExternalPartyHost {
+    pub participant_uid: String,
+    pub permission: i32,
 }
 
 /// Render a protobuf timestamp as RFC 3339 (UTC), for display.
@@ -714,12 +725,21 @@ pub async fn list_hosted_external_parties(config: &NodeConfig) -> Result<Vec<Hos
         if fingerprint == own_namespace || decentralized.contains(&fingerprint) {
             continue;
         }
+        let hosts = mapping
+            .participants
+            .iter()
+            .map(|h| HostedExternalPartyHost {
+                participant_uid: h.participant_uid.clone(),
+                permission: h.permission,
+            })
+            .collect();
         parties.push(HostedExternalParty {
             party_id: mapping.party.clone(),
             fingerprint,
             threshold: mapping.threshold,
             host_count: mapping.participants.len() as u32,
             created_at,
+            hosts,
         });
     }
     Ok(parties)

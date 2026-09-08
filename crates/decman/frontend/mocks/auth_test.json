@@ -9,7 +9,7 @@
       "success": true
     },
     {
-      "party_id": "vault-rc7-2::1220fb3be8c3236d9258e9e1f25fc5d1a924cd368f7346a7a7ff4a82dd3eba54",
+      "party_id": "treasury-rc7-2::1220fb3be8c3236d9258e9e1f25fc5d1a924cd368f7346a7a7ff4a82dd3eba54",
       "success": true
     },
     {
@@ -26,7 +26,7 @@
       "success": true
     },
     {
-      "party_id": "vault-yield-btc::1220425311ae37972f78e3781dcd68f64665f39e3b55688ffc060f062f0d2670",
+      "party_id": "yield-btc::1220425311ae37972f78e3781dcd68f64665f39e3b55688ffc060f062f0d2670",
       "success": false
     },
     {

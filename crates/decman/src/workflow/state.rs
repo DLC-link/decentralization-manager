@@ -186,6 +186,24 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
         }
     }
 
+    /// The peers that have connected to this run.
+    ///
+    /// Transient, like the set itself: a restart empties it and the peers'
+    /// next poll refills it. This is what the `WaitingForPeers` gate counts,
+    /// so it is also the only join progress the API can report on that step.
+    pub async fn connected_peers(&self) -> HashSet<CantonId> {
+        self.connected_peers.read().await.clone()
+    }
+
+    /// The peers this run marked complete for the current step.
+    ///
+    /// Restored by [`Self::from_persisted`], unlike `peer_data`, so a resumed
+    /// coordinator can reconcile what it has on disk against who it believes
+    /// already uploaded.
+    pub async fn completed_peers(&self) -> HashSet<CantonId> {
+        self.completed_peers.read().await.clone()
+    }
+
     pub async fn store_peer_data(&self, peer_id: CantonId, data: Vec<u8>) {
         let mut peer_data = self.peer_data.write().await;
         peer_data.insert(peer_id, data);
@@ -510,6 +528,31 @@ mod tests {
 
         state.peer_connected(peer(2)).await;
         assert_eq!(state.current_step().await, TestStep::Sign);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn connected_peers_is_the_progress_while_waiting(pool: SqlitePool) {
+        let state = WorkflowState::new(
+            pool,
+            "test-run".to_string(),
+            TestStep::WaitPeers,
+            vec![peer(1), peer(2), peer(3)],
+            None,
+        );
+
+        state.peer_connected(peer(1)).await;
+        state.peer_connected(peer(2)).await;
+
+        // Two of three joined, so the run still waits — and `completed_peers`
+        // is empty, because a waiting step carries no command for a peer to
+        // complete. Reporting it as run progress is what showed "0 responded"
+        // to an operator whose peers had in fact accepted.
+        assert_eq!(state.current_step().await, TestStep::WaitPeers);
+        assert!(state.completed_peers().await.is_empty());
+        let joined = state.connected_peers().await;
+        assert_eq!(joined.len(), 2);
+        assert!(joined.contains(&peer(1)));
+        assert!(joined.contains(&peer(2)));
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]

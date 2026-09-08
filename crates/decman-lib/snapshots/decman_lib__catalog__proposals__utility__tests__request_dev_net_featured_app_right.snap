@@ -1,0 +1,27 @@
+---
+source: crates/decman-lib/src/catalog/proposals/utility.rs
+expression: "RequestDevNetFeaturedAppRight\n{\n    amulet_rules_cid: \"00amulet\".to_string(),\n}.to_daml_proto().expect(\"payload encodes\")"
+---
+Value {
+    sum: Some(
+        Record(
+            Record {
+                record_id: None,
+                fields: [
+                    RecordField {
+                        label: "amuletRulesCid",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    ContractId(
+                                        "00amulet",
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                ],
+            },
+        ),
+    ),
+}

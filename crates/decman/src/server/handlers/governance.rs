@@ -5,8 +5,7 @@ use anyhow::Context;
 use base64::Engine;
 use canton_proto_rs::com::{
     daml::ledger::api::v2::{
-        Command, Commands, CreateCommand, DisclosedContract, ExerciseCommand, Identifier, Record,
-        RecordField, SubmitAndWaitForTransactionRequest, SubmitAndWaitRequest, Value, command,
+        CreatedEvent, DisclosedContract, SubmitAndWaitForTransactionRequest, SubmitAndWaitRequest,
         command_service_client::CommandServiceClient, value,
     },
     digitalasset::canton::topology::admin::v30::{
@@ -15,8 +14,25 @@ use canton_proto_rs::com::{
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
     },
 };
-use serde::Deserialize;
+use decman_lib::catalog::commands::{
+    build_cancel_domain_confirmation, build_cancel_proposal, build_cancel_self_confirmation,
+    build_confirm_proposal, build_confirm_self_action, build_execute_proposal,
+    build_execute_self_action, build_expire_domain_confirmation, build_expire_self_confirmation,
+};
+use decman_lib::catalog::proposals::custody::{
+    AcceptTransfer, AcceptTransferWithContext, Transfer, TransferWithContext,
+};
+use decman_lib::catalog::proposals::rewards::SetupCouponReassignmentDelegation;
+use decman_lib::catalog::proposals::utility::RequestDevNetFeaturedAppRight;
+use decman_lib::catalog::templates::{
+    domain_confirmation_template, governable_action_interface, governance_rules_template,
+    self_confirmation_template,
+};
+use decman_lib::framework::commands::{build_propose, first_created_contract_id};
+use decman_lib::framework::encode::TransferValidity;
+use decman_lib::framework::record::record_field;
 
+use super::token_standard::{AmuletRulesContract, GovernanceQuery, fetch_amulet_rules};
 use crate::{
     auth::WorkflowAuth,
     canton_id::CantonId,
@@ -25,69 +41,31 @@ use crate::{
     error::Result,
     noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
     server::{
-        AppState, action_serializer,
+        AppState,
         audit::{AuditEvent, AuditParams, spawn_audit_log},
         chain_audit,
         middleware::require_admin,
         queries::{
-            ContractQueryParams as QueryContractParams, get_credential_offers, get_credentials,
             get_governance_confirmations, get_governance_state as query_governance_state,
-            get_holdings, get_instruments, get_open_burn_requests, get_open_mint_requests,
-            get_open_transfer_instructions, get_provider_configurations, get_provider_services,
-            get_registrar_service_requests, get_registrar_services, get_transfer_factories,
-            get_user_services, get_vaults, query_contracts_by_template,
             resolve_contract_package_ref, select_input_holdings,
         },
         transfer_context::{
             AcceptTransferContext, ProposeTransferArgs, fetch as fetch_accept_transfer_context,
-            fetch_factory_for_propose, maybe_fetch_for_proposal, needs_registry_context,
-            to_proto_disclosed_contracts,
+            fetch_factory_for_propose, fetch_proposal_created_event, has_template,
+            maybe_fetch_for_proposal_event, needs_registry_context, to_proto_disclosed_contracts,
         },
         types::{
-            ActiveCouponReassignmentDelegation, AuditLogEntry, AuditLogQuery, AuditLogResponse,
-            BurnRequestsResponse, CancelConfirmationRequest, CancelProposalRequest,
+            ActionType, ActiveCouponReassignmentDelegation, AuditLogEntry, AuditLogQuery,
+            AuditLogResponse, AuditScope, CancelConfirmationRequest, CancelProposalRequest,
             ChainAuditEntry, ChainAuditQuery, ChainAuditResponse, ConfirmActionRequest,
-            ContractQueryResponse, CouponReassignmentDelegationSummary, CredentialOffersResponse,
-            CredentialsResponse, ErrorResponse, ExecuteActionRequest, ExpireConfirmationRequest,
-            GovernanceResponse, GovernanceStateResponse, GovernanceType, HoldingsResponse,
-            InstrumentsResponse, KnownMember, KnownMembersResponse, MessageResponse,
-            MintRequestsResponse, NetworkInfo, OperatorInfo, ProposalType, ProposeActionRequest,
-            ProviderConfigurationsResponse, ProviderServicesResponse,
-            RegistrarServiceRequestsResponse, RegistrarServicesResponse, TransferFactoriesResponse,
-            TransferFactoryInfo, TransferInstructionsResponse, TransferPreapprovalsResponse,
-            UserServicesResponse, VaultsResponse, chain_audit_entry_from_row,
+            CouponReassignmentDelegationSummary, ErrorResponse, ExecuteActionRequest,
+            ExpireConfirmationRequest, GovernanceResponse, GovernanceStateResponse, GovernanceType,
+            KnownMember, KnownMembersResponse, MessageResponse, ProposalType, ProposeActionRequest,
+            chain_audit_entry_from_row,
         },
     },
     utils,
 };
-
-// ============================================================================
-// Query Types
-// ============================================================================
-
-/// Query parameters for governance endpoints
-#[derive(Debug, Deserialize, utoipa::IntoParams)]
-pub struct GovernanceQuery {
-    pub party_id: CantonId,
-}
-
-/// Query parameters for generic contract query endpoint
-#[derive(Debug, Deserialize, utoipa::IntoParams)]
-pub struct ContractQueryParams {
-    pub party_id: CantonId,
-    pub package_id: String,
-    pub module_name: String,
-    pub entity_name: String,
-    /// Use InterfaceFilter instead of TemplateFilter (for querying by interface)
-    #[serde(default)]
-    pub interface: bool,
-    /// Drop contracts whose `executeBefore` deadline has already passed.
-    /// Used by Accept Mint/Burn Request dropdowns so the user doesn't pick
-    /// a contract that would fail at interpretation. No-op on templates
-    /// without an `executeBefore` field.
-    #[serde(default)]
-    pub active_only: bool,
-}
 
 // ============================================================================
 // Read Endpoints
@@ -115,7 +93,7 @@ pub async fn get_governance(
     let packages = packages();
 
     // Pull `(rules_contract_id, threshold)` off the active GovernanceRules /
-    // VaultGovernanceRules contract. The Daml `ExecuteGovernanceAction`
+    // rules contract. The Daml `ExecuteGovernanceAction`
     // choice gates on THIS threshold ("Enough member confirmations to
     // execute action") — not the decentralized-namespace topology
     // threshold, which is a separate value used for signing
@@ -159,7 +137,7 @@ pub async fn get_governance(
     }
 }
 
-/// Get governance state (VaultGovernanceRules contract state)
+/// Get governance state (GovernanceRules contract state)
 #[utoipa::path(
     tag = "Governance",
     params(GovernanceQuery),
@@ -309,674 +287,6 @@ async fn collect_known_members(
     Ok(out)
 }
 
-/// Get deployed Vault contracts
-#[utoipa::path(
-    tag = "Services",
-    params(GovernanceQuery),
-    responses(
-        (status = 200, description = "Deployed vaults", body = VaultsResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
-    )
-)]
-#[get("/vaults")]
-pub async fn get_vaults_handler(
-    data: web::Data<AppState>,
-    query: web::Query<GovernanceQuery>,
-) -> impl Responder {
-    let party_id = &query.party_id;
-
-    let token = get_party_token(&data, party_id).await;
-    let packages = packages();
-
-    match get_vaults(&data.config, party_id, token, &packages).await {
-        Ok(vaults) => HttpResponse::Ok().json(VaultsResponse { vaults }),
-        Err(e) => {
-            tracing::error!("Failed to fetch vaults: {e}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch vaults: {e}"),
-            })
-        }
-    }
-}
-
-/// Get ProviderService contracts
-#[utoipa::path(
-    tag = "Services",
-    params(GovernanceQuery),
-    responses(
-        (status = 200, description = "Provider services", body = ProviderServicesResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
-    )
-)]
-#[get("/services/provider")]
-pub async fn get_provider_services_handler(
-    data: web::Data<AppState>,
-    query: web::Query<GovernanceQuery>,
-) -> impl Responder {
-    let party_id = &query.party_id;
-
-    let token = get_party_token(&data, party_id).await;
-    let packages = packages();
-
-    match get_provider_services(&data.config, party_id, token, &packages).await {
-        Ok(services) => HttpResponse::Ok().json(ProviderServicesResponse { services }),
-        Err(e) => {
-            tracing::error!("Failed to fetch provider services: {e}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch provider services: {e}"),
-            })
-        }
-    }
-}
-
-/// Get UserService contracts
-#[utoipa::path(
-    tag = "Services",
-    params(GovernanceQuery),
-    responses(
-        (status = 200, description = "User services", body = UserServicesResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
-    )
-)]
-#[get("/services/user")]
-pub async fn get_user_services_handler(
-    data: web::Data<AppState>,
-    query: web::Query<GovernanceQuery>,
-) -> impl Responder {
-    let party_id = &query.party_id;
-
-    let token = get_party_token(&data, party_id).await;
-    let packages = packages();
-
-    match get_user_services(&data.config, party_id, token, &packages).await {
-        Ok(services) => HttpResponse::Ok().json(UserServicesResponse { services }),
-        Err(e) => {
-            tracing::error!("Failed to fetch user services: {e}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch user services: {e}"),
-            })
-        }
-    }
-}
-
-/// Get CredentialOffer contracts visible to the party
-#[utoipa::path(
-    tag = "Services",
-    params(GovernanceQuery),
-    responses(
-        (status = 200, description = "Credential offers", body = CredentialOffersResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
-    )
-)]
-#[get("/credential-offers")]
-pub async fn get_credential_offers_handler(
-    data: web::Data<AppState>,
-    query: web::Query<GovernanceQuery>,
-) -> impl Responder {
-    let party_id = &query.party_id;
-
-    let token = get_party_token(&data, party_id).await;
-    let packages = packages();
-
-    match get_credential_offers(&data.config, party_id, token, &packages).await {
-        Ok(credential_offers) => {
-            HttpResponse::Ok().json(CredentialOffersResponse { credential_offers })
-        }
-        Err(e) => {
-            tracing::error!("Failed to fetch credential offers: {e}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch credential offers: {e}"),
-            })
-        }
-    }
-}
-
-/// Get `Credential` contracts visible to the party. The accept mint/burn
-/// request forms list these so the issuer credentials backing the accept can
-/// be picked instead of pasted in by hand.
-#[utoipa::path(
-    tag = "Services",
-    params(GovernanceQuery),
-    responses(
-        (status = 200, description = "Credentials", body = CredentialsResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
-    )
-)]
-#[get("/credentials")]
-pub async fn get_credentials_handler(
-    data: web::Data<AppState>,
-    query: web::Query<GovernanceQuery>,
-) -> impl Responder {
-    let party_id = &query.party_id;
-
-    let token = get_party_token(&data, party_id).await;
-    let packages = packages();
-
-    match get_credentials(&data.config, party_id, token, &packages).await {
-        Ok(credentials) => HttpResponse::Ok().json(CredentialsResponse { credentials }),
-        Err(e) => {
-            tracing::error!("Failed to fetch credentials: {e}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch credentials: {e}"),
-            })
-        }
-    }
-}
-
-/// Get `RegistrarServiceRequest` contracts visible to the party. The
-/// OnboardRegistrar form lists these so the request backing the onboard can
-/// be picked instead of pasted in by hand.
-#[utoipa::path(
-    tag = "Services",
-    params(GovernanceQuery),
-    responses(
-        (
-            status = 200,
-            description = "Registrar service requests",
-            body = RegistrarServiceRequestsResponse,
-        ),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
-    )
-)]
-#[get("/registrar-service-requests")]
-pub async fn get_registrar_service_requests_handler(
-    data: web::Data<AppState>,
-    query: web::Query<GovernanceQuery>,
-) -> impl Responder {
-    let party_id = &query.party_id;
-
-    let token = get_party_token(&data, party_id).await;
-    let packages = packages();
-
-    match get_registrar_service_requests(&data.config, party_id, token, &packages).await {
-        Ok(registrar_service_requests) => {
-            HttpResponse::Ok().json(RegistrarServiceRequestsResponse {
-                registrar_service_requests,
-            })
-        }
-        Err(e) => {
-            tracing::error!("Failed to fetch registrar service requests: {e}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch registrar service requests: {e}"),
-            })
-        }
-    }
-}
-
-/// Get `ProviderConfiguration` contracts visible to the party. The
-/// OnboardRegistrar form lists these so the configuration backing the
-/// onboard can be picked instead of pasted in by hand.
-#[utoipa::path(
-    tag = "Services",
-    params(GovernanceQuery),
-    responses(
-        (
-            status = 200,
-            description = "Provider configurations",
-            body = ProviderConfigurationsResponse,
-        ),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
-    )
-)]
-#[get("/provider-configurations")]
-pub async fn get_provider_configurations_handler(
-    data: web::Data<AppState>,
-    query: web::Query<GovernanceQuery>,
-) -> impl Responder {
-    let party_id = &query.party_id;
-
-    let token = get_party_token(&data, party_id).await;
-    let packages = packages();
-
-    match get_provider_configurations(&data.config, party_id, token, &packages).await {
-        Ok(provider_configurations) => HttpResponse::Ok().json(ProviderConfigurationsResponse {
-            provider_configurations,
-        }),
-        Err(e) => {
-            tracing::error!("Failed to fetch provider configurations: {e}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch provider configurations: {e}"),
-            })
-        }
-    }
-}
-
-/// Get RegistrarService contracts
-#[utoipa::path(
-    tag = "Services",
-    params(GovernanceQuery),
-    responses(
-        (status = 200, description = "Registrar services", body = RegistrarServicesResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
-    )
-)]
-#[get("/services/registrar")]
-pub async fn get_registrar_services_handler(
-    data: web::Data<AppState>,
-    query: web::Query<GovernanceQuery>,
-) -> impl Responder {
-    let party_id = &query.party_id;
-
-    let token = get_party_token(&data, party_id).await;
-    let packages = packages();
-
-    match get_registrar_services(&data.config, party_id, token, &packages).await {
-        Ok(services) => HttpResponse::Ok().json(RegistrarServicesResponse { services }),
-        Err(e) => {
-            tracing::error!("Failed to fetch registrar services: {e}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch registrar services: {e}"),
-            })
-        }
-    }
-}
-
-/// List open `TransferInstruction` contracts (status
-/// `TransferPendingReceiverAcceptance`) addressed to this dec-party. Used by
-/// the Accept Transfer proposal form to populate a dropdown of acceptable
-/// transfers — operators pick from this list instead of pasting the contract
-/// id.
-#[utoipa::path(
-    tag = "Services",
-    params(GovernanceQuery),
-    responses(
-        (
-            status = 200,
-            description = "Open transfer instructions",
-            body = TransferInstructionsResponse,
-        ),
-        (status = 500, description = "Internal server error", body = ErrorResponse),
-    )
-)]
-#[get("/governance/transfer-instructions")]
-pub async fn get_transfer_instructions_handler(
-    data: web::Data<AppState>,
-    query: web::Query<GovernanceQuery>,
-) -> impl Responder {
-    let party_id = &query.party_id;
-    let token = get_party_token(&data, party_id).await;
-
-    match get_open_transfer_instructions(&data.config, party_id, token).await {
-        Ok(transfer_instructions) => HttpResponse::Ok().json(TransferInstructionsResponse {
-            transfer_instructions,
-        }),
-        Err(e) => {
-            tracing::error!("Failed to fetch transfer instructions: {e}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch transfer instructions: {e}"),
-            })
-        }
-    }
-}
-
-/// Open `MintRequest` contracts the governance party can accept. Returns
-/// typed fields (holder, amount, instrument) so the Accept Mint Request
-/// dropdown can surface a human-readable label instead of just the cid.
-#[utoipa::path(
-    tag = "Services",
-    params(GovernanceQuery),
-    responses(
-        (status = 200, description = "Open mint requests", body = MintRequestsResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse),
-    )
-)]
-#[get("/governance/mint-requests")]
-pub async fn get_mint_requests_handler(
-    data: web::Data<AppState>,
-    query: web::Query<GovernanceQuery>,
-) -> impl Responder {
-    let party_id = &query.party_id;
-    let token = get_party_token(&data, party_id).await;
-    let packages = packages();
-
-    match get_open_mint_requests(&data.config, party_id, token, &packages).await {
-        Ok(mint_requests) => HttpResponse::Ok().json(MintRequestsResponse { mint_requests }),
-        Err(e) => {
-            tracing::error!("Failed to fetch mint requests: {e}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch mint requests: {e}"),
-            })
-        }
-    }
-}
-
-/// Open `BurnRequest` contracts. Mirrors `/governance/mint-requests`.
-#[utoipa::path(
-    tag = "Services",
-    params(GovernanceQuery),
-    responses(
-        (status = 200, description = "Open burn requests", body = BurnRequestsResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse),
-    )
-)]
-#[get("/governance/burn-requests")]
-pub async fn get_burn_requests_handler(
-    data: web::Data<AppState>,
-    query: web::Query<GovernanceQuery>,
-) -> impl Responder {
-    let party_id = &query.party_id;
-    let token = get_party_token(&data, party_id).await;
-    let packages = packages();
-
-    match get_open_burn_requests(&data.config, party_id, token, &packages).await {
-        Ok(burn_requests) => HttpResponse::Ok().json(BurnRequestsResponse { burn_requests }),
-        Err(e) => {
-            tracing::error!("Failed to fetch burn requests: {e}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch burn requests: {e}"),
-            })
-        }
-    }
-}
-
-/// Count active `TransferPreapproval` contracts visible to this party, split
-/// between Canton Coin (Splice.Wallet) and utility-token (Utility.Registry)
-/// variants. Used by the proposal forms to warn that re-issuing a CC / Token
-/// preapproval would be a no-op when one already exists.
-#[utoipa::path(
-    tag = "Services",
-    params(GovernanceQuery),
-    responses(
-        (status = 200, description = "Preapproval counts", body = TransferPreapprovalsResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
-    )
-)]
-#[get("/transfer-preapprovals")]
-pub async fn get_transfer_preapprovals_handler(
-    data: web::Data<AppState>,
-    query: web::Query<GovernanceQuery>,
-) -> impl Responder {
-    let party_id = &query.party_id;
-    let token = get_party_token(&data, party_id).await;
-
-    // Canton Coin: the actual `TransferPreapproval` template lives in
-    // `Splice.AmuletRules` (signatories: receiver, provider, dso — gov party
-    // sees it as receiver). The intermediate `TransferPreapprovalProposal`
-    // (in `Splice.Wallet.TransferPreapproval`) is what the gov flow creates
-    // right after execution and sits there until the DSO accepts it; we
-    // count both so the warning fires regardless of which stage you're in.
-    let cc_preapproval = QueryContractParams {
-        package_id: "#splice-amulet".to_string(),
-        module_name: "Splice.AmuletRules".to_string(),
-        entity_name: "TransferPreapproval".to_string(),
-        use_interface_filter: false,
-        active_only: false,
-    };
-    let cc_proposal = QueryContractParams {
-        package_id: "#splice-amulet".to_string(),
-        module_name: "Splice.Wallet.TransferPreapproval".to_string(),
-        entity_name: "TransferPreapprovalProposal".to_string(),
-        use_interface_filter: false,
-        active_only: false,
-    };
-    let token_params = QueryContractParams {
-        package_id: "#utility-registry-app-v0".to_string(),
-        module_name: "Utility.Registry.App.V0.Model.TransferPreapproval".to_string(),
-        entity_name: "TransferPreapproval".to_string(),
-        use_interface_filter: false,
-        active_only: false,
-    };
-
-    async fn count(
-        config: &crate::config::NodeConfig,
-        party: &CantonId,
-        token: Option<String>,
-        params: &QueryContractParams,
-        label: &str,
-    ) -> usize {
-        match query_contracts_by_template(config, party, token, params).await {
-            Ok(c) => c.len(),
-            Err(e) => {
-                // Template-not-uploaded means there are simply no such
-                // contracts on this participant — a legitimate 0, not a
-                // failure worth a WARN.
-                if e.to_string()
-                    .contains("NO_TEMPLATES_FOR_PACKAGE_NAME_AND_QUALIFIED_NAME")
-                {
-                    tracing::debug!(
-                        "No {label} templates uploaded on this participant; counting as 0",
-                    );
-                } else {
-                    tracing::warn!("Failed to query {label}: {e}");
-                }
-                0
-            }
-        }
-    }
-
-    let cc_accepted = count(
-        &data.config,
-        party_id,
-        token.clone(),
-        &cc_preapproval,
-        "CC TransferPreapproval",
-    )
-    .await;
-    let cc_pending = count(
-        &data.config,
-        party_id,
-        token.clone(),
-        &cc_proposal,
-        "CC TransferPreapprovalProposal",
-    )
-    .await;
-    let token_count = count(
-        &data.config,
-        party_id,
-        token,
-        &token_params,
-        "utility TransferPreapproval",
-    )
-    .await;
-
-    HttpResponse::Ok().json(TransferPreapprovalsResponse {
-        cc: cc_accepted + cc_pending,
-        token: token_count,
-    })
-}
-
-/// Get InstrumentConfiguration contracts for a party. Each one represents a
-/// token the governance party can mint/burn against; the response includes the
-/// `instrument_admin` and `instrument_id` parsed from the contract's
-/// `defaultIdentifier` so the frontend can populate Mint/Burn forms without
-/// reading the contract blob.
-#[utoipa::path(
-    tag = "Services",
-    params(GovernanceQuery),
-    responses(
-        (status = 200, description = "Available instruments", body = InstrumentsResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
-    )
-)]
-#[get("/instruments")]
-pub async fn get_instruments_handler(
-    data: web::Data<AppState>,
-    query: web::Query<GovernanceQuery>,
-) -> impl Responder {
-    let party_id = &query.party_id;
-
-    let token = get_party_token(&data, party_id).await;
-
-    match get_instruments(&data.config, party_id, token).await {
-        Ok(instruments) => HttpResponse::Ok().json(InstrumentsResponse { instruments }),
-        Err(e) => {
-            tracing::error!("Failed to fetch instruments: {e}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch instruments: {e}"),
-            })
-        }
-    }
-}
-
-/// List active `TransferFactory` contracts visible to the party. Used by the
-/// Transfer Proposal form to prefill the factory contract id and expected
-/// admin once the user picks an instrument from the dropdown.
-#[utoipa::path(
-    tag = "Services",
-    params(GovernanceQuery),
-    responses(
-        (status = 200, description = "Transfer factories", body = TransferFactoriesResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
-    )
-)]
-#[get("/transfer-factories")]
-pub async fn get_transfer_factories_handler(
-    data: web::Data<AppState>,
-    query: web::Query<GovernanceQuery>,
-) -> impl Responder {
-    let party_id = &query.party_id;
-    let token = get_party_token(&data, party_id).await;
-
-    match get_transfer_factories(&data.config, party_id, token.clone()).await {
-        Ok(mut transfer_factories) => {
-            // Canton Coin's TransferFactory implementation is the system
-            // `Splice.AmuletRules:AmuletRules` contract, which the ledger
-            // interface query above doesn't surface to feature parties. The
-            // DSO API publishes its contract id; expose it as a synthetic
-            // factory keyed on the DSO party so the Transfer Proposal form's
-            // existing `expected_admin == holding.instrument_admin` join
-            // matches CC holdings (whose instrument_admin is the DSO).
-            if let Some((dso_party_id, amulet_rules_cid)) =
-                fetch_amulet_rules_factory(&data.http_client, &data.config).await
-            {
-                transfer_factories.push(TransferFactoryInfo {
-                    contract_id: amulet_rules_cid,
-                    expected_admin: dso_party_id,
-                });
-            }
-            // Shared-instrument tokens (e.g. CBTC, admin = `cbtc-network`)
-            // don't expose a `TransferFactory` on this dec party's ACS —
-            // the factory lives on the registrar. Surface a placeholder
-            // entry per unique non-self admin so the dropdown enables the
-            // holding; the propose handler resolves the real factory cid +
-            // choice context from the registrar at submit time.
-            let mut existing_admins: HashSet<String> = transfer_factories
-                .iter()
-                .map(|f| f.expected_admin.to_string())
-                .collect();
-            existing_admins.insert(party_id.to_string());
-            if let Ok(holdings) = get_holdings(&data.config, party_id, token).await {
-                for holding in holdings {
-                    let admin_str = holding.instrument_admin.to_string();
-                    if existing_admins.insert(admin_str) {
-                        transfer_factories.push(TransferFactoryInfo {
-                            contract_id: String::new(),
-                            expected_admin: holding.instrument_admin,
-                        });
-                    }
-                }
-            }
-            HttpResponse::Ok().json(TransferFactoriesResponse { transfer_factories })
-        }
-        Err(e) => {
-            tracing::error!("Failed to fetch transfer factories: {e}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch transfer factories: {e}"),
-            })
-        }
-    }
-}
-
-/// Pull the DSO party id and AmuletRules contract id from the DSO API. Returns
-/// `None` (with a logged warning) on any failure so callers can degrade
-/// gracefully — the only consumer is `/transfer-factories`, which omits CC
-/// rather than failing the whole response when the DSO API is unreachable.
-async fn fetch_amulet_rules_factory(
-    http_client: &reqwest::Client,
-    config: &NodeConfig,
-) -> Option<(CantonId, String)> {
-    let url = config.canton.network.dso_url();
-    let res = match http_client.get(url).send().await {
-        Ok(res) if res.status().is_success() => res,
-        Ok(res) => {
-            tracing::warn!("DSO API returned {} fetching AmuletRules", res.status());
-            return None;
-        }
-        Err(e) => {
-            tracing::warn!("Failed to reach DSO API for AmuletRules: {e}");
-            return None;
-        }
-    };
-    let json: serde_json::Value = res
-        .json()
-        .await
-        .inspect_err(|e| tracing::warn!("Failed to parse DSO response: {e}"))
-        .ok()?;
-    let dso = json.pointer("/dso_party_id").and_then(|v| v.as_str())?;
-    let cid = json
-        .pointer("/amulet_rules/contract/contract_id")
-        .and_then(|v| v.as_str())?;
-    Some((dso.parse().ok()?, cid.to_string()))
-}
-
-/// Get token-standard `Holding` contracts owned by a party, aggregated by
-/// `(instrument_admin, instrument_id)`. Each row also reports whether a
-/// `TransferPreapproval` is in place for that instrument so the frontend can
-/// render a Yes/No badge without a second round-trip.
-#[utoipa::path(
-    tag = "Services",
-    params(GovernanceQuery),
-    responses(
-        (status = 200, description = "Party holdings", body = HoldingsResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
-    )
-)]
-#[get("/holdings")]
-pub async fn get_holdings_handler(
-    data: web::Data<AppState>,
-    query: web::Query<GovernanceQuery>,
-) -> impl Responder {
-    let party_id = &query.party_id;
-    let token = get_party_token(&data, party_id).await;
-
-    match get_holdings(&data.config, party_id, token).await {
-        Ok(holdings) => HttpResponse::Ok().json(HoldingsResponse { holdings }),
-        Err(e) => {
-            tracing::error!("Failed to fetch holdings: {e}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch holdings: {e}"),
-            })
-        }
-    }
-}
-
-/// Query contract IDs by template
-#[utoipa::path(
-    tag = "Services",
-    params(ContractQueryParams),
-    responses(
-        (status = 200, description = "Contract query results", body = ContractQueryResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
-    )
-)]
-#[get("/contracts/query")]
-pub async fn query_contracts_handler(
-    data: web::Data<AppState>,
-    query: web::Query<ContractQueryParams>,
-) -> impl Responder {
-    let party_id = &query.party_id;
-
-    let token = get_party_token(&data, party_id).await;
-
-    let contract_params = QueryContractParams {
-        package_id: query.package_id.clone(),
-        module_name: query.module_name.clone(),
-        entity_name: query.entity_name.clone(),
-        use_interface_filter: query.interface,
-        active_only: query.active_only,
-    };
-
-    match query_contracts_by_template(&data.config, party_id, token, &contract_params).await {
-        Ok(contracts) => HttpResponse::Ok().json(ContractQueryResponse { contracts }),
-        Err(e) => {
-            tracing::error!("Failed to query contracts: {e}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to query contracts: {e}"),
-            })
-        }
-    }
-}
-
 /// Get paginated governance audit trail
 #[utoipa::path(
     tag = "Governance",
@@ -1090,13 +400,18 @@ fn cached_chain_audit_page(
     Some(chain_audit_response(entries, has_more))
 }
 
-/// Get on-chain governance audit entries.
-/// Returns cached data by default. Pass `refresh=true` to fetch from Canton and update cache.
+/// Get on-chain audit entries for a party.
+///
+/// Defaults to the governance scope, served from cache; pass `refresh=true` to
+/// fetch from Canton and update the cache. `scope=all` returns every ledger
+/// event the party witnesses and is always read live — the cache holds
+/// governance-scoped pages, and mixing the two under one party key would let
+/// an `all` read answer a governance request.
 #[utoipa::path(
     tag = "Governance",
     params(ChainAuditQuery),
     responses(
-        (status = 200, description = "On-chain governance audit entries", body = ChainAuditResponse),
+        (status = 200, description = "On-chain audit entries for the requested scope", body = ChainAuditResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     )
 )]
@@ -1115,7 +430,9 @@ pub async fn get_governance_chain_audit(
         return HttpResponse::Ok().json(chain_audit_response(Vec::new(), false));
     }
 
-    if !query.refresh {
+    let cacheable = query.scope == AuditScope::Governance;
+
+    if !query.refresh && cacheable {
         match data
             .db
             .get_chain_audit_cache(party_id, limit as i64, query.before_offset)
@@ -1142,19 +459,22 @@ pub async fn get_governance_chain_audit(
         party_id,
         token,
         &pkgs,
+        query.scope,
         limit,
         query.before_offset,
     )
     .await
     {
         Ok(page) => {
-            // Save to cache in background
-            let pool = data.db.clone();
-            let pid = party_id.clone();
-            let cached = page.entries.clone();
-            tokio::spawn(async move {
-                chain_audit::save_chain_audit_cache(&pool, &pid, &cached).await;
-            });
+            if cacheable {
+                // Save to cache in background
+                let pool = data.db.clone();
+                let pid = party_id.clone();
+                let cached = page.entries.clone();
+                tokio::spawn(async move {
+                    chain_audit::save_chain_audit_cache(&pool, &pid, &cached).await;
+                });
+            }
 
             HttpResponse::Ok().json(chain_audit_response(page.entries, page.has_more))
         }
@@ -1187,10 +507,10 @@ pub async fn get_governance_chain_audit(
 fn may_create_second_delegation(proposal: &ProposalType) -> bool {
     matches!(
         proposal,
-        ProposalType::SetupCouponReassignmentDelegation {
+        ProposalType::SetupCouponReassignmentDelegation(SetupCouponReassignmentDelegation {
             prior_delegation: None,
             ..
-        }
+        })
     )
 }
 
@@ -1309,21 +629,21 @@ pub async fn propose_action(
     // window defaults to 24h but the caller may override it per-transfer.
     let now_micros = chrono::Utc::now().timestamp_micros();
     let transfer_validity = match &body.proposal {
-        ProposalType::Transfer {
+        ProposalType::Transfer(Transfer {
             validity_window_hours: Some(hours),
             ..
-        } => action_serializer::TransferValidity::from_now_with_window(
+        }) => TransferValidity::from_now_with_window(
             now_micros,
             i64::from(*hours).saturating_mul(60 * 60 * 1_000_000),
         ),
-        _ => action_serializer::TransferValidity::from_now(now_micros),
+        _ => TransferValidity::from_now(now_micros),
     };
 
     let mut resolved_proposal = body.proposal.clone();
     let transfer_choice_context = match &mut resolved_proposal {
-        ProposalType::AcceptTransfer {
+        ProposalType::AcceptTransfer(AcceptTransfer {
             transfer_instruction_cid,
-        } => match fetch_accept_transfer_context(
+        }) => match fetch_accept_transfer_context(
             &data.config,
             Some(token.clone()),
             data.config.canton.network,
@@ -1342,14 +662,14 @@ pub async fn propose_action(
                 });
             }
         },
-        ProposalType::Transfer {
+        ProposalType::Transfer(Transfer {
             transfer_factory_cid,
             receiver,
             amount,
             instrument_id,
             input_holding_cids,
             ..
-        } if needs_registry_context(
+        }) if needs_registry_context(
             transfer_factory_cid,
             &instrument_id.admin,
             &party_id.to_string(),
@@ -1433,104 +753,63 @@ pub async fn propose_action(
         _ => None,
     };
 
-    let (package_source, module_name, entity_name, create_args) =
-        match action_serializer::build_proposal_create_args(
-            &party_id.to_string(),
-            &member_party_id.to_string(),
-            &resolved_proposal,
-            transfer_choice_context.as_ref().map(|r| &r.context),
-            Some(transfer_validity),
-        ) {
-            Ok(args) => args,
-            Err(e) => {
-                return HttpResponse::BadRequest().json(ErrorResponse {
-                    error: format!("Failed to build proposal create arguments: {e}"),
+    // The two transfer variants carry runtime data that is not a payload
+    // field — the registry choice context, the validity window, and the
+    // on-chain `sender` (the governance party) — so they submit through
+    // their wrapper structs. Every other variant is its own complete
+    // payload, reached through `grpc_payload()` without re-listing 29 arms.
+    let command_id = uuid::Uuid::new_v4().to_string();
+    let commands = match &resolved_proposal {
+        ProposalType::Transfer(t) => build_propose(
+            &TransferWithContext {
+                transfer: t,
+                sender: party_id,
+                context: transfer_choice_context.as_ref().map(|r| &r.context),
+                validity: transfer_validity,
+            },
+            party_id,
+            &member_party_id,
+            &packages,
+            command_id,
+        ),
+        ProposalType::AcceptTransfer(a) => build_propose(
+            &AcceptTransferWithContext {
+                accept: a,
+                context: transfer_choice_context.as_ref().map(|r| &r.context),
+            },
+            party_id,
+            &member_party_id,
+            &packages,
+            command_id,
+        ),
+        other => match other.grpc_payload() {
+            Some(p) => build_propose(p, party_id, &member_party_id, &packages, command_id),
+            // No variant reaches this today: `grpc_payload` returns `None`
+            // only for the two transfer variants, and both match above. A
+            // new variant that returns `None` gets a 500, not a panic.
+            None => {
+                tracing::error!("Proposal variant has no gRPC payload: {other:?}");
+                return HttpResponse::InternalServerError().json(ErrorResponse {
+                    error: "Unsupported proposal type".to_string(),
                 });
             }
-        };
-
-    let package_id = match package_source {
-        action_serializer::ProposalPackage::GovernanceCore => {
-            match packages.governance_core.as_deref() {
-                Some(pkg) => pkg,
-                None => {
-                    return HttpResponse::ServiceUnavailable().json(ErrorResponse {
-                        error: "governance_core package not configured".to_string(),
-                    });
-                }
-            }
-        }
-        action_serializer::ProposalPackage::GovernanceRewards => {
-            match packages.governance_rewards.as_deref() {
-                Some(pkg) => pkg,
-                None => {
-                    return HttpResponse::ServiceUnavailable().json(ErrorResponse {
-                        error: "governance_rewards package not configured".to_string(),
-                    });
-                }
-            }
-        }
-        action_serializer::ProposalPackage::GovernanceTokenCustody => {
-            match packages.governance_token_custody.as_deref() {
-                Some(pkg) => pkg,
-                None => {
-                    return HttpResponse::ServiceUnavailable().json(ErrorResponse {
-                        error: "governance_token_custody package not configured".to_string(),
-                    });
-                }
-            }
-        }
-        action_serializer::ProposalPackage::GovernanceUtilityCredential => {
-            match packages.governance_utility_credential.as_deref() {
-                Some(pkg) => pkg,
-                None => {
-                    return HttpResponse::ServiceUnavailable().json(ErrorResponse {
-                        error: "governance_utility_credential package not configured".to_string(),
-                    });
-                }
-            }
-        }
-        action_serializer::ProposalPackage::GovernanceUtilityOnboarding => {
-            match packages.governance_utility_onboarding.as_deref() {
-                Some(pkg) => pkg,
-                None => {
-                    return HttpResponse::ServiceUnavailable().json(ErrorResponse {
-                        error: "governance_utility_onboarding package not configured".to_string(),
-                    });
-                }
-            }
-        }
+        },
     };
-
-    let template_id = Identifier {
-        package_id: package_id.to_string(),
-        module_name: module_name.to_string(),
-        entity_name: entity_name.to_string(),
-    };
-
-    let cmd = Command {
-        command: Some(command::Command::Create(CreateCommand {
-            template_id: Some(template_id),
-            create_arguments: Some(create_args),
-        })),
-    };
-
-    let commands = Commands {
-        workflow_id: String::new(),
-        user_id: String::new(),
-        command_id: uuid::Uuid::new_v4().to_string(),
-        commands: vec![cmd],
-        deduplication_period: None,
-        min_ledger_time_abs: None,
-        min_ledger_time_rel: None,
-        act_as: vec![member_party_id.to_string()],
-        read_as: vec![party_id.to_string()],
-        submission_id: String::new(),
-        disclosed_contracts: vec![],
-        synchronizer_id: String::new(),
-        package_id_selection_preference: vec![],
-        prefetch_contract_keys: vec![],
-        taps_max_passes: None,
+    // An unconfigured package is a provisioning gap, not bad input: 503 with
+    // the lib's own `"<pkg> package not configured"` text, byte-identical to
+    // what the hand-written package match returned.
+    let commands = match commands {
+        Ok(c) => c,
+        Err(e @ decman_lib::Error::PackageNotConfigured(_)) => {
+            return HttpResponse::ServiceUnavailable().json(ErrorResponse {
+                error: e.to_string(),
+            });
+        }
+        Err(e) => {
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                error: format!("Failed to build proposal create arguments: {e}"),
+            });
+        }
     };
 
     let channel = match data.config.ledger_channel().await {
@@ -1557,16 +836,12 @@ pub async fn propose_action(
     let proposal_cid = match client.submit_and_wait_for_transaction(create_req).await {
         Ok(response) => {
             // Extract created contract ID from the transaction events
-            match response.into_inner().transaction.and_then(|tx| {
-                tx.events.iter().find_map(|event| {
-                    event.event.as_ref().and_then(|e| match e {
-                        canton_proto_rs::com::daml::ledger::api::v2::event::Event::Created(
-                            created,
-                        ) => Some(created.contract_id.clone()),
-                        _ => None,
-                    })
-                })
-            }) {
+            match response
+                .into_inner()
+                .transaction
+                .as_ref()
+                .and_then(first_created_contract_id)
+            {
                 Some(cid) => cid,
                 None => {
                     return HttpResponse::InternalServerError().json(ErrorResponse {
@@ -1605,9 +880,9 @@ pub async fn propose_action(
     // utility proposal reaches here on a node with no governance_core. The
     // proposal is already on the ledger by this point, so the body has to say
     // so — the caller must not retry into a second proposal.
-    let governance_core_pkg = match packages.governance_core.as_deref() {
-        Some(pkg) => pkg,
-        None => {
+    let mut rules = match governance_rules_template(&packages) {
+        Ok(rules) => rules,
+        Err(_) => {
             return HttpResponse::ServiceUnavailable().json(ErrorResponse {
                 error: format!(
                     "Proposal {proposal_cid} was created but could not be confirmed: \
@@ -1620,52 +895,23 @@ pub async fn propose_action(
 
     // The rules contract may be an out-of-date fallback living under an older
     // governance-core package — exercise it under its actual package ref.
-    let rules_package_ref = resolve_contract_package_ref(
+    rules.package_ref = resolve_contract_package_ref(
         &data.config,
         party_id,
         Some(token.clone()),
         &body.rules_contract_id,
-        governance_core_pkg,
+        &rules.package_ref,
     )
     .await;
 
-    let confirm_template = Identifier {
-        package_id: rules_package_ref,
-        module_name: "Governance.Rules".to_string(),
-        entity_name: "GovernanceRules".to_string(),
-    };
-
-    let confirm_arg = action_serializer::build_confirm_domain_action_arg(
-        &member_party_id.to_string(),
+    let confirm_commands = build_confirm_proposal(
+        &rules,
+        &body.rules_contract_id,
+        &member_party_id,
+        party_id,
         &proposal_cid,
+        uuid::Uuid::new_v4().to_string(),
     );
-
-    let confirm_cmd = Command {
-        command: Some(command::Command::Exercise(ExerciseCommand {
-            template_id: Some(confirm_template),
-            contract_id: body.rules_contract_id.clone(),
-            choice: "GovernanceRules_ConfirmAction".to_string(),
-            choice_argument: Some(confirm_arg),
-        })),
-    };
-
-    let confirm_commands = Commands {
-        workflow_id: String::new(),
-        user_id: String::new(),
-        command_id: uuid::Uuid::new_v4().to_string(),
-        commands: vec![confirm_cmd],
-        deduplication_period: None,
-        min_ledger_time_abs: None,
-        min_ledger_time_rel: None,
-        act_as: vec![member_party_id.to_string()],
-        read_as: vec![party_id.to_string()],
-        submission_id: String::new(),
-        disclosed_contracts: vec![],
-        synchronizer_id: String::new(),
-        package_id_selection_preference: vec![],
-        prefetch_contract_keys: vec![],
-        taps_max_passes: None,
-    };
 
     let mut confirm_req = tonic::Request::new(SubmitAndWaitRequest {
         commands: Some(confirm_commands),
@@ -1718,6 +964,39 @@ pub async fn propose_action(
     }
 }
 
+/// Reject an inline action the `core_self` path cannot carry, before any
+/// ledger work happens.
+///
+/// The inline confirm/execute choices serialize a `GovernanceSelfAction`, so
+/// only the six self-management variants fit. Everything else in `ActionType`
+/// exists for the read path and belongs on `POST /governance/propose`. Caught
+/// here it is a clear 400; left to the serializer it would be a 500.
+///
+/// Also runs the action's own field validation (thresholds, timeouts) so a
+/// malformed value surfaces as a 400 rather than a generic ledger submission
+/// error.
+///
+/// Scoped to `core_self` deliberately. `core_domain` builds its choice from
+/// `proposal_cid` and ignores `action` entirely, so both clients send a
+/// deliberate `governance_set_threshold: 0` placeholder there for payload
+/// symmetry — validating it would 400 every domain confirm and execute.
+fn validate_inline_action(
+    action: &ActionType,
+    governance_type: GovernanceType,
+) -> Result<(), String> {
+    if !matches!(governance_type, GovernanceType::CoreSelf) {
+        return Ok(());
+    }
+    if !action.is_governance_self_action() {
+        return Err(format!(
+            "action '{}' is not a governance self-management action; submit it as a domain \
+             proposal via POST /governance/propose",
+            crate::server::audit::action_summary(action)
+        ));
+    }
+    action.validate().map_err(|e| e.to_string())
+}
+
 /// Submit a confirmation for a governance action using structured ActionType
 #[utoipa::path(
     tag = "Governance",
@@ -1738,6 +1017,9 @@ pub async fn confirm_action(
 ) -> impl Responder {
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
+    }
+    if let Err(error) = validate_inline_action(&body.action, body.governance_type) {
+        return HttpResponse::BadRequest().json(ErrorResponse { error });
     }
 
     let party_id = &body.party_id;
@@ -1828,6 +1110,9 @@ pub async fn execute_action(
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
     }
+    if let Err(error) = validate_inline_action(&body.action, body.governance_type) {
+        return HttpResponse::BadRequest().json(ErrorResponse { error });
+    }
 
     let party_id = &body.party_id;
 
@@ -1860,7 +1145,16 @@ pub async fn execute_action(
 
     let packages = packages();
 
-    match execute_confirmed_action(&data.config, &body, &token, &member_party_id, &packages).await {
+    match execute_confirmed_action(
+        &data.config,
+        &data.http_client,
+        &body,
+        &token,
+        &member_party_id,
+        &packages,
+    )
+    .await
+    {
         Ok(()) => {
             spawn_audit_log(
                 audit_pool,
@@ -2155,19 +1449,6 @@ pub async fn cancel_proposal(
     }
 }
 
-/// Get package configuration for a party
-#[utoipa::path(
-    tag = "Configuration",
-    params(GovernanceQuery),
-    responses(
-        (status = 200, description = "Package configuration", body = PackageConfig)
-    )
-)]
-#[get("/packages")]
-pub async fn get_packages() -> impl Responder {
-    HttpResponse::Ok().json(packages())
-}
-
 /// Get the decparty's active CouponReassignmentDelegation contracts, newest first
 ///
 /// The vote forms read this so nobody pastes a contract id: setup prefills
@@ -2236,153 +1517,6 @@ pub async fn get_coupon_reassignment_delegation(
                 error: format!("cannot read this party's current delegations: {e}"),
             })
         }
-    }
-}
-
-/// Get DSO network info (DSO party ID + amulet rules contract)
-#[utoipa::path(
-    tag = "Proxy",
-    responses(
-        (status = 200, description = "Network info", body = NetworkInfo),
-        (status = 502, description = "DSO API error", body = ErrorResponse)
-    )
-)]
-#[get("/network-info")]
-pub async fn get_network_info(data: web::Data<AppState>) -> impl Responder {
-    let url = data.config.canton.network.dso_url();
-
-    match data.http_client.get(url).send().await {
-        Ok(res) if res.status().is_success() => match res.json::<serde_json::Value>().await {
-            Ok(json) => {
-                let dso_party = json.pointer("/dso_party_id").and_then(|v| v.as_str());
-                let contract_id = json
-                    .pointer("/amulet_rules/contract/contract_id")
-                    .and_then(|v| v.as_str());
-                let blob = json
-                    .pointer("/amulet_rules/contract/created_event_blob")
-                    .and_then(|v| v.as_str());
-
-                match (dso_party, contract_id, blob) {
-                    (Some(dso), Some(cid), Some(blob)) => match dso.parse::<CantonId>() {
-                        Ok(dso_id) => HttpResponse::Ok().json(NetworkInfo {
-                            dso_party_id: dso_id,
-                            amulet_rules_cid: cid.to_string(),
-                            amulet_rules_blob: blob.to_string(),
-                        }),
-                        Err(e) => HttpResponse::BadGateway().json(ErrorResponse {
-                            error: format!("Invalid DSO party ID: {e}"),
-                        }),
-                    },
-                    _ => {
-                        tracing::warn!("Unexpected DSO API response format");
-                        HttpResponse::BadGateway().json(ErrorResponse {
-                            error: "Unexpected response format from DSO API".to_string(),
-                        })
-                    }
-                }
-            }
-            Err(e) => HttpResponse::BadGateway().json(ErrorResponse {
-                error: format!("Failed to parse DSO response: {e}"),
-            }),
-        },
-        Ok(res) => {
-            let status = res.status();
-            let body = res.text().await.unwrap_or_default();
-            tracing::error!("DSO API returned {status}: {body}");
-            HttpResponse::BadGateway().json(ErrorResponse {
-                error: format!("DSO API returned {status}: {body}"),
-            })
-        }
-        Err(e) => HttpResponse::BadGateway().json(ErrorResponse {
-            error: format!("Failed to reach DSO API: {e}"),
-        }),
-    }
-}
-
-/// Get DA Utility operator party ID
-#[utoipa::path(
-    tag = "Proxy",
-    responses(
-        (status = 200, description = "Operator info", body = OperatorInfo),
-        (status = 502, description = "Operator API error", body = ErrorResponse)
-    )
-)]
-#[get("/operator-info")]
-pub async fn get_operator_info(data: web::Data<AppState>) -> impl Responder {
-    let url = data.config.canton.network.operator_url();
-
-    match data.http_client.get(url).send().await {
-        Ok(res) if res.status().is_success() => match res.json::<serde_json::Value>().await {
-            Ok(json) => match json.pointer("/partyId").and_then(|v| v.as_str()) {
-                Some(party) => match party.parse::<CantonId>() {
-                    Ok(party_id) => HttpResponse::Ok().json(OperatorInfo { party_id }),
-                    Err(e) => HttpResponse::BadGateway().json(ErrorResponse {
-                        error: format!("Invalid operator party ID: {e}"),
-                    }),
-                },
-                None => {
-                    tracing::warn!("Unexpected operator API response format");
-                    HttpResponse::BadGateway().json(ErrorResponse {
-                        error: "Unexpected response format from operator API".to_string(),
-                    })
-                }
-            },
-            Err(e) => HttpResponse::BadGateway().json(ErrorResponse {
-                error: format!("Failed to parse operator response: {e}"),
-            }),
-        },
-        Ok(res) => {
-            let status = res.status();
-            let body = res.text().await.unwrap_or_default();
-            tracing::error!("Operator API returned {status}: {body}");
-            HttpResponse::BadGateway().json(ErrorResponse {
-                error: format!("Operator API returned {status}: {body}"),
-            })
-        }
-        Err(e) => HttpResponse::BadGateway().json(ErrorResponse {
-            error: format!("Failed to reach operator API: {e}"),
-        }),
-    }
-}
-
-/// Proxy request to fetch token standard contracts (avoids CORS)
-#[utoipa::path(
-    tag = "Proxy",
-    request_body = serde_json::Value,
-    responses(
-        (status = 200, description = "Token standard contracts"),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
-        (status = 502, description = "Bad gateway", body = ErrorResponse)
-    )
-)]
-#[post("/token-standard-contracts")]
-pub async fn get_token_standard_contracts(
-    http_req: HttpRequest,
-    data: web::Data<AppState>,
-    body: web::Json<serde_json::Value>,
-) -> impl Responder {
-    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
-        return resp;
-    }
-    let url = "https://devnet.dlc.link/peer-2/app/get-token-standard-contracts";
-
-    match data
-        .http_client
-        .post(url)
-        .json(&body.into_inner())
-        .send()
-        .await
-    {
-        Ok(res) => match res.json::<serde_json::Value>().await {
-            Ok(json) => HttpResponse::Ok().json(json),
-            Err(e) => HttpResponse::BadGateway().json(ErrorResponse {
-                error: format!("Failed to parse response: {e}"),
-            }),
-        },
-        Err(e) => HttpResponse::BadGateway().json(ErrorResponse {
-            error: format!("Failed to fetch token standard contracts: {e}"),
-        }),
     }
 }
 
@@ -2494,7 +1628,7 @@ pub(crate) fn packages() -> PackageConfig {
 // Ledger Command Execution
 // ============================================================================
 
-/// Execute ConfirmAction choice on VaultGovernanceRules contract with structured action
+/// Execute ConfirmAction choice on the GovernanceRules contract with structured action
 async fn execute_confirm_action(
     config: &NodeConfig,
     request: &ConfirmActionRequest,
@@ -2502,110 +1636,59 @@ async fn execute_confirm_action(
     member_party_id: &CantonId,
     packages: &PackageConfig,
 ) -> Result {
-    let member_party_id_str = member_party_id.to_string();
-    let member_party_id = member_party_id_str.as_str();
-    let (mut template_id, choice, choice_argument) = match request.governance_type {
-        GovernanceType::Vault => {
-            let pkg = packages
-                .vault_governance
-                .as_deref()
-                .context("vault_governance package not configured")?;
-            (
-                Identifier {
-                    package_id: pkg.to_string(),
-                    module_name: "BitsafeVault.VaultGovernance".to_string(),
-                    entity_name: "VaultGovernanceRules".to_string(),
-                },
-                "VaultGovernanceRules_ConfirmAction".to_string(),
-                action_serializer::build_confirm_action_argument(member_party_id, &request.action),
-            )
-        }
+    let command_id = uuid::Uuid::new_v4().to_string();
+    let commands = match request.governance_type {
         GovernanceType::CoreSelf => {
-            let pkg = packages
-                .governance_core
-                .as_deref()
-                .context("governance_core package not configured")?;
-            (
-                Identifier {
-                    package_id: pkg.to_string(),
-                    module_name: "Governance.Rules".to_string(),
-                    entity_name: "GovernanceRules".to_string(),
-                },
-                "GovernanceRules_ConfirmGovernanceAction".to_string(),
-                action_serializer::build_confirm_governance_action_arg(
-                    member_party_id,
-                    &request.action,
-                ),
+            let mut rules = governance_rules_template(packages)?;
+            // The rules contract may be an out-of-date fallback living under an
+            // older governance-core package — exercise it under its actual
+            // package ref.
+            rules.package_ref = resolve_contract_package_ref(
+                config,
+                &request.party_id,
+                Some(token.to_string()),
+                &request.rules_contract_id,
+                &rules.package_ref,
             )
+            .await;
+            build_confirm_self_action(
+                &rules,
+                &request.rules_contract_id,
+                member_party_id,
+                &request.party_id,
+                &request.action,
+                command_id,
+            )?
         }
         GovernanceType::CoreDomain => {
-            let pkg = packages
-                .governance_core
-                .as_deref()
-                .context("governance_core package not configured")?;
+            let mut rules = governance_rules_template(packages)?;
             let proposal_cid = request
                 .proposal_cid
                 .as_deref()
                 .context("proposal_cid required for core_domain confirm")?;
-            (
-                Identifier {
-                    package_id: pkg.to_string(),
-                    module_name: "Governance.Rules".to_string(),
-                    entity_name: "GovernanceRules".to_string(),
-                },
-                "GovernanceRules_ConfirmAction".to_string(),
-                action_serializer::build_confirm_domain_action_arg(member_party_id, proposal_cid),
+            rules.package_ref = resolve_contract_package_ref(
+                config,
+                &request.party_id,
+                Some(token.to_string()),
+                &request.rules_contract_id,
+                &rules.package_ref,
+            )
+            .await;
+            build_confirm_proposal(
+                &rules,
+                &request.rules_contract_id,
+                member_party_id,
+                &request.party_id,
+                proposal_cid,
+                command_id,
             )
         }
     };
-
-    // The rules contract may be an out-of-date fallback living under an older
-    // governance-core package — exercise it under its actual package ref.
-    if matches!(
-        request.governance_type,
-        GovernanceType::CoreSelf | GovernanceType::CoreDomain
-    ) {
-        template_id.package_id = resolve_contract_package_ref(
-            config,
-            &request.party_id,
-            Some(token.to_string()),
-            &request.rules_contract_id,
-            &template_id.package_id,
-        )
-        .await;
-    }
 
     let channel = config.ledger_channel().await?;
 
     let mut client =
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
-
-    let cmd = Command {
-        command: Some(command::Command::Exercise(ExerciseCommand {
-            template_id: Some(template_id),
-            contract_id: request.rules_contract_id.clone(),
-            choice,
-            choice_argument: Some(choice_argument),
-        })),
-    };
-
-    let commands = Commands {
-        workflow_id: String::new(),
-        user_id: String::new(),
-        command_id: uuid::Uuid::new_v4().to_string(),
-        commands: vec![cmd],
-        deduplication_period: None,
-        min_ledger_time_abs: None,
-        min_ledger_time_rel: None,
-        act_as: vec![member_party_id.to_string()],
-        read_as: vec![request.party_id.to_string()],
-        submission_id: String::new(),
-        disclosed_contracts: vec![],
-        synchronizer_id: String::new(),
-        package_id_selection_preference: vec![],
-        prefetch_contract_keys: vec![],
-        taps_max_passes: None,
-    };
 
     let mut req = tonic::Request::new(SubmitAndWaitRequest {
         commands: Some(commands),
@@ -2621,107 +1704,43 @@ async fn execute_confirm_action(
 /// Execute ExecuteConfirmedAction choice on governance rules contract
 async fn execute_confirmed_action(
     config: &NodeConfig,
+    http_client: &reqwest::Client,
     request: &ExecuteActionRequest,
     token: &str,
     member_party_id: &CantonId,
     packages: &PackageConfig,
 ) -> Result {
-    let member_party_id_str = member_party_id.to_string();
-    let member_party_id = member_party_id_str.as_str();
-    let (mut template_id, choice, choice_argument) = match request.governance_type {
-        GovernanceType::Vault => {
-            let pkg = packages
-                .vault_governance
-                .as_deref()
-                .context("vault_governance package not configured")?;
-            (
-                Identifier {
-                    package_id: pkg.to_string(),
-                    module_name: "BitsafeVault.VaultGovernance".to_string(),
-                    entity_name: "VaultGovernanceRules".to_string(),
-                },
-                "VaultGovernanceRules_ExecuteConfirmedAction".to_string(),
-                action_serializer::build_execute_action_argument(
-                    member_party_id,
-                    &request.action,
-                    &request.confirmation_cids,
-                    None,
-                ),
-            )
-        }
-        GovernanceType::CoreSelf => {
-            let pkg = packages
-                .governance_core
-                .as_deref()
-                .context("governance_core package not configured")?;
-            (
-                Identifier {
-                    package_id: pkg.to_string(),
-                    module_name: "Governance.Rules".to_string(),
-                    entity_name: "GovernanceRules".to_string(),
-                },
-                "GovernanceRules_ExecuteGovernanceAction".to_string(),
-                action_serializer::build_execute_governance_action_arg(
-                    member_party_id,
-                    &request.action,
-                    &request.confirmation_cids,
-                ),
-            )
-        }
-        GovernanceType::CoreDomain => {
-            let pkg = packages
-                .governance_core
-                .as_deref()
-                .context("governance_core package not configured")?;
-            let proposal_cid = request
-                .proposal_cid
-                .as_deref()
-                .context("proposal_cid required for core_domain execute")?;
-            (
-                Identifier {
-                    package_id: pkg.to_string(),
-                    module_name: "Governance.Rules".to_string(),
-                    entity_name: "GovernanceRules".to_string(),
-                },
-                "GovernanceRules_ExecuteConfirmedAction".to_string(),
-                action_serializer::build_execute_domain_action_arg(
-                    member_party_id,
-                    proposal_cid,
-                    &request.confirmation_cids,
-                ),
-            )
-        }
-    };
-
-    // The rules contract may be an out-of-date fallback living under an older
-    // governance-core package — exercise it under its actual package ref.
-    if matches!(
-        request.governance_type,
-        GovernanceType::CoreSelf | GovernanceType::CoreDomain
-    ) {
-        template_id.package_id = resolve_contract_package_ref(
-            config,
-            &request.party_id,
-            Some(token.to_string()),
-            &request.rules_contract_id,
-            &template_id.package_id,
-        )
-        .await;
-    }
-
-    // For `AcceptTransferProposal` execution the executor's submission must
-    // include the registry-supplied disclosed contracts (transfer rule + its
-    // dependencies). `maybe_fetch_for_proposal` template-id-checks the
-    // on-chain proposal and returns `Ok(None)` for anything else, so we don't
-    // gate on `governance_type` here — that would silently drop the fetch on
-    // any non-CoreDomain path that happens to carry an AcceptTransferProposal.
+    // The executor's submission must carry the contracts the proposal's
+    // execute step reads but no member can see. `AcceptTransferProposal` needs
+    // the registry-supplied transfer rule and its dependencies;
+    // `RequestDevNetFeaturedAppRight` needs the DSO's `AmuletRules`. Both key
+    // on the on-chain proposal's template, not on `governance_type`, so a
+    // non-CoreDomain path carrying such a proposal still gets its contracts.
     let mut registry_disclosed: Vec<DisclosedContract> = Vec::new();
+    let mut proposal_event: Option<CreatedEvent> = None;
     if let Some(proposal_cid) = request.proposal_cid.as_deref() {
-        match maybe_fetch_for_proposal(
+        match fetch_proposal_created_event(
             config,
             Some(token.to_string()),
             &request.party_id,
             proposal_cid,
+        )
+        .await
+        {
+            Ok(event) => proposal_event = event,
+            // Don't hard-fail on ledger hiccups here; the submission below
+            // surfaces a clear error if the proposal really is gone.
+            Err(e) => tracing::warn!("Failed to look up proposal {proposal_cid}: {e:#}"),
+        }
+    }
+    if let (Some(proposal_cid), Some(created)) =
+        (request.proposal_cid.as_deref(), proposal_event.as_ref())
+    {
+        match maybe_fetch_for_proposal_event(
+            config,
+            Some(token.to_string()),
+            &request.party_id,
+            created,
         )
         .await
         {
@@ -2745,21 +1764,26 @@ async fn execute_confirmed_action(
                 );
             }
         }
+
+        if has_template(
+            created,
+            RequestDevNetFeaturedAppRight::MODULE,
+            RequestDevNetFeaturedAppRight::ENTITY,
+        ) {
+            let proposed_cid = created
+                .create_arguments
+                .as_ref()
+                .and_then(|args| record_field(args, "amuletRulesCid"))
+                .and_then(|v| match v {
+                    value::Sum::ContractId(cid) => Some(cid.as_str()),
+                    _ => None,
+                });
+            let current = fetch_amulet_rules(http_client, config)
+                .await
+                .context("Failed to fetch AmuletRules from the DSO API")?;
+            registry_disclosed.push(amulet_rules_disclosure(proposed_cid, &current)?);
+        }
     }
-
-    let channel = config.ledger_channel().await?;
-
-    let mut client =
-        CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
-
-    let cmd = Command {
-        command: Some(command::Command::Exercise(ExerciseCommand {
-            template_id: Some(template_id),
-            contract_id: request.rules_contract_id.clone(),
-            choice,
-            choice_argument: Some(choice_argument),
-        })),
-    };
 
     let mut disclosed_contracts: Vec<DisclosedContract> = request
         .disclosed_contracts
@@ -2787,23 +1811,63 @@ async fn execute_confirmed_action(
             .filter(|d| !seen.contains(&d.contract_id)),
     );
 
-    let commands = Commands {
-        workflow_id: String::new(),
-        user_id: String::new(),
-        command_id: uuid::Uuid::new_v4().to_string(),
-        commands: vec![cmd],
-        deduplication_period: None,
-        min_ledger_time_abs: None,
-        min_ledger_time_rel: None,
-        act_as: vec![member_party_id.to_string()],
-        read_as: vec![request.party_id.to_string()],
-        submission_id: String::new(),
-        disclosed_contracts,
-        synchronizer_id: String::new(),
-        package_id_selection_preference: vec![],
-        prefetch_contract_keys: vec![],
-        taps_max_passes: None,
+    let command_id = uuid::Uuid::new_v4().to_string();
+    let commands = match request.governance_type {
+        GovernanceType::CoreSelf => {
+            let mut rules = governance_rules_template(packages)?;
+            // The rules contract may be an out-of-date fallback living under an
+            // older governance-core package — exercise it under its actual
+            // package ref.
+            rules.package_ref = resolve_contract_package_ref(
+                config,
+                &request.party_id,
+                Some(token.to_string()),
+                &request.rules_contract_id,
+                &rules.package_ref,
+            )
+            .await;
+            build_execute_self_action(
+                &rules,
+                &request.rules_contract_id,
+                member_party_id,
+                &request.party_id,
+                &request.action,
+                &request.confirmation_cids,
+                disclosed_contracts,
+                command_id,
+            )?
+        }
+        GovernanceType::CoreDomain => {
+            let mut rules = governance_rules_template(packages)?;
+            let proposal_cid = request
+                .proposal_cid
+                .as_deref()
+                .context("proposal_cid required for core_domain execute")?;
+            rules.package_ref = resolve_contract_package_ref(
+                config,
+                &request.party_id,
+                Some(token.to_string()),
+                &request.rules_contract_id,
+                &rules.package_ref,
+            )
+            .await;
+            build_execute_proposal(
+                &rules,
+                &request.rules_contract_id,
+                member_party_id,
+                &request.party_id,
+                proposal_cid,
+                &request.confirmation_cids,
+                disclosed_contracts,
+                command_id,
+            )
+        }
     };
+
+    let channel = config.ledger_channel().await?;
+
+    let mut client =
+        CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
 
     let mut req = tonic::Request::new(SubmitAndWaitRequest {
         commands: Some(commands),
@@ -2816,6 +1880,35 @@ async fn execute_confirmed_action(
     Ok(())
 }
 
+/// The `AmuletRules` disclosure for a `RequestDevNetFeaturedAppRight` execute.
+///
+/// Only the DSO can see `AmuletRules`, so the executor discloses the current
+/// contract from the DSO scan API. The proposal pins a contract id. When the
+/// DSO has replaced its `AmuletRules` since, the pinned contract is archived
+/// and the execute can never succeed, so report that instead of disclosing a
+/// contract the choice will not read.
+fn amulet_rules_disclosure(
+    proposed_cid: Option<&str>,
+    current: &AmuletRulesContract,
+) -> Result<DisclosedContract> {
+    let proposed_cid =
+        proposed_cid.context("RequestDevNetFeaturedAppRight proposal has no amuletRulesCid")?;
+    if proposed_cid != current.contract_id {
+        anyhow::bail!(
+            "The proposal names AmuletRules {proposed_cid}, but the DSO's current AmuletRules is {}. Cancel this proposal and propose again.",
+            current.contract_id
+        );
+    }
+    Ok(DisclosedContract {
+        template_id: None,
+        contract_id: current.contract_id.clone(),
+        created_event_blob: base64::engine::general_purpose::STANDARD
+            .decode(&current.created_event_blob)
+            .context("Invalid base64 in the DSO's AmuletRules created_event_blob")?,
+        synchronizer_id: String::new(),
+    })
+}
+
 /// Execute ExpireConfirmation choice on governance rules contract
 async fn execute_expire_confirmation(
     config: &NodeConfig,
@@ -2824,127 +1917,61 @@ async fn execute_expire_confirmation(
     member_party_id: &CantonId,
     packages: &PackageConfig,
 ) -> Result {
-    let member_party_id_str = member_party_id.to_string();
-    let member_party_id = member_party_id_str.as_str();
-    // Both vault and core use the same argument shape: { member, staleConfirmationCid }
-    let choice_argument = Value {
-        sum: Some(value::Sum::Record(Record {
-            record_id: None,
-            fields: vec![
-                RecordField {
-                    label: "member".to_string(),
-                    value: Some(Value {
-                        sum: Some(value::Sum::Party(member_party_id.to_string())),
-                    }),
-                },
-                RecordField {
-                    label: "staleConfirmationCid".to_string(),
-                    value: Some(Value {
-                        sum: Some(value::Sum::ContractId(request.confirmation_cid.clone())),
-                    }),
-                },
-            ],
-        })),
-    };
-
-    let (mut template_id, choice) = match request.governance_type {
-        GovernanceType::Vault => {
-            let pkg = packages
-                .vault_governance
-                .as_deref()
-                .context("vault_governance package not configured")?;
-            (
-                Identifier {
-                    package_id: pkg.to_string(),
-                    module_name: "BitsafeVault.VaultGovernance".to_string(),
-                    entity_name: "VaultGovernanceRules".to_string(),
-                },
-                "VaultGovernanceRules_ExpireConfirmation".to_string(),
-            )
-        }
+    // All three flows take the same argument shape ({ member,
+    // staleConfirmationCid }); only the template and the choice differ.
+    let command_id = uuid::Uuid::new_v4().to_string();
+    let commands = match request.governance_type {
         GovernanceType::CoreSelf => {
-            let pkg = packages
-                .governance_core
-                .as_deref()
-                .context("governance_core package not configured")?;
-            (
-                Identifier {
-                    package_id: pkg.to_string(),
-                    module_name: "Governance.Rules".to_string(),
-                    entity_name: "GovernanceRules".to_string(),
-                },
-                "GovernanceRules_ExpireGovernanceSelfConfirmation".to_string(),
+            let mut rules = governance_rules_template(packages)?;
+            // The rules contract may be an out-of-date fallback living under an
+            // older governance-core package — exercise it under its actual
+            // package ref.
+            rules.package_ref = resolve_contract_package_ref(
+                config,
+                &request.party_id,
+                Some(token.to_string()),
+                &request.rules_contract_id,
+                &rules.package_ref,
+            )
+            .await;
+            build_expire_self_confirmation(
+                &rules,
+                &request.rules_contract_id,
+                member_party_id,
+                &request.party_id,
+                &request.confirmation_cid,
+                command_id,
             )
         }
         GovernanceType::CoreDomain => {
             // Same `GovernanceRules` template as CoreSelf but a different choice:
             // `GovernanceRules_ExpireConfirmation` operates on the
             // `GovernanceConfirmation` template (domain action confirmations)
-            // rather than `GovernanceSelfConfirmation`. Same argument shape
-            // ({ member, staleConfirmationCid }) so the choice_argument above
-            // is reused as-is.
-            let pkg = packages
-                .governance_core
-                .as_deref()
-                .context("governance_core package not configured")?;
-            (
-                Identifier {
-                    package_id: pkg.to_string(),
-                    module_name: "Governance.Rules".to_string(),
-                    entity_name: "GovernanceRules".to_string(),
-                },
-                "GovernanceRules_ExpireConfirmation".to_string(),
+            // rather than `GovernanceSelfConfirmation`.
+            let mut rules = governance_rules_template(packages)?;
+            rules.package_ref = resolve_contract_package_ref(
+                config,
+                &request.party_id,
+                Some(token.to_string()),
+                &request.rules_contract_id,
+                &rules.package_ref,
+            )
+            .await;
+            build_expire_domain_confirmation(
+                &rules,
+                &request.rules_contract_id,
+                member_party_id,
+                &request.party_id,
+                &request.confirmation_cid,
+                command_id,
             )
         }
     };
-
-    // The rules contract may be an out-of-date fallback living under an older
-    // governance-core package — exercise it under its actual package ref.
-    if matches!(
-        request.governance_type,
-        GovernanceType::CoreSelf | GovernanceType::CoreDomain
-    ) {
-        template_id.package_id = resolve_contract_package_ref(
-            config,
-            &request.party_id,
-            Some(token.to_string()),
-            &request.rules_contract_id,
-            &template_id.package_id,
-        )
-        .await;
-    }
 
     let channel = config.ledger_channel().await?;
 
     let mut client =
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
-
-    let cmd = Command {
-        command: Some(command::Command::Exercise(ExerciseCommand {
-            template_id: Some(template_id),
-            contract_id: request.rules_contract_id.clone(),
-            choice,
-            choice_argument: Some(choice_argument),
-        })),
-    };
-
-    let commands = Commands {
-        workflow_id: String::new(),
-        user_id: String::new(),
-        command_id: uuid::Uuid::new_v4().to_string(),
-        commands: vec![cmd],
-        deduplication_period: None,
-        min_ledger_time_abs: None,
-        min_ledger_time_rel: None,
-        act_as: vec![member_party_id.to_string()],
-        read_as: vec![request.party_id.to_string()],
-        submission_id: String::new(),
-        disclosed_contracts: vec![],
-        synchronizer_id: String::new(),
-        package_id_selection_preference: vec![],
-        prefetch_contract_keys: vec![],
-        taps_max_passes: None,
-    };
 
     let mut req = tonic::Request::new(SubmitAndWaitRequest {
         commands: Some(commands),
@@ -2965,112 +1992,57 @@ async fn execute_cancel_confirmation(
     member_party_id: &CantonId,
     packages: &PackageConfig,
 ) -> Result {
-    let member_party_id_str = member_party_id.to_string();
-    let member_party_id = member_party_id_str.as_str();
-    let (mut template_id, choice) = match request.governance_type {
-        GovernanceType::Vault => {
-            let pkg = packages
-                .vault_governance
-                .as_deref()
-                .context("vault_governance package not configured")?;
-            (
-                Identifier {
-                    package_id: pkg.to_string(),
-                    module_name: "BitsafeVault.VaultGovernance".to_string(),
-                    entity_name: "VaultGovernanceConfirmation".to_string(),
-                },
-                "VaultGovernanceConfirmation_Cancel".to_string(),
-            )
-        }
+    // Every `_Cancel` choice is controller=confirmer and takes no arguments;
+    // only the confirmation template differs.
+    let command_id = uuid::Uuid::new_v4().to_string();
+    let commands = match request.governance_type {
         GovernanceType::CoreSelf => {
-            let pkg = packages
-                .governance_core
-                .as_deref()
-                .context("governance_core package not configured")?;
-            (
-                Identifier {
-                    package_id: pkg.to_string(),
-                    module_name: "Governance.Rules".to_string(),
-                    entity_name: "GovernanceSelfConfirmation".to_string(),
-                },
-                "GovernanceSelfConfirmation_Cancel".to_string(),
+            let mut confirmation = self_confirmation_template(packages)?;
+            // The confirmation contract is created by the rules contract's
+            // choice, so it shares the rules contract's (possibly out-of-date)
+            // package — exercise it under its actual package ref.
+            confirmation.package_ref = resolve_contract_package_ref(
+                config,
+                &request.party_id,
+                Some(token.to_string()),
+                &request.confirmation_cid,
+                &confirmation.package_ref,
+            )
+            .await;
+            build_cancel_self_confirmation(
+                &confirmation,
+                &request.confirmation_cid,
+                member_party_id,
+                &request.party_id,
+                command_id,
             )
         }
         GovernanceType::CoreDomain => {
             // Domain confirmations live in their own template
             // `GovernanceConfirmation` (module `Governance.Confirmation`).
-            // The `Cancel` choice is controller=confirmer with no arguments.
-            let pkg = packages
-                .governance_core
-                .as_deref()
-                .context("governance_core package not configured")?;
-            (
-                Identifier {
-                    package_id: pkg.to_string(),
-                    module_name: "Governance.Confirmation".to_string(),
-                    entity_name: "GovernanceConfirmation".to_string(),
-                },
-                "GovernanceConfirmation_Cancel".to_string(),
+            let mut confirmation = domain_confirmation_template(packages)?;
+            confirmation.package_ref = resolve_contract_package_ref(
+                config,
+                &request.party_id,
+                Some(token.to_string()),
+                &request.confirmation_cid,
+                &confirmation.package_ref,
+            )
+            .await;
+            build_cancel_domain_confirmation(
+                &confirmation,
+                &request.confirmation_cid,
+                member_party_id,
+                &request.party_id,
+                command_id,
             )
         }
     };
-
-    // The confirmation contract is created by the rules contract's choice, so
-    // it shares the rules contract's (possibly out-of-date) package —
-    // exercise it under its actual package ref.
-    if matches!(
-        request.governance_type,
-        GovernanceType::CoreSelf | GovernanceType::CoreDomain
-    ) {
-        template_id.package_id = resolve_contract_package_ref(
-            config,
-            &request.party_id,
-            Some(token.to_string()),
-            &request.confirmation_cid,
-            &template_id.package_id,
-        )
-        .await;
-    }
 
     let channel = config.ledger_channel().await?;
 
     let mut client =
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
-
-    // Cancel takes no arguments
-    let choice_argument = Value {
-        sum: Some(value::Sum::Record(Record {
-            record_id: None,
-            fields: vec![],
-        })),
-    };
-
-    let cmd = Command {
-        command: Some(command::Command::Exercise(ExerciseCommand {
-            template_id: Some(template_id),
-            contract_id: request.confirmation_cid.clone(),
-            choice,
-            choice_argument: Some(choice_argument),
-        })),
-    };
-
-    let commands = Commands {
-        workflow_id: String::new(),
-        user_id: String::new(),
-        command_id: uuid::Uuid::new_v4().to_string(),
-        commands: vec![cmd],
-        deduplication_period: None,
-        min_ledger_time_abs: None,
-        min_ledger_time_rel: None,
-        act_as: vec![member_party_id.to_string()],
-        read_as: vec![request.party_id.to_string()],
-        submission_id: String::new(),
-        disclosed_contracts: vec![],
-        synchronizer_id: String::new(),
-        package_id_selection_preference: vec![],
-        prefetch_contract_keys: vec![],
-        taps_max_passes: None,
-    };
 
     let mut req = tonic::Request::new(SubmitAndWaitRequest {
         commands: Some(commands),
@@ -3081,64 +2053,6 @@ async fn execute_cancel_confirmation(
     client.submit_and_wait(req).await?;
 
     Ok(())
-}
-
-/// Build the exercise commands that retract a proposal.
-///
-/// The first command archives the proposal itself. `GovernableAction_ProposerCancel`
-/// is declared on the interface rather than on any one template, so the
-/// exercise carries the `GovernableAction` interface id and never the id of
-/// the template that actually created the contract. That also rules out
-/// [`resolve_contract_package_ref`]: it reports the package of the contract,
-/// which here is the proposal's own package, not the interface's.
-///
-/// The second command archives the caller's confirmation on that proposal,
-/// which `/governance/propose` creates for every proposal. Both choices take
-/// no arguments, and the caller controls both — `proposer` on one, `confirmer`
-/// on the other — so one submission covers them.
-fn build_cancel_proposal_commands(
-    proposal_cid: &str,
-    action_package_ref: &str,
-    confirmation: Option<(&str, &str)>,
-) -> Vec<Command> {
-    let no_arguments = || {
-        Some(Value {
-            sum: Some(value::Sum::Record(Record {
-                record_id: None,
-                fields: vec![],
-            })),
-        })
-    };
-
-    let mut commands = vec![Command {
-        command: Some(command::Command::Exercise(ExerciseCommand {
-            template_id: Some(Identifier {
-                package_id: action_package_ref.to_string(),
-                module_name: "Governance.Action".to_string(),
-                entity_name: "GovernableAction".to_string(),
-            }),
-            contract_id: proposal_cid.to_string(),
-            choice: "GovernableAction_ProposerCancel".to_string(),
-            choice_argument: no_arguments(),
-        })),
-    }];
-
-    if let Some((confirmation_cid, confirmation_package_ref)) = confirmation {
-        commands.push(Command {
-            command: Some(command::Command::Exercise(ExerciseCommand {
-                template_id: Some(Identifier {
-                    package_id: confirmation_package_ref.to_string(),
-                    module_name: "Governance.Confirmation".to_string(),
-                    entity_name: "GovernanceConfirmation".to_string(),
-                }),
-                contract_id: confirmation_cid.to_string(),
-                choice: "GovernanceConfirmation_Cancel".to_string(),
-                choice_argument: no_arguments(),
-            })),
-        });
-    }
-
-    commands
 }
 
 /// Exercise `GovernableAction_ProposerCancel` on a proposal, and archive the
@@ -3155,64 +2069,48 @@ async fn execute_cancel_proposal(
     member_party_id: &CantonId,
     packages: &PackageConfig,
 ) -> Result {
-    let action_package_ref = packages
-        .governance_action
-        .as_deref()
-        .context("governance_action package not configured")?;
+    // `GovernableAction_ProposerCancel` is declared on the interface rather
+    // than on any one template, so the exercise carries the `GovernableAction`
+    // interface id and never the id of the template that actually created the
+    // contract. That also rules out `resolve_contract_package_ref` here: it
+    // reports the package of the contract, which is the proposal's own
+    // package, not the interface's.
+    let interface = governable_action_interface(packages)?;
 
-    let confirmation_package_ref = match request.confirmation_cid.as_deref() {
+    let own_confirmation = match request.confirmation_cid.as_deref() {
         Some(cid) => {
-            let core = packages
-                .governance_core
-                .as_deref()
-                .context("governance_core package not configured")?;
+            let mut confirmation = domain_confirmation_template(packages)?;
             // The confirmation is created by the rules contract's choice, so it
             // shares that contract's possibly out-of-date package.
-            Some(
-                resolve_contract_package_ref(
-                    config,
-                    &request.party_id,
-                    Some(token.to_string()),
-                    cid,
-                    core,
-                )
-                .await,
+            confirmation.package_ref = resolve_contract_package_ref(
+                config,
+                &request.party_id,
+                Some(token.to_string()),
+                cid,
+                &confirmation.package_ref,
             )
+            .await;
+            Some(confirmation)
         }
         None => None,
     };
 
-    let commands = build_cancel_proposal_commands(
+    let commands = build_cancel_proposal(
+        &interface,
         &request.proposal_cid,
-        action_package_ref,
         request
             .confirmation_cid
             .as_deref()
-            .zip(confirmation_package_ref.as_deref()),
+            .zip(own_confirmation.as_ref()),
+        member_party_id,
+        &request.party_id,
+        uuid::Uuid::new_v4().to_string(),
     );
 
     let channel = config.ledger_channel().await?;
 
     let mut client =
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
-
-    let commands = Commands {
-        workflow_id: String::new(),
-        user_id: String::new(),
-        command_id: uuid::Uuid::new_v4().to_string(),
-        commands,
-        deduplication_period: None,
-        min_ledger_time_abs: None,
-        min_ledger_time_rel: None,
-        act_as: vec![member_party_id.to_string()],
-        read_as: vec![request.party_id.to_string()],
-        submission_id: String::new(),
-        disclosed_contracts: vec![],
-        synchronizer_id: String::new(),
-        package_id_selection_preference: vec![],
-        prefetch_contract_keys: vec![],
-        taps_max_passes: None,
-    };
 
     let mut req = tonic::Request::new(SubmitAndWaitRequest {
         commands: Some(commands),
@@ -3226,79 +2124,9 @@ async fn execute_cancel_proposal(
 }
 
 #[cfg(test)]
-mod cancel_proposal_tests {
-    use super::*;
-
-    fn exercise(command: &Command) -> &ExerciseCommand {
-        match command.command.as_ref() {
-            Some(command::Command::Exercise(e)) => e,
-            _ => panic!("the builder only emits exercise commands"),
-        }
-    }
-
-    #[test]
-    fn cancels_the_proposal_through_the_interface() {
-        let commands = build_cancel_proposal_commands("proposal-1", "action-pkg", None);
-
-        assert_eq!(commands.len(), 1);
-        let exercised = exercise(&commands[0]);
-        assert_eq!(exercised.contract_id, "proposal-1");
-        assert_eq!(exercised.choice, "GovernableAction_ProposerCancel");
-
-        let template_id = exercised
-            .template_id
-            .as_ref()
-            .expect("exercise carries a template id");
-        assert_eq!(template_id.package_id, "action-pkg");
-        assert_eq!(template_id.module_name, "Governance.Action");
-        assert_eq!(template_id.entity_name, "GovernableAction");
-    }
-
-    #[test]
-    fn archives_the_own_confirmation_in_the_same_batch() {
-        let commands = build_cancel_proposal_commands(
-            "proposal-1",
-            "action-pkg",
-            Some(("confirmation-1", "core-pkg")),
-        );
-
-        assert_eq!(commands.len(), 2);
-        let exercised = exercise(&commands[1]);
-        assert_eq!(exercised.contract_id, "confirmation-1");
-        assert_eq!(exercised.choice, "GovernanceConfirmation_Cancel");
-
-        let template_id = exercised
-            .template_id
-            .as_ref()
-            .expect("exercise carries a template id");
-        assert_eq!(template_id.package_id, "core-pkg");
-        assert_eq!(template_id.module_name, "Governance.Confirmation");
-        assert_eq!(template_id.entity_name, "GovernanceConfirmation");
-    }
-
-    #[test]
-    fn neither_choice_takes_arguments() {
-        let commands = build_cancel_proposal_commands(
-            "proposal-1",
-            "action-pkg",
-            Some(("confirmation-1", "core-pkg")),
-        );
-
-        for command in &commands {
-            let argument = exercise(command)
-                .choice_argument
-                .as_ref()
-                .and_then(|v| v.sum.as_ref());
-            match argument {
-                Some(value::Sum::Record(record)) => assert!(record.fields.is_empty()),
-                _ => panic!("choice argument is an empty record"),
-            }
-        }
-    }
-}
-
-#[cfg(test)]
 mod propose_guard_tests {
+    use decman_lib::catalog::proposals::core::GenericVote;
+
     use super::*;
 
     fn party() -> CantonId {
@@ -3315,21 +2143,23 @@ mod propose_guard_tests {
     /// touches the ledger, so a false positive would tax every propose.
     #[test]
     fn only_an_unnamed_replacement_can_create_a_second_delegation() {
-        let setup_without_prior = ProposalType::SetupCouponReassignmentDelegation {
-            dso: party(),
-            assigners: vec![party()],
-            new_beneficiaries: vec![],
-            prior_delegation: None,
-        };
-        let setup_with_prior = ProposalType::SetupCouponReassignmentDelegation {
-            dso: party(),
-            assigners: vec![party()],
-            new_beneficiaries: vec![],
-            prior_delegation: Some("00abc".to_string()),
-        };
-        let unrelated = ProposalType::GenericVote {
+        let setup_without_prior =
+            ProposalType::SetupCouponReassignmentDelegation(SetupCouponReassignmentDelegation {
+                dso: party(),
+                assigners: vec![party()],
+                new_beneficiaries: vec![],
+                prior_delegation: None,
+            });
+        let setup_with_prior =
+            ProposalType::SetupCouponReassignmentDelegation(SetupCouponReassignmentDelegation {
+                dso: party(),
+                assigners: vec![party()],
+                new_beneficiaries: vec![],
+                prior_delegation: Some("00abc".to_string()),
+            });
+        let unrelated = ProposalType::GenericVote(GenericVote {
             description: "unrelated".to_string(),
-        };
+        });
 
         // the accident: creating one without naming what it replaces
         assert!(may_create_second_delegation(&setup_without_prior));
@@ -3343,6 +2173,96 @@ mod propose_guard_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn amulet_rules(contract_id: &str, created_event_blob: &str) -> AmuletRulesContract {
+        AmuletRulesContract {
+            dso: CantonId::parse(
+                "dso::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+            )
+            .expect("valid canton id"),
+            contract_id: contract_id.to_owned(),
+            created_event_blob: created_event_blob.to_owned(),
+        }
+    }
+
+    /// "blob" in base64.
+    const BLOB_B64: &str = "YmxvYg==";
+
+    #[test]
+    fn amulet_rules_disclosure_discloses_the_current_contract_when_the_proposal_matches() {
+        let current = amulet_rules("00amulet", BLOB_B64);
+        let disclosed = amulet_rules_disclosure(Some("00amulet"), &current)
+            .expect("a matching cid is disclosed");
+        assert_eq!(disclosed.contract_id, "00amulet");
+        assert_eq!(disclosed.created_event_blob, b"blob");
+        assert!(disclosed.template_id.is_none());
+    }
+
+    #[test]
+    fn amulet_rules_disclosure_names_both_cids_when_the_dso_replaced_amulet_rules() {
+        let current = amulet_rules("00new", BLOB_B64);
+        let err = amulet_rules_disclosure(Some("00old"), &current)
+            .expect_err("a stale proposal cannot be executed");
+        let message = format!("{err:#}");
+        assert!(message.contains("00old"), "{message}");
+        assert!(message.contains("00new"), "{message}");
+    }
+
+    #[test]
+    fn amulet_rules_disclosure_rejects_a_proposal_without_amulet_rules_cid() {
+        let current = amulet_rules("00amulet", BLOB_B64);
+        assert!(amulet_rules_disclosure(None, &current).is_err());
+    }
+
+    #[test]
+    fn amulet_rules_disclosure_rejects_a_malformed_blob() {
+        let current = amulet_rules("00amulet", "not base64!");
+        assert!(amulet_rules_disclosure(Some("00amulet"), &current).is_err());
+    }
+
+    /// `core_domain` builds its choice from `proposal_cid` and never reads
+    /// `action`, so both clients send `governance_set_threshold: 0` as a
+    /// deliberate placeholder (`NotificationsView.tsx`, `app.rs`). The inline
+    /// guard must let it through untouched — validating it would 400 every
+    /// domain confirm and execute.
+    #[test]
+    fn domain_confirms_accept_the_zero_threshold_placeholder() {
+        let placeholder = ActionType::GovernanceSetThreshold { new_threshold: 0 };
+        assert!(
+            validate_inline_action(&placeholder, GovernanceType::CoreDomain).is_ok(),
+            "the core_domain placeholder must not be validated"
+        );
+    }
+
+    /// The same placeholder on the inline path is a real threshold, and 0 is
+    /// not a legal one.
+    #[test]
+    fn self_management_confirms_still_validate_the_threshold() {
+        let bad = ActionType::GovernanceSetThreshold { new_threshold: 0 };
+        match validate_inline_action(&bad, GovernanceType::CoreSelf) {
+            Ok(()) => panic!("new_threshold 0 must not pass core_self validation"),
+            Err(error) => assert!(
+                error.contains("at least 1"),
+                "error should name the bound: {error}"
+            ),
+        }
+    }
+
+    /// A non-self-management action paired with `core_self` is a client error,
+    /// caught before it reaches the serializer that cannot encode it.
+    #[test]
+    fn self_management_confirms_reject_a_domain_action() {
+        let action = ActionType::DevNetFeatureApp {
+            amulet_rules_cid: "00amulet".to_owned(),
+        };
+        match validate_inline_action(&action, GovernanceType::CoreSelf) {
+            Ok(()) => panic!("DevNetFeatureApp is not a self-management action"),
+            Err(error) => assert!(
+                error.contains("/governance/propose"),
+                "error should point at the proposal path: {error}"
+            ),
+        }
+    }
 
     fn entry_at(offset: i64) -> ChainAuditEntry {
         ChainAuditEntry {
@@ -3441,14 +2361,8 @@ mod tests {
 
 #[cfg(test)]
 mod get_party_credentials_tests {
-    use std::{
-        collections::HashMap,
-        sync::{Arc, Mutex as StdMutex},
-    };
+    use std::sync::{Arc, Mutex as StdMutex};
 
-    use actix_web::web::Data;
-    use sqlx::SqlitePool;
-    use tokio::sync::RwLock;
     use tracing_subscriber::fmt::MakeWriter;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
@@ -3457,7 +2371,7 @@ mod get_party_credentials_tests {
 
     use super::*;
     use crate::{
-        auth::{AuthRegistry, MockValidator, TokenValidator, WorkflowAuth},
+        auth::{AuthRegistry, WorkflowAuth},
         config::{KeycloakConfig, PartyCredentials},
     };
 
@@ -3498,36 +2412,13 @@ mod get_party_credentials_tests {
         }
     }
 
-    async fn app_state(auth: Option<WorkflowAuth>) -> Result<Data<AppState>> {
-        let db = SqlitePool::connect("sqlite::memory:").await?;
-        Ok(Data::new(AppState {
-            db,
-            config: NodeConfig::default(),
-            peer_status: Arc::new(RwLock::new(HashMap::new())),
-            last_seen: Arc::new(RwLock::new(HashMap::new())),
-            peer_job_sender: tokio::sync::mpsc::unbounded_channel().0,
-            workflows: crate::server::WorkflowRegistry::new(),
-            pending_invitations: Arc::new(RwLock::new(Vec::new())),
-            auth: Arc::new(RwLock::new(auth)),
-            token_validator: TokenValidator::Mock(Arc::new(MockValidator::new(
-                "decman-admin".to_string(),
-            ))),
-            admin_role: None,
-            party_credentials: Arc::new(RwLock::new(Vec::new())),
-            bootstrap_mu: Arc::new(tokio::sync::Mutex::new(())),
-            test_mode: true,
-            refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
-            http_client: reqwest::Client::new(),
-        }))
-    }
-
     fn party_id() -> Result<CantonId> {
         CantonId::parse(&format!("p::{}", "0".repeat(68)))
     }
 
     #[tokio::test]
     async fn no_auth_configured_is_ok_none() -> Result<()> {
-        let data = app_state(None).await?;
+        let data = AppState::for_test(None).await?;
         assert!(get_party_credentials(&data, &party_id()?).await?.is_none());
         Ok(())
     }
@@ -3535,7 +2426,7 @@ mod get_party_credentials_tests {
     #[tokio::test]
     async fn unknown_party_is_ok_none() -> Result<()> {
         let registry = AuthRegistry::new(&[]).await?;
-        let data = app_state(Some(WorkflowAuth::Keycloak(Arc::new(registry)))).await?;
+        let data = AppState::for_test(Some(WorkflowAuth::Keycloak(Arc::new(registry)))).await?;
         assert!(get_party_credentials(&data, &party_id()?).await?.is_none());
         Ok(())
     }
@@ -3579,7 +2470,7 @@ mod get_party_credentials_tests {
             packages: PackageConfig::default(),
         };
         let registry = AuthRegistry::new(&[credentials]).await?;
-        let data = app_state(Some(WorkflowAuth::Keycloak(Arc::new(registry)))).await?;
+        let data = AppState::for_test(Some(WorkflowAuth::Keycloak(Arc::new(registry)))).await?;
 
         let buffer = LogBuffer::default();
         let subscriber = tracing_subscriber::fmt()

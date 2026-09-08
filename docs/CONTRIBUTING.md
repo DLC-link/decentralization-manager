@@ -49,10 +49,13 @@ process in [SECURITY.md](SECURITY.md).
   - `crates/decman/src/` — server source.
   - `crates/decman/frontend/` — React + Vite UI (embedded into the binary at build time).
   - `crates/decman/migrations/` — SQLx database migrations.
-- `crates/common/` — shared wire DTOs + Canton-ID helpers (used by `decman` and `decman-cli`).
+- `crates/common/` — shared wire DTOs, Canton-ID helpers, and external-party
+  fingerprint derivation (used by every other crate).
 - `crates/decman-cli/` — terminal UI client.
+- `crates/decman-wallet/` — wallet-side client library for the tenant API.
 - `daml/` — Daml governance packages and tests.
 - `integration-tests/` — end-to-end test harness and scripts.
+- `e2e/` — Playwright UI tests.
 - `docs/` — architecture, integration, and use-case documentation.
 
 ## Building, testing, and linting
@@ -108,6 +111,10 @@ Key conventions:
   The binary writes one JSON object per line, and a SigNoz log pipeline parses that line.
   A field then becomes a queryable attribute. Text inside the message never does.
   Set `DECPM_LOG_FORMAT=text` for the readable console format while you work.
+- **Metrics:** the server exposes Prometheus text at `/metrics` on `DECPM_METRICS_PORT`
+  (default 9464), separate from the API port so an ingress never publishes it. Register a new
+  instrument beside the code that moves it, not in a shared module, and put any classification in
+  Rust rather than in an alert query.
 - **Cargo.toml:** dependencies and their features are kept in strict
   alphabetical order.
 - **Comments:** only where the logic isn't self-evident; remove dead code rather

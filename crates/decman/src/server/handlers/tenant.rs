@@ -284,6 +284,7 @@ pub async fn tenant_status(
 
 /// Base64-decode a raw Ed25519 public key into its fixed 32-byte array, or the
 /// 400 response to return.
+#[allow(clippy::result_large_err)]
 fn decode_public_key(encoded: &str) -> std::result::Result<[u8; 32], HttpResponse> {
     let bytes = STANDARD.decode(encoded).map_err(|e| {
         HttpResponse::BadRequest().json(ErrorResponse {

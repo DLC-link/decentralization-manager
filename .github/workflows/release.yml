@@ -79,13 +79,29 @@ jobs:
 
       # Tiny build context: just the binary in ctx/ + the runtime Dockerfile, so
       # there's no repo upload to the buildkit daemon and nothing to compile.
+      #
+      # Two images per release from the same binary and the same Dockerfile:
+      # `:<tag>` on the root base, and `:<tag>-nonroot` on the distroless
+      # `:nonroot` base, running as uid 65532. Both carry the same build stamp.
       - name: Build and push to ECR Public
         env:
           VERSION_TAG: ${{ steps.tag.outputs.version_tag }}
+          IMAGE: public.ecr.aws/dlc-link/decentralization-manager
         run: |
           cp Dockerfile ctx/Dockerfile
+          BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
           docker buildx build ctx \
             --build-arg DECPM_BUILD_VERSION=$VERSION_TAG \
-            --build-arg DECPM_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
-            -t public.ecr.aws/dlc-link/decentralization-manager:$VERSION_TAG \
+            --build-arg DECPM_BUILD_TIME=$BUILD_TIME \
+            -t $IMAGE:$VERSION_TAG \
+            --push
+
+          docker buildx build ctx \
+            --build-arg DECPM_BUILD_VERSION=$VERSION_TAG \
+            --build-arg DECPM_BUILD_TIME=$BUILD_TIME \
+            --build-arg BASE_TAG=nonroot \
+            --build-arg RUNTIME_UID=65532 \
+            --build-arg DECPM_DIR_DEFAULT=/home/nonroot \
+            -t $IMAGE:$VERSION_TAG-nonroot \
             --push

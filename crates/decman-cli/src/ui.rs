@@ -10,7 +10,8 @@ use ratatui::widgets::{
 
 use common::types::{
     ConnectionStatus, DecentralizedParty, PackageInfo, PeerErrorKind, PeerPackageComparison,
-    PendingInvitation, Permission, VettedPackageInfo, WorkflowProgress, WorkflowRun,
+    PendingInvitation, Permission, VettedPackageInfo, WAITING_FOR_PEERS_STEP, WorkflowProgress,
+    WorkflowRole, WorkflowRun,
 };
 
 use crate::api::{
@@ -1718,9 +1719,6 @@ fn gov_action_summary(action: &serde_json::Value) -> String {
             field_str("member").map(|m| id_prefix(m).to_owned())
         }
         "governance_set_timeout" => field_i64("new_timeout_microseconds").map(format_micros_human),
-        "vault_pause" | "vault_unpause" | "vault_update_limits" | "vault_update_backend" => {
-            field_str("vault_id").map(|v| truncate(v, 12))
-        }
         _ => None,
     };
     match detail {
@@ -2459,6 +2457,27 @@ fn detail_kv(label: &str, value: String) -> Line<'static> {
     Line::from(vec![detail_label(label), Span::raw(value)])
 }
 
+/// The peer count for a run's detail popup, or `None` when there is nothing
+/// truthful to show. Coordinator-only: a peer-side row never learns what the
+/// other peers did, so its counter would sit at 0 for the whole run. While the
+/// coordinator waits, the peers that joined are the progress — a waiting step
+/// carries no command, so nothing completes it — and from the next step on it
+/// is the peers that completed the current one.
+fn peers_progress(run: &WorkflowRun) -> Option<String> {
+    if run.role != WorkflowRole::Coordinator || run.expected_peers.is_empty() {
+        return None;
+    }
+    let (done, label) = if run.current_step == WAITING_FOR_PEERS_STEP {
+        (run.connected_peers.len(), "joined")
+    } else {
+        (run.completed_peers.len(), "done")
+    };
+    Some(format!(
+        "{done}/{total} {label}",
+        total = run.expected_peers.len()
+    ))
+}
+
 /// An indented detail value line (for list items).
 fn detail_item(value: String) -> Line<'static> {
     Line::from(vec![
@@ -2515,15 +2534,8 @@ fn run_detail_lines(run: &WorkflowRun) -> Vec<Line<'static>> {
         lines.push(detail_kv("Participants", String::new()));
         lines.extend(run.participants.iter().map(|p| detail_item(p.to_string())));
     }
-    if !run.completed_peers.is_empty() || !run.expected_peers.is_empty() {
-        lines.push(detail_kv(
-            "Peers",
-            format!(
-                "{done}/{total} done",
-                done = run.completed_peers.len(),
-                total = run.expected_peers.len()
-            ),
-        ));
+    if let Some(peers) = peers_progress(run) {
+        lines.push(detail_kv("Peers", peers));
     }
     if !run.package_names.is_empty() {
         lines.push(detail_kv("Packages", run.package_names.join(", ")));
@@ -2583,7 +2595,17 @@ fn invitation_detail_lines(invitation: &PendingInvitation) -> Vec<Line<'static>>
         lines.push(detail_kv("Packages", invitation.package_names.join(", ")));
     }
     if !invitation.dar_filenames.is_empty() {
-        lines.push(detail_kv("DARs", invitation.dar_filenames.join(", ")));
+        // Show the pinned content hash beside each filename. The peer refuses
+        // any DAR whose bytes do not hash to this value, so it is the operator
+        // accepting the content — not just the name — and it can be compared
+        // against a published release hash before accepting.
+        lines.push(detail_kv("DARs", String::new()));
+        for (index, filename) in invitation.dar_filenames.iter().enumerate() {
+            lines.push(detail_item(match invitation.dar_hashes.get(index) {
+                Some(hash) => format!("{filename}  sha256:{hash}"),
+                None => format!("{filename}  (no hash pinned)"),
+            }));
+        }
     }
     lines
 }
@@ -2715,11 +2737,11 @@ mod tests {
                 &Status::Loaded,
                 &refs,
                 &mut state,
-                tab_block(Tab::Parties, Some(("search: vault▏".to_owned(), true))),
+                tab_block(Tab::Parties, Some(("search: treasury▏".to_owned(), true))),
                 "⠋",
             );
         });
-        assert!(rendered.contains("search: vault"));
+        assert!(rendered.contains("search: treasury"));
     }
 
     #[test]
@@ -2769,6 +2791,7 @@ mod tests {
                 coordinator_name: None,
                 expected_peers: Vec::new(),
                 completed_peers: Vec::new(),
+                connected_peers: Vec::new(),
                 dec_party_id: None,
                 prefix: None,
                 participants: Vec::new(),
@@ -2797,6 +2820,7 @@ mod tests {
                 coordinator_name: None,
                 expected_peers: Vec::new(),
                 completed_peers: Vec::new(),
+                connected_peers: Vec::new(),
                 dec_party_id: None,
                 prefix: None,
                 participants: Vec::new(),
@@ -2817,9 +2841,10 @@ mod tests {
                 coordinator_pubkey: "1220deadbeef".to_owned(),
                 coordinator_name: Some("alice".to_owned()),
                 received_at: 0,
-                prefix: Some("vault-rc5".to_owned()),
+                prefix: Some("treasury-rc5".to_owned()),
                 participants: Vec::new(),
                 dar_filenames: Vec::new(),
+                dar_hashes: Vec::new(),
                 kicked_participant: None,
                 new_threshold: None,
                 previous_threshold: None,
@@ -2854,7 +2879,7 @@ mod tests {
         assert!(!rendered.contains("6/6"));
         // The invitation row is present and actionable.
         assert!(rendered.contains("Onboarding"));
-        assert!(rendered.contains("vault-rc5"));
+        assert!(rendered.contains("treasury-rc5"));
         assert!(rendered.contains("Invitation"));
     }
 
@@ -2881,14 +2906,14 @@ mod tests {
     #[test]
     fn compare_popup_renders_matrix_of_marks() {
         let comparison = PeerPackageComparison {
-            local_packages: vec![pkg("cbtc", "1.0.0"), pkg("vault", "0.0.1")],
+            local_packages: vec![pkg("cbtc", "1.0.0"), pkg("treasury", "0.0.1")],
             peers: vec![
                 PeerPackageResult {
                     participant_id: "p1::1220".to_owned(),
                     name: "devnet 1".to_owned(),
                     reachable: true,
                     error_kind: None,
-                    // Has cbtc but is missing vault.
+                    // Has cbtc but is missing treasury.
                     packages: vec![pkg("cbtc", "1.0.0")],
                 },
                 PeerPackageResult {
@@ -2909,7 +2934,7 @@ mod tests {
         assert!(rendered.contains("Local packages: 2"));
         assert!(rendered.contains("PACKAGE"));
         assert!(rendered.contains("cbtc"));
-        // devnet 1: cbtc ✓, vault ✗; devnet 4: unreachable → – in every cell.
+        // devnet 1: cbtc ✓, treasury ✗; devnet 4: unreachable → – in every cell.
         assert!(rendered.contains('✓'));
         assert!(rendered.contains('✗'));
         assert!(rendered.contains('–'));
@@ -3084,7 +3109,7 @@ mod tests {
     #[test]
     fn onboard_popup_renders_prefix_and_peers() {
         let overlay = Overlay::Onboard(OnboardForm {
-            prefix: "vault".to_owned(),
+            prefix: "treasury".to_owned(),
             peers: vec![PeerChoice {
                 id: "p1::1220".to_owned(),
                 name: "alpha".to_owned(),
@@ -3094,7 +3119,7 @@ mod tests {
         });
         let rendered = render(|frame, area| draw_overlay(frame, area, &overlay, "⠋"));
         assert!(rendered.contains("Onboard new party"));
-        assert!(rendered.contains("vault"));
+        assert!(rendered.contains("treasury"));
         assert!(rendered.contains("alpha"));
         assert!(rendered.contains("[x]"));
     }
@@ -3251,9 +3276,54 @@ mod tests {
     }
 
     #[test]
+    fn peers_progress_counts_joins_while_waiting_then_completions() {
+        let mut run = WorkflowRun {
+            instance_name: "beth-network-creation".to_owned(),
+            kind: WorkflowKind::Onboarding,
+            role: WorkflowRole::Coordinator,
+            status: WorkflowProgress::InProgress,
+            current_step: WAITING_FOR_PEERS_STEP.to_owned(),
+            step_index: 0,
+            step_total: 7,
+            config_json: String::new(),
+            coordinator_pubkey: None,
+            coordinator_instance: None,
+            coordinator_name: None,
+            expected_peers: vec![canton_id("p1"), canton_id("p2"), canton_id("p3")],
+            completed_peers: vec![canton_id("p1")],
+            connected_peers: vec![canton_id("p1"), canton_id("p2")],
+            dec_party_id: None,
+            prefix: Some("beth-network".to_owned()),
+            participants: Vec::new(),
+            previous_threshold: None,
+            new_threshold: None,
+            kicked_participant: None,
+            added_participant: None,
+            package_names: Vec::new(),
+            dar_filenames: Vec::new(),
+            error: None,
+            dismissed: false,
+            created_at: 0,
+            updated_at: 0,
+        };
+
+        // Waiting: the joins are the progress. Reporting `completed_peers` here
+        // is what showed a zero to an operator whose peers had accepted.
+        assert_eq!(peers_progress(&run).as_deref(), Some("2/3 joined"));
+
+        // Past the gate, completions of the current step take over.
+        run.current_step = "SignDns".to_owned();
+        assert_eq!(peers_progress(&run).as_deref(), Some("1/3 done"));
+
+        // A peer-side row has no such knowledge, so it shows no count at all.
+        run.role = WorkflowRole::Peer;
+        assert_eq!(peers_progress(&run), None);
+    }
+
+    #[test]
     fn feed_detail_popup_renders_run_fields_and_error() {
         let run = WorkflowRun {
-            instance_name: "onboarding-vault-abc".to_owned(),
+            instance_name: "onboarding-treasury-abc".to_owned(),
             kind: WorkflowKind::Onboarding,
             role: WorkflowRole::Coordinator,
             status: WorkflowProgress::Failed,
@@ -3266,8 +3336,9 @@ mod tests {
             coordinator_name: None,
             expected_peers: Vec::new(),
             completed_peers: Vec::new(),
+            connected_peers: Vec::new(),
             dec_party_id: None,
-            prefix: Some("vault".to_owned()),
+            prefix: Some("treasury".to_owned()),
             participants: Vec::new(),
             previous_threshold: None,
             new_threshold: None,
@@ -3347,13 +3418,14 @@ mod tests {
         );
         assert_eq!(
             gov_action_summary(
-                &serde_json::json!({ "type": "vault_pause", "vault_id": "00abcdef0123456789" })
+                &serde_json::json!({ "type": "governance_add_member", "member": "alice::1220" })
             ),
-            "Vault Pause  00abcdef012…"
+            "Governance Add Member  alice"
         );
+        // An action with no detail arm renders the humanized type alone.
         assert_eq!(
-            gov_action_summary(&serde_json::json!({ "type": "vault_deployment" })),
-            "Vault Deployment"
+            gov_action_summary(&serde_json::json!({ "type": "utility_setup" })),
+            "Utility Setup"
         );
     }
 
@@ -3364,7 +3436,7 @@ mod tests {
         let view = GovView {
             party_name: "cbtc-network".to_owned(),
             party_id: "dec::1220".to_owned(),
-            governance_type: "vault".to_owned(),
+            governance_type: "core_self".to_owned(),
             rules_contract_id: "00rules".to_owned(),
             member_party_id: "member::1220".to_owned(),
             threshold: 2,

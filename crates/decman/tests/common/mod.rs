@@ -68,6 +68,7 @@ pub struct NodePorts {
     pub http: u16,
     pub noise: u16,
     pub participant_id: String,
+    pub metrics: u16,
 }
 
 #[derive(Debug)]
@@ -145,16 +146,19 @@ impl Fixture {
             http: read_port("P1_HTTP")?,
             noise: read_port("P1_NOISE")?,
             participant_id: read_env("P1_PARTICIPANT_ID")?,
+            metrics: read_port("P1_METRICS")?,
         };
         let p2 = NodePorts {
             http: read_port("P2_HTTP")?,
             noise: read_port("P2_NOISE")?,
             participant_id: read_env("P2_PARTICIPANT_ID")?,
+            metrics: read_port("P2_METRICS")?,
         };
         let p3 = NodePorts {
             http: read_port("P3_HTTP")?,
             noise: read_port("P3_NOISE")?,
             participant_id: read_env("P3_PARTICIPANT_ID")?,
+            metrics: read_port("P3_METRICS")?,
         };
         let dev_dir = PathBuf::from(read_env("DEV_DIR")?);
         let current_pids = [
@@ -369,16 +373,19 @@ impl Fixture {
                 http: 8081,
                 noise: 9001,
                 participant_id: "p1".to_string(),
+                metrics: 9101,
             },
             p2: NodePorts {
                 http: 8082,
                 noise: 9002,
                 participant_id: "p2".to_string(),
+                metrics: 9102,
             },
             p3: NodePorts {
                 http: 8083,
                 noise: 9003,
                 participant_id: "p3".to_string(),
+                metrics: 9103,
             },
             probe_diag: probe::ProbeDiag::default(),
             target: TestTarget::Localnet,
@@ -429,6 +436,9 @@ mod tests {
             std::env::set_var("P1_NOISE", "9001");
             std::env::set_var("P2_NOISE", "9002");
             std::env::set_var("P3_NOISE", "9003");
+            std::env::set_var("P1_METRICS", "9101");
+            std::env::set_var("P2_METRICS", "9102");
+            std::env::set_var("P3_METRICS", "9103");
             std::env::set_var("P1_PARTICIPANT_ID", "p1");
             std::env::set_var("P2_PARTICIPANT_ID", "p2");
             std::env::set_var("P3_PARTICIPANT_ID", "p3");
@@ -488,6 +498,9 @@ mod tests {
                 "P1_NOISE",
                 "P2_NOISE",
                 "P3_NOISE",
+                "P1_METRICS",
+                "P2_METRICS",
+                "P3_METRICS",
                 "P1_PARTICIPANT_ID",
                 "P2_PARTICIPANT_ID",
                 "P3_PARTICIPANT_ID",

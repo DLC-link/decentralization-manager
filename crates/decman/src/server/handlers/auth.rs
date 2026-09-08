@@ -44,6 +44,7 @@ pub async fn get_auth_config(data: web::Data<AppState>) -> impl Responder {
             auth0_domain: None,
             auth0_client_id: None,
             auth0_audience: None,
+            auth0_scope: None,
         });
     }
 
@@ -56,6 +57,7 @@ pub async fn get_auth_config(data: web::Data<AppState>) -> impl Responder {
             auth0_domain: Some(config.domain.clone()),
             auth0_client_id: Some(config.client_id.clone()),
             auth0_audience: config.audience.clone(),
+            auth0_scope: config.scope.clone(),
         });
     }
 
@@ -68,6 +70,7 @@ pub async fn get_auth_config(data: web::Data<AppState>) -> impl Responder {
             auth0_domain: None,
             auth0_client_id: None,
             auth0_audience: None,
+            auth0_scope: None,
         }),
         None => HttpResponse::Ok().json(AuthConfigResponse {
             auth_required: false,
@@ -77,6 +80,7 @@ pub async fn get_auth_config(data: web::Data<AppState>) -> impl Responder {
             auth0_domain: None,
             auth0_client_id: None,
             auth0_audience: None,
+            auth0_scope: None,
         }),
     }
 }
@@ -744,7 +748,10 @@ mod tests {
     use crate::{
         auth::{MockAuthRegistry, MockValidator, TokenValidator, WorkflowAuth},
         canton_id::CantonId,
-        config::{Auth0M2MConfig, KeycloakConfig, NodeConfig, PackageConfig, PartyCredentials},
+        config::{
+            Auth0Config, Auth0M2MConfig, KeycloakConfig, NodeConfig, PackageConfig,
+            PartyCredentials,
+        },
         server::{AppState, middleware::AuthMiddleware},
     };
 
@@ -754,13 +761,21 @@ mod tests {
     /// - `WorkflowAuth::Mock` so `grant_rights` hits its test-mode short-circuit
     /// - `admin_role` is configurable so the require-admin gate can be exercised
     async fn build_state(admin_role: Option<&str>) -> Data<AppState> {
+        build_state_with(NodeConfig::default(), admin_role, true).await
+    }
+
+    async fn build_state_with(
+        config: NodeConfig,
+        admin_role: Option<&str>,
+        test_mode: bool,
+    ) -> Data<AppState> {
         let db = SqlitePool::connect("sqlite::memory:")
             .await
             .expect("in-memory sqlite");
         let party_credentials = Arc::new(RwLock::new(Vec::new()));
         Data::new(AppState {
             db,
-            config: NodeConfig::default(),
+            config,
             peer_status: Arc::new(RwLock::new(HashMap::new())),
             last_seen: Arc::new(RwLock::new(HashMap::new())),
             peer_job_sender: tokio::sync::mpsc::unbounded_channel().0,
@@ -775,7 +790,7 @@ mod tests {
             admin_role: admin_role.map(str::to_string),
             party_credentials,
             bootstrap_mu: Arc::new(Mutex::new(())),
-            test_mode: true,
+            test_mode,
             refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
             http_client: reqwest::Client::new(),
         })
@@ -988,5 +1003,51 @@ mod tests {
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    fn auth0_config(scope: Option<&str>) -> NodeConfig {
+        let mut config = NodeConfig::default();
+        config.auth0 = Some(Auth0Config {
+            domain: "tenant.eu.auth0.com".to_string(),
+            client_id: "spa-client-id".to_string(),
+            audience: Some("https://decman-api.example".to_string()),
+            scope: scope.map(str::to_string),
+        });
+        config
+    }
+
+    /// The SPA cannot ask Auth0 for an RBAC-granted admin scope unless the
+    /// backend names it, because `auth0-spa-js` only sends what it is given.
+    /// `/auth-config` is the only channel that carries deploy-time env vars to
+    /// the browser, so the configured scope has to survive the round trip.
+    #[actix_web::test]
+    async fn auth_config_surfaces_the_configured_auth0_scope() {
+        let state = build_state_with(auth0_config(Some("decman-admin")), None, false).await;
+        let app =
+            test::init_service(App::new().app_data(state).service(super::get_auth_config)).await;
+        let req = TestRequest::get().uri("/auth-config").to_request();
+        let body: Value = test::call_and_read_body_json(&app, req).await;
+
+        assert_eq!(body["auth0_scope"], "decman-admin");
+        assert_eq!(body["auth0_domain"], "tenant.eu.auth0.com");
+        assert_eq!(body["auth_required"], true);
+    }
+
+    /// An operator who sets no scope must get no `scope` key at all, so the
+    /// SPA falls through to `auth0-spa-js`'s own "openid profile email"
+    /// default instead of requesting the empty string.
+    #[actix_web::test]
+    async fn auth_config_omits_auth0_scope_when_unset() {
+        let state = build_state_with(auth0_config(None), None, false).await;
+        let app =
+            test::init_service(App::new().app_data(state).service(super::get_auth_config)).await;
+        let req = TestRequest::get().uri("/auth-config").to_request();
+        let body: Value = test::call_and_read_body_json(&app, req).await;
+
+        assert!(
+            body.get("auth0_scope").is_none(),
+            "auth0_scope should be omitted when unset, got {body}"
+        );
+        assert_eq!(body["auth0_domain"], "tenant.eu.auth0.com");
     }
 }

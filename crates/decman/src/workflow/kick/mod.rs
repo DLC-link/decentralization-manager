@@ -4,7 +4,9 @@ pub mod peer;
 pub mod steps;
 
 pub use config::KickConfig;
-pub use steps::{create_proposals, export_state, sign_proposals, submit_kick};
+pub use steps::{
+    create_proposals, export_state, prune_cached_membership, sign_proposals, submit_kick,
+};
 
 use crate::{noise::MessageType, server::WorkflowKind, workflow::state::WorkflowStep};
 

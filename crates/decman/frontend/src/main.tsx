@@ -3,6 +3,8 @@ import "@fontsource/space-grotesk/400.css";
 import "@fontsource/space-grotesk/500.css";
 import "@fontsource/space-grotesk/600.css";
 import "@fontsource/space-grotesk/700.css";
+import "@fontsource/roboto-mono/400.css";
+import "@fontsource/roboto-mono/500.css";
 
 import { StrictMode, useEffect, useState, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
@@ -38,6 +40,12 @@ function Auth0Bootstrap({ children }: { children: ReactNode }) {
           redirect_uri: window.location.origin,
           ...(config.auth0_audience
             ? { audience: config.auth0_audience }
+            : {}),
+          // auth0-spa-js shallow-merges authorizationParams over its own
+          // defaults, so a supplied `scope` replaces "openid profile email"
+          // outright. Re-state the default so extra scopes are additive.
+          ...(config.auth0_scope
+            ? { scope: `openid profile email ${config.auth0_scope}` }
             : {}),
         }}
       >
