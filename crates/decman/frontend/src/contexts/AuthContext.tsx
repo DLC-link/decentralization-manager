@@ -224,15 +224,36 @@ function Auth0AuthProvider({ children }: { children: ReactNode }) {
   );
 }
 
+// Dev-only (mock mode): a fake, toggleable login session so the full
+// authenticated UI (logout, the login screen) is previewable offline. The
+// `__MOCK__` guard is a compile-time constant, so this is dead-code-eliminated
+// from production builds.
+function MockAuthProvider({ children }: { children: ReactNode }) {
+  const [token, setTokenState] = useState<string | null>("mock-session");
+  const logout = useCallback(() => setTokenState(null), []);
+  const login = useCallback(() => setTokenState("mock-session"), []);
+
+  if (!token) return <LoginPage onLogin={login} />;
+
+  return (
+    <AuthContext.Provider value={{ token, logout }}>
+      {children}
+    </AuthContext.Provider>
+  );
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [config, setConfig] = useState<AuthConfig | null>(null);
 
   useEffect(() => {
+    if (__MOCK__) return;
     fetch("/auth-config")
       .then((res) => res.json())
       .then((c: AuthConfig) => setConfig(c))
       .catch(() => setConfig({ auth_required: false }));
   }, []);
+
+  if (__MOCK__) return <MockAuthProvider>{children}</MockAuthProvider>;
 
   if (!config) return <AuthenticatingScreen />;
 

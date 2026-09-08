@@ -51,14 +51,28 @@ jobs:
 
       # Tiny build context: just the binary in ctx/ + the runtime Dockerfile, so
       # there's no repo upload to the buildkit daemon and nothing to compile.
+      #
+      # Both published variants are built here too, so a dev image can be
+      # deployed under the same pod security context as a release.
       - name: Build and push to ECR (private)
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           SHORT_SHA: ${{ steps.sha.outputs.short }}
         run: |
           cp Dockerfile ctx/Dockerfile
+          BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
           docker buildx build ctx \
             --build-arg DECPM_BUILD_VERSION=$SHORT_SHA \
-            --build-arg DECPM_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+            --build-arg DECPM_BUILD_TIME=$BUILD_TIME \
             -t $ECR_REGISTRY/decentralization-manager:$SHORT_SHA \
+            --push
+
+          docker buildx build ctx \
+            --build-arg DECPM_BUILD_VERSION=$SHORT_SHA \
+            --build-arg DECPM_BUILD_TIME=$BUILD_TIME \
+            --build-arg BASE_TAG=nonroot \
+            --build-arg RUNTIME_UID=65532 \
+            --build-arg DECPM_DIR_DEFAULT=/home/nonroot \
+            -t $ECR_REGISTRY/decentralization-manager:$SHORT_SHA-nonroot \
             --push

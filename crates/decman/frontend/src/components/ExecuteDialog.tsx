@@ -15,10 +15,6 @@ import {
 } from "@mui/material";
 import DeleteIcon from "@mui/icons-material/Delete";
 import AddIcon from "@mui/icons-material/Add";
-import {
-  DEVNET_VAULT_RULES,
-  DEVNET_VAULT_PROCESSOR_RULES,
-} from "../constants";
 import { fieldHelpAdornment } from "./FieldHelp";
 import type {
   GovernanceAction,
@@ -31,14 +27,6 @@ const ACTION_TYPE_LABELS: Record<string, string> = {
   governance_remove_member: "Remove Governance Member",
   governance_set_threshold: "Set Governance Threshold",
   governance_set_timeout: "Set Governance Timeout",
-  vault_deployment: "Deploy Vault",
-  yield_epoch_deployment: "Deploy YieldEpoch",
-  vault_pause: "Pause Vault",
-  vault_unpause: "Unpause Vault",
-  vault_update_limits: "Update Vault Limits",
-  vault_update_backend: "Update Vault Backend",
-  vault_update_far_beneficiaries: "Update FAR Beneficiaries",
-  processor_deployment_request: "Deploy Processor",
   utility_create_provider_request: "Create Provider Request",
   utility_create_user_request: "Create User Request",
   utility_setup: "Utility Setup",
@@ -48,12 +36,6 @@ const ACTION_TYPE_LABELS: Record<string, string> = {
   dev_net_feature_app: "DevNet Feature App",
 };
 
-const STATIC_BLOB_MAP: Record<string, string> = Object.fromEntries(
-  [DEVNET_VAULT_RULES, DEVNET_VAULT_PROCESSOR_RULES].map(
-    (c) => [c.contract_id, c.blob],
-  ),
-);
-
 const formatActionType = (action: ActionType): string =>
   ACTION_TYPE_LABELS[action.type] || action.type;
 
@@ -62,20 +44,6 @@ const getRequiredContractIds = (action: ActionType): string[] => {
   switch (action.type) {
     case "dev_net_feature_app":
       return [action.amulet_rules_cid];
-    case "vault_deployment": {
-      const ids = [action.vault_rules_cid, action.allocation_factory_cid];
-      if (action.vault_far_config) {
-        ids.push(action.vault_far_config.featured_app_right_cid);
-      }
-      return ids;
-    }
-    case "processor_deployment_request": {
-      const ids = [action.vault_processor_rules_cid, action.allocation_factory_cid];
-      if (action.processor_far_config) {
-        ids.push(action.processor_far_config.featured_app_right_cid);
-      }
-      return ids;
-    }
     default:
       return [];
   }
@@ -332,10 +300,7 @@ export const ExecuteDialog = ({
   onErrorDismiss,
   blobMap = {},
 }: ExecuteDialogProps) => {
-  const fullBlobMap = useMemo(
-    () => ({ ...STATIC_BLOB_MAP, ...blobMap }),
-    [blobMap],
-  );
+  const fullBlobMap = useMemo(() => ({ ...blobMap }), [blobMap]);
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>

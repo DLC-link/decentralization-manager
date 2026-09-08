@@ -20,6 +20,195 @@
       "amount": "3.20000000",
       "locked_amount": "0.00",
       "preapproval_set_up": false
+    },
+    {
+      "instrument_admin": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
+      "instrument_id": "USDC-1",
+      "amount": "111.39000000",
+      "locked_amount": "0.00000000",
+      "preapproval_set_up": false
+    },
+    {
+      "instrument_admin": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
+      "instrument_id": "EURC-1",
+      "amount": "148.52000000",
+      "locked_amount": "4.00000000",
+      "preapproval_set_up": true
+    },
+    {
+      "instrument_admin": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
+      "instrument_id": "XAUT-1",
+      "amount": "185.65000000",
+      "locked_amount": "0.00000000",
+      "preapproval_set_up": true
+    },
+    {
+      "instrument_admin": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
+      "instrument_id": "WBTC-1",
+      "amount": "222.78000000",
+      "locked_amount": "0.00000000",
+      "preapproval_set_up": false
+    },
+    {
+      "instrument_admin": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
+      "instrument_id": "SOL-1",
+      "amount": "259.91000000",
+      "locked_amount": "0.00000000",
+      "preapproval_set_up": true
+    },
+    {
+      "instrument_admin": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
+      "instrument_id": "ETH-1",
+      "amount": "296.04000000",
+      "locked_amount": "1.00000000",
+      "preapproval_set_up": true
+    },
+    {
+      "instrument_admin": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
+      "instrument_id": "DAI-1",
+      "amount": "333.17000000",
+      "locked_amount": "0.00000000",
+      "preapproval_set_up": false
+    },
+    {
+      "instrument_admin": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
+      "instrument_id": "CBTC-2",
+      "amount": "370.30000000",
+      "locked_amount": "0.00000000",
+      "preapproval_set_up": true
+    },
+    {
+      "instrument_admin": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
+      "instrument_id": "IBTC-2",
+      "amount": "407.43000000",
+      "locked_amount": "0.00000000",
+      "preapproval_set_up": true
+    },
+    {
+      "instrument_admin": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
+      "instrument_id": "CC-2",
+      "amount": "444.56000000",
+      "locked_amount": "5.00000000",
+      "preapproval_set_up": false
+    },
+    {
+      "instrument_admin": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
+      "instrument_id": "USDC-2",
+      "amount": "481.69000000",
+      "locked_amount": "0.00000000",
+      "preapproval_set_up": true
+    },
+    {
+      "instrument_admin": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
+      "instrument_id": "EURC-2",
+      "amount": "518.82000000",
+      "locked_amount": "0.00000000",
+      "preapproval_set_up": true
+    },
+    {
+      "instrument_admin": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
+      "instrument_id": "XAUT-2",
+      "amount": "555.95000000",
+      "locked_amount": "0.00000000",
+      "preapproval_set_up": false
+    },
+    {
+      "instrument_admin": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
+      "instrument_id": "WBTC-2",
+      "amount": "592.08000000",
+      "locked_amount": "2.00000000",
+      "preapproval_set_up": true
+    },
+    {
+      "instrument_admin": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
+      "instrument_id": "SOL-2",
+      "amount": "629.21000000",
+      "locked_amount": "0.00000000",
+      "preapproval_set_up": true
+    },
+    {
+      "instrument_admin": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
+      "instrument_id": "ETH-2",
+      "amount": "666.34000000",
+      "locked_amount": "0.00000000",
+      "preapproval_set_up": false
+    },
+    {
+      "instrument_admin": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
+      "instrument_id": "DAI-2",
+      "amount": "703.47000000",
+      "locked_amount": "0.00000000",
+      "preapproval_set_up": true
+    },
+    {
+      "instrument_admin": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
+      "instrument_id": "CBTC-3",
+      "amount": "740.60000000",
+      "locked_amount": "6.00000000",
+      "preapproval_set_up": true
+    },
+    {
+      "instrument_admin": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
+      "instrument_id": "IBTC-3",
+      "amount": "777.73000000",
+      "locked_amount": "0.00000000",
+      "preapproval_set_up": false
+    },
+    {
+      "instrument_admin": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
+      "instrument_id": "CC-3",
+      "amount": "814.86000000",
+      "locked_amount": "0.00000000",
+      "preapproval_set_up": true
+    },
+    {
+      "instrument_admin": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
+      "instrument_id": "USDC-3",
+      "amount": "851.99000000",
+      "locked_amount": "0.00000000",
+      "preapproval_set_up": true
+    },
+    {
+      "instrument_admin": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
+      "instrument_id": "EURC-3",
+      "amount": "888.12000000",
+      "locked_amount": "3.00000000",
+      "preapproval_set_up": false
+    },
+    {
+      "instrument_admin": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
+      "instrument_id": "XAUT-3",
+      "amount": "925.25000000",
+      "locked_amount": "0.00000000",
+      "preapproval_set_up": true
+    },
+    {
+      "instrument_admin": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
+      "instrument_id": "WBTC-3",
+      "amount": "962.38000000",
+      "locked_amount": "0.00000000",
+      "preapproval_set_up": true
+    },
+    {
+      "instrument_admin": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
+      "instrument_id": "SOL-3",
+      "amount": "999.51000000",
+      "locked_amount": "0.00000000",
+      "preapproval_set_up": false
+    },
+    {
+      "instrument_admin": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
+      "instrument_id": "ETH-3",
+      "amount": "1036.64000000",
+      "locked_amount": "0.00000000",
+      "preapproval_set_up": true
+    },
+    {
+      "instrument_admin": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
+      "instrument_id": "DAI-3",
+      "amount": "1073.77000000",
+      "locked_amount": "0.00000000",
+      "preapproval_set_up": true
     }
   ]
 }

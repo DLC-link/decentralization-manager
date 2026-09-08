@@ -52,7 +52,7 @@ async fn log_governance_audit(pool: &SqlitePool, params: AuditParams) {
     let gov_type = serde_json::to_value(params.governance_type)
         .ok()
         .and_then(|v| v.as_str().map(String::from))
-        .unwrap_or_else(|| "vault".to_string());
+        .unwrap_or_else(|| "core_self".to_string());
 
     let result = sqlx::query(
         r"

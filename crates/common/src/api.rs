@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     canton_id::CantonId,
     types::{
-        AuditLogEntry, DecentralizedParty, PendingInvitation, WorkflowKind, WorkflowProgress,
-        WorkflowRun,
+        AuditLogEntry, DecentralizedParty, PendingInvitation, Permission, WorkflowKind,
+        WorkflowProgress, WorkflowRun,
     },
 };
 
@@ -48,8 +48,6 @@ pub struct PackageConfig {
     /// as a dependency but does not define its templates.
     pub utility_credential_app: Option<String>,
     pub utility_registry: Option<String>,
-    pub vault: Option<String>,
-    pub vault_governance: Option<String>,
 }
 
 // ============================================================================
@@ -331,6 +329,21 @@ pub struct ExternalPartyInfo {
     pub host_count: u32,
     /// When the hosting mapping became effective, RFC 3339.
     pub created_at: Option<String>,
+    /// The participants named by the hosting mapping, so the UI can show *which*
+    /// nodes host the party rather than only how many. Ordered as the mapping
+    /// lists them.
+    pub hosts: Vec<ExternalPartyHost>,
+}
+
+/// One participant named by an external party's `PartyToParticipant` mapping.
+#[derive(Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct ExternalPartyHost {
+    /// The hosting participant's uid (`{hint}::{fingerprint}`).
+    pub participant_uid: String,
+    /// What the mapping lets this participant do for the party.
+    pub permission: Permission,
 }
 
 /// Response wrapper for `GET /external-parties`.
@@ -671,6 +684,13 @@ pub struct DeclineInvitationPayload {
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct DarsInvitePayload {
     pub dar_filenames: Vec<String>,
+    /// SHA-256 of each DAR's content, hex encoded and index-aligned with
+    /// `dar_filenames`. A peer pins the accepted content with these, so a
+    /// coordinator cannot get a different DAR vetted under an accepted name.
+    /// Empty from a coordinator that predates the field; the peer then falls
+    /// back to checking filenames only.
+    #[serde(default)]
+    pub dar_hashes: Vec<String>,
     /// The member set (selected peers) this distribution targets, so the peer
     /// card can render the same participant list the coordinator shows.
     #[serde(default)]
@@ -955,7 +975,7 @@ pub struct GrantRightsResponse {
 // ============================================================================
 
 /// Instrument identifier (admin + id)
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct InstrumentId {
@@ -964,7 +984,7 @@ pub struct InstrumentId {
 }
 
 /// Credential claim (subject, property, value)
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct Claim {
@@ -976,7 +996,7 @@ pub struct Claim {
 /// One claim a `PartyCredentialRequirement` demands: a credential's claims
 /// must contain this `(property, value)` pair. The Daml side is a
 /// `DA.Types:Tuple2 Text Text`; the wire shape names the halves instead.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct RequiredClaim {
@@ -986,7 +1006,7 @@ pub struct RequiredClaim {
 
 /// A credential requirement on a party: `issuer` must have issued the party
 /// a credential whose claims contain every entry of `required_claims`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct PartyCredentialRequirement {
@@ -997,7 +1017,7 @@ pub struct PartyCredentialRequirement {
 
 /// One offboarded instrument issuer and the credentials to revoke for it. The
 /// Daml side checks that every claim on each credential names this issuer.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct InstrumentIssuerCredentials {
@@ -1012,17 +1032,15 @@ pub struct InstrumentIssuerCredentials {
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub enum GovernanceType {
-    /// VaultGovernanceRules (closed-enum inline actions)
-    #[default]
-    Vault,
     /// GovernanceRules self-management (GovernanceSelfAction)
+    #[default]
     CoreSelf,
     /// GovernanceRules domain actions (GovernableAction proposals)
     CoreDomain,
 }
 
 /// Instrument allowance for token preapproval
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct InstrumentAllowance {
@@ -1033,7 +1051,7 @@ pub struct InstrumentAllowance {
 /// Mirrors `Utility.Registry.Holding.V0.Types.InstrumentIdentifier` — used to
 /// record standard market symbols (e.g. Ticker, ISIN) alongside the primary
 /// `instrument_id_text` UUID.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct InstrumentIdentifier {
@@ -1091,13 +1109,13 @@ pub struct CancelProposalRequest {
     pub confirmation_cid: Option<String>,
 }
 
-/// State of a VaultGovernanceRules contract
+/// State of a GovernanceRules contract
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct GovernanceState {
     pub contract_id: String,
-    pub vault_manager: CantonId,
+    pub governance_party: CantonId,
     pub members: Vec<CantonId>,
     pub threshold: i64,
     // Optional on the wire: older governance rules contracts predate this field.
@@ -1122,26 +1140,6 @@ pub struct GovernanceState {
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct GovernanceStateResponse {
     pub state: Option<GovernanceState>,
-}
-
-/// Information about a deployed Vault contract
-#[derive(Clone, Debug, Serialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct VaultInfo {
-    pub contract_id: String,
-    pub vault_name: String,
-    pub share_symbol: String,
-    pub is_paused: bool,
-    pub vault_manager: CantonId,
-}
-
-/// Response for the vaults endpoint
-#[derive(Serialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct VaultsResponse {
-    pub vaults: Vec<VaultInfo>,
 }
 
 /// Information about a ProviderService contract
@@ -1585,7 +1583,7 @@ pub struct ChainAuditEntry {
     /// "Module:Entity"
     pub template_id: String,
     pub package_id: String,
-    /// vault | core_self | core_domain | cbtc | unknown
+    /// core_self | core_domain | cbtc | unknown
     pub governance_type: String,
     pub action_summary: String,
     /// Exercised choice name (None for Created events)
@@ -1630,7 +1628,7 @@ mod tests {
     fn governance_state_round_trips_with_every_optional_field_omitted() -> Result<()> {
         let state = GovernanceState {
             contract_id: "00rules".to_owned(),
-            vault_manager: party("mgr")?,
+            governance_party: party("mgr")?,
             members: vec![party("m1")?],
             threshold: 2,
             action_confirmation_timeout_microseconds: None,

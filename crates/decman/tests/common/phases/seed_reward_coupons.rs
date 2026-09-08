@@ -32,8 +32,8 @@ pub const SEED_AMOUNT: f64 = 100.0;
 /// output creates (`MAX_CREATES / beneficiary_count` = 100/2 = 50 coupons here),
 /// so 60 forces the drain loop to submit a second `Delegation_Assign` — the
 /// multi-chunk path a single-coupon seed never reaches. (That the whole set
-/// drains within *one* tick is pinned down by the `drain_assignable` unit tests;
-/// an e2e poll cannot distinguish one draining tick from several chunking ones.)
+/// drains within *one* sweep is pinned down by the `drain_assignable` unit tests;
+/// an e2e poll cannot distinguish one draining sweep from several chunking ones.)
 pub const SEED_COUPON_COUNT: usize = 60;
 
 /// Coupons per seed transaction. Keeps each seeding submission near the size
@@ -76,7 +76,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     grant_rights(&*f, P1_JSON_API, &operator_party, "participant-1").await?;
 
     // Freshly issued coupons at the real 36h TTL: well clear of the expiry
-    // margin, so select_assignable takes them on the next tick. Distinct rounds
+    // margin, so select_assignable takes them on the next sweep. Distinct rounds
     // keep the seeded contracts distinguishable in a failure dump.
     let expires_at = (Utc::now() + chrono::Duration::hours(36))
         .format("%Y-%m-%dT%H:%M:%SZ")

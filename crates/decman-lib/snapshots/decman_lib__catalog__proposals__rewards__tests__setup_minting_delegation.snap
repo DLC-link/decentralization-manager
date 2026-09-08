@@ -1,0 +1,75 @@
+---
+source: crates/decman-lib/src/catalog/proposals/rewards.rs
+expression: "SetupMintingDelegation\n{\n    delegate: cid(\"delegate\"), dso: cid(\"dso\"), expires_at_micros:\n    1_800_000_000_000_000, amulet_merge_limit: 10, description:\n    \"collect CIP-104 rewards\".to_string(),\n}.to_daml_proto().unwrap()"
+---
+Value {
+    sum: Some(
+        Record(
+            Record {
+                record_id: None,
+                fields: [
+                    RecordField {
+                        label: "delegate",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    Party(
+                                        "delegate::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "dso",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    Party(
+                                        "dso::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "expiresAt",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    Timestamp(
+                                        1800000000000000,
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "amuletMergeLimit",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    Int64(
+                                        10,
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "description",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    Text(
+                                        "collect CIP-104 rewards",
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                ],
+            },
+        ),
+    ),
+}

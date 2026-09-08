@@ -405,11 +405,11 @@ pub async fn tenant_add_hosts_onboard(
     let topology_transactions =
         match decode_all(&body.topology_transactions, "topology transaction") {
             Ok(v) => v,
-            Err(resp) => return resp,
+            Err(error) => return HttpResponse::BadRequest().json(ErrorResponse { error }),
         };
     let signatures = match decode_all(&body.signatures, "signature") {
         Ok(v) => v,
-        Err(resp) => return resp,
+        Err(error) => return HttpResponse::BadRequest().json(ErrorResponse { error }),
     };
     if signatures.len() != topology_transactions.len() {
         return HttpResponse::BadRequest().json(ErrorResponse {
@@ -738,11 +738,11 @@ pub async fn tenant_threshold_onboard(
     let topology_transactions =
         match decode_all(&body.topology_transactions, "topology transaction") {
             Ok(v) => v,
-            Err(resp) => return resp,
+            Err(error) => return HttpResponse::BadRequest().json(ErrorResponse { error }),
         };
     let signatures = match decode_all(&body.signatures, "signature") {
         Ok(v) => v,
-        Err(resp) => return resp,
+        Err(error) => return HttpResponse::BadRequest().json(ErrorResponse { error }),
     };
 
     let bundle = ExternalPartyThresholdPayload {
@@ -847,6 +847,7 @@ pub struct AcsBaseSerialQuery {
 
 /// Base64-decode a raw Ed25519 public key into its fixed 32-byte array, or the
 /// 400 response to return.
+#[allow(clippy::result_large_err)]
 fn decode_public_key(encoded: &str) -> std::result::Result<[u8; 32], HttpResponse> {
     let bytes = STANDARD.decode(encoded).map_err(|e| {
         HttpResponse::BadRequest().json(ErrorResponse {
@@ -862,15 +863,16 @@ fn decode_public_key(encoded: &str) -> std::result::Result<[u8; 32], HttpRespons
 
 /// Base64-decode every entry of `encoded`, or the 400 response to return.
 /// `what` names the field in the error.
-fn decode_all(encoded: &[String], what: &str) -> std::result::Result<Vec<Vec<u8>>, HttpResponse> {
+/// Returns the message rather than a built response: an `HttpResponse` in the
+/// `Err` arm is an order of magnitude larger than the `Ok` value, which clippy
+/// rightly objects to for a helper called on every request.
+fn decode_all(encoded: &[String], what: &str) -> std::result::Result<Vec<Vec<u8>>, String> {
     encoded
         .iter()
         .map(|value| {
-            STANDARD.decode(value).map_err(|e| {
-                HttpResponse::BadRequest().json(ErrorResponse {
-                    error: format!("{what} is not valid base64: {e}"),
-                })
-            })
+            STANDARD
+                .decode(value)
+                .map_err(|e| format!("{what} is not valid base64: {e}"))
         })
         .collect()
 }

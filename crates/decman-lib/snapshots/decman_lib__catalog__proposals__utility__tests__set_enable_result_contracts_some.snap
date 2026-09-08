@@ -1,0 +1,49 @@
+---
+source: crates/decman-lib/src/catalog/proposals/utility.rs
+expression: "SetEnableResultContracts\n{\n    registrar_service_cid: \"00rsc\".to_string(), enable_result_contracts:\n    Some(true),\n}.to_daml_proto().unwrap()"
+---
+Value {
+    sum: Some(
+        Record(
+            Record {
+                record_id: None,
+                fields: [
+                    RecordField {
+                        label: "registrarServiceCid",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    ContractId(
+                                        "00rsc",
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "enableResultContracts",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    Optional(
+                                        Optional {
+                                            value: Some(
+                                                Value {
+                                                    sum: Some(
+                                                        Bool(
+                                                            true,
+                                                        ),
+                                                    ),
+                                                },
+                                            ),
+                                        },
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                ],
+            },
+        ),
+    ),
+}

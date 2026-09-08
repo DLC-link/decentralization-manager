@@ -111,6 +111,10 @@ Key conventions:
   The binary writes one JSON object per line, and a SigNoz log pipeline parses that line.
   A field then becomes a queryable attribute. Text inside the message never does.
   Set `DECPM_LOG_FORMAT=text` for the readable console format while you work.
+- **Metrics:** the server exposes Prometheus text at `/metrics` on `DECPM_METRICS_PORT`
+  (default 9464), separate from the API port so an ingress never publishes it. Register a new
+  instrument beside the code that moves it, not in a shared module, and put any classification in
+  Rust rather than in an alert query.
 - **Cargo.toml:** dependencies and their features are kept in strict
   alphabetical order.
 - **Comments:** only where the logic isn't self-evident; remove dead code rather

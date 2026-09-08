@@ -1,6 +1,6 @@
 //! Read-only token-standard, registry, and network-proxy endpoints.
 //!
-//! Split out of `governance.rs` (#282): these handlers query vaults,
+//! Split out of `governance.rs` (#282): these handlers query
 //! services, credentials, transfer instructions/factories, holdings,
 //! instruments, generic contracts, package configuration, and the DSO
 //! network/operator proxies. They share nothing with the propose -> confirm
@@ -10,6 +10,7 @@
 use std::collections::HashSet;
 
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
+use anyhow::Context as _;
 use serde::Deserialize;
 
 use super::governance::{get_party_token, packages};
@@ -24,7 +25,7 @@ use crate::{
             get_holdings, get_instruments, get_open_burn_requests, get_open_mint_requests,
             get_open_transfer_instructions, get_provider_configurations, get_provider_services,
             get_registrar_service_requests, get_registrar_services, get_transfer_factories,
-            get_user_services, get_vaults, query_contracts_by_template,
+            get_user_services, query_contracts_by_template,
         },
         types::{
             BurnRequestsResponse, ContractQueryResponse, CredentialOffersResponse,
@@ -32,7 +33,7 @@ use crate::{
             MintRequestsResponse, NetworkInfo, OperatorInfo, ProviderConfigurationsResponse,
             ProviderServicesResponse, RegistrarServiceRequestsResponse, RegistrarServicesResponse,
             TransferFactoriesResponse, TransferFactoryInfo, TransferInstructionsResponse,
-            TransferPreapprovalsResponse, UserServicesResponse, VaultsResponse,
+            TransferPreapprovalsResponse, UserServicesResponse,
         },
     },
 };
@@ -59,36 +60,6 @@ pub struct ContractQueryParams {
     /// without an `executeBefore` field.
     #[serde(default)]
     pub active_only: bool,
-}
-
-/// Get deployed Vault contracts
-#[utoipa::path(
-    tag = "Services",
-    params(GovernanceQuery),
-    responses(
-        (status = 200, description = "Deployed vaults", body = VaultsResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
-    )
-)]
-#[get("/vaults")]
-pub async fn get_vaults_handler(
-    data: web::Data<AppState>,
-    query: web::Query<GovernanceQuery>,
-) -> impl Responder {
-    let party_id = &query.party_id;
-
-    let token = get_party_token(&data, party_id).await;
-    let packages = packages();
-
-    match get_vaults(&data.config, party_id, token, &packages).await {
-        Ok(vaults) => HttpResponse::Ok().json(VaultsResponse { vaults }),
-        Err(e) => {
-            tracing::error!("Failed to fetch vaults: {e}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch vaults: {e}"),
-            })
-        }
-    }
 }
 
 /// Get ProviderService contracts
@@ -629,6 +600,53 @@ pub async fn get_transfer_factories_handler(
     }
 }
 
+/// The DSO's current `AmuletRules` contract, as the DSO scan API reports it.
+pub(crate) struct AmuletRulesContract {
+    pub dso: CantonId,
+    pub contract_id: String,
+    /// Base64 created-event blob, ready to disclose on a submission.
+    pub created_event_blob: String,
+}
+
+/// Fetch the DSO party id and the current `AmuletRules` contract from the DSO
+/// scan API.
+pub(crate) async fn fetch_amulet_rules(
+    http_client: &reqwest::Client,
+    config: &NodeConfig,
+) -> anyhow::Result<AmuletRulesContract> {
+    fn text_at<'a>(json: &'a serde_json::Value, pointer: &str) -> anyhow::Result<&'a str> {
+        json.pointer(pointer)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                // Clients get the stable message; the pointer is a debugging aid.
+                tracing::warn!("DSO API response is missing {pointer}");
+                anyhow::anyhow!("Unexpected response format from DSO API")
+            })
+    }
+
+    let url = config.canton.network.dso_url();
+    let res = http_client
+        .get(url)
+        .send()
+        .await
+        .context("Failed to reach DSO API")?;
+    if !res.status().is_success() {
+        let status = res.status();
+        let body = res.text().await.unwrap_or_default();
+        anyhow::bail!("DSO API returned {status}: {body}");
+    }
+    let json: serde_json::Value = res.json().await.context("Failed to parse DSO response")?;
+    let dso = text_at(&json, "/dso_party_id")?
+        .parse::<CantonId>()
+        .map_err(|e| anyhow::anyhow!("Invalid DSO party ID: {e}"))?;
+    Ok(AmuletRulesContract {
+        dso,
+        contract_id: text_at(&json, "/amulet_rules/contract/contract_id")?.to_string(),
+        created_event_blob: text_at(&json, "/amulet_rules/contract/created_event_blob")?
+            .to_string(),
+    })
+}
+
 /// Pull the DSO party id and AmuletRules contract id from the DSO API. Returns
 /// `None` (with a logged warning) on any failure so callers can degrade
 /// gracefully — the only consumer is `/transfer-factories`, which omits CC
@@ -637,28 +655,13 @@ async fn fetch_amulet_rules_factory(
     http_client: &reqwest::Client,
     config: &NodeConfig,
 ) -> Option<(CantonId, String)> {
-    let url = config.canton.network.dso_url();
-    let res = match http_client.get(url).send().await {
-        Ok(res) if res.status().is_success() => res,
-        Ok(res) => {
-            tracing::warn!("DSO API returned {} fetching AmuletRules", res.status());
-            return None;
-        }
+    match fetch_amulet_rules(http_client, config).await {
+        Ok(rules) => Some((rules.dso, rules.contract_id)),
         Err(e) => {
-            tracing::warn!("Failed to reach DSO API for AmuletRules: {e}");
-            return None;
+            tracing::warn!("Failed to fetch AmuletRules from the DSO API: {e:#}");
+            None
         }
-    };
-    let json: serde_json::Value = res
-        .json()
-        .await
-        .inspect_err(|e| tracing::warn!("Failed to parse DSO response: {e}"))
-        .ok()?;
-    let dso = json.pointer("/dso_party_id").and_then(|v| v.as_str())?;
-    let cid = json
-        .pointer("/amulet_rules/contract/contract_id")
-        .and_then(|v| v.as_str())?;
-    Some((dso.parse().ok()?, cid.to_string()))
+    }
 }
 
 /// Get token-standard `Holding` contracts owned by a party, aggregated by
@@ -756,53 +759,21 @@ pub async fn get_packages() -> impl Responder {
 )]
 #[get("/network-info")]
 pub async fn get_network_info(data: web::Data<AppState>) -> impl Responder {
-    let url = data.config.canton.network.dso_url();
-
-    match data.http_client.get(url).send().await {
-        Ok(res) if res.status().is_success() => match res.json::<serde_json::Value>().await {
-            Ok(json) => {
-                let dso_party = json.pointer("/dso_party_id").and_then(|v| v.as_str());
-                let contract_id = json
-                    .pointer("/amulet_rules/contract/contract_id")
-                    .and_then(|v| v.as_str());
-                let blob = json
-                    .pointer("/amulet_rules/contract/created_event_blob")
-                    .and_then(|v| v.as_str());
-
-                match (dso_party, contract_id, blob) {
-                    (Some(dso), Some(cid), Some(blob)) => match dso.parse::<CantonId>() {
-                        Ok(dso_id) => HttpResponse::Ok().json(NetworkInfo {
-                            dso_party_id: dso_id,
-                            amulet_rules_cid: cid.to_string(),
-                            amulet_rules_blob: blob.to_string(),
-                        }),
-                        Err(e) => HttpResponse::BadGateway().json(ErrorResponse {
-                            error: format!("Invalid DSO party ID: {e}"),
-                        }),
-                    },
-                    _ => {
-                        tracing::warn!("Unexpected DSO API response format");
-                        HttpResponse::BadGateway().json(ErrorResponse {
-                            error: "Unexpected response format from DSO API".to_string(),
-                        })
-                    }
-                }
-            }
-            Err(e) => HttpResponse::BadGateway().json(ErrorResponse {
-                error: format!("Failed to parse DSO response: {e}"),
-            }),
-        },
-        Ok(res) => {
-            let status = res.status();
-            let body = res.text().await.unwrap_or_default();
-            tracing::error!("DSO API returned {status}: {body}");
+    match fetch_amulet_rules(&data.http_client, &data.config).await {
+        Ok(rules) => HttpResponse::Ok().json(NetworkInfo {
+            dso_party_id: rules.dso,
+            amulet_rules_cid: rules.contract_id,
+            amulet_rules_blob: rules.created_event_blob,
+        }),
+        Err(e) => {
+            tracing::warn!("Failed to fetch network info from the DSO API: {e:#}");
+            // `{:#}` joins the context chain on one line ("outer: cause"),
+            // which reproduces the messages this endpoint returned before
+            // `fetch_amulet_rules` existed, e.g. "Failed to reach DSO API: …".
             HttpResponse::BadGateway().json(ErrorResponse {
-                error: format!("DSO API returned {status}: {body}"),
+                error: format!("{e:#}"),
             })
         }
-        Err(e) => HttpResponse::BadGateway().json(ErrorResponse {
-            error: format!("Failed to reach DSO API: {e}"),
-        }),
     }
 }
 

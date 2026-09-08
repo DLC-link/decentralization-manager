@@ -23,7 +23,7 @@ use canton_common::{
     },
 };
 use canton_proto_rs::com::daml::ledger::api::v2::{
-    DisclosedContract, GetEventsByContractIdRequest, Identifier, Record, value,
+    CreatedEvent, DisclosedContract, GetEventsByContractIdRequest, Identifier, Record, value,
 };
 use chrono::DateTime;
 
@@ -291,26 +291,21 @@ async fn fetch_instruction_registrar(
         .context("Failed to parse instrument admin as a party id")
 }
 
-/// Inspect a governance proposal contract by cid; if it's an
-/// `AcceptTransferProposal`, fetch the choice context from the registry and
-/// return it so the executor can attach disclosed contracts. Returns `Ok(None)`
-/// for any other proposal type so the caller can pass through.
-///
-/// The lookup uses `EventQueryService.GetEventsByContractId`, which returns
-/// the create event for an exact contract id (cheap, single round-trip).
-pub async fn maybe_fetch_for_proposal(
+/// The create event of a governance proposal, looked up by contract id with
+/// `EventQueryService.GetEventsByContractId` (cheap, single round-trip).
+/// Returns `Ok(None)` when the proposal is not visible to `party_id` or is
+/// already archived; the caller's own submission then surfaces the right error.
+pub async fn fetch_proposal_created_event(
     config: &NodeConfig,
     token: Option<String>,
     party_id: &CantonId,
     proposal_cid: &str,
-) -> Result<Option<AcceptTransferContext>> {
-    // `fetch` (below) needs the token too — clone before this client consumes it.
-    let mut client = utils::create_event_query_client(config, token.clone()).await?;
+) -> Result<Option<CreatedEvent>> {
+    let mut client = utils::create_event_query_client(config, token).await?;
 
     // `GetEventsByContractId` filters by party-visibility so the requester
     // must be authorized to read the proposal. Use the party that's executing
     // the action — they're a stakeholder on the governance proposal.
-
     let request = GetEventsByContractIdRequest {
         contract_id: proposal_cid.to_string(),
         event_format: Some(party_event_format(
@@ -326,40 +321,51 @@ pub async fn maybe_fetch_for_proposal(
         .context("Failed to query event for proposal contract id")?
         .into_inner();
 
-    let Some(created) = response.created else {
-        // Proposal not visible or already archived — caller's submission will
-        // surface the right error, no need to second-guess it here.
-        return Ok(None);
-    };
-    let Some(created_event) = created.created_event else {
-        return Ok(None);
-    };
+    Ok(response.created.and_then(|created| created.created_event))
+}
 
-    // Identify the proposal template by id. The package id is package-name-resolved
-    // (e.g. `#governance-token-custody-v1`) so match on the module + entity tuple.
-    let template = created_event.template_id.as_ref();
-    let is_accept_transfer = template
-        .map(|t| {
-            t.module_name == "Governance.TokenCustody.AcceptTransfer"
-                && t.entity_name == "AcceptTransferProposal"
-        })
-        .unwrap_or(false);
-    let is_transfer = template
-        .map(|t| {
-            t.module_name == "Governance.TokenCustody.TransferProposal"
-                && t.entity_name == "TransferProposal"
-        })
-        .unwrap_or(false);
+/// True when `created_event` was created from the template `module_name` /
+/// `entity_name`. The package id is package-name-resolved (e.g.
+/// `#governance-token-custody-v1`), so the match ignores it.
+pub fn has_template(created_event: &CreatedEvent, module_name: &str, entity_name: &str) -> bool {
+    created_event
+        .template_id
+        .as_ref()
+        .map(|t| t.module_name == module_name && t.entity_name == entity_name)
+        .unwrap_or(false)
+}
+
+/// Inspect a governance proposal's create event; if it's an
+/// `AcceptTransferProposal` or a shared-instrument `TransferProposal`, fetch
+/// the choice context from the registry and return it so the executor can
+/// attach disclosed contracts. Returns `Ok(None)` for any other proposal type
+/// so the caller can pass through.
+pub async fn maybe_fetch_for_proposal_event(
+    config: &NodeConfig,
+    token: Option<String>,
+    party_id: &CantonId,
+    created_event: &CreatedEvent,
+) -> Result<Option<AcceptTransferContext>> {
+    let is_accept_transfer = has_template(
+        created_event,
+        "Governance.TokenCustody.AcceptTransfer",
+        "AcceptTransferProposal",
+    );
+    let is_transfer = has_template(
+        created_event,
+        "Governance.TokenCustody.TransferProposal",
+        "TransferProposal",
+    );
     if !is_accept_transfer && !is_transfer {
         return Ok(None);
     }
 
-    let Some(create_args) = created_event.create_arguments else {
+    let Some(create_args) = created_event.create_arguments.as_ref() else {
         anyhow::bail!("proposal create_arguments missing in event response");
     };
 
     if is_accept_transfer {
-        let transfer_instruction_cid = record_field(&create_args, "transferInstructionCid")
+        let transfer_instruction_cid = record_field(create_args, "transferInstructionCid")
             .and_then(|s| match s {
                 value::Sum::ContractId(cid) => Some(cid.clone()),
                 _ => None,
@@ -382,7 +388,7 @@ pub async fn maybe_fetch_for_proposal(
     // so the executor's submission can exercise TransferFactory_Transfer. Only
     // needed for shared-instrument transfers (e.g. CBTC); for utility tokens the
     // factory lives in the dec party's own ACS and no extra disclosure is needed.
-    let transfer = transfer_record_from_proposal(&create_args)?;
+    let transfer = transfer_record_from_proposal(create_args)?;
     let instrument_admin: CantonId = transfer
         .instrument_id
         .admin
@@ -548,9 +554,9 @@ mod tests {
     const DEC_PARTY: &str = "Test01::1220c5deadbeef";
     const DSO: &str = "DSO::1220ffaabbcc";
 
-    // ---- Small `Value` constructors (mirrors action_serializer.rs:26-94, which
-    // are module-private). Kept local so the parser tests can build the proto
-    // `Record` inputs they exercise. ----
+    // ---- Small `Value` constructors (mirrors the ones in
+    // `decman_lib::framework::encode`). Kept local so the parser tests can
+    // build the proto `Record` inputs they exercise. ----
 
     fn party(s: &str) -> Value {
         Value {

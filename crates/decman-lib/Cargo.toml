@@ -1,0 +1,27 @@
+[package]
+name = "decman-lib"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Domain model and gRPC codecs for the decman on-chain governance protocol"
+
+[features]
+# Derives `utoipa::ToSchema` on the payload types, for OpenAPI specs.
+openapi = ["dep:utoipa", "common/openapi"]
+# Derives `ts_rs::TS` on the payload types, for frontend TypeScript generation.
+typegen = ["dep:ts-rs", "common/typegen"]
+
+[dependencies]
+canton-common = { workspace = true }
+canton-proto-rs = { workspace = true }
+chrono = { workspace = true }
+common = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+ts-rs = { workspace = true, optional = true }
+utoipa = { workspace = true, optional = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+prost-types = { workspace = true }
