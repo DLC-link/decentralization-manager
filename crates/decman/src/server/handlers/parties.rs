@@ -99,9 +99,12 @@ fn now_secs() -> i64 {
         .unwrap_or_default()
 }
 
-/// Longest accepted `prefix`. A prefix narrows a Canton party id, so a longer
-/// one filters nothing, and the value keys an in-memory map.
-const MAX_PREFIX_LEN: usize = 128;
+/// Longest accepted `prefix`.
+///
+/// Wide enough for a whole party ID, identifier plus delimiter plus namespace,
+/// so no legal filter is refused: a Canton identifier alone runs to 185
+/// characters. It is a bound because the value keys an in-memory map.
+const MAX_PREFIX_LEN: usize = 255;
 
 /// Cap on distinct prefixes tracked in `AppState::discovery_completed`.
 const MAX_TRACKED_PREFIXES: usize = 1024;
@@ -176,6 +179,7 @@ pub(crate) struct DiscoveryGate {
     claims: Arc<tokio::sync::RwLock<HashSet<String>>>,
     permits: Arc<tokio::sync::Semaphore>,
     completed: Arc<tokio::sync::RwLock<HashMap<String, i64>>>,
+    generations: Arc<tokio::sync::RwLock<HashMap<String, u64>>>,
 }
 
 impl DiscoveryGate {
@@ -185,6 +189,7 @@ impl DiscoveryGate {
             claims: state.refreshing_prefixes.clone(),
             permits: state.discovery_permits.clone(),
             completed: state.discovery_completed.clone(),
+            generations: state.discovery_generations.clone(),
         }
     }
 }
@@ -258,6 +263,17 @@ pub(crate) async fn discover_and_cache(
             if let Err(e) = store_parties_to_db(db, prefix, &response.parties).await {
                 tracing::warn!("Failed to cache parties for prefix '{prefix}': {e}");
             }
+
+            // Bump last, while the claim still stands, so a waiter that sees
+            // the count move knows the mark and the cache are both in place.
+            // A count, not a timestamp: `updated_at` has one-second
+            // resolution, so a discovery finishing inside the same second was
+            // indistinguishable from one that never ran.
+            let mut generations = gate.generations.write().await;
+            let generation = generations.entry(prefix.to_string()).or_default();
+            *generation = generation.wrapping_add(1);
+            drop(generations);
+
             Discovery::Done(response)
         }
         Err(e) => Discovery::Failed(e),
@@ -386,7 +402,10 @@ pub async fn get_decentralized_parties(
             });
         }
 
-        response.refreshing = is_stale && data.refreshing_prefixes.read().await.contains(&prefix);
+        // A refresh was started above, so say so. Reading the claim set here
+        // raced the task that takes it and reported false while a refresh was
+        // getting under way.
+        response.refreshing = is_stale;
 
         // Resolve my_owner_key for parties where it's missing (e.g. old cache)
         if response.parties.iter().any(|p| p.my_owner_key.is_none())
@@ -486,53 +505,58 @@ async fn await_in_flight_discovery(
     prefix: &str,
     accept_cached: bool,
 ) -> HttpResponse {
-    let stamp_at_entry = match load_cached_parties(&data.db, prefix).await {
-        Ok(Some((mut response, updated_at))) => {
-            if accept_cached {
-                response.source = ResponseSource::Cache;
-                response.refreshing = true;
-                return HttpResponse::Ok().json(response);
-            }
-            Some(updated_at)
-        }
-        _ => None,
-    };
+    // A caller that will take cached rows gets them without waiting.
+    if accept_cached
+        && let Ok(Some((mut response, _))) = load_cached_parties(&data.db, prefix).await
+    {
+        response.source = ResponseSource::Cache;
+        response.refreshing = true;
+        return HttpResponse::Ok().json(response);
+    }
 
+    // Wait on the in-memory completion count, not on the cache: the running
+    // discovery bumps it once, after both the mark and the rows are in place.
+    // Re-reading SQLite every tick cost up to thirty queries per waiter.
+    let generation_at_entry = data.discovery_generations.read().await.get(prefix).copied();
     let deadline = tokio::time::Instant::now() + SINGLE_FLIGHT_WAIT;
+    let mut completed = false;
+
     while tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        if let Ok(Some((mut response, updated_at))) = load_cached_parties(&data.db, prefix).await
-            && (accept_cached || Some(updated_at) != stamp_at_entry)
-        {
-            response.source = ResponseSource::Cache;
-            response.refreshing = data.refreshing_prefixes.read().await.contains(prefix);
-            return HttpResponse::Ok().json(response);
-        }
-
-        // An empty discovery writes no rows, so its mark is the only evidence
-        // that it finished. It also means there is nothing fresher coming.
-        let completed_at = data.discovery_completed.read().await.get(prefix).copied();
-        if is_within_ttl(completed_at, now_secs()) {
+        if data.discovery_generations.read().await.get(prefix).copied() != generation_at_entry {
+            completed = true;
             break;
         }
 
+        // The claim clears on failure too, so this is the end of the wait
+        // rather than evidence of a result.
         if !data.refreshing_prefixes.read().await.contains(prefix) {
             break;
         }
     }
 
-    if !accept_cached {
+    if !accept_cached && !completed {
+        // The caller asked to bypass the cache and nothing completed, so the
+        // rows here are the ones from before its refresh. Say so instead.
         return HttpResponse::ServiceUnavailable().json(ErrorResponse {
             error: "a refresh for this prefix is still in flight, retry shortly".to_string(),
         });
     }
 
-    HttpResponse::Ok().json(DecentralizedPartiesResponse {
-        parties: Vec::new(),
-        source: ResponseSource::Cache,
-        refreshing: data.refreshing_prefixes.read().await.contains(prefix),
-    })
+    let refreshing = data.refreshing_prefixes.read().await.contains(prefix);
+    match load_cached_parties(&data.db, prefix).await {
+        Ok(Some((mut response, _))) => {
+            response.source = ResponseSource::Cache;
+            response.refreshing = refreshing;
+            HttpResponse::Ok().json(response)
+        }
+        _ => HttpResponse::Ok().json(DecentralizedPartiesResponse {
+            parties: Vec::new(),
+            source: ResponseSource::Cache,
+            refreshing,
+        }),
+    }
 }
 
 /// Background task: discover, cache, then resolve owner keys from peers.

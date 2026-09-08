@@ -147,6 +147,13 @@ pub struct AppState {
     /// `refreshing_prefixes` deduplicates one prefix; this bounds the total,
     /// which matters because the prefix comes from the request.
     pub discovery_permits: Arc<Semaphore>,
+    /// How many discoveries have completed for a prefix.
+    ///
+    /// The signal a waiting request watches. A count rather than a timestamp,
+    /// because `dec_parties.updated_at` has one-second resolution and a
+    /// discovery finishing inside the same second was indistinguishable from
+    /// one that never ran.
+    pub discovery_generations: Arc<RwLock<HashMap<String, u64>>>,
     /// Unix seconds of the last completed Canton discovery, per prefix.
     ///
     /// A prefix with no parties leaves no rows in `dec_parties`, so the cached
@@ -189,6 +196,7 @@ impl AppState {
             discovery_permits: Arc::new(Semaphore::new(
                 crate::server::handlers::MAX_CONCURRENT_DISCOVERIES,
             )),
+            discovery_generations: Arc::new(RwLock::new(HashMap::new())),
             discovery_completed: Arc::new(RwLock::new(HashMap::new())),
             http_client: reqwest::Client::new(),
         }))
@@ -1054,6 +1062,7 @@ pub async fn start_server(
         discovery_permits: Arc::new(Semaphore::new(
             crate::server::handlers::MAX_CONCURRENT_DISCOVERIES,
         )),
+        discovery_generations: Arc::new(RwLock::new(HashMap::new())),
         discovery_completed: Arc::new(RwLock::new(HashMap::new())),
         http_client,
     });

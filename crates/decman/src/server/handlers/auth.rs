@@ -795,6 +795,7 @@ mod tests {
             discovery_permits: Arc::new(tokio::sync::Semaphore::new(
                 crate::server::handlers::MAX_CONCURRENT_DISCOVERIES,
             )),
+            discovery_generations: Arc::new(RwLock::new(HashMap::new())),
             discovery_completed: Arc::new(RwLock::new(HashMap::new())),
             http_client: reqwest::Client::new(),
         })

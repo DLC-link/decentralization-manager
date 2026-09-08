@@ -688,6 +688,10 @@ async fn tcp_reachable(uri: &tonic::transport::Uri) -> bool {
     let Some(host) = uri.host() else {
         return true;
     };
+    // `Uri::host` keeps the brackets on an IPv6 literal, and `TcpStream`
+    // resolves `[::1]` as a hostname and fails. Without this the advice claims
+    // nothing is listening whenever the endpoint is addressed by IPv6.
+    let host = host.trim_start_matches('[').trim_end_matches(']');
     let port = uri.port_u16().unwrap_or(match uri.scheme_str() {
         Some("https") => 443,
         _ => 80,
@@ -853,6 +857,23 @@ mod tls_tests {
             advice.contains("DECPM_CANTON_LEDGER_TLS_CA_CERT"),
             "unhelpful advice: {advice}"
         );
+    }
+
+    /// An IPv6 endpoint that is listening must read as reachable. `Uri::host`
+    /// keeps the brackets, and a bracketed literal handed to `TcpStream` is
+    /// resolved as a hostname and fails, which would blame TLS for a healthy
+    /// endpoint.
+    #[tokio::test]
+    async fn a_listening_ipv6_endpoint_is_reachable() -> anyhow::Result<()> {
+        let listener = tokio::net::TcpListener::bind("[::1]:0").await?;
+        let port = listener.local_addr()?.port();
+        let uri: tonic::transport::Uri = format!("http://[::1]:{port}").parse()?;
+
+        assert!(
+            tcp_reachable(&uri).await,
+            "a listening IPv6 endpoint must not read as unreachable"
+        );
+        Ok(())
     }
 
     /// The regression this pairs with: an unreachable endpoint has nothing to
