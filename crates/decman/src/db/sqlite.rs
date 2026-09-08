@@ -1366,8 +1366,13 @@ mod tests {
     // Peers
     // ====================================================================
 
-    fn qid(s: &str) -> Result<CantonId> {
-        CantonId::parse(s).map_err(|e| anyhow::anyhow!("bad test id {s}: {e}"))
+    /// A valid Canton id for tests. The namespace must be exactly
+    /// `NAMESPACE_LENGTH` bytes, so build it the way `test_peer` does rather
+    /// than writing short hex.
+    fn qid(prefix: &str, tag: u8) -> Result<CantonId> {
+        let ns = format!("1220{:0>64}", format!("{tag:02x}"));
+        CantonId::parse(&format!("{prefix}::{ns}"))
+            .map_err(|e| anyhow::anyhow!("bad test id {prefix}: {e}"))
     }
 
     /// The quarantine records a fact about a *participant*, so it must outlive
@@ -1377,8 +1382,8 @@ mod tests {
     /// would import onto a partially populated participant.
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn acs_quarantine_outlives_the_run_that_set_it(pool: SqlitePool) -> Result {
-        let party = qid("cbtc-network::1220aa")?;
-        let target = qid("participant-3::1220bb")?;
+        let party = qid("cbtc-network", 0xaa)?;
+        let target = qid("participant-3", 0xbb)?;
 
         assert!(
             pool.get_acs_import_quarantine(&party, &target)
@@ -1403,10 +1408,10 @@ mod tests {
     /// participant for an unrelated party.
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn acs_quarantine_is_scoped_to_party_and_participant(pool: SqlitePool) -> Result {
-        let party = qid("cbtc-network::1220aa")?;
-        let other_party = qid("other-network::1220cc")?;
-        let target = qid("participant-3::1220bb")?;
-        let other_target = qid("participant-4::1220dd")?;
+        let party = qid("cbtc-network", 0xaa)?;
+        let other_party = qid("other-network", 0xcc)?;
+        let target = qid("participant-3", 0xbb)?;
+        let other_target = qid("participant-4", 0xdd)?;
 
         pool.quarantine_acs_import(&party, &target, "partial import", 1)
             .await?;
@@ -1436,8 +1441,8 @@ mod tests {
     /// operator can run it without checking first.
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn acs_quarantine_keeps_the_first_reason_and_lifts_once(pool: SqlitePool) -> Result {
-        let party = qid("cbtc-network::1220aa")?;
-        let target = qid("participant-3::1220bb")?;
+        let party = qid("cbtc-network", 0xaa)?;
+        let target = qid("participant-3", 0xbb)?;
 
         pool.quarantine_acs_import(&party, &target, "first failure", 100)
             .await?;
