@@ -15,6 +15,29 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 # Resolve project root (parent of integration-tests/)
 SCRIPT_DIR="${SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 
+# Localnet's Canton is a single container, so topology settles in under a
+# second and the 30s production default is pure sleep. devnet.env.sh
+# deliberately does NOT set this — devnet is a real network.
+export DECPM_TOPOLOGY_PROPAGATION_DELAY_SECS=3
+
+# The reward-automation tick. Exported, not passed as a command prefix like
+# common.sh's other node env, because the chaos phases respawn nodes from the
+# Rust harness (tests/common/processes.rs), which inherits this process's
+# environment. A prefix-only value silently left every respawned node on the
+# 300s production default, so `coupon_reassignment` — which runs after the
+# chaos block — waited on whichever tick that node happened to be on. That is
+# the 48s/109s/219s spread this phase showed across runs.
+export DECPM_REWARD_AUTOMATION_INTERVAL_SECS=3
+
+# The peer's coordinator-poll cadence, which quantizes every multi-step
+# workflow: 100% of the suite's waits >=2s floored to an even second on the 2s
+# default, and "onboarding reaches completed" was exactly 22.0s (11 polls) in
+# five runs out of five. 500ms rather than something smaller because each poll
+# is a fresh Noise connection, and this runner is CPU-sensitive enough that
+# handshake pressure has stalled the mesh before. devnet keeps the 2s default —
+# there a coordinator step is a real Canton round trip.
+export DECPM_PEER_WAIT_POLL_DELAY_MS=500
+
 # Localnet
 LOCALNET_VERSION="0.6.12"
 LOCALNET_BUNDLE_URL="https://github.com/digital-asset/decentralized-canton-sync/releases/download/v${LOCALNET_VERSION}/${LOCALNET_VERSION}_splice-node.tar.gz"
@@ -97,6 +120,40 @@ cleanup() {
                 kill -9 "$pid" 2>/dev/null || true
             fi
         done < "$DEV_DIR/restarted-pids"
+    fi
+
+    # run.sh may still have `docker compose up --wait` in flight (it backgrounds
+    # the bring-up to overlap it with the build). Settle it first: stop_localnet's
+    # `down -v` racing a live `up` leaves half-created containers and volumes
+    # behind, which fails the next run's port checks.
+    #
+    # Deliberately NOT a plain `kill` on the pid: that pid is the subshell
+    # wrapper, and `docker compose` is its child. Killing the wrapper orphans
+    # compose and `down -v` still races a live `up` — the very thing this
+    # guards. Signalling a process group is not an option either: a background
+    # job in a non-interactive shell shares the script's own group (verified),
+    # so `kill -- -$pid` would target this script.
+    #
+    # So: let it finish, bounded, and only then take down the whole subtree.
+    if [ -n "${CANTON_BRINGUP_PID:-}" ] && kill -0 "$CANTON_BRINGUP_PID" 2>/dev/null; then
+        echo "Letting the background Canton bring-up settle before teardown..."
+        _bringup_waited=0
+        while kill -0 "$CANTON_BRINGUP_PID" 2>/dev/null && [ "$_bringup_waited" -lt 240 ]; do
+            sleep 1
+            _bringup_waited=$((_bringup_waited + 1))
+        done
+        if kill -0 "$CANTON_BRINGUP_PID" 2>/dev/null; then
+            echo "Bring-up overstayed ${_bringup_waited}s; terminating it and its compose child"
+            pkill -P "$CANTON_BRINGUP_PID" 2>/dev/null || true
+            sleep 2
+            pkill -9 -P "$CANTON_BRINGUP_PID" 2>/dev/null || true
+            kill -9 "$CANTON_BRINGUP_PID" 2>/dev/null || true
+        fi
+        wait "$CANTON_BRINGUP_PID" 2>/dev/null || true
+    fi
+    if [ -n "${CANTON_BRINGUP_LOG:-}" ] && [ -f "$CANTON_BRINGUP_LOG" ]; then
+        cat "$CANTON_BRINGUP_LOG"
+        rm -f "$CANTON_BRINGUP_LOG"
     fi
 
     # Stop localnet

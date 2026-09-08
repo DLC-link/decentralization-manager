@@ -25,7 +25,9 @@ use crate::{
     auth::WorkflowAuth,
     canton_id::CantonId,
     config::{NetworkConfig, NodeConfig, Peer},
-    consts::{MAX_CONSECUTIVE_NO_WORKFLOW_POLLS, MAX_CONSECUTIVE_STEP_FAILURES},
+    consts::{
+        MAX_CONSECUTIVE_NO_WORKFLOW_POLLS, MAX_CONSECUTIVE_STEP_FAILURES, peer_wait_poll_delay_ms,
+    },
     db::schema::{Commitable, SchemaRead, SchemaWrite},
     error::Result,
     noise::{MessageType, NoiseError, client::NoiseClient, server::ActiveWorkflow},
@@ -350,7 +352,8 @@ pub async fn start_peer(
             MessageType::Wait => {
                 tracing::trace!("Received command: Wait");
                 // Coordinator says to wait, poll again after delay
-                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(peer_wait_poll_delay_ms()))
+                    .await;
             }
             MessageType::Disconnect => {
                 tracing::info!("Received disconnect command, shutting down");
