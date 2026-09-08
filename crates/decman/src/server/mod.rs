@@ -153,7 +153,7 @@ pub struct AppState {
     /// because `dec_parties.updated_at` has one-second resolution and a
     /// discovery finishing inside the same second was indistinguishable from
     /// one that never ran.
-    pub discovery_generations: Arc<RwLock<HashMap<String, u64>>>,
+    pub discovery_generations: Arc<RwLock<HashMap<String, (u64, i64)>>>,
     /// Unix seconds of the last completed Canton discovery, per prefix.
     ///
     /// A prefix with no parties leaves no rows in `dec_parties`, so the cached
@@ -1179,7 +1179,9 @@ pub async fn start_server(
                 handlers::resolve_owner_keys_from_peers(&sync_config, &sync_db, &response.parties)
                     .await;
             }
-            handlers::Discovery::InFlight | handlers::Discovery::AtCapacity => {
+            handlers::Discovery::InFlight
+            | handlers::Discovery::AtCapacity
+            | handlers::Discovery::Superseded => {
                 tracing::info!("Startup sync skipped: a discovery is already running");
             }
             handlers::Discovery::Failed(e) => {

@@ -118,6 +118,49 @@ fn is_within_ttl(at: Option<i64>, now: i64) -> bool {
     at.is_some_and(|at| (0..=PARTIES_CACHE_TTL_SECS).contains(&(now - at)))
 }
 
+/// Total wall clock one guarded discovery may take.
+///
+/// The permit is held for the whole of it, and the per-party contract and
+/// metadata reads carry no deadline of their own, so without this a handful of
+/// stalled Ledger API calls would hold every permit and turn each later
+/// discovery into a 503. Generous on purpose: a cold fetch of 213 parties
+/// measured 2m54s, almost all of it those reads.
+const DISCOVERY_BUDGET: Duration = Duration::from_secs(300);
+
+/// Drop expired entries, then the oldest, until `map` is under its cap.
+///
+/// Both prefix-keyed maps need this: `prefix` comes from the request, so an
+/// unbounded one grows on demand. Eviction takes the oldest rather than
+/// clearing, so a stream of unique prefixes cannot flush the entries real ones
+/// depend on.
+fn prune_and_cap<V: Copy>(map: &mut HashMap<String, V>, now: i64, at: impl Fn(&V) -> i64) {
+    map.retain(|_, value| is_within_ttl(Some(at(value)), now));
+
+    while map.len() >= MAX_TRACKED_PREFIXES {
+        let Some(oldest) = map
+            .iter()
+            .min_by_key(|(_, value)| at(value))
+            .map(|(prefix, _)| prefix.clone())
+        else {
+            break;
+        };
+        map.remove(&oldest);
+    }
+}
+
+/// Whether a discovery completed for a prefix while a waiter was waiting.
+///
+/// Only a present, higher count counts. An entry that has gone missing means
+/// eviction, not completion, and must never read as success: a waiter would
+/// otherwise take the eviction as proof that fresh rows had been written.
+fn discovery_completed_since(entry: Option<u64>, current: Option<u64>) -> bool {
+    match (entry, current) {
+        (_, None) => false,
+        (None, Some(_)) => true,
+        (Some(entry), Some(current)) => current > entry,
+    }
+}
+
 /// Record that a discovery completed for `prefix`.
 ///
 /// Only an empty result is marked. That is the one case the `dec_parties` cache
@@ -143,26 +186,10 @@ async fn record_discovery(
         return;
     }
 
-    completed.retain(|_, at| is_within_ttl(Some(*at), now));
-
-    // Evict the oldest rather than clearing: `prefix` is request-controlled,
-    // and clearing would let a stream of unique prefixes flush the entries
-    // real ones depend on, putting their discovery back on the participant.
-    //
-    // Only when this prefix is new. Re-stamping one already tracked does not
-    // grow the map, so it must not cost another prefix its place: repeated
-    // refreshes of a single prefix would otherwise drain the rest.
+    // Re-stamping a prefix already tracked replaces its entry rather than
+    // growing the map, so it must not cost another prefix its place.
     if !completed.contains_key(prefix) {
-        while completed.len() >= MAX_TRACKED_PREFIXES {
-            let Some(oldest) = completed
-                .iter()
-                .min_by_key(|(_, at)| **at)
-                .map(|(prefix, _)| prefix.clone())
-            else {
-                break;
-            };
-            completed.remove(&oldest);
-        }
+        prune_and_cap(&mut completed, now, |at| *at);
     }
 
     completed.insert(prefix.to_string(), now);
@@ -179,7 +206,7 @@ pub(crate) struct DiscoveryGate {
     claims: Arc<tokio::sync::RwLock<HashSet<String>>>,
     permits: Arc<tokio::sync::Semaphore>,
     completed: Arc<tokio::sync::RwLock<HashMap<String, i64>>>,
-    generations: Arc<tokio::sync::RwLock<HashMap<String, u64>>>,
+    generations: Arc<tokio::sync::RwLock<HashMap<String, (u64, i64)>>>,
 }
 
 impl DiscoveryGate {
@@ -200,6 +227,9 @@ pub(crate) enum Discovery {
     Done(DecentralizedPartiesResponse),
     /// Another discovery for this prefix was already running.
     InFlight,
+    /// Another discovery for this prefix finished while this one queued for
+    /// capacity, so the cache already holds a fresh answer.
+    Superseded,
     /// Every discovery permit was taken.
     AtCapacity,
     /// Canton refused or timed out.
@@ -231,6 +261,16 @@ pub(crate) async fn discover_and_cache(
         return Discovery::InFlight;
     }
 
+    // Noted before queuing for capacity. A discovery that runs and finishes
+    // while this one waits leaves no claim behind, so the claim check alone
+    // would let the second caller repeat the whole read.
+    let generation_at_entry = gate
+        .generations
+        .read()
+        .await
+        .get(prefix)
+        .map(|(generation, _)| *generation);
+
     let Ok(Ok(permit)) = tokio::time::timeout(
         SINGLE_FLIGHT_WAIT,
         Arc::clone(&gate.permits).acquire_owned(),
@@ -240,6 +280,17 @@ pub(crate) async fn discover_and_cache(
         return Discovery::AtCapacity;
     };
 
+    let generation_now = gate
+        .generations
+        .read()
+        .await
+        .get(prefix)
+        .map(|(generation, _)| *generation);
+    if discovery_completed_since(generation_at_entry, generation_now) {
+        drop(permit);
+        return Discovery::Superseded;
+    }
+
     // The read above was not a claim, so settle it under the write lock.
     if !gate.claims.write().await.insert(prefix.to_string()) {
         drop(permit);
@@ -247,32 +298,54 @@ pub(crate) async fn discover_and_cache(
     }
     let _permit = permit;
 
-    let fetched = fetch_decentralized_parties(
-        config,
-        db,
-        Some(prefix).filter(|prefix| !prefix.is_empty()),
-        auth,
-        party_credentials,
-        PartyReadOpts::default(),
+    let fetched = match tokio::time::timeout(
+        DISCOVERY_BUDGET,
+        fetch_decentralized_parties(
+            config,
+            db,
+            Some(prefix).filter(|prefix| !prefix.is_empty()),
+            auth,
+            party_credentials,
+            PartyReadOpts::default(),
+        ),
     )
-    .await;
+    .await
+    {
+        Ok(fetched) => fetched,
+        Err(_) => Err(anyhow::anyhow!(
+            "discovery for prefix '{prefix}' exceeded {secs}s",
+            secs = DISCOVERY_BUDGET.as_secs()
+        )),
+    };
 
     let outcome = match fetched {
         Ok(response) => {
             record_discovery(&gate.completed, prefix, &response.parties).await;
-            if let Err(e) = store_parties_to_db(db, prefix, &response.parties).await {
-                tracing::warn!("Failed to cache parties for prefix '{prefix}': {e}");
-            }
 
-            // Bump last, while the claim still stands, so a waiter that sees
-            // the count move knows the mark and the cache are both in place.
-            // A count, not a timestamp: `updated_at` has one-second
-            // resolution, so a discovery finishing inside the same second was
-            // indistinguishable from one that never ran.
-            let mut generations = gate.generations.write().await;
-            let generation = generations.entry(prefix.to_string()).or_default();
-            *generation = generation.wrapping_add(1);
-            drop(generations);
+            match store_parties_to_db(db, prefix, &response.parties).await {
+                Ok(()) => {
+                    // Signalled last, while the claim still stands, so a
+                    // waiter that sees the count move knows the mark and the
+                    // rows are both in place. A count, not a timestamp:
+                    // `updated_at` has one-second resolution, so a discovery
+                    // finishing inside the same second was indistinguishable
+                    // from one that never ran.
+                    let now = now_secs();
+                    let mut generations = gate.generations.write().await;
+                    if !generations.contains_key(prefix) {
+                        prune_and_cap(&mut generations, now, |(_, at)| *at);
+                    }
+                    let entry = generations.entry(prefix.to_string()).or_default();
+                    *entry = (entry.0 + 1, now);
+                    drop(generations);
+                }
+                // The rows a waiter would read are still the ones from before
+                // this discovery, so completion must not be signalled. This
+                // caller keeps its own live result.
+                Err(e) => {
+                    tracing::warn!("Failed to cache parties for prefix '{prefix}': {e}");
+                }
+            }
 
             Discovery::Done(response)
         }
@@ -471,6 +544,9 @@ pub async fn get_decentralized_parties(
             body
         }
         Discovery::InFlight => await_in_flight_discovery(&data, &prefix, !force_refresh).await,
+        // A discovery finished while this request queued, so the cache holds a
+        // fresh answer and even a bypass caller can be served from it.
+        Discovery::Superseded => await_in_flight_discovery(&data, &prefix, true).await,
         // Capacity says nothing about this prefix, and an empty list would
         // read as "no parties", so report the overload.
         Discovery::AtCapacity => HttpResponse::ServiceUnavailable().json(ErrorResponse {
@@ -517,14 +593,25 @@ async fn await_in_flight_discovery(
     // Wait on the in-memory completion count, not on the cache: the running
     // discovery bumps it once, after both the mark and the rows are in place.
     // Re-reading SQLite every tick cost up to thirty queries per waiter.
-    let generation_at_entry = data.discovery_generations.read().await.get(prefix).copied();
+    let generation_at_entry = data
+        .discovery_generations
+        .read()
+        .await
+        .get(prefix)
+        .map(|(generation, _)| *generation);
     let deadline = tokio::time::Instant::now() + SINGLE_FLIGHT_WAIT;
     let mut completed = false;
 
     while tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        if data.discovery_generations.read().await.get(prefix).copied() != generation_at_entry {
+        let generation_now = data
+            .discovery_generations
+            .read()
+            .await
+            .get(prefix)
+            .map(|(generation, _)| *generation);
+        if discovery_completed_since(generation_at_entry, generation_now) {
             completed = true;
             break;
         }
@@ -578,7 +665,7 @@ async fn refresh_and_cache_parties(data: &web::Data<AppState>, prefix: &str) {
         Discovery::Done(response) => {
             resolve_owner_keys_from_peers(&data.config, &data.db, &response.parties).await;
         }
-        Discovery::InFlight | Discovery::AtCapacity => {
+        Discovery::InFlight | Discovery::AtCapacity | Discovery::Superseded => {
             tracing::debug!("Skipped background refresh for prefix '{prefix}'");
         }
         Discovery::Failed(e) => {
@@ -1101,6 +1188,7 @@ const MAX_HOSTED_PARTIES: i32 = 5_000;
 /// answers with full party IDs the exact-filter path can use.
 async fn discover_hosted_party_ids(
     aggregation_client: &mut TopologyAggregationServiceClient<tonic::transport::Channel>,
+    synchronizer_id: &str,
     participant_id: &str,
     owned_namespaces: &HashSet<String>,
 ) -> Result<Vec<String>> {
@@ -1108,12 +1196,17 @@ async fn discover_hosted_party_ids(
         return Ok(Vec::new());
     }
 
+    // Unscoped, this asks across every synchronizer the participant is
+    // connected to, and those parties eat the result budget while the reads
+    // around it are scoped to this one.
     let response = bounded_read(
         "list_parties",
         aggregation_client.list_parties(tonic::Request::new(ListPartiesRequest {
             as_of: None,
             limit: MAX_HOSTED_PARTIES,
-            synchronizer_ids: Vec::new(),
+            synchronizer_ids: logical_synchronizer_id(synchronizer_id)
+                .map(|id| vec![id.to_string()])
+                .unwrap_or_default(),
             filter_party: String::new(),
             filter_participant: participant_id.to_string(),
         })),
@@ -1125,6 +1218,17 @@ async fn discover_hosted_party_ids(
         response.results.into_iter().map(|result| result.party),
         owned_namespaces,
     ))
+}
+
+/// The logical synchronizer ID inside a physical one.
+///
+/// `ListParties` parses this field as a `SynchronizerId`, so the physical form
+/// `<name>::<fingerprint>::<protocol version>` is rejected outright. Returns
+/// `None` for anything that is not in that shape, and the caller then sends no
+/// synchronizer filter rather than a request Canton will refuse.
+fn logical_synchronizer_id(physical: &str) -> Option<&str> {
+    let (logical, _protocol_version) = physical.rsplit_once("::")?;
+    logical.contains("::").then_some(logical)
 }
 
 /// Keep the party IDs whose namespace is one of `namespaces`.
@@ -1416,8 +1520,13 @@ async fn fetch_decentralized_parties(
             .map(|definition| definition.decentralized_namespace.clone())
             .collect();
 
-        discover_hosted_party_ids(&mut aggregation_client, &participant_id, &owned_namespaces)
-            .await?
+        discover_hosted_party_ids(
+            &mut aggregation_client,
+            &synchronizer_id,
+            &participant_id,
+            &owned_namespaces,
+        )
+        .await?
     };
     // Keyed to a list: a decentralized namespace is derived from its owner set
     // alone (`compute_decentralized_namespace`), so two parties with the same
@@ -2263,6 +2372,40 @@ mod tests {
             participants: Vec::new(),
             party_signing_keys: None,
         }
+    }
+
+    /// Eviction must never read as completion. A waiter holding a count for a
+    /// prefix that has since been evicted would otherwise take the missing
+    /// entry as proof that fresh rows had been written.
+    #[test]
+    fn an_evicted_count_is_not_a_completed_discovery() {
+        assert!(discovery_completed_since(None, Some(1)));
+        assert!(discovery_completed_since(Some(4), Some(5)));
+
+        assert!(!discovery_completed_since(None, None));
+        assert!(!discovery_completed_since(Some(4), None), "eviction");
+        assert!(!discovery_completed_since(Some(4), Some(4)));
+        assert!(
+            !discovery_completed_since(Some(9), Some(1)),
+            "a lower count means the prefix was evicted and started over"
+        );
+    }
+
+    /// The physical form carries the protocol version and `ListParties` parses
+    /// the field as a logical `SynchronizerId`, so sending the physical one
+    /// would be refused outright.
+    #[test]
+    fn the_logical_synchronizer_id_drops_the_protocol_version() {
+        let logical = "global-domain::1220be58c29e65de40bf273be1dc2b266d43a9a002ea5b18955aeef7";
+
+        assert_eq!(
+            logical_synchronizer_id(&format!("{logical}::35-5")),
+            Some(logical)
+        );
+        // Already logical, or otherwise not the shape we expect: send no
+        // filter rather than a request Canton will reject.
+        assert_eq!(logical_synchronizer_id(logical), None);
+        assert_eq!(logical_synchronizer_id("nonsense"), None);
     }
 
     /// A discovery that finds parties has to clear a standing empty mark. If

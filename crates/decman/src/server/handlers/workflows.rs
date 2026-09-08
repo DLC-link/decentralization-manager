@@ -1825,7 +1825,9 @@ pub async fn start_onboarding(
                                 }
                             }
                         }
-                        super::Discovery::InFlight | super::Discovery::AtCapacity => {
+                        super::Discovery::InFlight
+                        | super::Discovery::AtCapacity
+                        | super::Discovery::Superseded => {
                             tracing::debug!("Post-onboarding refresh skipped: already running");
                         }
                         super::Discovery::Failed(e) => {
@@ -2343,7 +2345,9 @@ pub async fn start_contracts(
                         super::Discovery::Done(resp) => {
                             resolve_owner_keys_from_peers(&bg_config, &bg_db, &resp.parties).await;
                         }
-                        super::Discovery::InFlight | super::Discovery::AtCapacity => {
+                        super::Discovery::InFlight
+                        | super::Discovery::AtCapacity
+                        | super::Discovery::Superseded => {
                             tracing::debug!("Post-contracts refresh skipped: already running");
                         }
                         super::Discovery::Failed(e) => {
