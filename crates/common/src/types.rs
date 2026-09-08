@@ -509,6 +509,10 @@ pub struct PendingInvitation {
     /// Dars-only: filenames the coordinator is distributing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dar_filenames: Vec<String>,
+    /// Dars-only: SHA-256 of each DAR, index-aligned with `dar_filenames`.
+    /// Recorded at accept time so the peer can pin the content it agreed to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dar_hashes: Vec<String>,
     /// Kick-only: the participant being removed from the party.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kicked_participant: Option<CantonId>,

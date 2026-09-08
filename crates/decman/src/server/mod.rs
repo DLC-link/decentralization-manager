@@ -541,6 +541,7 @@ impl WorkflowTriggers {
         let mut prefix = None;
         let mut participants = Vec::new();
         let mut dar_filenames = Vec::new();
+        let mut dar_hashes = Vec::new();
         let mut kicked_participant = None;
         let mut new_participant = None;
         let mut new_threshold = None;
@@ -558,6 +559,7 @@ impl WorkflowTriggers {
             }
             InvitationMeta::Dars(p) => {
                 dar_filenames = p.dar_filenames;
+                dar_hashes = p.dar_hashes;
                 participants = p.participants;
                 workflow_instance = p.workflow_instance;
             }
@@ -615,6 +617,7 @@ impl WorkflowTriggers {
             prefix,
             participants,
             dar_filenames,
+            dar_hashes,
             kicked_participant,
             new_participant,
             new_threshold,

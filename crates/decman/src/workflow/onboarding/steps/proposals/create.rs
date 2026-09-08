@@ -376,7 +376,7 @@ pub(crate) fn decode_keys_payload(payload: &[u8]) -> Result<Vec<SigningPublicKey
 ///    - Hash the UTF-8 bytes of the string itself
 ///
 /// The decentralized namespace is returned in multihash format with "1220" prefix
-fn compute_decentralized_namespace(namespaces: &HashSet<String>) -> String {
+pub(crate) fn compute_decentralized_namespace(namespaces: &HashSet<String>) -> String {
     use sha2::{Digest, Sha256};
 
     // HashPurpose.DecentralizedNamespaceNamespace = 37

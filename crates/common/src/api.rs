@@ -492,6 +492,13 @@ pub struct DeclineInvitationPayload {
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct DarsInvitePayload {
     pub dar_filenames: Vec<String>,
+    /// SHA-256 of each DAR's content, hex encoded and index-aligned with
+    /// `dar_filenames`. A peer pins the accepted content with these, so a
+    /// coordinator cannot get a different DAR vetted under an accepted name.
+    /// Empty from a coordinator that predates the field; the peer then falls
+    /// back to checking filenames only.
+    #[serde(default)]
+    pub dar_hashes: Vec<String>,
     /// The member set (selected peers) this distribution targets, so the peer
     /// card can render the same participant list the coordinator shows.
     #[serde(default)]

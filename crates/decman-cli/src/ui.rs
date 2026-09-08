@@ -2595,7 +2595,17 @@ fn invitation_detail_lines(invitation: &PendingInvitation) -> Vec<Line<'static>>
         lines.push(detail_kv("Packages", invitation.package_names.join(", ")));
     }
     if !invitation.dar_filenames.is_empty() {
-        lines.push(detail_kv("DARs", invitation.dar_filenames.join(", ")));
+        // Show the pinned content hash beside each filename. The peer refuses
+        // any DAR whose bytes do not hash to this value, so it is the operator
+        // accepting the content — not just the name — and it can be compared
+        // against a published release hash before accepting.
+        lines.push(detail_kv("DARs", String::new()));
+        for (index, filename) in invitation.dar_filenames.iter().enumerate() {
+            lines.push(detail_item(match invitation.dar_hashes.get(index) {
+                Some(hash) => format!("{filename}  sha256:{hash}"),
+                None => format!("{filename}  (no hash pinned)"),
+            }));
+        }
     }
     lines
 }
@@ -2834,6 +2844,7 @@ mod tests {
                 prefix: Some("treasury-rc5".to_owned()),
                 participants: Vec::new(),
                 dar_filenames: Vec::new(),
+                dar_hashes: Vec::new(),
                 kicked_participant: None,
                 new_threshold: None,
                 previous_threshold: None,
