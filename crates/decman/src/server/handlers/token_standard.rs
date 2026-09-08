@@ -617,7 +617,11 @@ pub(crate) async fn fetch_amulet_rules(
     fn text_at<'a>(json: &'a serde_json::Value, pointer: &str) -> anyhow::Result<&'a str> {
         json.pointer(pointer)
             .and_then(|v| v.as_str())
-            .with_context(|| format!("Unexpected response format from DSO API: missing {pointer}"))
+            .ok_or_else(|| {
+                // Clients get the stable message; the pointer is a debugging aid.
+                tracing::warn!("DSO API response is missing {pointer}");
+                anyhow::anyhow!("Unexpected response format from DSO API")
+            })
     }
 
     let url = config.canton.network.dso_url();
@@ -763,6 +767,9 @@ pub async fn get_network_info(data: web::Data<AppState>) -> impl Responder {
         }),
         Err(e) => {
             tracing::warn!("Failed to fetch network info from the DSO API: {e:#}");
+            // `{:#}` joins the context chain on one line ("outer: cause"),
+            // which reproduces the messages this endpoint returned before
+            // `fetch_amulet_rules` existed, e.g. "Failed to reach DSO API: …".
             HttpResponse::BadGateway().json(ErrorResponse {
                 error: format!("{e:#}"),
             })
