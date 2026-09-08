@@ -112,6 +112,10 @@ expression: all_proposal_fixtures()
     "operator": "op::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892"
   },
   {
+    "type": "request_dev_net_featured_app_right",
+    "amulet_rules_cid": "00amulet"
+  },
+  {
     "type": "setup_minting_delegation",
     "delegate": "delegate::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
     "dso": "dso::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",

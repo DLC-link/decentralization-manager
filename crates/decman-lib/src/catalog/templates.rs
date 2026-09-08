@@ -114,8 +114,9 @@ mod tests {
         AcceptBurnRequest, AcceptMintRequest, Burn, CreateDelegatedBatchedMarkersProxy,
         CreateProviderConfiguration, CreateProviderServiceRequest, CreateRegistrarServiceRequest,
         CreateUserServiceRequest, Mint, OffboardInstrumentIssuers, OnboardInstrumentIssuers,
-        OnboardRegistrar, ProvisionInstrument, ProvisionProviderService, SetEnableResultContracts,
-        SetProviderAppRewardBeneficiaries, SetupUtility,
+        OnboardRegistrar, ProvisionInstrument, ProvisionProviderService,
+        RequestDevNetFeaturedAppRight, SetEnableResultContracts, SetProviderAppRewardBeneficiaries,
+        SetupUtility,
     };
     use crate::catalog::types::BillingParams;
     use crate::framework::TemplateInfo;
@@ -382,6 +383,15 @@ mod tests {
                 "#governance-utility-onboarding-v1:Governance.UtilityOnboarding.CreateDelegatedBatchedMarkersProxy:CreateDelegatedBatchedMarkersProxy",
             ),
             (
+                RequestDevNetFeaturedAppRight {
+                    amulet_rules_cid: "00amulet".to_string(),
+                }
+                .template_id(&pkgs)
+                .expect("template id resolves")
+                .to_string(),
+                "#governance-utility-onboarding-v1:Governance.UtilityOnboarding.RequestDevNetFeaturedAppRight:RequestDevNetFeaturedAppRight",
+            ),
+            (
                 SetupUtility {
                     provider_service_cid: "psc".to_string(),
                     operator: cid("operator"),
@@ -535,7 +545,7 @@ mod tests {
                 "#governance-utility-onboarding-v1:Governance.UtilityOnboarding.OffboardInstrumentIssuers:OffboardInstrumentIssuers",
             ),
         ];
-        assert_eq!(cases.len(), 29, "one case per catalog proposal struct");
+        assert_eq!(cases.len(), 30, "one case per catalog proposal struct");
         for (actual, expected) in cases {
             assert_eq!(actual, expected);
         }

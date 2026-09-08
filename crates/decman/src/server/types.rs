@@ -369,6 +369,11 @@ pub enum ProposalType {
     CreateDelegatedBatchedMarkersProxy(
         decman_lib::catalog::proposals::utility::CreateDelegatedBatchedMarkersProxy,
     ),
+    /// Self-grant a `FeaturedAppRight` to the governance party on DevNet by
+    /// exercising `AmuletRules_DevNet_FeatureApp`.
+    RequestDevNetFeaturedAppRight(
+        decman_lib::catalog::proposals::utility::RequestDevNetFeaturedAppRight,
+    ),
     /// Delegate minting of the governance party's CIP-104 reward coupons to a
     /// validator node's `delegate` party via a `MintingDelegationProposal`.
     /// The delegation beneficiary is always the governance party; the delegate
@@ -469,6 +474,7 @@ impl ProposalType {
             Self::RevokeCouponReassignmentDelegation(p) => p,
             Self::SetEnableResultContracts(p) => p,
             Self::CreateDelegatedBatchedMarkersProxy(p) => p,
+            Self::RequestDevNetFeaturedAppRight(p) => p,
             Self::SetupMintingDelegation(p) => p,
             Self::AcceptExternalPartySetup(p) => p,
             Self::Mint(p) => p,
@@ -508,6 +514,7 @@ impl ProposalType {
             Self::RevokeCouponReassignmentDelegation(p) => Some(p),
             Self::SetEnableResultContracts(p) => Some(p),
             Self::CreateDelegatedBatchedMarkersProxy(p) => Some(p),
+            Self::RequestDevNetFeaturedAppRight(p) => Some(p),
             Self::SetupMintingDelegation(p) => Some(p),
             Self::AcceptExternalPartySetup(p) => Some(p),
             Self::Mint(p) => Some(p),
@@ -956,8 +963,9 @@ mod tests {
         AcceptBurnRequest, AcceptMintRequest, Burn, CreateDelegatedBatchedMarkersProxy,
         CreateProviderConfiguration, CreateProviderServiceRequest, CreateRegistrarServiceRequest,
         CreateUserServiceRequest, Mint, OffboardInstrumentIssuers, OnboardInstrumentIssuers,
-        OnboardRegistrar, ProvisionInstrument, ProvisionProviderService, SetEnableResultContracts,
-        SetProviderAppRewardBeneficiaries, SetupUtility,
+        OnboardRegistrar, ProvisionInstrument, ProvisionProviderService,
+        RequestDevNetFeaturedAppRight, SetEnableResultContracts, SetProviderAppRewardBeneficiaries,
+        SetupUtility,
     };
     use serde_json::Value;
     use sqlx::SqlitePool;
@@ -1391,6 +1399,9 @@ mod tests {
             }),
             ProposalType::CreateDelegatedBatchedMarkersProxy(CreateDelegatedBatchedMarkersProxy {
                 operator: test_party("op").unwrap(),
+            }),
+            ProposalType::RequestDevNetFeaturedAppRight(RequestDevNetFeaturedAppRight {
+                amulet_rules_cid: "00amulet".into(),
             }),
             ProposalType::SetupMintingDelegation(SetupMintingDelegation {
                 delegate: test_party("delegate").unwrap(),

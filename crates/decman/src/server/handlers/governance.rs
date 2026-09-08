@@ -5,8 +5,8 @@ use anyhow::Context;
 use base64::Engine;
 use canton_proto_rs::com::{
     daml::ledger::api::v2::{
-        DisclosedContract, SubmitAndWaitForTransactionRequest, SubmitAndWaitRequest,
-        command_service_client::CommandServiceClient,
+        CreatedEvent, DisclosedContract, SubmitAndWaitForTransactionRequest, SubmitAndWaitRequest,
+        command_service_client::CommandServiceClient, value,
     },
     digitalasset::canton::topology::admin::v30::{
         BaseQuery, ListDecentralizedNamespaceDefinitionRequest, StoreId, Synchronizer, base_query,
@@ -23,14 +23,16 @@ use decman_lib::catalog::proposals::custody::{
     AcceptTransfer, AcceptTransferWithContext, Transfer, TransferWithContext,
 };
 use decman_lib::catalog::proposals::rewards::SetupCouponReassignmentDelegation;
+use decman_lib::catalog::proposals::utility::RequestDevNetFeaturedAppRight;
 use decman_lib::catalog::templates::{
     domain_confirmation_template, governable_action_interface, governance_rules_template,
     self_confirmation_template,
 };
 use decman_lib::framework::commands::{build_propose, first_created_contract_id};
 use decman_lib::framework::encode::TransferValidity;
+use decman_lib::framework::record::record_field;
 
-use super::token_standard::GovernanceQuery;
+use super::token_standard::{AmuletRulesContract, GovernanceQuery, fetch_amulet_rules};
 use crate::{
     auth::WorkflowAuth,
     canton_id::CantonId,
@@ -49,8 +51,8 @@ use crate::{
         },
         transfer_context::{
             AcceptTransferContext, ProposeTransferArgs, fetch as fetch_accept_transfer_context,
-            fetch_factory_for_propose, maybe_fetch_for_proposal, needs_registry_context,
-            to_proto_disclosed_contracts,
+            fetch_factory_for_propose, fetch_proposal_created_event, has_template,
+            maybe_fetch_for_proposal_event, needs_registry_context, to_proto_disclosed_contracts,
         },
         types::{
             ActionType, ActiveCouponReassignmentDelegation, AuditLogEntry, AuditLogQuery,
@@ -1143,7 +1145,16 @@ pub async fn execute_action(
 
     let packages = packages();
 
-    match execute_confirmed_action(&data.config, &body, &token, &member_party_id, &packages).await {
+    match execute_confirmed_action(
+        &data.config,
+        &data.http_client,
+        &body,
+        &token,
+        &member_party_id,
+        &packages,
+    )
+    .await
+    {
         Ok(()) => {
             spawn_audit_log(
                 audit_pool,
@@ -1693,24 +1704,43 @@ async fn execute_confirm_action(
 /// Execute ExecuteConfirmedAction choice on governance rules contract
 async fn execute_confirmed_action(
     config: &NodeConfig,
+    http_client: &reqwest::Client,
     request: &ExecuteActionRequest,
     token: &str,
     member_party_id: &CantonId,
     packages: &PackageConfig,
 ) -> Result {
-    // For `AcceptTransferProposal` execution the executor's submission must
-    // include the registry-supplied disclosed contracts (transfer rule + its
-    // dependencies). `maybe_fetch_for_proposal` template-id-checks the
-    // on-chain proposal and returns `Ok(None)` for anything else, so we don't
-    // gate on `governance_type` here — that would silently drop the fetch on
-    // any non-CoreDomain path that happens to carry an AcceptTransferProposal.
+    // The executor's submission must carry the contracts the proposal's
+    // execute step reads but no member can see. `AcceptTransferProposal` needs
+    // the registry-supplied transfer rule and its dependencies;
+    // `RequestDevNetFeaturedAppRight` needs the DSO's `AmuletRules`. Both key
+    // on the on-chain proposal's template, not on `governance_type`, so a
+    // non-CoreDomain path carrying such a proposal still gets its contracts.
     let mut registry_disclosed: Vec<DisclosedContract> = Vec::new();
+    let mut proposal_event: Option<CreatedEvent> = None;
     if let Some(proposal_cid) = request.proposal_cid.as_deref() {
-        match maybe_fetch_for_proposal(
+        match fetch_proposal_created_event(
             config,
             Some(token.to_string()),
             &request.party_id,
             proposal_cid,
+        )
+        .await
+        {
+            Ok(event) => proposal_event = event,
+            // Don't hard-fail on ledger hiccups here; the submission below
+            // surfaces a clear error if the proposal really is gone.
+            Err(e) => tracing::warn!("Failed to look up proposal {proposal_cid}: {e:#}"),
+        }
+    }
+    if let (Some(proposal_cid), Some(created)) =
+        (request.proposal_cid.as_deref(), proposal_event.as_ref())
+    {
+        match maybe_fetch_for_proposal_event(
+            config,
+            Some(token.to_string()),
+            &request.party_id,
+            created,
         )
         .await
         {
@@ -1733,6 +1763,25 @@ async fn execute_confirmed_action(
                     "Failed to fetch transfer choice context for proposal {proposal_cid}: {e:#}"
                 );
             }
+        }
+
+        if has_template(
+            created,
+            RequestDevNetFeaturedAppRight::MODULE,
+            RequestDevNetFeaturedAppRight::ENTITY,
+        ) {
+            let proposed_cid = created
+                .create_arguments
+                .as_ref()
+                .and_then(|args| record_field(args, "amuletRulesCid"))
+                .and_then(|v| match v {
+                    value::Sum::ContractId(cid) => Some(cid.as_str()),
+                    _ => None,
+                });
+            let current = fetch_amulet_rules(http_client, config)
+                .await
+                .context("Failed to fetch AmuletRules from the DSO API")?;
+            registry_disclosed.push(amulet_rules_disclosure(proposed_cid, &current)?);
         }
     }
 
@@ -1829,6 +1878,35 @@ async fn execute_confirmed_action(
     client.submit_and_wait(req).await?;
 
     Ok(())
+}
+
+/// The `AmuletRules` disclosure for a `RequestDevNetFeaturedAppRight` execute.
+///
+/// Only the DSO can see `AmuletRules`, so the executor discloses the current
+/// contract from the DSO scan API. The proposal pins a contract id. When the
+/// DSO has replaced its `AmuletRules` since, the pinned contract is archived
+/// and the execute can never succeed, so report that instead of disclosing a
+/// contract the choice will not read.
+fn amulet_rules_disclosure(
+    proposed_cid: Option<&str>,
+    current: &AmuletRulesContract,
+) -> Result<DisclosedContract> {
+    let proposed_cid =
+        proposed_cid.context("RequestDevNetFeaturedAppRight proposal has no amuletRulesCid")?;
+    if proposed_cid != current.contract_id {
+        anyhow::bail!(
+            "The proposal names AmuletRules {proposed_cid}, but the DSO's current AmuletRules is {}. Cancel this proposal and propose again.",
+            current.contract_id
+        );
+    }
+    Ok(DisclosedContract {
+        template_id: None,
+        contract_id: current.contract_id.clone(),
+        created_event_blob: base64::engine::general_purpose::STANDARD
+            .decode(&current.created_event_blob)
+            .context("Invalid base64 in the DSO's AmuletRules created_event_blob")?,
+        synchronizer_id: String::new(),
+    })
 }
 
 /// Execute ExpireConfirmation choice on governance rules contract
@@ -2095,6 +2173,52 @@ mod propose_guard_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn amulet_rules(contract_id: &str, created_event_blob: &str) -> AmuletRulesContract {
+        AmuletRulesContract {
+            dso: CantonId::parse(
+                "dso::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+            )
+            .expect("valid canton id"),
+            contract_id: contract_id.to_owned(),
+            created_event_blob: created_event_blob.to_owned(),
+        }
+    }
+
+    /// "blob" in base64.
+    const BLOB_B64: &str = "YmxvYg==";
+
+    #[test]
+    fn amulet_rules_disclosure_discloses_the_current_contract_when_the_proposal_matches() {
+        let current = amulet_rules("00amulet", BLOB_B64);
+        let disclosed = amulet_rules_disclosure(Some("00amulet"), &current)
+            .expect("a matching cid is disclosed");
+        assert_eq!(disclosed.contract_id, "00amulet");
+        assert_eq!(disclosed.created_event_blob, b"blob");
+        assert!(disclosed.template_id.is_none());
+    }
+
+    #[test]
+    fn amulet_rules_disclosure_names_both_cids_when_the_dso_replaced_amulet_rules() {
+        let current = amulet_rules("00new", BLOB_B64);
+        let err = amulet_rules_disclosure(Some("00old"), &current)
+            .expect_err("a stale proposal cannot be executed");
+        let message = format!("{err:#}");
+        assert!(message.contains("00old"), "{message}");
+        assert!(message.contains("00new"), "{message}");
+    }
+
+    #[test]
+    fn amulet_rules_disclosure_rejects_a_proposal_without_amulet_rules_cid() {
+        let current = amulet_rules("00amulet", BLOB_B64);
+        assert!(amulet_rules_disclosure(None, &current).is_err());
+    }
+
+    #[test]
+    fn amulet_rules_disclosure_rejects_a_malformed_blob() {
+        let current = amulet_rules("00amulet", "not base64!");
+        assert!(amulet_rules_disclosure(Some("00amulet"), &current).is_err());
+    }
 
     /// `core_domain` builds its choice from `proposal_cid` and never reads
     /// `action`, so both clients send `governance_set_threshold: 0` as a

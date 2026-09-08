@@ -1187,6 +1187,15 @@ export const GovernanceSection = ({
     }
   }, [proposalType, dsoPartyId, fetchNetworkInfo]);
 
+  // Request DevNet Featured App Right pins the DSO's current AmuletRules, so
+  // prefill its cid from network-info too. The field keeps a refresh button
+  // for when the DSO replaces the contract while the form is open.
+  useEffect(() => {
+    if (proposalType === "request_dev_net_featured_app_right" && !amuletRulesCid) {
+      fetchNetworkInfo();
+    }
+  }, [proposalType, amuletRulesCid, fetchNetworkInfo]);
+
   // Read the delegations this party already has, so neither vote form asks for a
   // pasted contract id. Setup needs it for "Replaces Delegation" — blank while
   // one is live is rejected with 409. Revoke needs it to name what to archive.
@@ -1875,6 +1884,12 @@ export const GovernanceSection = ({
             operator: proposalOperator,
           };
           break;
+        case "request_dev_net_featured_app_right":
+          proposal = {
+            type: "request_dev_net_featured_app_right",
+            amulet_rules_cid: amuletRulesCid.trim(),
+          };
+          break;
         case "setup_minting_delegation": {
           const expiresAtMs = new Date(proposalDelegationExpiresAt).getTime();
           if (!Number.isFinite(expiresAtMs)) {
@@ -2077,6 +2092,40 @@ export const GovernanceSection = ({
   };
 
   // Render form fields based on selected action type
+  // Shared by the legacy DevNet Feature App action form and the Request DevNet
+  // Featured App Right proposal form: both pin the DSO's current AmuletRules.
+  const renderAmuletRulesCidField = () => (
+    <Box sx={{ display: "flex", gap: 1, alignItems: "center" }}>
+      <TextField
+        label="Amulet Rules CID"
+        value={amuletRulesCid}
+        onChange={(e) => setAmuletRulesCid(e.target.value)}
+        fullWidth
+        size="small"
+        required
+        slotProps={{
+          input: {
+            endAdornment: fieldHelpAdornment(
+              "Contract id of the DSO's current AmuletRules contract on DevNet, prefilled from the DSO scan API. Refresh it if the DSO has replaced the contract since this form opened.",
+              "Help for Amulet Rules CID",
+            ),
+          },
+        }}
+      />
+      <Tooltip title="Refresh">
+        <span>
+          <IconButton
+            size="small"
+            onClick={fetchNetworkInfo}
+            disabled={amuletRulesLoading}
+          >
+            {amuletRulesLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
+          </IconButton>
+        </span>
+      </Tooltip>
+    </Box>
+  );
+
   const renderActionFormFields = () => {
     switch (selectedActionType) {
       case "governance_add_member":
@@ -2699,37 +2748,7 @@ export const GovernanceSection = ({
           </>
         );
       case "dev_net_feature_app":
-        return (
-          <Box sx={{ display: "flex", gap: 1, alignItems: "center" }}>
-            <TextField
-              label="Amulet Rules CID"
-              value={amuletRulesCid}
-              onChange={(e) => setAmuletRulesCid(e.target.value)}
-              fullWidth
-              size="small"
-              required
-              slotProps={{
-                input: {
-                  endAdornment: fieldHelpAdornment(
-                    "Contract id of the active AmuletRules contract on devnet; needed to request a Featured App Right.",
-                    "Help for Amulet Rules CID",
-                  ),
-                },
-              }}
-            />
-            <Tooltip title="Refresh">
-              <span>
-                <IconButton
-                  size="small"
-                  onClick={fetchNetworkInfo}
-                  disabled={amuletRulesLoading}
-                >
-                  {amuletRulesLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
-                </IconButton>
-              </span>
-            </Tooltip>
-          </Box>
-        );
+        return renderAmuletRulesCidField();
       default:
         return null;
     }
@@ -3014,6 +3033,8 @@ export const GovernanceSection = ({
                   <ListSubheader sx={{ fontStyle: "italic", lineHeight: 1.5, pl: 4 }}>Actions</ListSubheader>
                   <MenuItem value="accept_mint_request">Accept Mint Request</MenuItem>
                   <MenuItem value="accept_burn_request">Accept Burn Request</MenuItem>
+                  <ListSubheader sx={{ fontStyle: "italic", lineHeight: 1.5, pl: 4 }}>DevNet</ListSubheader>
+                  <MenuItem value="request_dev_net_featured_app_right">Request DevNet Featured App Right</MenuItem>
                   <Divider />
                   <ListSubheader sx={{ color: "primary.main", fontWeight: 600 }}>Dual Governance Utility Onboarding</ListSubheader>
                   <ListSubheader sx={{ fontStyle: "italic", lineHeight: 1.5, pl: 4 }}>Onboarding (in order)</ListSubheader>
@@ -4162,6 +4183,9 @@ export const GovernanceSection = ({
                   }}
                 />
               )}
+
+              {proposalType === "request_dev_net_featured_app_right" &&
+                renderAmuletRulesCidField()}
 
               {proposalType === "setup_minting_delegation" && (
                 <>

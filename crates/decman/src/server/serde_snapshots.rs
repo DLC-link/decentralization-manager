@@ -22,8 +22,8 @@ use decman_lib::catalog::proposals::utility::{
     AcceptBurnRequest, AcceptMintRequest, Burn, CreateDelegatedBatchedMarkersProxy,
     CreateProviderConfiguration, CreateProviderServiceRequest, CreateRegistrarServiceRequest,
     CreateUserServiceRequest, Mint, OffboardInstrumentIssuers, OnboardInstrumentIssuers,
-    OnboardRegistrar, ProvisionInstrument, ProvisionProviderService, SetEnableResultContracts,
-    SetProviderAppRewardBeneficiaries, SetupUtility,
+    OnboardRegistrar, ProvisionInstrument, ProvisionProviderService, RequestDevNetFeaturedAppRight,
+    SetEnableResultContracts, SetProviderAppRewardBeneficiaries, SetupUtility,
 };
 use decman_lib::catalog::types::RewardBeneficiary;
 
@@ -122,7 +122,7 @@ fn all_action_fixtures() -> Vec<ActionType> {
     ]
 }
 
-/// One populated instance per `ProposalType` variant (29), every Option Some.
+/// One populated instance per `ProposalType` variant (30), every Option Some.
 fn all_proposal_fixtures() -> Vec<ProposalType> {
     vec![
         ProposalType::SetupCcPreapproval(SetupCcPreapproval {
@@ -201,6 +201,9 @@ fn all_proposal_fixtures() -> Vec<ProposalType> {
         }),
         ProposalType::CreateDelegatedBatchedMarkersProxy(CreateDelegatedBatchedMarkersProxy {
             operator: cid("op"),
+        }),
+        ProposalType::RequestDevNetFeaturedAppRight(RequestDevNetFeaturedAppRight {
+            amulet_rules_cid: "00amulet".into(),
         }),
         ProposalType::SetupMintingDelegation(SetupMintingDelegation {
             delegate: cid("delegate"),

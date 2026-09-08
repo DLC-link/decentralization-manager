@@ -78,7 +78,7 @@ pub fn proposal_create_arguments(
 ///
 /// `?Sized` so a caller holding an erased payload — decman's
 /// `ProposalType::grpc_payload`, which hands back a
-/// `&dyn GrpcPayload` rather than re-matching 29 variants — can submit
+/// `&dyn GrpcPayload` rather than re-matching 30 variants — can submit
 /// through the same entry point as a concrete struct. `dyn GrpcPayload`
 /// implements its supertraits automatically, so nothing else is needed.
 pub fn build_propose(

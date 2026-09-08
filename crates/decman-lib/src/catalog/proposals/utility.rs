@@ -164,6 +164,43 @@ impl DamlProtoEncode for CreateDelegatedBatchedMarkersProxy {
 
 impl Validate for CreateDelegatedBatchedMarkersProxy {}
 
+/// Self-grant a `FeaturedAppRight` to the governance party on DevNet by
+/// exercising `AmuletRules_DevNet_FeatureApp`. The choice refuses on any
+/// network whose `AmuletRules` is not flagged `isDevNet`.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct RequestDevNetFeaturedAppRight {
+    /// The DSO's current `AmuletRules` contract, as `GET /network-info`
+    /// reports it. The execute path discloses that contract.
+    pub amulet_rules_cid: String,
+}
+
+impl RequestDevNetFeaturedAppRight {
+    pub const MODULE: &'static str = "Governance.UtilityOnboarding.RequestDevNetFeaturedAppRight";
+    pub const ENTITY: &'static str = "RequestDevNetFeaturedAppRight";
+}
+
+impl TemplateInfo for RequestDevNetFeaturedAppRight {
+    fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
+        let pkg = pkgs
+            .package_ref("governance_utility_onboarding")
+            .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
+        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+    }
+}
+
+impl DamlProtoEncode for RequestDevNetFeaturedAppRight {
+    fn to_daml_proto(&self) -> Result<Value, Error> {
+        Ok(make_record(vec![field(
+            "amuletRulesCid",
+            make_contract_id(&self.amulet_rules_cid),
+        )]))
+    }
+}
+
+impl Validate for RequestDevNetFeaturedAppRight {}
+
 /// Run the full Utility-Registry onboarding in one vote. Flags control
 /// whether a `TransferRule` / `AllocationFactory` are created during the
 /// `RegistrarServiceRequest` accept.
@@ -1004,6 +1041,14 @@ mod tests {
             "create_delegated_batched_markers_proxy",
             CreateDelegatedBatchedMarkersProxy {
                 operator: cid("op")
+            }
+            .to_daml_proto()
+            .expect("payload encodes")
+        );
+        insta::assert_debug_snapshot!(
+            "request_dev_net_featured_app_right",
+            RequestDevNetFeaturedAppRight {
+                amulet_rules_cid: "00amulet".to_string(),
             }
             .to_daml_proto()
             .expect("payload encodes")

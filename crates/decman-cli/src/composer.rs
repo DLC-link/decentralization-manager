@@ -183,6 +183,10 @@ pub fn proposal_types() -> Vec<TypeOption> {
             "create_delegated_batched_markers_proxy",
             "Create delegated batched markers proxy",
         ),
+        opt(
+            "request_dev_net_featured_app_right",
+            "Request DevNet featured app right",
+        ),
         opt("mint", "Mint"),
         opt("burn", "Burn"),
         opt("accept_mint_request", "Accept mint request"),
@@ -507,6 +511,14 @@ pub fn fields_for_proposal(proposal_type: &str, ctx: &ComposerContext) -> Vec<Co
             ),
         ],
         "create_delegated_batched_markers_proxy" => vec![operator()],
+        "request_dev_net_featured_app_right" => vec![field(
+            "amulet_rules_cid",
+            "Amulet rules cid",
+            FieldKind::Text,
+            String::new(),
+            false,
+            "The DSO's current AmuletRules contract id, as GET /network-info reports it. DevNet only.",
+        )],
         "mint" => {
             let mut fields = vec![picker(
                 "allocation_factory_cid",
