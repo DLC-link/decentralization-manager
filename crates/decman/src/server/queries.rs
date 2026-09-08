@@ -7,8 +7,7 @@
 use std::{
     collections::HashMap,
     future::Future,
-    sync::{Arc, OnceLock, RwLock},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use canton_common::decimal::DamlDecimal;
@@ -564,16 +563,13 @@ pub async fn get_governance_confirmations(
     // synthesis in that case and wait for a refresh that reads cleanly.
     let mut domain_confirmations_complete = true;
 
-    // Read once per party per TTL rather than per batch: confirmations are
-    // small individually but a party can hold thousands, and re-reading them
-    // for every scroll is what made paging pointless.
-    let cached = match cached_domain_confirmations(config, party_id, token.clone(), packages).await
-    {
-        Ok(cached) => cached,
+    // Bounded, not cached: see read_domain_confirmations.
+    let cached = match read_domain_confirmations(config, party_id, token.clone(), packages).await {
+        Ok(read) => read,
         Err(e) => {
             tracing::warn!("Could not read confirmations: {e}");
             domain_confirmations_complete = false;
-            Arc::new((HashMap::new(), HashMap::new()))
+            (HashMap::new(), HashMap::new())
         }
     };
     confirmations_by_hash.extend(cached.0.clone());
@@ -867,32 +863,23 @@ async fn page_proposal_infos(
 /// batch of a paged feed would rescan the whole set.
 /// A party's parsed confirmations: domain ones keyed by proposal cid, and
 /// self-management ones keyed by action hash.
-type ParsedConfirmations = Arc<(
+type ParsedConfirmations = (
     HashMap<String, (ActionType, Vec<ParsedConfirmation>)>,
     HashMap<String, (String, Vec<ParsedDomainConfirmation>)>,
-)>;
-type ConfirmationCountsCache = RwLock<HashMap<String, (Instant, ParsedConfirmations)>>;
+);
 
-static CONFIRMATION_COUNTS: OnceLock<ConfirmationCountsCache> = OnceLock::new();
-
-const COUNTS_TTL: Duration = Duration::from_secs(300);
-
-async fn cached_domain_confirmations(
+/// Read a party's confirmations, bounded by [`MAX_CONFIRMATIONS_SCANNED`].
+///
+/// Deliberately uncached. These are small — a few hundred bytes each — and a
+/// confirmation has to show up on the next read, not once a TTL lapses: caching
+/// them for five minutes hid a peer's confirmation and left `can_execute` false
+/// long after quorum was reached.
+async fn read_domain_confirmations(
     config: &NodeConfig,
     party_id: &CantonId,
     token: Option<String>,
     packages: &PackageConfig,
 ) -> Result<ParsedConfirmations> {
-    let key = party_id.to_string();
-    let cache = CONFIRMATION_COUNTS.get_or_init(|| RwLock::new(HashMap::new()));
-
-    if let Ok(guard) = cache.read()
-        && let Some((at, cached)) = guard.get(&key)
-        && at.elapsed() < COUNTS_TTL
-    {
-        return Ok(cached.clone());
-    }
-
     let mut by_hash: HashMap<String, (ActionType, Vec<ParsedConfirmation>)> = HashMap::new();
     let mut domain: HashMap<String, (String, Vec<ParsedDomainConfirmation>)> = HashMap::new();
     for t in &decman_lib::catalog::templates::governance_templates(packages) {
@@ -912,11 +899,7 @@ async fn cached_domain_confirmations(
         }
     }
 
-    let confirmations = Arc::new((by_hash, domain));
-    if let Ok(mut guard) = cache.write() {
-        guard.insert(key, (Instant::now(), confirmations.clone()));
-    }
-    Ok(confirmations)
+    Ok((by_hash, domain))
 }
 
 /// One batch of a party's open proposals, plus where to resume.
@@ -963,7 +946,7 @@ pub async fn page_proposal_summaries(
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let confirmations = cached_domain_confirmations(config, party_id, token_for_counts, packages)
+    let confirmations = read_domain_confirmations(config, party_id, token_for_counts, packages)
         .await
         .unwrap_or_default();
     let summaries = summaries
