@@ -7,7 +7,8 @@
 use std::{
     collections::HashMap,
     future::Future,
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{Arc, OnceLock, RwLock},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use canton_common::decimal::DamlDecimal;
@@ -36,8 +37,8 @@ use crate::{
 use super::{
     event_filters::{interface_filter, party_event_format, template_filter, wildcard_filter},
     ledger_paging::{
-        FETCH_CHUNK, fetch_active_contracts_filtered, fetch_first_active_contract,
-        for_each_active_contract,
+        AcsCursor, FETCH_CHUNK, fetch_active_contracts_filtered, fetch_first_active_contract,
+        for_each_active_contract, page_active_contracts,
     },
     package_inventory::{
         fetch_package_id_to_name, fetch_package_names, newest_matching_names, package_name_prefix,
@@ -47,14 +48,14 @@ use super::{
         ActionType, Claim, ContractInfo, ContractWithBlob, CredentialInfo, CredentialOfferInfo,
         DomainConfirmation, DomainGovernanceAction, GovernanceAction, GovernanceConfirmation,
         GovernanceState, HoldingInfo, InstrumentInfo, PartyMetadata, PendingAction,
-        ProviderConfigurationInfo, ProviderServiceInfo, RegistrarServiceInfo,
+        ProposalSummary, ProviderConfigurationInfo, ProviderServiceInfo, RegistrarServiceInfo,
         RegistrarServiceRequestInfo, TokenRequestInfo, TransferFactoryInfo,
         TransferInstructionInfo, TransferInstructionStatus, UserServiceInfo,
     },
 };
 
 /// Template identifier for Daml contracts
-struct TemplateId {
+pub struct TemplateId {
     package_id: String,
     module_name: &'static str,
     entity_name: &'static str,
@@ -62,6 +63,24 @@ struct TemplateId {
 
 /// Contract template identifiers for the contracts list
 /// Each template is queried separately to handle cases where packages may not exist
+/// Every template the parties detail view can show.
+pub fn contract_templates_all(packages: &PackageConfig) -> Vec<TemplateId> {
+    contract_templates(packages)
+}
+
+/// The governance-rules templates only.
+///
+/// The parties list needs exactly one contract per party: the `GovernanceRules`
+/// the notifications flow keys off. Reading all nine templates for every hosted
+/// party is what OOMKilled nodes (#424), so the list reads this subset and the
+/// full set stays behind `include_contracts`.
+pub fn rules_templates(packages: &PackageConfig) -> Vec<TemplateId> {
+    contract_templates(packages)
+        .into_iter()
+        .filter(|t| t.entity_name.contains("GovernanceRules"))
+        .collect()
+}
+
 fn contract_templates(packages: &PackageConfig) -> Vec<TemplateId> {
     let mut templates = vec![
         // CBTC contracts (hardcoded package IDs)
@@ -197,14 +216,16 @@ pub async fn get_contracts(
     token: Option<String>,
     packages: &PackageConfig,
     package_versions: &HashMap<String, String>,
+    templates: &[TemplateId],
 ) -> Result<Vec<ContractInfo>> {
+    let _ = packages;
     let mut contracts = Vec::new();
 
     {
         // One query per template, so a package missing from this participant
         // degrades to "no contracts of that type" instead of failing the read.
         tracing::debug!("Using TemplateFilter for contracts query (per-template)");
-        for t in &contract_templates(packages) {
+        for t in templates {
             match fetch_contracts_for_template(
                 config,
                 party_id,
@@ -403,7 +424,7 @@ async fn fetch_contracts_for_template(
         false,
     );
 
-    for_each_active_contract(config, token, event_format, |created| {
+    for_each_active_contract(config, token, event_format, None, |created| {
         contracts.push(render_contract_info(&created, package_versions));
     })
     .await?;
@@ -495,13 +516,26 @@ where
 ///
 /// Similar to get_governance_confirmations but parses the action field into ActionType
 /// and groups by deterministic action hash.
+/// One batch of a party's governance queue.
+///
+/// `limit` bounds how many proposals are read from the ledger per call, and the
+/// returned cursor resumes the next batch. Reading a party's whole proposal set
+/// in one request is what left the approvals feed spinning (#424). The
+/// confirmations behind the batch come from a short-lived per-party cache, so
+/// scrolling does not re-read them.
 pub async fn get_governance_confirmations(
     config: &NodeConfig,
     party_id: &CantonId,
     threshold: usize,
     token: Option<String>,
     packages: &PackageConfig,
-) -> Result<(Vec<GovernanceAction>, Vec<DomainGovernanceAction>)> {
+    limit: usize,
+    cursor: Option<AcsCursor>,
+) -> Result<(
+    Vec<GovernanceAction>,
+    Vec<DomainGovernanceAction>,
+    Option<AcsCursor>,
+)> {
     // Collect confirmations grouped by action hash (core self-management)
     let mut confirmations_by_hash: HashMap<String, (ActionType, Vec<ParsedConfirmation>)> =
         HashMap::new();
@@ -530,52 +564,44 @@ pub async fn get_governance_confirmations(
     // synthesis in that case and wait for a refresh that reads cleanly.
     let mut domain_confirmations_complete = true;
 
-    tracing::debug!("Using TemplateFilter for governance query (per-template)");
-    for t in &decman_lib::catalog::templates::governance_templates(packages) {
-        match fetch_governance_for_template(
-            config,
-            party_id,
-            token.clone(),
-            t,
-            &mut confirmations_by_hash,
-            &mut domain_confirmations,
-        )
-        .await
-        {
-            Ok(()) => {
-                tracing::debug!("Successfully queried {}:{}", t.module, t.entity);
-            }
-            Err(e) => {
-                let err_str = e.to_string();
-                if err_str.contains("PACKAGE_NAMES_NOT_FOUND") {
-                    tracing::debug!(
-                        "Package {} not found, skipping {}:{}",
-                        t.package_ref,
-                        t.module,
-                        t.entity
-                    );
-                } else {
-                    tracing::warn!(
-                        "Failed to query {}:{}: {e}, continuing...",
-                        t.module,
-                        t.entity
-                    );
-                    domain_confirmations_complete = false;
-                }
-            }
+    // Read once per party per TTL rather than per batch: confirmations are
+    // small individually but a party can hold thousands, and re-reading them
+    // for every scroll is what made paging pointless.
+    let cached = match cached_domain_confirmations(config, party_id, token.clone(), packages).await
+    {
+        Ok(cached) => cached,
+        Err(e) => {
+            tracing::warn!("Could not read confirmations: {e}");
+            domain_confirmations_complete = false;
+            Arc::new((HashMap::new(), HashMap::new()))
         }
-    }
-    // Fetch proposal infos via GovernableAction interface query
-    let proposal_infos_complete =
-        match fetch_proposal_infos(config, party_id, token, packages, &mut proposal_infos).await {
-            Ok(complete) => complete,
+    };
+    confirmations_by_hash.extend(cached.0.clone());
+
+    // One batch of proposals, not the party's whole history.
+    let mut proposals_read_ok = true;
+    let (batch, next_cursor) =
+        match page_proposal_infos(config, party_id, token, packages, limit, cursor).await {
+            Ok(page) => page,
             Err(e) => {
                 // Warn, not debug: this drops every unconfirmed card from the page,
                 // and the operator needs to know why the queue looks empty.
                 tracing::warn!("Could not fetch proposal infos: {e}");
-                false
+                proposals_read_ok = false;
+                (Vec::new(), None)
             }
         };
+    let proposal_infos_complete = proposals_read_ok;
+    proposal_infos.extend(batch);
+
+    // Only the confirmations belonging to this batch, so a card's count matches
+    // the proposal beside it rather than the whole party's set.
+    domain_confirmations.extend(
+        proposal_infos
+            .keys()
+            .filter_map(|cid| cached.1.get(cid).map(|v| (cid.clone(), v.clone()))),
+    );
+
 
     let now_seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -643,7 +669,7 @@ pub async fn get_governance_confirmations(
     })
     .collect();
 
-    Ok((actions, domain_actions))
+    Ok((actions, domain_actions, next_cursor))
 }
 
 /// Map a parsed confirmation onto the wire DTO.
@@ -683,7 +709,12 @@ async fn fetch_governance_for_template(
         true,
     );
 
-    for_each_active_contract(config, token, event_format, |created| {
+    for_each_active_contract(
+        config,
+        token,
+        event_format,
+        Some(MAX_CONFIRMATIONS_SCANNED),
+        |created| {
         if created.template_id.as_ref().is_some_and(|t| {
             t.module_name == "Governance.Confirmation" && t.entity_name == "GovernanceConfirmation"
         }) {
@@ -783,28 +814,25 @@ async fn resolve_accept_transfer_details(
     Ok(())
 }
 
-/// Most proposals one approvals read keeps in memory.
+/// Most `GovernanceConfirmation` contracts one read walks.
 ///
-/// The read holds a `ProposalInfo` per proposal, so without a bound the page
-/// costs memory proportional to a party's whole open-proposal history rather
-/// than to what it displays. A party with 26k of them OOMKilled a node at 4Gi
-/// (#424). Exceeding this marks the result incomplete instead of failing.
-const MAX_PROPOSALS_RETAINED: usize = 2_000;
+/// Confirmations are small individually but a load-tested party can hold tens
+/// of thousands, and walking them all is what left the approvals feed spinning
+/// (#424). Every proposal a member could act on has at most a handful, so this
+/// is far above what a real queue needs.
+const MAX_CONFIRMATIONS_SCANNED: usize = 5_000;
 
-/// Fetch proposal infos via GovernableAction interface query.
-///
-/// Queries active contracts implementing GovernableAction and extracts the
-/// `description` field plus, where applicable, the `TransferProposal`'s
-/// recipient/amount/instrument from their create_arguments.
-async fn fetch_proposal_infos(
+/// One batch of a party's open proposals, keyed by cid, plus where to resume.
+async fn page_proposal_infos(
     config: &NodeConfig,
     party_id: &CantonId,
     token: Option<String>,
     packages: &PackageConfig,
-    proposal_infos: &mut HashMap<String, ProposalInfo>,
-) -> Result<bool> {
+    limit: usize,
+    cursor: Option<AcsCursor>,
+) -> Result<(Vec<(String, ProposalInfo)>, Option<AcsCursor>)> {
     let Ok(template) = decman_lib::catalog::templates::governable_action_interface(packages) else {
-        return Ok(true);
+        return Ok((Vec::new(), None));
     };
 
     let event_format = party_event_format(
@@ -813,33 +841,150 @@ async fn fetch_proposal_infos(
         true,
     );
 
-    let mut complete = true;
-    for_each_active_contract(config, token.clone(), event_format, |created| {
-        if proposal_infos.len() >= MAX_PROPOSALS_RETAINED {
-            complete = false;
-            return;
-        }
-        if let Some((proposal_cid, info)) = interpret::extract_proposal_info(&created, party_id) {
-            proposal_infos.insert(proposal_cid, info);
-        }
-    })
+    let (items, next) = page_active_contracts(
+        config,
+        token.clone(),
+        event_format,
+        limit,
+        cursor,
+        |created| interpret::extract_proposal_info(&created, party_id),
+    )
     .await?;
-    if !complete {
-        tracing::warn!(
-            %party_id,
-            retained = MAX_PROPOSALS_RETAINED,
-            "the party has more open proposals than one approvals read retains;              the page is marked incomplete"
-        );
+
+    // Resolve the linked `TransferInstruction`s for this batch only, so an
+    // AcceptTransfer card still renders sender/amount/instrument.
+    let mut map: HashMap<String, ProposalInfo> = items.into_iter().collect();
+    resolve_accept_transfer_details(config, party_id, token, &mut map).await?;
+
+    Ok((map.into_iter().collect(), next))
+}
+
+/// Live confirmation counts for a party, keyed by proposal cid.
+///
+/// Cached briefly: the walk covers every `GovernanceConfirmation` the party
+/// holds, which is cheap per contract but not per scroll. Without this, each
+/// batch of a paged feed would rescan the whole set.
+/// A party's parsed confirmations: domain ones keyed by proposal cid, and
+/// self-management ones keyed by action hash.
+type ParsedConfirmations = Arc<(
+    HashMap<String, (ActionType, Vec<ParsedConfirmation>)>,
+    HashMap<String, (String, Vec<ParsedDomainConfirmation>)>,
+)>;
+type ConfirmationCountsCache = RwLock<HashMap<String, (Instant, ParsedConfirmations)>>;
+
+static CONFIRMATION_COUNTS: OnceLock<ConfirmationCountsCache> = OnceLock::new();
+
+const COUNTS_TTL: Duration = Duration::from_secs(300);
+
+async fn cached_domain_confirmations(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    packages: &PackageConfig,
+) -> Result<ParsedConfirmations> {
+    let key = party_id.to_string();
+    let cache = CONFIRMATION_COUNTS.get_or_init(|| RwLock::new(HashMap::new()));
+
+    if let Ok(guard) = cache.read()
+        && let Some((at, cached)) = guard.get(&key)
+        && at.elapsed() < COUNTS_TTL
+    {
+        return Ok(cached.clone());
     }
 
-    // Resolve the linked `TransferInstruction` for any
-    // `AcceptTransferProposal`s we just captured so the notification card has
-    // sender/amount/instrument to render. Errors per-cid are logged and
-    // swallowed inside the resolver; an outer error here would only come from
-    // a client-creation failure, which we let propagate.
-    resolve_accept_transfer_details(config, party_id, token, proposal_infos).await?;
+    let mut by_hash: HashMap<String, (ActionType, Vec<ParsedConfirmation>)> = HashMap::new();
+    let mut domain: HashMap<String, (String, Vec<ParsedDomainConfirmation>)> = HashMap::new();
+    for t in &decman_lib::catalog::templates::governance_templates(packages) {
+        // A template this participant lacks means "no confirmations of that
+        // kind", not a failed read.
+        if let Err(e) =
+            fetch_governance_for_template(config, party_id, token.clone(), t, &mut by_hash, &mut domain)
+                .await
+        {
+            tracing::debug!(%party_id, "confirmation read skipped {}:{}: {e}", t.module, t.entity);
+        }
+    }
 
-    Ok(complete)
+    let confirmations = Arc::new((by_hash, domain));
+    if let Ok(mut guard) = cache.write() {
+        guard.insert(key, (Instant::now(), confirmations.clone()));
+    }
+    Ok(confirmations)
+}
+
+/// One batch of a party's open proposals, plus where to resume.
+///
+/// Unlike [`fetch_proposal_infos`], this reads only as far as `limit` and hands
+/// back a cursor, so a caller can show a batch while fetching the next instead
+/// of waiting on a party's whole proposal history (#424).
+pub async fn page_proposal_summaries(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    packages: &PackageConfig,
+    limit: usize,
+    cursor: Option<AcsCursor>,
+) -> Result<(Vec<ProposalSummary>, Option<AcsCursor>)> {
+    let Ok(template) = decman_lib::catalog::templates::governable_action_interface(packages) else {
+        return Ok((Vec::new(), None));
+    };
+
+    let event_format = party_event_format(
+        party_id,
+        vec![interface_filter((&template).into(), false)],
+        true,
+    );
+
+    let token_for_counts = token.clone();
+    let (summaries, next) = page_active_contracts(
+        config,
+        token,
+        event_format,
+        limit,
+        cursor,
+        |created| {
+            interpret::extract_proposal_info(&created, party_id).map(|(cid, info)| {
+                ProposalSummary {
+                    proposal_cid: cid,
+                    // Filled in below, once the counts map is resolved.
+                    confirmation_count: 0,
+                    action_label: info.action_label,
+                    description: info.description,
+                    proposer: info.proposer,
+                    created_at: info.created_at,
+                }
+            })
+        },
+    )
+    .await?;
+
+    let now_seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let confirmations = cached_domain_confirmations(config, party_id, token_for_counts, packages)
+        .await
+        .unwrap_or_default();
+    let summaries = summaries
+        .into_iter()
+        .map(|mut p| {
+            p.confirmation_count = confirmations
+                .1
+                .get(&p.proposal_cid)
+                .map(|(_label, list)| {
+                    let unique = interpret::dedupe_newest_per_party(
+                        list.clone(),
+                        |c| &c.confirming_party,
+                        |c| c.created_at,
+                    );
+                    interpret::live_count(&unique, |c| c.expires_at, now_seconds)
+                })
+                .unwrap_or(0);
+            p
+        })
+        .collect();
+
+    Ok((summaries, next))
 }
 
 /// Compute a deterministic hash of an action for grouping confirmations
@@ -941,6 +1086,17 @@ async fn fetch_governance_state_fallback(
             }
             Ok(None) => continue,
             Err(e) => {
+                // An auth failure is about the party, not the package, so every
+                // remaining ref fails the same way. Walking all of them cost
+                // seconds per ref per party and is what left the approvals feed
+                // spinning across a deployment of parties this node cannot read
+                // (#424).
+                if is_auth_failure(&e) {
+                    tracing::debug!(
+                        "Fallback gov-core query for #{name} not attempted further:                          no credentials for {party_id}"
+                    );
+                    return Ok(None);
+                }
                 if !e.to_string().contains("PACKAGE_NAMES_NOT_FOUND") {
                     tracing::warn!("Fallback gov-core query for #{name} failed: {e}");
                 }
@@ -949,6 +1105,17 @@ async fn fetch_governance_state_fallback(
         }
     }
     Ok(None)
+}
+
+/// Whether an error is the participant refusing the caller's credentials.
+///
+/// Distinguishable from a missing package: retrying a different package ref
+/// cannot fix it, so a caller should stop rather than pay for every ref.
+fn is_auth_failure(e: &anyhow::Error) -> bool {
+    let text = e.to_string();
+    text.contains("valid authentication credentials")
+        || text.contains("UNAUTHENTICATED")
+        || text.contains("PERMISSION_DENIED")
 }
 
 /// Fetch governance state for a specific template

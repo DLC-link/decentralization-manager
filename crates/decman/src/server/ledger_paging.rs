@@ -58,14 +58,20 @@ pub(crate) async fn for_each_active_contract<F>(
     config: &NodeConfig,
     token: Option<String>,
     event_format: EventFormat,
+    max_events: Option<usize>,
     mut f: F,
 ) -> Result<()>
 where
     F: FnMut(CreatedEvent),
 {
-    collect_active_contracts(config, token, event_format, None, |created| {
+    // `Some(())` so the walk counts what it visited and `max_events` can stop
+    // it. Returning `None` left the counter at zero, so a caller that only
+    // wanted the first N rows still paged through the entire ACS — 26k
+    // contracts on a busy party (#424). `Vec<()>` stores nothing per element,
+    // so counting this way costs no memory.
+    collect_active_contracts(config, token, event_format, max_events, |created| {
         f(created);
-        None::<()>
+        Some(())
     })
     .await?;
     Ok(())
@@ -87,6 +93,94 @@ pub(crate) async fn fetch_first_active_contract(
             .into_iter()
             .next(),
     )
+}
+
+/// Where a paged ACS walk left off.
+///
+/// Carries the offset as well as the page token: a token is only valid against
+/// the `active_at_offset` and event format that produced it, so resuming with
+/// the token alone would straddle two ledger states.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct AcsCursor {
+    pub offset: i64,
+    /// Opaque to everyone but the participant that issued it.
+    pub page_token: Vec<u8>,
+}
+
+/// One batch of the ACS, plus where to resume.
+///
+/// For a caller that shows results as they arrive rather than waiting for the
+/// whole set: a party with tens of thousands of contracts cannot be read in one
+/// request without either timing out or exhausting memory (#424).
+///
+/// `None` for `cursor` starts at the current ledger end and pins it for the
+/// walk; the returned cursor carries that same offset onward. A `None` in the
+/// returned position means the ACS is exhausted.
+pub(crate) async fn page_active_contracts<T, F>(
+    config: &NodeConfig,
+    token: Option<String>,
+    event_format: EventFormat,
+    limit: usize,
+    cursor: Option<AcsCursor>,
+    mut extract: F,
+) -> Result<(Vec<T>, Option<AcsCursor>)>
+where
+    F: FnMut(CreatedEvent) -> Option<T>,
+{
+    let mut client = utils::create_state_client(config, token.clone()).await?;
+
+    let (offset, mut page_token): (i64, Option<Vec<u8>>) = match cursor {
+        Some(c) => (c.offset, Some(c.page_token)),
+        None => (
+            client
+                .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+                .await?
+                .into_inner()
+                .offset,
+            None,
+        ),
+    };
+
+    let page_size = FETCH_CHUNK.min(limit.try_into().unwrap_or(FETCH_CHUNK)).max(1);
+    let mut kept: Vec<T> = Vec::new();
+
+    loop {
+        let request = GetActiveContractsPageRequest {
+            active_at_offset: Some(offset),
+            event_format: Some(event_format.clone()),
+            max_page_size: Some(page_size),
+            page_token: page_token.clone(),
+        };
+
+        let page = client
+            .get_active_contracts_page(tonic::Request::new(request))
+            .await?
+            .into_inner();
+
+        for response in page.active_contracts {
+            if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
+                && let Some(event) = active.created_event
+                && let Some(item) = extract(event)
+            {
+                kept.push(item);
+            }
+        }
+
+        let next = match page.next_page_token {
+            Some(next) if !next.is_empty() => Some(next),
+            _ => None,
+        };
+
+        // Out of ACS: no cursor to hand back, however little this batch held.
+        let Some(next) = next else {
+            return Ok((kept, None));
+        };
+        page_token = Some(next.clone());
+
+        if kept.len() >= limit {
+            return Ok((kept, Some(AcsCursor { offset, page_token: next })));
+        }
+    }
 }
 
 /// Walk the ACS a page at a time, stopping once `max_events` have been

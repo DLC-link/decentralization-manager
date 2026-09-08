@@ -3,6 +3,9 @@ use std::collections::HashSet;
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 use anyhow::Context;
 use base64::Engine;
+use serde::Deserialize;
+
+use crate::server::ledger_paging::AcsCursor;
 use canton_proto_rs::com::{
     daml::ledger::api::v2::{
         DisclosedContract, SubmitAndWaitForTransactionRequest, SubmitAndWaitRequest,
@@ -57,6 +60,7 @@ use crate::{
             AuditLogResponse, AuditScope, CancelConfirmationRequest, CancelProposalRequest,
             ChainAuditEntry, ChainAuditQuery, ChainAuditResponse, ConfirmActionRequest,
             CouponReassignmentDelegationSummary, ErrorResponse, ExecuteActionRequest,
+            ProposalsPageResponse,
             ExpireConfirmationRequest, GovernanceResponse, GovernanceStateResponse, GovernanceType,
             KnownMember, KnownMembersResponse, MessageResponse, ProposalType, ProposeActionRequest,
             chain_audit_entry_from_row,
@@ -116,9 +120,26 @@ pub async fn get_governance(
         None => get_party_threshold(&data, party_id).await.unwrap_or(2),
     };
 
-    match get_governance_confirmations(&data.config, party_id, threshold, token, &packages).await {
-        Ok((actions, domain_actions)) => HttpResponse::Ok().json(GovernanceResponse {
+    let batch = query.limit.unwrap_or(25).clamp(1, 200);
+    let from = match &query.cursor {
+        Some(raw) if !raw.is_empty() => decode_cursor(raw),
+        _ => None,
+    };
+
+    match get_governance_confirmations(
+        &data.config,
+        party_id,
+        threshold,
+        token,
+        &packages,
+        batch,
+        from,
+    )
+    .await
+    {
+        Ok((actions, domain_actions, next)) => HttpResponse::Ok().json(GovernanceResponse {
             actions,
+            next_cursor: next.as_ref().and_then(encode_cursor),
             domain_actions,
             threshold,
             member_party_id,
@@ -136,6 +157,110 @@ pub async fn get_governance(
 }
 
 /// Get governance state (GovernanceRules contract state)
+/// Query parameters for the paged proposals feed.
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct ProposalsQuery {
+    pub party_id: CantonId,
+    /// Proposals per batch. Defaults to 50, capped at 200.
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Opaque `next_cursor` from the previous batch. Absent starts at the top.
+    #[serde(default)]
+    pub cursor: Option<String>,
+}
+
+/// Default and ceiling for one batch. The ceiling is what keeps a client from
+/// asking for a party's whole proposal history in one request (#424).
+const PROPOSALS_BATCH_DEFAULT: usize = 50;
+const PROPOSALS_BATCH_MAX: usize = 200;
+
+fn encode_cursor(cursor: &AcsCursor) -> Option<String> {
+    serde_json::to_vec(cursor)
+        .ok()
+        .map(|bytes| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+}
+
+fn decode_cursor(raw: &str) -> Option<AcsCursor> {
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(raw)
+        .ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// One batch of a party's open proposals.
+///
+/// Paged because a party can hold tens of thousands: reading them all in one
+/// request either times out or exhausts the node (#424). Carries no
+/// confirmation counts — resolving those means reading every
+/// `GovernanceConfirmation`, which is the same unbounded scan.
+#[utoipa::path(
+    tag = "Governance",
+    params(ProposalsQuery),
+    responses(
+        (status = 200, description = "A batch of proposals", body = ProposalsPageResponse),
+        (status = 400, description = "Malformed cursor", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[get("/governance/proposals")]
+pub async fn get_proposals_page(
+    data: web::Data<AppState>,
+    query: web::Query<ProposalsQuery>,
+) -> impl Responder {
+    let party_id = &query.party_id;
+    let limit = query
+        .limit
+        .unwrap_or(PROPOSALS_BATCH_DEFAULT)
+        .clamp(1, PROPOSALS_BATCH_MAX);
+
+    let cursor = match &query.cursor {
+        Some(raw) if !raw.is_empty() => match decode_cursor(raw) {
+            Some(c) => Some(c),
+            None => {
+                return HttpResponse::BadRequest().json(ErrorResponse {
+                    error: "cursor is not one this endpoint issued".to_string(),
+                });
+            }
+        },
+        _ => None,
+    };
+
+    let token = get_party_token(&data, party_id).await;
+    let packages = packages();
+
+    // One contract, so cheap next to the batch. Lets a card render
+    // "n of threshold" without the client fetching the rules separately.
+    let threshold = query_governance_state(&data.config, party_id, token.clone(), &packages)
+        .await
+        .ok()
+        .flatten()
+        .map(|state| state.threshold.max(0) as usize)
+        .unwrap_or(0);
+
+    match crate::server::queries::page_proposal_summaries(
+        &data.config,
+        party_id,
+        token,
+        &packages,
+        limit,
+        cursor,
+    )
+    .await
+    {
+        Ok((proposals, next)) => HttpResponse::Ok().json(ProposalsPageResponse {
+            proposals,
+            threshold,
+            next_cursor: next.as_ref().and_then(encode_cursor),
+        }),
+        Err(e) => {
+            tracing::error!(%party_id, "Failed to read a proposals batch: {e}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to read proposals: {e}"),
+            })
+        }
+    }
+}
+
 #[utoipa::path(
     tag = "Governance",
     params(GovernanceQuery),

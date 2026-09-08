@@ -41,6 +41,12 @@ use crate::{
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
 pub struct GovernanceQuery {
     pub party_id: CantonId,
+    /// Proposals read from the ledger per request. Defaults to 25.
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// `next_cursor` from the previous batch. Absent starts at the top.
+    #[serde(default)]
+    pub cursor: Option<String>,
 }
 
 /// Query parameters for generic contract query endpoint

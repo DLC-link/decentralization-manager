@@ -1134,6 +1134,7 @@ pub async fn start_server(
             None,
             auth_snapshot,
             &creds_snapshot,
+            Default::default(),
         )
         .await
         {
@@ -1283,6 +1284,7 @@ pub async fn start_server(
             .service(handlers::grant_rights)
             .service(handlers::get_governance)
             .service(handlers::get_governance_state)
+            .service(handlers::get_proposals_page)
             .service(handlers::get_known_members)
             .service(handlers::get_provider_services_handler)
             .service(handlers::get_user_services_handler)

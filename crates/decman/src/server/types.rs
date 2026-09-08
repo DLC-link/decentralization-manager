@@ -30,7 +30,8 @@ pub use common::api::{
     KeyStatusResponse, KickInvitePayload, KickRequest, KnownMember, KnownMembersResponse,
     MessageResponse, MissingEdgeKind, MissingPeerEdge, NetworkInfo, OnboardingInvitePayload,
     OnboardingMeshErrorResponse, OnboardingRequest, OperatorInfo, PartyAuthStatus,
-    PartyConfigRequest, PartyConfigResponse, PendingInvitationsResponse, ProviderConfigurationInfo,
+    PartyConfigRequest, PartyConfigResponse, PendingInvitationsResponse, ProposalSummary,
+    ProposalsPageResponse, ProviderConfigurationInfo,
     ProviderConfigurationsResponse, ProviderServiceInfo, ProviderServicesResponse,
     RegistrarServiceInfo, RegistrarServiceRequestInfo, RegistrarServiceRequestsResponse,
     RegistrarServicesResponse, ResponseSource, RightsStatus, SuccessResponse, TenantOnboardRequest,
@@ -693,6 +694,10 @@ pub struct GovernanceAction {
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct GovernanceResponse {
     pub actions: Vec<GovernanceAction>,
+    /// Opaque resume token for the next batch of proposals. Absent when the
+    /// party has no more. Hand it back as `cursor` to continue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
     /// Pending domain action proposals (governance-core GovernableAction)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub domain_actions: Vec<DomainGovernanceAction>,
@@ -1177,6 +1182,7 @@ mod tests {
     #[test]
     fn governance_response_round_trips_with_every_optional_field_omitted() -> anyhow::Result<()> {
         let response = GovernanceResponse {
+            next_cursor: None,
             actions: vec![GovernanceAction {
                 action_hash: "hash".to_owned(),
                 action: ActionType::GovernanceSetThreshold { new_threshold: 2 },
@@ -1245,6 +1251,7 @@ mod tests {
     #[test]
     fn domain_confirmation_omits_action_self_confirmation_keeps_it() -> anyhow::Result<()> {
         let response = GovernanceResponse {
+            next_cursor: None,
             actions: vec![GovernanceAction {
                 action_hash: "hash".to_owned(),
                 action: ActionType::GovernanceSetThreshold { new_threshold: 7 },

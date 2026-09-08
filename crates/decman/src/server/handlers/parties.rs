@@ -41,7 +41,10 @@ use crate::{
         AppState,
         health::classify_health_reply,
         package_inventory::fetch_vetted_packages,
-        queries::{fetch_package_versions, get_contracts, get_party_metadata, sort_contracts},
+        queries::{
+            contract_templates_all, fetch_package_versions, get_contracts,
+            get_party_metadata, rules_templates, sort_contracts,
+        },
         types::{
             ConnectionStatus, ContractInfo, DecentralizedPartiesResponse, DecentralizedParty,
             ErrorResponse, PackageInfo, ParticipantInfo, ParticipantStatus,
@@ -75,6 +78,25 @@ pub struct PartiesQuery {
     /// instead of the up-to-60s-stale cached snapshot.
     #[serde(default)]
     pub refresh: Option<bool>,
+    /// Read each party's contracts. Off by default: the read is nine template
+    /// ACS page-scans per party, so a whole-deployment list costs memory
+    /// proportional to party count (#424). The approvals proposals view asks
+    /// for it, one page at a time.
+    #[serde(default)]
+    pub include_contracts: Option<bool>,
+    /// Window into the party list, after a stable sort by party id.
+    #[serde(default)]
+    pub offset: Option<usize>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// How much of each party a read should pull back.
+#[derive(Clone, Copy, Default)]
+pub struct PartyReadOpts {
+    pub include_contracts: bool,
+    /// `(offset, limit)`. `None` reads every party this participant hosts.
+    pub page: Option<(usize, usize)>,
 }
 
 /// Get decentralized parties the current participant is a member of
@@ -92,7 +114,14 @@ pub async fn get_decentralized_parties(
     query: web::Query<PartiesQuery>,
 ) -> impl Responder {
     let prefix = query.prefix.clone().unwrap_or_default();
-    let force_refresh = query.refresh.unwrap_or(false);
+    let opts = PartyReadOpts {
+        include_contracts: query.include_contracts.unwrap_or(false),
+        page: query.limit.map(|limit| (query.offset.unwrap_or(0), limit)),
+    };
+    // The cache holds the whole-list, contract-free snapshot. A targeted read
+    // is neither, so it goes straight to Canton — bounded by its own window.
+    let force_refresh =
+        query.refresh.unwrap_or(false) || opts.include_contracts || opts.page.is_some();
 
     // Try to load from DB cache first (unless caller explicitly demanded fresh)
     let cached = if force_refresh {
@@ -156,6 +185,7 @@ pub async fn get_decentralized_parties(
         Some(prefix.as_str()).filter(|s| !s.is_empty()),
         auth,
         &party_creds,
+        opts,
     )
     .await
     {
@@ -207,6 +237,7 @@ async fn refresh_and_cache_parties(data: &web::Data<AppState>, prefix: &str) {
         Some(prefix).filter(|s| !s.is_empty()),
         auth,
         &party_creds,
+        PartyReadOpts::default(),
     )
     .await
     {
@@ -612,6 +643,7 @@ async fn load_cached_parties(
 
     Ok(Some((
         DecentralizedPartiesResponse {
+            total: parties.len(),
             parties,
             source: ResponseSource::Cache,
             refreshing: false,
@@ -790,6 +822,7 @@ pub async fn fetch_decentralized_parties(
     prefix_filter: Option<&str>,
     auth: Option<WorkflowAuth>,
     party_credentials: &[PartyCredentials],
+    opts: PartyReadOpts,
 ) -> Result<DecentralizedPartiesResponse> {
     let channel = config.admin_channel().await?;
 
@@ -905,6 +938,14 @@ pub async fn fetch_decentralized_parties(
         })
         .collect();
 
+    // Stable order, so a paged caller sees each party once across requests.
+    let mut my_parties = my_parties;
+    my_parties.sort_by(|a, b| a.2.party.cmp(&b.2.party));
+    let total = my_parties.len();
+    if let Some((offset, limit)) = opts.page {
+        my_parties = my_parties.into_iter().skip(offset).take(limit).collect();
+    }
+
     // Check if we're in test mode (mock auth)
     let test_mode = matches!(auth, Some(WorkflowAuth::Mock(_)));
 
@@ -912,6 +953,12 @@ pub async fn fetch_decentralized_parties(
     // and `list_packages` is a whole-participant Admin API read. Building them
     // per party meant one full package inventory in flight per hosted party.
     let packages = default_package_config();
+    // One rules contract per party is all the parties list has a consumer for.
+    let templates = if opts.include_contracts {
+        contract_templates_all(&packages)
+    } else {
+        rules_templates(&packages)
+    };
     // Only when some party can use it. With no auth and no test mode every
     // per-party read below is skipped, so fetching a whole-participant
     // inventory would be pure waste — and it was never fetched on that path
@@ -937,6 +984,7 @@ pub async fn fetch_decentralized_parties(
             let auth = auth.clone();
             let packages = &packages;
             let package_versions = &package_versions;
+            let templates = templates.as_slice();
             let party_id_str = p2p.party.clone();
             async move {
                 let party_id = CantonId::parse(&p2p.party)?;
@@ -960,7 +1008,9 @@ pub async fn fetch_decentralized_parties(
                 let (contracts, local_metadata) = if token.is_some() || test_mode {
                     tokio::join!(
                         async {
-                            get_contracts(&config, &party_id, token, packages, package_versions)
+                            get_contracts(
+                                &config, &party_id, token, packages, package_versions, templates,
+                            )
                                 .await
                                 .unwrap_or_else(|e| {
                                     tracing::warn!(
@@ -1015,6 +1065,7 @@ pub async fn fetch_decentralized_parties(
 
     Ok(DecentralizedPartiesResponse {
         parties,
+        total,
         source: ResponseSource::Live,
         refreshing: false,
     })
