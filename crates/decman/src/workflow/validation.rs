@@ -917,6 +917,20 @@ mod tests {
         }
     }
 
+    /// One distinct Daml signing key per member — the shape every mapping
+    /// this tool builds carries, and what the checks expect to see.
+    fn signing_keys(count: u8, threshold: u32) -> SigningKeysWithThreshold {
+        SigningKeysWithThreshold {
+            keys: (1..=count)
+                .map(|seed| SigningPublicKey {
+                    public_key: vec![seed; 32],
+                    ..Default::default()
+                })
+                .collect(),
+            threshold,
+        }
+    }
+
     /// Wrap a mapping the way the coordinator ships it, so the decode path is
     /// exercised end to end rather than around.
     fn encode_proposal(mapping: topology_mapping::Mapping) -> Vec<u8> {
@@ -1117,10 +1131,8 @@ mod tests {
         let (a, b) = (canton_id("p1", 1)?, canton_id("p2", 2)?);
         let expectations = expectations(vec![a.clone(), b.clone()], a.clone());
         let mut mapping = p2p("dec::x", &[a, b], 2);
-        mapping.party_signing_keys = Some(SigningKeysWithThreshold {
-            keys: Vec::new(),
-            threshold: 1,
-        });
+        // A full key set, so the failure is the threshold and not the count.
+        mapping.party_signing_keys = Some(signing_keys(2, 1));
         assert!(expectations.check_p2p_thresholds(&mapping).is_err());
         Ok(())
     }
@@ -1316,11 +1328,62 @@ mod tests {
         let (a, b) = (canton_id("p1", 1)?, canton_id("p2", 2)?);
         let expectations = expectations(vec![a.clone(), b.clone()], a.clone());
         let mut mapping = p2p("dec::x", &[a, b], 2);
-        mapping.party_signing_keys = Some(SigningKeysWithThreshold {
-            keys: Vec::new(),
-            threshold: 2,
-        });
+        mapping.party_signing_keys = Some(signing_keys(2, 2));
         expectations.check_p2p_thresholds(&mapping)
+    }
+
+    /// The bug in #428: kick dropped the departing member from
+    /// `participants` but carried `party_signing_keys` over verbatim, leaving
+    /// its Daml key still counting towards the party's signing threshold. A
+    /// peer cannot tell whose key is whose — the mapping records no owner per
+    /// key — but one key too many for the member set is exactly what that
+    /// mistake looks like from here.
+    #[test]
+    fn rejects_a_surplus_party_signing_key() -> Result {
+        let (a, b) = (canton_id("p1", 1)?, canton_id("p2", 2)?);
+        let expectations = expectations(vec![a.clone(), b.clone()], a.clone());
+        let mut mapping = p2p("dec::x", &[a, b], 2);
+        // Two remaining members, three keys — the kicked member's is still in.
+        mapping.party_signing_keys = Some(signing_keys(3, 2));
+
+        let error = expectations
+            .check_p2p_thresholds(&mapping)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(
+            error.contains("3 party signing key(s) for 2 member(s)"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    /// The other half of #428: the operator asked for 2, the coordinator moved
+    /// the hosting threshold and left the signing one at 3, and the refusal
+    /// said only "proposed threshold 3 differs from the accepted 2" — which
+    /// reads as though the coordinator had ignored the operator's input. The
+    /// message has to say which of the two thresholds is wrong.
+    #[test]
+    fn names_the_signing_threshold_when_only_it_is_stale() -> Result {
+        let (a, b, c) = (
+            canton_id("p1", 1)?,
+            canton_id("p2", 2)?,
+            canton_id("p3", 3)?,
+        );
+        let expectations = expectations(vec![a.clone(), b.clone(), c.clone()], a.clone());
+        let mut mapping = p2p("dec::x", &[a, b, c], 2);
+        mapping.party_signing_keys = Some(signing_keys(3, 3));
+
+        let error = expectations
+            .check_p2p_thresholds(&mapping)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(
+            error.contains("signing threshold 3 differs from the accepted 2"),
+            "unexpected error: {error}"
+        );
+        Ok(())
     }
 
     #[test]
@@ -1333,10 +1396,7 @@ mod tests {
         let mut mapping = p2p(&party.to_string(), &[a, b], 2);
         // Keep the mapping otherwise valid so the assertion below is about the
         // onboarding flag, not about an earlier check tripping first.
-        mapping.party_signing_keys = Some(SigningKeysWithThreshold {
-            keys: Vec::new(),
-            threshold: 2,
-        });
+        mapping.party_signing_keys = Some(signing_keys(2, 2));
         mapping.participants[1].onboarding = Some(hosting_participant::Onboarding::default());
         let payload = encode_proposal(topology_mapping::Mapping::PartyToParticipant(mapping));
 
