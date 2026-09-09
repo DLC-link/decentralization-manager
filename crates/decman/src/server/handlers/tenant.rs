@@ -48,9 +48,9 @@ use crate::{
         threshold::{ExternalPartyThresholdPayload, prepare_threshold, submit_threshold},
     },
     workflow::party_replication::{
-        clear_onboarding_flag, collect_party_package_ids, import_party_acs, open_export_session,
+        ClearOutcome, collect_party_package_ids, import_party_acs, open_export_session,
         pipe::{PipeBlock, PipeTrailer},
-        wait_for_flag_cleared,
+        request_onboarding_flag_clear,
     },
 };
 
@@ -602,6 +602,45 @@ pub async fn tenant_acs_import(
         }
     };
 
+    // Before anything disconnects this participant. `import_party_acs` checks
+    // packages, drops the synchronizer connections, and only then does Canton
+    // reject a party this node does not host — so without this check any holder
+    // of the tenant API key can take this node off the synchronizer by posting a
+    // snapshot for an arbitrary party id.
+    match read_party_to_participant(&data.config, &body.party_id).await {
+        Ok(Some(current)) => {
+            let self_uid = data.config.participant_id().to_string();
+            let onboarding_here = current
+                .mapping
+                .participants
+                .iter()
+                .any(|p| p.participant_uid == self_uid && p.onboarding.is_some());
+            if !onboarding_here {
+                return HttpResponse::BadRequest().json(ErrorResponse {
+                    error: format!(
+                        "{party} is not being onboarded onto this participant; an import would \
+                         disconnect it from the synchronizer for a replication it is not part of",
+                        party = body.party_id
+                    ),
+                });
+            }
+        }
+        Ok(None) => {
+            return HttpResponse::NotFound().json(ErrorResponse {
+                error: format!(
+                    "No authorized PartyToParticipant for {party}",
+                    party = body.party_id
+                ),
+            });
+        }
+        Err(e) => {
+            tracing::error!("tenant acs import: topology read failed: {e:#}");
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: "Failed to read the party's topology; see the host's logs".to_string(),
+            });
+        }
+    }
+
     let imported = !snapshot.is_empty();
     // The import pulls blocks rather than taking a buffer, so the relayed
     // snapshot is served back to it a block at a time. It already holds the
@@ -626,41 +665,28 @@ pub async fn tenant_acs_import(
         });
     }
 
-    // Canton refuses to clear before its safe time, so this can take a while;
-    // it returns once the clearing transaction is proposed.
-    if let Err(e) = clear_onboarding_flag(&data.config, &data.db, &replication).await {
-        tracing::error!("tenant acs import: clearing the onboarding marker failed: {e:#}");
-        // An empty snapshot is skipped, not imported, so saying "imported" here
-        // would misdescribe the half that succeeded.
-        let did = if imported {
-            "Imported the ACS"
-        } else {
-            "The ACS was empty and needed no import"
+    // Requested, not waited on. clear_onboarding_flag blocks up to ten minutes
+    // for Canton's safe time and wait_for_flag_cleared polls another minute on
+    // top; that is right for a workflow step and wrong for an HTTP handler.
+    // Canton schedules the clearance itself, so the caller polls /status.
+    let marker_cleared =
+        match request_onboarding_flag_clear(&data.config, &data.db, &replication).await {
+            Ok(ClearOutcome::Cleared) => true,
+            Ok(ClearOutcome::Proposed) => false,
+            Err(e) => {
+                tracing::error!("tenant acs import: requesting the marker clear failed: {e:#}");
+                let did = if imported {
+                    "Imported the ACS"
+                } else {
+                    "The ACS was empty and needed no import"
+                };
+                return HttpResponse::InternalServerError().json(ErrorResponse {
+                    error: format!(
+                        "{did}, but could not request the marker clear; see the host's logs"
+                    ),
+                });
+            }
         };
-        return HttpResponse::InternalServerError().json(ErrorResponse {
-            error: format!("{did}, but could not clear the onboarding marker; see the host's logs"),
-        });
-    }
-
-    // Whether the proposal alone suffices depends on what Canton demands for a
-    // single-key party: the proto says the onboarding participant clears its own
-    // flag, but decparties were observed to need owner signatures anyway. Report
-    // what actually happened rather than assuming — a `false` here means the
-    // wallet must run a signing round, and that is worth knowing precisely.
-    let marker_cleared = match crate::utils::get_synchronizer_id(&data.config).await {
-        Ok(synchronizer_id) => wait_for_flag_cleared(
-            &data.config,
-            &synchronizer_id,
-            &replication.party_id,
-            &replication.target_participant_id,
-        )
-        .await
-        .is_ok(),
-        Err(e) => {
-            tracing::warn!("tenant acs import: could not resolve synchronizer id: {e:#}");
-            false
-        }
-    };
 
     HttpResponse::Ok().json(TenantAcsImportResponse {
         party_id: body.party_id.clone(),
@@ -857,7 +883,10 @@ async fn drain_export(
 ) -> anyhow::Result<Vec<u8>> {
     let mut session = open_export_session(config, db, replication).await?;
     let mut out = Vec::new();
-    let mut seq = 0u64;
+    // Sequence numbers are 1-based: the session treats served_seq 0 as "nothing
+    // served yet" and refuses anything but served_seq + 1, since the Canton
+    // stream behind it cannot rewind.
+    let mut seq = 1u64;
     while let PipeBlock::Data { bytes, .. } = session.block(seq, EXPORT_BLOCK_SIZE).await? {
         out.extend_from_slice(&bytes);
         seq += 1;
@@ -868,7 +897,9 @@ async fn drain_export(
 /// Serve block `seq` of an already-held snapshot, so the pull-based import can
 /// consume a buffer the wallet delivered in one piece.
 fn block_of(snapshot: &[u8], seq: u64) -> PipeBlock {
-    let start = (seq as usize).saturating_mul(EXPORT_BLOCK_SIZE);
+    // 1-based, matching the session's contract, so block 1 is the first bytes.
+    let index = (seq.saturating_sub(1)) as usize;
+    let start = index.saturating_mul(EXPORT_BLOCK_SIZE);
     if start >= snapshot.len() {
         return PipeBlock::End {
             seq,

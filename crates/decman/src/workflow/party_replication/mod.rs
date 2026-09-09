@@ -30,7 +30,8 @@ use crate::{canton_id::CantonId, error::Result, workflow::storage::WorkflowStora
 pub use acs::{collect_party_package_ids, import_party_acs, open_export_session};
 pub use offset::{capture_offset_once, current_ledger_offset};
 pub use onboarding_flag::{
-    ClearOutcome, clear_onboarding_flag, has_onboarding_marker, wait_for_flag_cleared,
+    ClearOutcome, clear_onboarding_flag, has_onboarding_marker, request_onboarding_flag_clear,
+    wait_for_flag_cleared,
 };
 
 /// The artifact keys one replication run reads and writes.
