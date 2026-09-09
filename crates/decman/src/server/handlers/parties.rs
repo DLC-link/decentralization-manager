@@ -1242,6 +1242,7 @@ async fn discover_hosted_party_ids(
     aggregation_client: &mut TopologyAggregationServiceClient<tonic::transport::Channel>,
     synchronizer_id: &str,
     participant_id: &str,
+    prefix_filter: Option<&str>,
     owned_namespaces: &HashSet<String>,
 ) -> Result<Vec<String>> {
     if owned_namespaces.is_empty() {
@@ -1269,7 +1270,13 @@ async fn discover_hosted_party_ids(
             as_of: None,
             limit: MAX_HOSTED_PARTIES,
             synchronizer_ids,
-            filter_party: String::new(),
+            // A bare prefix, with no `::`, narrows by party identifier on both
+            // sides of Canton's filtering: `identifier LIKE 'prefix%'` in the
+            // store query and `identifier.startsWith` in the post-filter. That
+            // is what keeps this bounded on a participant hosting a very large
+            // number of parties, where the result limit below would otherwise
+            // truncate before reaching any decentralized party.
+            filter_party: prefix_filter.unwrap_or_default().to_string(),
             filter_participant: participant_id.to_string(),
         })),
     )
@@ -1277,12 +1284,19 @@ async fn discover_hosted_party_ids(
     .into_inner();
 
     // The RPC truncates at the limit and says nothing, so a full page is the
-    // only signal that parties were left behind.
+    // only signal that parties were left behind. It has no cursor, so there is
+    // nothing to page with: a participant hosting more parties than this needs
+    // the query narrowed instead.
     if response.results.len() == MAX_HOSTED_PARTIES as usize {
         tracing::warn!(
             "ListParties returned the full {MAX_HOSTED_PARTIES}-party limit for this \
-             participant, so discovery may have missed some. Any party already known locally \
-             is unaffected, since those are queried by exact ID."
+             participant{scope}, so discovery may have missed a decentralized party. Ask for \
+             a party-name prefix to narrow it, which Canton applies in the store query. Any \
+             party already known locally is unaffected, since those are queried by exact ID.",
+            scope = match prefix_filter {
+                Some(prefix) => format!(" under prefix '{prefix}'"),
+                None => String::new(),
+            }
         );
     }
 
@@ -1596,6 +1610,7 @@ async fn fetch_decentralized_parties(
             &mut aggregation_client,
             &synchronizer_id,
             &participant_id,
+            prefix_filter,
             &owned_namespaces,
         )
         .await?
