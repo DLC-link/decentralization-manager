@@ -2377,9 +2377,9 @@ async fn run_peer_listener(
 /// its entry in `PartyToParticipant.party_signing_keys`. That mapping exists
 /// nowhere else: the protobuf records no owner per key and the key is not
 /// delegated in topology, so only the node that generated it can say it is
-/// theirs. Kick needs it to drop the removed member's key. Omitted when this
-/// node has no such key for the party; a caller that predates the field
-/// ignores it.
+/// theirs. Kick needs it to drop the removed member's key. `null` when this
+/// node has no such key for the party, which the reader treats the same way
+/// as the absent field it gets from a caller's older peers.
 ///
 /// `requested_party_ids` is the list of parties the caller cares about, sent
 /// in the Noise `RequestOwnerKeys` payload by `resolve_owner_keys_from_peers`.
