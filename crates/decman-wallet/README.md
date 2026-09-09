@@ -89,13 +89,22 @@ topology, then state, then activation.
 ```rust
 use decman_wallet::{add_hosts, raise_threshold};
 
+// Read the serial rather than remembering one: any PartyToParticipant write
+// moves it.
+let base_serial = current_hosts[0].client.party_state(&party_id).await?.serial;
+
 // The party gained a host, but a host with no contracts confirms nothing.
 let added = add_hosts(&current_hosts, &new_hosts, &key, &party_id, base_serial).await?;
 assert!(added.replicated, "a joiner is hosted but still suspended");
 
+// Not `added.serial`. Clearing each joiner's onboarding marker is itself a
+// PartyToParticipant write, so by now the party has moved past the serial the
+// add-hosts write carried and every host would answer 409.
+let state = all_hosts[0].client.party_state(&party_id).await?;
+
 // Only once the markers have cleared, because a marked host cannot confirm and
 // so cannot count toward the threshold.
-raise_threshold(&all_hosts, &key, &party_id, 2, added.serial).await?;
+raise_threshold(&all_hosts, &key, &party_id, 2, state.serial).await?;
 ```
 
 `base_serial` is the serial the wallet last saw for the party. Every host is
@@ -106,6 +115,11 @@ preparing something different.
 The wallet carries the ACS snapshot from a current host to each joiner itself.
 There is no host-to-host channel: a partner's node is generally not in anyone
 else's mesh, and the wallet already talks to all of them.
+
+A joiner's import returns as soon as the node has asked Canton to clear the
+marker; `add_hosts` then polls that joiner's status until the clear is
+authorized. `replicated: false` means a joiner ran out that wait, not that the
+import failed — the party is hosted there and holds no contracts.
 
 `AddedHosts::without_package_preflight` names joiners whose source could not
 check their vetted packages up front, so their import validated after

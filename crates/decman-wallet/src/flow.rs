@@ -16,6 +16,7 @@ use common::{
     types::WorkflowProgress,
 };
 use serde::Serialize;
+use std::time::Duration;
 
 use crate::{
     client::{HostStatus, TenantClient},
@@ -285,6 +286,40 @@ pub async fn statuses(hosts: &[WalletHost], party_id: &str) -> Vec<HostReport> {
     reports
 }
 
+/// How long to wait for a joiner's onboarding marker to clear, and how often to
+/// ask. Clearing is a topology write, so it takes a synchronizer round trip and
+/// the host's own signature; two minutes is generous for that and short enough
+/// that a stuck synchronizer is reported rather than waited on forever.
+const MARKER_CLEAR_TIMEOUT: Duration = Duration::from_secs(120);
+const MARKER_CLEAR_POLL: Duration = Duration::from_secs(3);
+
+/// Poll one joiner until it stops carrying the onboarding marker.
+///
+/// The import endpoint asks Canton to clear and returns; Canton authorizes the
+/// clearing transaction on its own schedule. `Hosted` is reported only once the
+/// marker is gone, so this is the wallet's read of "the party is usable there".
+async fn wait_for_marker_clear(host: &WalletHost, party_id: &str) -> bool {
+    let deadline = tokio::time::Instant::now() + MARKER_CLEAR_TIMEOUT;
+    loop {
+        match host.client.host_status(party_id).await {
+            Ok(HostStatus::Hosted) => return true,
+            Ok(_) => {}
+            Err(e) => tracing::warn!(
+                host = host.client.base_url(),
+                "reading the onboarding status failed: {e}"
+            ),
+        }
+        if tokio::time::Instant::now() + MARKER_CLEAR_POLL >= deadline {
+            tracing::warn!(
+                host = host.client.base_url(),
+                "the onboarding marker is still set; the party is hosted here and not yet usable"
+            );
+            return false;
+        }
+        tokio::time::sleep(MARKER_CLEAR_POLL).await;
+    }
+}
+
 /// The outcome of adding hosts to a party that already exists.
 #[derive(Clone, Debug, Serialize)]
 pub struct AddedHosts {
@@ -342,13 +377,13 @@ pub async fn add_hosts(
             role: "joining host",
         });
     }
-    // A current host is needed as the ACS source, not merely as a signer.
-    let Some(source) = current_hosts.first() else {
+    // A current host is needed as an ACS source, not merely as a signer.
+    if current_hosts.is_empty() {
         return Err(Error::NoHosts {
             operation: "adding hosts",
             role: "host that already holds the party",
         });
-    };
+    }
 
     let request = TenantAddHostsRequest {
         party_id: party_id.to_string(),
@@ -451,17 +486,33 @@ pub async fn add_hosts(
             replicated = false;
             continue;
         }
-        let snapshot = match source
-            .client
-            .acs_snapshot(party_id, &host.participant_id, base_serial)
-            .await
-        {
-            Ok(snapshot) => snapshot,
-            Err(e) => {
-                tracing::warn!(host = host.client.base_url(), "ACS export failed: {e}");
-                replicated = false;
-                continue;
+        // Any current host can serve the ACS — they all hold the party — so a
+        // source whose export fails costs a retry, not the joiner.
+        let mut snapshot = None;
+        for candidate in current_hosts {
+            match candidate
+                .client
+                .acs_snapshot(party_id, &host.participant_id, base_serial)
+                .await
+            {
+                Ok(found) => {
+                    snapshot = Some(found);
+                    break;
+                }
+                Err(e) => tracing::warn!(
+                    source = candidate.client.base_url(),
+                    host = host.client.base_url(),
+                    "ACS export failed: {e}"
+                ),
             }
+        }
+        let Some(snapshot) = snapshot else {
+            tracing::warn!(
+                host = host.client.base_url(),
+                "no current host could export the ACS"
+            );
+            replicated = false;
+            continue;
         };
         if !snapshot.package_preflight {
             without_package_preflight.push(host.client.base_url().to_string());
@@ -475,21 +526,22 @@ pub async fn add_hosts(
             snapshot: snapshot.snapshot,
             package_ids: snapshot.package_ids,
         };
-        match host.client.acs_import(&import).await {
-            Ok(resp) => {
-                if !resp.marker_cleared {
-                    tracing::warn!(
-                        host = host.client.base_url(),
-                        "ACS imported but the onboarding marker is still set; the party is \
-                         hosted here and not yet usable"
-                    );
-                    replicated = false;
-                }
-            }
+        // `marker_cleared: false` is the ordinary answer, not a failure: the host
+        // asks Canton to clear and returns rather than holding the request open
+        // for the synchronizer's safe time. The party is hosted but unusable
+        // until the clear is authorized, so wait for it here.
+        let cleared = match host.client.acs_import(&import).await {
+            Ok(resp) if resp.marker_cleared => true,
+            Ok(_) => wait_for_marker_clear(host, party_id).await,
             Err(e) => {
                 tracing::warn!(host = host.client.base_url(), "ACS import failed: {e}");
-                replicated = false;
+                // A timed-out import may still have landed — the node keeps
+                // importing after reqwest gives up — so ask before concluding.
+                wait_for_marker_clear(host, party_id).await
             }
+        };
+        if !cleared {
+            replicated = false;
         }
     }
 
