@@ -221,6 +221,18 @@ async fn mark_run_status(
 // Kick Workflow
 // ============================================================================
 
+/// A party's member count, as a threshold bound has to see it.
+///
+/// `members` is the cached membership and `self_id` is this node. The
+/// coordinator signs the proposals, so it is necessarily a member — but it does
+/// not appear in its own `peers` table, so a member set derived from that list
+/// omits it. Counting it explicitly keeps the bound right however `members` was
+/// built, including the fallback that substitutes the configured peer set when
+/// nothing is cached.
+fn party_member_count(members: &HashSet<CantonId>, self_id: &CantonId) -> usize {
+    members.len() + usize::from(!members.contains(self_id))
+}
+
 /// Start a kick workflow to remove a participant from a decentralized party
 #[utoipa::path(
     tag = "Workflows",
@@ -352,8 +364,8 @@ pub async fn start_kick(
     if peers.len() < 2 {
         return HttpResponse::BadRequest().json(ErrorResponse {
             error: format!(
-                "Cannot kick: need at least 2 party members (this node + the target), \
-                 have {n}",
+                "Cannot kick: need the target plus at least one other party member \
+                 besides this node to co-sign, have {n}",
                 n = peers.len(),
             ),
         });
@@ -372,13 +384,22 @@ pub async fn start_kick(
     // u32 and fails partway, leaving the DNS write committed with no
     // rollback. The upper bound is the post-kick member count — there
     // must be at least as many remaining signers as the threshold needs.
-    let post_kick_member_count = peers.len() as i32 - 1;
+    //
+    // Counted from the party's OWN member set, not from `peers`. `peers` is
+    // scoped to invitees and so excludes this node, which is itself a member —
+    // it signs the proposals. Bounding by it undercounts by one, and a party
+    // whose threshold already equals its member count then has no acceptable
+    // value at all: the peers reject anything below the current threshold, and
+    // this check rejects anything at or above it. The add-party and
+    // change-threshold bounds below already count the party set.
+    let self_id = data.config.participant_id().clone();
+    let post_kick_member_count = party_member_count(&party_member_ids, &self_id) as i32 - 1;
     if body.new_threshold < 1 || body.new_threshold > post_kick_member_count {
         return HttpResponse::BadRequest().json(ErrorResponse {
             error: format!(
                 "new_threshold must be between 1 and {post_kick_member_count} \
                  (party member count {n}, minus the participant being kicked); got {got}",
-                n = peers.len(),
+                n = party_member_count(&party_member_ids, &self_id),
                 got = body.new_threshold,
             ),
         });
@@ -3700,6 +3721,66 @@ async fn send_contracts_invites(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pid(tag: u8) -> anyhow::Result<CantonId> {
+        let ns = format!("1220{:0>64}", format!("{tag:02x}"));
+        CantonId::parse(&format!("validator-{tag}::{ns}"))
+    }
+
+    /// The coordinator signs the proposals, so it is a member of the party it
+    /// is changing — but it is absent from its own `peers` table. A member set
+    /// derived from that list must still count it, or every threshold bound
+    /// computed from it is one too low.
+    #[test]
+    fn party_member_count_counts_this_node_when_the_set_omits_it() -> anyhow::Result<()> {
+        let me = pid(1)?;
+        let others: HashSet<CantonId> = [pid(2)?, pid(3)?, pid(4)?].into_iter().collect();
+
+        // The shape that caused the bug: three other members cached, self absent.
+        assert_eq!(party_member_count(&others, &me), 4);
+        Ok(())
+    }
+
+    /// When the cache does contain this node — the normal case, since the
+    /// refresh writes the chain's participant list verbatim — it must not be
+    /// counted twice.
+    #[test]
+    fn party_member_count_does_not_double_count_a_present_self() -> anyhow::Result<()> {
+        let me = pid(1)?;
+        let all: HashSet<CantonId> = [me.clone(), pid(2)?, pid(3)?, pid(4)?]
+            .into_iter()
+            .collect();
+
+        assert_eq!(party_member_count(&all, &me), 4);
+        Ok(())
+    }
+
+    /// A one-member party is this node alone, whichever way the set was built.
+    #[test]
+    fn party_member_count_handles_a_lone_member() -> anyhow::Result<()> {
+        let me = pid(1)?;
+        assert_eq!(party_member_count(&HashSet::new(), &me), 1);
+        assert_eq!(
+            party_member_count(&[me.clone()].into_iter().collect(), &me),
+            1
+        );
+        Ok(())
+    }
+
+    /// The bug in the numbers that produced it: a 4-member party at threshold
+    /// 3 could not be kicked, because the bound said 2 while the peers demanded
+    /// 3. With self counted the bound is 3 and the kick is expressible.
+    #[test]
+    fn kick_bound_admits_the_threshold_the_peers_require() -> anyhow::Result<()> {
+        let me = pid(1)?;
+        let cached_without_self: HashSet<CantonId> =
+            [pid(2)?, pid(3)?, pid(4)?].into_iter().collect();
+
+        let bound = party_member_count(&cached_without_self, &me) as i32 - 1;
+        assert_eq!(bound, 3, "a 4-member party leaves 3 after a kick");
+        assert!(bound >= 3, "threshold 3 must be expressible");
+        Ok(())
+    }
 
     #[test]
     fn invite_reply_aborts_on_busy_only() -> anyhow::Result<()> {
