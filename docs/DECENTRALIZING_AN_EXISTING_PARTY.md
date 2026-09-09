@@ -99,7 +99,7 @@ plainly rather than letting them infer symmetry that is not there.
 | Symptom | Cause | Do |
 |---|---|---|
 | `409` from prepare or onboard | The party's serial moved between the wallet's read and the call | Re-read the party and retry with the new `base_serial` |
-| `404` from any of these | This host does not hold the party | Check the host set; a joiner cannot serve the ACS export |
+| `404` from any of these | No authorized mapping for this party on this host | Not the same as "this host does not hold it": a joiner that does not host the party still reads the mapping from the shared synchronizer store and answers 200. A 404 means the store has nothing for the party at all |
 | `400` naming a field | The submitted bundle failed validation against the host's own head state | Do not retry as-is. Something built a different mapping than the host would |
 | `marker_cleared: false` | The ACS imported but the flag has not cleared | Canton clears it past a safe time. Poll `/v0/tenant/{party}/status`; `InProgress` with the marker reason means wait |
 | `package_preflight: false` | The source cannot read the party's contracts over the Ledger API, which is normal for an external party | Confirm the joiner has the party's DARs vetted **before** importing. Without it the import fails after disconnecting |

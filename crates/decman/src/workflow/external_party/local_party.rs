@@ -461,7 +461,7 @@ mod tests {
         HostingParticipant, hosting_participant,
     };
 
-    use crate::canton_id::CantonId;
+    use crate::{canton_id::CantonId, workflow::external_party::steps};
 
     use super::*;
 
@@ -579,5 +579,194 @@ mod tests {
         assert_eq!(mapping.threshold, current.threshold);
         assert_eq!(mapping.participants.len(), current.participants.len());
         assert_eq!(mapping.party, current.party);
+    }
+
+    // ------------------------------------------------------------------
+    // The validator
+    //
+    // This node signs whatever passes here with its own namespace key, and for
+    // a local party that key *is* the party's namespace — so every one of these
+    // is a way to make this node hand its party to the caller.
+    // ------------------------------------------------------------------
+
+    fn current() -> CurrentPartyTopology {
+        CurrentPartyTopology {
+            serial: 4,
+            mapping: local_mapping(),
+        }
+    }
+
+    fn serialize(mapping: PartyToParticipant, serial: u32) -> Vec<u8> {
+        let transaction = TopologyTransaction {
+            operation: TopologyChangeOp::AddReplace as i32,
+            serial,
+            mapping: Some(TopologyMapping {
+                mapping: Some(topology_mapping::Mapping::PartyToParticipant(mapping)),
+            }),
+        };
+        UntypedVersionedMessage {
+            wrapper: Some(untyped_versioned_message::Wrapper::Data(
+                transaction.encode_to_vec(),
+            )),
+            version: 30,
+        }
+        .encode_to_vec()
+    }
+
+    fn bundle_of(mapping: PartyToParticipant, serial: u32) -> LocalPartyAdoptionPayload {
+        LocalPartyAdoptionPayload {
+            party_id: local_party_id(),
+            base_serial: 4,
+            public_key: OWNER_KEY,
+            topology_transactions: vec![serialize(mapping, serial)],
+            signatures: vec![vec![0u8; 64]],
+            signed_by: participant().namespace.to_hex(),
+        }
+    }
+
+    /// Validate a mapping submitted at the serial the current state expects.
+    fn validate(mapping: PartyToParticipant) -> anyhow::Result<()> {
+        validate_adoption_topology(&config(), &current(), &bundle_of(mapping, 5))
+    }
+
+    fn built() -> PartyToParticipant {
+        match adoption_mapping(&config(), &local_mapping(), &OWNER_KEY) {
+            Ok(m) => m,
+            Err(e) => panic!("building the adoption mapping must succeed: {e}"),
+        }
+    }
+
+    /// The mapping this node builds itself must pass its own validator. If it
+    /// did not, the endpoint pair could never complete a conversion.
+    #[test]
+    fn accepts_the_mapping_this_node_would_have_written() {
+        if let Err(e) = validate(built()) {
+            panic!("the node's own mapping must validate: {e}");
+        }
+    }
+
+    /// Adding a host is the change this endpoint most plausibly gets asked to
+    /// smuggle: it puts someone else's participant on a party whose namespace
+    /// this node controls.
+    #[test]
+    fn refuses_a_bundle_that_adds_a_host() {
+        let mut mapping = built();
+        mapping.participants.push(HostingParticipant {
+            participant_uid: format!("participant-2::1220{ns}", ns = "bb".repeat(32)),
+            permission: ParticipantPermission::Confirmation as i32,
+            onboarding: None,
+        });
+        assert!(validate(mapping).is_err());
+    }
+
+    /// The conversion carries the threshold through unchanged, so a bundle that
+    /// moves it is changing something the caller was not authorized to change.
+    #[test]
+    fn refuses_a_bundle_that_moves_the_threshold() {
+        let mut mapping = built();
+        mapping.threshold = 2;
+        assert!(validate(mapping).is_err());
+    }
+
+    /// The whole point of the check: the key that ends up in the mapping must be
+    /// the one whose holder asked for the conversion, not one the caller pasted
+    /// in alongside it.
+    #[test]
+    fn refuses_a_key_other_than_the_submitted_one() {
+        let mut mapping = built();
+        mapping.party_signing_keys = Some(SigningKeysWithThreshold {
+            keys: vec![steps::party_signing_key(&[9u8; 32])],
+            threshold: 1,
+        });
+        assert!(validate(mapping).is_err());
+    }
+
+    /// Two keys at threshold 1 means either holder can act as the party, so a
+    /// second key is a second owner.
+    #[test]
+    fn refuses_a_second_signing_key() {
+        let mut mapping = built();
+        mapping.party_signing_keys = Some(SigningKeysWithThreshold {
+            keys: vec![
+                steps::party_signing_key(&OWNER_KEY),
+                steps::party_signing_key(&[9u8; 32]),
+            ],
+            threshold: 1,
+        });
+        assert!(validate(mapping).is_err());
+    }
+
+    /// A party with no key at all is still local, and accepting this would let a
+    /// caller spend the node's signature on a no-op that only demotes the host.
+    #[test]
+    fn refuses_a_bundle_carrying_no_key() {
+        let mut mapping = built();
+        mapping.party_signing_keys = None;
+        assert!(validate(mapping).is_err());
+    }
+
+    /// Canton refuses Submission for a party that signs its own transactions, so
+    /// a bundle that leaves the host submitting is one Canton would reject —
+    /// after this node had signed it.
+    #[test]
+    fn refuses_a_host_left_at_submission() {
+        let mut mapping = built();
+        mapping.participants[0].permission = ParticipantPermission::Submission as i32;
+        assert!(validate(mapping).is_err());
+    }
+
+    /// A serial that is not exactly one past the current state either replays an
+    /// older write or skips one.
+    #[test]
+    fn refuses_a_wrong_serial() {
+        let bundle = bundle_of(built(), 7);
+        assert!(validate_adoption_topology(&config(), &current(), &bundle).is_err());
+        let bundle = bundle_of(built(), 4);
+        assert!(validate_adoption_topology(&config(), &current(), &bundle).is_err());
+    }
+
+    /// This endpoint authorizes one kind of change. Anything else in the bundle
+    /// is this node signing a mapping it never inspected.
+    #[test]
+    fn refuses_a_mapping_that_is_not_party_to_participant() {
+        let transaction = TopologyTransaction {
+            operation: TopologyChangeOp::AddReplace as i32,
+            serial: 5,
+            mapping: Some(TopologyMapping { mapping: None }),
+        };
+        let serialized = UntypedVersionedMessage {
+            wrapper: Some(untyped_versioned_message::Wrapper::Data(
+                transaction.encode_to_vec(),
+            )),
+            version: 30,
+        }
+        .encode_to_vec();
+        let bundle = LocalPartyAdoptionPayload {
+            topology_transactions: vec![serialized],
+            ..bundle_of(built(), 5)
+        };
+        assert!(validate_adoption_topology(&config(), &current(), &bundle).is_err());
+    }
+
+    /// Signatures are matched to transactions by index, so a bundle whose counts
+    /// differ would have this node sign a transaction nobody signed for.
+    #[test]
+    fn refuses_misaligned_signatures() {
+        let bundle = LocalPartyAdoptionPayload {
+            signatures: vec![vec![0u8; 64], vec![0u8; 64]],
+            ..bundle_of(built(), 5)
+        };
+        assert!(validate_adoption_topology(&config(), &current(), &bundle).is_err());
+    }
+
+    /// An empty bundle would submit nothing and report success.
+    #[test]
+    fn refuses_an_empty_bundle() {
+        let bundle = LocalPartyAdoptionPayload {
+            topology_transactions: Vec::new(),
+            signatures: Vec::new(),
+            ..bundle_of(built(), 5)
+        };
+        assert!(validate_adoption_topology(&config(), &current(), &bundle).is_err());
     }
 }
