@@ -369,6 +369,23 @@ pub fn validate_add_hosts_topology(
             s = bundle.signatures.len()
         );
     }
+    // The party's namespace is the fingerprint half of its id, and Canton will
+    // only accept a signature attributed to it. A wrong `signed_by` otherwise
+    // fails inside SignTransactions and comes back as a 500, telling the wallet
+    // this host is unhealthy when the request was simply wrong.
+    let namespace = bundle
+        .party_id
+        .rsplit_once("::")
+        .map(|(_, ns)| ns)
+        .unwrap_or_default();
+    if bundle.signed_by != namespace {
+        anyhow::bail!(
+            "signed_by {signed_by} is not {party}'s namespace ({namespace}); only the party's \
+             own key can authorize its topology",
+            signed_by = bundle.signed_by,
+            party = bundle.party_id
+        );
+    }
     // These go to Canton labelled as concatenated Ed25519, which is always 64
     // bytes. Base64 decoding accepts any length, so without this an empty or
     // truncated signature passes validation and fails inside a Canton RPC
@@ -1104,6 +1121,20 @@ mod tests {
     /// concatenated Ed25519, which is always 64 bytes. Base64 accepts any
     /// length, so a truncated or empty one used to pass validation and fail
     /// inside a Canton RPC, surfacing as a 500 for plainly malformed input.
+    /// A signature attributed to anything but the party's own namespace cannot
+    /// authorize its topology. Caught here so it reads as the caller's mistake
+    /// rather than as this host being unhealthy.
+    #[test]
+    fn rejects_a_signed_by_that_is_not_the_party_namespace() {
+        let mut bundle = bundle_of(built(), 5);
+        bundle.signed_by = "1220ff".to_string();
+        let Err(e) = validate_add_hosts_topology(&test_config(3), &current(), &bundle) else {
+            panic!("a signature attributed to another key must be refused");
+        };
+        assert!(e.to_string().contains("is not"), "{e}");
+        assert!(e.to_string().contains("namespace"), "{e}");
+    }
+
     #[test]
     fn rejects_a_signature_that_is_not_64_bytes() {
         for len in [0usize, 1, 63, 65, 128] {

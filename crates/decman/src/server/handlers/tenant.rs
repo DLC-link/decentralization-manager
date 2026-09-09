@@ -120,7 +120,7 @@ pub async fn tenant_prepare(
         Err(e) => {
             tracing::error!("tenant prepare: topology generation failed: {e:#}");
             HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to prepare onboarding topology: {e}"),
+                error: "Failed to prepare the onboarding topology; see the host's logs".to_string(),
             })
         }
     }
@@ -221,7 +221,8 @@ pub async fn tenant_onboard(
     if let Err(e) = allocate_party(&data.config, &bundle).await {
         tracing::error!("tenant onboard: allocate on this participant failed: {e:#}");
         return HttpResponse::InternalServerError().json(ErrorResponse {
-            error: format!("Failed to allocate external party on this host: {e}"),
+            error: "Failed to allocate the external party on this host; see the host's logs"
+                .to_string(),
         });
     }
 
@@ -249,7 +250,7 @@ pub async fn tenant_onboard(
     responses(
         (status = 200, description = "Onboarding status on this host", body = WorkflowStatusResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
-        (status = 404, description = "This host does not host this party", body = ErrorResponse)
+        (status = 404, description = "No authorized PartyToParticipant for this party", body = ErrorResponse)
     )
 )]
 #[get("/v0/tenant/{party}/status")]
@@ -278,7 +279,7 @@ pub async fn tenant_status(
         Err(e) => {
             tracing::error!("tenant status: topology read failed: {e:#}");
             HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to read onboarding status: {e}"),
+                error: "Failed to read the onboarding status; see the host's logs".to_string(),
             })
         }
     }
@@ -299,7 +300,7 @@ pub async fn tenant_status(
         (status = 200, description = "Unsigned add-hosts topology", body = TenantAddHostsPrepareResponse),
         (status = 400, description = "Bad request, or a host set this party cannot take", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
-        (status = 404, description = "This host does not host this party", body = ErrorResponse),
+        (status = 404, description = "No authorized PartyToParticipant for this party", body = ErrorResponse),
         (status = 409, description = "This host reads a different serial for the party", body = ErrorResponse),
         (status = 500, description = "A Canton call failed on this host", body = ErrorResponse)
     )
@@ -362,7 +363,7 @@ pub async fn tenant_add_hosts_prepare(
         (status = 202, description = "Submitted on this host", body = TenantAddHostsOnboardResponse),
         (status = 400, description = "Bad request, or topology that is not a plain add-hosts", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
-        (status = 404, description = "This host does not host this party", body = ErrorResponse),
+        (status = 404, description = "No authorized PartyToParticipant for this party", body = ErrorResponse),
         (status = 409, description = "The pinned base serial has moved on this host", body = ErrorResponse),
         (status = 500, description = "A Canton call failed on this host", body = ErrorResponse)
     )
@@ -492,9 +493,14 @@ fn add_hosts_error_response(stage: &str, error: AddHostsError) -> HttpResponse {
             })
         }
         AddHostsError::Canton(_) => {
-            tracing::error!("tenant add-hosts {stage}: Canton call failed: {error}");
+            // The chain goes to the log, not the body. A tonic transport error
+            // inside it names the admin endpoint address, and this response
+            // crosses a tenant API boundary to a wallet provider — same class of
+            // leak as omnibus#46. Nothing in the chain is actionable to the
+            // caller anyway: a Canton failure is ours to fix.
+            tracing::error!("tenant add-hosts {stage}: Canton call failed: {error:#}");
             HttpResponse::InternalServerError().json(ErrorResponse {
-                error: error.to_string(),
+                error: "A Canton call failed on this host; see the host's logs".to_string(),
             })
         }
     }
