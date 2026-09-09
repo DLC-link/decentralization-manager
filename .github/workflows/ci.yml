@@ -7,6 +7,18 @@ on:
   workflow_call:
   workflow_dispatch:
 
+# One in-flight CI run per PR: Integration Tests holds a 30-minute
+# `ubuntu-very-big` runner, so a superseded commit keeps a big machine busy
+# producing a result nobody reads.
+#
+# `cancel-in-progress` is gated on the event so only PR runs are ever killed —
+# a push to main and a release (which reaches this file via `workflow_call`
+# from release.yml) must always finish. The gate, not the group, is what keeps
+# releases safe.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   CARGO_NET_GIT_FETCH_WITH_CLI: true

@@ -141,6 +141,13 @@ export DEV_DIR
 # timeouts.
 export DECPM_TOPOLOGY_RETRY_MAX_ATTEMPTS=90
 
+# Same cadence common.sh already gave the initially-spawned nodes, but exported
+# so the chaos phases' respawned nodes (tests/common/processes.rs inherits this
+# environment) get it too instead of falling back to the 300s production
+# default. Kept at devnet's existing 15s — unlike localnet, this is a real
+# network and a 3s tick would hammer it.
+export DECPM_REWARD_AUTOMATION_INTERVAL_SECS=15
+
 # ---------------------------------------------------------------------------
 # Per-participant ports.
 # - HTTP: 8081/8082/8083 (DecMan's own HTTP API)

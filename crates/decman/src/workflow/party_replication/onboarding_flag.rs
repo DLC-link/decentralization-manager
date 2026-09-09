@@ -23,7 +23,10 @@ use crate::{
     config::NodeConfig,
     error::Result,
     utils,
-    workflow::{party_replication::ReplicationTarget, topology::fetch_p2p_mapping},
+    workflow::{
+        party_replication::{ReplicationTarget, offset},
+        topology::fetch_p2p_mapping,
+    },
 };
 
 const MAX_SAFE_TIME_WAIT_SECS: u64 = 600;
@@ -59,27 +62,18 @@ pub async fn clear_onboarding_flag(
         utils::extract_synchronizer_fingerprint(&utils::get_synchronizer_id(config).await?)?;
     let self_id = config.participant_id().to_string();
 
-    // No zero fallback: ClearPartyOnboardingFlag rejects non-positive
-    // offsets, and a missing artifact means GenerateNewMemberKeys never
-    // persisted one — a real bug to surface, not paper over.
-    let offset_bytes = target
-        .read_artifact(
-            storage,
-            target.artifacts.pre_activation_offset,
-            Some(&self_id),
-        )
-        .await?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "{kind} artifact missing for {self_id} — this participant's pre-activation \
-                 offset was never captured",
-                kind = target.artifacts.pre_activation_offset
-            )
-        })?;
-    let begin_offset_exclusive: i64 = String::from_utf8(offset_bytes)?
-        .trim()
-        .parse()
-        .map_err(|e| anyhow::anyhow!("Failed to parse pre-activation offset: {e}"))?;
+    // No zero fallback: ClearPartyOnboardingFlag rejects non-positive offsets.
+    // A missing artifact is not necessarily a bug though — a replication picked
+    // up after its original run was swept has none — so derive it from the
+    // activation rather than refusing.
+    let begin_offset_exclusive = offset::persisted_or_derived_offset(
+        config,
+        storage,
+        target,
+        target.artifacts.pre_activation_offset,
+        Some(&self_id),
+    )
+    .await?;
 
     let mut client = PartyManagementServiceClient::new(config.admin_channel().await?);
     let waited_start = time::Instant::now();

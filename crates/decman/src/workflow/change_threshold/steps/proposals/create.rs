@@ -1,4 +1,5 @@
 use canton_proto_rs::com::digitalasset::canton::{
+    crypto::v30::SigningKeysWithThreshold,
     protocol::v30::{
         DecentralizedNamespaceDefinition, PartyToParticipant, TopologyMapping, enums,
         topology_mapping,
@@ -27,8 +28,9 @@ use crate::{
 /// This step creates:
 /// - DNS proposal re-issuing the namespace with the new threshold (same
 ///   owners) — `CHANGE_THRESHOLD_DNS_PROPOSAL`
-/// - P2P proposal re-issuing the party mapping with the new threshold (same
-///   participants) — `CHANGE_THRESHOLD_P2P_PROPOSAL`
+/// - P2P proposal re-issuing the party mapping with the new threshold on both
+///   the hosting and the signing side (same participants, same keys) —
+///   `CHANGE_THRESHOLD_P2P_PROPOSAL`
 /// - New namespace definition — `CHANGE_THRESHOLD_NEW_NAMESPACE_DEF` (used by
 ///   submit to poll the topology)
 /// - Full party id — `CHANGE_THRESHOLD_PARTY_ID` (used by submit)
@@ -95,11 +97,26 @@ pub async fn create_proposals(
         threshold = current_p2p.threshold,
     );
 
+    // A `PartyToParticipant` carries two thresholds: how many hosting
+    // participants must confirm, and how many of the party's signing keys
+    // authorize a transaction for it. Both are the threshold this workflow
+    // exists to change, so re-issuing the signing keys verbatim changed only
+    // half of it (#428).
+    let signing_keys = current_p2p.party_signing_keys.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Party {party_id} carries no party signing keys, so its signing threshold \
+             cannot be changed"
+        )
+    })?;
+
     let new_p2p = PartyToParticipant {
         party: party_id_str.clone(),
         threshold: new_threshold.try_into()?,
         participants: current_p2p.participants,
-        party_signing_keys: current_p2p.party_signing_keys,
+        party_signing_keys: Some(SigningKeysWithThreshold {
+            keys: signing_keys.keys,
+            threshold: new_threshold.try_into()?,
+        }),
     };
 
     // Create proposals using topology manager

@@ -62,6 +62,7 @@ mod tests {
                 participant_uid: (*uid).to_string(),
                 permission: "submission".to_string(),
                 owner_key: None,
+                signing_key: None,
             })
             .collect();
 
@@ -127,6 +128,7 @@ mod tests {
                 participant_uid: NODE1.to_string(),
                 permission: "confirmation".to_string(),
                 owner_key: Some("fingerprint-1".to_string()),
+                signing_key: None,
             }],
         )
         .await?;

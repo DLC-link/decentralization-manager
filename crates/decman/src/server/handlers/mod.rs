@@ -20,7 +20,8 @@ pub(crate) use config::{
 pub(crate) use governance::{
     cancel_confirmation, cancel_proposal, confirm_action, execute_action, expire_confirmation,
     get_coupon_reassignment_delegation, get_governance, get_governance_audit,
-    get_governance_chain_audit, get_governance_state, get_known_members, propose_action,
+    get_governance_chain_audit, get_governance_state, get_known_members, get_proposals_page,
+    propose_action,
 };
 // Crate-internal governance helpers reused by the reward-automation module,
 // re-exported here so they are reachable through the private `governance`
@@ -29,9 +30,9 @@ pub(crate) use governance::{get_party_credentials, packages};
 pub(crate) use invitations::{accept_invitation, decline_invitation, get_invitations};
 pub(crate) use keys::get_key_status;
 pub(crate) use parties::{
-    compare_peer_packages, fetch_decentralized_parties, get_decentralized_parties,
-    get_participants_status, get_vetted_packages, resolve_owner_keys_from_peers,
-    store_parties_to_db,
+    Discovery, DiscoveryGate, MAX_CONCURRENT_DISCOVERIES, clear_acs_import_quarantine,
+    compare_peer_packages, discover_and_cache, get_decentralized_parties, get_participants_status,
+    get_vetted_packages, resolve_owner_keys_from_peers,
 };
 pub(crate) use party_config::{discover_member_party, get_party_config, save_party_config};
 pub(crate) use tenant::{

@@ -10,9 +10,7 @@ use anyhow::Context;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use sqlx::SqlitePool;
 
-use super::parties::{
-    fetch_decentralized_parties, resolve_owner_keys_from_peers, store_parties_to_db,
-};
+use super::parties::resolve_owner_keys_from_peers;
 use crate::{
     canton_id::{CantonId, validate_party_id_prefix},
     config::{NetworkConfig, NodeConfig},
@@ -221,6 +219,18 @@ async fn mark_run_status(
 // Kick Workflow
 // ============================================================================
 
+/// A party's member count, as a threshold bound has to see it.
+///
+/// `members` is the cached membership and `self_id` is this node. The
+/// coordinator signs the proposals, so it is necessarily a member — but it does
+/// not appear in its own `peers` table, so a member set derived from that list
+/// omits it. Counting it explicitly keeps the bound right however `members` was
+/// built, including the fallback that substitutes the configured peer set when
+/// nothing is cached.
+fn party_member_count(members: &HashSet<CantonId>, self_id: &CantonId) -> usize {
+    members.len() + usize::from(!members.contains(self_id))
+}
+
 /// Start a kick workflow to remove a participant from a decentralized party
 #[utoipa::path(
     tag = "Workflows",
@@ -352,8 +362,8 @@ pub async fn start_kick(
     if peers.len() < 2 {
         return HttpResponse::BadRequest().json(ErrorResponse {
             error: format!(
-                "Cannot kick: need at least 2 party members (this node + the target), \
-                 have {n}",
+                "Cannot kick: need the target plus at least one other party member \
+                 besides this node to co-sign, have {n}",
                 n = peers.len(),
             ),
         });
@@ -372,13 +382,22 @@ pub async fn start_kick(
     // u32 and fails partway, leaving the DNS write committed with no
     // rollback. The upper bound is the post-kick member count — there
     // must be at least as many remaining signers as the threshold needs.
-    let post_kick_member_count = peers.len() as i32 - 1;
+    //
+    // Counted from the party's OWN member set, not from `peers`. `peers` is
+    // scoped to invitees and so excludes this node, which is itself a member —
+    // it signs the proposals. Bounding by it undercounts by one, and a party
+    // whose threshold already equals its member count then has no acceptable
+    // value at all: the peers reject anything below the current threshold, and
+    // this check rejects anything at or above it. The add-party and
+    // change-threshold bounds below already count the party set.
+    let self_id = data.config.participant_id().clone();
+    let post_kick_member_count = party_member_count(&party_member_ids, &self_id) as i32 - 1;
     if body.new_threshold < 1 || body.new_threshold > post_kick_member_count {
         return HttpResponse::BadRequest().json(ErrorResponse {
             error: format!(
                 "new_threshold must be between 1 and {post_kick_member_count} \
                  (party member count {n}, minus the participant being kicked); got {got}",
-                n = peers.len(),
+                n = party_member_count(&party_member_ids, &self_id),
                 got = body.new_threshold,
             ),
         });
@@ -1689,6 +1708,7 @@ pub async fn start_onboarding(
     *onboarding_state.invited_peers.write().await = peer_ids.clone();
     let party_credentials = data.party_credentials.clone();
     let auth_lock = data.auth.clone();
+    let discovery_gate = super::DiscoveryGate::of(&data);
     let last_seen = data.last_seen.clone();
     let instance_for_task = instance_name.clone();
 
@@ -1765,16 +1785,25 @@ pub async fn start_onboarding(
                 let bg_db = db.clone();
                 let bg_auth = auth_lock.clone();
                 let bg_creds = party_credentials.clone();
+                let bg_gate = discovery_gate.clone();
                 tokio::spawn(async move {
                     let auth = bg_auth.read().await.clone();
                     let creds = bg_creds.read().await.clone();
-                    match fetch_decentralized_parties(&bg_config, &bg_db, None, auth, &creds).await
+                    // Through the shared gate: a direct discovery slips the
+                    // concurrency bound and races the cache write against a
+                    // request for the same prefix.
+                    match super::discover_and_cache(
+                        &bg_gate,
+                        &bg_config,
+                        &bg_db,
+                        "",
+                        auth,
+                        &creds,
+                        Default::default(),
+                    )
+                    .await
                     {
-                        Ok(resp) => {
-                            if let Err(e) = store_parties_to_db(&bg_db, "", &resp.parties).await {
-                                tracing::warn!("Failed to cache parties after onboarding: {e}");
-                                return;
-                            }
+                        super::Discovery::Done(resp) => {
                             resolve_owner_keys_from_peers(&bg_config, &bg_db, &resp.parties).await;
                             // Audit: report any participants whose owner_key
                             // is still NULL after resolve. Not fatal — Noise
@@ -1804,7 +1833,14 @@ pub async fn start_onboarding(
                                 }
                             }
                         }
-                        Err(e) => tracing::warn!("Failed to refresh parties after onboarding: {e}"),
+                        super::Discovery::InFlight
+                        | super::Discovery::AtCapacity
+                        | super::Discovery::Superseded => {
+                            tracing::debug!("Post-onboarding refresh skipped: already running");
+                        }
+                        super::Discovery::Failed(e) => {
+                            tracing::warn!("Failed to refresh parties after onboarding: {e}");
+                        }
                     }
                 });
             }
@@ -2227,6 +2263,7 @@ pub async fn start_contracts(
     let db = data.db.clone();
     let workflow_auth = data.auth.read().await.clone();
     let auth_lock = data.auth.clone();
+    let discovery_gate = super::DiscoveryGate::of(&data);
     let contracts_state_clone = instance.http.clone();
     let instance_for_coord = instance.clone();
     let workflows = data.workflows.clone();
@@ -2305,22 +2342,31 @@ pub async fn start_contracts(
                 let bg_db = db.clone();
                 let bg_auth = auth_lock.clone();
                 let bg_creds = party_credentials.clone();
+                let bg_gate = discovery_gate.clone();
                 tokio::spawn(async move {
                     let auth = bg_auth.read().await.clone();
                     let creds = bg_creds.read().await.clone();
-                    match fetch_decentralized_parties(&bg_config, &bg_db, None, auth, &creds).await
+                    // Through the shared gate, as above.
+                    match super::discover_and_cache(
+                        &bg_gate,
+                        &bg_config,
+                        &bg_db,
+                        "",
+                        auth,
+                        &creds,
+                        Default::default(),
+                    )
+                    .await
                     {
-                        Ok(resp) => {
-                            if let Err(e) = store_parties_to_db(&bg_db, "", &resp.parties).await {
-                                tracing::warn!(
-                                    "Failed to cache parties after contract deployment: {e}"
-                                );
-                            } else {
-                                resolve_owner_keys_from_peers(&bg_config, &bg_db, &resp.parties)
-                                    .await;
-                            }
+                        super::Discovery::Done(resp) => {
+                            resolve_owner_keys_from_peers(&bg_config, &bg_db, &resp.parties).await;
                         }
-                        Err(e) => {
+                        super::Discovery::InFlight
+                        | super::Discovery::AtCapacity
+                        | super::Discovery::Superseded => {
+                            tracing::debug!("Post-contracts refresh skipped: already running");
+                        }
+                        super::Discovery::Failed(e) => {
                             tracing::warn!(
                                 "Failed to refresh parties after contract deployment: {e}"
                             );
@@ -3684,6 +3730,66 @@ async fn send_contracts_invites(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pid(tag: u8) -> anyhow::Result<CantonId> {
+        let ns = format!("1220{:0>64}", format!("{tag:02x}"));
+        CantonId::parse(&format!("validator-{tag}::{ns}"))
+    }
+
+    /// The coordinator signs the proposals, so it is a member of the party it
+    /// is changing — but it is absent from its own `peers` table. A member set
+    /// derived from that list must still count it, or every threshold bound
+    /// computed from it is one too low.
+    #[test]
+    fn party_member_count_counts_this_node_when_the_set_omits_it() -> anyhow::Result<()> {
+        let me = pid(1)?;
+        let others: HashSet<CantonId> = [pid(2)?, pid(3)?, pid(4)?].into_iter().collect();
+
+        // The shape that caused the bug: three other members cached, self absent.
+        assert_eq!(party_member_count(&others, &me), 4);
+        Ok(())
+    }
+
+    /// When the cache does contain this node — the normal case, since the
+    /// refresh writes the chain's participant list verbatim — it must not be
+    /// counted twice.
+    #[test]
+    fn party_member_count_does_not_double_count_a_present_self() -> anyhow::Result<()> {
+        let me = pid(1)?;
+        let all: HashSet<CantonId> = [me.clone(), pid(2)?, pid(3)?, pid(4)?]
+            .into_iter()
+            .collect();
+
+        assert_eq!(party_member_count(&all, &me), 4);
+        Ok(())
+    }
+
+    /// A one-member party is this node alone, whichever way the set was built.
+    #[test]
+    fn party_member_count_handles_a_lone_member() -> anyhow::Result<()> {
+        let me = pid(1)?;
+        assert_eq!(party_member_count(&HashSet::new(), &me), 1);
+        assert_eq!(
+            party_member_count(&[me.clone()].into_iter().collect(), &me),
+            1
+        );
+        Ok(())
+    }
+
+    /// The bug in the numbers that produced it: a 4-member party at threshold
+    /// 3 could not be kicked, because the bound said 2 while the peers demanded
+    /// 3. With self counted the bound is 3 and the kick is expressible.
+    #[test]
+    fn kick_bound_admits_the_threshold_the_peers_require() -> anyhow::Result<()> {
+        let me = pid(1)?;
+        let cached_without_self: HashSet<CantonId> =
+            [pid(2)?, pid(3)?, pid(4)?].into_iter().collect();
+
+        let bound = party_member_count(&cached_without_self, &me) as i32 - 1;
+        assert_eq!(bound, 3, "a 4-member party leaves 3 after a kick");
+        assert!(bound >= 3, "threshold 3 must be expressible");
+        Ok(())
+    }
 
     #[test]
     fn invite_reply_aborts_on_busy_only() -> anyhow::Result<()> {

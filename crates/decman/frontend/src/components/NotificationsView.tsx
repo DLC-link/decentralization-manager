@@ -1,12 +1,28 @@
-import { Fragment, useState, type ReactNode } from "react";
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import {
   Alert,
   Box,
   Button,
+  Checkbox,
   Chip,
   CircularProgress,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   IconButton,
+  List,
+  ListItemButton,
+  ListItemText,
   Skeleton,
+  TextField,
   Tooltip,
   Typography,
 } from "@mui/material";
@@ -51,6 +67,8 @@ export interface PartyActions {
   governanceType: GovernanceType;
   threshold: number;
   actions: GovernanceAction[];
+  /** Resume token for this party's next batch; null when exhausted. */
+  nextCursor?: string | null;
   /** On-chain DSO governance proposals (governance_type = "core_domain"). Surfaced
    *  as cards in the notification feed alongside off-chain actions. */
   domainActions: DomainGovernanceAction[];
@@ -63,6 +81,16 @@ interface NotificationsViewProps {
   workflowRuns: WorkflowRun[];
   /** True while any feed source is still loading its initial response. */
   loading: boolean;
+  /** True while a refetch is in flight, initial or not. Keeps an empty list
+   *  from reading as "nothing to approve" when the answer is not in yet. */
+  fetching?: boolean;
+  /** Pull the next batch from the ledger. Called when the foot of the list
+   *  scrolls into view. */
+  onLoadMore?: () => void;
+  /** Whether any party still has a batch left. */
+  hasMore?: boolean;
+  /** True while a later batch is in flight. */
+  loadingMore?: boolean;
   onInvitationsChanged: () => void;
   onActionsChanged: () => void;
   onWorkflowsChanged: () => void;
@@ -1985,17 +2013,50 @@ export const NotificationsView = ({
   partyActions,
   workflowRuns,
   loading,
+  fetching = false,
+  onLoadMore,
+  hasMore = false,
+  loadingMore = false,
   onInvitationsChanged,
   onActionsChanged,
   onWorkflowsChanged,
   onSelectParty,
 }: NotificationsViewProps) => {
+  const sentinelObserver = useRef<IntersectionObserver | null>(null);
+  const loadMoreRef = useRef<(() => void) | undefined>(onLoadMore);
+  useEffect(() => {
+    loadMoreRef.current = onLoadMore;
+  }, [onLoadMore]);
+
+  // A callback ref, not an effect: the sentinel renders below several early
+  // returns, and a hook placed after those changes the hook count between
+  // renders (React #310). This attaches when the node mounts instead.
+  const attachSentinel = useCallback((node: HTMLDivElement | null) => {
+    sentinelObserver.current?.disconnect();
+    sentinelObserver.current = null;
+    if (!node) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) loadMoreRef.current?.();
+      },
+      { rootMargin: "300px" },
+    );
+    observer.observe(node);
+    sentinelObserver.current = observer;
+  }, []);
+
   const [statusFilter, setStatusFilter] = useState<
     "all" | "you" | "prog" | "done"
   >("all");
   const [typeFilter, setTypeFilter] = useState<"all" | "gov" | "wf" | "inv">(
     "all",
   );
+
+  // Empty means every party. Declared with the other filters so the hook
+  // count never varies between renders.
+  const [partyFilter, setPartyFilter] = useState<string[]>([]);
+  const [partyPickerOpen, setPartyPickerOpen] = useState(false);
+  const [partySearch, setPartySearch] = useState("");
   const [doneCollapsed, setDoneCollapsed] = useState(true);
 
   // Built above the loading / empty early-returns so the pagination hook below
@@ -2009,6 +2070,9 @@ export const NotificationsView = ({
     kind: Kind;
     ts: number;
     node: ReactNode;
+    /** Dec party this entry belongs to. Absent for invitations and workflow
+     *  runs, which carry no party, so the party filter leaves those alone. */
+    partyId?: string;
   }
 
   const entries: Entry[] = [];
@@ -2035,6 +2099,7 @@ export const NotificationsView = ({
         (c) => c.confirming_party === party.memberPartyId,
       );
       entries.push({
+        partyId: party.partyId,
         key: `act-${party.partyId}-${action.action_hash}`,
         // Needs you: you can execute it, or you haven't confirmed yet.
         // In progress: you confirmed and it's waiting on the others.
@@ -2056,6 +2121,7 @@ export const NotificationsView = ({
         (c) => c.confirming_party === party.memberPartyId,
       );
       entries.push({
+        partyId: party.partyId,
         key: `dom-${party.partyId}-${domainAction.proposal_cid}`,
         // Orphaned proposals can only be expired — still your cleanup to do.
         group:
@@ -2107,8 +2173,16 @@ export const NotificationsView = ({
 
   entries.sort((a, b) => b.ts - a.ts);
 
+  // Party filter first: the other dimensions' counts should reflect it.
+  const byParty = entries.filter(
+    (e) =>
+      partyFilter.length === 0 ||
+      e.partyId === undefined ||
+      partyFilter.includes(e.partyId),
+  );
+
   // Each chip's count reflects the *other* active filter dimension.
-  const byKind = entries.filter(
+  const byKind = byParty.filter(
     (e) => typeFilter === "all" || e.kind === typeFilter,
   );
   const groupCount: Record<"all" | Group, number> = {
@@ -2119,7 +2193,7 @@ export const NotificationsView = ({
   };
 
   const grouped: Record<Group, Entry[]> = { you: [], prog: [], done: [] };
-  for (const e of entries) {
+  for (const e of byParty) {
     if (statusFilter !== "all" && statusFilter !== e.group) continue;
     if (typeFilter !== "all" && typeFilter !== e.kind) continue;
     grouped[e.group].push(e);
@@ -2137,6 +2211,165 @@ export const NotificationsView = ({
     total: doneTotal,
   } = usePagination(grouped.done);
 
+  // Parties with something in the feed, newest activity first. Counted from the
+  // unfiltered set so a chip's number does not change as you select.
+  const partyCounts = new Map<string, number>();
+  for (const e of entries) {
+    if (e.partyId) {
+      partyCounts.set(e.partyId, (partyCounts.get(e.partyId) ?? 0) + 1);
+    }
+  }
+  const partyOptions = [...partyCounts.entries()].sort((a, b) => b[1] - a[1]);
+
+  // At most this many rows are mounted at once. A deployment can hold tens of
+  // thousands of parties, and mounting a row each would stall the dialog.
+  const PARTY_ROWS_SHOWN = 200;
+  const searchLower = partySearch.trim().toLowerCase();
+  const matchingParties = partyOptions.filter(
+    ([partyId]) => !searchLower || partyId.toLowerCase().includes(searchLower),
+  );
+  const shownParties = matchingParties.slice(0, PARTY_ROWS_SHOWN);
+
+  const partyPicker = (
+    <>
+      <Button
+        size="small"
+        variant="outlined"
+        onClick={() => setPartyPickerOpen(true)}
+        sx={{
+          fontFamily: "var(--font-mono)",
+          fontSize: 12,
+          textTransform: "none",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {partyFilter.length === 0
+          ? "All parties"
+          : `${partyFilter.length} ${partyFilter.length === 1 ? "party" : "parties"}`}
+      </Button>
+
+      <Dialog
+        open={partyPickerOpen}
+        onClose={() => setPartyPickerOpen(false)}
+        fullWidth
+        maxWidth="sm"
+      >
+        <DialogTitle sx={{ pb: 1 }}>Filter by dec party</DialogTitle>
+        <DialogContent dividers sx={{ pt: 1 }}>
+          <TextField
+            size="small"
+            fullWidth
+            autoFocus
+            placeholder="Search parties…"
+            value={partySearch}
+            onChange={(e) => setPartySearch(e.target.value)}
+            sx={{ mb: 1 }}
+          />
+          <Box
+            sx={{
+              display: "flex",
+              gap: 1,
+              alignItems: "center",
+              mb: 1,
+              flexWrap: "wrap",
+            }}
+          >
+            <Button
+              size="small"
+              onClick={() =>
+                setPartyFilter(matchingParties.map(([partyId]) => partyId))
+              }
+              disabled={matchingParties.length === 0}
+            >
+              Select all{searchLower ? " matching" : ""}
+            </Button>
+            <Button
+              size="small"
+              onClick={() => setPartyFilter([])}
+              disabled={partyFilter.length === 0}
+            >
+              Deselect all
+            </Button>
+            <Box sx={{ flex: 1 }} />
+            <Typography variant="caption" color="text.secondary">
+              {partyFilter.length === 0
+                ? "No filter: every party shown"
+                : `${partyFilter.length} selected`}
+            </Typography>
+          </Box>
+
+          <List dense disablePadding sx={{ maxHeight: 360, overflowY: "auto" }}>
+            {shownParties.map(([partyId, count]) => {
+              const checked = partyFilter.includes(partyId);
+              return (
+                <ListItemButton
+                  key={partyId}
+                  onClick={() =>
+                    setPartyFilter((current) =>
+                      current.includes(partyId)
+                        ? current.filter((p) => p !== partyId)
+                        : [...current, partyId],
+                    )
+                  }
+                  sx={{ borderRadius: 1 }}
+                >
+                  <Checkbox
+                    edge="start"
+                    size="small"
+                    checked={checked}
+                    tabIndex={-1}
+                    disableRipple
+                  />
+                  <ListItemText
+                    primary={
+                      <Box
+                        component="span"
+                        sx={{
+                          display: "block",
+                          fontFamily: "var(--font-mono)",
+                          fontSize: 13,
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {partyId.split("::")[0]}
+                      </Box>
+                    }
+                    secondary={`${count} ${count === 1 ? "entry" : "entries"}`}
+                  />
+                </ListItemButton>
+              );
+            })}
+          </List>
+
+          {matchingParties.length > shownParties.length && (
+            <Typography
+              variant="caption"
+              color="text.secondary"
+              sx={{ display: "block", mt: 1 }}
+            >
+              Showing {shownParties.length} of {matchingParties.length}. Narrow
+              the search to reach the rest.
+            </Typography>
+          )}
+          {matchingParties.length === 0 && (
+            <Typography
+              variant="body2"
+              color="text.secondary"
+              sx={{ py: 2, textAlign: "center" }}
+            >
+              No party matches that search.
+            </Typography>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setPartyPickerOpen(false)}>Done</Button>
+        </DialogActions>
+      </Dialog>
+    </>
+  );
+
   if (loading) {
     return (
       <Box sx={{ display: "flex", flexDirection: "column", gap: 1, p: 3 }}>
@@ -2148,11 +2381,27 @@ export const NotificationsView = ({
   }
 
   if (entries.length === 0) {
+    if (fetching) {
+      return (
+        <Box sx={{ display: "flex", flexDirection: "column", gap: 1, p: 3 }}>
+          <Typography variant="body2" color="text.secondary" sx={{ px: 1 }}>
+            Querying proposals…
+          </Typography>
+          <NotificationSkeleton />
+          <NotificationSkeleton />
+        </Box>
+      );
+    }
     return (
       <Box sx={{ p: 4, textAlign: "center" }}>
-        <Typography variant="body2" color="text.secondary">
-          No pending notifications.
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+          {partyFilter.length > 0
+            ? "No notifications for the selected parties."
+            : "No pending notifications."}
         </Typography>
+        {/* Kept reachable here: a filter that matches nothing would otherwise
+          * be impossible to clear from this screen. */}
+        <Box sx={{ display: "inline-flex" }}>{partyPicker}</Box>
       </Box>
     );
   }
@@ -2183,6 +2432,11 @@ export const NotificationsView = ({
     grouped.done.length > 0 &&
     !(doneCollapsed && statusFilter !== "done");
   const showDoneFooter = doneShown && donePageCount > 1;
+
+  const loadedCount = sections
+    .filter(({ group }) => group !== "done")
+    .reduce((sum, { group }) => sum + grouped[group].length, 0);
+
 
   return (
     <Box sx={{ flex: 1, display: "flex", flexDirection: "column" }}>
@@ -2265,6 +2519,8 @@ export const NotificationsView = ({
             );
           })}
         </Box>
+        <Box sx={{ flex: 1, minWidth: 8 }} />
+        {partyPicker}
         <Box sx={{ flex: 1, minWidth: 8 }} />
         <Box sx={{ display: "flex", gap: 0.75 }}>
           {typeChips.map((c) => {
@@ -2386,6 +2642,28 @@ export const NotificationsView = ({
         );
       })}
       </Box>
+
+      {/* Grows the mounted count as it scrolls into view, so a long queue
+        * arrives a batch at a time instead of all at once. */}
+      {hasMore && (
+        <Box
+          ref={attachSentinel}
+          sx={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 1,
+            py: 2,
+          }}
+        >
+          {loadingMore && <CircularProgress size={14} />}
+          <Typography variant="caption" color="text.secondary">
+            {loadingMore
+              ? `Loading more… (${loadedCount} so far)`
+              : `Scroll for more (${loadedCount} loaded)`}
+          </Typography>
+        </Box>
+      )}
 
       {/* Outside the column, so the rule runs the full width of the view and
         * the bar sits flush at the bottom — the parties lists' footer shape. */}

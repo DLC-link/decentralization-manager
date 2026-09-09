@@ -48,7 +48,8 @@ use crate::{
         threshold::{ExternalPartyThresholdPayload, prepare_threshold, submit_threshold},
     },
     workflow::party_replication::{
-        clear_onboarding_flag, collect_party_package_ids, export_party_acs, import_party_acs,
+        clear_onboarding_flag, collect_party_package_ids, import_party_acs, open_export_session,
+        pipe::{PipeBlock, PipeTrailer},
         wait_for_flag_cleared,
     },
 };
@@ -257,7 +258,7 @@ pub async fn tenant_onboard(
     responses(
         (status = 200, description = "Onboarding status on this host", body = WorkflowStatusResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
-        (status = 404, description = "This host does not host this party", body = ErrorResponse)
+        (status = 404, description = "No authorized PartyToParticipant for this party", body = ErrorResponse)
     )
 )]
 #[get("/v0/tenant/{party}/status")]
@@ -320,7 +321,7 @@ pub async fn tenant_status(
         (status = 200, description = "Unsigned add-hosts topology", body = TenantAddHostsPrepareResponse),
         (status = 400, description = "Bad request, or a host set this party cannot take", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
-        (status = 404, description = "This host does not host this party", body = ErrorResponse),
+        (status = 404, description = "No authorized PartyToParticipant for this party", body = ErrorResponse),
         (status = 409, description = "This host reads a different serial for the party", body = ErrorResponse),
         (status = 500, description = "A Canton call failed on this host", body = ErrorResponse)
     )
@@ -388,7 +389,7 @@ pub async fn tenant_add_hosts_prepare(
         (status = 202, description = "Submitted on this host", body = TenantAddHostsOnboardResponse),
         (status = 400, description = "Bad request, or topology that is not a plain add-hosts", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
-        (status = 404, description = "This host does not host this party", body = ErrorResponse),
+        (status = 404, description = "No authorized PartyToParticipant for this party", body = ErrorResponse),
         (status = 409, description = "The pinned base serial has moved on this host", body = ErrorResponse),
         (status = 500, description = "A Canton call failed on this host", body = ErrorResponse)
     )
@@ -509,7 +510,10 @@ pub async fn tenant_acs_snapshot(
         }
     };
 
-    let snapshot = match export_party_acs(&data.config, &data.db, &replication).await {
+    // Drained from the block pipe the add-party path also uses, rather than a
+    // second export API. The wallet relay hands the snapshot over HTTP in one
+    // body here, so the blocks are reassembled before responding.
+    let snapshot = match drain_export(&data.config, &data.db, &replication).await {
         Ok(snapshot) => snapshot,
         Err(e) => {
             tracing::error!("tenant acs snapshot: export failed: {e:#}");
@@ -599,12 +603,20 @@ pub async fn tenant_acs_import(
     };
 
     let imported = !snapshot.is_empty();
+    // The import pulls blocks rather than taking a buffer, so the relayed
+    // snapshot is served back to it a block at a time. It already holds the
+    // whole thing — the wallet carried it in one body — so this is a shim over
+    // the same protocol the Noise path streams.
+    let served = std::sync::Arc::new(snapshot);
     if let Err(e) = import_party_acs(
         &data.config,
         &data.db,
         &replication,
-        snapshot,
         &body.package_ids,
+        move |seq| {
+            let served = std::sync::Arc::clone(&served);
+            async move { Ok(block_of(&served, seq)) }
+        },
     )
     .await
     {
@@ -833,6 +845,54 @@ pub async fn tenant_party_state(
     }
 }
 
+/// Drain an export session into one buffer.
+///
+/// The tenant relay answers with the whole snapshot in a body, so the blocks are
+/// reassembled here. The pipe is still the transport underneath, which keeps one
+/// export protocol rather than two.
+async fn drain_export(
+    config: &crate::config::NodeConfig,
+    db: &sqlx::SqlitePool,
+    replication: &crate::workflow::party_replication::ReplicationTarget,
+) -> anyhow::Result<Vec<u8>> {
+    let mut session = open_export_session(config, db, replication).await?;
+    let mut out = Vec::new();
+    let mut seq = 0u64;
+    while let PipeBlock::Data { bytes, .. } = session.block(seq, EXPORT_BLOCK_SIZE).await? {
+        out.extend_from_slice(&bytes);
+        seq += 1;
+    }
+    Ok(out)
+}
+
+/// Serve block `seq` of an already-held snapshot, so the pull-based import can
+/// consume a buffer the wallet delivered in one piece.
+fn block_of(snapshot: &[u8], seq: u64) -> PipeBlock {
+    let start = (seq as usize).saturating_mul(EXPORT_BLOCK_SIZE);
+    if start >= snapshot.len() {
+        return PipeBlock::End {
+            seq,
+            trailer: PipeTrailer {
+                total_len: snapshot.len() as u64,
+                sha256: {
+                    use sha2::{Digest, Sha256};
+                    let mut h = Sha256::new();
+                    h.update(snapshot);
+                    hex::encode(h.finalize())
+                },
+            },
+        };
+    }
+    let end = (start + EXPORT_BLOCK_SIZE).min(snapshot.len());
+    PipeBlock::Data {
+        seq,
+        bytes: snapshot[start..end].to_vec(),
+    }
+}
+
+/// Block size for draining and re-serving a snapshot.
+const EXPORT_BLOCK_SIZE: usize = 1024 * 1024;
+
 // ============================================================================
 // Helpers
 // ============================================================================
@@ -905,8 +965,9 @@ fn add_hosts_error_response(stage: &str, error: AddHostsError) -> HttpResponse {
         AddHostsError::Canton(_) => {
             // The chain goes to the log, not the body. A tonic transport error
             // inside it names the admin endpoint address, and this response
-            // crosses a tenant API boundary to a wallet provider. Nothing in the
-            // chain is actionable to the caller anyway: a Canton failure is ours.
+            // crosses a tenant API boundary to a wallet provider — same class of
+            // leak as omnibus#46. Nothing in the chain is actionable to the
+            // caller anyway: a Canton failure is ours to fix.
             tracing::error!("tenant add-hosts {stage}: Canton call failed: {error:#}");
             HttpResponse::InternalServerError().json(ErrorResponse {
                 error: "A Canton call failed on this host; see the host's logs".to_string(),

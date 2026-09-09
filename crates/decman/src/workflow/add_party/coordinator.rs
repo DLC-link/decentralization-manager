@@ -12,7 +12,9 @@ use crate::{
     utils,
     workflow::{
         kick::coordinator::split_signed_kick_pair,
-        party_replication::{collect_party_package_ids, export_party_acs, wait_for_flag_cleared},
+        party_replication::{
+            collect_party_package_ids, open_export_session, wait_for_flag_cleared,
+        },
         state::WorkflowState,
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
     },
@@ -96,11 +98,46 @@ async fn run_workflow(
             AddPartyStep::WaitingForPeers
             | AddPartyStep::GenerateNewMemberKeys
             | AddPartyStep::SignProposals
-            | AddPartyStep::SyncAcs
             | AddPartyStep::ProposeClearOnboarding
             | AddPartyStep::SignClearOnboarding => {
                 // Peer-gated (or connection-gated) — the listener advances the
                 // state as peers report in; the coordinator just idles.
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            }
+            AddPartyStep::SyncAcs => {
+                // Peer-gated like the arm above, but two things a resumed
+                // coordinator cannot rebuild live here: the command payload,
+                // which is restored from its artifact, and the Canton export
+                // stream, which has to be re-opened.
+                if workflow_state.get_command_payload().await.is_empty()
+                    && let Some(saved) = db
+                        .read_artifact(
+                            &instance_name,
+                            artifact_kinds::ADD_PARTY_SYNC_ACS_COMMAND,
+                            None,
+                        )
+                        .await?
+                {
+                    tracing::info!(
+                        "Restored the SyncAcs command payload after a restart ({len} bytes)",
+                        len = saved.len()
+                    );
+                    workflow_state.set_command_payload(saved).await;
+                }
+                // The export is a live gRPC stream and cannot outlive the
+                // process. Re-opening it lets a retried run work; the new member
+                // starts again from block 1, since the stream cannot be seeked.
+                if !workflow_state.has_acs_export().await {
+                    tracing::warn!(
+                        "No ACS export is open — re-opening it; the transfer restarts \
+                         from the beginning"
+                    );
+                    let target = add_party_config.replication_target(&instance_name);
+                    let session = open_export_session(&node_config, &db, &target).await?;
+                    workflow_state
+                        .set_acs_export(add_party_config.new_participant_id.clone(), session)
+                        .await;
+                }
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             }
             AddPartyStep::ExportState => {
@@ -149,38 +186,41 @@ async fn run_workflow(
                 submit_proposals(&node_config, &db, &instance_name, &add_party_config).await?;
                 copy_new_member_identity(&db, &instance_name, &add_party_config).await?;
 
-                // The topology is live; export the party's ACS for the new
-                // member and ship it with the ImportAcs command. Empty when
-                // the party has no active contracts — the new member skips.
-                let snapshot = export_party_acs(
-                    &node_config,
-                    &db,
-                    &add_party_config.replication_target(&instance_name),
+                // The topology is live. Open the export but read nothing from it:
+                // the new member pulls it block by block straight into its own
+                // Canton import, so the snapshot is never assembled here.
+                let target = add_party_config.replication_target(&instance_name);
+                let session = open_export_session(&node_config, &db, &target).await?;
+                workflow_state
+                    .set_acs_export(add_party_config.new_participant_id.clone(), session)
+                    .await;
+
+                // Package ids the new member must have to validate the imported
+                // ACS — its preflight fails fast (before disconnecting) if any
+                // are missing, instead of the import dying mid-window.
+                let party_id = add_party_config.decentralized_party_id.to_string();
+                let package_ids =
+                    collect_party_package_ids(&node_config, &party_id, ledger_token.as_deref())
+                        .await?;
+                let package_ids_payload = package_ids.join("\n").into_bytes();
+                let payload =
+                    utils::encode_length_prefixed(&[&config_payload, &package_ids_payload]);
+                db.write_artifact(
+                    &instance_name,
+                    artifact_kinds::ADD_PARTY_SYNC_ACS_COMMAND,
+                    None,
+                    &payload,
                 )
                 .await?;
-                // Package ids the new member must have to validate the imported
-                // ACS — its import preflight fails fast (before disconnecting) if
-                // any are missing, instead of the import dying mid-window. Skip the
-                // ledger scan when the snapshot is empty: no contracts, no packages.
-                let package_ids = if snapshot.is_empty() {
-                    Vec::new()
-                } else {
-                    let party_id = add_party_config.decentralized_party_id.to_string();
-                    collect_party_package_ids(&node_config, &party_id, ledger_token.as_deref())
-                        .await?
-                };
-                let package_ids_payload = package_ids.join("\n").into_bytes();
-                let payload = utils::encode_length_prefixed(&[
-                    &config_payload,
-                    &snapshot,
-                    &package_ids_payload,
-                ]);
                 workflow_state.set_command_payload(payload).await;
                 workflow_state.advance_step().await;
             }
             AddPartyStep::PrepareClearOnboarding => {
-                // Swap the (potentially large) ACS payload for the bare
-                // config before the next peer-gated command.
+                // SyncAcs is done, so close the Canton export stream rather
+                // than holding it open for the rest of the run.
+                workflow_state.clear_acs_export().await;
+                // Swap the SyncAcs payload for the bare config before the next
+                // peer-gated command.
                 workflow_state
                     .set_command_payload(config_payload.clone())
                     .await;
