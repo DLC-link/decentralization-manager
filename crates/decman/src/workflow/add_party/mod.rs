@@ -199,6 +199,44 @@ impl WorkflowStep for AddPartyStep {
 mod tests {
     use super::*;
 
+    /// A resumed coordinator seeds `command_payload` with the bare config
+    /// before its loop starts, so "is the payload missing?" is the wrong
+    /// question at `SyncAcs` — it is present and wrong. The target decodes
+    /// that command as two length-prefixed items, so the config's leading
+    /// bytes are read as a length: `{"de` is 0x7B226465, i.e. a 2 GB prefix on
+    /// a 365-byte payload, and every attempt fails until the peer aborts.
+    ///
+    /// This pins the shape that made the bug invisible: the bare config and a
+    /// real SyncAcs payload are both non-empty, so only comparing them tells
+    /// the two apart.
+    #[test]
+    fn a_bare_config_payload_is_not_a_valid_sync_acs_command() -> anyhow::Result<()> {
+        use crate::utils;
+
+        let config = serde_json::to_vec(&serde_json::json!({
+            "decentralized_party_id": "p::1220aa",
+            "new_participant_id": "q::1220bb",
+        }))?;
+        let package_ids = b"pkg-a\npkg-b".to_vec();
+        let sync_acs = utils::encode_length_prefixed(&[&config, &package_ids]);
+
+        // What a resumed coordinator serves without the restore.
+        assert!(!config.is_empty(), "an emptiness check cannot catch this");
+        assert!(
+            utils::decode_length_prefixed(&config, 2).is_err(),
+            "the bare config must not decode as a SyncAcs command"
+        );
+
+        // What it must serve instead.
+        let items = utils::decode_length_prefixed(&sync_acs, 2)?;
+        assert_eq!(items[0], config);
+        assert_eq!(items[1], package_ids);
+
+        // The two differ, which is what the restore now keys on.
+        assert_ne!(config, sync_acs);
+        Ok(())
+    }
+
     /// Every variant must round-trip through its persisted step name — a
     /// mismatch would break resume-after-restart for runs stopped on that
     /// step.
