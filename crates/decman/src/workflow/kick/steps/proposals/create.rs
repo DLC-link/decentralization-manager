@@ -1,4 +1,5 @@
 use canton_proto_rs::com::digitalasset::canton::{
+    crypto::v30::SigningKeysWithThreshold,
     protocol::v30::{
         DecentralizedNamespaceDefinition, PartyToParticipant, TopologyMapping, enums,
         topology_mapping,
@@ -17,6 +18,7 @@ use crate::{
     utils,
     workflow::{
         kick::KickConfig,
+        signing_keys::{known_signing_keys_by_member, signing_keys_without_member},
         storage::{WorkflowStorage, artifact_kinds},
         topology,
     },
@@ -26,7 +28,9 @@ use crate::{
 ///
 /// This step creates:
 /// - DNS proposal to update namespace (remove kicked owner) — `KICK_DNS_PROPOSAL`
-/// - P2P proposal to remove participant from mapping — `KICK_P2P_PROPOSAL`
+/// - P2P proposal to remove participant from mapping, with the kicked
+///   member's Daml key taken out of `party_signing_keys` and both thresholds
+///   moved to the new one — `KICK_P2P_PROPOSAL`
 /// - New namespace definition — `KICK_NEW_NAMESPACE_DEF` (used by submit)
 /// - Full party id — `KICK_PARTY_ID` (used by submit)
 pub async fn create_proposals(
@@ -133,11 +137,48 @@ pub async fn create_proposals(
         anyhow::bail!("Cannot remove all participants from party mapping");
     }
 
+    // Both thresholds move together, and the kicked member's Daml key comes
+    // out. Carrying `party_signing_keys` over verbatim left the removed
+    // member's key counting towards the party's signing threshold and left
+    // that threshold at its old value, which every peer refuses to sign (#428).
+    let current_signing_keys = current_p2p
+        .party_signing_keys
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Party {party_id} carries no party signing keys, so the kick cannot rebuild them"
+            )
+        })?
+        .keys;
+    let survivors: Vec<String> = new_participants
+        .iter()
+        .map(|p| p.participant_uid.clone())
+        .collect();
+    let claims = known_signing_keys_by_member(config, storage, &party_id).await?;
+    let new_signing_keys = signing_keys_without_member(
+        &current_signing_keys,
+        &kick_participant_str,
+        &survivors,
+        &claims,
+    )?;
+
+    if new_signing_keys.len() != new_participants.len() {
+        anyhow::bail!(
+            "Kick would leave the party with {keys} signing key(s) for {members} member(s). \
+             Every member contributes exactly one, so the party's key set does not match \
+             its membership and the peers would refuse the proposal",
+            keys = new_signing_keys.len(),
+            members = new_participants.len()
+        );
+    }
+
     let new_p2p = PartyToParticipant {
         party: party_id_str.clone(),
         threshold: new_threshold.try_into()?,
         participants: new_participants,
-        party_signing_keys: current_p2p.party_signing_keys,
+        party_signing_keys: Some(SigningKeysWithThreshold {
+            keys: new_signing_keys,
+            threshold: new_threshold.try_into()?,
+        }),
     };
 
     // Create proposals using topology manager

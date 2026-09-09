@@ -55,6 +55,10 @@ import type {
   ExternalPartiesResponse,
 } from "./types";
 
+/// Proposals fetched per request. The feed grows a batch at a time rather
+/// than reading a party's whole proposal set at once.
+const ACTIONS_BATCH = 25;
+
 const TAB_HASHES = ["parties", "packages", "config", "notifications"] as const;
 
 // Saved in index.html <script> before any modules load.
@@ -123,6 +127,17 @@ const App = () => {
   const [invitationsLoaded, setInvitationsLoaded] = useState(false);
   const [partyActions, setPartyActions] = useState<PartyActions[]>([]);
   const [partyActionsLoaded, setPartyActionsLoaded] = useState(false);
+  const [partyActionsFetching, setPartyActionsFetching] = useState(false);
+  // Per-party resume token from the last batch. A null value means that party
+  // has no more proposals; a missing key means we never asked.
+  const [actionCursors, setActionCursors] = useState<
+    Record<string, string | null>
+  >({});
+  const [loadingMoreActions, setLoadingMoreActions] = useState(false);
+  // True once a later batch has been pulled in. The poll replaces state
+  // wholesale, so it must not run while a queue is being read or it would
+  // discard everything scrolled and snap back to the first batch.
+  const [actionsAccumulated, setActionsAccumulated] = useState(false);
   const [workflowRuns, setWorkflowRuns] = useState<WorkflowRun[]>([]);
   const [workflowRunsLoaded, setWorkflowRunsLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -533,6 +548,7 @@ const App = () => {
     templateId === "Governance.Rules:GovernanceRules";
 
   const refreshPartyActions = useCallback(async () => {
+    setPartyActionsFetching(true);
     const candidates = parties
       .map((p) => {
         const authStatus = authStatuses.find(
@@ -564,12 +580,13 @@ const App = () => {
         }): Promise<PartyActions | null> => {
           try {
             const res = await authenticatedFetch(
-              `${API_BASE}/governance/confirmations?party_id=${encodeURIComponent(party.party_id)}`,
+              `${API_BASE}/governance/confirmations?party_id=${encodeURIComponent(party.party_id)}&limit=${ACTIONS_BATCH}`,
             );
             if (!res.ok) return null;
             const data = await res.json();
             return {
               partyId: party.party_id,
+              nextCursor: (data.next_cursor ?? null) as string | null,
               // Prefer the live rules contract id from the API — confirm
               // archives + re-creates the rules contract, so the cached
               // `parties` snapshot can point at an archived contract id.
@@ -586,17 +603,95 @@ const App = () => {
         },
       ),
     );
-    setPartyActions(results.filter((r): r is PartyActions => r !== null));
+    const kept = results.filter((r): r is PartyActions => r !== null);
+    setPartyActions(kept);
+    setActionCursors(
+      Object.fromEntries(
+        kept.map((p) => [p.partyId, p.nextCursor ?? null]),
+      ),
+    );
+    setActionsAccumulated(false);
     setPartyActionsLoaded(true);
+    setPartyActionsFetching(false);
   }, [parties, authStatuses]);
+
+  /**
+   * Pull the next batch for every party that still has one and append it.
+   *
+   * Appending rather than replacing is the point: the feed grows as you scroll
+   * instead of re-reading a party's whole proposal set on every render.
+   */
+  const loadMoreActions = useCallback(async () => {
+    const pending = Object.entries(actionCursors).filter(
+      ([, cursor]) => cursor,
+    );
+    if (pending.length === 0 || loadingMoreActions) return;
+    setLoadingMoreActions(true);
+    setActionsAccumulated(true);
+    try {
+      const batches = await Promise.all(
+        pending.map(async ([partyId, cursor]) => {
+          try {
+            const res = await authenticatedFetch(
+              `${API_BASE}/governance/confirmations?party_id=${encodeURIComponent(partyId)}` +
+                `&limit=${ACTIONS_BATCH}&cursor=${encodeURIComponent(cursor as string)}`,
+            );
+            if (!res.ok) return null;
+            const data = await res.json();
+            return {
+              partyId,
+              actions: data.actions ?? [],
+              domainActions: data.domain_actions ?? [],
+              nextCursor: (data.next_cursor ?? null) as string | null,
+            };
+          } catch {
+            return null;
+          }
+        }),
+      );
+
+      setPartyActions((current) =>
+        current.map((entry) => {
+          const batch = batches.find((b) => b && b.partyId === entry.partyId);
+          if (!batch) return entry;
+          // De-dupe by cid: a re-issued cursor must not double a card.
+          const seen = new Set(
+            entry.domainActions.map((d) => d.proposal_cid),
+          );
+          return {
+            ...entry,
+            domainActions: [
+              ...entry.domainActions,
+              ...batch.domainActions.filter(
+                (d: { proposal_cid: string }) => !seen.has(d.proposal_cid),
+              ),
+            ],
+          };
+        }),
+      );
+
+      setActionCursors((current) => {
+        const next = { ...current };
+        for (const batch of batches) {
+          if (batch) next[batch.partyId] = batch.nextCursor;
+        }
+        return next;
+      });
+    } finally {
+      setLoadingMoreActions(false);
+    }
+  }, [actionCursors, loadingMoreActions]);
+
+  const hasMoreActions = Object.values(actionCursors).some(Boolean);
 
   // Poll governance actions across configured parties (only after parties load)
   useEffect(() => {
     if (loading) return;
+    if (actionsAccumulated) return;
     refreshPartyActions();
     const interval = window.setInterval(refreshPartyActions, 10_000);
     return () => clearInterval(interval);
-  }, [refreshPartyActions, loading]);
+  }, [refreshPartyActions, loading, actionsAccumulated]);
 
   const notificationCount =
     pendingInvitations.length +
@@ -1105,6 +1200,10 @@ const App = () => {
             pendingInvitations={pendingInvitations}
             partyActions={partyActions}
             workflowRuns={workflowRuns}
+            fetching={partyActionsFetching}
+            onLoadMore={loadMoreActions}
+            hasMore={hasMoreActions}
+            loadingMore={loadingMoreActions}
             loading={
               !invitationsLoaded || !partyActionsLoaded || !workflowRunsLoaded
             }

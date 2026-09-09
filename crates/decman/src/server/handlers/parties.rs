@@ -4,7 +4,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use actix_web::{HttpResponse, Responder, get, web};
+use actix_web::{HttpResponse, Responder, delete, get, web};
 use canton_proto_rs::com::digitalasset::canton::{
     admin::participant::v30::{ListPackagesRequest, package_service_client::PackageServiceClient},
     crypto::{
@@ -13,11 +13,13 @@ use canton_proto_rs::com::digitalasset::canton::{
         },
         v30::public_key,
     },
+    protocol::v30::{DecentralizedNamespaceDefinition, PartyToParticipant},
     topology::admin::v30::{
         BaseQuery, ListDecentralizedNamespaceDefinitionRequest, ListNamespaceDelegationRequest,
-        ListPartyToParticipantRequest, StoreId, Synchronizer, base_query,
+        ListPartiesRequest, ListPartyToParticipantRequest, StoreId, Synchronizer, base_query,
         list_namespace_delegation_response::result::Item as NsDelegationItem,
         list_party_to_participant_response::result::Item as P2pItem, store_id, synchronizer,
+        topology_aggregation_service_client::TopologyAggregationServiceClient,
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
     },
 };
@@ -41,7 +43,10 @@ use crate::{
         AppState,
         health::classify_health_reply,
         package_inventory::fetch_vetted_packages,
-        queries::{fetch_package_versions, get_contracts, get_party_metadata, sort_contracts},
+        queries::{
+            contract_templates_all, fetch_package_versions, get_contracts, get_party_metadata,
+            rules_templates, sort_contracts,
+        },
         types::{
             ConnectionStatus, ContractInfo, DecentralizedPartiesResponse, DecentralizedParty,
             ErrorResponse, PackageInfo, ParticipantInfo, ParticipantStatus,
@@ -64,6 +69,369 @@ use crate::{
 /// the node shares a 500m CPU limit with everything else it serves.
 const PARTY_READ_CONCURRENCY: usize = 8;
 
+/// How long a completed party discovery answers requests before another one
+/// runs, whether it found parties or not.
+const PARTIES_CACHE_TTL_SECS: i64 = 60;
+
+/// How long a request waits on another request's in-flight discovery before it
+/// answers without data.
+const SINGLE_FLIGHT_WAIT: Duration = Duration::from_secs(3);
+
+/// How many Canton discoveries may run at once, across every prefix.
+///
+/// Per-prefix single-flight does not bound this on its own: `prefix` comes from
+/// the request, so a burst of distinct values would each start their own
+/// discovery and put the concurrent load back on the participant.
+pub(crate) const MAX_CONCURRENT_DISCOVERIES: usize = 4;
+
+/// Deadline for a single topology read.
+///
+/// Canton applies no deadline of its own, so a read the participant cannot
+/// answer quickly holds the request open indefinitely, well past any gateway
+/// timeout in front of it, and every retry stacks another one on the
+/// participant.
+const TOPOLOGY_READ_TIMEOUT: Duration = Duration::from_secs(60);
+
+fn now_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or_default()
+}
+
+/// Longest accepted `prefix`.
+///
+/// Wide enough for a whole party ID, identifier plus delimiter plus namespace,
+/// so no legal filter is refused: a Canton identifier alone runs to 185
+/// characters. It is a bound because the value keys an in-memory map.
+const MAX_PREFIX_LEN: usize = 255;
+
+/// Cap on distinct prefixes tracked in `AppState::discovery_completed`.
+const MAX_TRACKED_PREFIXES: usize = 1024;
+
+/// Whether something recorded at `at` is still within the cache TTL.
+///
+/// `None` is never fresh. Neither is a timestamp ahead of `now`: the clock
+/// moved backwards after it was written, and treating a negative age as fresh
+/// would pin the answer until the clock caught up.
+fn is_within_ttl(at: Option<i64>, now: i64) -> bool {
+    at.is_some_and(|at| (0..=PARTIES_CACHE_TTL_SECS).contains(&(now - at)))
+}
+
+/// Total wall clock one guarded discovery may take.
+///
+/// The permit is held for the whole of it, and the per-party contract and
+/// metadata reads carry no deadline of their own, so without this a handful of
+/// stalled Ledger API calls would hold every permit and turn each later
+/// discovery into a 503. Generous on purpose: a cold fetch of 213 parties
+/// measured 2m54s, almost all of it those reads.
+const DISCOVERY_BUDGET: Duration = Duration::from_secs(300);
+
+/// Drop expired entries, then the oldest, until `map` is under its cap.
+///
+/// Both prefix-keyed maps need this: `prefix` comes from the request, so an
+/// unbounded one grows on demand. Eviction takes the oldest rather than
+/// clearing, so a stream of unique prefixes cannot flush the entries real ones
+/// depend on.
+fn prune_and_cap<V: Copy>(map: &mut HashMap<String, V>, now: i64, at: impl Fn(&V) -> i64) {
+    map.retain(|_, value| is_within_ttl(Some(at(value)), now));
+
+    while map.len() >= MAX_TRACKED_PREFIXES {
+        let Some(oldest) = map
+            .iter()
+            .min_by_key(|(_, value)| at(value))
+            .map(|(prefix, _)| prefix.clone())
+        else {
+            break;
+        };
+        map.remove(&oldest);
+    }
+}
+
+/// Whether a discovery completed for a prefix while a waiter was waiting.
+///
+/// Only a present, higher count counts. An entry that has gone missing means
+/// eviction, not completion, and must never read as success: a waiter would
+/// otherwise take the eviction as proof that fresh rows had been written.
+fn discovery_completed_since(entry: Option<u64>, current: Option<u64>) -> bool {
+    match (entry, current) {
+        (_, None) => false,
+        (None, Some(_)) => true,
+        (Some(entry), Some(current)) => current > entry,
+    }
+}
+
+/// Record that a discovery completed for `prefix`.
+///
+/// Only an empty result is marked. That is the one case the `dec_parties` cache
+/// cannot represent, and marking a non-empty result would let a request
+/// arriving before the cache write answer empty for the whole TTL.
+///
+/// A non-empty result clears any standing mark instead of leaving it: the
+/// cached rows are the answer from that point, and if their write fails the
+/// next request has to retry rather than read a stale mark as an empty result.
+///
+/// Expired entries go on the way in and the map is capped, because `prefix`
+/// comes from the request.
+async fn record_discovery(
+    completed: &Arc<tokio::sync::RwLock<HashMap<String, i64>>>,
+    prefix: &str,
+    parties: &[DecentralizedParty],
+) {
+    let now = now_secs();
+    let mut completed = completed.write().await;
+
+    if !parties.is_empty() {
+        completed.remove(prefix);
+        return;
+    }
+
+    // Re-stamping a prefix already tracked replaces its entry rather than
+    // growing the map, so it must not cost another prefix its place.
+    if !completed.contains_key(prefix) {
+        prune_and_cap(&mut completed, now, |at| *at);
+    }
+
+    completed.insert(prefix.to_string(), now);
+}
+
+/// The shared bound every discovery runs under.
+///
+/// Cloned out of [`AppState`] so a background task can carry it without the
+/// whole state. Calling [`fetch_decentralized_parties`] directly skips the
+/// bound: two discoveries for one prefix then write the cache in an undefined
+/// order, and the advertised concurrency cap stops meaning anything.
+#[derive(Clone)]
+pub(crate) struct DiscoveryGate {
+    claims: Arc<tokio::sync::RwLock<HashSet<String>>>,
+    permits: Arc<tokio::sync::Semaphore>,
+    completed: Arc<tokio::sync::RwLock<HashMap<String, i64>>>,
+    generations: Arc<tokio::sync::RwLock<HashMap<String, (u64, i64)>>>,
+}
+
+impl DiscoveryGate {
+    /// The gate the HTTP paths and every background task share.
+    pub(crate) fn of(state: &AppState) -> Self {
+        Self {
+            claims: state.refreshing_prefixes.clone(),
+            permits: state.discovery_permits.clone(),
+            completed: state.discovery_completed.clone(),
+            generations: state.discovery_generations.clone(),
+        }
+    }
+}
+
+/// What a guarded discovery did.
+pub(crate) enum Discovery {
+    /// It ran, and the cache now holds this.
+    Done(DecentralizedPartiesResponse),
+    /// Another discovery for this prefix was already running.
+    InFlight,
+    /// Another discovery for this prefix finished while this one queued for
+    /// capacity, so the cache already holds a fresh answer.
+    Superseded,
+    /// Every discovery permit was taken.
+    AtCapacity,
+    /// Canton refused or timed out.
+    Failed(anyhow::Error),
+}
+
+/// Run one discovery for `prefix`, under the per-prefix claim and the global
+/// bound, and leave the result recorded and cached.
+///
+/// Every entry point goes through here: the request path, the stale-cache
+/// refresh, the startup sync and the post-workflow refreshes.
+///
+/// Three steps, in this order for a reason. Reading the claim first keeps a
+/// duplicate from ever holding a permit while it waits. Taking the permit
+/// before claiming keeps the claim set bounded by the permit count, since
+/// `prefix` can come from a request and a burst of distinct values would
+/// otherwise each add an entry and sit there. Recording and caching before the
+/// release closes the window where a request that had seen neither could claim
+/// the prefix and repeat the read.
+pub(crate) async fn discover_and_cache(
+    gate: &DiscoveryGate,
+    config: &NodeConfig,
+    db: &SqlitePool,
+    prefix: &str,
+    auth: Option<WorkflowAuth>,
+    party_credentials: &[PartyCredentials],
+    opts: PartyReadOpts,
+) -> Discovery {
+    // A targeted read answers a different question from the cached snapshot,
+    // so it neither claims the prefix nor writes the cache: single-flighting
+    // the two together would hand a windowed request the whole cached list.
+    // It still takes a permit, because it is a Canton read, and a heavier one
+    // when it pulls contracts.
+    if !opts.is_cacheable() {
+        let Ok(Ok(_permit)) = tokio::time::timeout(
+            SINGLE_FLIGHT_WAIT,
+            Arc::clone(&gate.permits).acquire_owned(),
+        )
+        .await
+        else {
+            return Discovery::AtCapacity;
+        };
+
+        return match budgeted_fetch(config, db, prefix, auth, party_credentials, opts).await {
+            Ok(response) => {
+                // A window that came back with parties proves the whole list is
+                // not empty, so it clears a standing mark even though it writes
+                // no cache and signals no completion. Otherwise the plain call
+                // keeps answering empty for the rest of the TTL while this very
+                // read held the evidence that the mark was stale.
+                //
+                // Guarded on non-empty because an offset past the end says
+                // nothing about the whole list, and `record_discovery` would
+                // read it as an empty result and mark the prefix.
+                if !response.parties.is_empty() {
+                    record_discovery(&gate.completed, prefix, &response.parties).await;
+                }
+                Discovery::Done(response)
+            }
+            Err(e) => Discovery::Failed(e),
+        };
+    }
+
+    if gate.claims.read().await.contains(prefix) {
+        return Discovery::InFlight;
+    }
+
+    // Noted before queuing for capacity. A discovery that runs and finishes
+    // while this one waits leaves no claim behind, so the claim check alone
+    // would let the second caller repeat the whole read.
+    let generation_at_entry = gate
+        .generations
+        .read()
+        .await
+        .get(prefix)
+        .map(|(generation, _)| *generation);
+
+    let Ok(Ok(permit)) = tokio::time::timeout(
+        SINGLE_FLIGHT_WAIT,
+        Arc::clone(&gate.permits).acquire_owned(),
+    )
+    .await
+    else {
+        return Discovery::AtCapacity;
+    };
+
+    let generation_now = gate
+        .generations
+        .read()
+        .await
+        .get(prefix)
+        .map(|(generation, _)| *generation);
+    if discovery_completed_since(generation_at_entry, generation_now) {
+        drop(permit);
+        return Discovery::Superseded;
+    }
+
+    // The read above was not a claim, so settle it under the write lock.
+    if !gate.claims.write().await.insert(prefix.to_string()) {
+        drop(permit);
+        return Discovery::InFlight;
+    }
+    let _permit = permit;
+
+    let fetched = budgeted_fetch(config, db, prefix, auth, party_credentials, opts).await;
+
+    let outcome = match fetched {
+        Ok(response) => {
+            record_discovery(&gate.completed, prefix, &response.parties).await;
+
+            match store_parties_to_db(db, prefix, &response.parties).await {
+                Ok(()) => {
+                    // Signalled last, while the claim still stands, so a
+                    // waiter that sees the count move knows the mark and the
+                    // rows are both in place. A count, not a timestamp:
+                    // `updated_at` has one-second resolution, so a discovery
+                    // finishing inside the same second was indistinguishable
+                    // from one that never ran.
+                    let now = now_secs();
+                    let mut generations = gate.generations.write().await;
+                    if !generations.contains_key(prefix) {
+                        prune_and_cap(&mut generations, now, |(_, at)| *at);
+                    }
+                    let entry = generations.entry(prefix.to_string()).or_default();
+                    *entry = (entry.0 + 1, now);
+                    drop(generations);
+                }
+                // The rows a waiter would read are still the ones from before
+                // this discovery, so completion must not be signalled. This
+                // caller keeps its own live result.
+                Err(e) => {
+                    tracing::warn!("Failed to cache parties for prefix '{prefix}': {e}");
+                }
+            }
+
+            Discovery::Done(response)
+        }
+        Err(e) => Discovery::Failed(e),
+    };
+
+    gate.claims.write().await.remove(prefix);
+    outcome
+}
+
+/// One discovery under [`DISCOVERY_BUDGET`].
+async fn budgeted_fetch(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    prefix: &str,
+    auth: Option<WorkflowAuth>,
+    party_credentials: &[PartyCredentials],
+    opts: PartyReadOpts,
+) -> Result<DecentralizedPartiesResponse> {
+    match tokio::time::timeout(
+        DISCOVERY_BUDGET,
+        fetch_decentralized_parties(
+            config,
+            db,
+            Some(prefix).filter(|prefix| !prefix.is_empty()),
+            auth,
+            party_credentials,
+            opts,
+        ),
+    )
+    .await
+    {
+        Ok(fetched) => fetched,
+        Err(_) => anyhow::bail!(
+            "discovery for prefix '{prefix}' exceeded {secs}s",
+            secs = DISCOVERY_BUDGET.as_secs()
+        ),
+    }
+}
+
+/// Run one fallible call under [`TOPOLOGY_READ_TIMEOUT`].
+async fn bounded_call<T>(
+    what: &str,
+    call: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    match tokio::time::timeout(TOPOLOGY_READ_TIMEOUT, call).await {
+        Ok(result) => result,
+        Err(_) => anyhow::bail!(
+            "{what} did not answer within {secs}s",
+            secs = TOPOLOGY_READ_TIMEOUT.as_secs()
+        ),
+    }
+}
+
+/// Run one topology read under [`TOPOLOGY_READ_TIMEOUT`].
+async fn bounded_read<T>(
+    what: &str,
+    read: impl std::future::Future<Output = std::result::Result<T, tonic::Status>>,
+) -> Result<T> {
+    match tokio::time::timeout(TOPOLOGY_READ_TIMEOUT, read).await {
+        Ok(result) => Ok(result?),
+        Err(_) => anyhow::bail!(
+            "{what} did not answer within {secs}s",
+            secs = TOPOLOGY_READ_TIMEOUT.as_secs()
+        ),
+    }
+}
+
 /// Query parameters for decentralized parties endpoint
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
 pub struct PartiesQuery {
@@ -75,6 +443,37 @@ pub struct PartiesQuery {
     /// instead of the up-to-60s-stale cached snapshot.
     #[serde(default)]
     pub refresh: Option<bool>,
+    /// Read each party's contracts. Off by default: the read is nine template
+    /// ACS page-scans per party, so a whole-deployment list costs memory
+    /// proportional to party count (#424). The approvals proposals view asks
+    /// for it, one page at a time.
+    #[serde(default)]
+    pub include_contracts: Option<bool>,
+    /// Window into the party list, after a stable sort by party id.
+    #[serde(default)]
+    pub offset: Option<usize>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// How much of each party a read should pull back.
+#[derive(Clone, Copy, Default)]
+pub struct PartyReadOpts {
+    pub include_contracts: bool,
+    /// `(offset, limit)`. `None` reads every party this participant hosts.
+    pub page: Option<(usize, usize)>,
+}
+
+impl PartyReadOpts {
+    /// Whether a read of this shape belongs in the cache.
+    ///
+    /// `dec_parties` holds the whole list without contracts, so only that
+    /// shape may be written to it, marked as a completed discovery, or counted
+    /// as one. A window or a contract-bearing read would otherwise be served
+    /// back later as if it were everything.
+    fn is_cacheable(&self) -> bool {
+        !self.include_contracts && self.page.is_none()
+    }
 }
 
 /// Get decentralized parties the current participant is a member of
@@ -83,7 +482,13 @@ pub struct PartiesQuery {
     params(PartiesQuery),
     responses(
         (status = 200, description = "Decentralized parties", body = DecentralizedPartiesResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
+        (status = 400, description = "Prefix too long", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+        (
+            status = 503,
+            description = "Too many discoveries in flight; retry",
+            body = ErrorResponse
+        )
     )
 )]
 #[get("/decentralized-parties")]
@@ -92,7 +497,20 @@ pub async fn get_decentralized_parties(
     query: web::Query<PartiesQuery>,
 ) -> impl Responder {
     let prefix = query.prefix.clone().unwrap_or_default();
-    let force_refresh = query.refresh.unwrap_or(false);
+    let opts = PartyReadOpts {
+        include_contracts: query.include_contracts.unwrap_or(false),
+        page: query.limit.map(|limit| (query.offset.unwrap_or(0), limit)),
+    };
+    // The cache holds the whole-list, contract-free snapshot. A targeted read
+    // is neither, so it goes straight to Canton — bounded by its own window.
+    let force_refresh =
+        query.refresh.unwrap_or(false) || opts.include_contracts || opts.page.is_some();
+
+    if prefix.len() > MAX_PREFIX_LEN {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: format!("prefix must be at most {MAX_PREFIX_LEN} characters"),
+        });
+    }
 
     // Try to load from DB cache first (unless caller explicitly demanded fresh)
     let cached = if force_refresh {
@@ -103,31 +521,24 @@ pub async fn get_decentralized_parties(
     if let Ok(Some((mut response, updated_at))) = cached {
         response.source = ResponseSource::Cache;
 
-        // Only refresh if cache is stale (older than 60 seconds)
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-        let is_stale = (now - updated_at) > 60;
+        // Only refresh if the cache is stale. A row stamped ahead of the clock
+        // counts as stale too, so a backwards correction cannot pin old rows.
+        let is_stale = !is_within_ttl(Some(updated_at), now_secs());
 
         if is_stale {
-            // Atomic check+insert to avoid duplicate spawns
-            let spawned = data
-                .refreshing_prefixes
-                .write()
-                .await
-                .insert(prefix.clone());
-            if spawned {
-                let data = data.clone();
-                let prefix = prefix.clone();
-                tokio::spawn(async move {
-                    refresh_and_cache_parties(&data, &prefix).await;
-                    data.refreshing_prefixes.write().await.remove(&prefix);
-                });
-            }
+            // `discover_and_cache` owns the claim, so a second spawn for the
+            // same prefix finds it in flight and does nothing.
+            let data = data.clone();
+            let prefix = prefix.clone();
+            tokio::spawn(async move {
+                refresh_and_cache_parties(&data, &prefix).await;
+            });
         }
 
-        response.refreshing = is_stale && data.refreshing_prefixes.read().await.contains(&prefix);
+        // A refresh was started above, so say so. Reading the claim set here
+        // raced the task that takes it and reported false while a refresh was
+        // getting under way.
+        response.refreshing = is_stale;
 
         // Resolve my_owner_key for parties where it's missing (e.g. old cache)
         if response.parties.iter().any(|p| p.my_owner_key.is_none())
@@ -147,48 +558,66 @@ pub async fn get_decentralized_parties(
         return HttpResponse::Ok().json(response);
     }
 
-    // No cache — do the full Canton query (first request is slow)
+    // No cached rows. A party this node is not a member of and a party that
+    // does not exist leave the same empty table, so the cache alone cannot
+    // tell "never fetched" from "fetched, found nothing". Answering from a
+    // recent completed discovery is what stops a node with no party from
+    // re-running that query on every single request.
+    let completed_at = data.discovery_completed.read().await.get(&prefix).copied();
+    if !force_refresh && is_within_ttl(completed_at, now_secs()) {
+        return HttpResponse::Ok().json(DecentralizedPartiesResponse {
+            parties: Vec::new(),
+            total: 0,
+            source: ResponseSource::Cache,
+            refreshing: data.refreshing_prefixes.read().await.contains(&prefix),
+        });
+    }
+
     let auth = data.auth.read().await.clone();
     let party_creds = data.party_credentials.read().await.clone();
-    match fetch_decentralized_parties(
+    let discovered = discover_and_cache(
+        &DiscoveryGate::of(&data),
         &data.config,
         &data.db,
-        Some(prefix.as_str()).filter(|s| !s.is_empty()),
+        &prefix,
         auth,
         &party_creds,
+        opts,
     )
-    .await
-    {
-        Ok(response) => {
-            // Cache + resolve owner keys in background. Mirrors
-            // `refresh_and_cache_parties` so a cold cache reaches the same
-            // post-resolved state on the next request. Dedup against
-            // `refreshing_prefixes` so concurrent cold-cache requests don't
-            // each fan out their own Noise resolution pass.
-            let spawned = data
-                .refreshing_prefixes
-                .write()
-                .await
-                .insert(prefix.clone());
+    .await;
+
+    match discovered {
+        Discovery::Done(response) => {
             // Serialise first, then hand the parties themselves to the task.
             // Cloning them instead meant a second full copy of every party and
             // its contracts alive at once, on top of the response body (#415).
             let body = HttpResponse::Ok().json(&response);
-            if spawned {
+
+            // Owner-key resolution fans out to every peer over Noise, so it
+            // stays off the request path. Only for a cacheable read: it writes
+            // into the rows that read just cached, and a windowed or
+            // contract-bearing request caches nothing, so resolving for it
+            // would put a peer fan-out behind every page of the approvals
+            // view (#424).
+            if opts.is_cacheable() && !response.parties.is_empty() {
                 let data = data.clone();
                 let parties = response.parties;
                 tokio::spawn(async move {
-                    if let Err(e) = store_parties_to_db(&data.db, &prefix, &parties).await {
-                        tracing::warn!("Failed to cache parties: {e}");
-                    } else {
-                        resolve_owner_keys_from_peers(&data.config, &data.db, &parties).await;
-                    }
-                    data.refreshing_prefixes.write().await.remove(&prefix);
+                    resolve_owner_keys_from_peers(&data.config, &data.db, &parties).await;
                 });
             }
             body
         }
-        Err(e) => {
+        Discovery::InFlight => await_in_flight_discovery(&data, &prefix, !force_refresh).await,
+        // A discovery finished while this request queued, so the cache holds a
+        // fresh answer and even a bypass caller can be served from it.
+        Discovery::Superseded => await_in_flight_discovery(&data, &prefix, true).await,
+        // Capacity says nothing about this prefix, and an empty list would
+        // read as "no parties", so report the overload.
+        Discovery::AtCapacity => HttpResponse::ServiceUnavailable().json(ErrorResponse {
+            error: "party discovery is at capacity, retry shortly".to_string(),
+        }),
+        Discovery::Failed(e) => {
             tracing::error!("Failed to fetch decentralized parties: {e}");
             HttpResponse::InternalServerError().json(ErrorResponse {
                 error: format!("Failed to fetch decentralized parties: {e}"),
@@ -197,27 +626,115 @@ pub async fn get_decentralized_parties(
     }
 }
 
-/// Background task: fetch from Canton, store to DB, then resolve owner keys from peers
+/// Answer a request that cannot run its own discovery, because another request
+/// holds the prefix or because the concurrency bound is spent.
+///
+/// Waits [`SINGLE_FLIGHT_WAIT`] for the running discovery to land. The winner
+/// records and caches before it releases the prefix, so a prefix that is no
+/// longer claimed means its result is already visible here.
+///
+/// `accept_cached` is false for a caller that asked to bypass the cache. Such a
+/// caller may only be served rows the running discovery rewrote, which a moved
+/// `updated_at` is the evidence for. Waiting is not evidence on its own: the
+/// claim also clears when the discovery fails. When freshness cannot be
+/// established it gets a retryable 503, never the rows from before its
+/// refresh. A caller that did not ask to bypass takes cached rows gladly, and
+/// an empty list only as the last answer, since that reads as "no parties" in a
+/// client that does not act on `refreshing`.
+async fn await_in_flight_discovery(
+    data: &web::Data<AppState>,
+    prefix: &str,
+    accept_cached: bool,
+) -> HttpResponse {
+    // A caller that will take cached rows gets them without waiting.
+    if accept_cached
+        && let Ok(Some((mut response, _))) = load_cached_parties(&data.db, prefix).await
+    {
+        response.source = ResponseSource::Cache;
+        response.refreshing = true;
+        return HttpResponse::Ok().json(response);
+    }
+
+    // Wait on the in-memory completion count, not on the cache: the running
+    // discovery bumps it once, after both the mark and the rows are in place.
+    // Re-reading SQLite every tick cost up to thirty queries per waiter.
+    let generation_at_entry = data
+        .discovery_generations
+        .read()
+        .await
+        .get(prefix)
+        .map(|(generation, _)| *generation);
+    let deadline = tokio::time::Instant::now() + SINGLE_FLIGHT_WAIT;
+    let mut completed = false;
+
+    while tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let generation_now = data
+            .discovery_generations
+            .read()
+            .await
+            .get(prefix)
+            .map(|(generation, _)| *generation);
+        if discovery_completed_since(generation_at_entry, generation_now) {
+            completed = true;
+            break;
+        }
+
+        // The claim clears on failure too, so this is the end of the wait
+        // rather than evidence of a result.
+        if !data.refreshing_prefixes.read().await.contains(prefix) {
+            break;
+        }
+    }
+
+    if !accept_cached && !completed {
+        // The caller asked to bypass the cache and nothing completed, so the
+        // rows here are the ones from before its refresh. Say so instead.
+        return HttpResponse::ServiceUnavailable().json(ErrorResponse {
+            error: "a refresh for this prefix is still in flight, retry shortly".to_string(),
+        });
+    }
+
+    let refreshing = data.refreshing_prefixes.read().await.contains(prefix);
+    match load_cached_parties(&data.db, prefix).await {
+        Ok(Some((mut response, _))) => {
+            response.source = ResponseSource::Cache;
+            response.refreshing = refreshing;
+            HttpResponse::Ok().json(response)
+        }
+        _ => HttpResponse::Ok().json(DecentralizedPartiesResponse {
+            parties: Vec::new(),
+            total: 0,
+            source: ResponseSource::Cache,
+            refreshing,
+        }),
+    }
+}
+
+/// Background task: discover, cache, then resolve owner keys from peers.
 async fn refresh_and_cache_parties(data: &web::Data<AppState>, prefix: &str) {
     let auth = data.auth.read().await.clone();
     let party_creds = data.party_credentials.read().await.clone();
-    match fetch_decentralized_parties(
+
+    match discover_and_cache(
+        &DiscoveryGate::of(data),
         &data.config,
         &data.db,
-        Some(prefix).filter(|s| !s.is_empty()),
+        prefix,
         auth,
         &party_creds,
+        PartyReadOpts::default(),
     )
     .await
     {
-        Ok(response) => {
-            if let Err(e) = store_parties_to_db(&data.db, prefix, &response.parties).await {
-                tracing::warn!("Failed to cache parties: {e}");
-                return;
-            }
+        Discovery::Done(response) => {
             resolve_owner_keys_from_peers(&data.config, &data.db, &response.parties).await;
         }
-        Err(e) => {
+        Discovery::InFlight | Discovery::AtCapacity | Discovery::Superseded => {
+            tracing::debug!("Skipped background refresh for prefix '{prefix}'");
+        }
+        Discovery::Failed(e) => {
             tracing::warn!("Background refresh failed for prefix '{prefix}': {e}");
         }
     }
@@ -410,6 +927,20 @@ pub async fn resolve_owner_keys_from_peers(
                     .await
                 {
                     tracing::debug!("Failed to update owner key for {peer_uid}: {e}");
+                }
+
+                // Absent from peers that predate the field. Nothing else can
+                // supply it — the party's signing keys carry no owner — so a
+                // kick coordinated here falls back to elimination until this
+                // peer answers a later refresh.
+                let Some(signing_key) = entry["signing_key"].as_str() else {
+                    continue;
+                };
+                if let Err(e) = tx
+                    .update_participant_signing_key(&party_id_canton, &peer_uid, signing_key)
+                    .await
+                {
+                    tracing::debug!("Failed to update signing key for {peer_uid}: {e}");
                 }
             }
             if let Err(e) = Commitable::commit(tx).await {
@@ -612,6 +1143,7 @@ async fn load_cached_parties(
 
     Ok(Some((
         DecentralizedPartiesResponse {
+            total: parties.len(),
             parties,
             source: ResponseSource::Cache,
             refreshing: false,
@@ -621,7 +1153,7 @@ async fn load_cached_parties(
 }
 
 /// Store parties into the dec_party tables
-pub async fn store_parties_to_db(
+async fn store_parties_to_db(
     db: &SqlitePool,
     prefix: &str,
     parties: &[DecentralizedParty],
@@ -668,6 +1200,10 @@ pub async fn store_parties_to_db(
                 }
                 .to_string(),
                 owner_key: p.owner_key.clone(),
+                // Reported by the participant itself over the OwnerKeys
+                // exchange, never carried on the live Canton fetch — the
+                // upsert COALESCEs a cached value rather than clearing it.
+                signing_key: None,
             })
             .collect();
         tx.replace_dec_party_participants(&party.party_id, &participants)
@@ -697,15 +1233,243 @@ pub async fn store_parties_to_db(
     Commitable::commit(tx).await
 }
 
+/// Most parties `ListParties` returns for one participant.
+///
+/// The RPC takes a limit and offers no cursor, so this truncates rather than
+/// pages. It sits far above any realistic number of parties on one
+/// participant; a node holding more would discover the first
+/// `MAX_HOSTED_PARTIES` of them, and the exact-ID path covers the rest as soon
+/// as one is known locally.
+const MAX_HOSTED_PARTIES: i32 = 5_000;
+
+/// The full IDs of the decentralized parties this node hosts, found without
+/// reading every party on the synchronizer.
+///
+/// There is no way to ask Canton for a party by namespace.
+/// `listPartyToParticipant` re-filters its own result with
+/// `partyId.startsWith(filter_party)` against the unsplit string, and a party
+/// ID can never begin with the `::` delimiter, so a namespace-only filter
+/// matches nothing however the store reads it. `ListParties` takes a
+/// participant filter, which is the question discovery actually asks, and
+/// answers with full party IDs the exact-filter path can use.
+async fn discover_hosted_party_ids(
+    aggregation_client: &mut TopologyAggregationServiceClient<tonic::transport::Channel>,
+    synchronizer_id: &str,
+    participant_id: &str,
+    prefix_filter: Option<&str>,
+    owned_namespaces: &HashSet<String>,
+) -> Result<Vec<String>> {
+    if owned_namespaces.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Unscoped, this asks across every synchronizer the participant is
+    // connected to, and those parties eat the result budget while the reads
+    // around it are scoped to this one.
+    let synchronizer_ids = match logical_synchronizer_id(synchronizer_id) {
+        Some(id) => vec![id.to_string()],
+        None => {
+            tracing::warn!(
+                "Cannot read a logical synchronizer ID out of '{synchronizer_id}', so party \
+                 discovery asks across every connected synchronizer. Parties from the others \
+                 count against the {MAX_HOSTED_PARTIES} result budget."
+            );
+            Vec::new()
+        }
+    };
+
+    let response = bounded_read(
+        "list_parties",
+        aggregation_client.list_parties(tonic::Request::new(ListPartiesRequest {
+            as_of: None,
+            limit: MAX_HOSTED_PARTIES,
+            synchronizer_ids,
+            // A bare prefix, with no `::`, narrows by party identifier on both
+            // sides of Canton's filtering: `identifier LIKE 'prefix%'` in the
+            // store query and `identifier.startsWith` in the post-filter. That
+            // is what keeps this bounded on a participant hosting a very large
+            // number of parties, where the result limit below would otherwise
+            // truncate before reaching any decentralized party.
+            filter_party: prefix_filter.unwrap_or_default().to_string(),
+            filter_participant: participant_id.to_string(),
+        })),
+    )
+    .await?
+    .into_inner();
+
+    // The RPC truncates at the limit and says nothing, so a full page is the
+    // only signal that parties were left behind. It has no cursor, so there is
+    // nothing to page with: a participant hosting more parties than this needs
+    // the query narrowed instead.
+    if response.results.len() == MAX_HOSTED_PARTIES as usize {
+        tracing::warn!(
+            "ListParties returned the full {MAX_HOSTED_PARTIES}-party limit for this \
+             participant{scope}, so discovery may have missed a decentralized party. Ask for \
+             a party-name prefix to narrow it, which Canton applies in the store query. Any \
+             party already known locally is unaffected, since those are queried by exact ID.",
+            scope = match prefix_filter {
+                Some(prefix) => format!(" under prefix '{prefix}'"),
+                None => String::new(),
+            }
+        );
+    }
+
+    Ok(parties_in_namespaces(
+        response.results.into_iter().map(|result| result.party),
+        owned_namespaces,
+    ))
+}
+
+/// The logical synchronizer ID inside a physical one.
+///
+/// `ListParties` parses this field as a `SynchronizerId`, so the physical form
+/// `<name>::<fingerprint>::<protocol version>` is rejected outright. Returns
+/// `None` for anything that is not in that shape, and the caller then sends no
+/// synchronizer filter rather than a request Canton will refuse.
+fn logical_synchronizer_id(physical: &str) -> Option<&str> {
+    let (logical, _protocol_version) = physical.rsplit_once("::")?;
+    logical.contains("::").then_some(logical)
+}
+
+/// Keep the party IDs whose namespace is one of `namespaces`.
+///
+/// `ListParties` answers with every party the participant hosts, decentralized
+/// or not, so the namespace is what separates the ones this node is a member of
+/// from the ordinary parties it also hosts.
+fn parties_in_namespaces(
+    parties: impl IntoIterator<Item = String>,
+    namespaces: &HashSet<String>,
+) -> Vec<String> {
+    let mut party_ids: Vec<String> = parties
+        .into_iter()
+        .filter(|party| {
+            party
+                .rsplit_once("::")
+                .is_some_and(|(hint, namespace)| !hint.is_empty() && namespaces.contains(namespace))
+        })
+        .collect();
+    party_ids.sort();
+    party_ids.dedup();
+
+    party_ids
+}
+
+/// This node's namespace signing-key fingerprints, from the local vault.
+async fn my_namespace_fingerprints(
+    vault_client: &mut VaultServiceClient<tonic::transport::Channel>,
+) -> Result<HashSet<String>> {
+    let response = bounded_read(
+        "list_my_keys",
+        vault_client.list_my_keys(tonic::Request::new(ListMyKeysRequest {
+            filters: None,
+            base_request: None,
+        })),
+    )
+    .await?
+    .into_inner();
+
+    let mut fingerprints = HashSet::new();
+    for key_meta in response.private_keys_metadata {
+        if let Some(private_key_metadata::PublicKeyWithName::V30(pub_key_with_name)) =
+            &key_meta.public_key_with_name
+            && let Some(pub_key) = &pub_key_with_name.public_key
+            && let Some(public_key::Key::SigningPublicKey(signing_key)) = &pub_key.key
+            && signing_key.usage.contains(&1)
+        {
+            // SigningKeyUsage::Namespace = 1
+            fingerprints.insert(utils::compute_fingerprint(signing_key));
+        }
+    }
+
+    Ok(fingerprints)
+}
+
+/// The decentralized namespaces this node owns a namespace key in.
+///
+/// This is the discovery step for a node that holds no local record of its
+/// parties. It goes through the namespaces rather than the parties because a
+/// party is only selectable by an in-memory participant filter, while a
+/// namespace is a store-level predicate.
+async fn owned_decentralized_namespaces(
+    topology_client: &mut TopologyManagerReadServiceClient<tonic::transport::Channel>,
+    synchronizer_id: &str,
+    my_fingerprints: &HashSet<String>,
+) -> Result<Vec<DecentralizedNamespaceDefinition>> {
+    let response = bounded_read(
+        "list_decentralized_namespace_definition",
+        topology_client.list_decentralized_namespace_definition(tonic::Request::new(
+            build_decentralized_namespace_request(synchronizer_id, ""),
+        )),
+    )
+    .await?
+    .into_inner();
+
+    let mut owned: Vec<_> = response
+        .results
+        .into_iter()
+        .filter_map(|result| {
+            let item = result.item?;
+            item.owners
+                .iter()
+                .any(|owner| my_fingerprints.contains(owner))
+                .then_some(item)
+        })
+        .collect();
+    owned.sort_by(|a, b| a.decentralized_namespace.cmp(&b.decentralized_namespace));
+    owned.dedup_by(|a, b| a.decentralized_namespace == b.decentralized_namespace);
+
+    Ok(owned)
+}
+
+/// Pair each decentralized namespace this node owns a key in with every party
+/// in it, dropping any party the requested prefix excludes.
+///
+/// A namespace is derived from its owner set alone, so two parties with the
+/// same owners share one and a namespace-scoped query returns both. Keeping one
+/// party per namespace silently dropped the other, and left a prefix query
+/// answering empty depending on which of them arrived last.
+fn pair_namespaces_with_parties(
+    namespace_definitions: Vec<DecentralizedNamespaceDefinition>,
+    parties_by_namespace: &HashMap<String, Vec<PartyToParticipant>>,
+    my_fingerprints: &HashSet<String>,
+    prefix_filter: Option<&str>,
+) -> Vec<(DecentralizedNamespaceDefinition, String, PartyToParticipant)> {
+    let mut paired = Vec::new();
+
+    for definition in namespace_definitions {
+        let Some(my_owner_key) = definition
+            .owners
+            .iter()
+            .find(|owner| my_fingerprints.contains(*owner))
+            .cloned()
+        else {
+            continue;
+        };
+        let Some(parties) = parties_by_namespace.get(&definition.decentralized_namespace) else {
+            continue;
+        };
+
+        for party in parties {
+            // Namespace-scoped discovery does not know about the requested
+            // prefix, so apply it to each party the namespace resolved to.
+            if !prefix_filter.is_none_or(|prefix| party.party.starts_with(prefix)) {
+                continue;
+            }
+            paired.push((definition.clone(), my_owner_key.clone(), party.clone()));
+        }
+    }
+
+    paired
+}
+
 /// Build the `list_party_to_participant` request used to discover this node's
 /// decentralized parties.
 ///
-/// Exact `filter_party` values are the scalable path. Canton 3.5.12 pushes that
-/// filter into the topology store, while `filter_participant` is applied only
-/// after the store query. The participant filter still protects correctness,
-/// but an empty or prefix-only party filter can load the synchronizer-wide
-/// result before post-filtering and is reserved for the no-local-knowledge
-/// onboarding fallback.
+/// `filter_party` is the only scalable filter here. Canton splits it on `::`
+/// and compiles both halves into the store query, while `filter_participant`
+/// and `filter_signed_key` are applied in memory after every party has been
+/// loaded. So every caller must pass a party filter: an exact id, or
+/// [`namespace_party_filter`] for a whole namespace.
 fn build_party_to_participant_request(
     synchronizer_id: &str,
     party_filter: Option<&str>,
@@ -730,16 +1494,17 @@ fn build_party_to_participant_request(
     }
 }
 
-/// Build a decentralized-namespace query for one exact namespace.
+/// Build a decentralized-namespace query, for one namespace or for all of them.
 ///
-/// An empty namespace enumerates the entire synchronizer. That is prohibitively
-/// expensive on mainnet, so callers must first discover the locally relevant
-/// party IDs and query their namespaces individually.
+/// An empty namespace enumerates every decentralized namespace on the
+/// synchronizer. Canton pushes the mapping type into the store query, so that
+/// reads one small slice of the topology store rather than all of it: a
+/// synchronizer holds a handful of decentralized namespaces against a
+/// `PartyToParticipant` mapping for every party on it.
 fn build_decentralized_namespace_request(
     synchronizer_id: &str,
     namespace: &str,
 ) -> ListDecentralizedNamespaceDefinitionRequest {
-    debug_assert!(!namespace.is_empty());
     ListDecentralizedNamespaceDefinitionRequest {
         base_query: Some(BaseQuery {
             store: Some(StoreId {
@@ -783,23 +1548,18 @@ fn known_party_filters(
     parties
 }
 
-/// Fetch decentralized parties from Canton topology and ledger APIs
-pub async fn fetch_decentralized_parties(
+/// Fetch decentralized parties from Canton topology and ledger APIs.
+///
+/// Private on purpose: [`discover_and_cache`] is the only way in, so no caller
+/// can start a discovery outside the per-prefix claim and the global bound.
+async fn fetch_decentralized_parties(
     config: &NodeConfig,
     db: &SqlitePool,
     prefix_filter: Option<&str>,
     auth: Option<WorkflowAuth>,
     party_credentials: &[PartyCredentials],
+    opts: PartyReadOpts,
 ) -> Result<DecentralizedPartiesResponse> {
-    let channel = config.admin_channel().await?;
-
-    let mut topology_client = TopologyManagerReadServiceClient::new(channel.clone())
-        .max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
-    let mut vault_client =
-        VaultServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
-
-    let synchronizer_id = utils::get_synchronizer_id(config).await?;
-
     let workflow_runs = db.get_visible_workflow_runs().await?;
     let cached_parties = db.get_dec_parties_by_prefix("").await?;
     let known_party_ids = known_party_filters(
@@ -810,33 +1570,85 @@ pub async fn fetch_decentralized_parties(
         cached_parties.into_iter().map(|party| party.party_id),
         None,
     );
-    let has_local_party_knowledge = !known_party_ids.is_empty();
     let exact_party_filters: Vec<_> = known_party_ids
         .into_iter()
         .filter(|party_id| prefix_filter.is_none_or(|prefix| party_id.starts_with(prefix)))
         .collect();
 
-    // Prefer exact IDs from every local source. Only a node that knows no
-    // matching party at all uses participant-scoped discovery; Canton applies
-    // that participant filter after loading topology rows, so this fallback is
-    // intentionally limited to bootstrap/onboarding.
-    let party_filters: Vec<Option<String>> = if !has_local_party_knowledge {
-        vec![prefix_filter.map(str::to_string)]
-    } else {
-        exact_party_filters.into_iter().map(Some).collect()
-    };
+    let channel = config.admin_channel().await?;
 
+    let mut topology_client = TopologyManagerReadServiceClient::new(channel.clone())
+        .max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
+    let mut aggregation_client = TopologyAggregationServiceClient::new(channel.clone())
+        .max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
+    let mut vault_client =
+        VaultServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
+
+    // Its own Admin API call on a cold process-wide cache, so it carries the
+    // same deadline as the reads that follow it.
+    let synchronizer_id =
+        bounded_call("get_synchronizer_id", utils::get_synchronizer_id(config)).await?;
     let participant_id = config.participant_id().to_string();
-    let mut p2p_by_namespace = HashMap::new();
+
+    // Wanted twice: to discover which namespaces this node owns a key in, and
+    // to pick each party's `my_owner_key` below.
+    let namespace_key_fingerprints = my_namespace_fingerprints(&mut vault_client).await?;
+
+    // Prefer exact IDs from every local source. A node with no exact ID for
+    // what was asked has to discover: the decentralized namespaces it owns a
+    // key in, then the parties its own participant hosts. Both are narrow
+    // reads, unlike a participant-scoped party query, which Canton filters in
+    // memory only after loading every party on the synchronizer.
+    //
+    // Keying this on the filters rather than on "knows any party at all"
+    // matters for a node that holds one party and is asked about another
+    // prefix: it has to discover instead of issuing no query and reporting
+    // nothing.
+    let mut discovered_definitions = Vec::new();
+    let party_filters: Vec<String> = if !exact_party_filters.is_empty() {
+        exact_party_filters
+    } else {
+        discovered_definitions = owned_decentralized_namespaces(
+            &mut topology_client,
+            &synchronizer_id,
+            &namespace_key_fingerprints,
+        )
+        .await?;
+
+        let owned_namespaces: HashSet<String> = discovered_definitions
+            .iter()
+            .map(|definition| definition.decentralized_namespace.clone())
+            .collect();
+
+        discover_hosted_party_ids(
+            &mut aggregation_client,
+            &synchronizer_id,
+            &participant_id,
+            prefix_filter,
+            &owned_namespaces,
+        )
+        .await?
+    };
+    // Keyed to a list: a decentralized namespace is derived from its owner set
+    // alone (`compute_decentralized_namespace`), so two parties with the same
+    // owners share one, and a namespace-wide filter returns both.
+    let mut p2p_by_namespace: HashMap<String, Vec<_>> = HashMap::new();
+    // An exact party filter is an identifier *prefix* once Canton has split off
+    // the namespace, so two filters can return the same party.
+    let mut seen_parties: HashSet<String> = HashSet::new();
     for party_filter in party_filters {
-        let response = topology_client
-            .list_party_to_participant(tonic::Request::new(build_party_to_participant_request(
-                &synchronizer_id,
-                party_filter.as_deref(),
-                &participant_id,
-            )))
-            .await?
-            .into_inner();
+        let response = bounded_read(
+            "list_party_to_participant",
+            topology_client.list_party_to_participant(tonic::Request::new(
+                build_party_to_participant_request(
+                    &synchronizer_id,
+                    Some(party_filter.as_str()),
+                    &participant_id,
+                ),
+            )),
+        )
+        .await?
+        .into_inner();
 
         for result in response.results {
             let Some(P2pItem::V30(party_mapping)) = result.item else {
@@ -848,62 +1660,61 @@ pub async fn fetch_decentralized_parties(
             if namespace.is_empty() {
                 continue;
             }
-            p2p_by_namespace.insert(namespace.to_string(), party_mapping);
+            if !seen_parties.insert(party_mapping.party.clone()) {
+                continue;
+            }
+            p2p_by_namespace
+                .entry(namespace.to_string())
+                .or_default()
+                .push(party_mapping);
         }
     }
 
-    // Query only the exact decentralized namespaces belonging to locally
-    // hosted parties. Never issue an empty namespace filter on this path.
-    let mut namespaces: Vec<_> = p2p_by_namespace.keys().cloned().collect();
-    namespaces.sort();
-    let mut dns_results = Vec::new();
-    for namespace in namespaces {
-        let response = topology_client
-            .list_decentralized_namespace_definition(tonic::Request::new(
-                build_decentralized_namespace_request(&synchronizer_id, &namespace),
-            ))
-            .await?
-            .into_inner();
-        dns_results.extend(response.results);
-    }
+    // Discovery already read these, so only the exact-ID path pays for them.
+    let mut definitions = discovered_definitions;
+    let already_known: HashSet<String> = definitions
+        .iter()
+        .map(|definition| definition.decentralized_namespace.clone())
+        .collect();
 
-    // Get namespace keys only after completing the scoped topology lookup.
-    let keys_response = vault_client
-        .list_my_keys(tonic::Request::new(ListMyKeysRequest {
-            filters: None,
-            base_request: None,
-        }))
+    let mut namespaces: Vec<_> = p2p_by_namespace
+        .keys()
+        .filter(|namespace| !already_known.contains(*namespace))
+        .cloned()
+        .collect();
+    namespaces.sort();
+    for namespace in namespaces {
+        let response = bounded_read(
+            "list_decentralized_namespace_definition",
+            topology_client.list_decentralized_namespace_definition(tonic::Request::new(
+                build_decentralized_namespace_request(&synchronizer_id, &namespace),
+            )),
+        )
         .await?
         .into_inner();
-
-    let mut namespace_key_fingerprints = HashMap::new();
-    for key_meta in keys_response.private_keys_metadata {
-        if let Some(private_key_metadata::PublicKeyWithName::V30(pub_key_with_name)) =
-            &key_meta.public_key_with_name
-            && let Some(pub_key) = &pub_key_with_name.public_key
-            && let Some(public_key::Key::SigningPublicKey(signing_key)) = &pub_key.key
-            && signing_key.usage.contains(&1)
-        {
-            // SigningKeyUsage::Namespace = 1
-            let fingerprint = utils::compute_fingerprint(signing_key);
-            namespace_key_fingerprints.insert(fingerprint, true);
-        }
+        definitions.extend(
+            response
+                .results
+                .into_iter()
+                .filter_map(|result| result.item),
+        );
     }
 
-    // Filter to parties where this participant is a member
-    let my_parties: Vec<_> = dns_results
-        .into_iter()
-        .filter_map(|result| {
-            let item = result.item?;
-            let my_owner_key = item
-                .owners
-                .iter()
-                .find(|owner| namespace_key_fingerprints.contains_key(*owner))
-                .cloned()?;
-            let p2p = p2p_by_namespace.get(&item.decentralized_namespace)?;
-            Some((item, my_owner_key, p2p.clone()))
-        })
-        .collect();
+    // Filter to parties where this participant is a member.
+    let my_parties = pair_namespaces_with_parties(
+        definitions,
+        &p2p_by_namespace,
+        &namespace_key_fingerprints,
+        prefix_filter,
+    );
+
+    // Stable order, so a paged caller sees each party once across requests.
+    let mut my_parties = my_parties;
+    my_parties.sort_by(|a, b| a.2.party.cmp(&b.2.party));
+    let total = my_parties.len();
+    if let Some((offset, limit)) = opts.page {
+        my_parties = my_parties.into_iter().skip(offset).take(limit).collect();
+    }
 
     // Check if we're in test mode (mock auth)
     let test_mode = matches!(auth, Some(WorkflowAuth::Mock(_)));
@@ -912,11 +1723,19 @@ pub async fn fetch_decentralized_parties(
     // and `list_packages` is a whole-participant Admin API read. Building them
     // per party meant one full package inventory in flight per hosted party.
     let packages = default_package_config();
+    // One rules contract per party is all the parties list has a consumer for.
+    let templates = if opts.include_contracts {
+        contract_templates_all(&packages)
+    } else {
+        rules_templates(&packages)
+    };
     // Only when some party can use it. With no auth and no test mode every
     // per-party read below is skipped, so fetching a whole-participant
     // inventory would be pure waste — and it was never fetched on that path
-    // before, when `get_contracts` fetched it for itself.
-    let package_versions = if auth.is_some() || test_mode {
+    // before, when `get_contracts` fetched it for itself. A node that holds no
+    // party reads nothing either, which is the ordinary state of one that has
+    // not been onboarded yet.
+    let package_versions = if !my_parties.is_empty() && (auth.is_some() || test_mode) {
         match fetch_package_versions(config).await {
             Ok(map) => map,
             Err(e) => {
@@ -937,6 +1756,7 @@ pub async fn fetch_decentralized_parties(
             let auth = auth.clone();
             let packages = &packages;
             let package_versions = &package_versions;
+            let templates = templates.as_slice();
             let party_id_str = p2p.party.clone();
             async move {
                 let party_id = CantonId::parse(&p2p.party)?;
@@ -960,14 +1780,19 @@ pub async fn fetch_decentralized_parties(
                 let (contracts, local_metadata) = if token.is_some() || test_mode {
                     tokio::join!(
                         async {
-                            get_contracts(&config, &party_id, token, packages, package_versions)
-                                .await
-                                .unwrap_or_else(|e| {
-                                    tracing::warn!(
-                                        "Failed to get contracts for {party_id_str}: {e}"
-                                    );
-                                    Vec::new()
-                                })
+                            get_contracts(
+                                &config,
+                                &party_id,
+                                token,
+                                packages,
+                                package_versions,
+                                templates,
+                            )
+                            .await
+                            .unwrap_or_else(|e| {
+                                tracing::warn!("Failed to get contracts for {party_id_str}: {e}");
+                                Vec::new()
+                            })
                         },
                         async {
                             get_party_metadata(&config, &party_id, token_clone)
@@ -1015,12 +1840,72 @@ pub async fn fetch_decentralized_parties(
 
     Ok(DecentralizedPartiesResponse {
         parties,
+        total,
         source: ResponseSource::Live,
         refreshing: false,
     })
 }
 
 /// Get vetted packages for this participant
+/// Which participant is quarantined for which party.
+#[derive(Debug, serde::Deserialize, utoipa::IntoParams)]
+pub struct QuarantineQuery {
+    /// The decentralized party the failed replication was for.
+    pub party_id: String,
+    /// The participant that may hold part of its ACS.
+    pub participant_id: String,
+}
+
+/// Lift an ACS-import quarantine.
+///
+/// A transfer that failed after bytes had reached Canton leaves the
+/// participant holding an unknown fraction of the party's ACS, and Canton
+/// offers no way to ask how much. Replication onto it is refused until an
+/// operator confirms it has been repaired or restored, which is what this
+/// records. It does not repair anything.
+#[utoipa::path(
+    tag = "Parties",
+    params(QuarantineQuery),
+    responses(
+        (status = 200, description = "Quarantine lifted, or none was set"),
+        (status = 400, description = "Malformed party or participant id", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[delete("/acs-import-quarantine")]
+pub async fn clear_acs_import_quarantine(
+    data: web::Data<AppState>,
+    query: web::Query<QuarantineQuery>,
+) -> impl Responder {
+    let (Ok(party_id), Ok(participant_id)) = (
+        CantonId::parse(&query.party_id),
+        CantonId::parse(&query.participant_id),
+    ) else {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: "party_id and participant_id must be valid Canton ids".to_string(),
+        });
+    };
+
+    match data
+        .db
+        .clear_acs_import_quarantine(&party_id, &participant_id)
+        .await
+    {
+        Ok(lifted) => {
+            if lifted {
+                tracing::warn!(
+                    "ACS-import quarantine lifted for {participant_id} on {party_id} — \
+                     an operator has declared the participant repaired"
+                );
+            }
+            HttpResponse::Ok().json(serde_json::json!({ "lifted": lifted }))
+        }
+        Err(e) => HttpResponse::InternalServerError().json(ErrorResponse {
+            error: format!("Failed to lift the quarantine: {e}"),
+        }),
+    }
+}
+
 #[utoipa::path(
     tag = "Packages",
     responses(
@@ -1377,32 +2262,10 @@ async fn fetch_peer_packages(
 /// Query the local participant's vault for namespace key fingerprints.
 /// Returns a set of fingerprints that identify this node as an owner.
 async fn get_local_namespace_fingerprints(config: &NodeConfig) -> Result<HashSet<String>> {
-    let channel = config.admin_channel().await?;
+    let mut vault_client = VaultServiceClient::new(config.admin_channel().await?)
+        .max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
 
-    let mut vault_client =
-        VaultServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
-
-    let keys_response = vault_client
-        .list_my_keys(tonic::Request::new(ListMyKeysRequest {
-            filters: None,
-            base_request: None,
-        }))
-        .await?
-        .into_inner();
-
-    let mut fingerprints = HashSet::new();
-    for key_meta in keys_response.private_keys_metadata {
-        if let Some(private_key_metadata::PublicKeyWithName::V30(pub_key_with_name)) =
-            &key_meta.public_key_with_name
-            && let Some(pub_key) = &pub_key_with_name.public_key
-            && let Some(public_key::Key::SigningPublicKey(signing_key)) = &pub_key.key
-            && signing_key.usage.contains(&1)
-        {
-            fingerprints.insert(utils::compute_fingerprint(signing_key));
-        }
-    }
-
-    Ok(fingerprints)
+    my_namespace_fingerprints(&mut vault_client).await
 }
 
 #[cfg(test)]
@@ -1410,6 +2273,354 @@ mod tests {
     use http::StatusCode;
 
     use super::*;
+    use crate::{config::Network, db::MIGRATOR};
+
+    /// Discovery is the same query on every network, because it reads the
+    /// decentralized-namespace mappings rather than every party. MainNet used
+    /// to be the size problem, so it must not be treated as a special case
+    /// again: with nothing listening, every network has to fail rather than
+    /// quietly answer empty.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn every_network_discovers_the_same_way(pool: SqlitePool) {
+        for network in [Network::Devnet, Network::Testnet, Network::Mainnet] {
+            let config = closed_admin_api(network);
+
+            let result = fetch_decentralized_parties(
+                &config,
+                &pool,
+                None,
+                None,
+                &[],
+                PartyReadOpts::default(),
+            )
+            .await;
+
+            assert!(result.is_err(), "{network:?} must attempt discovery");
+        }
+    }
+
+    /// A node that holds one party and is asked about a different prefix has
+    /// no exact ID to use, so it must discover under that prefix rather than
+    /// issue no query at all and report nothing.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_known_party_does_not_mask_another_prefix(pool: SqlitePool) -> anyhow::Result<()> {
+        let config = closed_admin_api(Network::Mainnet);
+        store_parties_to_db(&pool, "cbtc", &[a_party()?]).await?;
+
+        let result = fetch_decentralized_parties(
+            &config,
+            &pool,
+            Some("other"),
+            None,
+            &[],
+            PartyReadOpts::default(),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "an unmatched prefix must still be queried against Canton"
+        );
+        Ok(())
+    }
+
+    /// `ListParties` answers with every party the participant hosts, so the
+    /// namespace is the only thing separating a decentralized party this node
+    /// is a member of from an ordinary party it happens to host.
+    #[test]
+    fn only_parties_in_an_owned_namespace_are_discovered() {
+        let mine = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
+        let theirs = "1220d5010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5893";
+        let owned = HashSet::from([mine.to_string()]);
+
+        let found = parties_in_namespaces(
+            [
+                format!("beta::{mine}"),
+                format!("alpha::{mine}"),
+                // Same namespace twice: `ListParties` reports a party once per
+                // participant that hosts it.
+                format!("alpha::{mine}"),
+                // Someone else's decentralized party, and an ordinary party on
+                // this participant's own namespace.
+                format!("outsider::{theirs}"),
+                format!("plain::{theirs}"),
+                // Malformed, and a namespace with no identifier half, which
+                // Canton would never mint.
+                "no-delimiter".to_string(),
+                format!("::{mine}"),
+            ],
+            &owned,
+        );
+
+        assert_eq!(
+            found,
+            vec![format!("alpha::{mine}"), format!("beta::{mine}")],
+            "expected the owned namespace's parties, sorted and deduplicated"
+        );
+    }
+
+    /// Nothing can listen on port 1, so any attempt to reach Canton fails
+    /// instead of finding a participant a developer happens to be running.
+    fn closed_admin_api(network: Network) -> NodeConfig {
+        let mut config = NodeConfig::default();
+        config.canton.network = network;
+        config.canton.admin_api_host = "127.0.0.1".to_string();
+        config.canton.admin_api_port = 1;
+        config
+    }
+
+    /// A party this node does not belong to leaves no cached rows, so without
+    /// a record of the completed discovery every request re-ran it. The
+    /// boundary matters: the TTL second itself still answers from the record.
+    #[test]
+    fn a_completed_discovery_answers_until_the_ttl_passes() {
+        let now = 1_000_000;
+
+        assert!(!is_within_ttl(None, now));
+        assert!(is_within_ttl(Some(now), now));
+        assert!(is_within_ttl(Some(now - PARTIES_CACHE_TTL_SECS), now));
+        assert!(!is_within_ttl(Some(now - PARTIES_CACHE_TTL_SECS - 1), now));
+    }
+
+    /// A backwards clock jump must not pin the answer. A negative age would
+    /// satisfy a plain `<= TTL` and hold the record forever.
+    #[test]
+    fn a_timestamp_from_the_future_is_not_fresh() {
+        let now = 1_000_000;
+
+        assert!(!is_within_ttl(Some(now + 1), now));
+        assert!(!is_within_ttl(Some(now + 86_400), now));
+    }
+
+    /// Only an empty result is recorded. A non-empty one is served from
+    /// `dec_parties`, and recording it would make a request that arrives
+    /// before that write answer empty for the whole TTL.
+    #[tokio::test]
+    async fn only_an_empty_discovery_is_recorded() -> anyhow::Result<()> {
+        let completed = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+
+        record_discovery(&completed, "cbtc", &[a_party()?]).await;
+        assert!(
+            completed.read().await.is_empty(),
+            "a non-empty discovery must not be recorded"
+        );
+
+        record_discovery(&completed, "cbtc", &[]).await;
+        assert!(completed.read().await.contains_key("cbtc"));
+        Ok(())
+    }
+
+    /// Two parties with the same owners share one decentralized namespace, so
+    /// a namespace-scoped query returns both. Reporting one of them silently
+    /// loses a party the node is a member of.
+    #[test]
+    fn a_shared_namespace_reports_every_party_in_it() {
+        let namespace = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
+        let mine = "1220aaaa";
+        let definition = DecentralizedNamespaceDefinition {
+            decentralized_namespace: namespace.to_string(),
+            threshold: 1,
+            owners: vec![mine.to_string(), "1220bbbb".to_string()],
+        };
+        let parties_by_namespace = HashMap::from([(
+            namespace.to_string(),
+            vec![
+                a_mapping(&format!("alpha::{namespace}")),
+                a_mapping(&format!("beta::{namespace}")),
+            ],
+        )]);
+        let mut fingerprints = HashSet::new();
+        fingerprints.insert(mine.to_string());
+
+        let paired = pair_namespaces_with_parties(
+            vec![definition.clone()],
+            &parties_by_namespace,
+            &fingerprints,
+            None,
+        );
+
+        let found: Vec<_> = paired.iter().map(|(_, _, p2p)| p2p.party.clone()).collect();
+        assert_eq!(
+            found,
+            vec![format!("alpha::{namespace}"), format!("beta::{namespace}")]
+        );
+        assert!(paired.iter().all(|(_, key, _)| key == mine));
+
+        // The prefix narrows within the namespace, and picks the party by name
+        // rather than by whichever mapping arrived last.
+        let filtered = pair_namespaces_with_parties(
+            vec![definition],
+            &parties_by_namespace,
+            &fingerprints,
+            Some("beta"),
+        );
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].2.party, format!("beta::{namespace}"));
+    }
+
+    /// A namespace this node owns no key in is somebody else's party.
+    #[test]
+    fn a_namespace_without_my_key_is_skipped() {
+        let namespace = "1220dddd";
+        let definition = DecentralizedNamespaceDefinition {
+            decentralized_namespace: namespace.to_string(),
+            threshold: 1,
+            owners: vec!["1220bbbb".to_string()],
+        };
+        let parties_by_namespace = HashMap::from([(
+            namespace.to_string(),
+            vec![a_mapping(&format!("theirs::{namespace}"))],
+        )]);
+
+        let paired = pair_namespaces_with_parties(
+            vec![definition],
+            &parties_by_namespace,
+            &HashSet::from(["1220aaaa".to_string()]),
+            None,
+        );
+
+        assert!(paired.is_empty());
+    }
+
+    fn a_mapping(party: &str) -> PartyToParticipant {
+        PartyToParticipant {
+            party: party.to_string(),
+            threshold: 1,
+            participants: Vec::new(),
+            party_signing_keys: None,
+        }
+    }
+
+    /// Eviction must never read as completion. A waiter holding a count for a
+    /// prefix that has since been evicted would otherwise take the missing
+    /// entry as proof that fresh rows had been written.
+    #[test]
+    fn an_evicted_count_is_not_a_completed_discovery() {
+        assert!(discovery_completed_since(None, Some(1)));
+        assert!(discovery_completed_since(Some(4), Some(5)));
+
+        assert!(!discovery_completed_since(None, None));
+        assert!(!discovery_completed_since(Some(4), None), "eviction");
+        assert!(!discovery_completed_since(Some(4), Some(4)));
+        assert!(
+            !discovery_completed_since(Some(9), Some(1)),
+            "a lower count means the prefix was evicted and started over"
+        );
+    }
+
+    /// The physical form carries the protocol version and `ListParties` parses
+    /// the field as a logical `SynchronizerId`, so sending the physical one
+    /// would be refused outright.
+    #[test]
+    fn the_logical_synchronizer_id_drops_the_protocol_version() {
+        let logical = "global-domain::1220be58c29e65de40bf273be1dc2b266d43a9a002ea5b18955aeef7";
+
+        assert_eq!(
+            logical_synchronizer_id(&format!("{logical}::35-5")),
+            Some(logical)
+        );
+        // Already logical, or otherwise not the shape we expect: send no
+        // filter rather than a request Canton will reject.
+        assert_eq!(logical_synchronizer_id(logical), None);
+        assert_eq!(logical_synchronizer_id("nonsense"), None);
+    }
+
+    /// A discovery that finds parties has to clear a standing empty mark. If
+    /// the cache write then fails, the next request must retry rather than
+    /// read the old mark as "this prefix has no parties".
+    #[tokio::test]
+    async fn a_non_empty_discovery_clears_a_standing_mark() -> anyhow::Result<()> {
+        let completed = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+
+        record_discovery(&completed, "cbtc", &[]).await;
+        assert!(completed.read().await.contains_key("cbtc"));
+
+        record_discovery(&completed, "cbtc", &[a_party()?]).await;
+        assert!(
+            !completed.read().await.contains_key("cbtc"),
+            "a found party must invalidate the empty mark"
+        );
+        Ok(())
+    }
+
+    /// Eviction has to take the oldest entry, not the whole map: `prefix` is
+    /// request-controlled, so clearing would let a stream of unique prefixes
+    /// flush the entry a real prefix depends on.
+    #[tokio::test]
+    async fn a_full_map_evicts_the_oldest_entry() {
+        let completed = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+        let now = now_secs();
+
+        // All fresh, so nothing is dropped for age. The oldest is the one
+        // eviction must choose.
+        for index in 0..MAX_TRACKED_PREFIXES {
+            completed
+                .write()
+                .await
+                .insert(format!("prefix-{index}"), now - (index as i64 % 5));
+        }
+        completed
+            .write()
+            .await
+            .insert("oldest".to_string(), now - 6);
+
+        record_discovery(&completed, "newcomer", &[]).await;
+
+        let seen = completed.read().await;
+        assert!(!seen.contains_key("oldest"), "the oldest entry survived");
+        assert!(seen.contains_key("newcomer"));
+        assert!(seen.len() > 1, "the map was cleared instead of trimmed");
+        drop(seen);
+
+        // Re-stamping a tracked prefix does not grow the map, so it must not
+        // evict anyone. Repeated refreshes of one prefix would drain the rest.
+        let before: Vec<String> = completed.read().await.keys().cloned().collect();
+        record_discovery(&completed, "newcomer", &[]).await;
+        let after: Vec<String> = completed.read().await.keys().cloned().collect();
+        assert_eq!(
+            before.len(),
+            after.len(),
+            "re-stamping an existing prefix evicted another"
+        );
+    }
+
+    /// `prefix` comes from the request, so the map has to stay bounded whoever
+    /// is asking.
+    #[tokio::test]
+    async fn recording_drops_expired_entries_and_stays_bounded() {
+        let completed = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+        let stale = now_secs() - PARTIES_CACHE_TTL_SECS - 1;
+        completed.write().await.insert("expired".to_string(), stale);
+
+        record_discovery(&completed, "fresh", &[]).await;
+
+        let seen = completed.read().await;
+        assert!(!seen.contains_key("expired"), "expired entry survived");
+        assert!(seen.contains_key("fresh"));
+        drop(seen);
+
+        for index in 0..MAX_TRACKED_PREFIXES + 1 {
+            record_discovery(&completed, &format!("prefix-{index}"), &[]).await;
+        }
+        assert!(
+            completed.read().await.len() <= MAX_TRACKED_PREFIXES,
+            "the map grew past its cap"
+        );
+    }
+
+    fn a_party() -> anyhow::Result<DecentralizedParty> {
+        Ok(DecentralizedParty {
+            party_id: CantonId::parse(
+                "cbtc::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+            )?,
+            threshold: 1,
+            owners: Vec::new(),
+            my_owner_key: None,
+            participants: Vec::new(),
+            contracts: Vec::new(),
+            local_metadata: None,
+        })
+    }
 
     #[test]
     fn peer_error_kind_mapping_known_variants() {

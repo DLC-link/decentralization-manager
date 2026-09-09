@@ -41,7 +41,7 @@ use canton_proto_rs::com::digitalasset::canton::{
         admin::v30::{
             ListMyKeysRequest, private_key_metadata, vault_service_client::VaultServiceClient,
         },
-        v30::public_key,
+        v30::{SigningKeyUsage, public_key},
     },
     topology::admin::v30::{
         BaseQuery, ListDecentralizedNamespaceDefinitionRequest, StoreId, Synchronizer, base_query,
@@ -51,7 +51,7 @@ use canton_proto_rs::com::digitalasset::canton::{
 };
 use hyper::{Body, Response, StatusCode};
 use sqlx::SqlitePool;
-use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio::sync::{Mutex, RwLock, Semaphore, mpsc};
 use tokio_noise::handshakes::nn_psk2::Responder;
 use utoipa_actix_web::AppExt;
 use utoipa_swagger_ui::SwaggerUi;
@@ -143,6 +143,24 @@ pub struct AppState {
     pub test_mode: bool,
     /// Prefixes currently being refreshed from Canton (deduplication)
     pub refreshing_prefixes: Arc<RwLock<HashSet<String>>>,
+    /// Bounds how many Canton discoveries run at once, across every prefix.
+    /// `refreshing_prefixes` deduplicates one prefix; this bounds the total,
+    /// which matters because the prefix comes from the request.
+    pub discovery_permits: Arc<Semaphore>,
+    /// How many discoveries have completed for a prefix.
+    ///
+    /// The signal a waiting request watches. A count rather than a timestamp,
+    /// because `dec_parties.updated_at` has one-second resolution and a
+    /// discovery finishing inside the same second was indistinguishable from
+    /// one that never ran.
+    pub discovery_generations: Arc<RwLock<HashMap<String, (u64, i64)>>>,
+    /// Unix seconds of the last completed Canton discovery, per prefix.
+    ///
+    /// A prefix with no parties leaves no rows in `dec_parties`, so the cached
+    /// rows alone cannot tell "never fetched" from "fetched, found nothing".
+    /// Without this a node with no party re-ran the whole discovery query on
+    /// every request.
+    pub discovery_completed: Arc<RwLock<HashMap<String, i64>>>,
     /// Shared `reqwest::Client` for the proxy-style handlers (`/network-info`,
     /// `/operator-info`, `/token-standard-contracts`). Constructed once at
     /// startup so its connection pool / keep-alives are reused across
@@ -175,6 +193,11 @@ impl AppState {
             bootstrap_mu: Arc::new(Mutex::new(())),
             test_mode: true,
             refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
+            discovery_permits: Arc::new(Semaphore::new(
+                crate::server::handlers::MAX_CONCURRENT_DISCOVERIES,
+            )),
+            discovery_generations: Arc::new(RwLock::new(HashMap::new())),
+            discovery_completed: Arc::new(RwLock::new(HashMap::new())),
             http_client: reqwest::Client::new(),
         }))
     }
@@ -1036,6 +1059,11 @@ pub async fn start_server(
         // `--insecure` (or tests). See the `insecure` binding above.
         test_mode: insecure,
         refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
+        discovery_permits: Arc::new(Semaphore::new(
+            crate::server::handlers::MAX_CONCURRENT_DISCOVERIES,
+        )),
+        discovery_generations: Arc::new(RwLock::new(HashMap::new())),
+        discovery_completed: Arc::new(RwLock::new(HashMap::new())),
         http_client,
     });
 
@@ -1120,6 +1148,7 @@ pub async fn start_server(
     let sync_db = db.clone();
     let sync_auth = app_state.auth.clone();
     let sync_party_creds = app_state.party_credentials.clone();
+    let sync_gate = handlers::DiscoveryGate::of(&app_state);
     tokio::spawn(async move {
         // Delay to let Canton stabilize after startup
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -1128,33 +1157,34 @@ pub async fn start_server(
         let auth_snapshot = sync_auth.read().await.clone();
         let creds_snapshot = sync_party_creds.read().await.clone();
 
-        match handlers::fetch_decentralized_parties(
+        // Through the same gate as the request paths: a direct call would
+        // duplicate an in-flight discovery for the empty prefix and put both
+        // results into the cache in an undefined order.
+        match handlers::discover_and_cache(
+            &sync_gate,
             &sync_config,
             &sync_db,
-            None,
+            "",
             auth_snapshot,
             &creds_snapshot,
+            Default::default(),
         )
         .await
         {
-            Ok(response) => {
-                if let Err(e) = handlers::store_parties_to_db(&sync_db, "", &response.parties).await
-                {
-                    tracing::warn!("Failed to cache parties on startup: {e}");
-                } else {
-                    tracing::info!(
-                        "Cached {} decentralized parties from Canton",
-                        response.parties.len()
-                    );
-                    handlers::resolve_owner_keys_from_peers(
-                        &sync_config,
-                        &sync_db,
-                        &response.parties,
-                    )
+            handlers::Discovery::Done(response) => {
+                tracing::info!(
+                    "Cached {} decentralized parties from Canton",
+                    response.parties.len()
+                );
+                handlers::resolve_owner_keys_from_peers(&sync_config, &sync_db, &response.parties)
                     .await;
-                }
             }
-            Err(e) => {
+            handlers::Discovery::InFlight
+            | handlers::Discovery::AtCapacity
+            | handlers::Discovery::Superseded => {
+                tracing::info!("Startup sync skipped: a discovery is already running");
+            }
+            handlers::Discovery::Failed(e) => {
                 tracing::warn!("Background Canton sync failed on startup: {e}");
             }
         }
@@ -1246,6 +1276,7 @@ pub async fn start_server(
             .service(handlers::get_participants_status)
             .service(handlers::compare_peer_packages)
             .service(handlers::get_vetted_packages)
+            .service(handlers::clear_acs_import_quarantine)
             .service(handlers::start_kick)
             .service(handlers::get_kick_status)
             .service(handlers::cancel_kick)
@@ -1285,6 +1316,7 @@ pub async fn start_server(
             .service(handlers::grant_rights)
             .service(handlers::get_governance)
             .service(handlers::get_governance_state)
+            .service(handlers::get_proposals_page)
             .service(handlers::get_known_members)
             .service(handlers::get_provider_services_handler)
             .service(handlers::get_user_services_handler)
@@ -1918,6 +1950,7 @@ async fn handle_incoming_connection(
                                 .unwrap());
                         }
                         MessageType::GetNextCommand
+                        | MessageType::GetNextAcsBlock
                         | MessageType::KeysUpload
                         | MessageType::DnsSignature
                         | MessageType::P2pSignatures
@@ -2370,7 +2403,16 @@ async fn run_peer_listener(
 
 /// Query Canton for this node's owner keys across a caller-supplied set of
 /// decentralized parties. Returns JSON:
-/// `[{"party_id": "prefix::namespace", "owner_key": "fingerprint"}, ...]`.
+/// `[{"party_id": "prefix::namespace", "owner_key": "fingerprint",
+/// "signing_key": "fingerprint"}, ...]`.
+///
+/// `signing_key` is this node's Daml (protocol) signing key for the party —
+/// its entry in `PartyToParticipant.party_signing_keys`. That mapping exists
+/// nowhere else: the protobuf records no owner per key and the key is not
+/// delegated in topology, so only the node that generated it can say it is
+/// theirs. Kick needs it to drop the removed member's key. `null` when this
+/// node has no such key for the party, which the reader treats the same way
+/// as the absent field it gets from a caller's older peers.
 ///
 /// `requested_party_ids` is the list of parties the caller cares about, sent
 /// in the Noise `RequestOwnerKeys` payload by `resolve_owner_keys_from_peers`.
@@ -2417,14 +2459,32 @@ async fn list_my_owner_keys(
         .into_inner();
 
     let mut my_fingerprints = Vec::new();
+    // Protocol-usage keys, indexed by the vault name onboarding / add-party
+    // gave them (`<party prefix>-daml-transactions`). The name is how
+    // `get_or_create_signing_key` finds the key again on a retry, so it is
+    // also the only local record of which party a protocol key belongs to.
+    let mut my_protocol_keys_by_name: HashMap<String, String> = HashMap::new();
     for key_meta in keys_response.private_keys_metadata {
         if let Some(private_key_metadata::PublicKeyWithName::V30(pub_key_with_name)) =
             &key_meta.public_key_with_name
             && let Some(pub_key) = &pub_key_with_name.public_key
             && let Some(public_key::Key::SigningPublicKey(signing_key)) = &pub_key.key
-            && signing_key.usage.contains(&1)
         {
-            my_fingerprints.push(compute_fingerprint(signing_key));
+            if signing_key
+                .usage
+                .contains(&(SigningKeyUsage::Namespace as i32))
+            {
+                my_fingerprints.push(compute_fingerprint(signing_key));
+            }
+            if signing_key
+                .usage
+                .contains(&(SigningKeyUsage::Protocol as i32))
+            {
+                my_protocol_keys_by_name.insert(
+                    pub_key_with_name.name.clone(),
+                    compute_fingerprint(signing_key),
+                );
+            }
         }
     }
 
@@ -2466,11 +2526,15 @@ async fn list_my_owner_keys(
         let Some(full_party_id) = namespace_to_party.get(&item.decentralized_namespace) else {
             continue;
         };
+        let signing_key = full_party_id.rsplit_once("::").and_then(|(prefix, _)| {
+            my_protocol_keys_by_name.get(&workflow::signing_keys::party_daml_key_name(prefix))
+        });
         for owner in &item.owners {
             if my_fingerprints.contains(owner) {
                 entries.push(serde_json::json!({
                     "party_id": full_party_id,
                     "owner_key": owner,
+                    "signing_key": signing_key,
                 }));
             }
         }

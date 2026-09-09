@@ -131,7 +131,7 @@ if [ -z "${RUST_LOG:-}" ]; then
         # configure_peers restart window stale clients spam ~20 of these
         # over ~50s while the mesh converges. They're not actionable for
         # readers of a passing test; --verbose surfaces them.
-        export RUST_LOG="warn,hyper_noise::server=error,governance_workflows::common::scenario=info,governance_workflows::common::phases=info"
+        export RUST_LOG="warn,hyper_noise::server=error,governance_workflows::common::scenario=info,governance_workflows::common::phases=info,governance_workflows::common::chaos=info"
     fi
 fi
 
@@ -156,6 +156,20 @@ if [ "$TARGET" = "localnet" ]; then
     FEATURES_FLAG=(--features test-mode)
 fi
 
+# The localnet bring-up is minutes of pure waiting (most of it splice's readyz)
+# and needs nothing the compiler produces, so start it first and build
+# underneath it. Only localnet: on devnet `start_localnet` is
+# `start_canton_tunnels`, which records CANTON_TUNNEL_PIDS for cleanup, and a
+# subshell would lose them.
+CANTON_BRINGUP_PID=""
+CANTON_BRINGUP_LOG=""
+if [ "$TARGET" = "localnet" ]; then
+    log_phase "Starting Canton ($TARGET) in the background"
+    CANTON_BRINGUP_LOG="$(mktemp "${TMPDIR:-/tmp}/decman-it-canton-bringup-XXXXXX")"
+    ( download_localnet && start_localnet ) >"$CANTON_BRINGUP_LOG" 2>&1 &
+    CANTON_BRINGUP_PID=$!
+fi
+
 log_phase "Building release-ci binary (target=$TARGET)"
 # `-p decman` selects the server crate: the root is now a virtual workspace
 # (so a bare `--features` is rejected), and this skips compiling the decman-cli TUI.
@@ -166,11 +180,34 @@ if [ ! -f "$BINARY" ]; then
     exit 1
 fi
 
+# Link the e2e test binary now rather than after the stack is live, so the
+# nodes don't sit idle while their own test binary compiles. `cargo test` below
+# reuses this artifact — the flags must stay identical to the build above, per
+# the feature-unification note there.
+log_phase "Compiling e2e test binary"
+cargo test --no-run --profile release-ci -p decman ${FEATURES_FLAG[@]+"${FEATURES_FLAG[@]}"} \
+    --test governance_workflows
+
 # Canton bring-up. Both hooks are target-polymorphic: devnet.env.sh redefines
 # download_localnet as a no-op and start_localnet as start_canton_tunnels.
-log_phase "Starting Canton ($TARGET)"
-download_localnet
-start_localnet
+if [ -n "$CANTON_BRINGUP_PID" ]; then
+    log_phase "Waiting for Canton ($TARGET) bring-up"
+    bringup_rc=0
+    wait "$CANTON_BRINGUP_PID" || bringup_rc=$?
+    # Clear before the rc check so cleanup() doesn't try to kill a reaped pid.
+    CANTON_BRINGUP_PID=""
+    cat "$CANTON_BRINGUP_LOG"
+    rm -f "$CANTON_BRINGUP_LOG"
+    CANTON_BRINGUP_LOG=""
+    if [ "$bringup_rc" -ne 0 ]; then
+        echo "ERROR: Canton bring-up failed (exit $bringup_rc)" >&2
+        exit 1
+    fi
+else
+    log_phase "Starting Canton ($TARGET)"
+    download_localnet
+    start_localnet
+fi
 
 # dec-party-manager instances
 log_phase "Starting dec-party-manager instances"

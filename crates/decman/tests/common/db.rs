@@ -346,6 +346,58 @@ pub async fn dec_party_cache_has_participant(
     Ok(n > 0)
 }
 
+/// Test-only: age the `/decentralized-parties` cache for `prefix` so the next
+/// GET crosses the server's staleness threshold and spawns
+/// `refresh_and_cache_parties`.
+///
+/// The handler compares `now - max(dec_party.updated_at)` for the prefix
+/// against a 60s window. Backdating the rows is the same trigger as sleeping
+/// out that window, and it avoids lowering the threshold globally — a shorter
+/// window would make every parties GET in the suite spawn a peer fan-out
+/// refresh (see #415).
+///
+/// Returns the number of cache rows aged. Safe against a live node: it writes
+/// only `updated_at`, and a spurious refresh is what the caller wants anyway.
+pub async fn backdate_dec_party_cache(
+    db_path: &Path,
+    prefix: &str,
+    by: std::time::Duration,
+) -> anyhow::Result<u64> {
+    let pool = open_rw(db_path).await?;
+    let secs = i64::try_from(by.as_secs()).context("backdate offset overflows i64")?;
+    let res = sqlx::query(
+        "UPDATE dec_party SET updated_at = CAST(strftime('%s', 'now') AS INTEGER) - ?1 \
+         WHERE prefix = ?2",
+    )
+    .bind(secs)
+    .bind(prefix)
+    .execute(&pool)
+    .await
+    .context("backdate_dec_party_cache")?;
+    pool.close().await;
+    Ok(res.rows_affected())
+}
+
+/// Newest `updated_at` across the prefix's `dec_party` cache rows — the same
+/// value the handler's staleness check reads. Paired with
+/// [`backdate_dec_party_cache`] it proves a refresh actually ran and wrote,
+/// which observing the `refreshing` flag cannot: the spawned task can start
+/// and finish between two polls.
+pub async fn dec_party_cache_updated_at(
+    db_path: &Path,
+    prefix: &str,
+) -> anyhow::Result<Option<i64>> {
+    let pool = open(db_path).await?;
+    let v: Option<i64> =
+        sqlx::query_scalar("SELECT MAX(updated_at) FROM dec_party WHERE prefix = ?1")
+            .bind(prefix)
+            .fetch_one(&pool)
+            .await
+            .context("dec_party_cache_updated_at")?;
+    pool.close().await;
+    Ok(v)
+}
+
 pub async fn count_dec_party_identity(db_path: &Path, dec_party_id: &str) -> anyhow::Result<i64> {
     let pool = open(db_path).await?;
     let n: i64 =

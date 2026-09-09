@@ -92,6 +92,32 @@ pub const DECLINE_NOTIFY_BACKOFF_SECS: u64 = 2;
 
 pub const MAX_CONSECUTIVE_NO_WORKFLOW_POLLS: usize = 4;
 
+/// Delay before a peer re-polls the coordinator after a `Wait` reply, in
+/// milliseconds.
+/// Default value; the actual delay is read via [`peer_wait_poll_delay_ms`].
+pub const PEER_WAIT_POLL_DELAY_MS: u64 = 2000;
+
+/// How long a peer waits before asking the coordinator for its next command
+/// again, configurable via the `DECPM_PEER_WAIT_POLL_DELAY_MS` env var.
+/// Defaults to [`PEER_WAIT_POLL_DELAY_MS`] (2000) when unset or unparseable.
+///
+/// This is the cadence of the peer event loop in `workflow/mod.rs`: whenever
+/// the coordinator has no command ready it answers `Wait`, and the peer sleeps
+/// this long before asking again. It therefore quantizes every multi-step
+/// workflow — a run that needs N polls cannot finish faster than N times this
+/// value, whatever the work actually costs.
+///
+/// 2s is right against a real synchronizer, where each coordinator step is a
+/// 10-30s Canton round trip and the poll is noise. On a single-container
+/// localnet the step lands in milliseconds, so the quantization *is* the
+/// runtime; the integration-test harness lowers it.
+pub fn peer_wait_poll_delay_ms() -> u64 {
+    std::env::var("DECPM_PEER_WAIT_POLL_DELAY_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(PEER_WAIT_POLL_DELAY_MS)
+}
+
 /// Canton protocol version used for key export and topology operations.
 /// Bumped 34 -> 35 alongside the localnet 0.6.7 -> 0.6.11 test target; the
 /// network (testnet) has live-upgraded to protocol version 35.
@@ -101,7 +127,25 @@ pub const CANTON_PROTOCOL_VERSION: i32 = 35;
 /// After topology becomes effective, Canton needs time to propagate updates
 /// to the sequencer's topology state. Without this wait, transactions may be
 /// rejected with LOCAL_VERDICT_TIMEOUT.
+///
+/// Default value; the actual delay is read via
+/// [`topology_propagation_delay_secs`].
 pub const TOPOLOGY_PROPAGATION_DELAY_SECS: u64 = 30;
+
+/// Post-submission topology propagation wait, configurable via the
+/// `DECPM_TOPOLOGY_PROPAGATION_DELAY_SECS` env var. Defaults to
+/// [`TOPOLOGY_PROPAGATION_DELAY_SECS`] (30) when unset or unparseable.
+///
+/// The 30s default is sized for a real multi-node synchronizer, where the
+/// sequencer's topology state settles well after the transaction becomes
+/// effective. A single-container localnet settles in under a second, so the
+/// integration-test harness lowers it.
+pub fn topology_propagation_delay_secs() -> u64 {
+    std::env::var("DECPM_TOPOLOGY_PROPAGATION_DELAY_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(TOPOLOGY_PROPAGATION_DELAY_SECS)
+}
 
 // Base directory names (relative to root directory)
 /// Data directory name (contains the Noise key, SQLite database, and DARs)

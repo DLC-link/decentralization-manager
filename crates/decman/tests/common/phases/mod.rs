@@ -6,6 +6,7 @@ pub mod add_party_missing_dar;
 pub mod cancel_cascades;
 pub mod cancel_stuck_contracts;
 pub mod canton_admin_tls;
+pub mod change_threshold;
 pub mod check_peer_dars;
 pub mod concurrent_cross_workflows;
 pub mod concurrent_sibling_cancel;

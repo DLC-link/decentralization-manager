@@ -43,6 +43,18 @@ use crate::{
     },
 };
 
+/// What an unrecorded local key bundle means for a check that needs it.
+///
+/// Onboarding generates the bundle on the run itself, so its absence there is
+/// a broken run. Every later proposal falls back to the long-lived identity
+/// row, which a party onboarded before that table existed does not have — the
+/// same legacy gap the DNS owner-set check tolerates.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WhenUnrecorded {
+    Fail,
+    Skip,
+}
+
 /// What the operator agreed to when they accepted the invitation.
 ///
 /// Built from the peer's own `workflow_runs` row, which
@@ -216,7 +228,7 @@ impl PeerExpectations {
             );
         }
 
-        self.check_threshold(namespace_def.threshold, owners.len())?;
+        self.check_threshold("namespace", namespace_def.threshold, owners.len())?;
 
         let owner_set: std::collections::HashSet<String> = owners.iter().cloned().collect();
         let computed = compute_decentralized_namespace(&owner_set);
@@ -294,7 +306,7 @@ impl PeerExpectations {
         self.check_p2p_membership(&mapping)?;
         self.check_onboarding_markers(&mapping)?;
         self.check_p2p_thresholds(&mapping)?;
-        self.check_own_daml_key(storage, instance_name, &mapping)
+        self.check_own_daml_key(storage, instance_name, &mapping, WhenUnrecorded::Fail)
             .await
     }
 
@@ -348,7 +360,7 @@ impl PeerExpectations {
                 expected = self.members.len()
             );
         }
-        self.check_threshold(namespace_def.threshold, owners.len())?;
+        self.check_threshold("namespace", namespace_def.threshold, owners.len())?;
 
         // Losing our namespace from the owner set would leave this node hosting
         // a party it can no longer authorize changes to. The lookup itself is
@@ -381,6 +393,12 @@ impl PeerExpectations {
         self.check_p2p_membership(&mapping)?;
         self.check_onboarding_markers(&mapping)?;
         self.check_p2p_thresholds(&mapping)?;
+        // Kick rebuilds the key set to take the departing member's key out
+        // (#428), and it has to work out which key that is from local records.
+        // Get it wrong and a remaining member's key goes instead: the counts
+        // still match, so only the member whose key vanished can catch it.
+        self.check_own_daml_key(storage, instance_name, &mapping, WhenUnrecorded::Skip)
+            .await?;
 
         tracing::info!(
             "{kind:?} proposals match the accepted invitation for {dec_party_id}",
@@ -644,36 +662,72 @@ impl PeerExpectations {
     /// authorize a transaction for it. Both are pinned — leaving the signing
     /// threshold unchecked would let a coordinator raise a hosting threshold
     /// the operator agreed to while quietly dropping the signing one to 1.
+    ///
+    /// The size of the key set is pinned with them, because a threshold only
+    /// means what the operator agreed to if the set it counts over does. Two
+    /// of three member keys is the accepted 2; two of a set that still holds
+    /// a kicked member's key is not (#428).
     fn check_p2p_thresholds(&self, mapping: &PartyToParticipant) -> Result {
-        self.check_threshold(i32::try_from(mapping.threshold)?, self.members.len())?;
-        match &mapping.party_signing_keys {
-            Some(signing_keys) => {
-                self.check_threshold(i32::try_from(signing_keys.threshold)?, self.members.len())
-            }
-            // Signing a mapping with no party signing keys does not merely
-            // leave a threshold unchecked — it submits a party that can no
-            // longer authorize anything. Every mapping this tool produces
-            // carries them (onboarding sets them, and the kick / add-party /
-            // change-threshold / clearing proposals all derive from the current
-            // on-chain mapping), so an absent set is a stripped proposal.
-            None => anyhow::bail!(
+        self.check_threshold(
+            "hosting",
+            i32::try_from(mapping.threshold)?,
+            self.members.len(),
+        )?;
+
+        // Signing a mapping with no party signing keys does not merely leave a
+        // threshold unchecked — it submits a party that can no longer
+        // authorize anything. Every mapping this tool produces carries them
+        // (onboarding sets them, and the kick / add-party / change-threshold /
+        // clearing proposals all derive from the current on-chain mapping), so
+        // an absent set is a stripped proposal.
+        let Some(signing_keys) = &mapping.party_signing_keys else {
+            anyhow::bail!(
                 "P2P proposal carries no party signing keys, which would leave the party \
                  unable to authorize anything"
-            ),
+            );
+        };
+
+        self.check_threshold(
+            "signing",
+            i32::try_from(signing_keys.threshold)?,
+            self.members.len(),
+        )?;
+
+        // Every member contributes exactly one Daml key, so the counts match.
+        // A peer cannot tell whose key is whose — the mapping records no owner
+        // per key — but it can tell that one too many is present, which is
+        // what a kick that forgot to drop the departing member's key looks
+        // like from here.
+        if signing_keys.keys.len() != self.members.len() {
+            anyhow::bail!(
+                "P2P proposal carries {keys} party signing key(s) for {members} member(s); \
+                 each member contributes exactly one, so a surplus key would let a \
+                 non-member keep authorizing for the party",
+                keys = signing_keys.keys.len(),
+                members = self.members.len()
+            );
         }
+        Ok(())
     }
 
     /// The threshold must be the one the invitation advertised, and in any
     /// case a sane value for the owner count — a threshold of 0 or one above
     /// the owner count would either need no signatures or deadlock the party.
-    fn check_threshold(&self, threshold: i32, owner_count: usize) -> Result {
+    ///
+    /// `kind` names which threshold is being checked. A mapping carries a
+    /// hosting and a signing threshold and both come through here, so a
+    /// message that named neither read as though the coordinator had ignored
+    /// the operator's input when in fact the other one was wrong.
+    fn check_threshold(&self, kind: &str, threshold: i32, owner_count: usize) -> Result {
         let owner_count = i32::try_from(owner_count)?;
         if !(1..=owner_count).contains(&threshold) {
-            anyhow::bail!("proposed threshold {threshold} is outside 1..={owner_count}");
+            anyhow::bail!("proposed {kind} threshold {threshold} is outside 1..={owner_count}");
         }
         match self.threshold {
             Some(expected) if expected != threshold => {
-                anyhow::bail!("proposed threshold {threshold} differs from the accepted {expected}")
+                anyhow::bail!(
+                    "proposed {kind} threshold {threshold} differs from the accepted {expected}"
+                )
             }
             Some(_) => Ok(()),
             // Only the onboarding invite's threshold is optional on the wire
@@ -683,14 +737,14 @@ impl PeerExpectations {
             None if self.kind == WorkflowKind::Onboarding => {
                 tracing::warn!(
                     "accepted onboarding invitation carried no threshold; only the range \
-                     check was applied to the proposed {threshold}"
+                     check was applied to the proposed {kind} threshold {threshold}"
                 );
                 Ok(())
             }
             None => anyhow::bail!(
-                "accepted {kind:?} invitation carries no threshold, so the proposed \
-                 {threshold} cannot be checked against it",
-                kind = self.kind
+                "accepted {workflow:?} invitation carries no threshold, so the proposed \
+                 {kind} threshold {threshold} cannot be checked against it",
+                workflow = self.kind
             ),
         }
     }
@@ -702,16 +756,22 @@ impl PeerExpectations {
         storage: &SqlitePool,
         instance_name: &str,
         mapping: &PartyToParticipant,
+        when_unrecorded: WhenUnrecorded,
     ) -> Result {
-        let keys = self
-            .own_keys(storage, instance_name)
-            .await?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "this node's public keys are not on the {instance_name} run, so the P2P \
-                     proposal cannot be checked against them"
-                )
-            })?;
+        let keys = match self.own_keys(storage, instance_name).await? {
+            Some(keys) => keys,
+            None if when_unrecorded == WhenUnrecorded::Fail => anyhow::bail!(
+                "this node's public keys are not on the {instance_name} run, so the P2P \
+                 proposal cannot be checked against them"
+            ),
+            None => {
+                tracing::warn!(
+                    "this node's keys are unrecorded for this party (onboarded before the \
+                     identity table existed); skipping the party-signing-key check"
+                );
+                return Ok(());
+            }
+        };
         let own_daml_fingerprint = utils::compute_fingerprint(&keys[1]);
         let signing_keys = mapping
             .party_signing_keys
@@ -917,6 +977,20 @@ mod tests {
         }
     }
 
+    /// One distinct Daml signing key per member — the shape every mapping
+    /// this tool builds carries, and what the checks expect to see.
+    fn signing_keys(count: u8, threshold: u32) -> SigningKeysWithThreshold {
+        SigningKeysWithThreshold {
+            keys: (1..=count)
+                .map(|seed| SigningPublicKey {
+                    public_key: vec![seed; 32],
+                    ..Default::default()
+                })
+                .collect(),
+            threshold,
+        }
+    }
+
     /// Wrap a mapping the way the coordinator ships it, so the decode path is
     /// exercised end to end rather than around.
     fn encode_proposal(mapping: topology_mapping::Mapping) -> Vec<u8> {
@@ -1030,7 +1104,7 @@ mod tests {
     fn rejects_a_threshold_the_invitation_did_not_advertise() -> Result {
         let a = canton_id("p1", 1)?;
         let expectations = expectations(vec![a.clone()], a);
-        assert!(expectations.check_threshold(1, 3).is_err());
+        assert!(expectations.check_threshold("namespace", 1, 3).is_err());
         Ok(())
     }
 
@@ -1040,9 +1114,9 @@ mod tests {
         let a = canton_id("p1", 1)?;
         let mut expectations = expectations(vec![a.clone()], a);
         expectations.threshold = Some(0);
-        assert!(expectations.check_threshold(0, 3).is_err());
+        assert!(expectations.check_threshold("namespace", 0, 3).is_err());
         expectations.threshold = Some(4);
-        assert!(expectations.check_threshold(4, 3).is_err());
+        assert!(expectations.check_threshold("namespace", 4, 3).is_err());
         Ok(())
     }
 
@@ -1050,7 +1124,7 @@ mod tests {
     fn accepts_the_advertised_threshold() -> Result {
         let a = canton_id("p1", 1)?;
         let expectations = expectations(vec![a.clone()], a);
-        expectations.check_threshold(2, 3)
+        expectations.check_threshold("namespace", 2, 3)
     }
 
     #[tokio::test]
@@ -1117,10 +1191,8 @@ mod tests {
         let (a, b) = (canton_id("p1", 1)?, canton_id("p2", 2)?);
         let expectations = expectations(vec![a.clone(), b.clone()], a.clone());
         let mut mapping = p2p("dec::x", &[a, b], 2);
-        mapping.party_signing_keys = Some(SigningKeysWithThreshold {
-            keys: Vec::new(),
-            threshold: 1,
-        });
+        // A full key set, so the failure is the threshold and not the count.
+        mapping.party_signing_keys = Some(signing_keys(2, 1));
         assert!(expectations.check_p2p_thresholds(&mapping).is_err());
         Ok(())
     }
@@ -1189,12 +1261,12 @@ mod tests {
         expectations.threshold = None;
 
         expectations.kind = WorkflowKind::Kick;
-        assert!(expectations.check_threshold(2, 3).is_err());
+        assert!(expectations.check_threshold("namespace", 2, 3).is_err());
         expectations.kind = WorkflowKind::AddParty;
-        assert!(expectations.check_threshold(2, 3).is_err());
+        assert!(expectations.check_threshold("namespace", 2, 3).is_err());
 
         expectations.kind = WorkflowKind::Onboarding;
-        expectations.check_threshold(2, 3)
+        expectations.check_threshold("namespace", 2, 3)
     }
 
     /// `generate_keys` derives the vault key names from the prefix, so an
@@ -1316,11 +1388,62 @@ mod tests {
         let (a, b) = (canton_id("p1", 1)?, canton_id("p2", 2)?);
         let expectations = expectations(vec![a.clone(), b.clone()], a.clone());
         let mut mapping = p2p("dec::x", &[a, b], 2);
-        mapping.party_signing_keys = Some(SigningKeysWithThreshold {
-            keys: Vec::new(),
-            threshold: 2,
-        });
+        mapping.party_signing_keys = Some(signing_keys(2, 2));
         expectations.check_p2p_thresholds(&mapping)
+    }
+
+    /// The bug in #428: kick dropped the departing member from
+    /// `participants` but carried `party_signing_keys` over verbatim, leaving
+    /// its Daml key still counting towards the party's signing threshold. A
+    /// peer cannot tell whose key is whose — the mapping records no owner per
+    /// key — but one key too many for the member set is exactly what that
+    /// mistake looks like from here.
+    #[test]
+    fn rejects_a_surplus_party_signing_key() -> Result {
+        let (a, b) = (canton_id("p1", 1)?, canton_id("p2", 2)?);
+        let expectations = expectations(vec![a.clone(), b.clone()], a.clone());
+        let mut mapping = p2p("dec::x", &[a, b], 2);
+        // Two remaining members, three keys — the kicked member's is still in.
+        mapping.party_signing_keys = Some(signing_keys(3, 2));
+
+        let error = expectations
+            .check_p2p_thresholds(&mapping)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(
+            error.contains("3 party signing key(s) for 2 member(s)"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    /// The other half of #428: the operator asked for 2, the coordinator moved
+    /// the hosting threshold and left the signing one at 3, and the refusal
+    /// said only "proposed threshold 3 differs from the accepted 2" — which
+    /// reads as though the coordinator had ignored the operator's input. The
+    /// message has to say which of the two thresholds is wrong.
+    #[test]
+    fn names_the_signing_threshold_when_only_it_is_stale() -> Result {
+        let (a, b, c) = (
+            canton_id("p1", 1)?,
+            canton_id("p2", 2)?,
+            canton_id("p3", 3)?,
+        );
+        let expectations = expectations(vec![a.clone(), b.clone(), c.clone()], a.clone());
+        let mut mapping = p2p("dec::x", &[a, b, c], 2);
+        mapping.party_signing_keys = Some(signing_keys(3, 3));
+
+        let error = expectations
+            .check_p2p_thresholds(&mapping)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(
+            error.contains("signing threshold 3 differs from the accepted 2"),
+            "unexpected error: {error}"
+        );
+        Ok(())
     }
 
     #[test]
@@ -1333,10 +1456,7 @@ mod tests {
         let mut mapping = p2p(&party.to_string(), &[a, b], 2);
         // Keep the mapping otherwise valid so the assertion below is about the
         // onboarding flag, not about an earlier check tripping first.
-        mapping.party_signing_keys = Some(SigningKeysWithThreshold {
-            keys: Vec::new(),
-            threshold: 2,
-        });
+        mapping.party_signing_keys = Some(signing_keys(2, 2));
         mapping.participants[1].onboarding = Some(hosting_participant::Onboarding::default());
         let payload = encode_proposal(topology_mapping::Mapping::PartyToParticipant(mapping));
 

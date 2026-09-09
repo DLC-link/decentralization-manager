@@ -138,12 +138,52 @@ pub enum ResponseSource {
     Cache,
 }
 
+/// One proposal card in the paged proposals feed.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct ProposalSummary {
+    pub proposal_cid: String,
+    /// Live confirmations, deduped to the newest per member and excluding
+    /// expired ones — the same count the notifications feed shows.
+    #[serde(default)]
+    pub confirmation_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposer: Option<CantonId>,
+    #[cfg_attr(feature = "typegen", ts(type = "number | null"))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<i64>,
+}
+
+/// A batch of proposals plus where to resume.
+///
+/// `next_cursor` is opaque: hand it back verbatim to get the following batch.
+/// `None` means the party has no more open proposals.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct ProposalsPageResponse {
+    pub proposals: Vec<ProposalSummary>,
+    /// Confirmations needed to execute, so a card can render "n of threshold".
+    #[serde(default)]
+    pub threshold: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
 /// Response for the decentralized parties endpoint
 #[derive(Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct DecentralizedPartiesResponse {
     pub parties: Vec<DecentralizedParty>,
+    /// Parties this participant hosts, before any paging window is applied.
+    #[serde(default)]
+    pub total: usize,
     #[serde(default)]
     pub source: ResponseSource,
     /// Whether a background refresh from Canton is currently in progress
