@@ -580,8 +580,12 @@ pub async fn get_decentralized_parties(
             let body = HttpResponse::Ok().json(&response);
 
             // Owner-key resolution fans out to every peer over Noise, so it
-            // stays off the request path.
-            if !response.parties.is_empty() {
+            // stays off the request path. Only for a cacheable read: it writes
+            // into the rows that read just cached, and a windowed or
+            // contract-bearing request caches nothing, so resolving for it
+            // would put a peer fan-out behind every page of the approvals
+            // view (#424).
+            if opts.is_cacheable() && !response.parties.is_empty() {
                 let data = data.clone();
                 let parties = response.parties;
                 tokio::spawn(async move {
