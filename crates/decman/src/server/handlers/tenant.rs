@@ -127,7 +127,7 @@ pub async fn tenant_prepare(
         Err(e) => {
             tracing::error!("tenant prepare: topology generation failed: {e:#}");
             HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to prepare onboarding topology: {e}"),
+                error: "Failed to prepare the onboarding topology; see the host's logs".to_string(),
             })
         }
     }
@@ -228,7 +228,8 @@ pub async fn tenant_onboard(
     if let Err(e) = allocate_party(&data.config, &bundle).await {
         tracing::error!("tenant onboard: allocate on this participant failed: {e:#}");
         return HttpResponse::InternalServerError().json(ErrorResponse {
-            error: format!("Failed to allocate external party on this host: {e}"),
+            error: "Failed to allocate the external party on this host; see the host's logs"
+                .to_string(),
         });
     }
 
@@ -298,7 +299,7 @@ pub async fn tenant_status(
         Err(e) => {
             tracing::error!("tenant status: topology read failed: {e:#}");
             HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to read onboarding status: {e}"),
+                error: "Failed to read the onboarding status; see the host's logs".to_string(),
             })
         }
     }
@@ -513,7 +514,7 @@ pub async fn tenant_acs_snapshot(
         Err(e) => {
             tracing::error!("tenant acs snapshot: export failed: {e:#}");
             return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to export the party's ACS: {e}"),
+                error: "Failed to export the party's ACS; see the host's logs".to_string(),
             });
         }
     };
@@ -609,7 +610,7 @@ pub async fn tenant_acs_import(
     {
         tracing::error!("tenant acs import: import failed: {e:#}");
         return HttpResponse::InternalServerError().json(ErrorResponse {
-            error: format!("Failed to import the party's ACS on this host: {e}"),
+            error: "Failed to import the party's ACS on this host; see the host's logs".to_string(),
         });
     }
 
@@ -625,7 +626,7 @@ pub async fn tenant_acs_import(
             "The ACS was empty and needed no import"
         };
         return HttpResponse::InternalServerError().json(ErrorResponse {
-            error: format!("{did}, but could not clear the onboarding marker: {e}"),
+            error: format!("{did}, but could not clear the onboarding marker; see the host's logs"),
         });
     }
 
@@ -826,7 +827,7 @@ pub async fn tenant_party_state(
         Err(e) => {
             tracing::error!("tenant party state: topology read failed: {e:#}");
             HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to read the party's topology: {e}"),
+                error: "Failed to read the party's topology; see the host's logs".to_string(),
             })
         }
     }
@@ -902,9 +903,13 @@ fn add_hosts_error_response(stage: &str, error: AddHostsError) -> HttpResponse {
             })
         }
         AddHostsError::Canton(_) => {
-            tracing::error!("tenant add-hosts {stage}: Canton call failed: {error}");
+            // The chain goes to the log, not the body. A tonic transport error
+            // inside it names the admin endpoint address, and this response
+            // crosses a tenant API boundary to a wallet provider. Nothing in the
+            // chain is actionable to the caller anyway: a Canton failure is ours.
+            tracing::error!("tenant add-hosts {stage}: Canton call failed: {error:#}");
             HttpResponse::InternalServerError().json(ErrorResponse {
-                error: error.to_string(),
+                error: "A Canton call failed on this host; see the host's logs".to_string(),
             })
         }
     }
