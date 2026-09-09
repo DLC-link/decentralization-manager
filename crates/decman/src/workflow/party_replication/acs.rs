@@ -70,7 +70,8 @@ pub async fn open_export_session(
     config: &NodeConfig,
     storage: &SqlitePool,
     target: &ReplicationTarget,
-) -> Result<ExportSession> {    // Logical synchronizer id — see `current_ledger_offset` for why the
+) -> Result<ExportSession> {
+    // Logical synchronizer id — see `current_ledger_offset` for why the
     // physical id is rejected by PartyManagementService.
     let synchronizer_id =
         utils::extract_synchronizer_fingerprint(&utils::get_synchronizer_id(config).await?)?;
@@ -115,7 +116,8 @@ pub async fn open_export_session(
         });
 
         match client.export_party_acs(request).await {
-            Ok(response) => return Ok(ExportSession::new(response.into_inner())),            Err(status)
+            Ok(response) => return Ok(ExportSession::new(response.into_inner())),
+            Err(status)
                 if status
                     .message()
                     .contains("INVALID_STATE_PARTY_MANAGEMENT_ERROR")

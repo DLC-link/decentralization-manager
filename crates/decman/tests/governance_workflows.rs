@@ -110,6 +110,10 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     // Serial-N+1 against a party that already exists: onboards on P1+P2, then
     // adds P3. Same plain-HTTP path, so it sits here with its sibling.
     phases::external_party_add_hosts::run(&mut f).await?;
+    // Plan B1: an ordinary local party on P1 adopts a wallet-held key through
+    // the adopt-key endpoints. Same plain-HTTP path, and it touches only its own
+    // freshly allocated party, so it sits with the other two.
+    phases::local_party_adopt_endpoints::run(&mut f).await?;
     phases::create_dec_party::run(&mut f).await?;
     phases::distribute_dars::run(&mut f).await?;
     phases::check_peer_dars::run(&mut f).await?;
@@ -255,6 +259,7 @@ async fn external_party_e2e() -> anyhow::Result<()> {
     f.discover_network_parties().await?;
     phases::external_party_tenant::run(&mut f).await?;
     phases::external_party_add_hosts::run(&mut f).await?;
+    phases::local_party_adopt_endpoints::run(&mut f).await?;
     Ok(())
 }
 
