@@ -41,7 +41,7 @@ use canton_proto_rs::com::digitalasset::canton::{
         admin::v30::{
             ListMyKeysRequest, private_key_metadata, vault_service_client::VaultServiceClient,
         },
-        v30::public_key,
+        v30::{SigningKeyUsage, public_key},
     },
     topology::admin::v30::{
         BaseQuery, ListDecentralizedNamespaceDefinitionRequest, StoreId, Synchronizer, base_query,
@@ -2370,7 +2370,16 @@ async fn run_peer_listener(
 
 /// Query Canton for this node's owner keys across a caller-supplied set of
 /// decentralized parties. Returns JSON:
-/// `[{"party_id": "prefix::namespace", "owner_key": "fingerprint"}, ...]`.
+/// `[{"party_id": "prefix::namespace", "owner_key": "fingerprint",
+/// "signing_key": "fingerprint"}, ...]`.
+///
+/// `signing_key` is this node's Daml (protocol) signing key for the party —
+/// its entry in `PartyToParticipant.party_signing_keys`. That mapping exists
+/// nowhere else: the protobuf records no owner per key and the key is not
+/// delegated in topology, so only the node that generated it can say it is
+/// theirs. Kick needs it to drop the removed member's key. Omitted when this
+/// node has no such key for the party; a caller that predates the field
+/// ignores it.
 ///
 /// `requested_party_ids` is the list of parties the caller cares about, sent
 /// in the Noise `RequestOwnerKeys` payload by `resolve_owner_keys_from_peers`.
@@ -2417,14 +2426,32 @@ async fn list_my_owner_keys(
         .into_inner();
 
     let mut my_fingerprints = Vec::new();
+    // Protocol-usage keys, indexed by the vault name onboarding / add-party
+    // gave them (`<party prefix>-daml-transactions`). The name is how
+    // `get_or_create_signing_key` finds the key again on a retry, so it is
+    // also the only local record of which party a protocol key belongs to.
+    let mut my_protocol_keys_by_name: HashMap<String, String> = HashMap::new();
     for key_meta in keys_response.private_keys_metadata {
         if let Some(private_key_metadata::PublicKeyWithName::V30(pub_key_with_name)) =
             &key_meta.public_key_with_name
             && let Some(pub_key) = &pub_key_with_name.public_key
             && let Some(public_key::Key::SigningPublicKey(signing_key)) = &pub_key.key
-            && signing_key.usage.contains(&1)
         {
-            my_fingerprints.push(compute_fingerprint(signing_key));
+            if signing_key
+                .usage
+                .contains(&(SigningKeyUsage::Namespace as i32))
+            {
+                my_fingerprints.push(compute_fingerprint(signing_key));
+            }
+            if signing_key
+                .usage
+                .contains(&(SigningKeyUsage::Protocol as i32))
+            {
+                my_protocol_keys_by_name.insert(
+                    pub_key_with_name.name.clone(),
+                    compute_fingerprint(signing_key),
+                );
+            }
         }
     }
 
@@ -2466,11 +2493,15 @@ async fn list_my_owner_keys(
         let Some(full_party_id) = namespace_to_party.get(&item.decentralized_namespace) else {
             continue;
         };
+        let signing_key = full_party_id.rsplit_once("::").and_then(|(prefix, _)| {
+            my_protocol_keys_by_name.get(&workflow::signing_keys::party_daml_key_name(prefix))
+        });
         for owner in &item.owners {
             if my_fingerprints.contains(owner) {
                 entries.push(serde_json::json!({
                     "party_id": full_party_id,
                     "owner_key": owner,
+                    "signing_key": signing_key,
                 }));
             }
         }

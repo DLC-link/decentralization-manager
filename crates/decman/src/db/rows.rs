@@ -153,6 +153,10 @@ pub struct DecPartyParticipantRow {
     pub participant_uid: String,
     pub permission: String,
     pub owner_key: Option<String>,
+    /// Fingerprint of the Daml signing key this participant contributes to
+    /// the party's `party_signing_keys`. `None` until the participant
+    /// reports it over the OwnerKeys exchange.
+    pub signing_key: Option<String>,
 }
 
 #[derive(Debug, sqlx::FromRow)]

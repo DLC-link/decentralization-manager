@@ -224,6 +224,15 @@ pub trait Commitable {
         owner_key: &str,
     ) -> Result;
 
+    /// Update the Daml signing-key fingerprint for a specific participant in
+    /// a decentralized party
+    async fn update_participant_signing_key(
+        &mut self,
+        party_id: &CantonId,
+        participant_uid: &str,
+        signing_key: &str,
+    ) -> Result;
+
     /// Insert or replace a pending invitation
     async fn upsert_pending_invitation(&mut self, inv: &PendingInvitation) -> Result;
 

@@ -6,6 +6,7 @@ pub mod external_party;
 pub mod kick;
 pub mod onboarding;
 pub mod party_replication;
+pub mod signing_keys;
 pub mod state;
 pub mod storage;
 pub mod topology;
