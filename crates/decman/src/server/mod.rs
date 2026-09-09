@@ -51,7 +51,7 @@ use canton_proto_rs::com::digitalasset::canton::{
 };
 use hyper::{Body, Response, StatusCode};
 use sqlx::SqlitePool;
-use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio::sync::{Mutex, RwLock, Semaphore, mpsc};
 use tokio_noise::handshakes::nn_psk2::Responder;
 use utoipa_actix_web::AppExt;
 use utoipa_swagger_ui::SwaggerUi;
@@ -143,6 +143,24 @@ pub struct AppState {
     pub test_mode: bool,
     /// Prefixes currently being refreshed from Canton (deduplication)
     pub refreshing_prefixes: Arc<RwLock<HashSet<String>>>,
+    /// Bounds how many Canton discoveries run at once, across every prefix.
+    /// `refreshing_prefixes` deduplicates one prefix; this bounds the total,
+    /// which matters because the prefix comes from the request.
+    pub discovery_permits: Arc<Semaphore>,
+    /// How many discoveries have completed for a prefix.
+    ///
+    /// The signal a waiting request watches. A count rather than a timestamp,
+    /// because `dec_parties.updated_at` has one-second resolution and a
+    /// discovery finishing inside the same second was indistinguishable from
+    /// one that never ran.
+    pub discovery_generations: Arc<RwLock<HashMap<String, (u64, i64)>>>,
+    /// Unix seconds of the last completed Canton discovery, per prefix.
+    ///
+    /// A prefix with no parties leaves no rows in `dec_parties`, so the cached
+    /// rows alone cannot tell "never fetched" from "fetched, found nothing".
+    /// Without this a node with no party re-ran the whole discovery query on
+    /// every request.
+    pub discovery_completed: Arc<RwLock<HashMap<String, i64>>>,
     /// Shared `reqwest::Client` for the proxy-style handlers (`/network-info`,
     /// `/operator-info`, `/token-standard-contracts`). Constructed once at
     /// startup so its connection pool / keep-alives are reused across
@@ -175,6 +193,11 @@ impl AppState {
             bootstrap_mu: Arc::new(Mutex::new(())),
             test_mode: true,
             refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
+            discovery_permits: Arc::new(Semaphore::new(
+                crate::server::handlers::MAX_CONCURRENT_DISCOVERIES,
+            )),
+            discovery_generations: Arc::new(RwLock::new(HashMap::new())),
+            discovery_completed: Arc::new(RwLock::new(HashMap::new())),
             http_client: reqwest::Client::new(),
         }))
     }
@@ -1036,6 +1059,11 @@ pub async fn start_server(
         // `--insecure` (or tests). See the `insecure` binding above.
         test_mode: insecure,
         refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
+        discovery_permits: Arc::new(Semaphore::new(
+            crate::server::handlers::MAX_CONCURRENT_DISCOVERIES,
+        )),
+        discovery_generations: Arc::new(RwLock::new(HashMap::new())),
+        discovery_completed: Arc::new(RwLock::new(HashMap::new())),
         http_client,
     });
 
@@ -1120,6 +1148,7 @@ pub async fn start_server(
     let sync_db = db.clone();
     let sync_auth = app_state.auth.clone();
     let sync_party_creds = app_state.party_credentials.clone();
+    let sync_gate = handlers::DiscoveryGate::of(&app_state);
     tokio::spawn(async move {
         // Delay to let Canton stabilize after startup
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -1128,34 +1157,34 @@ pub async fn start_server(
         let auth_snapshot = sync_auth.read().await.clone();
         let creds_snapshot = sync_party_creds.read().await.clone();
 
-        match handlers::fetch_decentralized_parties(
+        // Through the same gate as the request paths: a direct call would
+        // duplicate an in-flight discovery for the empty prefix and put both
+        // results into the cache in an undefined order.
+        match handlers::discover_and_cache(
+            &sync_gate,
             &sync_config,
             &sync_db,
-            None,
+            "",
             auth_snapshot,
             &creds_snapshot,
             Default::default(),
         )
         .await
         {
-            Ok(response) => {
-                if let Err(e) = handlers::store_parties_to_db(&sync_db, "", &response.parties).await
-                {
-                    tracing::warn!("Failed to cache parties on startup: {e}");
-                } else {
-                    tracing::info!(
-                        "Cached {} decentralized parties from Canton",
-                        response.parties.len()
-                    );
-                    handlers::resolve_owner_keys_from_peers(
-                        &sync_config,
-                        &sync_db,
-                        &response.parties,
-                    )
+            handlers::Discovery::Done(response) => {
+                tracing::info!(
+                    "Cached {} decentralized parties from Canton",
+                    response.parties.len()
+                );
+                handlers::resolve_owner_keys_from_peers(&sync_config, &sync_db, &response.parties)
                     .await;
-                }
             }
-            Err(e) => {
+            handlers::Discovery::InFlight
+            | handlers::Discovery::AtCapacity
+            | handlers::Discovery::Superseded => {
+                tracing::info!("Startup sync skipped: a discovery is already running");
+            }
+            handlers::Discovery::Failed(e) => {
                 tracing::warn!("Background Canton sync failed on startup: {e}");
             }
         }
