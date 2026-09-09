@@ -31,7 +31,7 @@ use crate::{
     utils,
     workflow::{
         party_replication::{
-            ReplicationTarget,
+            ReplicationTarget, offset,
             pipe::{ExportSession, PipeBlock, PipeTrailer},
         },
         storage::WorkflowStorage,
@@ -79,19 +79,16 @@ pub async fn open_export_session(
     let synchronizer_id =
         utils::extract_synchronizer_fingerprint(&utils::get_synchronizer_id(config).await?)?;
 
-    let offset_bytes = storage
-        .read_artifact(&target.instance_name, target.artifacts.export_offset, None)
-        .await?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "{kind} artifact missing — the pre-topology offset was never captured",
-                kind = target.artifacts.export_offset
-            )
-        })?;
-    let begin_offset_exclusive: i64 = String::from_utf8(offset_bytes)?
-        .trim()
-        .parse()
-        .map_err(|e| anyhow::anyhow!("Failed to parse export offset: {e}"))?;
+    let begin_offset_exclusive = offset::persisted_or_derived_offset(
+        config,
+        storage,
+        &target.instance_name,
+        target.artifacts.export_offset,
+        None,
+        &target.party_id,
+        &target.target_participant_id,
+    )
+    .await?;
 
     tracing::info!(
         "Opening ACS export of {party} for target {member} (begin offset {begin_offset_exclusive})",
