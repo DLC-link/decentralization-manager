@@ -582,6 +582,96 @@ async fn add_hosts_prepares_on_every_host_and_submits_only_to_joiners() {
     assert!(added.without_package_preflight.is_empty());
 }
 
+/// The ordinary import answer is `marker_cleared: false` — the node asks Canton
+/// to clear and returns rather than holding the request open for the
+/// synchronizer's safe time. The wallet must then wait for the clear, not
+/// declare the replication half-done.
+#[tokio::test]
+async fn add_hosts_waits_out_a_marker_the_import_did_not_clear() {
+    let (p1, p2, p3) = (
+        MockServer::start().await,
+        MockServer::start().await,
+        MockServer::start().await,
+    );
+    for s in [&p1, &p2, &p3] {
+        stub_add_hosts_prepare(s, 5).await;
+    }
+    stub_add_hosts_onboard(&p3, 5).await;
+    Mock::given(method("GET"))
+        .and(wiremock::matchers::path_regex(r"^/v0/tenant/.+/acs/.+$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "party_id": "alice::1220aa",
+            "snapshot": STANDARD.encode(b"an-acs-snapshot"),
+            "package_ids": ["pkg-one"],
+            "package_preflight": true,
+        })))
+        .mount(&p1)
+        .await;
+    // Imported, clear only requested.
+    Mock::given(method("POST"))
+        .and(path("/v0/tenant/add-hosts/import"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "party_id": "alice::1220aa",
+            "imported": true,
+            "marker_cleared": false,
+        })))
+        .mount(&p3)
+        .await;
+    // ...and by the time the wallet asks, Canton has authorized it.
+    Mock::given(method("GET"))
+        .and(path("/v0/tenant/alice::1220aa/status"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"status": "completed"})))
+        .mount(&p3)
+        .await;
+
+    let key = ExternalKeyPair::from_seed([4u8; 32]);
+    let current = vec![host_for(&p1, 1), host_for(&p2, 2)];
+    let joining = vec![host_for(&p3, 3)];
+
+    let Ok(added) = decman_wallet::add_hosts(&current, &joining, &key, "alice::1220aa", 4).await
+    else {
+        panic!("a requested-but-not-yet-authorized clear must not fail the run");
+    };
+    assert!(
+        added.replicated,
+        "the marker cleared while the wallet waited, so the joiner is usable"
+    );
+}
+
+/// Every current host holds the party, so a source whose export fails costs a
+/// retry against the next one rather than the joiner.
+#[tokio::test]
+async fn add_hosts_falls_back_to_another_source_for_the_acs() {
+    let (p1, p2, p3) = (
+        MockServer::start().await,
+        MockServer::start().await,
+        MockServer::start().await,
+    );
+    for s in [&p1, &p2, &p3] {
+        stub_add_hosts_prepare(s, 5).await;
+    }
+    stub_add_hosts_onboard(&p3, 5).await;
+    Mock::given(method("GET"))
+        .and(wiremock::matchers::path_regex(r"^/v0/tenant/.+/acs/.+$"))
+        .respond_with(ResponseTemplate::new(500).set_body_json(json!({"error": "export failed"})))
+        .mount(&p1)
+        .await;
+    stub_acs_relay(&p2, &p3).await;
+
+    let key = ExternalKeyPair::from_seed([4u8; 32]);
+    let current = vec![host_for(&p1, 1), host_for(&p2, 2)];
+    let joining = vec![host_for(&p3, 3)];
+
+    let Ok(added) = decman_wallet::add_hosts(&current, &joining, &key, "alice::1220aa", 4).await
+    else {
+        panic!("a second source must carry the run");
+    };
+    assert!(
+        added.replicated,
+        "the second current host served the ACS, so the joiner is usable"
+    );
+}
+
 /// A host that prepares different bytes must stop the run before anything is
 /// signed. This is the whole reason every host prepares.
 #[tokio::test]

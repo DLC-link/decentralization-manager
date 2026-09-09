@@ -10,8 +10,9 @@ use common::{
     api::{
         TenantAcsImportRequest, TenantAcsImportResponse, TenantAcsSnapshotResponse,
         TenantAddHostsOnboardRequest, TenantAddHostsOnboardResponse, TenantAddHostsPrepareResponse,
-        TenantAddHostsRequest, TenantOnboardRequest, TenantOnboardResponse, TenantPrepareRequest,
-        TenantPrepareResponse, TenantThresholdOnboardRequest, TenantThresholdRequest,
+        TenantAddHostsRequest, TenantOnboardRequest, TenantOnboardResponse,
+        TenantPartyStateResponse, TenantPrepareRequest, TenantPrepareResponse,
+        TenantThresholdOnboardRequest, TenantThresholdRequest,
     },
     canton_id::CantonId,
     types::WorkflowProgress,
@@ -105,6 +106,18 @@ impl TenantClient {
             Err(e) if e.is_status(StatusCode::NOT_FOUND.as_u16()) => Ok(HostStatus::NotHosted),
             Err(e) => Err(e),
         }
+    }
+
+    /// `GET /v0/tenant/{party}/state` — this host's authorized mapping, most
+    /// importantly its serial.
+    ///
+    /// Every write in this API pins a `base_serial`, and a wallet has no Canton
+    /// Admin API to read one from. Read it here rather than deriving it: any
+    /// `PartyToParticipant` write moves the serial, and clearing an onboarding
+    /// marker is such a write, so a serial computed from an earlier response is
+    /// stale as soon as a joiner finishes replicating.
+    pub async fn party_state(&self, party_id: &str) -> Result<TenantPartyStateResponse> {
+        self.get(&format!("/v0/tenant/{party_id}/state")).await
     }
 
     /// `POST /v0/tenant/add-hosts/prepare` — the serial-N+1 topology that adds
