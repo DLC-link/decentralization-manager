@@ -442,6 +442,20 @@ pub async fn resolve_owner_keys_from_peers(
                 {
                     tracing::debug!("Failed to update owner key for {peer_uid}: {e}");
                 }
+
+                // Absent from peers that predate the field. Nothing else can
+                // supply it — the party's signing keys carry no owner — so a
+                // kick coordinated here falls back to elimination until this
+                // peer answers a later refresh.
+                let Some(signing_key) = entry["signing_key"].as_str() else {
+                    continue;
+                };
+                if let Err(e) = tx
+                    .update_participant_signing_key(&party_id_canton, &peer_uid, signing_key)
+                    .await
+                {
+                    tracing::debug!("Failed to update signing key for {peer_uid}: {e}");
+                }
             }
             if let Err(e) = Commitable::commit(tx).await {
                 tracing::debug!("Failed to commit owner key updates: {e}");
@@ -700,6 +714,10 @@ pub async fn store_parties_to_db(
                 }
                 .to_string(),
                 owner_key: p.owner_key.clone(),
+                // Reported by the participant itself over the OwnerKeys
+                // exchange, never carried on the live Canton fetch — the
+                // upsert COALESCEs a cached value rather than clearing it.
+                signing_key: None,
             })
             .collect();
         tx.replace_dec_party_participants(&party.party_id, &participants)

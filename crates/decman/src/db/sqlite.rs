@@ -701,9 +701,9 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
     ) -> Result {
         let party_id_str = party_id.to_string();
         // UPSERT each fresh row. permission may change (e.g., submission ->
-        // confirmation); owner_key only ever transitions NULL -> Some, never
-        // back to NULL. COALESCE keeps a previously-known fingerprint when
-        // the live Canton fetch carries None for it.
+        // confirmation); owner_key and signing_key only ever transition
+        // NULL -> Some, never back to NULL. COALESCE keeps a previously-known
+        // fingerprint when the live Canton fetch carries None for it.
         for p in participants {
             sqlx::query(
                 r"
@@ -711,17 +711,21 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                     dec_party_id,
                     participant_uid,
                     permission,
-                    owner_key
-                ) VALUES (?, ?, ?, ?)
+                    owner_key,
+                    signing_key
+                ) VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(dec_party_id, participant_uid) DO UPDATE SET
                     permission = excluded.permission,
-                    owner_key = COALESCE(excluded.owner_key, dec_party_participant.owner_key)
+                    owner_key = COALESCE(excluded.owner_key, dec_party_participant.owner_key),
+                    signing_key =
+                        COALESCE(excluded.signing_key, dec_party_participant.signing_key)
                 ",
             )
             .bind(&party_id_str)
             .bind(&p.participant_uid)
             .bind(&p.permission)
             .bind(&p.owner_key)
+            .bind(&p.signing_key)
             .execute(&mut **self)
             .await?;
         }
@@ -868,6 +872,28 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
             ",
         )
         .bind(owner_key)
+        .bind(party_id.to_string())
+        .bind(participant_uid)
+        .execute(&mut **self)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn update_participant_signing_key(
+        &mut self,
+        party_id: &CantonId,
+        participant_uid: &str,
+        signing_key: &str,
+    ) -> Result {
+        sqlx::query(
+            r"
+            UPDATE dec_party_participant
+            SET signing_key = ?
+            WHERE dec_party_id = ? AND participant_uid = ?
+            ",
+        )
+        .bind(signing_key)
         .bind(party_id.to_string())
         .bind(participant_uid)
         .execute(&mut **self)
@@ -1471,12 +1497,14 @@ mod tests {
                 participant_uid: "node1::1220aa".to_string(),
                 permission: "submission".to_string(),
                 owner_key: Some("fingerprint-1".to_string()),
+                signing_key: None,
             },
             DecPartyParticipantRow {
                 dec_party_id: party_id_str.clone(),
                 participant_uid: "node2::1220bb".to_string(),
                 permission: "confirmation".to_string(),
                 owner_key: None,
+                signing_key: None,
             },
         ];
         tx.replace_dec_party_participants(&party_id, &participants)
@@ -1518,6 +1546,7 @@ mod tests {
                 participant_uid: "node1::1220aa".to_string(),
                 permission: "submission".to_string(),
                 owner_key: Some("fingerprint-1".to_string()),
+                signing_key: None,
             }],
         )
         .await?;
@@ -1533,6 +1562,7 @@ mod tests {
                 participant_uid: "node1::1220aa".to_string(),
                 permission: "submission".to_string(),
                 owner_key: None,
+                signing_key: None,
             }],
         )
         .await?;
@@ -1544,6 +1574,66 @@ mod tests {
             result[0].owner_key,
             Some("fingerprint-1".to_string()),
             "owner_key should be preserved across a refresh that brings a NULL value"
+        );
+
+        Ok(())
+    }
+
+    /// The party's `party_signing_keys` record no owner per key, so the only
+    /// place the mapping from member to Daml key lives is what each member
+    /// reports about itself. A refresh that brings a NULL must not throw it
+    /// away, or a kick loses the record it needs to drop the right key (#428).
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_participant_signing_key_survives_a_refresh(pool: SqlitePool) -> Result {
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_dec_party(&test_dec_party("net-a")).await?;
+        let party_id_str = format!("net-a::{TEST_NS}");
+        let party_id = CantonId::parse(&party_id_str)?;
+        tx.replace_dec_party_participants(
+            &party_id,
+            &[DecPartyParticipantRow {
+                dec_party_id: party_id_str.clone(),
+                participant_uid: "node1::1220aa".to_string(),
+                permission: "submission".to_string(),
+                owner_key: None,
+                signing_key: None,
+            }],
+        )
+        .await?;
+        // What `resolve_owner_keys_from_peers` writes once the peer answers.
+        tx.update_participant_signing_key(&party_id, "node1::1220aa", "daml-fingerprint-1")
+            .await?;
+        Commitable::commit(tx).await?;
+
+        let seeded = pool.get_dec_party_participants(&party_id).await?;
+        assert_eq!(
+            seeded.first().and_then(|p| p.signing_key.clone()),
+            Some("daml-fingerprint-1".to_string())
+        );
+
+        // A live Canton fetch never carries the fingerprint, so every refresh
+        // brings a NULL for it.
+        let mut tx = pool.begin_transaction().await?;
+        tx.replace_dec_party_participants(
+            &party_id,
+            &[DecPartyParticipantRow {
+                dec_party_id: party_id_str,
+                participant_uid: "node1::1220aa".to_string(),
+                permission: "confirmation".to_string(),
+                owner_key: None,
+                signing_key: None,
+            }],
+        )
+        .await?;
+        Commitable::commit(tx).await?;
+
+        let result = pool.get_dec_party_participants(&party_id).await?;
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].permission, "confirmation");
+        assert_eq!(
+            result[0].signing_key,
+            Some("daml-fingerprint-1".to_string()),
+            "signing_key should be preserved across a refresh that brings a NULL value"
         );
 
         Ok(())
@@ -1566,6 +1656,7 @@ mod tests {
                 participant_uid: "node1::1220aa".to_string(),
                 permission: "submission".to_string(),
                 owner_key: Some("fingerprint-1".to_string()),
+                signing_key: None,
             }],
         )
         .await?;
@@ -1603,6 +1694,7 @@ mod tests {
                 participant_uid: "node1::1220aa".to_string(),
                 permission: "submission".to_string(),
                 owner_key: None,
+                signing_key: None,
             }],
         )
         .await?;
@@ -1639,12 +1731,14 @@ mod tests {
                     participant_uid: p1.to_string(),
                     permission: "submission".to_string(),
                     owner_key: Some("fp-1".to_string()),
+                    signing_key: None,
                 },
                 DecPartyParticipantRow {
                     dec_party_id: party_id_str.clone(),
                     participant_uid: p2.to_string(),
                     permission: "submission".to_string(),
                     owner_key: Some("fp-2".to_string()),
+                    signing_key: None,
                 },
             ],
         )
@@ -1661,6 +1755,7 @@ mod tests {
                 participant_uid: p1.to_string(),
                 permission: "submission".to_string(),
                 owner_key: Some("fp-1".to_string()),
+                signing_key: None,
             }],
         )
         .await?;
@@ -1692,12 +1787,14 @@ mod tests {
                     participant_uid: "node1::1220aa".to_string(),
                     permission: "submission".to_string(),
                     owner_key: Some("fingerprint-1".to_string()),
+                    signing_key: None,
                 },
                 DecPartyParticipantRow {
                     dec_party_id: party_id_str.clone(),
                     participant_uid: "node2::1220bb".to_string(),
                     permission: "confirmation".to_string(),
                     owner_key: None,
+                    signing_key: None,
                 },
             ],
         )
@@ -1776,6 +1873,7 @@ mod tests {
                 participant_uid: "node1".to_string(),
                 permission: "submission".to_string(),
                 owner_key: None,
+                signing_key: None,
             }],
         )
         .await?;
@@ -2703,6 +2801,7 @@ mod tests {
                 participant_uid: "a-node1::1220aa".to_string(),
                 permission: "submission".to_string(),
                 owner_key: None,
+                signing_key: None,
             }],
         )
         .await?;
@@ -2714,12 +2813,14 @@ mod tests {
                     participant_uid: "b-node1::1220bb".to_string(),
                     permission: "submission".to_string(),
                     owner_key: None,
+                    signing_key: None,
                 },
                 DecPartyParticipantRow {
                     dec_party_id: party_b_str.clone(),
                     participant_uid: "b-node2::1220cc".to_string(),
                     permission: "confirmation".to_string(),
                     owner_key: None,
+                    signing_key: None,
                 },
             ],
         )
