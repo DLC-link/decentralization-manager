@@ -1217,32 +1217,6 @@ async fn stage_export(
     staging::finish_export(config, &replication.instance_name).await
 }
 
-async fn drain_export(
-    config: &crate::config::NodeConfig,
-    db: &sqlx::SqlitePool,
-    replication: &crate::workflow::party_replication::ReplicationTarget,
-    max_bytes: usize,
-) -> anyhow::Result<Vec<u8>> {
-    let mut session = open_export_session(config, db, replication).await?;
-    let mut out = Vec::new();
-    // Sequence numbers are 1-based: the session treats served_seq 0 as "nothing
-    // served yet" and refuses anything but served_seq + 1, since the Canton
-    // stream behind it cannot rewind.
-    let mut seq = 1u64;
-    while let PipeBlock::Data { bytes, .. } = session.block(seq, EXPORT_BLOCK_SIZE).await? {
-        out.extend_from_slice(&bytes);
-        // Checked per block rather than at the end: this response is assembled
-        // whole in memory, so an oversized party would OOM the node long before
-        // there was a length to reject.
-        anyhow::ensure!(
-            out.len() <= max_bytes,
-            "the party's ACS exceeds DECPM_TENANT_ACS_MAX_BYTES ({max_bytes} bytes)"
-        );
-        seq += 1;
-    }
-    Ok(out)
-}
-
 /// Serve block `seq` of an already-held snapshot, so the pull-based import can
 /// consume a buffer the wallet delivered in one piece.
 fn block_of(snapshot: &[u8], seq: u64) -> PipeBlock {

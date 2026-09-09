@@ -667,7 +667,15 @@ async fn add_hosts_waits_out_a_marker_the_import_did_not_clear() {
     let current = vec![host_for(&p1, 1), host_for(&p2, 2)];
     let joining = vec![host_for(&p3, 3)];
 
-    let Ok(added) = decman_wallet::add_hosts(&current, &joining, &key, "alice::1220aa", 4).await
+    let Ok(added) = decman_wallet::add_hosts(
+        &current,
+        &joining,
+        &key,
+        "alice::1220aa",
+        HostPermission::Confirmation,
+        4,
+    )
+    .await
     else {
         panic!("a requested-but-not-yet-authorized clear must not fail the run");
     };
@@ -707,7 +715,15 @@ async fn add_hosts_falls_back_to_another_source_for_the_acs() {
     let current = vec![host_for(&p1, 1), host_for(&p2, 2)];
     let joining = vec![host_for(&p3, 3)];
 
-    let Ok(added) = decman_wallet::add_hosts(&current, &joining, &key, "alice::1220aa", 4).await
+    let Ok(added) = decman_wallet::add_hosts(
+        &current,
+        &joining,
+        &key,
+        "alice::1220aa",
+        HostPermission::Confirmation,
+        4,
+    )
+    .await
     else {
         panic!("a second source must carry the run");
     };
