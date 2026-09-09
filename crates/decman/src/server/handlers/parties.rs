@@ -274,7 +274,21 @@ pub(crate) async fn discover_and_cache(
         };
 
         return match budgeted_fetch(config, db, prefix, auth, party_credentials, opts).await {
-            Ok(response) => Discovery::Done(response),
+            Ok(response) => {
+                // A window that came back with parties proves the whole list is
+                // not empty, so it clears a standing mark even though it writes
+                // no cache and signals no completion. Otherwise the plain call
+                // keeps answering empty for the rest of the TTL while this very
+                // read held the evidence that the mark was stale.
+                //
+                // Guarded on non-empty because an offset past the end says
+                // nothing about the whole list, and `record_discovery` would
+                // read it as an empty result and mark the prefix.
+                if !response.parties.is_empty() {
+                    record_discovery(&gate.completed, prefix, &response.parties).await;
+                }
+                Discovery::Done(response)
+            }
             Err(e) => Discovery::Failed(e),
         };
     }
