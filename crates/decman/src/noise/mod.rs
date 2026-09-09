@@ -39,6 +39,19 @@ pub const NOISE_CHUNK_TIMEOUT: Duration = Duration::from_secs(25);
 /// Kept comfortably above `NOISE_CHUNK_TIMEOUT`.
 pub const NOISE_HANDLER_TIMEOUT: Duration = Duration::from_secs(45);
 
+/// Per-request timeout for one ACS block fetch.
+///
+/// `NOISE_CHUNK_TIMEOUT` (25s) was sized for a 1 MiB chunk that "transfers in
+/// well under a second" and is far too tight for an ACS block: at 25s a 4 MiB
+/// block needs 1.4 Mbit/s sustained just to arrive, and `RequestTimeout` is
+/// transient, so a link below that burns three attempts and a step strike on
+/// every block without ever making progress.
+///
+/// 40s sits under the server's `NOISE_HANDLER_TIMEOUT` backstop, so the client
+/// still gives up first and retries on a fresh connection, and it is the budget
+/// [`acs_block_size`] is clamped against.
+pub const NOISE_ACS_BLOCK_TIMEOUT: Duration = Duration::from_secs(40);
+
 /// Message types for the Noise protocol communication
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[repr(u16)]
@@ -141,6 +154,12 @@ pub enum MessageType {
     GetChunk = 0x0301,
     /// Chunk data response - payload contains: [chunk_index (4 bytes)] [chunk_data (variable)]
     Chunk = 0x0302,
+    /// Request the next block of the source's open ACS export - payload contains: [seq (8 bytes)]
+    GetNextAcsBlock = 0x0305,
+    /// ACS block response - payload contains: [seq (8 bytes)] [bytes (variable)]
+    AcsBlock = 0x0306,
+    /// Final ACS block - payload contains: [seq (8 bytes)] [total (8 bytes)] [sha256 hex]
+    AcsBlockEnd = 0x0307,
 }
 
 /// Maximum payload size sent inline in a single message before the chunked
@@ -168,6 +187,37 @@ pub const MAX_CHUNKED_TOTAL_SIZE: usize = 16 * 1024 * 1024;
 /// Hard ceiling on the chunk count for a chunked response. Equal to
 /// `MAX_CHUNKED_TOTAL_SIZE / CHUNK_SIZE` rounded up.
 pub const MAX_CHUNK_COUNT: usize = MAX_CHUNKED_TOTAL_SIZE.div_ceil(CHUNK_SIZE);
+
+/// Bytes served per `GetNextAcsBlock`. Default; the live value is read via
+/// [`acs_block_size`].
+///
+/// Bounded from above by `NOISE_ACS_BLOCK_TIMEOUT`, the *client's* per-block
+/// budget, which is the binding one — the server's `NOISE_HANDLER_TIMEOUT` is
+/// only a backstop behind it. A block that cannot transfer inside that budget
+/// times out identically on every retry, so the block size implies a floor on
+/// usable bandwidth: 4 MiB in 40s is ~0.84 Mbit/s, and the 8 MiB ceiling below
+/// is ~1.7 Mbit/s. Bounded from below by round trips: the fixed per-block cost
+/// is a TCP connect plus a Noise handshake (measured at 0.30 ms) plus two RTTs,
+/// so on a high-latency link fewer, larger blocks finish sooner.
+pub const ACS_BLOCK_SIZE: usize = 4 * 1024 * 1024;
+
+/// Ceiling for [`acs_block_size`], set by what fits in
+/// `NOISE_ACS_BLOCK_TIMEOUT` on a link we are willing to call usable
+/// (~1.7 Mbit/s). Deliberately below `MAX_CHUNKED_TOTAL_SIZE`: that constant
+/// bounds an in-memory assembly, not a per-request transfer budget.
+pub const MAX_ACS_BLOCK_SIZE: usize = 8 * 1024 * 1024;
+
+/// Bytes to request per ACS block, overridable via `DECPM_ACS_BLOCK_BYTES`.
+/// Clamped to `[64 KiB, MAX_ACS_BLOCK_SIZE]` so a mistyped value cannot stall
+/// every block against `NOISE_ACS_BLOCK_TIMEOUT` or shrink to a per-byte round
+/// trip.
+pub fn acs_block_size() -> usize {
+    std::env::var("DECPM_ACS_BLOCK_BYTES")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(ACS_BLOCK_SIZE)
+        .clamp(64 * 1024, MAX_ACS_BLOCK_SIZE)
+}
 
 impl TryFrom<u16> for MessageType {
     type Error = anyhow::Error;
@@ -228,6 +278,9 @@ impl TryFrom<u16> for MessageType {
             0x0300 => Ok(Self::ChunkedCommand),
             0x0301 => Ok(Self::GetChunk),
             0x0302 => Ok(Self::Chunk),
+            0x0305 => Ok(Self::GetNextAcsBlock),
+            0x0306 => Ok(Self::AcsBlock),
+            0x0307 => Ok(Self::AcsBlockEnd),
             _ => Err(anyhow::anyhow!("Unknown message type: 0x{value:04x}")),
         }
     }
@@ -247,7 +300,17 @@ impl MessageType {
 /// Bump this on any framing change; the decoder rejects mismatches with a
 /// clear error, and future versions can branch on it instead of forcing
 /// another lockstep upgrade.
-pub const WIRE_VERSION: u8 = 0xD1;
+///
+/// 0xD1 -> 0xD2: the `ImportAcs` payload dropped the inline snapshot for
+/// `[config, package_ids]` and the ACS moved to `GetNextAcsBlock`. This one had
+/// to be a version bump rather than a tolerated difference: a 0xD1 peer decodes
+/// the new two-item payload as its own legacy `[config, snapshot]`, so it would
+/// read the package-id list as ACS bytes, find them non-empty, skip the package
+/// preflight, and DISCONNECT its participant to import them — after the
+/// topology change is already live. Rejecting the frame outright keeps an old
+/// build from ever reaching that, and it fails the invite's health probe, so
+/// the run does not start at all.
+pub const WIRE_VERSION: u8 = 0xD2;
 
 /// Message structure for Noise protocol communication.
 ///

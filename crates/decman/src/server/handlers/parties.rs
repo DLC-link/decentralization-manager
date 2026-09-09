@@ -4,7 +4,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use actix_web::{HttpResponse, Responder, get, web};
+use actix_web::{HttpResponse, Responder, delete, get, web};
 use canton_proto_rs::com::digitalasset::canton::{
     admin::participant::v30::{ListPackagesRequest, package_service_client::PackageServiceClient},
     crypto::{
@@ -1093,6 +1093,65 @@ pub async fn fetch_decentralized_parties(
 }
 
 /// Get vetted packages for this participant
+/// Which participant is quarantined for which party.
+#[derive(Debug, serde::Deserialize, utoipa::IntoParams)]
+pub struct QuarantineQuery {
+    /// The decentralized party the failed replication was for.
+    pub party_id: String,
+    /// The participant that may hold part of its ACS.
+    pub participant_id: String,
+}
+
+/// Lift an ACS-import quarantine.
+///
+/// A transfer that failed after bytes had reached Canton leaves the
+/// participant holding an unknown fraction of the party's ACS, and Canton
+/// offers no way to ask how much. Replication onto it is refused until an
+/// operator confirms it has been repaired or restored, which is what this
+/// records. It does not repair anything.
+#[utoipa::path(
+    tag = "Parties",
+    params(QuarantineQuery),
+    responses(
+        (status = 200, description = "Quarantine lifted, or none was set"),
+        (status = 400, description = "Malformed party or participant id", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[delete("/acs-import-quarantine")]
+pub async fn clear_acs_import_quarantine(
+    data: web::Data<AppState>,
+    query: web::Query<QuarantineQuery>,
+) -> impl Responder {
+    let (Ok(party_id), Ok(participant_id)) = (
+        CantonId::parse(&query.party_id),
+        CantonId::parse(&query.participant_id),
+    ) else {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: "party_id and participant_id must be valid Canton ids".to_string(),
+        });
+    };
+
+    match data
+        .db
+        .clear_acs_import_quarantine(&party_id, &participant_id)
+        .await
+    {
+        Ok(lifted) => {
+            if lifted {
+                tracing::warn!(
+                    "ACS-import quarantine lifted for {participant_id} on {party_id} — \
+                     an operator has declared the participant repaired"
+                );
+            }
+            HttpResponse::Ok().json(serde_json::json!({ "lifted": lifted }))
+        }
+        Err(e) => HttpResponse::InternalServerError().json(ErrorResponse {
+            error: format!("Failed to lift the quarantine: {e}"),
+        }),
+    }
+}
+
 #[utoipa::path(
     tag = "Packages",
     responses(

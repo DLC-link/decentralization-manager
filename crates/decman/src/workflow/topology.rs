@@ -201,6 +201,73 @@ pub fn head_state_query(synchronizer_id: &str) -> BaseQuery {
     }
 }
 
+/// A [`BaseQuery`] over the synchronizer store's whole history, so a caller
+/// can see superseded serials rather than only what is currently in force.
+///
+/// `until: None` means "up to now"; `from: None` means "from the beginning".
+pub fn history_query(synchronizer_id: &str) -> BaseQuery {
+    BaseQuery {
+        store: Some(synchronizer_store_id(synchronizer_id)),
+        proposals: false,
+        operation: 0,
+        time_query: Some(base_query::TimeQuery::Range(base_query::TimeRange {
+            from: None,
+            until: None,
+        })),
+        filter_signed_key: String::new(),
+        protocol_version: None,
+        client_version: None,
+    }
+}
+
+/// Every `PartyToParticipant` serial ever in force for `party_id`, paired with
+/// the time each became effective.
+///
+/// The head state answers "who hosts this party now"; this answers "when did
+/// that become true", which is what a replication needs when it has to find an
+/// offset from before a participant was activated.
+///
+/// # Errors
+/// Returns an error if the topology read fails.
+pub async fn fetch_p2p_history(
+    config: &NodeConfig,
+    synchronizer_id: &str,
+    party_id: &CantonId,
+) -> Result<Vec<(prost_types::Timestamp, PartyToParticipant)>> {
+    let mut topology_read_client =
+        TopologyManagerReadServiceClient::new(config.admin_channel().await?);
+
+    let request = tonic::Request::new(ListPartyToParticipantRequest {
+        base_query: Some(history_query(synchronizer_id)),
+        filter_party: party_id.to_string(),
+        filter_participant: String::new(),
+    });
+
+    let response = topology_read_client
+        .list_party_to_participant(request)
+        .await?
+        .into_inner();
+
+    let mut history: Vec<(i32, prost_types::Timestamp, PartyToParticipant)> = response
+        .results
+        .into_iter()
+        .filter_map(|r| {
+            let context = r.context?;
+            let valid_from = context.valid_from?;
+            let P2pItem::V30(mapping) = r.item?;
+            Some((context.serial, valid_from, mapping))
+        })
+        .collect();
+
+    // Canton does not promise an order, and the caller wants the EARLIEST
+    // serial that matches, so sort rather than trusting the response.
+    history.sort_by_key(|(serial, _, _)| *serial);
+    Ok(history
+        .into_iter()
+        .map(|(_, valid_from, mapping)| (valid_from, mapping))
+        .collect())
+}
+
 /// An [`AddTransactionsRequest`] submitting a single signed transaction to the
 /// synchronizer store.
 pub fn add_transactions_request(
