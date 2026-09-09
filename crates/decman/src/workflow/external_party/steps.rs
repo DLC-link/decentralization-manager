@@ -552,7 +552,7 @@ pub async fn allocate_party(
 }
 
 /// A head-state (or proposal) topology query against the synchronizer store.
-fn party_query(synchronizer_id: &str, proposals: bool) -> BaseQuery {
+pub(super) fn party_query(synchronizer_id: &str, proposals: bool) -> BaseQuery {
     BaseQuery {
         store: Some(StoreId {
             store: Some(store_id::Store::Synchronizer(Synchronizer {
