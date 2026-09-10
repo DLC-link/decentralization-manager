@@ -706,6 +706,15 @@ pub struct TenantPartyStateResponse {
     /// until it clears. A threshold above `host_count - onboarding_hosts` is one
     /// the party cannot currently meet.
     pub onboarding_hosts: u32,
+    /// Whether the party carries its own signing key, i.e. whether it is
+    /// externally signed.
+    ///
+    /// This is the line the runbook routes on: a local party without one is a
+    /// candidate for conversion, and one with it has already been converted (or
+    /// was external from the start). Nothing else on the node reported it, so
+    /// an operator learned which case they had by calling prepare and reading
+    /// the 400.
+    pub has_signing_key: bool,
 }
 
 /// Response for key status check

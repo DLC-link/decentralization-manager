@@ -659,6 +659,15 @@ mod tests {
         assert!(validate(mapping).is_err());
     }
 
+    /// The mirror of adding a host: a bundle that drops this node leaves the
+    /// party hosted somewhere else entirely, on this node's own signature.
+    #[test]
+    fn refuses_a_bundle_that_drops_this_node() {
+        let mut mapping = built();
+        mapping.participants.clear();
+        assert!(validate(mapping).is_err());
+    }
+
     /// The conversion carries the threshold through unchanged, so a bundle that
     /// moves it is changing something the caller was not authorized to change.
     #[test]

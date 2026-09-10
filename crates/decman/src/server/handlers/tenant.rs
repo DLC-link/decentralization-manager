@@ -867,6 +867,7 @@ pub async fn tenant_party_state(
                 threshold: current.mapping.threshold,
                 host_count: current.mapping.participants.len() as u32,
                 onboarding_hosts,
+                has_signing_key: current.mapping.party_signing_keys.is_some(),
             })
         }
         Ok(None) => HttpResponse::NotFound().json(ErrorResponse {
@@ -1025,6 +1026,19 @@ pub async fn tenant_local_party_adopt_onboard(
         Ok(key) => key,
         Err(resp) => return resp,
     };
+    // The same check `tenant_onboard` makes. Canton refuses the mismatch anyway,
+    // but as a 500 reading "AddTransactions RPC failed" — which does not tell
+    // the caller which of the two fields was wrong.
+    let derived_fingerprint = fingerprint_from_public_key(&public_key);
+    if derived_fingerprint != body.signed_by {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: format!(
+                "signed_by ({signed_by}) does not match the fingerprint derived from public_key \
+                 ({derived_fingerprint})",
+                signed_by = body.signed_by
+            ),
+        });
+    }
     let topology_transactions =
         match decode_all(&body.topology_transactions, "topology transaction") {
             Ok(v) => v,
