@@ -129,10 +129,25 @@ pub mod artifact_kinds {
     /// target's preflight needs). The ACS itself is not in it: the target pulls
     /// the snapshot block by block straight into Canton's import.
     ///
-    /// Persisted because the coordinator only holds it in memory, and a restart
-    /// during the transfer would otherwise serve the target an empty payload it
-    /// cannot decode.
+    /// Persisted because the coordinator only holds it in memory. A resumed run
+    /// does not arrive with an *empty* payload — `run_workflow` seeds one with
+    /// the bare config before its loop starts — it arrives with the wrong one,
+    /// which the target decodes as a two-item command and rejects. So the
+    /// restore compares against what is currently served rather than testing
+    /// for absence.
     pub const ADD_PARTY_SYNC_ACS_COMMAND: &str = "add_party_sync_acs_command";
+    /// JSON `AcsTransferProgress` for the run's ACS transfer, so the UI can
+    /// show movement during a step that otherwise looks frozen for minutes.
+    ///
+    /// Display only — nothing reads it back to make a decision, so a stale or
+    /// missing sample costs a readout, never correctness. Sampled every
+    /// `PROGRESS_ARTIFACT_EVERY_BYTES` (16 MiB) rather than per block, which is
+    /// 64 writes per GiB plus one each at the start and end. Deliberately finer
+    /// than the 256 MiB log cadence, which is too coarse to look like movement.
+    ///
+    /// Target side only. The source's progress is live in its `WorkflowState`,
+    /// so the API reads that directly and never writes this.
+    pub const ADD_PARTY_ACS_PROGRESS: &str = "add_party_acs_progress";
 
     /// Unsigned onboarding-flag clearing proposal (P2P update without the
     /// new member's Onboarding marker) created by the coordinator. Empty
