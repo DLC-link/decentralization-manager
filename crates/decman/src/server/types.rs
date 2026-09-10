@@ -44,10 +44,11 @@ pub use common::api::{
     WorkflowRunsResponse, WorkflowStatusResponse,
 };
 pub use common::types::{
-    AuditLogEntry, AuthConfigResponse, ConnectionStatus, ContractInfo, DecentralizedParty,
-    InvitationType, PackageInfo, ParticipantInfo, ParticipantStatus, ParticipantsStatusResponse,
-    PartyMetadata, PeerErrorKind, PeerPackageComparison, PeerPackageResult, PendingInvitation,
-    Permission, VettedPackageInfo, WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun,
+    AcsTransferProgress, AuditLogEntry, AuthConfigResponse, ConnectionStatus, ContractInfo,
+    DecentralizedParty, InvitationType, PackageInfo, ParticipantInfo, ParticipantStatus,
+    ParticipantsStatusResponse, PartyMetadata, PeerErrorKind, PeerPackageComparison,
+    PeerPackageResult, PendingInvitation, Permission, VettedPackageInfo, WorkflowKind,
+    WorkflowProgress, WorkflowRole, WorkflowRun,
 };
 pub use decman_lib::catalog::types::{
     AcceptTransferDetails, AppRewardBeneficiary, BillingParams, ServiceRequestDetails,
@@ -957,6 +958,7 @@ pub fn chain_audit_entry_from_row(row: crate::db::rows::ChainAuditCacheRow) -> C
 #[cfg(test)]
 mod tests {
     use common::api::InstrumentId;
+    use common::types::AcsTransferDirection;
     use decman_lib::catalog::proposals::core::GenericVote;
     use decman_lib::catalog::proposals::credential::{
         AcceptFreeCredential, OfferFreeCredential, OfferPaidCredential,
@@ -1092,6 +1094,49 @@ mod tests {
         Ok(())
     }
 
+    /// The card reads these field names and the lowercase direction straight
+    /// off the wire, and `acs_progress` must vanish rather than appear as
+    /// `null` when nothing is transferring, or every idle run renders a meter.
+    #[test]
+    fn acs_transfer_progress_wire_shape_is_stable() -> Result {
+        let progress = AcsTransferProgress {
+            direction: AcsTransferDirection::Import,
+            bytes: 1_369_579_398,
+            block: 1306,
+            started_at_ms: 1_788_968_788_000,
+            updated_at_ms: 1_788_969_093_000,
+        };
+        let json = serde_json::to_value(&progress)?;
+
+        assert_eq!(
+            json.get("direction").and_then(Value::as_str),
+            Some("import")
+        );
+        assert_eq!(
+            json.get("bytes").and_then(Value::as_i64),
+            Some(1_369_579_398)
+        );
+        assert_eq!(json.get("block").and_then(Value::as_i64), Some(1306));
+        assert_eq!(
+            json.get("started_at_ms").and_then(Value::as_i64),
+            Some(1_788_968_788_000)
+        );
+        assert_eq!(
+            json.get("updated_at_ms").and_then(Value::as_i64),
+            Some(1_788_969_093_000)
+        );
+
+        let exported = serde_json::to_value(AcsTransferProgress {
+            direction: AcsTransferDirection::Export,
+            ..progress
+        })?;
+        assert_eq!(
+            exported.get("direction").and_then(Value::as_str),
+            Some("export")
+        );
+        Ok(())
+    }
+
     /// P3: locks the wire shape of `WorkflowRun` so the `String → CantonId`
     /// typing change for participant-id fields cannot silently switch from
     /// plain strings to nested objects on the JSON the frontend consumes.
@@ -1123,6 +1168,7 @@ mod tests {
             expected_peers: vec![peer_a.clone(), peer_b.clone()],
             completed_peers: vec![peer_a],
             connected_peers: vec![peer_b],
+            acs_progress: None,
             dec_party_id: Some(CantonId::parse(&dec_party_id_str).unwrap()),
             prefix: None,
             participants: Vec::new(),

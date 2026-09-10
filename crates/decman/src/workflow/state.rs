@@ -11,6 +11,7 @@ use std::{
     sync::Arc,
 };
 
+use common::types::{AcsTransferDirection, AcsTransferProgress};
 use sqlx::SqlitePool;
 use tokio::sync::{Mutex, RwLock};
 
@@ -228,6 +229,26 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
             .await
             .as_ref()
             .map_or(0, |(_, session)| session.served_bytes())
+    }
+
+    /// Live progress of the open export session, for the UI. `None` when no
+    /// export is open, which is every run and step that shifts no ACS.
+    ///
+    /// `updated_at_ms` is when a block was last actually served, not when this
+    /// was called, so an export that stops moving reads as stalled instead of
+    /// looking permanently fresh to anything polling it.
+    pub async fn acs_export_progress(&self) -> Option<AcsTransferProgress> {
+        self.acs_export
+            .lock()
+            .await
+            .as_ref()
+            .map(|(_, session)| AcsTransferProgress {
+                direction: AcsTransferDirection::Export,
+                bytes: i64::try_from(session.served_bytes()).unwrap_or(i64::MAX),
+                block: i64::try_from(session.served_blocks()).unwrap_or(i64::MAX),
+                started_at_ms: session.started_at_ms(),
+                updated_at_ms: session.last_served_at_ms(),
+            })
     }
 
     /// Drop the export session, closing the Canton stream.

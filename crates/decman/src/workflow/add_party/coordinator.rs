@@ -109,14 +109,20 @@ async fn run_workflow(
                 // coordinator cannot rebuild live here: the command payload,
                 // which is restored from its artifact, and the Canton export
                 // stream, which has to be re-opened.
-                if workflow_state.get_command_payload().await.is_empty()
-                    && let Some(saved) = db
-                        .read_artifact(
-                            &instance_name,
-                            artifact_kinds::ADD_PARTY_SYNC_ACS_COMMAND,
-                            None,
-                        )
-                        .await?
+                // Restored on mismatch, NOT merely when empty: `run_workflow`
+                // seeds the payload with the bare config before this loop
+                // starts, so after a restart it is non-empty but wrong. The
+                // target decodes the SyncAcs command as two length-prefixed
+                // items and reads the config's leading `{"de` as a 2 GB length
+                // prefix, failing every attempt until it aborts.
+                if let Some(saved) = db
+                    .read_artifact(
+                        &instance_name,
+                        artifact_kinds::ADD_PARTY_SYNC_ACS_COMMAND,
+                        None,
+                    )
+                    .await?
+                    && workflow_state.get_command_payload().await != saved
                 {
                     tracing::info!(
                         "Restored the SyncAcs command payload after a restart ({len} bytes)",
