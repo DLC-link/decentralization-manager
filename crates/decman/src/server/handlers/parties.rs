@@ -1846,7 +1846,6 @@ async fn fetch_decentralized_parties(
     })
 }
 
-/// Get vetted packages for this participant
 /// Which participant is quarantined for which party.
 #[derive(Debug, serde::Deserialize, utoipa::IntoParams)]
 pub struct QuarantineQuery {
@@ -1913,6 +1912,7 @@ pub async fn clear_acs_import_quarantine(
         (status = 500, description = "Internal server error", body = ErrorResponse)
     )
 )]
+/// Get vetted packages for this participant
 #[get("/packages/vetted")]
 pub async fn get_vetted_packages(data: web::Data<AppState>) -> impl Responder {
     // Reads topology vetting state. Neither list contains the other: a DAR can
