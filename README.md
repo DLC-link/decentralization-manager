@@ -17,6 +17,7 @@ A web application for managing decentralized parties in Canton blockchain networ
 ## Documentation
 
 - [Architecture Overview](docs/ARCHITECTURE.md) -- System architecture, core concepts, communication protocol, and technical constraints
+- [LocalNet Quickstart](hackathon/README.md) -- One-command local sandbox: three participants, three DecMan nodes, no identity provider
 - [User Guide](USER_GUIDE.md) -- Walkthrough of the web UI for day-to-day party and governance operations
 - [Custom Daml Templates](docs/CUSTOM_DAML_TEMPLATES.md) -- Authoring and deploying your own Daml governance templates
 - [Deployment Guide](docs/DEPLOYMENT_GUIDE.md) -- Deploying a node to Kubernetes from scratch: manifests, identity-provider setup, and configuration reference
@@ -51,53 +52,27 @@ The application runs as an HTTP server with an embedded React frontend. Multiple
 
 ## Quick Start
 
-### Prerequisites
+### Try it on LocalNet (no Canton node needed)
 
-- Rust toolchain (for building from source)
-- Access to Canton participant nodes (Admin API and Ledger API)
-- Docker (optional, for containerized deployment). Building the image also
-  requires an SSH key registered on a GitHub account — see
-  [Running with Docker](#running-with-docker)
-
-### Running Locally
+One command starts three Canton participants, one local synchronizer, and three
+DecMan nodes from the published release image. There is no login and no build
+step: Docker, `curl` and `jq` are enough.
 
 ```bash
-# Build and run with env vars
-DECPM_DIR=./development/participant-1 \
-DECPM_PORT=8081 \
-DECPM_CANTON_ADMIN_HOST=localhost \
-DECPM_CANTON_ADMIN_PORT=5002 \
-DECPM_CANTON_LEDGER_HOST=localhost \
-DECPM_CANTON_LEDGER_PORT=5001 \
-DECPM_NOISE_PORT=9001 \
-cargo run -p decman -- serve
-
-# Or with a .env file in the data directory
-cargo run -p decman -- -d ./development/participant-1 serve
-
-# Or with release build
-cargo build --release -p decman
-DECPM_PORT=8081 ./target/release/dec-party-manager -d ./development/participant-1 serve
+./hackathon/up.sh
 ```
 
-Open http://localhost:8081 in your browser.
+[hackathon/README.md](hackathon/README.md) lists the prerequisites (Docker needs
+about 12GB) and the fixes for the usual problems.
+[hackathon/WALKTHROUGH.md](hackathon/WALKTHROUGH.md) takes you from an empty
+stack to an executed governance action in about 30 minutes.
 
-### Running with Docker
+### Run against your own Canton node
 
-> **An SSH key is required to build the image.** The build compiles the
-> `canton-lib` Rust dependency, which Cargo fetches from GitHub over SSH, so
-> BuildKit needs an SSH key forwarded into the build via `--ssh`. `canton-lib`
-> is a **public** repository, so any SSH key registered on any GitHub account
-> works — no special repository access is required. Point `--ssh default=` at
-> your private key file, or pass just `--ssh default` to forward your running
-> `ssh-agent`.
+The published image needs no build. It wants a Canton participant's Admin and
+Ledger APIs, and an identity provider unless you run it in insecure mode:
 
 ```bash
-# Build the image (forward an SSH key registered on a GitHub account;
-# replace the key path with your own)
-docker build --ssh default=$HOME/.ssh/id_ed25519 -f development/Dockerfile -t dec-party-manager .
-
-# Run a single instance
 docker run -p 8080:8080 -v ./data:/data \
   -e DECPM_CANTON_ADMIN_HOST=canton-node \
   -e DECPM_CANTON_ADMIN_PORT=5002 \
@@ -106,7 +81,7 @@ docker run -p 8080:8080 -v ./data:/data \
   -e DECPM_NOISE_PORT=9001 \
   -e DECPM_CANTON_SYNCHRONIZER=global \
   -e DECPM_CANTON_NETWORK=devnet \
-  dec-party-manager
+  public.ecr.aws/dlc-link/decentralization-manager:<tag>
 ```
 
 Published releases ship that same binary as two images, `…:<tag>` and
@@ -122,21 +97,13 @@ docker run -p 8080:8080 -v ./data:/home/nonroot/data \
   ... public.ecr.aws/dlc-link/decentralization-manager:<tag>-nonroot
 ```
 
-### Running Multiple Participants (Development)
+### Prerequisites
 
-The Compose services build from `development/Dockerfile` and forward your
-`ssh-agent` (`ssh: default`), so add your GitHub-registered SSH key to the
-agent before bringing them up:
-
-```bash
-ssh-add ~/.ssh/id_ed25519   # your GitHub-registered key
-cd development
-docker compose up
-```
-
-This starts three participant instances on ports 8081, 8082, and 8083.
-
-The compose stack uses bridge networking and reaches Canton through `host.docker.internal`, so it runs the same on Docker Desktop, OrbStack, and Linux. Each participant expects its Canton Ledger/Admin APIs reachable on the host (the standard layout forwards them to `localhost:5001/5002`, `5011/5012`, `5021/5022` — e.g. via `just port-forward`). See the header of [`development/docker-compose.yml`](development/docker-compose.yml) for the full prerequisites.
+- Docker, or Docker Desktop. Compose v2.1.1 or newer for the LocalNet bundle.
+- Access to Canton participant nodes (Admin API and Ledger API), unless you use
+  the LocalNet bundle above.
+- A Rust toolchain and Node only to build from source — see
+  [Development](#development).
 
 ## Configuration
 
@@ -487,6 +454,72 @@ This repository is a Cargo workspace with four crates under `crates/`:
 
 Workspace-wide `cargo` commands build all four; pass `-p decman` to act on
 just the server (e.g. `cargo run -p decman -- serve`).
+
+### Running locally from source
+
+```bash
+# Build and run with env vars
+DECPM_DIR=./development/participant-1 \
+DECPM_PORT=8081 \
+DECPM_CANTON_ADMIN_HOST=localhost \
+DECPM_CANTON_ADMIN_PORT=5002 \
+DECPM_CANTON_LEDGER_HOST=localhost \
+DECPM_CANTON_LEDGER_PORT=5001 \
+DECPM_NOISE_PORT=9001 \
+cargo run -p decman -- serve
+
+# Or with a .env file in the data directory
+cargo run -p decman -- -d ./development/participant-1 serve
+
+# Or with release build
+cargo build --release -p decman
+DECPM_PORT=8081 ./target/release/dec-party-manager -d ./development/participant-1 serve
+```
+
+Open http://localhost:8081 in your browser.
+
+### Building the development image
+
+> **An SSH key is required to build the image.** The build compiles the
+> `canton-lib` Rust dependency, which Cargo fetches from GitHub over SSH, so
+> BuildKit needs an SSH key forwarded into the build via `--ssh`. `canton-lib`
+> is a **public** repository, so any SSH key registered on any GitHub account
+> works — no special repository access is required. Point `--ssh default=` at
+> your private key file, or pass just `--ssh default` to forward your running
+> `ssh-agent`.
+
+```bash
+# Build the image (forward an SSH key registered on a GitHub account;
+# replace the key path with your own)
+docker build --ssh default=$HOME/.ssh/id_ed25519 -f development/Dockerfile -t dec-party-manager .
+
+# Run a single instance
+docker run -p 8080:8080 -v ./data:/data \
+  -e DECPM_CANTON_ADMIN_HOST=canton-node \
+  -e DECPM_CANTON_ADMIN_PORT=5002 \
+  -e DECPM_CANTON_LEDGER_HOST=canton-node \
+  -e DECPM_CANTON_LEDGER_PORT=5001 \
+  -e DECPM_NOISE_PORT=9001 \
+  -e DECPM_CANTON_SYNCHRONIZER=global \
+  -e DECPM_CANTON_NETWORK=devnet \
+  dec-party-manager
+```
+
+### Running multiple participants from source
+
+The Compose services build from `development/Dockerfile` and forward your
+`ssh-agent` (`ssh: default`), so add your GitHub-registered SSH key to the
+agent before bringing them up:
+
+```bash
+ssh-add ~/.ssh/id_ed25519   # your GitHub-registered key
+cd development
+docker compose up
+```
+
+This starts three participant instances on ports 8081, 8082, and 8083.
+
+The compose stack uses bridge networking and reaches Canton through `host.docker.internal`, so it runs the same on Docker Desktop, OrbStack, and Linux. Each participant expects its Canton Ledger/Admin APIs reachable on the host (the standard layout forwards them to `localhost:5001/5002`, `5011/5012`, `5021/5022` — e.g. via `just port-forward`). See the header of [`development/docker-compose.yml`](development/docker-compose.yml) for the full prerequisites.
 
 ### Building
 

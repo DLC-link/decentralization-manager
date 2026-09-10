@@ -1,0 +1,85 @@
+networks:
+  localnet:
+    external: true
+    name: ${DOCKER_NETWORK:-localnet}
+
+volumes:
+  decman-1-data:
+  decman-2-data:
+  decman-3-data:
+
+services:
+  decman-1:
+    image: ${DECMAN_IMAGE:?set DECMAN_IMAGE, or start the stack with hackathon/up.sh}
+    platform: linux/amd64
+    container_name: decman-1
+    hostname: decman-1
+    networks:
+      - localnet
+    ports:
+      - "8081:8081"
+    volumes:
+      - decman-1-data:/data
+    environment:
+      DECPM_PORT: "8081"
+      DECPM_NOISE_PORT: "9001"
+      DECPM_PUBLIC_ADDRESS: decman-1
+      DECPM_CANTON_ADMIN_HOST: canton
+      DECPM_CANTON_ADMIN_PORT: "3902"
+      DECPM_CANTON_LEDGER_HOST: canton
+      DECPM_CANTON_LEDGER_PORT: "3901"
+      DECPM_CANTON_NETWORK: devnet
+      DECPM_CANTON_SYNCHRONIZER: global
+      DECPM_INSECURE: "true"
+      RUST_LOG: ${DECMAN_LOG:-dec_party_manager=info,tokio_noise=error,hyper_noise=error}
+    restart: unless-stopped
+
+  decman-2:
+    image: ${DECMAN_IMAGE:?set DECMAN_IMAGE, or start the stack with hackathon/up.sh}
+    platform: linux/amd64
+    container_name: decman-2
+    hostname: decman-2
+    networks:
+      - localnet
+    ports:
+      - "8082:8082"
+    volumes:
+      - decman-2-data:/data
+    environment:
+      DECPM_PORT: "8082"
+      DECPM_NOISE_PORT: "9002"
+      DECPM_PUBLIC_ADDRESS: decman-2
+      DECPM_CANTON_ADMIN_HOST: canton
+      DECPM_CANTON_ADMIN_PORT: "2902"
+      DECPM_CANTON_LEDGER_HOST: canton
+      DECPM_CANTON_LEDGER_PORT: "2901"
+      DECPM_CANTON_NETWORK: devnet
+      DECPM_CANTON_SYNCHRONIZER: global
+      DECPM_INSECURE: "true"
+      RUST_LOG: ${DECMAN_LOG:-dec_party_manager=info,tokio_noise=error,hyper_noise=error}
+    restart: unless-stopped
+
+  decman-3:
+    image: ${DECMAN_IMAGE:?set DECMAN_IMAGE, or start the stack with hackathon/up.sh}
+    platform: linux/amd64
+    container_name: decman-3
+    hostname: decman-3
+    networks:
+      - localnet
+    ports:
+      - "8083:8083"
+    volumes:
+      - decman-3-data:/data
+    environment:
+      DECPM_PORT: "8083"
+      DECPM_NOISE_PORT: "9003"
+      DECPM_PUBLIC_ADDRESS: decman-3
+      DECPM_CANTON_ADMIN_HOST: canton
+      DECPM_CANTON_ADMIN_PORT: "4902"
+      DECPM_CANTON_LEDGER_HOST: canton
+      DECPM_CANTON_LEDGER_PORT: "4901"
+      DECPM_CANTON_NETWORK: devnet
+      DECPM_CANTON_SYNCHRONIZER: global
+      DECPM_INSECURE: "true"
+      RUST_LOG: ${DECMAN_LOG:-dec_party_manager=info,tokio_noise=error,hyper_noise=error}
+    restart: unless-stopped
