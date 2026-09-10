@@ -4,29 +4,30 @@ set -euo pipefail
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
 download_bundle() {
-    if [ -d "$LOCALNET_CACHE_DIR/splice-node" ]; then
-        info "LocalNet bundle $LOCALNET_VERSION is already cached"
-        return 0
-    fi
-
-    say "Downloading the Splice LocalNet bundle $LOCALNET_VERSION (about 760MB, once)"
-    mkdir -p "$LOCALNET_CACHE_DIR"
-    curl -fL "$LOCALNET_BUNDLE_URL" -o "$LOCALNET_CACHE_DIR/splice-node.tar.gz" \
-        || die "download failed. Check the network and run this script again."
-    tar xzf "$LOCALNET_CACHE_DIR/splice-node.tar.gz" -C "$LOCALNET_CACHE_DIR" \
-        || die "the bundle did not extract. Delete $LOCALNET_CACHE_DIR and try again."
-    rm -f "$LOCALNET_CACHE_DIR/splice-node.tar.gz"
-    [ -f "$LOCALNET_DIR/compose.yaml" ] || die "unexpected bundle layout: $LOCALNET_DIR/compose.yaml is missing"
+    say "Fetching the Splice LocalNet bundle $LOCALNET_VERSION"
+    download_localnet || die "the bundle is not ready. Delete $LOCALNET_CACHE_DIR and run this script again."
 }
 
 start_localnet() {
     say "Starting LocalNet (Canton, Splice, Postgres)"
     info "the first start also pulls several GB of images"
-    localnet_compose up -d --wait canton splice postgres
+    localnet_start
+}
+
+pull_decman_image() {
+    say "Pulling $DECMAN_IMAGE"
+    if docker pull --platform linux/amd64 "$DECMAN_IMAGE" >/dev/null; then
+        return 0
+    fi
+    if [ -f "$HOME/.docker/config.json" ] \
+        && jq -e '.auths | has("public.ecr.aws")' "$HOME/.docker/config.json" >/dev/null 2>&1; then
+        die "the pull failed and your Docker config holds a public.ecr.aws login, which is probably expired. The image is public, so drop the login and try again: docker logout public.ecr.aws"
+    fi
+    die "could not pull $DECMAN_IMAGE. Check the network, then run this script again."
 }
 
 start_decman() {
-    say "Starting three DecMan nodes from $DECMAN_IMAGE"
+    say "Starting three DecMan nodes"
     decman_compose up -d
     wait_for_all_nodes
 }
@@ -104,6 +105,7 @@ if [ -z "$(decman_compose ps -q 2>/dev/null)" ]; then
 fi
 
 download_bundle
+pull_decman_image
 start_localnet
 start_decman
 configure_peers

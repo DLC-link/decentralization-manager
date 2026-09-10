@@ -3,18 +3,13 @@
 HACKATHON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$HACKATHON_DIR/.." && pwd)"
 
-set -a
-. "$HACKATHON_DIR/versions.env"
-set +a
-
-LOCALNET_CACHE_DIR="$HACKATHON_DIR/.localnet"
-LOCALNET_DIR="$LOCALNET_CACHE_DIR/splice-node/docker-compose/localnet"
-LOCALNET_BUNDLE_URL="https://github.com/digital-asset/decentralized-canton-sync/releases/download/v${LOCALNET_VERSION}/${LOCALNET_VERSION}_splice-node.tar.gz"
+# The LocalNet lifecycle, the bundle version and the compose invocation live in
+# localnet.sh, which integration-tests/env.sh sources too, so the two paths
+# cannot drift.
+. "$HACKATHON_DIR/localnet.sh"
 
 DECMAN_PROJECT=decman-hackathon
 STATE_FILE="$HACKATHON_DIR/.state"
-
-export DOCKER_NETWORK="${DOCKER_NETWORK:-localnet}"
 
 CANTON_TOKEN="eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJodHRwczovL2NhbnRvbi5uZXR3b3JrLmdsb2JhbCIsImlhdCI6MTc2Mzc0ODcwMiwic3ViIjoibGVkZ2VyLWFwaS11c2VyIn0.vpkfH4SoM9AZqbE38W4hrvl3xxy69jYs4u8gveskw9k"
 
@@ -99,19 +94,6 @@ ports_in_use() {
         fi
     done
     printf '%s' "$used"
-}
-
-localnet_compose() {
-    export IMAGE_TAG="$LOCALNET_VERSION"
-    docker compose \
-        --env-file "$LOCALNET_DIR/compose.env" \
-        --env-file "$LOCALNET_DIR/env/common.env" \
-        -f "$LOCALNET_DIR/compose.yaml" \
-        -f "$LOCALNET_DIR/resource-constraints.yaml" \
-        --profile sv \
-        --profile app-provider \
-        --profile app-user \
-        "$@"
 }
 
 decman_compose() {

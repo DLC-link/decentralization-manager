@@ -203,11 +203,16 @@ curl -s "localhost:8081/governance/chain-audit?party_id=$PARTY&limit=20&refresh=
   | jq '[.entries[] | {event_type, update_id, offset, timestamp, acting_parties, contract_id}]'
 ```
 
-You should see four kinds of event: the `create` of the rules contract, your
-`propose`, the `confirm` from P2, and the `execute` from P3. `acting_parties`
-names who signed each one, and `update_id` and `offset` locate the transaction
-on the ledger. This is the proof a decentralized party leaves behind: every
-step is attributable, and the execute is only there because two members agreed.
+You get four kinds of event: `propose`, `confirm`, `execute` and
+`execute_result`. There are more `confirm` entries than you pressed buttons for:
+the proposer's own confirmation counts toward the threshold, and one transaction
+can leave more than one entry. `acting_parties` names who signed each event, and
+`update_id` and `offset` locate the transaction on the ledger.
+
+This is the proof a decentralized party leaves behind: every step is
+attributable, and the execute exists only because two members agreed. The
+default scope is the governance trail; pass `scope=all` to see every ledger
+event the party witnesses.
 
 Do the same call on P2 and P3. All three nodes read the same trail from their
 own participant. No node is the source of truth.
