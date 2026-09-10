@@ -8,7 +8,7 @@ decman_compose stop
 
 if [ -d "$LOCALNET_DIR" ]; then
     say "Stopping LocalNet"
-    localnet_compose stop
+    localnet_stop
 fi
 
 say "Stopped"

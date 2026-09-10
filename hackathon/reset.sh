@@ -19,7 +19,7 @@ decman_compose down -v
 
 if [ -d "$LOCALNET_DIR" ]; then
     say "Removing LocalNet and its volumes"
-    localnet_compose down -v
+    localnet_wipe
 fi
 
 rm -f "$STATE_FILE"

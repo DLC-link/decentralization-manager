@@ -37,16 +37,22 @@ about 30 minutes and ends with an executed governance action in the audit trail.
 - A clone of this repository. The scripts read the governance DARs from
   `releases/v1/`.
 
-Apple Silicon: the release image is `linux/amd64` only, so Docker runs it under
-emulation. The compose file pins `platform: linux/amd64` so the pull does not
-fail. Expect slower startup. The Canton and Splice images have the same
-constraint.
+Apple Silicon: the Canton and Splice images are multi-arch and run native, but
+the DecMan release image is `linux/amd64` only, so Docker runs the three DecMan
+containers under emulation. The compose file pins `platform: linux/amd64` so the
+pull does not fail. Expect a slower start and higher CPU use on those three
+containers.
+
+If `DOCKER_DEFAULT_PLATFORM=linux/amd64` is set in your shell, everything in the
+stack runs emulated, Canton included. Unset it for a native LocalNet.
 
 ## What runs
 
 `up.sh` does five things:
 
-1. Downloads and caches the Splice LocalNet bundle in `hackathon/.localnet/`.
+1. Downloads and caches the Splice LocalNet bundle in `.localnet/` at the repo
+   root — the same cache the integration-test harness uses, so you download it
+   once.
 2. Starts the bundle's `canton`, `splice` and `postgres` services with the `sv`,
    `app-provider` and `app-user` profiles, and waits for the health checks.
 3. Starts three DecMan containers from the pinned release image on the bundle's
@@ -59,7 +65,10 @@ Re-running `up.sh` is safe. It keeps the ledger and the DecMan databases, and it
 skips the peer setup when the mesh is already up.
 
 Versions live in one place, [versions.env](versions.env): the LocalNet bundle
-version and the DecMan image tag.
+version and the DecMan image tag. The bring-up itself lives in
+[localnet.sh](localnet.sh), which `integration-tests/env.sh` sources as well, so
+CI and this bundle boot LocalNet exactly the same way. The harness wipes the
+ledger on start because tests must own it; this bundle keeps it.
 
 ## What LocalNet is not
 
@@ -97,7 +106,16 @@ docker logs -f canton
 docker logs -f splice
 ```
 
-**The download fails.** Delete `hackathon/.localnet/` and run `up.sh` again. The
+**The DecMan image will not pull.** `pull access denied` or `authorization token
+has expired` on `public.ecr.aws` means your Docker config holds a stale ECR
+login. The image is public and needs none, so drop the login:
+
+```bash
+docker logout public.ecr.aws
+```
+
+**The download fails.** Delete `.localnet/` at the repo root and run `up.sh`
+again. The
 bundle comes from the `digital-asset/decentralized-canton-sync` GitHub release,
 which needs no credentials.
 
