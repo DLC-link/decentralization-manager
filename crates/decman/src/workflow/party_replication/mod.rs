@@ -26,6 +26,18 @@ pub mod pipe;
 use crate::canton_id::CantonId;
 
 pub use acs::{collect_party_package_ids, import_party_acs, open_export_session};
+
+/// Unix milliseconds, saturating at 0 if the clock is before the epoch.
+///
+/// Progress timestamps only, so a clock that misbehaves costs a wrong elapsed
+/// readout and nothing else.
+pub fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
+}
+
 pub use offset::{capture_offset_once, current_ledger_offset};
 pub use onboarding_flag::{
     ClearOutcome, clear_onboarding_flag, has_onboarding_marker, wait_for_flag_cleared,
