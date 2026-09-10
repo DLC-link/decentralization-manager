@@ -2,8 +2,14 @@ name: Build Binary
 
 # Reusable binary build. Compiles the dec-party-manager binary on the runner
 # (not in Docker) with the given cargo profile and uploads it as an artifact
-# named "dec-party-manager". Callers (build.yml, release.yml) then wrap it in
-# the tiny Dockerfile.runtime image and push it to their respective ECR repo.
+# named "dec-party-manager-<arch>". Callers (build.yml, release.yml) then wrap
+# it in the tiny Dockerfile.runtime image and push it to their respective ECR
+# repo.
+#
+# One job per requested architecture. Each compiles natively — amd64 on
+# ubuntu-latest, arm64 on GitHub's ubuntu-24.04-arm runners, which are free for
+# public repositories. Nothing is emulated, so an arm64 build costs the same
+# wall clock as an amd64 one.
 #
 # Runs in rust:slim-bookworm so the binary links against the same glibc/openssl
 # that the distroless/cc-debian12 runtime image ships.
@@ -14,11 +20,22 @@ on:
         description: "Cargo profile to build: `fast` (dev images) or `release` (tags)."
         required: true
         type: string
+      arches:
+        description: >-
+          JSON array of architectures to build, e.g. `["amd64"]` or
+          `["amd64","arm64"]`. One job and one artifact per entry.
+        required: false
+        default: '["amd64"]'
+        type: string
 
 jobs:
   binary:
-    name: Build Binary (${{ inputs.profile }})
-    runs-on: ubuntu-latest
+    name: Build Binary (${{ inputs.profile }}, ${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ${{ fromJSON(inputs.arches) }}
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     container: rust:slim-bookworm
     # mold is a much faster linker. Set at job level so every cargo invocation
     # (gen-types + the binary build) shares one fingerprint and reuses the
@@ -35,12 +52,13 @@ jobs:
           # download the Swagger UI bundle (its reqwest feature isn't enabled).
           extra-packages: curl mold
 
-      # Separate cache per profile: fast (opt-level 0) and release (fat LTO)
-      # produce disjoint artifacts, so they must not share a target cache.
+      # Separate cache per profile and architecture: fast (opt-level 0) and
+      # release (fat LTO) produce disjoint artifacts, and so do two target
+      # architectures, so none of them may share a target cache.
       - name: Setup Rust target cache
         uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ inputs.profile }}-image
+          key: ${{ inputs.profile }}-image-${{ matrix.arch }}
           cache-on-failure: "true"
 
       # The frontend imports frontend/src/types.generated.ts (gitignored), so the
@@ -78,6 +96,6 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: dec-party-manager
+          name: dec-party-manager-${{ matrix.arch }}
           path: dec-party-manager
           retention-days: 1
