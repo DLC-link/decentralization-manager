@@ -35,7 +35,10 @@ pub(crate) use parties::{
     get_vetted_packages, resolve_owner_keys_from_peers,
 };
 pub(crate) use party_config::{discover_member_party, get_party_config, save_party_config};
-pub(crate) use tenant::{tenant_onboard, tenant_prepare, tenant_status};
+pub(crate) use tenant::{
+    tenant_add_hosts_onboard, tenant_add_hosts_prepare, tenant_onboard, tenant_prepare,
+    tenant_status,
+};
 pub(crate) use token_standard::{
     get_burn_requests_handler, get_credential_offers_handler, get_credentials_handler,
     get_holdings_handler, get_instruments_handler, get_mint_requests_handler, get_network_info,

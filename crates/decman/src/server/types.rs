@@ -34,10 +34,11 @@ pub use common::api::{
     ProposalsPageResponse, ProviderConfigurationInfo, ProviderConfigurationsResponse,
     ProviderServiceInfo, ProviderServicesResponse, RegistrarServiceInfo,
     RegistrarServiceRequestInfo, RegistrarServiceRequestsResponse, RegistrarServicesResponse,
-    ResponseSource, RightsStatus, SuccessResponse, TenantOnboardRequest, TenantOnboardResponse,
-    TenantPrepareRequest, TenantPrepareResponse, TransferFactoriesResponse, TransferFactoryInfo,
-    TransferPreapprovalsResponse, UserServiceInfo, UserServicesResponse, WorkflowResponse,
-    WorkflowRunsResponse, WorkflowStatusResponse,
+    ResponseSource, RightsStatus, SuccessResponse, TenantAddHostsOnboardRequest,
+    TenantAddHostsOnboardResponse, TenantAddHostsPrepareResponse, TenantAddHostsRequest,
+    TenantOnboardRequest, TenantOnboardResponse, TenantPrepareRequest, TenantPrepareResponse,
+    TransferFactoriesResponse, TransferFactoryInfo, TransferPreapprovalsResponse, UserServiceInfo,
+    UserServicesResponse, WorkflowResponse, WorkflowRunsResponse, WorkflowStatusResponse,
 };
 pub use common::types::{
     AcsTransferProgress, AuditLogEntry, AuthConfigResponse, ConnectionStatus, ContractInfo,
