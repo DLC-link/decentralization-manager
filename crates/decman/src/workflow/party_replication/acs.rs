@@ -19,6 +19,7 @@ use canton_proto_rs::com::{
         synchronizer_connectivity_service_client::SynchronizerConnectivityServiceClient,
     },
 };
+use common::types::{AcsTransferDirection, AcsTransferProgress};
 use futures::SinkExt;
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
@@ -29,11 +30,60 @@ use crate::{
     db::schema::{SchemaRead, SchemaWrite},
     error::Result,
     utils,
-    workflow::party_replication::{
-        ReplicationTarget, offset,
-        pipe::{ExportSession, PipeBlock, PipeTrailer},
+    workflow::{
+        party_replication::{
+            ReplicationTarget, now_ms, offset,
+            pipe::{ExportSession, PipeBlock, PipeTrailer},
+        },
+        storage::{WorkflowStorage, artifact_kinds},
     },
 };
+
+/// How often a moving transfer records progress for the UI, in bytes. Finer
+/// than the log cadence because a readout that only moves every 256 MiB looks
+/// stuck: at the rates we see this lands a sample every few seconds, and still
+/// only a few dozen writes per gigabyte.
+const PROGRESS_ARTIFACT_EVERY_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Record how far a transfer has got, for the UI to read back.
+///
+/// Best effort by design: this is a readout, and nothing reads it to make a
+/// decision, so a failed write warns rather than failing the transfer it is
+/// reporting on.
+pub async fn record_acs_progress(
+    storage: &SqlitePool,
+    instance_name: &str,
+    direction: AcsTransferDirection,
+    bytes: u64,
+    block: u64,
+    started_at_ms: i64,
+) {
+    let progress = AcsTransferProgress {
+        direction,
+        bytes: i64::try_from(bytes).unwrap_or(i64::MAX),
+        block: i64::try_from(block).unwrap_or(i64::MAX),
+        started_at_ms,
+        updated_at_ms: now_ms(),
+    };
+    let payload = match serde_json::to_vec(&progress) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("Could not encode ACS transfer progress: {e}");
+            return;
+        }
+    };
+    if let Err(e) = storage
+        .write_artifact(
+            instance_name,
+            artifact_kinds::ADD_PARTY_ACS_PROGRESS,
+            None,
+            &payload,
+        )
+        .await
+    {
+        tracing::warn!("Could not record ACS transfer progress: {e}");
+    }
+}
 
 /// How long Canton may wait for the party's activation topology transaction
 /// when exporting the ACS. The export runs after `SubmitProposals` already
@@ -563,6 +613,19 @@ where
     let mut hasher = Sha256::new();
     let mut fed = 0u64;
     let mut logged = 0u64;
+    let mut recorded = 0u64;
+    // A broken transfer restarts from block 1, so anchoring the rate here (not
+    // at the run's creation) keeps the reported throughput about this attempt.
+    let started_at_ms = now_ms();
+    record_acs_progress(
+        storage,
+        &target.instance_name,
+        AcsTransferDirection::Import,
+        0,
+        0,
+        started_at_ms,
+    )
+    .await;
 
     // The feeding loop's result is captured rather than propagated with `?`.
     // Returning early here would drop the RPC's JoinHandle, and tokio detaches
@@ -597,8 +660,33 @@ where
                             mib = fed / (1024 * 1024)
                         );
                     }
+                    if fed / PROGRESS_ARTIFACT_EVERY_BYTES != recorded {
+                        recorded = fed / PROGRESS_ARTIFACT_EVERY_BYTES;
+                        record_acs_progress(
+                            storage,
+                            &target.instance_name,
+                            AcsTransferDirection::Import,
+                            fed,
+                            seq,
+                            started_at_ms,
+                        )
+                        .await;
+                    }
                 }
-                PipeBlock::End { trailer, .. } => return Ok(Some(trailer)),
+                PipeBlock::End { trailer, .. } => {
+                    // Final sample, so the readout lands on the true total
+                    // rather than the last 16 MiB boundary it crossed.
+                    record_acs_progress(
+                        storage,
+                        &target.instance_name,
+                        AcsTransferDirection::Import,
+                        fed,
+                        seq,
+                        started_at_ms,
+                    )
+                    .await;
+                    return Ok(Some(trailer));
+                }
             }
             seq += 1;
             block = next_block(seq).await?;

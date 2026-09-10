@@ -27,21 +27,22 @@ use crate::{
         middleware::require_admin,
         respawn_coordinator,
         types::{
-            AddPartyInvitePayload, AddPartyRequest, ChangeThresholdInvitePayload,
-            ChangeThresholdRequest, ContractsInvitePayload, ContractsRequest, DarsInvitePayload,
-            DarsRequest, ErrorResponse, ExternalPartiesResponse, ExternalPartyHost,
-            ExternalPartyInfo, KickInvitePayload, KickRequest, KickResponse, KickStatus,
-            MessageResponse, MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload,
-            OnboardingMeshErrorResponse, OnboardingRequest, OnboardingResponse, OnboardingStatus,
-            SuccessResponse, WorkflowGuard, WorkflowInstance, WorkflowKind, WorkflowProgress,
-            WorkflowResponse, WorkflowRole, WorkflowRun, WorkflowRunsResponse,
-            WorkflowStatusResponse, permission_from_proto,
+            AcsTransferProgress, AddPartyInvitePayload, AddPartyRequest,
+            ChangeThresholdInvitePayload, ChangeThresholdRequest, ContractsInvitePayload,
+            ContractsRequest, DarsInvitePayload, DarsRequest, ErrorResponse,
+            ExternalPartiesResponse, ExternalPartyHost, ExternalPartyInfo, KickInvitePayload,
+            KickRequest, KickResponse, KickStatus, MessageResponse, MissingEdgeKind,
+            MissingPeerEdge, OnboardingInvitePayload, OnboardingMeshErrorResponse,
+            OnboardingRequest, OnboardingResponse, OnboardingStatus, SuccessResponse,
+            WorkflowGuard, WorkflowInstance, WorkflowKind, WorkflowProgress, WorkflowResponse,
+            WorkflowRole, WorkflowRun, WorkflowRunsResponse, WorkflowStatusResponse,
+            permission_from_proto,
         },
     },
     utils,
     workflow::{
         self, AddPartyStep, ChangeThresholdStep, ContractsStep, DarsStep, KickStep, OnboardingStep,
-        state::WorkflowStep,
+        state::WorkflowStep, storage::WorkflowStorage,
     },
 };
 
@@ -99,6 +100,7 @@ where
         expected_peers: invitees.to_vec(),
         completed_peers: Vec::new(),
         connected_peers: Vec::new(),
+        acs_progress: None,
         dec_party_id,
         prefix: None,
         participants: Vec::new(),
@@ -3080,11 +3082,36 @@ pub async fn list_workflows(data: web::Data<AppState>) -> impl Responder {
             let mut joined: Vec<CantonId> = active.connected_peers().await.into_iter().collect();
             joined.sort();
             r.connected_peers = joined;
+            // The source's progress is live in the open export session, so read
+            // it straight from memory rather than from a sampled artefact.
+            r.acs_progress = active.acs_export_progress().await;
+        }
+        if r.acs_progress.is_none() {
+            // The target has no registry entry — its side of the transfer runs
+            // in a peer job — so it records samples as an artefact instead.
+            r.acs_progress = read_acs_progress(&data.db, &r.instance_name).await;
         }
         resolved.push(r);
     }
 
     HttpResponse::Ok().json(WorkflowRunsResponse { runs: resolved })
+}
+
+/// Read the target's last recorded ACS transfer sample for a run.
+///
+/// Display only: a missing or unparseable sample means the card shows no
+/// transfer line, never an error.
+async fn read_acs_progress(db: &SqlitePool, instance_name: &str) -> Option<AcsTransferProgress> {
+    let raw = db
+        .read_artifact(
+            instance_name,
+            workflow::storage::artifact_kinds::ADD_PARTY_ACS_PROGRESS,
+            None,
+        )
+        .await
+        .ok()
+        .flatten()?;
+    serde_json::from_slice(&raw).ok()
 }
 
 /// List the external parties this participant currently hosts, read from its own
@@ -3856,6 +3883,7 @@ mod tests {
             expected_peers,
             completed_peers: Vec::new(),
             connected_peers: Vec::new(),
+            acs_progress: None,
             dec_party_id: None,
             prefix: None,
             participants: Vec::new(),

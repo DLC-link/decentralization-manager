@@ -2,6 +2,8 @@ use std::{collections::HashSet, marker::PhantomData, sync::Arc, time::Instant};
 
 use sqlx::SqlitePool;
 
+use common::types::AcsTransferProgress;
+
 use crate::{
     canton_id::CantonId,
     config::{NetworkConfig, NodeConfig, Peer},
@@ -118,6 +120,17 @@ impl ActiveWorkflow {
             Self::Dars(s) => s.workflow_state.connected_peers().await,
             Self::AddParty(s) => s.workflow_state.connected_peers().await,
             Self::ChangeThreshold(s) => s.workflow_state.connected_peers().await,
+        }
+    }
+
+    /// Live ACS export progress for this run, when a transfer is open.
+    ///
+    /// Only AddParty replicates a party, so every other kind answers `None`
+    /// without touching its state.
+    pub async fn acs_export_progress(&self) -> Option<AcsTransferProgress> {
+        match self {
+            Self::AddParty(s) => s.workflow_state.acs_export_progress().await,
+            _ => None,
         }
     }
 }
