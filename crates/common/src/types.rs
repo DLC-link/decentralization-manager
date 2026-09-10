@@ -359,6 +359,46 @@ impl std::str::FromStr for WorkflowRole {
 /// a step that carries no command.
 pub const WAITING_FOR_PEERS_STEP: &str = "WaitingForPeers";
 
+/// Which end of an ACS transfer this node is on.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+#[serde(rename_all = "lowercase")]
+pub enum AcsTransferDirection {
+    /// This node is the source, serving blocks out of its export stream.
+    Export,
+    /// This node is the target, feeding blocks into its Canton import.
+    Import,
+}
+
+/// How far an offline ACS transfer has got.
+///
+/// Deliberately carries no total, because there isn't one to carry:
+/// `ExportPartyAcsResponse` is a bare `bytes chunk` with no length or count,
+/// and counting the party's contracts up front would materialize the whole ACS
+/// — the read that has OOM'd nodes. So this drives an indeterminate bar with a
+/// throughput readout, never a percentage.
+///
+/// Written by whichever side is moving bytes, at the same cadence as the
+/// progress logs, and read back by the API. It is an artefact of the run, so a
+/// dismissed run takes its progress with it.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct AcsTransferProgress {
+    pub direction: AcsTransferDirection,
+    /// Bytes moved so far in this attempt.
+    pub bytes: i64,
+    /// Sequence number of the most recent block moved.
+    pub block: i64,
+    /// Unix milliseconds this attempt started. A transfer that breaks restarts
+    /// from block 1, so this resets with it and the rate stays honest.
+    pub started_at_ms: i64,
+    /// Unix milliseconds of this sample, so a stalled transfer is visible as a
+    /// timestamp that stops advancing.
+    pub updated_at_ms: i64,
+}
+
 /// A single persisted workflow run — control-plane state for either the
 /// coordinator side or an peer side. The matching artefacts live in
 /// `workflow_artifacts` and are looked up by `instance_name`.
@@ -399,6 +439,11 @@ pub struct WorkflowRun {
     /// node does not currently coordinate.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connected_peers: Vec<CantonId>,
+    /// How far this run's ACS transfer has got, when one is moving. Merged in
+    /// by the API layer from the run's artefacts, so it is `None` for every
+    /// run and step that shifts no ACS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acs_progress: Option<AcsTransferProgress>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dec_party_id: Option<CantonId>,
     /// Dec party prefix associated with this run (e.g. "UAT"). Populated by

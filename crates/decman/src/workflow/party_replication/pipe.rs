@@ -21,7 +21,7 @@
 use canton_proto_rs::com::digitalasset::canton::admin::participant::v30::ExportPartyAcsResponse;
 use sha2::{Digest, Sha256};
 
-use crate::error::Result;
+use crate::{error::Result, workflow::party_replication::now_ms};
 
 /// The final block's trailer: total bytes served plus the SHA-256 over all of
 /// them, so the target can prove after the fact what it fed Canton.
@@ -60,6 +60,9 @@ pub struct ExportSession {
     hasher: Sha256,
     /// True once Canton's stream has ended and the trailer has been built.
     drained: bool,
+    /// Unix ms this session opened. A broken transfer opens a fresh session
+    /// from block 1, so the reported rate is always about the current attempt.
+    started_at_ms: i64,
 }
 
 impl ExportSession {
@@ -73,12 +76,23 @@ impl ExportSession {
             total_len: 0,
             hasher: Sha256::new(),
             drained: false,
+            started_at_ms: now_ms(),
         }
     }
 
     /// Total bytes handed out so far, for progress logging.
     pub fn served_bytes(&self) -> u64 {
         self.total_len
+    }
+
+    /// Sequence number of the last block served, for progress readouts.
+    pub fn served_blocks(&self) -> u64 {
+        self.served_seq
+    }
+
+    /// Unix ms this session opened, so the UI can show elapsed and rate.
+    pub fn started_at_ms(&self) -> i64 {
+        self.started_at_ms
     }
 
     /// Whether this session has served past the first block.

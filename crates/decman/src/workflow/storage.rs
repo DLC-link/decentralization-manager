@@ -119,6 +119,15 @@ pub mod artifact_kinds {
     /// during the transfer would otherwise serve the target an empty payload it
     /// cannot decode.
     pub const ADD_PARTY_SYNC_ACS_COMMAND: &str = "add_party_sync_acs_command";
+    /// JSON `AcsTransferProgress` for the run's ACS transfer, written by
+    /// whichever side is moving bytes so the UI can show movement during a
+    /// step that otherwise looks frozen for minutes.
+    ///
+    /// Display only — nothing reads it back to make a decision, so a stale or
+    /// missing sample costs a readout, never correctness. Written at the same
+    /// cadence as the progress logs rather than per block, which is roughly
+    /// twenty writes for a gigabyte.
+    pub const ADD_PARTY_ACS_PROGRESS: &str = "add_party_acs_progress";
 
     /// Unsigned onboarding-flag clearing proposal (P2P update without the
     /// new member's Onboarding marker) created by the coordinator. Empty
