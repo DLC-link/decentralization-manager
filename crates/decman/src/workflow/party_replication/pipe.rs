@@ -63,6 +63,10 @@ pub struct ExportSession {
     /// Unix ms this session opened. A broken transfer opens a fresh session
     /// from block 1, so the reported rate is always about the current attempt.
     started_at_ms: i64,
+    /// Unix ms a NEW block was last served. Replays do not touch it: the same
+    /// bytes going out twice is a retry, not progress, and a reader watching
+    /// for a stall needs the moment the counters last actually moved.
+    last_served_at_ms: i64,
 }
 
 impl ExportSession {
@@ -77,6 +81,7 @@ impl ExportSession {
             hasher: Sha256::new(),
             drained: false,
             started_at_ms: now_ms(),
+            last_served_at_ms: now_ms(),
         }
     }
 
@@ -93,6 +98,14 @@ impl ExportSession {
     /// Unix ms this session opened, so the UI can show elapsed and rate.
     pub fn started_at_ms(&self) -> i64 {
         self.started_at_ms
+    }
+
+    /// Unix ms a new block was last served, so a reader can tell a moving
+    /// transfer from a stalled one. Stamping this at read time instead would
+    /// make every poll look like progress and no export would ever appear
+    /// stalled.
+    pub fn last_served_at_ms(&self) -> i64 {
+        self.last_served_at_ms
     }
 
     /// Whether this session has served past the first block.
@@ -155,6 +168,7 @@ impl ExportSession {
 
         self.served_seq = seq;
         self.last = Some(block.clone());
+        self.last_served_at_ms = now_ms();
         Ok(block)
     }
 }

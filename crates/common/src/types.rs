@@ -379,9 +379,11 @@ pub enum AcsTransferDirection {
 /// — the read that has OOM'd nodes. So this drives an indeterminate bar with a
 /// throughput readout, never a percentage.
 ///
-/// Written by whichever side is moving bytes, at the same cadence as the
-/// progress logs, and read back by the API. It is an artefact of the run, so a
-/// dismissed run takes its progress with it.
+/// Sampled rather than continuous. The source reports live session state on
+/// every read; the target records a sample every 16 MiB, so `bytes` trails the
+/// true figure by up to one sample and `updated_at_ms` is when the counters
+/// last moved, not when the run was last polled. A sample that stops advancing
+/// is the signal that the transfer has stalled.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]

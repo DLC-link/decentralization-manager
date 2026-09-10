@@ -21,10 +21,7 @@ use crate::{
     error::Result,
     noise::MessageType,
     server::{WorkflowKind, WorkflowProgress},
-    workflow::party_replication::{
-        now_ms,
-        pipe::{ExportSession, PipeBlock},
-    },
+    workflow::party_replication::pipe::{ExportSession, PipeBlock},
 };
 
 /// Trait for workflow steps. Implementations are small `Copy` enums per
@@ -236,6 +233,10 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
 
     /// Live progress of the open export session, for the UI. `None` when no
     /// export is open, which is every run and step that shifts no ACS.
+    ///
+    /// `updated_at_ms` is when a block was last actually served, not when this
+    /// was called, so an export that stops moving reads as stalled instead of
+    /// looking permanently fresh to anything polling it.
     pub async fn acs_export_progress(&self) -> Option<AcsTransferProgress> {
         self.acs_export
             .lock()
@@ -246,7 +247,7 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
                 bytes: i64::try_from(session.served_bytes()).unwrap_or(i64::MAX),
                 block: i64::try_from(session.served_blocks()).unwrap_or(i64::MAX),
                 started_at_ms: session.started_at_ms(),
-                updated_at_ms: now_ms(),
+                updated_at_ms: session.last_served_at_ms(),
             })
     }
 
