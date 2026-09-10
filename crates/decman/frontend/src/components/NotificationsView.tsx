@@ -38,6 +38,7 @@ import { columnSx } from "../styles";
 import { PaginationControls } from "./Pagination";
 import { usePagination } from "../usePagination";
 import {
+  AcsTransferMeter,
   ApprovalCard,
   ConfirmAvatars,
   ConfirmRing,
@@ -1751,6 +1752,11 @@ const WorkflowRunCard = ({
                 current={run.step_index}
                 total={run.step_total}
               />
+            </Box>
+          )}
+          {isInProgress && run.acs_progress && (
+            <Box sx={{ mt: 1.25 }}>
+              <AcsTransferMeter progress={run.acs_progress} />
             </Box>
           )}
         </>

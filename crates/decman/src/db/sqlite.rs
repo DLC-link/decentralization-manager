@@ -2512,6 +2512,7 @@ mod tests {
             ],
             completed_peers: Vec::new(),
             connected_peers: Vec::new(),
+            acs_progress: None,
             dec_party_id: None,
             prefix: None,
             participants: Vec::new(),
