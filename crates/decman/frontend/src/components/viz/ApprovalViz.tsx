@@ -1,7 +1,7 @@
-import { Fragment, useState, type ReactNode } from "react";
-import { Box, Button, Tooltip, Typography } from "@mui/material";
+import { Fragment, useEffect, useState, type ReactNode } from "react";
+import { Box, Button, LinearProgress, Tooltip, Typography } from "@mui/material";
 import { alpha, keyframes, useTheme } from "@mui/material/styles";
-import type { WorkflowProgress } from "../../types";
+import type { AcsTransferProgress, WorkflowProgress } from "../../types";
 
 type PillTone = "accent" | "neutral" | "success" | "danger";
 
@@ -372,6 +372,126 @@ export const ApprovalCard = ({
  * current as a green pulsing dot, the rest as empty circles. The current step
  * name is shown by the caller (in the footer), so this renders dots only.
  */
+/** How often the meter re-reads the clock, so "no movement for Nm" advances. */
+const ACS_TICK_MS = 5_000;
+
+/**
+ * The current time, re-read on an interval.
+ *
+ * Reading `Date.now()` during render is impure and would only update when the
+ * component happened to re-render, which is exactly when a stalled transfer
+ * stops causing renders.
+ */
+const useTicking = (intervalMs: number): number => {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), intervalMs);
+    return () => clearInterval(id);
+  }, [intervalMs]);
+  return now;
+};
+
+/** A transfer with no sample this recent is treated as stalled, not moving. */
+const ACS_STALL_AFTER_MS = 45_000;
+
+const BYTE_UNITS = ["B", "KiB", "MiB", "GiB", "TiB"];
+
+const formatBytes = (n: number): string => {
+  let value = Math.max(0, n);
+  let unit = 0;
+  while (value >= 1024 && unit < BYTE_UNITS.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  const shown = unit === 0 ? String(Math.round(value)) : value.toFixed(value < 10 ? 2 : 1);
+  return `${shown} ${BYTE_UNITS[unit]}`;
+};
+
+const formatElapsed = (ms: number): string => {
+  const total = Math.max(0, Math.round(ms / 1000));
+  if (total < 60) return `${total}s`;
+  const minutes = Math.floor(total / 60);
+  if (minutes < 60) return `${minutes}m ${total % 60}s`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+};
+
+/**
+ * Movement on an ACS transfer.
+ *
+ * Indeterminate on purpose. Canton streams the snapshot as bare chunks with no
+ * length and no contract count, and counting the party's contracts up front
+ * would materialize the whole ACS, which is the read that has OOM'd nodes. So
+ * this shows how much has moved and how fast, never a percentage: for a
+ * transfer that can run for hours, "moving at 4.5 MB/s" is the useful signal,
+ * and a fake percentage would be worse than none.
+ */
+export const AcsTransferMeter = ({
+  progress,
+}: {
+  progress: AcsTransferProgress;
+}) => {
+  const theme = useTheme();
+  const now = useTicking(ACS_TICK_MS);
+  const elapsedMs = Math.max(0, progress.updated_at_ms - progress.started_at_ms);
+  const bytesPerSecond = elapsedMs > 0 ? (progress.bytes * 1000) / elapsedMs : 0;
+  const sinceSampleMs = Math.max(0, now - progress.updated_at_ms);
+  const stalled = sinceSampleMs > ACS_STALL_AFTER_MS;
+  const label = progress.direction === "export" ? "Sending ACS" : "Importing ACS";
+
+  const facts = [
+    formatBytes(progress.bytes),
+    bytesPerSecond > 0 ? `${formatBytes(bytesPerSecond)}/s` : null,
+    elapsedMs > 0 ? formatElapsed(elapsedMs) : null,
+    progress.block > 0 ? `block ${progress.block}` : null,
+  ].filter(Boolean);
+
+  return (
+    <Box>
+      <Box
+        sx={{
+          display: "flex",
+          alignItems: "baseline",
+          justifyContent: "space-between",
+          gap: 1,
+          mb: 0.5,
+        }}
+      >
+        <Typography sx={{ fontSize: 12, fontWeight: 600 }}>{label}</Typography>
+        <Typography
+          sx={{
+            fontSize: 12,
+            color: stalled ? "warning.main" : "text.secondary",
+            fontVariantNumeric: "tabular-nums",
+          }}
+        >
+          {stalled
+            ? `no movement for ${formatElapsed(sinceSampleMs)}`
+            : facts.join(" · ")}
+        </Typography>
+      </Box>
+      <Tooltip
+        title={
+          stalled
+            ? "The last progress sample is old. The transfer may be retrying a block, or the node may be down."
+            : "Canton streams the snapshot without a total, so there is no percentage to show."
+        }
+      >
+        <LinearProgress
+          variant={stalled ? "determinate" : "indeterminate"}
+          value={stalled ? 100 : undefined}
+          color={stalled ? "warning" : "primary"}
+          sx={{
+            height: 4,
+            borderRadius: 2,
+            bgcolor: alpha(theme.palette.text.primary, 0.08),
+            [REDUCED]: { "& .MuiLinearProgress-bar": { animation: "none" } },
+          }}
+        />
+      </Tooltip>
+    </Box>
+  );
+};
+
 export const WorkflowPipeline = ({
   current,
   total,
