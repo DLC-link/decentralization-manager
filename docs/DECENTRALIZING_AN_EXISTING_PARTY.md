@@ -91,8 +91,13 @@ being updated, the party cannot transact.
 
 Afterwards the party is external in every respect except one: its namespace is
 still the source participant's key, so **that node can unilaterally change the
-party's topology forever**, including removing hosts. Say this to the partner
-plainly rather than letting them infer symmetry that is not there.
+party's topology forever**, including removing hosts. That is not only an
+availability risk. By Canton's authorization table, removing a signing key needs
+the party namespace and re-promoting a host to Submission needs the party
+namespace plus the participant namespace — and for a converted local party those
+are the same key. So the node can revoke the owner's key and resume acting as
+the party, on its own signature alone. Say this to the partner plainly rather
+than letting them infer symmetry that is not there.
 
 ## What can go wrong
 
@@ -126,4 +131,5 @@ partial import replaces one inconsistency with a different one.
   Whether the party then transacts with it is a different runtime path and is
   not yet covered by a test.
 - **Undo a conversion.** Removing a signing key is a topology write nobody has
-  built or tried here.
+  built or tried here. Unimplemented, not forbidden: the source node's own key
+  authorizes it, per the paragraph above.
