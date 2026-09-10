@@ -1,8 +1,8 @@
-# Runtime-only image. The binary is compiled in CI by the reusable
+# Runtime-only image. The binaries are compiled in CI by the reusable
 # build-binary.yml workflow (used by both build.yml for per-commit private dev
 # images and release.yml for tagged public images) and passed in via the build
 # context, so this Dockerfile does no compilation at all — it just wraps the
-# prebuilt binary.
+# prebuilt binary for the architecture being assembled.
 #
 # The local dev / docker-compose full-source build lives in development/Dockerfile.
 #
@@ -20,7 +20,12 @@
 ARG BASE_TAG=latest
 FROM gcr.io/distroless/cc-debian12:${BASE_TAG}
 
-COPY --chmod=0755 dec-party-manager /usr/local/bin/dec-party-manager
+# One binary per architecture sits under ctx/<arch>/, and buildx sets
+# TARGETARCH per platform it assembles, so a single `--platform
+# linux/amd64,linux/arm64` build picks the right one for each. The image runs no
+# build step, so nothing needs QEMU.
+ARG TARGETARCH
+COPY --chmod=0755 ${TARGETARCH}/dec-party-manager /usr/local/bin/dec-party-manager
 
 # Stated explicitly rather than inherited from the base, so the runtime
 # identity is visible here. The binary needs no root either way: it binds 8080
