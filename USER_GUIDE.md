@@ -10,16 +10,14 @@ kicking a participant), see the [Use Cases](docs/USE_CASES.md).
 
 ## Quick Start with Docker
 
-Build the image locally, then run a single instance. The build fetches the
-`canton-lib` Rust dependency from GitHub over SSH, so forward an SSH key
-registered on a GitHub account via BuildKit's `--ssh` flag (`canton-lib` is
-public, so no special repository access is needed):
+If you have no Canton node yet, start with the LocalNet bundle in
+[hackathon/README.md](hackathon/README.md): one command, three participants,
+three DecMan nodes, no identity provider.
+
+Against your own participant, run the published image. It carries the same
+binary as every release and needs no build:
 
 ```bash
-# Build the image (replace the key path with your own GitHub-registered key)
-docker build --ssh default=$HOME/.ssh/id_ed25519 -f development/Dockerfile -t dec-party-manager .
-
-# Run
 docker run -p 8080:8080 -p 9000:9000 -v ./data:/data \
   -e DECPM_PORT=8080 \
   -e DECPM_NOISE_PORT=9000 \
@@ -29,10 +27,13 @@ docker run -p 8080:8080 -p 9000:9000 -v ./data:/data \
   -e DECPM_CANTON_LEDGER_PORT=5001 \
   -e DECPM_CANTON_SYNCHRONIZER=global \
   -e DECPM_CANTON_NETWORK=devnet \
-  dec-party-manager
+  public.ecr.aws/dlc-link/decentralization-manager:<tag>
 ```
 
 Then open the web UI at `http://localhost:8080`.
+
+To build the image from source instead, see
+[Building the development image](README.md#building-the-development-image).
 
 The `-v ./data:/data` mount persists the SQLite database (peers, party
 credentials) and the auto-generated Noise keypair across restarts.
