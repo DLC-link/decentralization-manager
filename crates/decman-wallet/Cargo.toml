@@ -10,6 +10,7 @@ name = "decman_wallet"
 path = "src/lib.rs"
 
 [dependencies]
+async-trait = { workspace = true }
 base64 = { workspace = true }
 ed25519-dalek = { workspace = true }
 rand = { workspace = true }
@@ -17,11 +18,12 @@ reqwest = { version = "0.13", features = ["json"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
 tracing = { workspace = true }
 zeroize = { workspace = true }
 
 common = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "time"] }
 wiremock = { workspace = true }
