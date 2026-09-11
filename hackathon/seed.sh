@@ -5,13 +5,24 @@ set -euo pipefail
 
 PREFIX_FROM_ENV="${PARTY_PREFIX-}"
 load_state
-PARTY_PREFIX="${PREFIX_FROM_ENV:-${PARTY_PREFIX:-demo-party}}"
+STORED_PREFIX="${PARTY_PREFIX-}"
 DEC_PARTY_ID="${DEC_PARTY_ID-}"
 RULES_CID="${RULES_CID-}"
 DARS_DONE="${DARS_DONE-}"
 MEMBER_1="${MEMBER_1-}"
 MEMBER_2="${MEMBER_2-}"
 MEMBER_3="${MEMBER_3-}"
+
+PARTY_PREFIX="${PREFIX_FROM_ENV:-${STORED_PREFIX:-demo-party}}"
+
+# A prefix the caller asked for wins over the one the last run recorded:
+# seeding a second party must not silently reuse the first one's id. The DARs
+# and the member parties are per participant, not per party, so they carry
+# over.
+if [ "$PARTY_PREFIX" != "$STORED_PREFIX" ]; then
+    DEC_PARTY_ID=""
+    RULES_CID=""
+fi
 
 read_participant_ids() {
     local idx
@@ -24,7 +35,7 @@ read_participant_ids() {
 find_party_id() {
     local attempt=0 found
     while [ "$attempt" -lt 60 ]; do
-        found=$(dm_get 8081 /decentralized-parties \
+        found=$(try_get 8081 /decentralized-parties \
             | jq -r --arg p "$PARTY_PREFIX" 'first(.parties[]? | select(.party_id | startswith($p + "::")) | .party_id) // empty')
         if [ -n "$found" ]; then
             printf '%s' "$found"
@@ -94,13 +105,11 @@ distribute_dars() {
         return 0
     fi
 
-    say "Uploading and distributing the governance DARs"
+    say "Distributing the governance DARs"
     local workdir
     workdir=$(mktemp -d)
-    build_dar_payload "$workdir/upload.json"
     build_dar_payload "$workdir/distribute.json" "$(jq -n --arg p2 "$PID_2" --arg p3 "$PID_3" '[$p2, $p3]')"
 
-    dm_post 8081 /dars/upload "@$workdir/upload.json" >/dev/null
     dm_post 8081 /dars/distribute "@$workdir/distribute.json" >/dev/null
     rm -rf "$workdir"
 
@@ -156,13 +165,7 @@ configure_party_on_nodes() {
                 user_id: "ledger-api-user",
                 keycloak_url: "",
                 keycloak_realm: "",
-                keycloak_client_id: "",
-                packages: {
-                    governance_action: "#governance-action-v1",
-                    governance_core: "#governance-core-v1",
-                    governance_token_custody: "#governance-token-custody-v1",
-                    governance_utility_onboarding: "#governance-utility-onboarding-v1"
-                }
+                keycloak_client_id: ""
             }')" >/dev/null
         info "$(node_name "$idx") is configured"
     done
@@ -171,10 +174,10 @@ configure_party_on_nodes() {
 find_rules_cid() {
     local attempt=0 cid
     while [ "$attempt" -lt 30 ]; do
-        cid=$(dm_get 8081 /decentralized-parties | jq -r --arg id "$DEC_PARTY_ID" \
+        cid=$(try_get 8081 /decentralized-parties | jq -r --arg id "$DEC_PARTY_ID" \
             'first(.parties[]? | select(.party_id == $id) | .contracts[]? | select(.template_id | contains("GovernanceRules")) | .contract_id) // empty')
         if [ -z "$cid" ]; then
-            cid=$(dm_get 8081 "/governance/state?party_id=$DEC_PARTY_ID" | jq -r '.state.contract_id // empty')
+            cid=$(try_get 8081 "/governance/state?party_id=$DEC_PARTY_ID" | jq -r '.state.contract_id // empty')
         fi
         if [ -n "$cid" ]; then
             printf '%s' "$cid"

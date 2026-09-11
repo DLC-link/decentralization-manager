@@ -15,6 +15,10 @@ The DecMan nodes run the published release image as is.
 
 After `up.sh` finishes:
 
+The UIs listen on loopback only. These nodes have authentication disabled, so
+publishing them on every interface would give anyone on the venue network full
+control of your party.
+
 | Node | UI | Canton participant |
 | --- | --- | --- |
 | DecMan 1 | http://localhost:8081 | app-provider (`canton:3901` / `canton:3902`) |
@@ -57,8 +61,9 @@ stack runs emulated, Canton included. Unset it for a native LocalNet.
    `app-provider` and `app-user` profiles, and waits for the health checks.
 3. Starts three DecMan containers from the pinned release image on the bundle's
    Docker network, so they reach Canton as `canton:<port>`.
-4. Writes the peer mesh: each node learns the other two Noise public keys, then
-   the nodes restart to load them.
+4. Writes the peer mesh: each node learns the other two Noise public keys. No
+   restart — a node rebuilds that allowlist from its peers table per inbound
+   connection, and the ping loop reads it live.
 5. Waits until all three nodes report each other as connected.
 
 Re-running `up.sh` is safe. It keeps the ledger and the DecMan databases, and it

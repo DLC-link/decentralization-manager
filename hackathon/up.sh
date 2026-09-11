@@ -15,8 +15,12 @@ start_localnet() {
 }
 
 pull_decman_image() {
+    if docker image inspect "$DECMAN_IMAGE" >/dev/null 2>&1; then
+        info "$DECMAN_IMAGE is already present"
+        return 0
+    fi
     say "Pulling $DECMAN_IMAGE"
-    if docker pull --platform linux/amd64 "$DECMAN_IMAGE" >/dev/null; then
+    if docker pull --platform "${DECMAN_PLATFORM:-linux/amd64}" "$DECMAN_IMAGE" >/dev/null; then
         return 0
     fi
     if [ -f "$HOME/.docker/config.json" ] \
@@ -63,10 +67,9 @@ configure_peers() {
         dm_post "$(http_port "$idx")" /network-config "$peers" >/dev/null
     done
 
-    say "Restarting the nodes so they load the peer keys"
-    decman_compose restart
-    wait_for_all_nodes
-
+    # No restart: each node rebuilds its inbound key allowlist from the peers
+    # table per connection, and the 5s ping loop reads the same table live, so
+    # the mesh converges within a tick or two of the POSTs above.
     local attempt=0
     while [ "$attempt" -lt 45 ]; do
         if peers_connected; then
