@@ -145,11 +145,19 @@ jobs:
         with:
           key: release-ci
           cache-on-failure: "true"
+      # The bundle version lives in hackathon/versions.env, which both
+      # integration-tests/env.sh and the hackathon quickstart read, so the key
+      # is derived from it rather than restated here.
+      - name: Read the LocalNet version
+        id: localnet
+        run: |
+          . hackathon/versions.env
+          echo "version=$LOCALNET_VERSION" >> "$GITHUB_OUTPUT"
       - name: Cache localnet bundle
         uses: actions/cache@v6
         with:
           path: .localnet/
-          key: localnet-0.6.12
+          key: localnet-${{ steps.localnet.outputs.version }}
       # Generate the frontend TS bindings before the integration build (which
       # builds the decman binary → build.rs → frontend, needing this file).
       - name: Generate frontend TypeScript bindings
