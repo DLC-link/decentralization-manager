@@ -5,15 +5,14 @@ use canton_proto_rs::com::{
     digitalasset::canton::{
         crypto::{
             admin::v30::{
-                ListKeysFilters, ListMyKeysRequest, vault_service_client::VaultServiceClient,
+                ListKeysFilters, ListMyKeysRequest, private_key_metadata,
+                vault_service_client::VaultServiceClient,
             },
-            v30::SigningPublicKey,
+            v30::{SigningKeyUsage, SigningPublicKey, public_key},
         },
         topology::admin::v30::{
-            BaseQuery, ListPartyToKeyMappingRequest, ListPartyToParticipantRequest, StoreId,
-            Synchronizer, base_query,
-            list_party_to_key_mapping_response::result::Item as PartyToKeyItem,
-            list_party_to_participant_response::result::Item as P2pItem, store_id, synchronizer,
+            ListPartyToParticipantRequest,
+            list_party_to_participant_response::result::Item as P2pItem,
             topology_manager_read_service_client::TopologyManagerReadServiceClient,
         },
     },
@@ -27,7 +26,10 @@ use crate::{
     error::Result,
     signing::{PreparedTransactionHash, SigningKeyContext, select_signer},
     utils,
-    workflow::storage::{WorkflowStorage, artifact_kinds, identity_kinds},
+    workflow::{
+        storage::{WorkflowStorage, artifact_kinds, identity_kinds},
+        topology,
+    },
 };
 
 /// Sign prepared ledger submissions with Daml key
@@ -344,9 +346,66 @@ fn encode_messages_length_prefixed<M: prost::Message>(messages: &[M]) -> Vec<u8>
 /// as of Canton 3.5, still served). Both are checked, newest format first.
 ///
 /// Returns the same `varint(len)||SigningPublicKey` × 2 byte layout that
-/// `read_all_messages_from_bytes` expects. Index `[0]` is unused downstream
-/// (originally the namespace key), so we duplicate the Daml key to keep the
-/// shape valid; the caller only reads `[1]`.
+/// `read_all_messages_from_bytes` expects. Index `[0]` is this node's
+/// namespace key for the party, resolved out of the vault against the
+/// party's owner set: the bundle outlives this call in `dec_party_identity`,
+/// and peer validation reads `[0]` to check that a DNS proposal keeps this
+/// node an owner.
+/// This node's namespace key for a party: the vault key with namespace usage
+/// whose fingerprint is in the party's decentralized-namespace owner set.
+///
+/// Returns `None` when the party's namespace definition cannot be read or no
+/// vault key matches — this node is then not an owner, or the key is gone.
+///
+/// # Errors
+///
+/// Errors when the vault cannot be listed.
+async fn own_namespace_key(
+    config: &NodeConfig,
+    dec_party_id: &CantonId,
+    synchronizer_id: &str,
+) -> Result<Option<SigningPublicKey>> {
+    let owners = match topology::fetch_namespace_definition(
+        config,
+        synchronizer_id,
+        &dec_party_id.namespace.to_hex(),
+    )
+    .await
+    {
+        Ok(definition) => definition.owners,
+        Err(e) => {
+            tracing::warn!("Cannot read the namespace definition for {dec_party_id}: {e:#}");
+            return Ok(None);
+        }
+    };
+
+    let mut vault_client = VaultServiceClient::new(config.admin_channel().await?);
+    let response = vault_client
+        .list_my_keys(tonic::Request::new(ListMyKeysRequest {
+            filters: Some(ListKeysFilters {
+                fingerprint: String::new(),
+                name: String::new(),
+                purpose: vec![],
+                usage_v30: vec![SigningKeyUsage::Namespace as i32],
+            }),
+            base_request: None,
+        }))
+        .await?
+        .into_inner();
+
+    for meta in response.private_keys_metadata {
+        if let Some(private_key_metadata::PublicKeyWithName::V30(named)) = meta.public_key_with_name
+            && let Some(pk) = named.public_key
+            && let Some(public_key::Key::SigningPublicKey(signing_key)) = pk.key
+            && owners.contains(&utils::compute_fingerprint(&signing_key))
+        {
+            return Ok(Some(signing_key));
+        }
+    }
+
+    Ok(None)
+}
+
 async fn backfill_peer_keys_from_chain(
     config: &NodeConfig,
     dec_party_id: &CantonId,
@@ -354,25 +413,11 @@ async fn backfill_peer_keys_from_chain(
     let dec_party_id_str = dec_party_id.to_string();
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
 
-    let base_query = BaseQuery {
-        store: Some(StoreId {
-            store: Some(store_id::Store::Synchronizer(Synchronizer {
-                kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id)),
-            })),
-        }),
-        proposals: false,
-        operation: 0,
-        time_query: Some(base_query::TimeQuery::HeadState(())),
-        filter_signed_key: String::new(),
-        protocol_version: None,
-        client_version: None,
-    };
-
     // 1. Current format: signing keys embedded on the PartyToParticipant.
     let mut topology_client = TopologyManagerReadServiceClient::new(config.admin_channel().await?);
     let p2p_response = topology_client
         .list_party_to_participant(tonic::Request::new(ListPartyToParticipantRequest {
-            base_query: Some(base_query.clone()),
+            base_query: Some(topology::head_state_query(&synchronizer_id)),
             filter_party: dec_party_id_str.clone(),
             filter_participant: String::new(),
         }))
@@ -394,18 +439,9 @@ async fn backfill_peer_keys_from_chain(
             "PartyToParticipant for {dec_party_id} carries no party_signing_keys; \
              trying the legacy PartyToKeyMapping topology mapping"
         );
-        let ptk_response = topology_client
-            .list_party_to_key_mapping(tonic::Request::new(ListPartyToKeyMappingRequest {
-                base_query: Some(base_query),
-                filter_party: dec_party_id_str.clone(),
-            }))
+        signing_keys = topology::fetch_party_to_key_mapping(config, &synchronizer_id, dec_party_id)
             .await?
-            .into_inner();
-        signing_keys = ptk_response
-            .results
-            .into_iter()
-            .find_map(|r| r.item.map(|PartyToKeyItem::V30(mapping)| mapping))
-            .map(|item| item.signing_keys)
+            .map(|mapping| mapping.signing_keys)
             .unwrap_or_default();
     }
 
@@ -440,11 +476,18 @@ async fn backfill_peer_keys_from_chain(
                 "Recovered Daml signing key {fingerprint} for {dec_party_id} from the on-chain \
                  topology state"
             );
-            // Encode as [namespace_placeholder, daml_key]. Downstream only
-            // reads index [1], so the placeholder content is irrelevant
-            // beyond the length-prefix shape — we duplicate the daml key.
+            let namespace_key = own_namespace_key(config, dec_party_id, &synchronizer_id)
+                .await?
+                .unwrap_or_else(|| {
+                    tracing::warn!(
+                        "No namespace key for {dec_party_id} in this node's vault; recording \
+                         the Daml key in its place. Peer validation treats such a bundle as \
+                         unrecorded rather than reading a Daml fingerprint as a namespace"
+                    );
+                    key.clone()
+                });
             return Ok(Some(encode_messages_length_prefixed(&[
-                key.clone(),
+                namespace_key,
                 key.clone(),
             ])));
         }

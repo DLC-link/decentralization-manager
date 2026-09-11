@@ -75,6 +75,16 @@ pub async fn submit_change(
     let party_id = CantonId::parse(&party_id_raw)?;
     tracing::info!("Party ID: {party_id}");
 
+    // The DNS is submitted first, so a P2P that Canton will refuse for a
+    // missing signing-key signature has to stop the run before that happens.
+    topology::check_added_signing_keys_signed(
+        config,
+        &synchronizer_id,
+        &party_id,
+        &p2p_transaction,
+    )
+    .await?;
+
     topology::submit_dns_then_p2p(
         config,
         &synchronizer_id,

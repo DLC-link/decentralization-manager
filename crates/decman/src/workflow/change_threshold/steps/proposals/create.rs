@@ -18,6 +18,7 @@ use crate::{
     utils,
     workflow::{
         change_threshold::ChangeThresholdConfig,
+        signing_keys::adopt_legacy_signing_keys,
         storage::{WorkflowStorage, artifact_kinds},
         topology,
     },
@@ -102,19 +103,30 @@ pub async fn create_proposals(
     // authorize a transaction for it. Both are the threshold this workflow
     // exists to change, so re-issuing the signing keys verbatim changed only
     // half of it (#428).
-    let signing_keys = current_p2p.party_signing_keys.ok_or_else(|| {
-        anyhow::anyhow!(
-            "Party {party_id} carries no party signing keys, so its signing threshold \
-             cannot be changed"
-        )
-    })?;
+    let current_signing_keys = current_p2p
+        .party_signing_keys
+        .map(|sk| sk.keys)
+        .unwrap_or_default();
+    let signing_keys = if current_signing_keys.is_empty() {
+        // A party onboarded before Canton 3.4 keeps its keys in a deprecated
+        // PartyToKeyMapping, which carries a threshold of its own. Moving the
+        // members' keys inline is what puts both thresholds in one place.
+        let members: Vec<String> = current_p2p
+            .participants
+            .iter()
+            .map(|p| p.participant_uid.clone())
+            .collect();
+        adopt_legacy_signing_keys(config, storage, &synchronizer_id, &party_id, &members).await?
+    } else {
+        current_signing_keys
+    };
 
     let new_p2p = PartyToParticipant {
         party: party_id_str.clone(),
         threshold: new_threshold.try_into()?,
         participants: current_p2p.participants,
         party_signing_keys: Some(SigningKeysWithThreshold {
-            keys: signing_keys.keys,
+            keys: signing_keys,
             threshold: new_threshold.try_into()?,
         }),
     };
