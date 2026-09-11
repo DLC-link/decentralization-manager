@@ -111,6 +111,20 @@ pub mod artifact_kinds {
     /// health-verifying the participant — before retrying. That recovery is a
     /// no-op when the participant is already healthy, so leaving it set is safe.
     pub const ADD_PARTY_ACS_IMPORT_INFLIGHT: &str = "add_party_acs_import_inflight";
+
+    /// Tenant add-hosts: the source host's ledger offset, captured at
+    /// `/v0/tenant/add-hosts/prepare` — before the topology is submitted — so
+    /// `ExportPartyAcs` finds the party's activation on the joiner after it.
+    /// Plaintext UTF-8 integer.
+    pub const TENANT_ADD_HOSTS_EXPORT_OFFSET: &str = "tenant_add_hosts_export_offset";
+    /// Tenant add-hosts: the joiner's own pre-activation offset, captured at
+    /// the same moment on its own node, used as `begin_offset_exclusive` for
+    /// `ClearPartyOnboardingFlag`. Keyed by self id.
+    pub const TENANT_ADD_HOSTS_PRE_ACTIVATION_OFFSET: &str =
+        "tenant_add_hosts_pre_activation_offset";
+    /// Tenant add-hosts: durable disconnect-window marker, same contract as
+    /// [`ADD_PARTY_ACS_IMPORT_INFLIGHT`].
+    pub const TENANT_ADD_HOSTS_IMPORT_INFLIGHT: &str = "tenant_add_hosts_import_inflight";
     /// The assembled SyncAcs command payload (config + the package ids the
     /// target's preflight needs). The ACS itself is not in it: the target pulls
     /// the snapshot block by block straight into Canton's import.

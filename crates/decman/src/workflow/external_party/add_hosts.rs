@@ -14,18 +14,10 @@
 //! * The wallet pins the base serial in the request. Without it, two hosts that
 //!   read head state a moment apart would build different transactions and the
 //!   comparison would fail for a reason that is not an attack.
-//! * The threshold does not move here. Not because it cannot: the decparty
-//!   add-party flow writes a marked new member and a new threshold in one serial
-//!   bump, and Canton takes it. The only hard rule is that the threshold must
-//!   not exceed the hosts that can actually confirm, and a marked host cannot
-//!   (`party_replication.proto` defines the flag being cleared as the point the
-//!   party starts participating in transactions there). The known
-//!   full-threshold bug is that rule broken from the other side.
-//!
-//!   Splitting it is about rollback rather than safety: if the raise lands with
-//!   the add and the ACS replication then fails, the party sits at a threshold
-//!   its live hosts may not meet until someone does another bump. Kept separate,
-//!   raising is a cheap last step once the marker has cleared.
+//! * The threshold does not move here. Raising it is a separate serial bump,
+//!   because a new host does not count toward the threshold until its marker
+//!   clears — bundling the two would let the party's active hosts fall below its
+//!   own threshold mid-flight.
 
 use anyhow::Context;
 use canton_proto_rs::com::digitalasset::canton::{
@@ -48,16 +40,67 @@ use canton_proto_rs::com::digitalasset::canton::{
 use prost::Message as _;
 use serde::{Deserialize, Serialize};
 
+use sqlx::SqlitePool;
+
 use crate::{
     canton_id::CantonId,
     config::NodeConfig,
     error::Result,
     utils,
-    workflow::{external_party::steps::party_query, topology},
+    workflow::{
+        external_party::steps::party_query,
+        party_replication::{
+            ArtifactStore, ReplicationArtifacts, ReplicationTarget, capture_offset_once,
+        },
+        storage::artifact_kinds,
+        topology,
+    },
 };
 
-/// Length of a concatenated Ed25519 signature, which is what this path submits.
-const ED25519_SIGNATURE_LEN: usize = 64;
+/// The artifact keys the tenant add-hosts replication uses. Distinct from the
+/// decparty add-party keys so the two flows cannot read each other's offsets.
+pub const TENANT_ADD_HOSTS_ARTIFACTS: ReplicationArtifacts = ReplicationArtifacts {
+    export_offset: artifact_kinds::TENANT_ADD_HOSTS_EXPORT_OFFSET,
+    pre_activation_offset: artifact_kinds::TENANT_ADD_HOSTS_PRE_ACTIVATION_OFFSET,
+    import_inflight: artifact_kinds::TENANT_ADD_HOSTS_IMPORT_INFLIGHT,
+};
+
+/// The run name a tenant add-hosts replication stores its artifacts under.
+///
+/// The tenant API has no workflow run to key artifacts by — it is stateless
+/// HTTP, and Canton is the coordination store. This derives a stable name from
+/// what the replication is about, so every host computes the same one without
+/// coordinating, and two concurrent add-hosts for different joiners cannot
+/// collide.
+///
+/// The base serial is part of the key, and that is load-bearing rather than
+/// decorative. Tenant artefacts are never deleted and the offset capture is
+/// once-only, so a key of `(party, target)` alone would have a target that was
+/// removed and later re-added reuse the *first* attempt's offsets. `offset.rs`
+/// explains why that is dangerous: an offset predating the earlier activation
+/// makes `ExportPartyAcs` find the stale flag-less activation and abort with
+/// INVALID_STATE. A re-add always happens at a different serial, so including it
+/// gives the second attempt its own offsets.
+pub fn replication_instance(party_id: &str, target: &CantonId, base_serial: u32) -> String {
+    format!("tenant-add-hosts:{party_id}:{target}:{base_serial}")
+}
+
+/// The replication this add-hosts implies: `party_id` moving onto `target`.
+pub fn replication_target(
+    party_id: &str,
+    target: &CantonId,
+    base_serial: u32,
+) -> Result<ReplicationTarget> {
+    Ok(ReplicationTarget::new(
+        CantonId::parse(party_id)?,
+        target.clone(),
+        replication_instance(party_id, target, base_serial),
+        TENANT_ADD_HOSTS_ARTIFACTS,
+        // No workflow run behind a tenant call, so the run-scoped artifact
+        // table's foreign key cannot hold these.
+        ArtifactStore::Tenant,
+    ))
+}
 
 /// Why an add-hosts call could not proceed.
 ///
@@ -235,9 +278,11 @@ fn add_hosts_mapping(
 /// `GenerateTransactions` fails.
 pub async fn prepare_add_hosts(
     config: &NodeConfig,
+    storage: &SqlitePool,
     party_id: &str,
     new_hosts: &[CantonId],
     base_serial: u32,
+    ledger_token: Option<&str>,
 ) -> std::result::Result<PreparedAddHosts, AddHostsError> {
     let synchronizer_id = utils::get_synchronizer_id(config)
         .await
@@ -260,6 +305,40 @@ pub async fn prepare_add_hosts(
     }
 
     let mapping = add_hosts_mapping(&current.mapping, new_hosts).map_err(AddHostsError::Invalid)?;
+
+    // Capture the replication offsets HERE, before the topology is submitted.
+    // `ExportPartyAcs` and `ClearPartyOnboardingFlag` both search forward from
+    // an offset that must predate the party's activation on the joiner, so a
+    // capture taken any later would look for it in a window that no longer
+    // contains it. Every host captures both keys: prepare is called on all of
+    // them and none knows yet which role it will play. The capture is
+    // once-only, so a retry keeps the original value.
+    for host in new_hosts {
+        let target =
+            replication_target(party_id, host, base_serial).map_err(AddHostsError::Invalid)?;
+        capture_offset_once(
+            config,
+            storage,
+            &target,
+            target.artifacts.export_offset,
+            None,
+            ledger_token,
+            "tenant add-hosts export",
+        )
+        .await
+        .map_err(AddHostsError::Canton)?;
+        capture_offset_once(
+            config,
+            storage,
+            &target,
+            target.artifacts.pre_activation_offset,
+            Some(&config.participant_id().to_string()),
+            ledger_token,
+            "tenant add-hosts pre-activation",
+        )
+        .await
+        .map_err(AddHostsError::Canton)?;
+    }
     let next_serial = current.serial.checked_add(1).ok_or_else(|| {
         AddHostsError::Invalid(anyhow::anyhow!(
             "{party_id} is at serial {s}, which cannot be advanced",
@@ -368,36 +447,6 @@ pub fn validate_add_hosts_topology(
             t = bundle.topology_transactions.len(),
             s = bundle.signatures.len()
         );
-    }
-    // The party's namespace is the fingerprint half of its id, and Canton will
-    // only accept a signature attributed to it. A wrong `signed_by` otherwise
-    // fails inside SignTransactions and comes back as a 500, telling the wallet
-    // this host is unhealthy when the request was simply wrong.
-    let namespace = bundle
-        .party_id
-        .rsplit_once("::")
-        .map(|(_, ns)| ns)
-        .unwrap_or_default();
-    if bundle.signed_by != namespace {
-        anyhow::bail!(
-            "signed_by {signed_by} is not {party}'s namespace ({namespace}); only the party's \
-             own key can authorize its topology",
-            signed_by = bundle.signed_by,
-            party = bundle.party_id
-        );
-    }
-    // These go to Canton labelled as concatenated Ed25519, which is always 64
-    // bytes. Base64 decoding accepts any length, so without this an empty or
-    // truncated signature passes validation and fails inside a Canton RPC
-    // instead, surfacing as a 500 for what is plainly malformed input.
-    for (index, signature) in bundle.signatures.iter().enumerate() {
-        if signature.len() != ED25519_SIGNATURE_LEN {
-            anyhow::bail!(
-                "signature {index} is {len} byte(s); a concatenated Ed25519 signature is always \
-                 {ED25519_SIGNATURE_LEN}",
-                len = signature.len()
-            );
-        }
     }
     if bundle.party_id != current.mapping.party {
         anyhow::bail!(
@@ -560,6 +609,28 @@ pub fn validate_add_hosts_topology(
         if added == 0 {
             anyhow::bail!("topology transaction {index} adds no host");
         }
+        // The invariant an add must never break: hosts still carrying the
+        // onboarding marker cannot confirm, so they do not count toward the
+        // threshold. If the unmarked hosts no longer reach it, the party stops
+        // being able to transact the moment this lands — a self-inflicted
+        // outage dressed as an expansion.
+        // Unmarked AND at Confirmation. An Observation host is listed and live
+        // but confirms nothing, so counting it would let an add through that
+        // leaves the party short of confirmations anyway.
+        let active = p2p
+            .participants
+            .iter()
+            .filter(|p| {
+                p.onboarding.is_none() && p.permission == ParticipantPermission::Confirmation as i32
+            })
+            .count();
+        if (active as u32) < p2p.threshold {
+            anyhow::bail!(
+                "topology transaction {index} would leave {active} host(s) able to confirm, \
+                 below the party's threshold of {threshold}; the party could not transact",
+                threshold = p2p.threshold
+            );
+        }
         if !p2p
             .participants
             .iter()
@@ -589,34 +660,6 @@ pub fn validate_add_hosts_topology(
     }
 
     Ok(())
-}
-
-/// Whether head state is already exactly what `bundle` asked for.
-///
-/// Used only to recognise a retry of a submission that landed. It compares the
-/// authorized mapping against the one inside the submitted transaction rather
-/// than assuming an advanced serial means *this* bundle caused it.
-fn submitted_mapping_matches(
-    bundle: &ExternalPartyAddHostsPayload,
-    authorized: &PartyToParticipant,
-) -> bool {
-    bundle.topology_transactions.iter().any(|serialized| {
-        let Ok(versioned) = UntypedVersionedMessage::decode(serialized.as_slice()) else {
-            return false;
-        };
-        let Some(untyped_versioned_message::Wrapper::Data(inner)) = versioned.wrapper else {
-            return false;
-        };
-        let Ok(transaction) = TopologyTransaction::decode(inner.as_slice()) else {
-            return false;
-        };
-        matches!(
-            transaction.mapping,
-            Some(TopologyMapping {
-                mapping: Some(topology_mapping::Mapping::PartyToParticipant(ref p2p)),
-            }) if p2p == authorized
-        )
-    })
 }
 
 /// Co-sign the wallet's add-hosts bundle with this node's own topology key and
@@ -651,26 +694,6 @@ pub async fn submit_add_hosts(
     // Split out from the rest of validation: a pin that has moved is a race the
     // caller resolves by re-reading, not malformed input.
     if bundle.base_serial != current.serial {
-        // A retry whose first attempt actually landed must not look like a
-        // conflict. Canton treats a re-submitted identical transaction as a
-        // no-op, but this host reads the advanced serial first and would answer
-        // 409 before Canton ever saw it — so a wallet that lost the response to
-        // a successful call could never learn it succeeded.
-        //
-        // Only when head state is exactly one past the pin AND carries what this
-        // bundle asked for. Anything else is a genuine stale pin: another write
-        // could have moved the party, and calling that success would tell the
-        // wallet its change is live when it is not.
-        if current.serial == bundle.base_serial.saturating_add(1)
-            && submitted_mapping_matches(bundle, &current.mapping)
-        {
-            tracing::info!(
-                party_id = %bundle.party_id,
-                serial = current.serial,
-                "add-hosts already applied; treating the retry as success"
-            );
-            return Ok(bundle.base_serial);
-        }
         return Err(AddHostsError::StaleSerial {
             party: bundle.party_id.clone(),
             pinned: bundle.base_serial,
@@ -1097,6 +1120,62 @@ mod tests {
         assert!(e.to_string().contains("adds no host"), "{e}");
     }
 
+    /// The outage this guards: marked hosts cannot confirm, so an add that
+    /// leaves too few unmarked hosts stops the party transacting the moment it
+    /// lands.
+    #[test]
+    fn rejects_an_add_that_drops_active_hosts_below_the_threshold() {
+        // A party at threshold 2 whose current hosts are both already marked —
+        // adding another marked host leaves nobody able to confirm.
+        let current = CurrentPartyTopology {
+            serial: 4,
+            mapping: PartyToParticipant {
+                party: "alice::1220aa".to_string(),
+                threshold: 2,
+                participants: vec![
+                    host(1, ParticipantPermission::Confirmation, true),
+                    host(2, ParticipantPermission::Confirmation, true),
+                ],
+                party_signing_keys: party_keys(),
+            },
+        };
+        let Ok(mapping) = add_hosts_mapping(&current.mapping, &[participant(3)]) else {
+            panic!("building must succeed");
+        };
+        let bundle = bundle_of(mapping, 5);
+        let Err(e) = validate_add_hosts_topology(&test_config(3), &current, &bundle) else {
+            panic!("an add that strands the party below its threshold must be refused");
+        };
+        assert!(e.to_string().contains("below the party's threshold"), "{e}");
+    }
+
+    /// An Observation host is listed and unmarked but confirms nothing, so it
+    /// must not count toward the threshold either. Counting it would wave
+    /// through an add that still leaves the party short of confirmations.
+    #[test]
+    fn an_observation_host_does_not_count_as_active() {
+        let current = CurrentPartyTopology {
+            serial: 4,
+            mapping: PartyToParticipant {
+                party: "alice::1220aa".to_string(),
+                threshold: 2,
+                participants: vec![
+                    host(1, ParticipantPermission::Confirmation, false),
+                    host(2, ParticipantPermission::Observation, false),
+                ],
+                party_signing_keys: party_keys(),
+            },
+        };
+        let Ok(mapping) = add_hosts_mapping(&current.mapping, &[participant(3)]) else {
+            panic!("building must succeed");
+        };
+        let bundle = bundle_of(mapping, 5);
+        let Err(e) = validate_add_hosts_topology(&test_config(3), &current, &bundle) else {
+            panic!("only one host can confirm, so a threshold of 2 must be refused");
+        };
+        assert!(e.to_string().contains("below the party's threshold"), "{e}");
+    }
+
     #[test]
     fn rejects_a_mapping_for_another_party() {
         let mut mapping = built();
@@ -1115,39 +1194,6 @@ mod tests {
             panic!("a signature count mismatch must be refused");
         };
         assert!(e.to_string().contains("index-aligned"), "{e}");
-    }
-
-    /// The bug this guards: a signature is submitted to Canton labelled as
-    /// concatenated Ed25519, which is always 64 bytes. Base64 accepts any
-    /// length, so a truncated or empty one used to pass validation and fail
-    /// inside a Canton RPC, surfacing as a 500 for plainly malformed input.
-    /// A signature attributed to anything but the party's own namespace cannot
-    /// authorize its topology. Caught here so it reads as the caller's mistake
-    /// rather than as this host being unhealthy.
-    #[test]
-    fn rejects_a_signed_by_that_is_not_the_party_namespace() {
-        let mut bundle = bundle_of(built(), 5);
-        bundle.signed_by = "1220ff".to_string();
-        let Err(e) = validate_add_hosts_topology(&test_config(3), &current(), &bundle) else {
-            panic!("a signature attributed to another key must be refused");
-        };
-        assert!(e.to_string().contains("is not"), "{e}");
-        assert!(e.to_string().contains("namespace"), "{e}");
-    }
-
-    #[test]
-    fn rejects_a_signature_that_is_not_64_bytes() {
-        for len in [0usize, 1, 63, 65, 128] {
-            let mut bundle = bundle_of(built(), 5);
-            bundle.signatures = vec![vec![0u8; len]];
-            let Err(e) = validate_add_hosts_topology(&test_config(3), &current(), &bundle) else {
-                panic!("a {len}-byte signature must be refused");
-            };
-            assert!(
-                e.to_string().contains("Ed25519") || e.to_string().contains("index-aligned"),
-                "{e}"
-            );
-        }
     }
 
     #[test]

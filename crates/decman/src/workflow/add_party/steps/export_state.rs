@@ -82,7 +82,7 @@ pub async fn export_state(
     capture_offset_once(
         config,
         storage,
-        instance_name,
+        &add_party_config.replication_target(instance_name),
         artifact_kinds::ADD_PARTY_EXPORT_OFFSET,
         None,
         ledger_token,

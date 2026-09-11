@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     canton_id::CantonId,
     workflow::{
-        party_replication::{ReplicationArtifacts, ReplicationTarget},
+        party_replication::{ArtifactStore, ReplicationArtifacts, ReplicationTarget},
         storage::artifact_kinds,
     },
 };
@@ -85,6 +85,7 @@ impl AddPartyConfig {
             self.new_participant_id.clone(),
             instance_name.to_string(),
             ADD_PARTY_REPLICATION_ARTIFACTS,
+            ArtifactStore::WorkflowRun,
         )
     }
 }
