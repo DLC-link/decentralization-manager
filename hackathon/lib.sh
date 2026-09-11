@@ -11,8 +11,6 @@ REPO_DIR="$(cd "$HACKATHON_DIR/.." && pwd)"
 DECMAN_PROJECT=decman-hackathon
 STATE_FILE="$HACKATHON_DIR/.state"
 
-CANTON_TOKEN="eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJodHRwczovL2NhbnRvbi5uZXR3b3JrLmdsb2JhbCIsImlhdCI6MTc2Mzc0ODcwMiwic3ViIjoibGVkZ2VyLWFwaS11c2VyIn0.vpkfH4SoM9AZqbE38W4hrvl3xxy69jYs4u8gveskw9k"
-
 DAR_FILES="governance-action-v1-0.1.0.dar
 governance-core-v1-0.1.0.dar
 governance-token-custody-v1-0.1.0.dar
@@ -66,14 +64,16 @@ require_tools() {
     [ -n "$compose_version" ] || die "docker compose v2 is required (Docker Desktop ships it)"
     printf '2.1.1\n%s\n' "$compose_version" | sort -CV \
         || die "docker compose v2.1.1 or newer is required (found $compose_version)"
-
-    docker info >/dev/null 2>&1 || die "the Docker daemon is not reachable — start Docker Desktop first"
 }
 
+# Doubles as the daemon check: one `docker info` answers both "is Docker
+# running" and "how much has it been given".
 check_docker_resources() {
-    local mem cpus mem_gb
-    mem=$(docker info --format '{{.MemTotal}}' 2>/dev/null || echo 0)
-    cpus=$(docker info --format '{{.NCPU}}' 2>/dev/null || echo 0)
+    local info mem cpus mem_gb
+    info=$(docker info --format '{{.MemTotal}} {{.NCPU}}' 2>/dev/null) \
+        || die "the Docker daemon is not reachable — start Docker Desktop first"
+    mem=${info% *}
+    cpus=${info#* }
     mem_gb=$((mem / 1073741824))
 
     info "Docker reports ${mem_gb}GB memory and ${cpus} CPUs"
@@ -122,7 +122,7 @@ req() {
 dm_get() { req GET "http://localhost:$1$2"; }
 dm_post() { req POST "http://localhost:$1$2" "$3"; }
 dm_put() { req PUT "http://localhost:$1$2" "$3"; }
-canton_post() { req POST "http://localhost:$1$2" "$3" "$CANTON_TOKEN"; }
+canton_post() { req POST "http://localhost:$1$2" "$3" "$LOCALNET_CANTON_TOKEN"; }
 
 try_get() { curl -sSf --max-time 30 "http://localhost:$1$2" 2>/dev/null; }
 
@@ -167,13 +167,13 @@ poll_workflow() {
         response=$(try_get "$port" "$endpoint" || echo '{}')
         status=$(printf '%s' "$response" | jq -r '.status // empty')
         case "$status" in
-            completed | Completed)
+            completed)
                 info "$label completed"
                 return 0
                 ;;
-            failed | Failed)
+            failed | cancelled)
                 error=$(printf '%s' "$response" | jq -r '.error // "unknown error"')
-                die "$label failed: $error"
+                die "$label $status: $error"
                 ;;
         esac
         attempt=$((attempt + 1))

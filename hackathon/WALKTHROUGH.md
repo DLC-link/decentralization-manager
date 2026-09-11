@@ -123,7 +123,7 @@ party exists, so allocate one on each participant's Canton JSON Ledger API and
 let the ledger user act as it:
 
 ```bash
-TOKEN=$(grep '^CANTON_TOKEN=' hackathon/lib.sh | cut -d'"' -f2)
+TOKEN=$(grep '^LOCALNET_CANTON_TOKEN=' hackathon/localnet.sh | cut -d'"' -f2)
 
 # participant 1 is on 3975, participant 2 on 2975, participant 3 on 4975
 curl -s -X POST localhost:3975/v2/parties \
@@ -136,8 +136,12 @@ curl -s -X POST localhost:3975/v2/parties \
 registers the pair on each node.
 
 In the UI the registration is the **Party Configuration** dialog: it stores the
-member party for this node and the package names the governance workflows use.
-On LocalNet the user is `ledger-api-user` and the Keycloak fields stay empty.
+member party this node signs with, and the ledger user it acts as. On LocalNet
+that user is `ledger-api-user` and the Keycloak fields stay empty.
+
+The dialog also shows a package map. The server does not store it today — it
+writes its built-in defaults on every save — so a fork of the governance
+packages needs those defaults changed, not this form.
 
 Shortcut for this step and the two before it:
 
@@ -174,8 +178,11 @@ list.
 
 The API path is three calls. Note the `action` field on confirm and execute: for
 a domain proposal the endpoint requires a well-formed action object, but the
-action that actually runs comes from `proposal_cid`, so a placeholder is normal
-here. `hackathon/demo.sh` uses exactly these calls:
+action that runs comes from `proposal_cid`, so a placeholder is normal here.
+Send `{"type": "governance_set_threshold", "new_threshold": 0}`, which is what
+the UI sends: the node writes the request into its local audit log as received,
+so a non-zero placeholder leaves a "set threshold to 1" entry for an action
+nobody proposed. `hackathon/demo.sh` uses exactly these calls:
 
 ```bash
 PARTY=$(curl -s localhost:8081/decentralized-parties | jq -r '.parties[0].party_id')

@@ -12,10 +12,34 @@ LOCALNET_BUNDLE_URL="https://github.com/digital-asset/decentralized-canton-sync/
 
 export DOCKER_NETWORK="${DOCKER_NETWORK:-localnet}"
 
+# LocalNet's unsafe-auth JWT: HS256 over the dev secret, sub=ledger-api-user,
+# aud=https://canton.network.global, no exp. It is what Canton's JSON Ledger
+# API accepts here and what DecMan mints for itself in insecure mode. LocalNet
+# only — it authorizes nothing anywhere else.
+LOCALNET_CANTON_TOKEN="eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJodHRwczovL2NhbnRvbi5uZXR3b3JrLmdsb2JhbCIsImlhdCI6MTc2Mzc0ODcwMiwic3ViIjoibGVkZ2VyLWFwaS11c2VyIn0.vpkfH4SoM9AZqbE38W4hrvl3xxy69jYs4u8gveskw9k"
+
+# The stamp is written only after the layout check passes, so it certifies
+# "this exact version, fully extracted". A version bump or an interrupted
+# extraction leaves no matching stamp and the bundle is fetched again —
+# without it, a stale splice-node/ would boot new images against old compose
+# files, or a half-extracted tree would be reused forever.
+LOCALNET_STAMP="$LOCALNET_CACHE_DIR/.version"
+
+localnet_cached() {
+    [ -f "$LOCALNET_DIR/compose.yaml" ] || return 1
+    [ -f "$LOCALNET_STAMP" ] || return 1
+    [ "$(cat "$LOCALNET_STAMP")" = "$LOCALNET_VERSION" ]
+}
+
 download_localnet() {
-    if [ -d "$LOCALNET_CACHE_DIR/splice-node" ]; then
+    if localnet_cached; then
         echo "Localnet bundle $LOCALNET_VERSION already cached"
         return 0
+    fi
+
+    if [ -d "$LOCALNET_CACHE_DIR/splice-node" ]; then
+        echo "Cached bundle is incomplete or not $LOCALNET_VERSION; fetching it again..."
+        rm -rf "$LOCALNET_CACHE_DIR/splice-node"
     fi
 
     echo "Downloading localnet bundle v${LOCALNET_VERSION} (about 760MB, once)..."
@@ -30,6 +54,7 @@ download_localnet() {
         echo "ERROR: unexpected bundle layout: $LOCALNET_DIR/compose.yaml is missing" >&2
         return 1
     fi
+    printf '%s\n' "$LOCALNET_VERSION" > "$LOCALNET_STAMP"
     echo "Localnet bundle ready"
 }
 

@@ -8,7 +8,12 @@ DEC_PARTY_ID="${DEC_PARTY_ID-}"
 RULES_CID="${RULES_CID-}"
 VOTE_DESCRIPTION="${VOTE_DESCRIPTION:-Adopt the hackathon demo motion}"
 
-PLACEHOLDER_ACTION='{"type": "governance_set_threshold", "new_threshold": 1}'
+# A core_domain confirm and execute build their choice from proposal_cid and
+# ignore `action`, but the endpoint still requires a well-formed one. Both
+# first-party clients send this exact zero placeholder, and the local audit log
+# stores the request as sent — so anything else writes a governance action into
+# the log that nobody proposed.
+PLACEHOLDER_ACTION='{"type": "governance_set_threshold", "new_threshold": 0}'
 
 list_proposal_cids() {
     local port=$1
@@ -103,9 +108,16 @@ print_evidence() {
 }
 
 require_stack_up
-[ -n "$DEC_PARTY_ID" ] && [ -n "$RULES_CID" ] || die "no party found in hackathon/.state — run hackathon/seed.sh first"
+[ -n "$DEC_PARTY_ID" ] || die "no party found in hackathon/.state — run hackathon/seed.sh first"
+
+# Read the live rules contract rather than the one seed.sh recorded: any
+# executed threshold or timeout change archives it and creates a new one.
+LIVE_RULES=$(try_get 8081 "/governance/state?party_id=$DEC_PARTY_ID" | jq -r '.state.contract_id // empty')
+RULES_CID="${LIVE_RULES:-$RULES_CID}"
+[ -n "$RULES_CID" ] || die "party $DEC_PARTY_ID has no governance rules contract — run hackathon/seed.sh first"
 
 info "party $DEC_PARTY_ID"
+info "rules $RULES_CID"
 BEFORE=$(list_proposal_cids 8081)
 propose
 PROPOSAL_CID=$(wait_for_new_proposal "$BEFORE") || die "the proposal did not appear on P1"
