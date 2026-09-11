@@ -27,7 +27,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use crate::{config::NodeConfig, error::Result};
 
 /// Where a replication's staged snapshots live.
-fn staging_dir(config: &NodeConfig) -> PathBuf {
+pub(crate) fn staging_dir(config: &NodeConfig) -> PathBuf {
     config.data_dir().join("acs-staging")
 }
 
@@ -36,7 +36,7 @@ fn staging_dir(config: &NodeConfig) -> PathBuf {
 /// Named from the replication's instance name, which both sides derive from the
 /// (party, target) pair, so a resumed transfer finds the same file without
 /// anyone having to remember a handle.
-fn staging_path(config: &NodeConfig, instance_name: &str) -> PathBuf {
+pub(crate) fn staging_path(config: &NodeConfig, instance_name: &str) -> PathBuf {
     // The instance name embeds a party id, which contains `::` and could contain
     // path separators on a malformed input. Hashing keeps it a single flat file
     // name that cannot escape the directory.
@@ -73,6 +73,39 @@ const EXPORT_CLAIM_TTL: std::time::Duration = std::time::Duration::from_secs(360
 /// short enough that an abandoned one is not a permanent copy of the party's
 /// contracts.
 pub const STAGING_TTL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// The path an in-flight export streams into.
+///
+/// Only for a caller that already holds the claim from [`begin_export`]. Finish
+/// with [`finish_export`], which is what makes the snapshot visible.
+pub fn claim_path(config: &NodeConfig, instance_name: &str) -> PathBuf {
+    staging_temp_path(config, instance_name)
+}
+
+/// Publish an export streamed into [`claim_path`], returning its size.
+///
+/// The rename is the whole point: until it happens the staged path holds
+/// nothing, so a concurrent range request cannot read a growing file and take
+/// its current length for the snapshot's size.
+///
+/// # Errors
+/// Returns an error if the claim is missing or cannot be renamed.
+pub async fn finish_export(config: &NodeConfig, instance_name: &str) -> Result<u64> {
+    let temp = staging_temp_path(config, instance_name);
+    let len = tokio::fs::metadata(&temp)
+        .await
+        .with_context(|| format!("inspecting the streamed ACS at {}", temp.display()))?
+        .len();
+    let path = staging_path(config, instance_name);
+    tokio::fs::rename(&temp, &path).await.with_context(|| {
+        format!(
+            "moving the staged ACS from {} to {}",
+            temp.display(),
+            path.display()
+        )
+    })?;
+    Ok(len)
+}
 
 /// Claim the right to export this replication, returning `false` if another
 /// export already holds it.

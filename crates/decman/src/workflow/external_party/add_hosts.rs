@@ -51,6 +51,7 @@ use canton_proto_rs::com::digitalasset::canton::{
     },
     version::v1::{UntypedVersionedMessage, untyped_versioned_message},
 };
+use common::api::HostPermission;
 use prost::Message as _;
 use serde::{Deserialize, Serialize};
 
@@ -244,6 +245,14 @@ pub async fn read_party_to_participant(
     Ok(None)
 }
 
+/// Canton's enum value for a requested host permission.
+fn canton_permission(permission: HostPermission) -> i32 {
+    match permission {
+        HostPermission::Confirmation => ParticipantPermission::Confirmation as i32,
+        HostPermission::Submission => ParticipantPermission::Submission as i32,
+    }
+}
+
 /// Build the serial-N+1 `PartyToParticipant` that adds `new_hosts` to `current`.
 ///
 /// Current hosts are carried over untouched, new hosts land at Confirmation with
@@ -256,9 +265,21 @@ pub async fn read_party_to_participant(
 fn add_hosts_mapping(
     current: &PartyToParticipant,
     new_hosts: &[CantonId],
+    permission: HostPermission,
 ) -> Result<PartyToParticipant> {
     if new_hosts.is_empty() {
         anyhow::bail!("add-hosts named no new hosting participant");
+    }
+    // Canton's rule, quoted from topology.proto: "if threshold > 1, must be
+    // Confirmation or Observation". A Submission host is the failover-only
+    // offer, and it only exists while the party needs exactly one confirmation.
+    if permission == HostPermission::Submission && current.threshold != 1 {
+        anyhow::bail!(
+            "a Submission host needs the party's threshold to be 1, and {party} is at {t}; \
+             Canton forbids Submission once more than one host must confirm",
+            party = current.party,
+            t = current.threshold
+        );
     }
 
     let mut participants = current.participants.clone();
@@ -272,10 +293,7 @@ fn add_hosts_mapping(
         }
         participants.push(HostingParticipant {
             participant_uid: uid,
-            // Confirmation, never Submission: a party whose threshold can rise
-            // above 1 may not have a Submission host, and an external party signs
-            // its own submissions anyway.
-            permission: ParticipantPermission::Confirmation as i32,
+            permission: canton_permission(permission),
             // The marker is what keeps the party suspended on the new host until
             // its ACS import lands. Without it the host would be expected to
             // confirm transactions it has no contracts for.
@@ -315,6 +333,7 @@ pub async fn prepare_add_hosts(
     storage: &SqlitePool,
     party_id: &str,
     new_hosts: &[CantonId],
+    permission: HostPermission,
     base_serial: u32,
     ledger_token: Option<&str>,
 ) -> std::result::Result<PreparedAddHosts, AddHostsError> {
@@ -338,7 +357,8 @@ pub async fn prepare_add_hosts(
         });
     }
 
-    let mapping = add_hosts_mapping(&current.mapping, new_hosts).map_err(AddHostsError::Invalid)?;
+    let mapping = add_hosts_mapping(&current.mapping, new_hosts, permission)
+        .map_err(AddHostsError::Invalid)?;
 
     // Capture the replication offsets HERE, before the topology is submitted.
     // `ExportPartyAcs` and `ClearPartyOnboardingFlag` both search forward from
@@ -603,10 +623,20 @@ pub fn validate_add_hosts_topology(
                 }
                 None => {
                     added += 1;
-                    if participant.permission != ParticipantPermission::Confirmation as i32 {
+                    // Confirmation always; Submission only while the party needs
+                    // one confirmation, which is Canton's constraint rather than
+                    // ours. Observation is never useful here: it confirms
+                    // nothing and cannot submit, so it would add a host that
+                    // does neither.
+                    let confirming =
+                        participant.permission == ParticipantPermission::Confirmation as i32;
+                    let submitting =
+                        participant.permission == ParticipantPermission::Submission as i32;
+                    if !(confirming || (submitting && p2p.threshold == 1)) {
                         anyhow::bail!(
                             "topology transaction {index} gives new host {uid} permission {perm}; \
-                             a new host must be Confirmation",
+                             a new host must be Confirmation, or Submission while the party's \
+                             threshold is 1",
                             uid = participant.participant_uid,
                             perm = participant.permission
                         );
@@ -648,19 +678,24 @@ pub fn validate_add_hosts_topology(
         // threshold. If the unmarked hosts no longer reach it, the party stops
         // being able to transact the moment this lands — a self-inflicted
         // outage dressed as an expansion.
-        // Unmarked AND at Confirmation. An Observation host is listed and live
-        // but confirms nothing, so counting it would let an add through that
-        // leaves the party short of confirmations anyway.
+        // Unmarked, and able to act for the party. Confirmation counts, and so
+        // does Submission — which only exists at threshold 1 and is precisely a
+        // host that can act alone. Observation counts for neither: it is listed
+        // and live but confirms nothing and cannot submit, so counting it would
+        // let an add through that leaves the party unable to transact.
         let active = p2p
             .participants
             .iter()
             .filter(|p| {
-                p.onboarding.is_none() && p.permission == ParticipantPermission::Confirmation as i32
+                p.onboarding.is_none()
+                    && (p.permission == ParticipantPermission::Confirmation as i32
+                        || p.permission == ParticipantPermission::Submission as i32)
             })
             .count();
         if (active as u32) < p2p.threshold {
             anyhow::bail!(
-                "topology transaction {index} would leave {active} host(s) able to confirm, \
+                "topology transaction {index} would leave {active} host(s) able to act for the \
+                 party, \
                  below the party's threshold of {threshold}; the party could not transact",
                 threshold = p2p.threshold
             );
@@ -903,7 +938,11 @@ mod tests {
     }
 
     fn built() -> PartyToParticipant {
-        match add_hosts_mapping(&current().mapping, &[participant(3)]) {
+        match add_hosts_mapping(
+            &current().mapping,
+            &[participant(3)],
+            HostPermission::Confirmation,
+        ) {
             Ok(m) => m,
             Err(e) => panic!("building the add-hosts mapping must succeed: {e}"),
         }
@@ -933,8 +972,11 @@ mod tests {
     /// which host built the transaction.
     #[test]
     fn participants_are_sorted_so_every_host_builds_the_same_bytes() {
-        let mapping = match add_hosts_mapping(&current().mapping, &[participant(9), participant(3)])
-        {
+        let mapping = match add_hosts_mapping(
+            &current().mapping,
+            &[participant(9), participant(3)],
+            HostPermission::Confirmation,
+        ) {
             Ok(m) => m,
             Err(e) => panic!("building must succeed: {e}"),
         };
@@ -969,7 +1011,11 @@ mod tests {
 
     #[test]
     fn builder_refuses_a_host_that_already_hosts_the_party() {
-        let Err(e) = add_hosts_mapping(&current().mapping, &[participant(2)]) else {
+        let Err(e) = add_hosts_mapping(
+            &current().mapping,
+            &[participant(2)],
+            HostPermission::Confirmation,
+        ) else {
             panic!("adding an existing host must be refused");
         };
         assert!(e.to_string().contains("already hosts"), "{e}");
@@ -977,7 +1023,8 @@ mod tests {
 
     #[test]
     fn builder_refuses_an_empty_host_list() {
-        let Err(e) = add_hosts_mapping(&current().mapping, &[]) else {
+        let Err(e) = add_hosts_mapping(&current().mapping, &[], HostPermission::Confirmation)
+        else {
             panic!("adding no host must be refused");
         };
         assert!(e.to_string().contains("no new hosting participant"), "{e}");
@@ -1070,21 +1117,33 @@ mod tests {
     /// Threshold > 1 forbids a Submission host, and an external party signs its
     /// own submissions, so Submission is never right here.
     #[test]
-    fn rejects_a_new_host_that_is_not_confirmation() {
+    fn rejects_a_new_host_that_can_neither_confirm_nor_submit() {
+        // Observation is refused outright: it confirms nothing and cannot
+        // submit, so it adds a host that does neither. Submission is refused
+        // here specifically because `current()` sits at threshold 2 for this
+        // case — at threshold 1 it is the failover offer and allowed.
+        let mut current = current();
+        current.mapping.threshold = 2;
         for permission in [
             ParticipantPermission::Submission,
             ParticipantPermission::Observation,
         ] {
             let mut mapping = built();
+            mapping.threshold = 2;
             for entry in &mut mapping.participants {
                 if entry.participant_uid == participant(3).to_string() {
                     entry.permission = permission as i32;
                 }
             }
-            let Err(e) = validate(mapping) else {
+            let Err(e) =
+                validate_add_hosts_topology(&test_config(3), &current, &bundle_of(mapping, 5))
+            else {
                 panic!("a new host at {permission:?} must be refused");
             };
-            assert!(e.to_string().contains("must be Confirmation"), "{e}");
+            assert!(
+                e.to_string().contains("must be Confirmation"),
+                "{permission:?}: {e}"
+            );
         }
     }
 
@@ -1173,7 +1232,11 @@ mod tests {
                 party_signing_keys: party_keys(),
             },
         };
-        let Ok(mapping) = add_hosts_mapping(&current.mapping, &[participant(3)]) else {
+        let Ok(mapping) = add_hosts_mapping(
+            &current.mapping,
+            &[participant(3)],
+            HostPermission::Confirmation,
+        ) else {
             panic!("building must succeed");
         };
         let bundle = bundle_of(mapping, 5);
@@ -1200,7 +1263,11 @@ mod tests {
                 party_signing_keys: party_keys(),
             },
         };
-        let Ok(mapping) = add_hosts_mapping(&current.mapping, &[participant(3)]) else {
+        let Ok(mapping) = add_hosts_mapping(
+            &current.mapping,
+            &[participant(3)],
+            HostPermission::Confirmation,
+        ) else {
             panic!("building must succeed");
         };
         let bundle = bundle_of(mapping, 5);
@@ -1208,6 +1275,110 @@ mod tests {
             panic!("only one host can confirm, so a threshold of 2 must be refused");
         };
         assert!(e.to_string().contains("below the party's threshold"), "{e}");
+    }
+
+    /// B2, the failover-only offer: a Submission host at threshold 1. It needs
+    /// no change to the party's application, because the host keeps submitting
+    /// on the party's behalf rather than the party signing for itself.
+    #[test]
+    fn accepts_a_submission_host_while_the_threshold_is_one() {
+        let current = CurrentPartyTopology {
+            serial: 4,
+            mapping: PartyToParticipant {
+                party: "alice::1220aa".to_string(),
+                threshold: 1,
+                participants: vec![host(1, ParticipantPermission::Submission, false)],
+                party_signing_keys: party_keys(),
+            },
+        };
+        let Ok(mapping) = add_hosts_mapping(
+            &current.mapping,
+            &[participant(3)],
+            HostPermission::Submission,
+        ) else {
+            panic!("a failover host at threshold 1 must be allowed");
+        };
+        let Some(added) = mapping
+            .participants
+            .iter()
+            .find(|p| p.participant_uid == participant(3).to_string())
+        else {
+            panic!("the new host must appear");
+        };
+        assert_eq!(added.permission, ParticipantPermission::Submission as i32);
+        assert!(added.onboarding.is_some(), "even a failover host is marked");
+
+        if let Err(e) =
+            validate_add_hosts_topology(&test_config(3), &current, &bundle_of(mapping, 5))
+        {
+            panic!("the mapping this builds must validate: {e}");
+        }
+    }
+
+    /// Canton's rule, not ours: `topology.proto` says a mapping with threshold
+    /// above 1 may not have a Submission host. Refused at the builder so the
+    /// caller hears why rather than getting a Canton rejection.
+    #[test]
+    fn refuses_a_submission_host_above_threshold_one() {
+        let mut current = current();
+        current.mapping.threshold = 2;
+        let Err(e) = add_hosts_mapping(
+            &current.mapping,
+            &[participant(3)],
+            HostPermission::Submission,
+        ) else {
+            panic!("a Submission host above threshold 1 must be refused");
+        };
+        assert!(e.to_string().contains("threshold to be 1"), "{e}");
+    }
+
+    /// And the validator refuses it too, since the onboard endpoint is
+    /// independently callable and must not trust that prepare was consulted.
+    #[test]
+    fn validator_refuses_a_submission_host_above_threshold_one() {
+        // threshold 2, so Submission is not permitted for the joiner
+        let mut mapping = built();
+        for entry in &mut mapping.participants {
+            if entry.participant_uid == participant(3).to_string() {
+                entry.permission = ParticipantPermission::Submission as i32;
+            }
+        }
+        mapping.threshold = 2;
+        let mut current = current();
+        current.mapping.threshold = 2;
+        let Err(e) = validate_add_hosts_topology(&test_config(3), &current, &bundle_of(mapping, 5))
+        else {
+            panic!("a Submission joiner above threshold 1 must be refused");
+        };
+        assert!(e.to_string().contains("threshold is 1"), "{e}");
+    }
+
+    /// A Submission host can act for the party alone, so it satisfies the
+    /// active-hosts invariant that an Observation host does not.
+    #[test]
+    fn a_submission_host_counts_as_active() {
+        let current = CurrentPartyTopology {
+            serial: 4,
+            mapping: PartyToParticipant {
+                party: "alice::1220aa".to_string(),
+                threshold: 1,
+                participants: vec![host(1, ParticipantPermission::Submission, false)],
+                party_signing_keys: party_keys(),
+            },
+        };
+        let Ok(mapping) = add_hosts_mapping(
+            &current.mapping,
+            &[participant(3)],
+            HostPermission::Submission,
+        ) else {
+            panic!("building must succeed");
+        };
+        // One unmarked Submission host covers a threshold of 1.
+        if let Err(e) =
+            validate_add_hosts_topology(&test_config(3), &current, &bundle_of(mapping, 5))
+        {
+            panic!("a lone unmarked Submission host must satisfy threshold 1: {e}");
+        }
     }
 
     #[test]

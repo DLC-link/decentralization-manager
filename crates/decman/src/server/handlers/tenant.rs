@@ -355,6 +355,7 @@ pub async fn tenant_add_hosts_prepare(
         &data.db,
         &body.party_id,
         &body.new_hosts,
+        body.permission,
         body.base_serial,
         None,
     )
@@ -1163,46 +1164,57 @@ pub async fn tenant_party_state(
 /// The tenant relay answers with the whole snapshot in a body, so the blocks are
 /// reassembled here. The pipe is still the transport underneath, which keeps one
 /// export protocol rather than two.
-/// Export the party's ACS and stage it, returning the snapshot's size.
+/// Export the party's ACS into the claim file and publish it, returning the
+/// snapshot's size.
 ///
-/// The caller must already hold the export claim: `stage` writes through the
-/// claim path and renames, so a second caller never sees a partial file at the
-/// staged path.
+/// Streamed block by block rather than assembled first: the point of the ranged
+/// relay is that a large party costs the source a file, not a resident
+/// allocation. The cap is checked as it goes, so an oversized party is stopped
+/// before it fills the disk rather than after.
+///
+/// The caller must already hold the claim from `begin_export`; the snapshot only
+/// becomes visible at the staged path when this renames it, so a concurrent
+/// range request never reads a growing file.
 async fn stage_export(
     config: &crate::config::NodeConfig,
     db: &sqlx::SqlitePool,
     replication: &crate::workflow::party_replication::ReplicationTarget,
 ) -> anyhow::Result<u64> {
-    let snapshot = drain_export(config, db, replication, config.tenant_acs_max_bytes).await?;
-    let len = snapshot.len() as u64;
-    staging::stage(config, &replication.instance_name, &snapshot).await?;
-    Ok(len)
-}
+    use anyhow::Context as _;
+    use tokio::io::AsyncWriteExt as _;
 
-async fn drain_export(
-    config: &crate::config::NodeConfig,
-    db: &sqlx::SqlitePool,
-    replication: &crate::workflow::party_replication::ReplicationTarget,
-    max_bytes: usize,
-) -> anyhow::Result<Vec<u8>> {
+    let max_bytes = config.tenant_acs_max_bytes as u64;
+    let path = staging::claim_path(config, &replication.instance_name);
+    // Truncating, not appending. A retry after a partial stream must not add to
+    // what the failed attempt left, or the file becomes two half-snapshots
+    // spliced together and the next range serves that as a complete one.
+    let mut file = tokio::fs::File::create(&path)
+        .await
+        .with_context(|| format!("opening {} for the ACS export", path.display()))?;
+
     let mut session = open_export_session(config, db, replication).await?;
-    let mut out = Vec::new();
+    let mut written = 0u64;
     // Sequence numbers are 1-based: the session treats served_seq 0 as "nothing
     // served yet" and refuses anything but served_seq + 1, since the Canton
     // stream behind it cannot rewind.
     let mut seq = 1u64;
     while let PipeBlock::Data { bytes, .. } = session.block(seq, EXPORT_BLOCK_SIZE).await? {
-        out.extend_from_slice(&bytes);
-        // Checked per block rather than at the end: this response is assembled
-        // whole in memory, so an oversized party would OOM the node long before
-        // there was a length to reject.
+        written += bytes.len() as u64;
         anyhow::ensure!(
-            out.len() <= max_bytes,
+            written <= max_bytes,
             "the party's ACS exceeds DECPM_TENANT_ACS_MAX_BYTES ({max_bytes} bytes)"
         );
+        file.write_all(&bytes)
+            .await
+            .with_context(|| format!("writing the ACS export to {}", path.display()))?;
         seq += 1;
     }
-    Ok(out)
+    file.flush()
+        .await
+        .with_context(|| format!("flushing {}", path.display()))?;
+    drop(file);
+
+    staging::finish_export(config, &replication.instance_name).await
 }
 
 /// Serve block `seq` of an already-held snapshot, so the pull-based import can
