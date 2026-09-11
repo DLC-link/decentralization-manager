@@ -310,11 +310,18 @@ pub async fn fetch_p2p_mapping(
         .await?
         .into_inner();
 
+    // Same pinning as `fetch_party_to_key_mapping`: `filter_party` matches on
+    // a prefix, and the head state can hold a `Remove`.
     response
         .results
-        .first()
-        .and_then(|r| r.item.as_ref().map(|P2pItem::V30(mapping)| mapping))
-        .cloned()
+        .into_iter()
+        .find_map(|r| {
+            if r.context?.operation != enums::TopologyChangeOp::AddReplace as i32 {
+                return None;
+            }
+            let P2pItem::V30(mapping) = r.item?;
+            (mapping.party == party_id.to_string()).then_some(mapping)
+        })
         .ok_or_else(|| anyhow::anyhow!("No P2P mapping found for party {party_id}"))
 }
 
