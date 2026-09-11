@@ -19,7 +19,7 @@
 use std::collections::BTreeSet;
 
 use canton_proto_rs::com::digitalasset::canton::{
-    crypto::v30::SigningPublicKey,
+    crypto::v30::{SigningKeyUsage, SigningPublicKey},
     protocol::v30::{
         DecentralizedNamespaceDefinition, PartyToParticipant, SignedTopologyTransaction,
         TopologyTransaction, enums, topology_mapping,
@@ -39,6 +39,7 @@ use crate::{
         onboarding::steps::proposals::create::{
             compute_decentralized_namespace, decode_keys_payload,
         },
+        signing_keys::vault_holds,
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
     },
 };
@@ -259,6 +260,7 @@ impl PeerExpectations {
     /// Errors on any mismatch with the accepted invitation.
     pub async fn check_onboarding_p2p(
         &self,
+        config: &NodeConfig,
         storage: &SqlitePool,
         instance_name: &str,
         payload: &[u8],
@@ -306,8 +308,14 @@ impl PeerExpectations {
         self.check_p2p_membership(&mapping)?;
         self.check_onboarding_markers(&mapping)?;
         self.check_p2p_thresholds(&mapping)?;
-        self.check_own_daml_key(storage, instance_name, &mapping, WhenUnrecorded::Fail)
-            .await
+        self.check_own_daml_key(
+            config,
+            storage,
+            instance_name,
+            &mapping,
+            WhenUnrecorded::Fail,
+        )
+        .await
     }
 
     /// Validate the DNS + P2P proposal pair of a kick, add-party or
@@ -322,6 +330,7 @@ impl PeerExpectations {
     /// Errors on any mismatch with the accepted invitation.
     pub async fn check_party_proposals(
         &self,
+        config: &NodeConfig,
         storage: &SqlitePool,
         instance_name: &str,
         dns_payload: &[u8],
@@ -397,8 +406,14 @@ impl PeerExpectations {
         // (#428), and it has to work out which key that is from local records.
         // Get it wrong and a remaining member's key goes instead: the counts
         // still match, so only the member whose key vanished can catch it.
-        self.check_own_daml_key(storage, instance_name, &mapping, WhenUnrecorded::Skip)
-            .await?;
+        self.check_own_daml_key(
+            config,
+            storage,
+            instance_name,
+            &mapping,
+            WhenUnrecorded::Skip,
+        )
+        .await?;
 
         tracing::info!(
             "{kind:?} proposals match the accepted invitation for {dec_party_id}",
@@ -753,6 +768,7 @@ impl PeerExpectations {
     /// it would be a member that cannot sign for the party it just authorized.
     async fn check_own_daml_key(
         &self,
+        config: &NodeConfig,
         storage: &SqlitePool,
         instance_name: &str,
         mapping: &PartyToParticipant,
@@ -767,9 +783,9 @@ impl PeerExpectations {
             None => {
                 tracing::warn!(
                     "this node's keys are unrecorded for this party (onboarded before the \
-                     identity table existed); skipping the party-signing-key check"
+                     identity table existed); checking the proposal against the vault instead"
                 );
-                return Ok(());
+                return self.check_vault_holds_a_party_key(config, mapping).await;
             }
         };
         let own_daml_fingerprint = utils::compute_fingerprint(&keys[1]);
@@ -791,6 +807,43 @@ impl PeerExpectations {
         Ok(())
     }
 
+    /// The fallback for a party this node has no local key record for: the
+    /// vault still knows whether this node holds the private half of one of
+    /// the proposed keys.
+    ///
+    /// Without it a legacy party's members cannot check the attribution at
+    /// all — the coordinator works out whose key is whose from its own
+    /// records, and a stale one would take a member's authority away
+    /// irreversibly, because inline keys override the mapping the member's
+    /// key still sits in.
+    ///
+    /// # Errors
+    ///
+    /// Errors when the proposal carries no signing keys, when the vault holds
+    /// none of them, or when the vault cannot be read.
+    async fn check_vault_holds_a_party_key(
+        &self,
+        config: &NodeConfig,
+        mapping: &PartyToParticipant,
+    ) -> Result {
+        let Some(signing_keys) = mapping.party_signing_keys.as_ref() else {
+            anyhow::bail!("P2P proposal carries no party signing keys");
+        };
+
+        for key in &signing_keys.keys {
+            if vault_holds(config, &utils::compute_fingerprint(key)).await? {
+                return Ok(());
+            }
+        }
+
+        anyhow::bail!(
+            "P2P proposal carries {count} party signing key(s) and this node holds the \
+             private half of none of them, so it would be left a member that cannot sign \
+             for the party",
+            count = signing_keys.keys.len()
+        )
+    }
+
     /// This node's namespace fingerprint for the run: from the keys it
     /// generated during onboarding, falling back to the long-lived identity
     /// row when the run's artefacts are already gone.
@@ -799,10 +852,24 @@ impl PeerExpectations {
         storage: &SqlitePool,
         instance_name: &str,
     ) -> Result<Option<String>> {
-        Ok(self
-            .own_keys(storage, instance_name)
-            .await?
-            .map(|keys| utils::compute_fingerprint(&keys[0])))
+        let Some(keys) = self.own_keys(storage, instance_name).await? else {
+            return Ok(None);
+        };
+
+        // An identity row recovered from the chain can only carry the party's
+        // Daml key, and older builds wrote a copy of it where the namespace
+        // key belongs. Reading that as a namespace fingerprint would compare a
+        // Daml key against the owner set and refuse every proposal, so a
+        // bundle without a namespace key counts as unrecorded instead.
+        if !keys[0].usage.contains(&(SigningKeyUsage::Namespace as i32)) {
+            tracing::warn!(
+                "this node's recorded key bundle for this party carries no namespace key \
+                 (recovered from the chain, which cannot supply one)"
+            );
+            return Ok(None);
+        }
+
+        Ok(Some(utils::compute_fingerprint(&keys[0])))
     }
 
     /// This node's `[namespace_key, daml_key]` bundle.
@@ -1150,7 +1217,7 @@ mod tests {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await?;
         assert!(
             expectations
-                .check_party_proposals(&pool, "run", &dns, &p2p_payload)
+                .check_party_proposals(&NodeConfig::default(), &pool, "run", &dns, &p2p_payload)
                 .await
                 .is_err()
         );
@@ -1312,7 +1379,7 @@ mod tests {
 
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await?;
         let error = expectations
-            .check_onboarding_p2p(&pool, "run", &payload, None)
+            .check_onboarding_p2p(&NodeConfig::default(), &pool, "run", &payload, None)
             .await
             .err()
             .map(|e| e.to_string())
@@ -1341,7 +1408,7 @@ mod tests {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await?;
         assert!(
             expectations
-                .check_onboarding_p2p(&pool, "run", &payload, None)
+                .check_onboarding_p2p(&NodeConfig::default(), &pool, "run", &payload, None)
                 .await
                 .is_err()
         );
@@ -1495,7 +1562,7 @@ mod tests {
 
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await?;
         let error = expectations
-            .check_party_proposals(&pool, "run", &dns, &p2p_payload)
+            .check_party_proposals(&NodeConfig::default(), &pool, "run", &dns, &p2p_payload)
             .await
             .err()
             .map(|e| e.to_string())

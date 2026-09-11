@@ -18,7 +18,9 @@ use crate::{
     utils,
     workflow::{
         kick::KickConfig,
-        signing_keys::{known_signing_keys_by_member, signing_keys_without_member},
+        signing_keys::{
+            adopt_legacy_signing_keys, known_signing_keys_by_member, signing_keys_without_member,
+        },
         storage::{WorkflowStorage, artifact_kinds},
         topology,
     },
@@ -143,23 +145,27 @@ pub async fn create_proposals(
     // that threshold at its old value, which every peer refuses to sign (#428).
     let current_signing_keys = current_p2p
         .party_signing_keys
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Party {party_id} carries no party signing keys, so the kick cannot rebuild them"
-            )
-        })?
-        .keys;
+        .map(|sk| sk.keys)
+        .unwrap_or_default();
     let survivors: Vec<String> = new_participants
         .iter()
         .map(|p| p.participant_uid.clone())
         .collect();
-    let claims = known_signing_keys_by_member(config, storage, &party_id).await?;
-    let new_signing_keys = signing_keys_without_member(
-        &current_signing_keys,
-        &kick_participant_str,
-        &survivors,
-        &claims,
-    )?;
+    let new_signing_keys = if current_signing_keys.is_empty() {
+        // A party onboarded before Canton 3.4 keeps its keys in a deprecated
+        // PartyToKeyMapping. Adopting the survivors' keys moves them inline
+        // and leaves the departing member's behind in the same step.
+        adopt_legacy_signing_keys(config, storage, &synchronizer_id, &party_id, &survivors).await?
+    } else {
+        let claims =
+            known_signing_keys_by_member(config, storage, &party_id, &current_signing_keys).await?;
+        signing_keys_without_member(
+            &current_signing_keys,
+            &kick_participant_str,
+            &survivors,
+            &claims,
+        )?
+    };
 
     if new_signing_keys.len() != new_participants.len() {
         anyhow::bail!(

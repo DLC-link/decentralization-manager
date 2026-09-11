@@ -16,7 +16,7 @@ use std::{
 use canton_proto_rs::com::digitalasset::canton::{
     protocol::v30::{
         DecentralizedNamespaceDefinition, PartyToKeyMapping, PartyToParticipant,
-        SignedTopologyTransaction,
+        SignedTopologyTransaction, TopologyTransaction, enums, topology_mapping,
     },
     topology::admin::v30::{
         AddTransactionsRequest, AuthorizeRequest, AuthorizeResponse, BaseQuery,
@@ -344,10 +344,84 @@ pub async fn fetch_party_to_key_mapping(
         .await?
         .into_inner();
 
-    Ok(response
-        .results
-        .into_iter()
-        .find_map(|r| r.item.map(|PartyToKeyItem::V30(mapping)| mapping)))
+    // `filter_party` is a prefix filter and a head-state result can carry a
+    // `Remove`, so neither is taken on trust: these keys become the party's
+    // entire signing authority once a caller moves them inline.
+    Ok(response.results.into_iter().find_map(|r| {
+        if r.context?.operation != enums::TopologyChangeOp::AddReplace as i32 {
+            return None;
+        }
+        let PartyToKeyItem::V30(mapping) = r.item?;
+        (mapping.party == party_id.to_string()).then_some(mapping)
+    }))
+}
+
+/// Check that every party signing key a `PartyToParticipant` transaction adds
+/// is among the transaction's signers.
+///
+/// Canton requires a newly added signing key to authorize the transaction
+/// that adds it (`topology.proto`: "adding a signing key: party namespace +
+/// all the new signing key"). A party that already carries its keys inline
+/// adds exactly one — the joining member's, whose node signs in the same
+/// round — but a party whose keys still sit in a legacy `PartyToKeyMapping`
+/// adds every member's key at once. A member whose node can no longer produce
+/// that signature would leave the namespace change applied and the
+/// participant change rejected, so the run stops before submitting rather
+/// than half-way through.
+///
+/// # Errors
+///
+/// Errors when the transaction will not decode, when it carries no
+/// `PartyToParticipant`, or when a key it adds has not signed it.
+pub async fn check_added_signing_keys_signed(
+    config: &NodeConfig,
+    synchronizer_id: &str,
+    party_id: &CantonId,
+    transaction: &SignedTopologyTransaction,
+) -> Result {
+    let topology_transaction: TopologyTransaction =
+        utils::decode_versioned(&transaction.transaction)?;
+    let Some(topology_mapping::Mapping::PartyToParticipant(proposed)) =
+        topology_transaction.mapping.and_then(|m| m.mapping)
+    else {
+        anyhow::bail!("P2P transaction does not carry a PartyToParticipant mapping");
+    };
+
+    let current: HashSet<String> = fetch_p2p_mapping(config, synchronizer_id, party_id)
+        .await?
+        .party_signing_keys
+        .map(|k| k.keys)
+        .unwrap_or_default()
+        .iter()
+        .map(utils::compute_fingerprint)
+        .collect();
+    let signers: HashSet<&str> = transaction
+        .signatures
+        .iter()
+        .map(|s| s.signed_by.as_str())
+        .collect();
+
+    let missing: Vec<String> = proposed
+        .party_signing_keys
+        .map(|k| k.keys)
+        .unwrap_or_default()
+        .iter()
+        .map(utils::compute_fingerprint)
+        .filter(|f| !current.contains(f) && !signers.contains(f.as_str()))
+        .collect();
+
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "The P2P proposal adds {count} party signing key(s) that did not sign it: \
+             {missing}. Canton refuses a new signing key that does not authorize its own \
+             addition, and the namespace change is submitted first, so this would leave the \
+             party half-migrated",
+            count = missing.len(),
+            missing = missing.join(", ")
+        );
+    }
+
+    Ok(())
 }
 
 /// Fetch the current `DecentralizedNamespaceDefinition` from the synchronizer

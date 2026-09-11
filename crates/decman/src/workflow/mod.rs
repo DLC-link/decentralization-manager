@@ -620,6 +620,7 @@ pub async fn start_peer(
                 };
                 if let Err(e) = expectations
                     .check_onboarding_p2p(
+                        &node_config,
                         &db,
                         &instance_name,
                         &payload,
@@ -799,7 +800,7 @@ pub async fn start_peer(
                 };
 
                 if let Err(e) = expectations
-                    .check_party_proposals(&db, &instance_name, &items[1], &items[2])
+                    .check_party_proposals(&node_config, &db, &instance_name, &items[1], &items[2])
                     .await
                 {
                     tracing::error!("Refusing the coordinator's kick proposals: {e}");
@@ -866,7 +867,7 @@ pub async fn start_peer(
                     };
 
                 if let Err(e) = expectations
-                    .check_party_proposals(&db, &instance_name, &items[1], &items[2])
+                    .check_party_proposals(&node_config, &db, &instance_name, &items[1], &items[2])
                     .await
                 {
                     tracing::error!("Refusing the coordinator's change-threshold proposals: {e}");
@@ -1003,7 +1004,13 @@ pub async fn start_peer(
                     expectations.check_dec_party(&add_party_config.decentralized_party_id)?;
                     expectations.check_new_participant(&add_party_config.new_participant_id)?;
                     expectations
-                        .check_party_proposals(&db, &instance_name, &items[1], &items[2])
+                        .check_party_proposals(
+                            &node_config,
+                            &db,
+                            &instance_name,
+                            &items[1],
+                            &items[2],
+                        )
                         .await
                 }
                 .await;

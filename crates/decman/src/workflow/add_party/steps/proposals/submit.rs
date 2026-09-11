@@ -51,6 +51,16 @@ pub async fn submit_proposals(
     topology::dedupe_signatures(&mut dns_transaction);
     topology::dedupe_signatures(&mut p2p_transaction);
 
+    // The DNS is submitted first, so a P2P that Canton will refuse has to stop
+    // the run here rather than half-way through it.
+    topology::check_added_signing_keys_signed(
+        config,
+        &synchronizer_id,
+        &add_party_config.decentralized_party_id,
+        &p2p_transaction,
+    )
+    .await?;
+
     let new_namespace_bytes = storage
         .read_artifact(
             instance_name,
