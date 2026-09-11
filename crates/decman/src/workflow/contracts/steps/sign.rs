@@ -10,9 +10,7 @@ use canton_proto_rs::com::{
             v30::SigningPublicKey,
         },
         topology::admin::v30::{
-            BaseQuery, ListPartyToKeyMappingRequest, ListPartyToParticipantRequest, StoreId,
-            Synchronizer, base_query,
-            list_party_to_key_mapping_response::result::Item as PartyToKeyItem,
+            BaseQuery, ListPartyToParticipantRequest, StoreId, Synchronizer, base_query,
             list_party_to_participant_response::result::Item as P2pItem, store_id, synchronizer,
             topology_manager_read_service_client::TopologyManagerReadServiceClient,
         },
@@ -27,7 +25,10 @@ use crate::{
     error::Result,
     signing::{PreparedTransactionHash, SigningKeyContext, select_signer},
     utils,
-    workflow::storage::{WorkflowStorage, artifact_kinds, identity_kinds},
+    workflow::{
+        storage::{WorkflowStorage, artifact_kinds, identity_kinds},
+        topology,
+    },
 };
 
 /// Sign prepared ledger submissions with Daml key
@@ -357,7 +358,7 @@ async fn backfill_peer_keys_from_chain(
     let base_query = BaseQuery {
         store: Some(StoreId {
             store: Some(store_id::Store::Synchronizer(Synchronizer {
-                kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id)),
+                kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.clone())),
             })),
         }),
         proposals: false,
@@ -372,7 +373,7 @@ async fn backfill_peer_keys_from_chain(
     let mut topology_client = TopologyManagerReadServiceClient::new(config.admin_channel().await?);
     let p2p_response = topology_client
         .list_party_to_participant(tonic::Request::new(ListPartyToParticipantRequest {
-            base_query: Some(base_query.clone()),
+            base_query: Some(base_query),
             filter_party: dec_party_id_str.clone(),
             filter_participant: String::new(),
         }))
@@ -394,18 +395,9 @@ async fn backfill_peer_keys_from_chain(
             "PartyToParticipant for {dec_party_id} carries no party_signing_keys; \
              trying the legacy PartyToKeyMapping topology mapping"
         );
-        let ptk_response = topology_client
-            .list_party_to_key_mapping(tonic::Request::new(ListPartyToKeyMappingRequest {
-                base_query: Some(base_query),
-                filter_party: dec_party_id_str.clone(),
-            }))
+        signing_keys = topology::fetch_party_to_key_mapping(config, &synchronizer_id, dec_party_id)
             .await?
-            .into_inner();
-        signing_keys = ptk_response
-            .results
-            .into_iter()
-            .find_map(|r| r.item.map(|PartyToKeyItem::V30(mapping)| mapping))
-            .map(|item| item.signing_keys)
+            .map(|mapping| mapping.signing_keys)
             .unwrap_or_default();
     }
 

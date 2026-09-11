@@ -15,12 +15,15 @@ use std::{
 
 use canton_proto_rs::com::digitalasset::canton::{
     protocol::v30::{
-        DecentralizedNamespaceDefinition, PartyToParticipant, SignedTopologyTransaction,
+        DecentralizedNamespaceDefinition, PartyToKeyMapping, PartyToParticipant,
+        SignedTopologyTransaction,
     },
     topology::admin::v30::{
         AddTransactionsRequest, AuthorizeRequest, AuthorizeResponse, BaseQuery,
-        ListDecentralizedNamespaceDefinitionRequest, ListPartyToParticipantRequest,
-        SignTransactionsRequest, SignTransactionsResponse, StoreId, Synchronizer, base_query,
+        ListDecentralizedNamespaceDefinitionRequest, ListPartyToKeyMappingRequest,
+        ListPartyToParticipantRequest, SignTransactionsRequest, SignTransactionsResponse, StoreId,
+        Synchronizer, base_query,
+        list_party_to_key_mapping_response::result::Item as PartyToKeyItem,
         list_party_to_participant_response::result::Item as P2pItem, store_id, synchronizer,
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
         topology_manager_write_service_client::TopologyManagerWriteServiceClient,
@@ -313,6 +316,38 @@ pub async fn fetch_p2p_mapping(
         .and_then(|r| r.item.as_ref().map(|P2pItem::V30(mapping)| mapping))
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("No P2P mapping found for party {party_id}"))
+}
+
+/// Fetch the deprecated `PartyToKeyMapping` for a party from the
+/// synchronizer head state, or `None` when the party has none.
+///
+/// A party onboarded before Canton 3.4 keeps its protocol signing keys in
+/// this separate mapping instead of inline on its `PartyToParticipant`.
+/// Canton 3.5 deprecates the mapping but still serves it.
+///
+/// # Errors
+///
+/// Errors when the admin API call fails.
+pub async fn fetch_party_to_key_mapping(
+    config: &NodeConfig,
+    synchronizer_id: &str,
+    party_id: &CantonId,
+) -> Result<Option<PartyToKeyMapping>> {
+    let mut topology_read_client =
+        TopologyManagerReadServiceClient::new(config.admin_channel().await?);
+
+    let response = topology_read_client
+        .list_party_to_key_mapping(tonic::Request::new(ListPartyToKeyMappingRequest {
+            base_query: Some(head_state_query(synchronizer_id)),
+            filter_party: party_id.to_string(),
+        }))
+        .await?
+        .into_inner();
+
+    Ok(response
+        .results
+        .into_iter()
+        .find_map(|r| r.item.map(|PartyToKeyItem::V30(mapping)| mapping)))
 }
 
 /// Fetch the current `DecentralizedNamespaceDefinition` from the synchronizer

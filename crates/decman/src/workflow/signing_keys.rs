@@ -16,7 +16,7 @@
 //! 3. Elimination — a key claimed by no surviving member belongs to the one
 //!    being removed.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use canton_proto_rs::com::digitalasset::canton::crypto::{
     admin::v30::{
@@ -36,6 +36,7 @@ use crate::{
     workflow::{
         onboarding::steps::proposals::create::decode_keys_payload,
         storage::{WorkflowStorage, identity_kinds},
+        topology,
     },
 };
 
@@ -222,6 +223,129 @@ pub fn signing_keys_without_member(
         .collect())
 }
 
+/// Load the party's signing keys from its deprecated `PartyToKeyMapping` and
+/// attribute them to `members`.
+///
+/// Only for a party whose `PartyToParticipant` carries no inline
+/// `party_signing_keys` — see [`signing_keys_for_members`] for what the
+/// attribution rejects.
+///
+/// # Errors
+///
+/// Errors when the party has no `PartyToKeyMapping` either, or when the keys
+/// it holds cannot be attributed to every current member.
+pub async fn adopt_legacy_signing_keys(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    synchronizer_id: &str,
+    dec_party_id: &CantonId,
+    members: &[String],
+) -> Result<Vec<SigningPublicKey>> {
+    let mapping = topology::fetch_party_to_key_mapping(config, synchronizer_id, dec_party_id)
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Party {dec_party_id} carries neither inline party signing keys nor a legacy \
+                 PartyToKeyMapping, so its signing key set cannot be rebuilt"
+            )
+        })?;
+
+    tracing::info!(
+        "Party {dec_party_id} keeps its signing keys in a legacy PartyToKeyMapping: \
+         {keys} key(s) at threshold {threshold}, against {members} current member(s)",
+        keys = mapping.signing_keys.len(),
+        threshold = mapping.threshold,
+        members = members.len()
+    );
+
+    let claims = known_signing_keys_by_member(config, db, dec_party_id).await?;
+    signing_keys_for_members(&mapping.signing_keys, members, &claims)
+}
+
+/// The keys of `legacy_keys` that `members` claim, in member order — the set
+/// a party's `PartyToParticipant` should carry inline.
+///
+/// A party onboarded before Canton 3.4 has no inline `party_signing_keys`, so
+/// a workflow that merges a new member's key into that empty set would
+/// propose a party whose only signing key is the new member's. The legacy
+/// `PartyToKeyMapping` holds the real keys, but nothing rewrites it when a
+/// member leaves, so it also holds the keys of everyone who was ever a
+/// member. Only a key a current member claims may move inline.
+///
+/// Inline keys take precedence over the legacy mapping, so the keys left
+/// behind stop authorizing for the party once the proposal is in force.
+///
+/// # Errors
+///
+/// Errors when a member's key is unknown to this node, when a member claims a
+/// key the mapping does not carry, or when two members claim the same key.
+/// Each of those would put a key set into topology that does not match the
+/// membership, which every peer refuses to sign.
+pub fn signing_keys_for_members(
+    legacy_keys: &[SigningPublicKey],
+    members: &[String],
+    claims: &BTreeMap<String, String>,
+) -> Result<Vec<SigningPublicKey>> {
+    let by_fingerprint: HashMap<String, &SigningPublicKey> = legacy_keys
+        .iter()
+        .map(|key| (utils::compute_fingerprint(key), key))
+        .collect();
+
+    let mut keys = Vec::with_capacity(members.len());
+    let mut taken = BTreeSet::new();
+    let mut unclaimed = Vec::new();
+    let mut unmatched = Vec::new();
+    let mut duplicated = Vec::new();
+    for member in members {
+        let Some(fingerprint) = claims.get(member) else {
+            unclaimed.push(member.clone());
+            continue;
+        };
+        match by_fingerprint.get(fingerprint) {
+            Some(key) if taken.insert(fingerprint.clone()) => keys.push((*key).clone()),
+            Some(_) => duplicated.push(format!("{member} ({fingerprint})")),
+            None => unmatched.push(format!("{member} ({fingerprint})")),
+        }
+    }
+
+    if !unclaimed.is_empty() {
+        anyhow::bail!(
+            "Cannot tell which Daml signing key these members contributed: {members}. \
+             Refresh /decentralized-parties so every member reports its signing key, then \
+             retry",
+            members = unclaimed.join(", ")
+        );
+    }
+    if !unmatched.is_empty() {
+        anyhow::bail!(
+            "These members claim a Daml signing key the party's PartyToKeyMapping does not \
+             carry, so it cannot be moved onto the PartyToParticipant: {members}",
+            members = unmatched.join(", ")
+        );
+    }
+    if !duplicated.is_empty() {
+        anyhow::bail!(
+            "These members claim a Daml signing key another member already claimed: \
+             {members}. One of the two attributions is wrong, and the party would end up \
+             with fewer keys than members",
+            members = duplicated.join(", ")
+        );
+    }
+
+    let left_behind = legacy_keys.len() - keys.len();
+    if left_behind > 0 {
+        tracing::warn!(
+            "Moving {adopted} of the party's {total} legacy signing keys onto the \
+             PartyToParticipant; the remaining {left_behind} are claimed by no current \
+             member and stop authorizing for the party",
+            adopted = keys.len(),
+            total = legacy_keys.len()
+        );
+    }
+
+    Ok(keys)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,5 +460,80 @@ mod tests {
                 "unexpected error: {error}"
             ),
         }
+    }
+
+    /// The mainnet case: the party predates inline signing keys and its
+    /// `PartyToKeyMapping` still holds the keys of members that have left.
+    /// Only the two keys the current members claim move inline.
+    #[test]
+    fn takes_only_the_keys_current_members_claim() -> Result {
+        let legacy = vec![key(1), key(2), key(3), key(4)];
+        let claims = claims(&[("p1", 1), ("p2", 2)]);
+
+        let adopted = signing_keys_for_members(&legacy, &uids(&["p1", "p2"]), &claims)?;
+
+        assert_eq!(
+            adopted
+                .iter()
+                .map(utils::compute_fingerprint)
+                .collect::<Vec<_>>(),
+            vec![fingerprint(1), fingerprint(2)]
+        );
+        Ok(())
+    }
+
+    /// Guessing here would hand the party a key set that does not match its
+    /// membership, so an unattributable member stops the run instead.
+    #[test]
+    fn refuses_a_member_whose_key_is_unknown() -> Result {
+        let legacy = vec![key(1), key(2), key(3)];
+        let claims = claims(&[("p1", 1)]);
+
+        let error = signing_keys_for_members(&legacy, &uids(&["p1", "p2"]), &claims)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+
+        assert!(error.contains("p2"), "unexpected error: {error}");
+        assert!(
+            error.contains("Refresh /decentralized-parties"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    /// A stale cached fingerprint must not silently drop a member's key.
+    #[test]
+    fn refuses_a_claim_the_legacy_mapping_does_not_carry() -> Result {
+        let legacy = vec![key(1), key(2)];
+        let claims = claims(&[("p1", 1), ("p2", 9)]);
+
+        let error = signing_keys_for_members(&legacy, &uids(&["p1", "p2"]), &claims)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+
+        assert!(
+            error.contains("PartyToKeyMapping does not"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn refuses_two_members_that_claim_the_same_key() -> Result {
+        let legacy = vec![key(1), key(2)];
+        let claims = claims(&[("p1", 1), ("p2", 1)]);
+
+        let error = signing_keys_for_members(&legacy, &uids(&["p1", "p2"]), &claims)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+
+        assert!(
+            error.contains("another member already claimed"),
+            "unexpected error: {error}"
+        );
+        Ok(())
     }
 }
