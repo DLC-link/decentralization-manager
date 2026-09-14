@@ -50,7 +50,10 @@ pub fn party_daml_key_name(party_id_prefix: &str) -> String {
 /// This node's own Daml signing-key fingerprint for a party: from its
 /// long-lived identity row, falling back to the vault key named after the
 /// party. Returns `None` when the node holds neither.
-async fn own_signing_key_fingerprint(
+///
+/// `pub(crate)` so `onledger::keys::local_identity_for_party` can fall back
+/// to it after the on-chain lookup.
+pub(crate) async fn own_signing_key_fingerprint(
     config: &NodeConfig,
     db: &SqlitePool,
     dec_party_id: &CantonId,

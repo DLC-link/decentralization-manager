@@ -13,6 +13,8 @@
 //!   the D6 counting predicates, and the `pending_invitations` projection.
 //! * [`topology`]: proposal discovery, propose, co-sign by hash, waits, root
 //!   delegations, and the canonical mapping builders.
+//! * [`keys`]: the dual-usage party key, its root delegation, the local
+//!   identity, and the member key caches (design D4).
 //! * [`validation`]: what a member checks before it co-signs.
 //! * [`engine`]: start, accept, decline, cancel, retry, and the per-kind
 //!   [`engine::KindDriver`] contract the observer dispatches to.
@@ -28,6 +30,7 @@ pub mod daml;
 pub mod dars;
 pub mod engine;
 pub mod identity;
+pub mod keys;
 pub mod observer;
 pub mod proposals;
 pub mod registry;
@@ -59,6 +62,7 @@ pub use engine::{
     StartedRun, TickCtx, accept_invitation, cancel_run, decline_invitation, retry_run, start_run,
 };
 pub use identity::{HostingCheck, NodeIdentity, require_node_identity, verify_hosting};
+pub use keys::{PartyKey, ensure_party_key, party_key_name, proposer_key_material};
 pub use observer::spawn_observer;
 pub use registry::{PeerHealth, PeerHealthSnapshot, PublishOutcome};
 pub use topology::UnsolicitedProposal;

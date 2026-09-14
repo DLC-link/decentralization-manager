@@ -25,6 +25,7 @@ Every timestamp in this module is an `i64` of **microseconds since the epoch**
 | `proposals.rs` | `WorkflowProposal` create/accept/decline/cancel/finish, D6 counting, `pending_invitations` projection, archive sweep. |
 | `topology.rs` | Discovery queries, pending/accepted reads, `propose_mapping`, `cosign_by_hash`, waits, root delegations, canonical mapping builders, unsolicited scan. |
 | `validation.rs` | `Expectations` and the pure per-kind checks a member runs before it co-signs (design section 5). |
+| `keys.rs` | The dual-usage party key and its root delegation, the local identity for validation, and the `dec_party_participant` key caches (design D4). |
 | `engine/mod.rs` | `StartRequest`, `start_run`, `accept_invitation`, `decline_invitation`, `cancel_run`, `retry_run`, `RunMeta`, `TickCtx`, `KindDriver`, row helpers, quorum arithmetic. |
 | `engine/{onboarding,add_party,kick,change_threshold,contracts,dars}.rs` | One `KindDriver` per kind with the section-6 step lists. Tick bodies are stubs. |
 | `observer.rs` | `spawn_observer`: the polling loop, per-run `try_lock`, metrics. |
@@ -543,6 +544,75 @@ key to the kicked owner fingerprint on a dual-key party (signing key
 fingerprints equal the DND owners) and uses elimination alone on a legacy
 party: exactly one key removed, not this node's, not claimed by a survivor.
 
+## `keys.rs`
+
+Key material every kind driver shares (design D4). One vault key per member
+per new party, named `{prefix}-key`, with usages `[Namespace, Protocol]`.
+Its self-signed root `NamespaceDelegation` carries the key bytes into the
+synchronizer store; the same key is the member's Daml signing key. Legacy
+parties (`{prefix}-namespace` + `{prefix}-daml-transactions`) keep working:
+every lookup is chain first, then the local caches, then the legacy vault
+names.
+
+```rust
+pub fn party_key_name(prefix: &str) -> String;              // "{prefix}-key"
+pub fn legacy_namespace_key_name(prefix: &str) -> String;   // "{prefix}-namespace"
+pub use workflow::signing_keys::party_daml_key_name as legacy_daml_key_name;   // "{prefix}-daml-transactions"
+
+pub struct PartyKey { pub key: SigningPublicKey, pub fingerprint: String, pub key_hex: String }
+impl PartyKey { pub fn from_key(key: SigningPublicKey) -> Self; }   // fingerprint + lowercase hex of the prost bytes
+pub fn decode_key_hex(key_hex: &str) -> Result<SigningPublicKey>;
+pub fn proposer_key_material(key: &PartyKey) -> engine::ProposerKeyMaterial;   // ns fp, key hex, daml fp = ns fp
+
+pub async fn ensure_party_key(config: &NodeConfig, prefix: &str) -> Result<PartyKey>;
+pub async fn wait_own_root_delegation(config: &NodeConfig, sync_id: &str, fingerprint: &str, budget: WaitBudget) -> Result<()>;
+
+pub struct VaultKey { pub name: String, pub key: SigningPublicKey, pub fingerprint: String }
+impl VaultKey { pub fn has_usage(&self, usage: SigningKeyUsage) -> bool; }
+pub async fn list_vault_keys(config: &NodeConfig) -> Result<Vec<VaultKey>>;   // ListMyKeys, no filter
+
+pub async fn local_identity_for_party(config: &NodeConfig, db: &SqlitePool, dec_party_id: Option<&CantonId>,
+                                      prefix: Option<&str>) -> Result<validation::LocalIdentity>;
+
+pub async fn kicked_member(config: &NodeConfig, db: &SqlitePool, dec_party_id: &CantonId,
+                           kicked_participant: &CantonId) -> Result<Option<validation::KickedMember>>;
+pub fn kicked_member_from_rows(rows: &[DecPartyParticipantRow], kicked_uid: &str) -> Option<KickedMember>;   // pure
+pub async fn survivor_key_claims(db: &SqlitePool, dec_party_id: &CantonId) -> Result<BTreeMap<String, String>>;  // uid -> daml fp
+pub fn key_claims_from_rows(rows: &[DecPartyParticipantRow]) -> BTreeMap<String, String>;                     // pure
+pub async fn record_member_keys(db: &SqlitePool, dec_party_id: &CantonId, participant: &CantonId,
+                                owner_fp: Option<&str>, signing_fp: Option<&str>) -> Result<()>;
+```
+
+`ensure_party_key` is idempotent: it reuses the vault key by exact name
+(and refuses a same-named key without both usages), then publishes the root
+delegation to the Authorized store with `must_fully_authorize = true`, the
+same request legacy onboarding sent. The publish is skipped when the
+delegation is already in the synchronizer store, or already in the
+Authorized store and waiting for dispatch, because Canton rejects a
+duplicate mapping. A coordinator calls it in `prepare` before the proposal
+exists (D6); a member calls it at its `GenerateKeys` step and then
+`wait_own_root_delegation` before it accepts.
+
+`local_identity_for_party`: `participant_id` from the config. With a party
+id, `owner_fingerprints` = Namespace-usage vault keys that own the head DND,
+plus the `{prefix}-key` when the vault holds it (an add-party joiner owns
+nothing yet); `daml_key_fingerprint` = the one Protocol-usage vault key in
+the head P2P `party_signing_keys`, else
+`signing_keys::own_signing_key_fingerprint` (`dec_party_identity`, then the
+legacy vault name). Without a party id (onboarding), `owner_fingerprints` =
+every Namespace-usage vault key and `daml_key_fingerprint` = the
+`{prefix}-key`, else the legacy `{prefix}-daml-transactions` key.
+
+`kicked_member` reads `dec_party_participant.owner_key` / `signing_key` for
+the kicked participant from this node's cache only (section 5). `Ok(None)`
+means no cached owner key; an error means the cached key is not an owner of
+the head DND (stale cache, or the kick already landed). `survivor_key_claims`
+returns every cached claim, the kicked member's included; `check_kick_p2p`
+skips it by uid. `record_member_keys` writes what a counted acceptance said
+about its acceptor (design M6) through `update_participant_owner_key` /
+`update_participant_signing_key`; a participant without a cached row is
+skipped with a warning until the next parties refresh creates it.
+
 ## `engine/mod.rs`
 
 ```rust
@@ -733,7 +803,7 @@ pub async fn cleanup_spool(config, party, target) -> Result<usize>;             
 
 ```
 DECMAN_SKIP_FRONTEND=1 cargo check -p decman --tests
-DECMAN_SKIP_FRONTEND=1 cargo test -p decman --lib onledger
+DECMAN_SKIP_FRONTEND=1 cargo test -p decman --lib onledger   # onledger::keys for this file alone
 DECMAN_SKIP_FRONTEND=1 cargo clippy -p decman --all-targets --all-features --no-deps -- -D warnings
 cargo fmt -p decman -- --check
 ```
