@@ -226,10 +226,29 @@ impl RelaySessions {
         let sender = {
             let mut imports = self.imports.lock().await;
             if seq == 1 {
-                // A restart. Dropping the old entry closes its channel, which
-                // fails the callback and unwinds the previous import through
-                // its reconnect bracket.
-                imports.remove(&target.instance_name);
+                // A restart. The previous import must be fully retired before
+                // the next one starts, not merely told to stop.
+                //
+                // Dropping the sender closes its channel, which fails the
+                // callback and unwinds that import through its own
+                // reconnect-and-verify bracket. That reconnect is the problem:
+                // if the new import has already disconnected the participant
+                // and begun feeding Canton by the time it lands, the old task
+                // reconnects underneath it and the new import loses its stream
+                // with bytes already imported — the orphan-ACS state the
+                // quarantine exists to catch. An ordinary wallet retry after a
+                // transient error would be enough to cause it.
+                //
+                // So the teardown is awaited, under the lock, before anything
+                // new is spawned. Holding it cannot deadlock: a spawned import
+                // never touches this registry.
+                if let Some(old) = imports.remove(&target.instance_name) {
+                    // Its failure is expected — it is being cancelled — so it is
+                    // logged rather than returned over this fresh transfer.
+                    if let Err(e) = retire(old).await {
+                        tracing::info!("the previous ACS import ended: {e}");
+                    }
+                }
                 let (tx, rx) = mpsc::channel(BLOCK_CHANNEL_CAPACITY);
                 let task = spawn_import(
                     config.clone(),
@@ -291,13 +310,7 @@ impl RelaySessions {
                 party = target.party_id
             );
         };
-        // The sender is dropped with the entry, so a task still waiting for a
-        // block it will never get sees the channel close and unwinds.
-        drop(entry.blocks);
-        match entry.task.await {
-            Ok(result) => result,
-            Err(e) => anyhow::bail!("the ACS import task did not complete: {e}"),
-        }
+        retire(entry).await
     }
 
     /// Drop this replication's sessions, if any.
@@ -306,7 +319,12 @@ impl RelaySessions {
     /// aborted — see the module docs.
     pub async fn discard(&self, instance_name: &str) {
         self.exports.lock().await.remove(instance_name);
-        self.imports.lock().await.remove(instance_name);
+        let entry = self.imports.lock().await.remove(instance_name);
+        if let Some(entry) = entry
+            && let Err(e) = retire(entry).await
+        {
+            tracing::info!("the discarded ACS import ended: {e}");
+        }
     }
 
     /// Remove sessions untouched for longer than `idle_timeout`.
@@ -332,6 +350,11 @@ impl RelaySessions {
         let exports_reaped = stale.len();
         drop(exports);
 
+        // Awaited, not merely removed. A reaped import is still unwinding
+        // towards its reconnect, and a wallet that retries the moment the entry
+        // disappears would otherwise race that reconnect against a fresh
+        // import's disconnect. The reaper can afford to wait; the transfer it
+        // is reaping has been idle for minutes.
         let mut imports = self.imports.lock().await;
         let stale: Vec<String> = imports
             .iter()
@@ -344,9 +367,32 @@ impl RelaySessions {
                  stopped relaying, so the import is failed and the participant reconnected",
                 secs = idle_timeout.as_secs()
             );
-            imports.remove(name);
+            if let Some(entry) = imports.remove(name)
+                && let Err(e) = retire(entry).await
+            {
+                tracing::info!("the reaped ACS import ended: {e}");
+            }
         }
         (exports_reaped, stale.len())
+    }
+}
+
+/// Close an import's channel and wait for it to unwind, returning what it
+/// finished with.
+///
+/// The single way an import is ever torn down. Returning only once the task has
+/// finished is what makes a teardown safe: the import has been through its own
+/// reconnect-and-verify bracket before anything else is allowed to disconnect
+/// the participant again. Removing the entry without this await lets the old
+/// task's reconnect land underneath a new import that has already begun feeding
+/// Canton, which is the orphan-ACS state the quarantine exists to catch.
+async fn retire(entry: ImportEntry) -> Result<()> {
+    // Dropping the sender is what the callback sees as "the wallet stopped
+    // relaying"; the await is what makes the ordering observable.
+    drop(entry.blocks);
+    match entry.task.await {
+        Ok(result) => result,
+        Err(e) => anyhow::bail!("the ACS import task did not complete: {e}"),
     }
 }
 
@@ -477,6 +523,129 @@ mod tests {
             Ok(_) => panic!("block 4 cannot be imported without an open session"),
             Err(e) => panic!("this is a protocol answer, not a failure: {e}"),
         }
+    }
+
+    /// A stand-in for `import_party_acs`: pulls blocks until the channel
+    /// closes, then does what the real one's reconnect bracket does — some work
+    /// on the way out. `finished` flips only after that work.
+    fn fake_import(
+        mut rx: mpsc::Receiver<PipeBlock>,
+        taken: Arc<std::sync::atomic::AtomicUsize>,
+        finished: Arc<std::sync::atomic::AtomicBool>,
+    ) -> tokio::task::JoinHandle<Result<()>> {
+        tokio::spawn(async move {
+            while rx.recv().await.is_some() {
+                taken.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            // Stands for reconnect-and-verify: the window during which the old
+            // import is still touching the participant.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            finished.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        })
+    }
+
+    fn entry_for(
+        tx: mpsc::Sender<PipeBlock>,
+        task: tokio::task::JoinHandle<Result<()>>,
+    ) -> ImportEntry {
+        ImportEntry {
+            blocks: tx,
+            task,
+            expected_seq: 2,
+            last_touched: Instant::now(),
+        }
+    }
+
+    /// The bug this guards: removing an import's entry only *starts* its
+    /// unwind. If the next import is allowed to disconnect the participant
+    /// while the old one is still heading for its reconnect, that reconnect
+    /// lands underneath a stream with bytes already in Canton — the orphan-ACS
+    /// state the quarantine exists to catch, reachable from an ordinary wallet
+    /// retry.
+    #[tokio::test]
+    async fn retiring_an_import_waits_for_it_to_finish_unwinding() {
+        let (tx, rx) = mpsc::channel(BLOCK_CHANNEL_CAPACITY);
+        let taken = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let task = fake_import(rx, taken.clone(), finished.clone());
+
+        if tx
+            .send(PipeBlock::Data {
+                seq: 1,
+                bytes: b"first".to_vec(),
+            })
+            .await
+            .is_err()
+        {
+            panic!("the import must take the first block");
+        }
+
+        if let Err(e) = retire(entry_for(tx, task)).await {
+            panic!("retiring a healthy import must not fail: {e}");
+        }
+        assert!(
+            finished.load(std::sync::atomic::Ordering::SeqCst),
+            "retire returned before the import finished unwinding, so a new import \
+             could disconnect the participant underneath it"
+        );
+        assert_eq!(taken.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// The channel is the whole backpressure mechanism: at capacity one, the
+    /// POST carrying block N+1 cannot return until Canton has taken block N.
+    /// Without it the joiner would have to buffer, which is the property this
+    /// design exists to avoid.
+    #[tokio::test]
+    async fn a_second_block_waits_until_the_import_has_taken_the_first() {
+        let (tx, mut rx) = mpsc::channel::<PipeBlock>(BLOCK_CHANNEL_CAPACITY);
+        let block = |seq| PipeBlock::Data {
+            seq,
+            bytes: vec![0u8; 4],
+        };
+
+        if tx.send(block(1)).await.is_err() {
+            panic!("the first block fits in the channel");
+        }
+        // Nothing has consumed block 1, so block 2 has nowhere to go.
+        assert!(
+            tx.try_send(block(2)).is_err(),
+            "a second block must not be accepted before the import takes the first"
+        );
+
+        let Some(_) = rx.recv().await else {
+            panic!("block 1 must be there to take")
+        };
+        if tx.try_send(block(2)).is_err() {
+            panic!("once the import has taken a block, the next one fits");
+        }
+    }
+
+    /// Restarting at block 1 must retire the previous import before spawning
+    /// the next, not merely forget it.
+    #[tokio::test]
+    async fn restarting_retires_the_previous_import_first() {
+        let sessions = RelaySessions::new();
+        let target = target("run-1");
+        let (tx, rx) = mpsc::channel(BLOCK_CHANNEL_CAPACITY);
+        let taken = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let task = fake_import(rx, taken.clone(), finished.clone());
+        sessions
+            .imports
+            .lock()
+            .await
+            .insert(target.instance_name.clone(), entry_for(tx, task));
+
+        // `discard` is the teardown path a caller reaches for directly; it
+        // shares `retire` with the restart branch.
+        sessions.discard(&target.instance_name).await;
+
+        assert!(
+            finished.load(std::sync::atomic::Ordering::SeqCst),
+            "the previous import must be fully unwound before the registry lets go of it"
+        );
+        assert!(sessions.imports.lock().await.is_empty());
     }
 
     /// Discarding a replication that has no sessions is the ordinary case on a
