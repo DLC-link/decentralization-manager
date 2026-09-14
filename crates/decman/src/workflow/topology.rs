@@ -13,6 +13,7 @@ use std::{
     time::Duration,
 };
 
+use anyhow::Context;
 use canton_proto_rs::com::digitalasset::canton::{
     protocol::v30::{
         DecentralizedNamespaceDefinition, PartyToKeyMapping, PartyToParticipant,
@@ -28,7 +29,9 @@ use canton_proto_rs::com::digitalasset::canton::{
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
         topology_manager_write_service_client::TopologyManagerWriteServiceClient,
     },
+    version::v1::{UntypedVersionedMessage, untyped_versioned_message},
 };
+use prost::Message;
 use sqlx::SqlitePool;
 
 use crate::{
@@ -348,12 +351,14 @@ pub async fn build_signed_proposal(
             count = generated.len()
         );
     };
+    let transaction = versioned_topology_transaction(&generated.serialized_transaction)
+        .with_context(|| format!("{label}: GenerateTransactions returned unusable bytes"))?;
 
     let signed = sign_transactions_with_topology_retry(
         config,
         SignTransactionsRequest {
             transactions: vec![SignedTopologyTransaction {
-                transaction: generated.serialized_transaction.clone(),
+                transaction,
                 signatures: vec![],
                 proposal: true,
                 multi_transaction_signatures: vec![],
@@ -725,6 +730,46 @@ pub fn dedupe_signatures(transaction: &mut SignedTopologyTransaction) {
         .retain(|sig| seen.insert(sig.signed_by.clone()));
 }
 
+/// The bytes to put in `SignedTopologyTransaction.transaction`, which holds a
+/// `TopologyTransaction` inside an `UntypedVersionedMessage` envelope.
+///
+/// `GenerateTransactions` documents its output only as "Serialized
+/// com.digitalasset.canton.protocol.v30.TopologyTransaction", so this accepts
+/// either shape: bytes that are already the envelope pass through, bare ones
+/// are wrapped.
+///
+/// The test is whether the decoded transaction carries a mapping, not whether
+/// it decodes at all. A bare `TopologyTransaction` also parses as an
+/// `UntypedVersionedMessage` — `operation` lands on `version` and `mapping` on
+/// the wrapper — so a plain decode would hand Canton silent garbage.
+///
+/// # Errors
+///
+/// Errors when the bytes are neither shape.
+fn versioned_topology_transaction(bytes: &[u8]) -> Result<Vec<u8>> {
+    if utils::decode_versioned::<TopologyTransaction>(bytes)
+        .is_ok_and(|transaction| transaction.mapping.is_some())
+    {
+        return Ok(bytes.to_vec());
+    }
+
+    let bare = TopologyTransaction::decode(bytes)
+        .context("not an UntypedVersionedMessage envelope, and not a TopologyTransaction")?;
+    if bare.mapping.is_none() {
+        anyhow::bail!("decoded a TopologyTransaction carrying no mapping");
+    }
+
+    Ok(UntypedVersionedMessage {
+        version: TOPOLOGY_TRANSACTION_PROTO_VERSION,
+        wrapper: Some(untyped_versioned_message::Wrapper::Data(bytes.to_vec())),
+    }
+    .encode_to_vec())
+}
+
+/// The `UntypedVersionedMessage` version a v30 `TopologyTransaction` is
+/// wrapped with, matching what the external-party flows already write.
+const TOPOLOGY_TRANSACTION_PROTO_VERSION: i32 = 30;
+
 /// The force flags a party's DNS and P2P proposals need at publish time.
 ///
 /// A P2P that adds a member's Daml key carries a key Canton has not seen
@@ -894,5 +939,52 @@ mod tests {
             .map(|s| s.signed_by.as_str())
             .collect();
         assert_eq!(kept, ["a", "b", "c"]);
+    }
+
+    /// A `TopologyTransaction` and an `UntypedVersionedMessage` share field
+    /// numbers, so a bare transaction decodes as an envelope full of nonsense.
+    /// Wrapping has to key off the mapping, or Canton gets garbage and answers
+    /// `PROTO_DESERIALIZATION_FAILURE`.
+    fn transaction() -> TopologyTransaction {
+        TopologyTransaction {
+            operation: enums::TopologyChangeOp::AddReplace as i32,
+            serial: 7,
+            mapping: Some(TopologyMapping {
+                mapping: Some(topology_mapping::Mapping::DecentralizedNamespaceDefinition(
+                    DecentralizedNamespaceDefinition {
+                        decentralized_namespace: "1220ab".to_string(),
+                        threshold: 2,
+                        owners: vec!["1220cd".to_string(), "1220ef".to_string()],
+                    },
+                )),
+            }),
+        }
+    }
+
+    #[test]
+    fn wraps_a_bare_topology_transaction() -> Result {
+        let bare = transaction().encode_to_vec();
+
+        let wrapped = versioned_topology_transaction(&bare)?;
+
+        assert_eq!(
+            utils::decode_versioned::<TopologyTransaction>(&wrapped)?,
+            transaction()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn passes_an_already_versioned_transaction_through() -> Result {
+        let versioned = UntypedVersionedMessage {
+            version: TOPOLOGY_TRANSACTION_PROTO_VERSION,
+            wrapper: Some(untyped_versioned_message::Wrapper::Data(
+                transaction().encode_to_vec(),
+            )),
+        }
+        .encode_to_vec();
+
+        assert_eq!(versioned_topology_transaction(&versioned)?, versioned);
+        Ok(())
     }
 }
