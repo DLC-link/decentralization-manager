@@ -25,8 +25,9 @@ import { Header } from "./components/Header";
 import { Sidebar, SIDEBAR_WIDTH, SIDEBAR_WIDTH_COLLAPSED } from "./components/Sidebar";
 import { PartyList } from "./components/PartyList";
 import { PartyDetail } from "./components/PartyDetail";
-import { NodeConfigAccordion } from "./components/NodeConfigAccordion";
+import { NodeHealthCard } from "./components/NodeHealthCard";
 import { NetworkConfigAccordion } from "./components/NetworkConfigAccordion";
+import { useNodeHealth } from "./useNodeHealth";
 import { PackagesPanel } from "./components/PackagesPanel";
 import { LoadingSkeleton, ConfigTabSkeleton } from "./components/LoadingSkeleton";
 import { DarsDialog } from "./components/DarsDialog";
@@ -112,9 +113,12 @@ const App = () => {
   >([]);
   // Our own round-trip latency to the backend (ms). The peers table fills the
   // peer rows from Noise health probes but never the "you" row; this fills it.
-  const [selfLatencyMs, setSelfLatencyMs] = useState<number | undefined>(
-    undefined,
-  );
+  //
+  // `seq` advances on every measurement, so the node health card's sparkline
+  // still records a sample when the latency reads the same twice in a row.
+  const [selfLatency, setSelfLatency] = useState<{ ms?: number; seq: number }>({
+    seq: 0,
+  });
   const [keyStatus, setKeyStatus] = useState<KeyStatusResponse | null>(null);
   const [authStatuses, setAuthStatuses] = useState<PartyAuthStatus[]>([]);
   const [packageCount, setPackageCount] = useState(0);
@@ -154,6 +158,9 @@ const App = () => {
   const [showSearchBar, setShowSearchBar] = useState(true);
   const [showHidden, setShowHidden] = useState(false);
   const { toggle: toggleHidden, isHidden } = useHiddenParties();
+  // Only the Configuration tab shows node health, and only it pays for the
+  // poll: the probe stops the moment the operator moves to another tab.
+  const nodeHealth = useNodeHealth(activeTab === 2);
   const visibleParties = useMemo(
     () => (showHidden ? parties : parties.filter((p) => !isHidden(p.party_id))),
     [parties, showHidden, isHidden],
@@ -451,7 +458,7 @@ const App = () => {
       // Clear on failure so the row drops a stale number during an outage,
       // matching how an unreachable peer shows no latency.
       const ms = await pingLatency(`${API_BASE}/healthz`);
-      setSelfLatencyMs(ms ?? undefined);
+      setSelfLatency((prev) => ({ ms: ms ?? undefined, seq: prev.seq + 1 }));
     };
 
     // In-flight guard: if a cycle (the status probe in particular) runs longer
@@ -1158,7 +1165,11 @@ const App = () => {
           {nodeConfig ? (
             <>
               <Box sx={{ px: "var(--content-pad)", py: 2 }}>
-                <NodeConfigAccordion config={nodeConfig} />
+                <NodeHealthCard
+                  config={nodeConfig}
+                  health={nodeHealth}
+                  selfLatency={selfLatency}
+                />
               </Box>
               <Divider />
               {networkConfig ? (
@@ -1167,7 +1178,7 @@ const App = () => {
                   nodeConfig={nodeConfig ?? undefined}
                   keyStatus={keyStatus ?? undefined}
                   participantStatuses={participantStatuses}
-                  selfLatencyMs={selfLatencyMs}
+                  selfLatencyMs={selfLatency.ms}
                   onSave={savePeers}
                 />
               ) : (

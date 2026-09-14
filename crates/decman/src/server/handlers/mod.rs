@@ -15,7 +15,7 @@ pub(crate) use auth::{get_auth_config, get_auth_status, grant_rights, test_auth}
 // handler functions beside it have no such consumer.
 pub use config::NodeConfigResponse;
 pub(crate) use config::{
-    get_network_config, get_node_config, healthz, metrics, save_network_config,
+    get_network_config, get_node_config, get_node_health, healthz, metrics, save_network_config,
 };
 pub(crate) use governance::{
     cancel_confirmation, cancel_proposal, confirm_action, execute_action, expire_confirmation,
