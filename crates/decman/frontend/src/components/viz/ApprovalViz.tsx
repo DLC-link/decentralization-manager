@@ -507,13 +507,30 @@ export const WorkflowPipeline = ({
   if (total <= 0) return null;
   const dots = Array.from({ length: total }, (_, i) => i);
   return (
-    <Box sx={{ display: "flex", alignItems: "center", overflowX: "auto" }}>
+    <Box
+      sx={{
+        display: "flex",
+        alignItems: "center",
+        overflowX: "auto",
+        // `overflow-x: auto` also clips vertically, so the focus ring needs
+        // room of its own or it renders as two arcs.
+        py: "4px",
+      }}
+    >
         {dots.map((i) => {
           const done = i < current;
           const active = i === current;
           const step = steps?.[i];
+          const state = done ? "done" : active ? "in progress" : "pending";
+          const position = `Step ${i + 1} of ${total} · ${state}`;
           const dot = (
             <Box
+              // Labelled dots take focus so the description is reachable
+              // without a pointer; bare ones carry nothing to reveal.
+              tabIndex={step ? 0 : undefined}
+              aria-label={
+                step && `${step.label}. ${step.description} ${position}`
+              }
               sx={{
                 flexShrink: 0,
                 width: 18,
@@ -539,6 +556,11 @@ export const WorkflowPipeline = ({
                     border: "1.5px solid",
                     borderColor: "divider",
                   }),
+                "&:focus-visible": {
+                  outline: "2px solid",
+                  outlineColor: "primary.main",
+                  outlineOffset: 1,
+                },
               }}
             >
               {done ? "✓" : null}
@@ -568,9 +590,7 @@ export const WorkflowPipeline = ({
                         {step.description}
                       </Typography>
                       <Typography sx={{ fontSize: 11, opacity: 0.7, mt: 0.5 }}>
-                        {`Step ${i + 1} of ${total} · ${
-                          done ? "done" : active ? "in progress" : "pending"
-                        }`}
+                        {position}
                       </Typography>
                     </>
                   }

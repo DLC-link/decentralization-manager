@@ -248,6 +248,11 @@ const SYNTHETIC_STEP_LABELS: Record<string, string> = {
   Active: "Waiting for the coordinator",
 };
 
+const syntheticLabel = (name: string): string | undefined =>
+  Object.hasOwn(SYNTHETIC_STEP_LABELS, name)
+    ? SYNTHETIC_STEP_LABELS[name]
+    : undefined;
+
 /** `"SubmitClearOnboarding"` -> `"Submit clear onboarding"`. */
 export const humanizeEnumName = (name: string): string =>
   name
@@ -276,19 +281,19 @@ interface StepPosition {
  * or reordered on the backend would mislabel every dot from there on. The run
  * carries both the total and the name of the step it sits on, which is enough
  * to detect a stale copy and fall back to unlabelled dots instead of confident
- * wrong labels. A `current_step` that is not a step name at all (peer-side rows
- * start on the synthetic `"Active"`) is not drift, so it keeps the list.
+ * wrong labels: the name at `step_index` has to be the one the run reports, so
+ * a renamed or replaced step is caught even when the total holds. Only the
+ * synthetic steps the backend writes outside any enum are exempt.
  */
 export const stepsForRun = (run: StepPosition): WorkflowStepInfo[] | null => {
   const steps = WORKFLOW_STEPS[run.kind];
   if (!steps || steps.length !== run.step_total) return null;
-  const declared = steps.findIndex((s) => s.name === run.current_step);
-  if (declared !== -1 && declared !== run.step_index) return null;
-  return steps;
+  if (syntheticLabel(run.current_step) !== undefined) return steps;
+  return steps[run.step_index]?.name === run.current_step ? steps : null;
 };
 
 /** Human label for the step a run sits on, PascalCase name as the fallback. */
 export const currentStepLabel = (run: StepPosition): string =>
   stepsForRun(run)?.find((s) => s.name === run.current_step)?.label ??
-  SYNTHETIC_STEP_LABELS[run.current_step] ??
+  syntheticLabel(run.current_step) ??
   humanizeEnumName(run.current_step);

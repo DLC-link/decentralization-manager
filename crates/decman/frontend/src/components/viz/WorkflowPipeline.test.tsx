@@ -54,11 +54,27 @@ describe("WorkflowPipeline", () => {
     expect(tip).toContain("· pending");
   });
 
+  // MUI opens the tooltip on focus-visible, which jsdom cannot produce; the
+  // keyboard path is verified against the running app instead. What the
+  // component owes is a dot that takes focus and names itself.
+  it("makes a labelled dot focusable and names it for a screen reader", () => {
+    const { container } = render(
+      <WorkflowPipeline current={2} total={STEPS.length} steps={STEPS} />,
+    );
+    const dot = dotsOf(container)[6];
+    expect(dot.tabIndex).toBe(0);
+    expect(dot.getAttribute("aria-label")).toContain("Copying contracts");
+    expect(dot.getAttribute("aria-label")).toContain(
+      `Step 7 of ${STEPS.length} · pending`,
+    );
+  });
+
   it("renders bare dots when the step list is withheld", () => {
     const { container } = render(
       <WorkflowPipeline current={2} total={STEPS.length} steps={null} />,
     );
     expect(dotsOf(container)).toHaveLength(STEPS.length);
+    expect(dotsOf(container).every((d) => d.tabIndex === -1)).toBe(true);
     fireEvent.mouseOver(dotsOf(container)[2]);
     expect(screen.queryByRole("tooltip")).toBeNull();
   });

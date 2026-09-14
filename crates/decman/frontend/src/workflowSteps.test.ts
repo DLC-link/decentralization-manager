@@ -88,6 +88,47 @@ describe("stepsForRun", () => {
     ).toBeNull();
   });
 
+  it("drops the list when the backend reports a step it does not know", () => {
+    // A step renamed or replaced on the backend keeps the total, so the name
+    // at `step_index` is the only thing that catches it.
+    expect(
+      stepsForRun(
+        run({
+          kind: "Onboarding",
+          current_step: "SignNamespace",
+          step_index: 3,
+          step_total: WORKFLOW_STEPS.Onboarding.length,
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  it("drops the list when step_index points past the end", () => {
+    expect(
+      stepsForRun(
+        run({
+          kind: "Dars",
+          current_step: "Complete",
+          step_index: WORKFLOW_STEPS.Dars.length,
+          step_total: WORKFLOW_STEPS.Dars.length,
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  it("does not treat an inherited Object key as a synthetic step", () => {
+    expect(
+      stepsForRun(
+        run({
+          kind: "Dars",
+          current_step: "constructor",
+          step_index: 0,
+          step_total: WORKFLOW_STEPS.Dars.length,
+        }),
+      ),
+    ).toBeNull();
+  });
+
   it("drops the list when a known step sits at a different index", () => {
     const steps = WORKFLOW_STEPS.Onboarding;
     const at = steps.findIndex((s) => s.name === "SignDns");
