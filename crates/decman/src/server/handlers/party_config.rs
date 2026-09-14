@@ -10,7 +10,9 @@ use tokio::sync::RwLock;
 use crate::{
     auth::{AuthRegistry, WorkflowAuth, auth0_client_credentials},
     canton_id::CantonId,
-    config::{Auth0M2MConfig, KeycloakConfig, PartyCredentials, default_package_config},
+    config::{
+        Auth0M2MConfig, CredentialKind, KeycloakConfig, PartyCredentials, default_package_config,
+    },
     db::schema::{Commitable, SchemaWrite},
     error::Result,
     server::{
@@ -203,6 +205,7 @@ pub async fn save_party_config(
         }
 
         let creds = PartyCredentials {
+            kind: CredentialKind::Decparty,
             dec_party_id: req.dec_party_id.clone(),
             member_party_id: req.member_party_id.clone(),
             user_id: req.user_id.clone(),
@@ -304,6 +307,7 @@ pub async fn save_party_config(
     };
 
     let creds = PartyCredentials {
+        kind: CredentialKind::Decparty,
         dec_party_id: req.dec_party_id.clone(),
         member_party_id: req.member_party_id,
         user_id: req.user_id,
@@ -583,7 +587,9 @@ mod tests {
     use crate::{
         auth::{MockAuthRegistry, MockValidator, TokenValidator, WorkflowAuth},
         canton_id::CantonId,
-        config::{KeycloakConfig, NodeConfig, PartyCredentials, default_package_config},
+        config::{
+            CredentialKind, KeycloakConfig, NodeConfig, PartyCredentials, default_package_config,
+        },
         server::{AppState, middleware::AuthMiddleware},
     };
 
@@ -628,6 +634,7 @@ mod tests {
             discovery_completed: Arc::new(RwLock::new(HashMap::new())),
             http_client: reqwest::Client::new(),
             health_cache: crate::server::HealthCache::new(),
+            onledger: crate::onledger::OnLedger::placeholder(),
         });
         let app =
             test::init_service(App::new().app_data(state).service(discover_member_party)).await;
@@ -661,6 +668,7 @@ mod tests {
         let existing_member =
             CantonId::parse(&format!("member-party::{ns}")).expect("parse member party");
         let existing = PartyCredentials {
+            kind: CredentialKind::Decparty,
             dec_party_id: existing_dec.clone(),
             member_party_id: existing_member.clone(),
             user_id: "test-user".to_string(),
@@ -706,6 +714,7 @@ mod tests {
             discovery_completed: Arc::new(RwLock::new(HashMap::new())),
             http_client: reqwest::Client::new(),
             health_cache: crate::server::HealthCache::new(),
+            onledger: crate::onledger::OnLedger::placeholder(),
         });
         let app = test::init_service(
             App::new()
@@ -782,6 +791,7 @@ mod tests {
             discovery_completed: Arc::new(RwLock::new(HashMap::new())),
             http_client: reqwest::Client::new(),
             health_cache: crate::server::HealthCache::new(),
+            onledger: crate::onledger::OnLedger::placeholder(),
         });
         let app = test::init_service(App::new().app_data(state).service(get_party_config)).await;
 

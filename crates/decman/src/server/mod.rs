@@ -10,15 +10,15 @@
 mod assets;
 mod audit;
 mod chain_audit;
-mod event_filters;
+pub(crate) mod event_filters;
 mod handlers;
-mod ledger_paging;
+pub(crate) mod ledger_paging;
 mod middleware;
 mod node_health;
-mod package_inventory;
+pub(crate) mod package_inventory;
 mod queries;
 mod record;
-mod reward_automation;
+pub(crate) mod reward_automation;
 mod transfer_context;
 mod types;
 
@@ -182,6 +182,10 @@ pub struct AppState {
     /// the warm gRPC channels the probes reuse. Shared so a Config tab open in
     /// many browsers costs one probe per TTL, not one per browser.
     pub health_cache: HealthCache,
+    /// Canton-native coordination: node identity, registry snapshot, and the
+    /// client that submits as the node party. Shares `auth` and
+    /// `party_credentials` with this state.
+    pub onledger: Arc<crate::onledger::OnLedger>,
 }
 
 #[cfg(test)]
@@ -219,6 +223,7 @@ impl AppState {
             discovery_completed: Arc::new(RwLock::new(HashMap::new())),
             http_client: reqwest::Client::new(),
             health_cache: HealthCache::new(),
+            onledger: crate::onledger::OnLedger::placeholder(),
         }))
     }
 }
@@ -1064,6 +1069,17 @@ pub async fn start_server(
 
     let relay_sessions = Arc::new(crate::workflow::party_replication::relay::RelaySessions::new());
 
+    // On-ledger coordination facade. Loads the node identity once; a node
+    // without one starts normally and waits for `PUT /node-identity`.
+    let onledger = crate::onledger::OnLedger::new(
+        config.clone(),
+        db.clone(),
+        auth.clone(),
+        party_credentials.clone(),
+        insecure,
+    )
+    .await;
+
     let app_state = web::Data::new(AppState {
         db: db.clone(),
         config: config.clone(),
@@ -1089,6 +1105,7 @@ pub async fn start_server(
         discovery_completed: Arc::new(RwLock::new(HashMap::new())),
         http_client,
         health_cache: HealthCache::new(),
+        onledger,
     });
 
     // Boot-time workflow recovery. For any `workflow_runs` row that was
@@ -1146,6 +1163,11 @@ pub async fn start_server(
             reward_automation::run_reward_automation_loop(reward_automation_state).await;
         },
     );
+
+    // Background task: the on-ledger observer loop (design D5, D11). It idles
+    // until a node identity exists, so it is safe on a fresh node, and it
+    // never panics, so it needs no supervisor.
+    let _observer = crate::onledger::spawn_observer(app_state.onledger.clone());
 
     // Single peer-job listener: drains the queue and spawns one
     // `workflow::start_peer` per accepted / retried / resumed invite, so this
@@ -1418,6 +1440,9 @@ pub async fn start_server(
             .service(handlers::get_party_config)
             .service(handlers::save_party_config)
             .service(handlers::discover_member_party)
+            .service(handlers::get_node_identity)
+            .service(handlers::save_node_identity)
+            .service(handlers::get_registry)
             .split_for_parts();
 
         let mut app = app.wrap(AuthMiddleware).wrap(cors);

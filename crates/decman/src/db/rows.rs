@@ -4,7 +4,9 @@ use anyhow::Context;
 
 use crate::{
     canton_id::CantonId,
-    config::{Auth0M2MConfig, KeycloakConfig, PackageConfig, PartyCredentials, Peer},
+    config::{
+        Auth0M2MConfig, CredentialKind, KeycloakConfig, PackageConfig, PartyCredentials, Peer,
+    },
     db::crypto,
     error::Result,
     server::{
@@ -49,6 +51,8 @@ impl PeerRow {
 
 #[derive(Debug, sqlx::FromRow)]
 pub struct PartyCredentialsRow {
+    /// `decparty` or `node`; see [`CredentialKind`].
+    pub kind: String,
     pub dec_party_id: String,
     pub member_party_id: String,
     pub user_id: String,
@@ -77,6 +81,7 @@ impl PartyCredentialsRow {
                 None => (None, None, None, None),
             };
         Ok(Self {
+            kind: creds.kind.as_str().to_string(),
             dec_party_id: creds.dec_party_id.to_string(),
             member_party_id: creds.member_party_id.to_string(),
             user_id: creds.user_id.clone(),
@@ -111,6 +116,8 @@ impl PartyCredentialsRow {
             _ => None,
         };
         Ok(PartyCredentials {
+            kind: CredentialKind::from_str(&self.kind)
+                .with_context(|| format!("party_credentials row {}", self.dec_party_id))?,
             dec_party_id: CantonId::parse(&self.dec_party_id)?,
             member_party_id: CantonId::parse(&self.member_party_id)?,
             user_id: self.user_id,
@@ -128,6 +135,95 @@ impl PartyCredentialsRow {
             },
             auth0,
             packages: PackageConfig::default(),
+        })
+    }
+}
+
+/// What this node decided about one `WorkflowProposal`.
+///
+/// The row is the idempotency guard of the observer: a proposal with a
+/// decision is never projected into `pending_invitations` again.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProposalDecision {
+    /// The operator accepted. The node co-signs matching topology proposals.
+    Accepted,
+    /// The operator declined. `WorkflowProposal_Decline` was exercised.
+    Declined,
+    /// The operator dismissed the card without answering.
+    Dismissed,
+}
+
+impl ProposalDecision {
+    /// The stored column value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::Declined => "declined",
+            Self::Dismissed => "dismissed",
+        }
+    }
+}
+
+impl std::fmt::Display for ProposalDecision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ProposalDecision {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "accepted" => Ok(Self::Accepted),
+            "declined" => Ok(Self::Declined),
+            "dismissed" => Ok(Self::Dismissed),
+            other => Err(anyhow::anyhow!("unknown proposal decision: {other}")),
+        }
+    }
+}
+
+/// One `proposal_decisions` row, decoded.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProposalDecisionEntry {
+    /// The `WorkflowProposal` contract id the decision is about.
+    pub proposal_cid: String,
+    pub decision: ProposalDecision,
+    /// Unix seconds.
+    pub decided_at: i64,
+    /// Topology transaction hashes (Canton hex) this node agreed to co-sign.
+    /// Empty until the observer pins them.
+    pub pinned_hashes: Vec<String>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct ProposalDecisionRow {
+    pub proposal_cid: String,
+    pub decision: String,
+    pub decided_at: i64,
+    pub pinned_hashes_json: Option<String>,
+}
+
+impl ProposalDecisionRow {
+    pub fn from_domain(entry: &ProposalDecisionEntry) -> Result<Self> {
+        Ok(Self {
+            proposal_cid: entry.proposal_cid.clone(),
+            decision: entry.decision.as_str().to_string(),
+            decided_at: entry.decided_at,
+            pinned_hashes_json: encode_list(&entry.pinned_hashes, "proposal pinned hashes")?,
+        })
+    }
+
+    pub fn into_domain(self) -> Result<ProposalDecisionEntry> {
+        let decision = ProposalDecision::from_str(&self.decision)
+            .with_context(|| format!("proposal_decisions row {}", self.proposal_cid))?;
+        let pinned_hashes =
+            decode_list(self.pinned_hashes_json, &self.proposal_cid, "pinned_hashes")?;
+        Ok(ProposalDecisionEntry {
+            proposal_cid: self.proposal_cid,
+            decision,
+            decided_at: self.decided_at,
+            pinned_hashes,
         })
     }
 }
@@ -605,6 +701,7 @@ mod tests {
         // the other tests use as raw strings they never parse.
         let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
         PartyCredentialsRow {
+            kind: "decparty".to_string(),
             dec_party_id: format!("dec::{ns}"),
             member_party_id: format!("member::{ns}"),
             user_id: "user-1".to_string(),

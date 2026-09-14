@@ -16,7 +16,7 @@ use ts_rs::{Config, TS};
 // (governance/decimal cluster + node config). Glob the `common` modules; the
 // `decman`-only types are imported by name (a glob over `server` would clash
 // with its re-exports of `common`).
-use common::{api::*, types::*};
+use common::{api::*, coordination::*, types::*};
 use dec_party_manager::{
     config::{
         Auth0Config, CantonConfig, CantonTlsConfig, KeycloakConfig, Network, NetworkConfig,
@@ -160,6 +160,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         WorkflowRun,
         WorkflowRunsResponse,
         WorkflowStatusResponse,
+        // on-ledger coordination (node identity, registry)
+        DecmanNodeView,
+        NodeIdentityRequest,
+        NodeIdentityResponse,
+        PeerHealthStatus,
+        RegistryResponse,
         // decman governance / decimal cluster
         AcceptTransferDetails,
         ActionType,

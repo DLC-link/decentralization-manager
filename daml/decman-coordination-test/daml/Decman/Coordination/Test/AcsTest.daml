@@ -1,0 +1,120 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Tests for the AcsManifest pin.
+module Decman.Coordination.Test.AcsTest where
+
+import Daml.Script
+
+import Decman.Coordination.Acs
+import Decman.Coordination.TestUtils
+
+import TestHarness
+
+-- ============================================================================
+-- Given
+-- ============================================================================
+
+given_parties : Script CoordinationTestParties
+given_parties = do
+  _ <- startClock
+  allocateCoordinationTestParties
+
+-- ============================================================================
+-- When
+-- ============================================================================
+
+when_manifest_published : CoordinationTestParties -> Script (ContractId AcsManifest)
+when_manifest_published parties = do
+  now <- getTime
+  submit parties.invitee1 $ createCmd (testManifest parties now)
+
+when_empty_manifest_published : CoordinationTestParties -> Script (ContractId AcsManifest)
+when_empty_manifest_published parties = do
+  now <- getTime
+  submit parties.invitee1 $ createCmd (testManifest parties now) with
+    sizeBytes = 0
+
+when_published_with_negative_size : CoordinationTestParties -> Script ()
+when_published_with_negative_size parties = do
+  now <- getTime
+  submitMustFail parties.invitee1 $ createCmd (testManifest parties now) with
+    sizeBytes = -1
+
+when_published_with_zero_activation_serial : CoordinationTestParties -> Script ()
+when_published_with_zero_activation_serial parties = do
+  now <- getTime
+  submitMustFail parties.invitee1 $ createCmd (testManifest parties now) with
+    activationSerial = 0
+
+when_exporter_archives : CoordinationTestParties -> Script ()
+when_exporter_archives parties = do
+  now <- getTime
+  manifestCid <- submit parties.invitee1 $ createCmd (testManifest parties now)
+  submit parties.invitee1 $ exerciseCmd manifestCid AcsManifest_Archive
+
+-- ============================================================================
+-- Then
+-- ============================================================================
+
+then_manifest_visible_to_target : CoordinationTestParties -> ContractId AcsManifest -> Script Failures
+then_manifest_visible_to_target parties manifestCid = do
+  Some manifest <- queryContractId parties.invitee2 manifestCid
+  proposerView <- query @AcsManifest parties.proposer
+  pure $
+    shouldBe "exporter" parties.invitee1 manifest.exporter <>
+    shouldBe "exporterParticipant" invitee1ParticipantId manifest.exporterParticipant <>
+    shouldBe "decPartyId" testDecPartyId manifest.decPartyId <>
+    shouldBe "targetParticipant" invitee2ParticipantId manifest.targetParticipant <>
+    shouldBe "activationSerial" 3 manifest.activationSerial <>
+    shouldBe "sizeBytes" 4096 manifest.sizeBytes <>
+    shouldBe "packageIds" ["1220aaaa", "1220bbbb"] manifest.packageIds <>
+    shouldBe "exportedAt" testStartTime manifest.exportedAt <>
+    shouldBe "proposer sees the manifest" [manifestCid] (map fst proposerView)
+
+then_empty_manifest_accepted : CoordinationTestParties -> ContractId AcsManifest -> Script Failures
+then_empty_manifest_accepted parties manifestCid = do
+  Some manifest <- queryContractId parties.invitee2 manifestCid
+  pure $ shouldBe "sizeBytes" 0 manifest.sizeBytes
+
+then_no_manifest : CoordinationTestParties -> () -> Script Failures
+then_no_manifest parties _ = do
+  targetView <- query @AcsManifest parties.invitee2
+  exporterView <- query @AcsManifest parties.invitee1
+  pure $
+    shouldBe "target view" 0 (length targetView) <>
+    shouldBe "exporter view" 0 (length exporterView)
+
+-- ============================================================================
+-- Tests
+-- ============================================================================
+
+test_when_manifest_published_then_visible_to_target = script do
+  run Test with
+    given = given_parties
+    when = when_manifest_published
+    then_ = then_manifest_visible_to_target
+
+test_when_empty_snapshot_then_manifest_accepted = script do
+  run Test with
+    given = given_parties
+    when = when_empty_manifest_published
+    then_ = then_empty_manifest_accepted
+
+test_when_negative_size_then_create_rejected = script do
+  run Test with
+    given = given_parties
+    when = when_published_with_negative_size
+    then_ = then_no_manifest
+
+test_when_activation_serial_zero_then_create_rejected = script do
+  run Test with
+    given = given_parties
+    when = when_published_with_zero_activation_serial
+    then_ = then_no_manifest
+
+test_when_exporter_archives_then_manifest_gone = script do
+  run Test with
+    given = given_parties
+    when = when_exporter_archives
+    then_ = then_no_manifest

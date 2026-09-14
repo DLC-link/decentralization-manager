@@ -12,7 +12,8 @@ use super::{
     rows::{
         ChainAuditCacheRow, DecPartyContractRow, DecPartyIdentityRow, DecPartyParticipantRow,
         DecPartyRow, GovernanceAuditRow, PartyCredentialsRow, PeerRow, PendingInvitationRow,
-        WorkflowArtifactRow, WorkflowRunRow,
+        ProposalDecision, ProposalDecisionEntry, ProposalDecisionRow, WorkflowArtifactRow,
+        WorkflowRunRow,
     },
     schema::{Commitable, SchemaRead, SchemaWrite},
 };
@@ -562,6 +563,30 @@ impl SchemaRead for SqlitePool {
             .map(|r| Ok((r.peer_id, crypto::decrypt_bytes(&r.payload)?)))
             .collect()
     }
+
+    async fn get_proposal_decision(
+        &self,
+        proposal_cid: &str,
+    ) -> Result<Option<ProposalDecisionEntry>> {
+        let row = sqlx::query_as::<_, ProposalDecisionRow>(
+            "SELECT * FROM proposal_decisions WHERE proposal_cid = ?",
+        )
+        .bind(proposal_cid)
+        .fetch_optional(self)
+        .await?;
+
+        row.map(|r| r.into_domain()).transpose()
+    }
+
+    async fn get_all_proposal_decisions(&self) -> Result<Vec<ProposalDecisionEntry>> {
+        let rows = sqlx::query_as::<_, ProposalDecisionRow>(
+            "SELECT * FROM proposal_decisions ORDER BY decided_at ASC, proposal_cid ASC",
+        )
+        .fetch_all(self)
+        .await?;
+
+        rows.into_iter().map(|r| r.into_domain()).collect()
+    }
 }
 
 impl SchemaWrite for SqlitePool {
@@ -658,6 +683,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         sqlx::query(
             r"
             INSERT OR REPLACE INTO party_credentials (
+                kind,
                 dec_party_id,
                 member_party_id,
                 user_id,
@@ -671,9 +697,10 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 auth0_audience,
                 auth0_client_id,
                 auth0_client_secret
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ",
         )
+        .bind(&row.kind)
         .bind(&row.dec_party_id)
         .bind(&row.member_party_id)
         .bind(&row.user_id)
@@ -689,6 +716,79 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         .bind(&row.auth0_client_secret)
         .execute(&mut **self)
         .await?;
+
+        Ok(())
+    }
+
+    async fn delete_party_credentials(&mut self, dec_party_id: &CantonId) -> Result {
+        sqlx::query("DELETE FROM party_credentials WHERE dec_party_id = ?")
+            .bind(dec_party_id.to_string())
+            .execute(&mut **self)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn insert_proposal_decision(&mut self, entry: &ProposalDecisionEntry) -> Result<bool> {
+        let row = ProposalDecisionRow::from_domain(entry)?;
+
+        let result = sqlx::query(
+            "INSERT OR IGNORE INTO proposal_decisions \
+             (proposal_cid, decision, decided_at, pinned_hashes_json) \
+             VALUES (?, ?, ?, ?)",
+        )
+        .bind(&row.proposal_cid)
+        .bind(&row.decision)
+        .bind(row.decided_at)
+        .bind(&row.pinned_hashes_json)
+        .execute(&mut **self)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn update_proposal_decision(
+        &mut self,
+        proposal_cid: &str,
+        decision: ProposalDecision,
+        decided_at: i64,
+    ) -> Result {
+        sqlx::query(
+            "UPDATE proposal_decisions SET decision = ?, decided_at = ? WHERE proposal_cid = ?",
+        )
+        .bind(decision.as_str())
+        .bind(decided_at)
+        .bind(proposal_cid)
+        .execute(&mut **self)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn set_proposal_pinned_hashes(
+        &mut self,
+        proposal_cid: &str,
+        pinned_hashes: &[String],
+    ) -> Result {
+        let json = if pinned_hashes.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(pinned_hashes).context("encode pinned hashes")?)
+        };
+        sqlx::query("UPDATE proposal_decisions SET pinned_hashes_json = ? WHERE proposal_cid = ?")
+            .bind(json)
+            .bind(proposal_cid)
+            .execute(&mut **self)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn delete_proposal_decision(&mut self, proposal_cid: &str) -> Result {
+        sqlx::query("DELETE FROM proposal_decisions WHERE proposal_cid = ?")
+            .bind(proposal_cid)
+            .execute(&mut **self)
+            .await?;
 
         Ok(())
     }
@@ -1294,9 +1394,14 @@ mod tests {
 
     use crate::{
         canton_id::CantonId,
-        config::{Auth0M2MConfig, KeycloakConfig, PackageConfig, PartyCredentials, Peer},
+        config::{
+            Auth0M2MConfig, CredentialKind, KeycloakConfig, PackageConfig, PartyCredentials, Peer,
+        },
         db::{
-            rows::{DecPartyContractRow, DecPartyParticipantRow, DecPartyRow},
+            rows::{
+                DecPartyContractRow, DecPartyParticipantRow, DecPartyRow, ProposalDecision,
+                ProposalDecisionEntry,
+            },
             schema::{Commitable, SchemaRead, SchemaWrite},
         },
         error::Result,
@@ -1325,6 +1430,7 @@ mod tests {
 
     fn test_creds(prefix: &str) -> PartyCredentials {
         PartyCredentials {
+            kind: CredentialKind::Decparty,
             dec_party_id: CantonId::parse(&format!("{prefix}::{TEST_NS}")).unwrap(),
             member_party_id: CantonId::parse(&format!("member::{TEST_NS}")).unwrap(),
             user_id: "test-user".to_string(),
@@ -1587,6 +1693,108 @@ mod tests {
         assert!(pool.get_party_credentials(&dec_id).await?.is_some());
         let nonexistent = CantonId::parse(&format!("nonexistent::{TEST_NS}")).unwrap();
         assert!(pool.get_party_credentials(&nonexistent).await?.is_none());
+
+        Ok(())
+    }
+
+    /// Migration 000020: a row written before the column existed reads back as
+    /// a decparty row, and a node row keeps its kind across the round trip.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn party_credentials_kind_round_trips_and_defaults(pool: SqlitePool) -> Result {
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_party_credentials(&test_creds("party-a")).await?;
+        let node = PartyCredentials {
+            kind: CredentialKind::Node,
+            dec_party_id: CantonId::parse(&format!("node::{TEST_NS}"))?,
+            member_party_id: CantonId::parse(&format!("node::{TEST_NS}"))?,
+            ..test_creds("node")
+        };
+        tx.upsert_party_credentials(&node).await?;
+        Commitable::commit(tx).await?;
+
+        // A pre-000020 writer never names the column, so the default applies.
+        sqlx::query(
+            "INSERT INTO party_credentials \
+             (dec_party_id, member_party_id, user_id, keycloak_url, keycloak_realm, \
+              keycloak_client_id) VALUES (?, ?, 'u', '', '', '')",
+        )
+        .bind(format!("legacy::{TEST_NS}"))
+        .bind(format!("member::{TEST_NS}"))
+        .execute(&pool)
+        .await?;
+
+        let all = pool.get_all_party_credentials().await?;
+        let kind_of = |prefix: &str| {
+            all.iter()
+                .find(|c| c.dec_party_id.to_string().starts_with(prefix))
+                .map(|c| c.kind)
+        };
+        assert_eq!(kind_of("party-a"), Some(CredentialKind::Decparty));
+        assert_eq!(kind_of("node"), Some(CredentialKind::Node));
+        assert_eq!(kind_of("legacy"), Some(CredentialKind::Decparty));
+
+        let mut tx = pool.begin_transaction().await?;
+        tx.delete_party_credentials(&node.dec_party_id).await?;
+        Commitable::commit(tx).await?;
+        assert!(
+            pool.get_party_credentials(&node.dec_party_id)
+                .await?
+                .is_none()
+        );
+
+        Ok(())
+    }
+
+    /// The first decision wins; later writers update in place and pin hashes.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn proposal_decisions_first_write_wins_then_updates(pool: SqlitePool) -> Result {
+        let entry = ProposalDecisionEntry {
+            proposal_cid: "00proposal".to_string(),
+            decision: ProposalDecision::Accepted,
+            decided_at: 100,
+            pinned_hashes: vec![],
+        };
+
+        let mut tx = pool.begin_transaction().await?;
+        assert!(tx.insert_proposal_decision(&entry).await?);
+        let racing = ProposalDecisionEntry {
+            decision: ProposalDecision::Declined,
+            decided_at: 101,
+            ..entry.clone()
+        };
+        assert!(
+            !tx.insert_proposal_decision(&racing).await?,
+            "a second insert must not replace the first decision"
+        );
+        Commitable::commit(tx).await?;
+
+        let stored = pool
+            .get_proposal_decision("00proposal")
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("decision missing"))?;
+        assert_eq!(stored, entry);
+        assert!(pool.get_proposal_decision("other").await?.is_none());
+
+        let hashes = vec!["1220aa".to_string(), "1220bb".to_string()];
+        let mut tx = pool.begin_transaction().await?;
+        tx.set_proposal_pinned_hashes("00proposal", &hashes).await?;
+        tx.update_proposal_decision("00proposal", ProposalDecision::Dismissed, 200)
+            .await?;
+        Commitable::commit(tx).await?;
+
+        let stored = pool
+            .get_proposal_decision("00proposal")
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("decision missing"))?;
+        assert_eq!(stored.decision, ProposalDecision::Dismissed);
+        assert_eq!(stored.decided_at, 200);
+        assert_eq!(stored.pinned_hashes, hashes);
+        assert_eq!(pool.get_all_proposal_decisions().await?.len(), 1);
+
+        let mut tx = pool.begin_transaction().await?;
+        tx.delete_proposal_decision("00proposal").await?;
+        Commitable::commit(tx).await?;
+        assert!(pool.get_all_proposal_decisions().await?.is_empty());
 
         Ok(())
     }

@@ -510,6 +510,7 @@ mod tests {
         let mut namespace = [0u8; NAMESPACE_LENGTH];
         namespace[0] = name;
         PartyCredentials {
+            kind: crate::config::CredentialKind::Decparty,
             dec_party_id: CantonId::new(format!("party{name}"), Namespace::new(namespace)),
             member_party_id: CantonId::new(format!("member{name}"), Namespace::new(namespace)),
             user_id: format!("user{name}"),

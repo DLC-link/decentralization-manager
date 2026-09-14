@@ -147,9 +147,55 @@ pub struct Auth0M2MConfig {
 /// it); re-exported so `crate::config::PackageConfig` resolves unchanged.
 pub use common::api::PackageConfig;
 
+/// What a `party_credentials` row stands for.
+///
+/// A `Decparty` row maps one decentralized party to the member party that
+/// acts for it on this node. A `Node` row is this node's own identity (design
+/// D1): `dec_party_id` and `member_party_id` both hold the node party, so
+/// `AuthRegistry::get(node_party)` returns its token manager unchanged.
+/// Decparty views filter on `Decparty`; the inbound JWT trust set skips `Node`.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum CredentialKind {
+    #[default]
+    Decparty,
+    Node,
+}
+
+impl CredentialKind {
+    /// The stored column value; matches the serde representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Decparty => "decparty",
+            Self::Node => "node",
+        }
+    }
+}
+
+impl std::fmt::Display for CredentialKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for CredentialKind {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "decparty" => Ok(Self::Decparty),
+            "node" => Ok(Self::Node),
+            other => Err(anyhow::anyhow!("unknown credential kind: {other}")),
+        }
+    }
+}
+
 /// Credentials for a specific decentralized party
 #[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct PartyCredentials {
+    /// Whether this row is a decparty mapping or the node identity.
+    #[serde(default)]
+    pub kind: CredentialKind,
     /// The decentralized party ID (shared among all members)
     pub dec_party_id: CantonId,
     /// The member party ID (local to this node, owns the credentials)

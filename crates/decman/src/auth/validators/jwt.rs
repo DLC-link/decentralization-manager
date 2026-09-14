@@ -322,7 +322,12 @@ impl JwtValidator {
             });
         }
         let creds = self.party_credentials.read().await;
-        for party in creds.iter() {
+        // A node identity row (design D1) mints outbound tokens only. It
+        // never widens who may log in, so it is not a trusted issuer.
+        for party in creds
+            .iter()
+            .filter(|p| p.kind != crate::config::CredentialKind::Node)
+        {
             if let Some(ref a) = party.auth0
                 && format!("https://{}", a.domain.trim_end_matches('/')) == issuer
             {

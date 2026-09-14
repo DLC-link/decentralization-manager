@@ -2580,6 +2580,7 @@ mod get_party_credentials_tests {
 
         let id = party_id()?;
         let credentials = PartyCredentials {
+            kind: crate::config::CredentialKind::Decparty,
             dec_party_id: id.clone(),
             member_party_id: id.clone(),
             user_id: "user".to_string(),

@@ -1,0 +1,230 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Tests for WorkflowProposal and the contracts it creates.
+module Decman.Coordination.Test.WorkflowTest where
+
+import DA.Time (seconds)
+import Daml.Script
+
+import Decman.Coordination.TestUtils
+import Decman.Coordination.Types (WorkflowKind(..))
+import Decman.Coordination.Workflow
+
+import TestHarness
+
+-- ============================================================================
+-- Fixtures
+-- ============================================================================
+
+data ProposalFixture = ProposalFixture
+  with
+    parties : CoordinationTestParties
+    proposalCid : ContractId WorkflowProposal
+    createdAt : Time
+  deriving (Eq, Show)
+
+-- ============================================================================
+-- Given
+-- ============================================================================
+
+given_parties : Script CoordinationTestParties
+given_parties = do
+  _ <- startClock
+  allocateCoordinationTestParties
+
+given_open_proposal : Script ProposalFixture
+given_open_proposal = do
+  createdAt <- startClock
+  parties <- allocateCoordinationTestParties
+  proposalCid <- createTestProposal parties
+  pure ProposalFixture with ..
+
+-- ============================================================================
+-- When
+-- ============================================================================
+
+when_both_invitees_accept : ProposalFixture -> Script (ContractId WorkflowAcceptance, ContractId WorkflowAcceptance)
+when_both_invitees_accept f = do
+  first <- submit f.parties.invitee1 $ acceptCmd f.parties.invitee1 invitee1ParticipantId f.proposalCid
+  second <- submit f.parties.invitee2 $ acceptCmd f.parties.invitee2 invitee2ParticipantId f.proposalCid
+  pure (first, second)
+
+-- | readAs stands in for explicit disclosure: the outsider can read the
+-- proposal, so only the "not invited" guard can reject it.
+when_outsider_accepts : ProposalFixture -> Script ()
+when_outsider_accepts f =
+  submitMustFail (disclosedContext f.parties.outsider f.parties.invitee1) $
+    acceptCmd f.parties.outsider proposerParticipantId f.proposalCid
+
+when_outsider_declines : ProposalFixture -> Script ()
+when_outsider_declines f =
+  submitMustFail (disclosedContext f.parties.outsider f.parties.invitee1) $
+    declineCmd f.parties.outsider "not my party" f.proposalCid
+
+when_invitee_accepts_after_expiry : ProposalFixture -> Script ()
+when_invitee_accepts_after_expiry f = do
+  passTime (testProposalTtl + seconds 1)
+  submitMustFail f.parties.invitee1 $ acceptCmd f.parties.invitee1 invitee1ParticipantId f.proposalCid
+
+when_invitee_declines : ProposalFixture -> Script (ContractId WorkflowDecline)
+when_invitee_declines f =
+  submit f.parties.invitee1 $ declineCmd f.parties.invitee1 "key generation failed" f.proposalCid
+
+when_proposer_cancels : ProposalFixture -> Script ()
+when_proposer_cancels f =
+  submit f.parties.proposer $ exerciseCmd f.proposalCid WorkflowProposal_Cancel
+
+when_proposer_finishes_with_success : ProposalFixture -> Script (ContractId WorkflowOutcome)
+when_proposer_finishes_with_success f =
+  submit f.parties.proposer $ exerciseCmd f.proposalCid WorkflowProposal_Finish with
+    succeeded = True
+    error = None
+
+when_proposer_finishes_with_failure : ProposalFixture -> Script (ContractId WorkflowOutcome)
+when_proposer_finishes_with_failure f =
+  submit f.parties.proposer $ exerciseCmd f.proposalCid WorkflowProposal_Finish with
+    succeeded = False
+    error = Some "Peer Invitee2 declined the invitation"
+
+when_created_with_expiry_not_after_creation : CoordinationTestParties -> Script ()
+when_created_with_expiry_not_after_creation parties = do
+  now <- getTime
+  submitMustFail parties.proposer $ createCmd (testProposal parties now) with
+    expiresAt = now
+
+-- ============================================================================
+-- Then
+-- ============================================================================
+
+then_both_acceptances_recorded : ProposalFixture -> (ContractId WorkflowAcceptance, ContractId WorkflowAcceptance) -> Script Failures
+then_both_acceptances_recorded f (first, second) = do
+  Some acceptance1 <- queryContractId f.parties.proposer first
+  Some acceptance2 <- queryContractId f.parties.proposer second
+  proposerView <- query @WorkflowAcceptance f.parties.proposer
+  siblingView <- query @WorkflowAcceptance f.parties.invitee1
+  proposals <- query @WorkflowProposal f.parties.proposer
+  pure $
+    shouldBe "acceptances visible to the proposer" 2 (length proposerView) <>
+    shouldBe "acceptances visible to a sibling invitee" 2 (length siblingView) <>
+    shouldBe "proposal stays active" [f.proposalCid] (map fst proposals) <>
+    shouldBe "acceptance 1 proposal" f.proposalCid acceptance1.proposal <>
+    shouldBe "acceptance 1 acceptor" f.parties.invitee1 acceptance1.acceptor <>
+    shouldBe "acceptance 1 participantId" invitee1ParticipantId acceptance1.participantId <>
+    shouldBe "acceptance 1 runId" testRunId acceptance1.runId <>
+    shouldBe "acceptance 1 acceptedAt" f.createdAt acceptance1.acceptedAt <>
+    shouldBe "acceptance 2 acceptor" f.parties.invitee2 acceptance2.acceptor <>
+    shouldBe "acceptance 2 participantId" invitee2ParticipantId acceptance2.participantId
+
+then_no_acceptance_recorded : ProposalFixture -> () -> Script Failures
+then_no_acceptance_recorded f _ = do
+  acceptances <- query @WorkflowAcceptance f.parties.proposer
+  pure $ shouldBe "acceptances" 0 (length acceptances)
+
+then_no_decline_recorded : ProposalFixture -> () -> Script Failures
+then_no_decline_recorded f _ = do
+  declines <- query @WorkflowDecline f.parties.proposer
+  pure $ shouldBe "declines" 0 (length declines)
+
+then_decline_visible_to_proposer : ProposalFixture -> ContractId WorkflowDecline -> Script Failures
+then_decline_visible_to_proposer f declineCid = do
+  Some decline <- queryContractId f.parties.proposer declineCid
+  proposals <- query @WorkflowProposal f.parties.proposer
+  pure $
+    shouldBe "decliner" f.parties.invitee1 decline.decliner <>
+    shouldBe "reason" "key generation failed" decline.reason <>
+    shouldBe "proposal" f.proposalCid decline.proposal <>
+    shouldBe "declinedAt" f.createdAt decline.declinedAt <>
+    shouldBe "proposal stays active" 1 (length proposals)
+
+then_proposal_archived_for_everyone : ProposalFixture -> () -> Script Failures
+then_proposal_archived_for_everyone f _ = do
+  proposerView <- query @WorkflowProposal f.parties.proposer
+  inviteeView <- query @WorkflowProposal f.parties.invitee1
+  pure $
+    shouldBe "proposer view" 0 (length proposerView) <>
+    shouldBe "invitee view" 0 (length inviteeView)
+
+then_success_outcome_visible_to_invitees : ProposalFixture -> ContractId WorkflowOutcome -> Script Failures
+then_success_outcome_visible_to_invitees f outcomeCid = do
+  Some outcome <- queryContractId f.parties.invitee1 outcomeCid
+  invitee2View <- query @WorkflowOutcome f.parties.invitee2
+  proposals <- query @WorkflowProposal f.parties.proposer
+  pure $
+    shouldBe "succeeded" True outcome.succeeded <>
+    shouldBe "error" None outcome.error <>
+    shouldBe "runId" testRunId outcome.runId <>
+    shouldBe "kind" Onboarding outcome.kind <>
+    shouldBe "finishedAt" f.createdAt outcome.finishedAt <>
+    shouldBe "second invitee sees the outcome" [outcomeCid] (map fst invitee2View) <>
+    shouldBe "proposal archived" 0 (length proposals)
+
+then_failed_outcome_carries_error : ProposalFixture -> ContractId WorkflowOutcome -> Script Failures
+then_failed_outcome_carries_error f outcomeCid = do
+  Some outcome <- queryContractId f.parties.invitee1 outcomeCid
+  pure $
+    shouldBe "succeeded" False outcome.succeeded <>
+    shouldBe "error" (Some "Peer Invitee2 declined the invitation") outcome.error
+
+then_no_proposal_created : CoordinationTestParties -> () -> Script Failures
+then_no_proposal_created parties _ = do
+  proposals <- query @WorkflowProposal parties.proposer
+  pure $ shouldBe "proposals" 0 (length proposals)
+
+-- ============================================================================
+-- Tests
+-- ============================================================================
+
+test_when_two_invitees_accept_then_both_acceptances_recorded = script do
+  run Test with
+    given = given_open_proposal
+    when = when_both_invitees_accept
+    then_ = then_both_acceptances_recorded
+
+test_when_outsider_accepts_then_rejected = script do
+  run Test with
+    given = given_open_proposal
+    when = when_outsider_accepts
+    then_ = then_no_acceptance_recorded
+
+test_when_outsider_declines_then_rejected = script do
+  run Test with
+    given = given_open_proposal
+    when = when_outsider_declines
+    then_ = then_no_decline_recorded
+
+test_when_accept_after_expiry_then_rejected = script do
+  run Test with
+    given = given_open_proposal
+    when = when_invitee_accepts_after_expiry
+    then_ = then_no_acceptance_recorded
+
+test_when_invitee_declines_then_decline_visible_to_proposer = script do
+  run Test with
+    given = given_open_proposal
+    when = when_invitee_declines
+    then_ = then_decline_visible_to_proposer
+
+test_when_proposer_cancels_then_proposal_archived = script do
+  run Test with
+    given = given_open_proposal
+    when = when_proposer_cancels
+    then_ = then_proposal_archived_for_everyone
+
+test_when_proposer_finishes_then_outcome_visible_to_invitees = script do
+  run Test with
+    given = given_open_proposal
+    when = when_proposer_finishes_with_success
+    then_ = then_success_outcome_visible_to_invitees
+
+test_when_proposer_finishes_with_failure_then_outcome_carries_error = script do
+  run Test with
+    given = given_open_proposal
+    when = when_proposer_finishes_with_failure
+    then_ = then_failed_outcome_carries_error
+
+test_when_expiry_not_after_creation_then_create_rejected = script do
+  run Test with
+    given = given_parties
+    when = when_created_with_expiry_not_after_creation
+    then_ = then_no_proposal_created

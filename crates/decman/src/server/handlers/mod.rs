@@ -3,6 +3,7 @@ mod config;
 mod governance;
 mod invitations;
 mod keys;
+mod node_identity;
 mod parties;
 mod party_config;
 mod tenant;
@@ -29,6 +30,7 @@ pub(crate) use governance::{
 pub(crate) use governance::{get_party_credentials, packages};
 pub(crate) use invitations::{accept_invitation, decline_invitation, get_invitations};
 pub(crate) use keys::get_key_status;
+pub(crate) use node_identity::{get_node_identity, get_registry, save_node_identity};
 pub(crate) use parties::{
     Discovery, DiscoveryGate, MAX_CONCURRENT_DISCOVERIES, clear_acs_import_quarantine,
     compare_peer_packages, discover_and_cache, get_decentralized_parties, get_participants_status,

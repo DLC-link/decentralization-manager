@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::canton_id::CantonId;
 
 /// Participant permission level
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 #[serde(rename_all = "lowercase")]

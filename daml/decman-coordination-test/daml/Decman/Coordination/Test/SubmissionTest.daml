@@ -1,0 +1,143 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Tests for SubmissionRound signature collection.
+module Decman.Coordination.Test.SubmissionTest where
+
+import DA.Time (addRelTime, hours, seconds)
+import Daml.Script
+
+import Decman.Coordination.Submission
+import Decman.Coordination.TestUtils
+
+import TestHarness
+
+-- ============================================================================
+-- Fixtures
+-- ============================================================================
+
+data RoundFixture = RoundFixture
+  with
+    parties : CoordinationTestParties
+    roundCid : ContractId SubmissionRound
+    preparedAt : Time
+  deriving (Eq, Show)
+
+-- ============================================================================
+-- Given
+-- ============================================================================
+
+given_parties : Script CoordinationTestParties
+given_parties = do
+  _ <- startClock
+  allocateCoordinationTestParties
+
+given_open_round : Script RoundFixture
+given_open_round = do
+  preparedAt <- startClock
+  parties <- allocateCoordinationTestParties
+  roundCid <- createTestRound parties
+  pure RoundFixture with ..
+
+-- ============================================================================
+-- When
+-- ============================================================================
+
+when_signer_signs : RoundFixture -> Script (ContractId SubmissionSignature)
+when_signer_signs f =
+  submit f.parties.invitee1 $ signCmd f.parties.invitee1 invitee1ParticipantId f.roundCid
+
+-- | readAs stands in for explicit disclosure: the outsider can read the round,
+-- so only the "not a signer" guard can reject it.
+when_outsider_signs : RoundFixture -> Script ()
+when_outsider_signs f =
+  submitMustFail (disclosedContext f.parties.outsider f.parties.invitee1) $
+    signCmd f.parties.outsider proposerParticipantId f.roundCid
+
+when_signer_signs_after_deadline : RoundFixture -> Script ()
+when_signer_signs_after_deadline f = do
+  passTime (testRoundDeadline + seconds 1)
+  submitMustFail f.parties.invitee1 $ signCmd f.parties.invitee1 invitee1ParticipantId f.roundCid
+
+when_proposer_closes : RoundFixture -> Script ()
+when_proposer_closes f =
+  submit f.parties.proposer $ exerciseCmd f.roundCid SubmissionRound_Close with
+    result = "executed"
+
+when_created_with_deadline_after_max_record_time : CoordinationTestParties -> Script ()
+when_created_with_deadline_after_max_record_time parties = do
+  now <- getTime
+  submitMustFail parties.proposer $ createCmd (testRound parties now) with
+    deadline = addRelTime now (hours 21)
+
+-- ============================================================================
+-- Then
+-- ============================================================================
+
+then_signature_visible_to_proposer : RoundFixture -> ContractId SubmissionSignature -> Script Failures
+then_signature_visible_to_proposer f signatureCid = do
+  Some signature <- queryContractId f.parties.proposer signatureCid
+  siblingView <- query @SubmissionSignature f.parties.invitee2
+  rounds <- query @SubmissionRound f.parties.proposer
+  pure $
+    shouldBe "round" f.roundCid signature.round <>
+    shouldBe "signer" f.parties.invitee1 signature.signer <>
+    shouldBe "participantId" invitee1ParticipantId signature.participantId <>
+    shouldBe "runId" testRunId signature.runId <>
+    shouldBe "index" 0 signature.index <>
+    shouldBe "signedBy" testFingerprint signature.signedBy <>
+    shouldBe "signedAt" f.preparedAt signature.signedAt <>
+    shouldBe "sibling signer sees the signature" [signatureCid] (map fst siblingView) <>
+    shouldBe "round stays active" [f.roundCid] (map fst rounds)
+
+then_no_signature_recorded : RoundFixture -> () -> Script Failures
+then_no_signature_recorded f _ = do
+  signatures <- query @SubmissionSignature f.parties.proposer
+  pure $ shouldBe "signatures" 0 (length signatures)
+
+then_round_archived : RoundFixture -> () -> Script Failures
+then_round_archived f _ = do
+  proposerView <- query @SubmissionRound f.parties.proposer
+  signerView <- query @SubmissionRound f.parties.invitee1
+  pure $
+    shouldBe "proposer view" 0 (length proposerView) <>
+    shouldBe "signer view" 0 (length signerView)
+
+then_no_round_created : CoordinationTestParties -> () -> Script Failures
+then_no_round_created parties _ = do
+  rounds <- query @SubmissionRound parties.proposer
+  pure $ shouldBe "rounds" 0 (length rounds)
+
+-- ============================================================================
+-- Tests
+-- ============================================================================
+
+test_when_signer_signs_then_signature_visible_to_proposer = script do
+  run Test with
+    given = given_open_round
+    when = when_signer_signs
+    then_ = then_signature_visible_to_proposer
+
+test_when_outsider_signs_then_rejected = script do
+  run Test with
+    given = given_open_round
+    when = when_outsider_signs
+    then_ = then_no_signature_recorded
+
+test_when_sign_after_deadline_then_rejected = script do
+  run Test with
+    given = given_open_round
+    when = when_signer_signs_after_deadline
+    then_ = then_no_signature_recorded
+
+test_when_proposer_closes_then_round_archived = script do
+  run Test with
+    given = given_open_round
+    when = when_proposer_closes
+    then_ = then_round_archived
+
+test_when_deadline_after_max_record_time_then_create_rejected = script do
+  run Test with
+    given = given_parties
+    when = when_created_with_deadline_after_max_record_time
+    then_ = then_no_round_created

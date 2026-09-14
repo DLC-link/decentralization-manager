@@ -2710,6 +2710,7 @@ mod tests {
         let namespace_c = "1220e6010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5894";
         let credentials = |party: &str, namespace: &str| -> anyhow::Result<PartyCredentials> {
             Ok(PartyCredentials {
+                kind: crate::config::CredentialKind::Decparty,
                 dec_party_id: CantonId::parse(&format!("{party}::{namespace}"))?,
                 member_party_id: CantonId::parse(&format!("member::{namespace}"))?,
                 user_id: "user".to_string(),

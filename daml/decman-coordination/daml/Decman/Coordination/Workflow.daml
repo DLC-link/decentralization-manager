@@ -1,0 +1,169 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Workflow intent and the responses to it.
+-- The proposer signs the intent alone. Invitees answer with their own
+-- self-signed contracts, so no submission ever needs two acting parties.
+module Decman.Coordination.Workflow where
+
+import Decman.Coordination.Types
+
+-- | The proposer's intent for one run. The reference fields are what a member
+-- validates every later topology proposal against before it co-signs.
+template WorkflowProposal
+  with
+    proposer : Party
+    proposerParticipant : Text
+    proposerNamespaceFingerprint : Optional Text
+    proposerSigningPublicKeyHex : Optional Text
+    proposerDamlKeyFingerprint : Optional Text
+    runId : Text
+    kind : WorkflowKind
+    invitees : [Party]
+    participants : [Text]
+    decPartyId : Optional Text
+    prefix : Optional Text
+    threshold : Optional Int
+    previousThreshold : Optional Int
+      -- ^ Head DND threshold at creation. Sets the quorum for kick and change-threshold.
+    dndBaseSerial : Optional Int
+      -- ^ Accepted DND serial at creation. A member refuses a proposal built on another base.
+    p2pBaseSerial : Optional Int
+    newParticipant : Optional Text
+    kickedParticipant : Optional Text
+    darPins : [DarPin]
+    packageNames : [Text]
+    description : Text
+    createdAt : Time
+    expiresAt : Time
+  where
+    signatory proposer
+    observer invitees
+    ensure expiresAt > createdAt
+
+    -- | Nonconsuming, so every invitee accepts the same contract. The guard,
+    -- not visibility, rejects an outsider who obtained the contract by disclosure.
+    nonconsuming choice WorkflowProposal_Accept : ContractId WorkflowAcceptance
+      with
+        acceptor : Party
+        participantId : Text
+        namespaceFingerprint : Optional Text
+        signingPublicKeyHex : Optional Text
+        damlKeyFingerprint : Optional Text
+        memberParty : Optional Party
+      controller acceptor
+      do
+        assertMsg "not invited" (acceptor `elem` invitees)
+        now <- getTime
+        assertMsg "proposal expired" (now < expiresAt)
+        create WorkflowAcceptance with
+          proposal = self
+          proposer
+          acceptor
+          observers = invitees
+          runId
+          participantId
+          namespaceFingerprint
+          signingPublicKeyHex
+          damlKeyFingerprint
+          memberParty
+          acceptedAt = now
+
+    nonconsuming choice WorkflowProposal_Decline : ContractId WorkflowDecline
+      with
+        decliner : Party
+        reason : Text
+      controller decliner
+      do
+        assertMsg "not invited" (decliner `elem` invitees)
+        now <- getTime
+        create WorkflowDecline with
+          proposal = self
+          proposer
+          decliner
+          observers = invitees
+          runId
+          reason
+          declinedAt = now
+
+    -- | A topology proposal cannot be withdrawn. Cancel archives the intent, so
+    -- members stop co-signing because the match disappears.
+    choice WorkflowProposal_Cancel : ()
+      controller proposer
+      do pure ()
+
+    choice WorkflowProposal_Finish : ContractId WorkflowOutcome
+      with
+        succeeded : Bool
+        error : Optional Text
+      controller proposer
+      do
+        now <- getTime
+        create WorkflowOutcome with
+          proposer
+          runId
+          kind
+          observers = invitees
+          succeeded
+          error
+          finishedAt = now
+
+-- | One invitee's acceptance. The proposer counts it only after it has checked
+-- the acceptor against the proposal and the hosting against the topology store.
+template WorkflowAcceptance
+  with
+    proposal : ContractId WorkflowProposal
+    proposer : Party
+    acceptor : Party
+    observers : [Party]
+    runId : Text
+    participantId : Text
+    namespaceFingerprint : Optional Text
+    signingPublicKeyHex : Optional Text
+      -- ^ Informational. The root NamespaceDelegation is the source of key bytes.
+    damlKeyFingerprint : Optional Text
+    memberParty : Optional Party
+    acceptedAt : Time
+  where
+    signatory acceptor
+    observer proposer, observers
+
+    choice WorkflowAcceptance_Archive : ()
+      controller acceptor
+      do pure ()
+
+template WorkflowDecline
+  with
+    proposal : ContractId WorkflowProposal
+    proposer : Party
+    decliner : Party
+    observers : [Party]
+    runId : Text
+    reason : Text
+    declinedAt : Time
+  where
+    signatory decliner
+    observer proposer, observers
+
+    choice WorkflowDecline_Archive : ()
+      controller decliner
+      do pure ()
+
+-- | The proposer's verdict on a finished run. It outlives the proposal, so
+-- invitees can settle their own run rows after the proposal is gone.
+template WorkflowOutcome
+  with
+    proposer : Party
+    runId : Text
+    kind : WorkflowKind
+    observers : [Party]
+    succeeded : Bool
+    error : Optional Text
+    finishedAt : Time
+  where
+    signatory proposer
+    observer observers
+
+    choice WorkflowOutcome_Archive : ()
+      controller proposer
+      do pure ()

@@ -9,7 +9,7 @@ use keycloak::login::{ClientCredentialsParams, client_credentials, token_url};
 use crate::{
     auth::WorkflowAuth,
     canton_id::CantonId,
-    config::{Auth0M2MConfig, NodeConfig, PartyCredentials},
+    config::{Auth0M2MConfig, CredentialKind, NodeConfig, PartyCredentials},
     error::Result,
     server::{
         AppState,
@@ -124,7 +124,10 @@ pub async fn get_auth_status(data: web::Data<AppState>) -> impl Responder {
             // real dec party — the hardcoded placeholder above never matched it,
             // so auth-gated actions (member-party discovery, contract deploy)
             // stayed blocked even after `/party-config` succeeded.
-            for creds in party_creds_list.iter() {
+            for creds in party_creds_list
+                .iter()
+                .filter(|c| c.kind == CredentialKind::Decparty)
+            {
                 party_statuses.push(PartyAuthStatus {
                     dec_party_id: creds.dec_party_id.clone(),
                     member_party_id: creds.member_party_id.clone(),
@@ -150,8 +153,12 @@ pub async fn get_auth_status(data: web::Data<AppState>) -> impl Responder {
 
     let party_creds_list = data.party_credentials.read().await;
 
-    // Check each configured party
-    for party_creds in party_creds_list.iter() {
+    // Check each configured decparty. The node identity row is a node-level
+    // credential, not a party mapping; `GET /node-identity` reports it.
+    for party_creds in party_creds_list
+        .iter()
+        .filter(|c| c.kind == CredentialKind::Decparty)
+    {
         let dec_party_id = party_creds.dec_party_id.clone();
         let member_party_id = party_creds.member_party_id.clone();
         let user_id = party_creds.user_id.clone();
@@ -802,6 +809,7 @@ mod tests {
             discovery_completed: Arc::new(RwLock::new(HashMap::new())),
             http_client: reqwest::Client::new(),
             health_cache: crate::server::HealthCache::new(),
+            onledger: crate::onledger::OnLedger::placeholder(),
         })
     }
 
@@ -863,6 +871,7 @@ mod tests {
     /// empty shape because nothing fills it in.
     fn auth0_party() -> PartyCredentials {
         PartyCredentials {
+            kind: crate::config::CredentialKind::Decparty,
             dec_party_id: CantonId::parse(VALID_CANTON_ID).expect("valid dec party id"),
             member_party_id: CantonId::parse(VALID_CANTON_ID).expect("valid member party id"),
             user_id: "attestor-1".to_string(),
