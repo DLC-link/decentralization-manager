@@ -22,8 +22,8 @@ use crate::{
     error::Result,
     utils::{self, get_synchronizer_id},
     workflow::{
-        party_replication::onboarding_flag::has_onboarding_marker, storage::WorkflowStorage,
-        topology,
+        party_replication::ReplicationTarget,
+        party_replication::onboarding_flag::has_onboarding_marker, topology,
     },
 };
 
@@ -41,24 +41,33 @@ use crate::{
 pub async fn capture_offset_once(
     config: &NodeConfig,
     storage: &SqlitePool,
-    instance_name: &str,
+    replication: &ReplicationTarget,
     kind: &str,
     scope: Option<&str>,
     ledger_token: Option<&str>,
     label: &str,
 ) -> Result {
-    if storage
-        .read_artifact(instance_name, kind, scope)
+    // Reached through the replication so a tenant run, which has no workflow
+    // row to hang artefacts off, writes to the table without the foreign key.
+    if replication
+        .read_artifact(storage, kind, scope)
         .await?
         .is_some()
     {
         return Ok(());
     }
     let offset = current_ledger_offset(config, ledger_token).await?;
-    storage
-        .write_artifact(instance_name, kind, scope, offset.to_string().as_bytes())
+    // Insert-only: two concurrent callers can both pass the check above, and the
+    // slower one must not overwrite a value the faster one already acted on.
+    // Losing that race is success — whatever is stored is pre-activation.
+    let wrote = replication
+        .write_artifact_if_absent(storage, kind, scope, offset.to_string().as_bytes())
         .await?;
-    tracing::info!("Captured {label} ledger offset {offset}");
+    if wrote {
+        tracing::info!("Captured {label} ledger offset {offset}");
+    } else {
+        tracing::info!("Another caller captured the {label} offset first; keeping theirs");
+    }
     Ok(())
 }
 
@@ -159,13 +168,15 @@ async fn ledger_end_offset(config: &NodeConfig, token: Option<&str>) -> Result<i
 pub async fn persisted_or_derived_offset(
     config: &NodeConfig,
     storage: &SqlitePool,
-    instance_name: &str,
+    replication: &ReplicationTarget,
     kind: &str,
     scope: Option<&str>,
-    party_id: &CantonId,
-    target: &CantonId,
 ) -> Result<i64> {
-    if let Some(bytes) = storage.read_artifact(instance_name, kind, scope).await? {
+    // Artefacts are reached through the replication, not the pool directly: a
+    // tenant replication has no workflow run behind it, so its artefacts live in
+    // a table without the run foreign key and a raw pool write is refused.
+    let (party_id, target) = (&replication.party_id, &replication.target_participant_id);
+    if let Some(bytes) = replication.read_artifact(storage, kind, scope).await? {
         return String::from_utf8(bytes)?
             .trim()
             .parse()
@@ -178,8 +189,8 @@ pub async fn persisted_or_derived_offset(
          started it was dismissed or swept."
     );
     let offset = derive_pre_activation_offset(config, party_id, target).await?;
-    storage
-        .write_artifact(instance_name, kind, scope, offset.to_string().as_bytes())
+    replication
+        .write_artifact(storage, kind, scope, offset.to_string().as_bytes())
         .await?;
     Ok(offset)
 }

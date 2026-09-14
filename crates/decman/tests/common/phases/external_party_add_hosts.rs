@@ -12,25 +12,22 @@
 //! compare them before it signs, and it is the only thing standing between the
 //! wallet and a lying host. A phase that prepared on one host would not test it.
 //!
-//! ## What this does NOT yet cover
+//! After the topology lands the phase drives the rest of the replication: the
+//! wallet pulls the ACS snapshot from a current host and relays it to the
+//! joiner, which imports it and clears Canton's onboarding marker. The final
+//! assertion is that P3 reports the party fully hosted — marker gone — which is
+//! the only state in which it can actually confirm for the party.
 //!
-//! The flow currently stops at the topology write. Nothing replicates the ACS
-//! onto the new host and nothing clears Canton's onboarding marker, so P3 ends
-//! up named in the mapping while the party is still suspended there and holds
-//! none of its contracts. This phase therefore asserts the mapping advanced —
-//! not that the new host is usable.
+//! That last assertion is also the empirical answer to an open question from the
+//! scoping study: whether a single-key party's onboarding participant can clear
+//! its own flag, or whether the party key must sign a second round. The proto
+//! says the former; decparties were observed to need owner signatures anyway. If
+//! this phase's final step times out, the answer is the latter and the wallet
+//! needs a signing round.
 //!
-//! Two known gaps show up here and are deliberately not asserted as correct:
-//!
-//! * The wallet has no endpoint that reports a party's current serial, so the
-//!   base serial is pinned from knowledge that a freshly onboarded party sits at
-//!   1. A real wallet cannot do that.
-//! * `host_onboarding_status` decides "hosted" without looking at the
-//!   onboarding marker, so `/v0/tenant/{party}/status` would call P3 hosted the
-//!   moment the mapping is authorized — before the party is usable there.
-//!
-//! Both are tracked as the next piece of work; this phase should tighten to a
-//! real end-to-end assertion once the ACS replication and the flag-clear land.
+//! The base serial comes from `GET /v0/tenant/{party}/state`, the way a real
+//! wallet learns it, rather than from the test knowing a freshly onboarded party
+//! sits at 1.
 
 use std::time::Duration;
 
@@ -45,10 +42,6 @@ use decman_wallet::ExternalKeyPair;
 use crate::common::{
     Fixture, chaos::fresh_prefix, http::probe_workflow_status, scenario::Scenario,
 };
-
-/// A freshly onboarded party's `PartyToParticipant` sits at serial 1. Pinned
-/// here because no endpoint reports it yet (see the module docs).
-const BASE_SERIAL: u32 = 1;
 
 /// Read side of `/external-parties`. The shipped `ExternalPartiesResponse` is
 /// serialize-only, so the test declares the fields it reads.
@@ -158,10 +151,26 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 move |f, _| {
                     let party_id = party_id.clone();
                     Box::pin(async move {
+                        // The way a real wallet learns it. Asserting it is 1 as
+                        // well, because a freshly onboarded party should be, and
+                        // a surprise there would mean the endpoint is reporting
+                        // something else entirely.
+                        let state: Value = f
+                            .get_json(f.p1.http, &format!("/v0/tenant/{party_id}/state"))
+                            .await?;
+                        let base_serial = state
+                            .get("serial")
+                            .and_then(Value::as_u64)
+                            .context("party state missing serial")?;
+                        anyhow::ensure!(
+                            base_serial == 1,
+                            "a freshly onboarded party should sit at serial 1, got {base_serial}"
+                        );
+
                         let request = json!({
                             "party_id": party_id,
                             "new_hosts": [&f.p3.participant_id],
-                            "base_serial": BASE_SERIAL,
+                            "base_serial": base_serial,
                         });
 
                         // Every host — the two current ones AND the joiner —
@@ -195,7 +204,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                             .and_then(Value::as_u64)
                             .context("prepare response missing serial")?;
                         anyhow::ensure!(
-                            serial == u64::from(BASE_SERIAL) + 1,
+                            serial == base_serial + 1,
                             "add-hosts must write exactly one serial past the base, got {serial}"
                         );
 
@@ -206,7 +215,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         // do not sign an add.
                         let onboard_req = json!({
                             "party_id": party_id,
-                            "base_serial": BASE_SERIAL,
+                            "base_serial": base_serial,
                             "topology_transactions": first
                                 .get("topology_transactions")
                                 .cloned()
@@ -243,18 +252,103 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 }
             },
         )
+        .run(f)
+        .await?;
+
+    // ------------------------------------------------------------------
+    // Scenario 3 — give the new host the contracts, and switch it on.
+    // ------------------------------------------------------------------
+    Scenario::with_ctx(format!("replicate {hint}'s ACS onto P3"), ())
+        .when("wallet relays the snapshot from P1 to P3", {
+            let party_id = party_id.clone();
+            move |f, _| {
+                let party_id = party_id.clone();
+                Box::pin(async move {
+                    // Pulled from a host that already holds the party, scoped to
+                    // the joiner. Canton needs the joiner's activation to exist
+                    // first, which the authorized serial-2 write just created.
+                    let target = f.p3.participant_id.clone();
+
+                    // The replication's staged state is keyed by the serial the
+                    // add was pinned to, not the current one. The add advanced
+                    // exactly one serial, so the base is one behind whatever
+                    // head state reads now.
+                    let state: Value = f
+                        .get_json(f.p1.http, &format!("/v0/tenant/{party_id}/state"))
+                        .await?;
+                    let current_serial = state
+                        .get("serial")
+                        .and_then(Value::as_u64)
+                        .context("party state missing serial")?;
+                    let base_serial = current_serial
+                        .checked_sub(1)
+                        .context("the add-hosts write should have advanced the serial")?;
+
+                    let snapshot: Value = f
+                        .get_json(
+                            f.p1.http,
+                            &format!(
+                                "/v0/tenant/{party_id}/acs/{target}?base_serial={base_serial}"
+                            ),
+                        )
+                        .await?;
+
+                    // The wallet is the transport: no host-to-host channel is
+                    // involved, which is the whole point for a partner node that
+                    // is not in this mesh.
+                    let import_req = json!({
+                        "party_id": party_id,
+                        "base_serial": base_serial,
+                        "snapshot": snapshot
+                            .get("snapshot")
+                            .cloned()
+                            .context("acs response missing snapshot")?,
+                        "package_ids": snapshot
+                            .get("package_ids")
+                            .cloned()
+                            .context("acs response missing package_ids")?,
+                    });
+                    let result: Value = f
+                        .post_json(f.p3.http, "/v0/tenant/add-hosts/import", &import_req)
+                        .await?;
+                    info!("add-hosts import on P3: {result}");
+
+                    // Checked here, inside the step that does the import, rather
+                    // than as a later Then. Scenario steps run in sequence, so a
+                    // Then would only observe P1 after replication finished and
+                    // would pass even if P1 had dropped out during it — which is
+                    // exactly the regression worth catching, since the import
+                    // disconnects the joiner and must not touch anyone else.
+                    let p1_status: Value = f
+                        .get_json(f.p1.http, &format!("/v0/tenant/{party_id}/status"))
+                        .await
+                        .context("P1's view of the party right after the import")?;
+                    anyhow::ensure!(
+                        p1_status.get("status").and_then(Value::as_str) == Some("completed"),
+                        "P1 stopped reporting the party live across the import: {p1_status}"
+                    );
+                    Ok(())
+                })
+            }
+        })
+        // The marker is the difference between "in the mapping" and "usable".
+        // A host still carrying it holds none of the party's contracts and
+        // cannot confirm, so this is the assertion that the flow actually works.
         .then(
-            "the joiner sees itself hosting the party",
-            Duration::from_secs(120),
+            "P3 hosts the party with the onboarding marker cleared",
+            Duration::from_secs(180),
             {
                 let party_id = party_id.clone();
                 move |f, _| {
                     let party_id = party_id.clone();
                     Box::pin(async move {
-                        let listed: ListedParties =
-                            f.probe_get_json(f.p3.http, "/external-parties").await?;
-                        listed.parties.iter().find(|p| p.party_id == party_id)?;
-                        Some(Ok(()))
+                        probe_workflow_status(
+                            &*f,
+                            f.p3.http,
+                            &format!("/v0/tenant/{party_id}/status"),
+                            "tenant-add-hosts",
+                        )
+                        .await
                     })
                 }
             },

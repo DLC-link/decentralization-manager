@@ -129,11 +129,9 @@ pub async fn open_export_session(
     let begin_offset_exclusive = offset::persisted_or_derived_offset(
         config,
         storage,
-        &target.instance_name,
+        target,
         target.artifacts.export_offset,
         None,
-        &target.party_id,
-        &target.target_participant_id,
     )
     .await?;
 
@@ -227,12 +225,10 @@ where
     // crash-looping (unclean participant shutdown). Recover conservatively:
     // reconnect and verify health before doing anything else. This is a no-op
     // when the participant is already connected and healthy.
-    let disconnect_window_opened = storage
-        .read_artifact(
-            &target.instance_name,
-            target.artifacts.import_inflight,
-            None,
-        )
+    // Through the target, not the pool: a tenant replication has no workflow
+    // run, so its artefacts live in a table without the run foreign key.
+    let disconnect_window_opened = target
+        .read_artifact(storage, target.artifacts.import_inflight, None)
         .await?
         .is_some();
     if disconnect_window_opened {
@@ -348,13 +344,8 @@ where
 
     // Open the crash-safety window BEFORE disconnecting so a crash between here
     // and a verified reconnect is detected on the next attempt.
-    storage
-        .write_artifact(
-            &target.instance_name,
-            target.artifacts.import_inflight,
-            None,
-            b"1",
-        )
+    target
+        .write_artifact(storage, target.artifacts.import_inflight, None, b"1")
         .await?;
 
     tracing::info!(

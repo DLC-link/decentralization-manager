@@ -51,6 +51,53 @@ pub enum ClearOutcome {
 /// safe time, a call proposes the clearing topology transaction, which still
 /// needs whatever signatures the party's namespace demands — collected by the
 /// calling workflow, not here.
+/// Ask Canton to clear the flag once and return whatever it says, without
+/// waiting for its safe time.
+///
+/// For a request path. `clear_onboarding_flag` blocks up to
+/// `MAX_SAFE_TIME_WAIT_SECS` waiting for the safe time, which is right for a
+/// workflow step driving a run to completion and wrong for an HTTP handler: it
+/// turns one call into a ten-minute request. Canton schedules the clearance
+/// itself when it is not yet safe — the RPC is documented as idempotent and
+/// designed to be polled — so returning immediately loses nothing but the wait.
+///
+/// # Errors
+/// As [`clear_onboarding_flag`], minus the stuck-synchronizer timeout.
+pub async fn request_onboarding_flag_clear(
+    config: &NodeConfig,
+    storage: &SqlitePool,
+    target: &ReplicationTarget,
+) -> Result<ClearOutcome> {
+    let synchronizer_id =
+        utils::extract_synchronizer_fingerprint(&utils::get_synchronizer_id(config).await?)?;
+    let self_id = config.participant_id().to_string();
+    let begin_offset_exclusive = offset::persisted_or_derived_offset(
+        config,
+        storage,
+        target,
+        target.artifacts.pre_activation_offset,
+        Some(&self_id),
+    )
+    .await?;
+
+    let mut client = PartyManagementServiceClient::new(config.admin_channel().await?);
+    let response = client
+        .clear_party_onboarding_flag(tonic::Request::new(ClearPartyOnboardingFlagRequest {
+            party_id: target.party_id.to_string(),
+            synchronizer_id,
+            begin_offset_exclusive,
+            wait_for_activation_timeout: None,
+        }))
+        .await?
+        .into_inner();
+
+    Ok(if response.onboarded {
+        ClearOutcome::Cleared
+    } else {
+        ClearOutcome::Proposed
+    })
+}
+
 pub async fn clear_onboarding_flag(
     config: &NodeConfig,
     storage: &SqlitePool,
@@ -69,11 +116,9 @@ pub async fn clear_onboarding_flag(
     let begin_offset_exclusive = offset::persisted_or_derived_offset(
         config,
         storage,
-        &target.instance_name,
+        target,
         target.artifacts.pre_activation_offset,
         Some(&self_id),
-        &target.party_id,
-        &target.target_participant_id,
     )
     .await?;
 
