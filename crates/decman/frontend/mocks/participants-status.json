@@ -1,43 +1,43 @@
 {
   "statuses": [
     {
-      "id": "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d",
+      "id": "iBTC-validator-1::122042208735e3f23ef64a268afafa9276c05e5810c296e93444cdec4a635738a72f",
       "status": "CurrentNode",
       "latency_ms": 0,
       "version": "0.1.8",
       "build_version": "v0.1.8"
     },
     {
-      "id": "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+      "id": "iBTC-validator-2::1220a8c40594107def9ef1403d34e17a25018a411561038042d974766e506de1bdd4",
       "status": "Connected",
       "latency_ms": 101,
       "version": "0.1.9",
       "build_version": "v0.1.9"
     },
     {
-      "id": "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343",
+      "id": "iBTC-validator-3::122029739d4b281f74d7e7037387980ee36165085e5dd51c1617627bcfb6a434b830",
       "status": "Connected",
       "latency_ms": 167,
       "version": "0.1.10",
       "build_version": "v0.1.10"
     },
     {
-      "id": "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+      "id": "cn-validator-07::122038baa36e80ce0d445f3b49b67e965ea5f847469f571b220fedc9d99aa8d5fb9f",
       "status": "Unreachable"
     },
     {
-      "id": "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+      "id": "relay-zrh::122032e3df42c8378bef548df0fdccf4b16ed4c7fb966fd0ab18d0b05772a5704b25",
       "status": "Connected",
       "latency_ms": 137,
       "version": "0.1.10",
       "build_version": "v0.1.10"
     },
     {
-      "id": "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9",
+      "id": "bsafe-tok3::122039e33739c64ad43fa23b83d26f59177e37e1e81b9ceb3674b8e9e6b56c443dd7",
       "status": "HandshakeFailed"
     },
     {
-      "id": "dec-syd1::1220ac2594b1f585253379f7fd2d121b204088b41ae60a31698a802fef37d5b8",
+      "id": "dec-syd1::122004fde4fda828384def7426720ab8ce41d2bff13131bb4d59ca48f9b91277dff4",
       "status": "Connected",
       "latency_ms": 66,
       "version": "0.1.9",
@@ -51,40 +51,40 @@
       "build_version": "v0.1.9"
     },
     {
-      "id": "canton-nyc::12208651f1b033067b4c5cbe09328210794e2bef13d338de4bf0aca2af277b6d",
+      "id": "canton-nyc::122016247cef397323ea69ee6501e66e824e81c03b19f0460acaa3374748b319158c",
       "status": "Connected",
       "latency_ms": 44,
       "version": "0.2.0-rc1",
       "build_version": "v0.2.0-rc1"
     },
     {
-      "id": "validator-sgp::122044a2d77adbb0679fa754a1e8493afae5d1597eada7404cf7a569263574db",
+      "id": "validator-sgp::1220dfe41ccf56a0ccf085399e11bca59b2c754654be3c82bf40d90e250c11ce6af6",
       "status": "Unreachable"
     },
     {
-      "id": "ibtc-fra-spare::12206b9220cb439e354deddd22af1f602a6ee3983b3a8956d0ef7dd07e958ebf",
+      "id": "ibtc-fra-spare::1220ec155c888ada79d19fad35124d30ed9d86cb90fc9d6be2e89668ec926fb2ccaa",
       "status": "Connected",
       "latency_ms": 74,
       "version": "0.1.8",
       "build_version": "v0.1.8"
     },
     {
-      "id": "dec-saopaulo::1220ecc57a74bf7229aaf620b544d7fb6f5b199b20b2581752bece576a50adee",
+      "id": "dec-saopaulo::12209003476a43f9bfa80a7c1b830431cbc85a743437c9d3116a9139570896c5062b",
       "status": "HandshakeFailed"
     },
     {
-      "id": "canton-mum::1220649a6a537db9f061d24e3c98ef1c46cbe0605015fb2ec3d52ea6215ed0ee",
+      "id": "canton-mum::1220f3ffa802e6629f77946d7f58c2b2d8df9d28d8d6ca27c79b682bbe9bff548120",
       "status": "Connected",
       "latency_ms": 111,
       "version": "0.1.8",
       "build_version": "v0.1.8"
     },
     {
-      "id": "bsafe-cape::122015a048f5c1a6ede86d6ec87272554bbbd23f4a342ac191dc644612f35d6a",
+      "id": "bsafe-cape::12203e4773a51c0520ab9e446cc00c683ba1cc8c8f54647125c4fb6293229cdbbc0a",
       "status": "Unreachable"
     },
     {
-      "id": "relay-dub::12202946e81d20be83b1f31e8df7d4cc139473b6e44143a79f4d92149eb0e50a",
+      "id": "relay-dub::1220b8fa6add9d783b83d854eb24e0e9b31526dc446cd1c943bb6cd0cccd0e345a8b",
       "status": "Connected",
       "latency_ms": 31,
       "version": "0.1.9",

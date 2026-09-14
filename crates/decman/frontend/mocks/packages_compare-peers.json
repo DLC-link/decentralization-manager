@@ -173,7 +173,7 @@
   ],
   "peers": [
     {
-      "participant_id": "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+      "participant_id": "iBTC-validator-2::1220a8c40594107def9ef1403d34e17a25018a411561038042d974766e506de1bdd4",
       "name": "iBTC-validator-2",
       "reachable": true,
       "packages": [
@@ -320,7 +320,7 @@
       ]
     },
     {
-      "participant_id": "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343",
+      "participant_id": "iBTC-validator-3::122029739d4b281f74d7e7037387980ee36165085e5dd51c1617627bcfb6a434b830",
       "name": "iBTC-validator-3",
       "reachable": true,
       "packages": [
@@ -462,7 +462,7 @@
       ]
     },
     {
-      "participant_id": "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+      "participant_id": "cn-validator-07::122038baa36e80ce0d445f3b49b67e965ea5f847469f571b220fedc9d99aa8d5fb9f",
       "name": "cn-validator-07",
       "reachable": false,
       "packages": [
@@ -519,7 +519,7 @@
       ]
     },
     {
-      "participant_id": "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+      "participant_id": "relay-zrh::122032e3df42c8378bef548df0fdccf4b16ed4c7fb966fd0ab18d0b05772a5704b25",
       "name": "relay-zrh",
       "reachable": true,
       "packages": [
@@ -671,7 +671,7 @@
       ]
     },
     {
-      "participant_id": "dec-syd1::1220ac2594b1f585253379f7fd2d121b204088b41ae60a31698a802fef37d5b8",
+      "participant_id": "dec-syd1::122004fde4fda828384def7426720ab8ce41d2bff13131bb4d59ca48f9b91277dff4",
       "name": "dec-syd1",
       "reachable": true,
       "packages": [

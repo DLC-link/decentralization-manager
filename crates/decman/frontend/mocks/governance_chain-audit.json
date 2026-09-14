@@ -11,7 +11,7 @@
       "action_summary": "Set governance threshold 3 → 4",
       "choice": "SetThreshold",
       "acting_parties": [
-        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
+        "cbtc-network::1220b1cfb0b06e502d45400a5b7bd6b2c4d8c8ea377cd022c8d45b4ccb4f2eede33b"
       ],
       "update_id": "00bf5e57266129873f5aaa5e9420b347aec17454eadb399e62972853fd87ec6a89",
       "details": {
@@ -30,8 +30,8 @@
       "action_summary": "Onboard yCBTC instrument",
       "choice": "OnboardInstrument",
       "acting_parties": [
-        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78",
-        "ibtc-admin::12209688b4410a59414d40a2a541644d22ac9e85a7f9438545749f65965a495f"
+        "cbtc-network::1220b1cfb0b06e502d45400a5b7bd6b2c4d8c8ea377cd022c8d45b4ccb4f2eede33b",
+        "ibtc-admin::12206b74fe7904ce2f7e9458941081a2cdbb85529f1ef1716d9a8a22efb46f15714c"
       ],
       "update_id": "0045f00b8708ba7a2bcb0fbbbeb21312c028f5754c1ed77007515a64424bd63d6a",
       "details": {
@@ -50,7 +50,7 @@
       "action_summary": "Add member ibtc-admin",
       "choice": "AddMember",
       "acting_parties": [
-        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
+        "cbtc-network::1220b1cfb0b06e502d45400a5b7bd6b2c4d8c8ea377cd022c8d45b4ccb4f2eede33b"
       ],
       "update_id": "00a857c1c32d5f1b0ae586e31f7903b2b11419035e55fa899c0229b0d3d0a38813",
       "details": {
@@ -68,8 +68,8 @@
       "action_summary": "Mint 500.00 CBTC",
       "choice": "Mint",
       "acting_parties": [
-        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78",
-        "governance-core::1220b49bc40b5fc97a403d844155fd5074d3fb20e98a733ef85473b89831cce5"
+        "cbtc-network::1220b1cfb0b06e502d45400a5b7bd6b2c4d8c8ea377cd022c8d45b4ccb4f2eede33b",
+        "governance-core::12207c6069f4e2396e1ca65deddfe9781c4e4b07b77206c23dd29a47a1ebd4fa7970"
       ],
       "update_id": "00154b82c945c67ced3da8c5493d6b365c825bb947b978b5fcbcf40f037bafa869",
       "details": {
@@ -88,7 +88,7 @@
       "action_summary": "Vote on DIP-039 (passed)",
       "choice": "CastVote",
       "acting_parties": [
-        "ibtc-admin::12209688b4410a59414d40a2a541644d22ac9e85a7f9438545749f65965a495f"
+        "ibtc-admin::12206b74fe7904ce2f7e9458941081a2cdbb85529f1ef1716d9a8a22efb46f15714c"
       ],
       "update_id": "002085e89f41aae2ea1c2c4b232c2ba3fb00e1ae5563d6e92a013055eeee21e374",
       "details": {
@@ -107,7 +107,7 @@
       "action_summary": "Pause Delta-Neutral BTC issuance",
       "choice": "Pause",
       "acting_parties": [
-        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
+        "cbtc-network::1220b1cfb0b06e502d45400a5b7bd6b2c4d8c8ea377cd022c8d45b4ccb4f2eede33b"
       ],
       "update_id": "00ae166746fb5d4a6784eb05d3b24b225ded019dce3df7a73f46015a036e1eefef",
       "details": {
@@ -125,7 +125,7 @@
       "action_summary": "Rotate action confirmation timeout → 48h",
       "choice": "SetTimeout",
       "acting_parties": [
-        "governance-core::1220b49bc40b5fc97a403d844155fd5074d3fb20e98a733ef85473b89831cce5"
+        "governance-core::12207c6069f4e2396e1ca65deddfe9781c4e4b07b77206c23dd29a47a1ebd4fa7970"
       ],
       "update_id": "00dec781b33111366cf74744f3b1195a46dbb72f53b99ec3985f07ad747772617a",
       "details": {
@@ -143,7 +143,7 @@
       "action_summary": "Burn 75.00 CBTC",
       "choice": "Burn",
       "acting_parties": [
-        "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb"
+        "cbtc-mint-authority::1220b1f9128e7d18cb579d6ebc52fdc49f788ffa84fd3f4f4044de7ed73e2bf00109"
       ],
       "update_id": "006583232a681a7486a88c4fe4408ea767cedc0eb3abe830314f6fed1b56b1ee53",
       "details": {
@@ -162,8 +162,8 @@
       "action_summary": "Provision registrar service",
       "choice": "Provision",
       "acting_parties": [
-        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78",
-        "ibtc-admin::12209688b4410a59414d40a2a541644d22ac9e85a7f9438545749f65965a495f"
+        "cbtc-network::1220b1cfb0b06e502d45400a5b7bd6b2c4d8c8ea377cd022c8d45b4ccb4f2eede33b",
+        "ibtc-admin::12206b74fe7904ce2f7e9458941081a2cdbb85529f1ef1716d9a8a22efb46f15714c"
       ],
       "update_id": "0027e58defc272c063fb56e07c4996381e9f325b3d228fbccdf123ab9dc6c4ed2b",
       "details": {}
@@ -179,7 +179,7 @@
       "action_summary": "Remove member backend-signatory-0",
       "choice": "RemoveMember",
       "acting_parties": [
-        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
+        "cbtc-network::1220b1cfb0b06e502d45400a5b7bd6b2c4d8c8ea377cd022c8d45b4ccb4f2eede33b"
       ],
       "update_id": "007f81a6b7ab8b2770312576b1734938086dd80ddb1a36cfa486a936ec6f8d2b56",
       "details": {
@@ -197,7 +197,7 @@
       "action_summary": "Transfer 250.00 CBTC to treasury",
       "choice": "Transfer",
       "acting_parties": [
-        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
+        "cbtc-network::1220b1cfb0b06e502d45400a5b7bd6b2c4d8c8ea377cd022c8d45b4ccb4f2eede33b"
       ],
       "update_id": "006db02cdcab3923a49070710205333c5fb527d152fc198b45592eabe3df4b5b7d",
       "details": {
@@ -216,7 +216,7 @@
       "action_summary": "Update issuance limits (max 10,000 CBTC)",
       "choice": "UpdateLimits",
       "acting_parties": [
-        "governance-core::1220b49bc40b5fc97a403d844155fd5074d3fb20e98a733ef85473b89831cce5"
+        "governance-core::12207c6069f4e2396e1ca65deddfe9781c4e4b07b77206c23dd29a47a1ebd4fa7970"
       ],
       "update_id": "005b72c38c9c7d795acbbd43ee03004b6c34c1c343c26006d9c88e37292ba737c9",
       "details": {
@@ -234,7 +234,7 @@
       "action_summary": "Add member governance-core",
       "choice": "AddMember",
       "acting_parties": [
-        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
+        "cbtc-network::1220b1cfb0b06e502d45400a5b7bd6b2c4d8c8ea377cd022c8d45b4ccb4f2eede33b"
       ],
       "update_id": "008a73d366dc972fa57592fdebe0eebe6341e12fcc714e9b0d7e83ffd586a342c2",
       "details": {
@@ -252,7 +252,7 @@
       "action_summary": "Deploy governance core",
       "choice": "OnboardInstrument",
       "acting_parties": [
-        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
+        "cbtc-network::1220b1cfb0b06e502d45400a5b7bd6b2c4d8c8ea377cd022c8d45b4ccb4f2eede33b"
       ],
       "update_id": "00125a532ec861ace7ace196d1b6114c15880e4b050b5bbad8f81d0983d1eea001",
       "details": {}
@@ -268,7 +268,7 @@
       "action_summary": "Confirmed pending action",
       "choice": "Confirm",
       "acting_parties": [
-        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
+        "cbtc-network::1220b1cfb0b06e502d45400a5b7bd6b2c4d8c8ea377cd022c8d45b4ccb4f2eede33b"
       ],
       "update_id": "4e9210b80e7b1cb7d3ff52aacdefe20157c2d36cf71cb7db2e888b7ea0403cc5e7",
       "details": {
@@ -287,7 +287,7 @@
       "action_summary": "Set governance threshold 3 → 4",
       "choice": "SetThreshold",
       "acting_parties": [
-        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
+        "cbtc-network::1220b1cfb0b06e502d45400a5b7bd6b2c4d8c8ea377cd022c8d45b4ccb4f2eede33b"
       ],
       "update_id": "6119dac7d559597a68891a91c42412bc6616ceebb6fc174e3f233655c72b93b022",
       "details": {
@@ -306,7 +306,7 @@
       "action_summary": "Added member to governance",
       "choice": "AddMember",
       "acting_parties": [
-        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
+        "cbtc-network::1220b1cfb0b06e502d45400a5b7bd6b2c4d8c8ea377cd022c8d45b4ccb4f2eede33b"
       ],
       "update_id": "73f0544a1c72b7214572660c4f12e9fba321d71e02cad3e5e285f400f074575f55",
       "details": {
@@ -325,7 +325,7 @@
       "action_summary": "Removed member from governance",
       "choice": "RemoveMember",
       "acting_parties": [
-        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
+        "cbtc-network::1220b1cfb0b06e502d45400a5b7bd6b2c4d8c8ea377cd022c8d45b4ccb4f2eede33b"
       ],
       "update_id": "8755b7b13342cd5c82a2090b5056caeeb6f015754799a850881c5f6fc5bd06022d",
       "details": {
@@ -344,7 +344,7 @@
       "action_summary": "Executed governance action",
       "choice": "Execute",
       "acting_parties": [
-        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
+        "cbtc-network::1220b1cfb0b06e502d45400a5b7bd6b2c4d8c8ea377cd022c8d45b4ccb4f2eede33b"
       ],
       "update_id": "1e6a48ac39952c1be737f2bef98bfb05320bb0a0af06ab7f878142d225210409ab",
       "details": {
@@ -363,7 +363,7 @@
       "action_summary": "Confirmed pending action",
       "choice": "Confirm",
       "acting_parties": [
-        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
+        "cbtc-network::1220b1cfb0b06e502d45400a5b7bd6b2c4d8c8ea377cd022c8d45b4ccb4f2eede33b"
       ],
       "update_id": "24fd532b2ba24e8ecad784955ac10cf006d43b8ff5e7f3a2ef1ade99d26e372438",
       "details": {
@@ -382,7 +382,7 @@
       "action_summary": "Set governance threshold 3 → 4",
       "choice": "SetThreshold",
       "acting_parties": [
-        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
+        "cbtc-network::1220b1cfb0b06e502d45400a5b7bd6b2c4d8c8ea377cd022c8d45b4ccb4f2eede33b"
       ],
       "update_id": "4cb2de5e1d4bb22547debd401d660f9feb5e187211159d29102744746307a54373",
       "details": {
@@ -401,7 +401,7 @@
       "action_summary": "Added member to governance",
       "choice": "AddMember",
       "acting_parties": [
-        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
+        "cbtc-network::1220b1cfb0b06e502d45400a5b7bd6b2c4d8c8ea377cd022c8d45b4ccb4f2eede33b"
       ],
       "update_id": "65a183b59cc9c1907cdd27af9190b14296da3fb913f8e5c4dbc2b653c8124796ab",
       "details": {
@@ -420,7 +420,7 @@
       "action_summary": "Removed member from governance",
       "choice": "RemoveMember",
       "acting_parties": [
-        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
+        "cbtc-network::1220b1cfb0b06e502d45400a5b7bd6b2c4d8c8ea377cd022c8d45b4ccb4f2eede33b"
       ],
       "update_id": "6a2719e0bb9a83bf316cbe12a271c6492e581b1456a64b6341953966a0d7818deb",
       "details": {
@@ -439,7 +439,7 @@
       "action_summary": "Executed governance action",
       "choice": "Execute",
       "acting_parties": [
-        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
+        "cbtc-network::1220b1cfb0b06e502d45400a5b7bd6b2c4d8c8ea377cd022c8d45b4ccb4f2eede33b"
       ],
       "update_id": "8c3f23cf031f3ee2fc2530d9a0f9e46447e364734c3bdf36c2aecd1dccddebd817",
       "details": {
@@ -458,7 +458,7 @@
       "action_summary": "Confirmed pending action",
       "choice": "Confirm",
       "acting_parties": [
-        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
+        "cbtc-network::1220b1cfb0b06e502d45400a5b7bd6b2c4d8c8ea377cd022c8d45b4ccb4f2eede33b"
       ],
       "update_id": "fe1533b2a27d7f69eed341b4f3eb018367c33906dba73cadf2fef628335d6367c2",
       "details": {
