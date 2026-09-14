@@ -8,7 +8,7 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
 use common::{
     api::{
-        TenantAcsImportRequest, TenantAcsImportResponse, TenantAcsSnapshotResponse,
+        TenantAcsBlockResponse, TenantAcsImportRequest, TenantAcsImportResponse,
         TenantAddHostsOnboardRequest, TenantAddHostsOnboardResponse, TenantAddHostsPrepareResponse,
         TenantAddHostsRequest, TenantOnboardRequest, TenantOnboardResponse,
         TenantPartyStateResponse, TenantPrepareRequest, TenantPrepareResponse,
@@ -138,16 +138,22 @@ impl TenantClient {
         self.post("/v0/tenant/add-hosts/onboard", req).await
     }
 
-    /// `GET /v0/tenant/{party}/acs/{target}` — the party's ACS scoped to a
-    /// joining host, for this wallet to relay to it.
-    pub async fn acs_snapshot(
+    /// `GET /v0/tenant/{party}/acs/{target}?seq=` — one block of the party's ACS
+    /// scoped to a joining host, for this wallet to relay to it.
+    ///
+    /// Blocks are 1-based and forward-only: the host holds the Canton export
+    /// stream open between calls and cannot rewind it. Asking for the block just
+    /// served replays it, which makes one transport retry safe; anything else is
+    /// a 409 and the transfer restarts from block 1.
+    pub async fn acs_block(
         &self,
         party_id: &str,
         target: &CantonId,
         base_serial: u32,
-    ) -> Result<TenantAcsSnapshotResponse> {
+        seq: u64,
+    ) -> Result<TenantAcsBlockResponse> {
         self.get(&format!(
-            "/v0/tenant/{party_id}/acs/{target}?base_serial={base_serial}"
+            "/v0/tenant/{party_id}/acs/{target}?base_serial={base_serial}&seq={seq}"
         ))
         .await
     }

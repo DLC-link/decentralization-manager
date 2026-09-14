@@ -35,7 +35,7 @@ pub use common::api::{
     ProviderConfigurationsResponse, ProviderServiceInfo, ProviderServicesResponse,
     RegistrarServiceInfo, RegistrarServiceRequestInfo, RegistrarServiceRequestsResponse,
     RegistrarServicesResponse, ResponseSource, RightsStatus, SuccessResponse,
-    TenantAcsImportRequest, TenantAcsImportResponse, TenantAcsSnapshotResponse,
+    TenantAcsBlockResponse, TenantAcsImportRequest, TenantAcsImportResponse,
     TenantAddHostsOnboardRequest, TenantAddHostsOnboardResponse, TenantAddHostsPrepareResponse,
     TenantAddHostsRequest, TenantOnboardRequest, TenantOnboardResponse, TenantPartyStateResponse,
     TenantPrepareRequest, TenantPrepareResponse, TenantThresholdOnboardRequest,

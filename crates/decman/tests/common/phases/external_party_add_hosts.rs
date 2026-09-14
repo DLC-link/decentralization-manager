@@ -13,8 +13,11 @@
 //! wallet and a lying host. A phase that prepared on one host would not test it.
 //!
 //! After the topology lands the phase drives the rest of the replication: the
-//! wallet pulls the ACS snapshot from a current host and relays it to the
-//! joiner, which imports it and clears Canton's onboarding marker. The final
+//! wallet pulls the ACS from a current host **a range at a time** and relays
+//! each to the joiner, which appends until it holds the whole snapshot, then
+//! imports it and clears Canton's onboarding marker. Relaying in ranges is what
+//! keeps the snapshot out of a single request body, so the loop here is the
+//! shape a real wallet uses rather than a test convenience. The final
 //! assertion is that P3 reports the party fully hosted — marker gone — which is
 //! the only state in which it can actually confirm for the party.
 //!
@@ -264,9 +267,9 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             move |f, _| {
                 let party_id = party_id.clone();
                 Box::pin(async move {
-                    // Pulled from a host that already holds the party, scoped to
-                    // the joiner. Canton needs the joiner's activation to exist
-                    // first, which the authorized serial-2 write just created.
+                    // Pulled from a host that already holds the party, scoped
+                    // to the joiner, and relayed a range at a time. Neither end
+                    // ever holds the whole snapshot in a request body.
                     let target = f.p3.participant_id.clone();
 
                     // The replication's staged state is keyed by the serial the
@@ -284,34 +287,88 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         .checked_sub(1)
                         .context("the add-hosts write should have advanced the serial")?;
 
-                    let snapshot: Value = f
-                        .get_json(
-                            f.p1.http,
-                            &format!(
-                                "/v0/tenant/{party_id}/acs/{target}?base_serial={base_serial}"
-                            ),
-                        )
-                        .await?;
-
                     // The wallet is the transport: no host-to-host channel is
                     // involved, which is the whole point for a partner node that
-                    // is not in this mesh.
-                    let import_req = json!({
-                        "party_id": party_id,
-                        "base_serial": base_serial,
-                        "snapshot": snapshot
-                            .get("snapshot")
-                            .cloned()
-                            .context("acs response missing snapshot")?,
-                        "package_ids": snapshot
-                            .get("package_ids")
-                            .cloned()
-                            .context("acs response missing package_ids")?,
-                    });
-                    let result: Value = f
-                        .post_json(f.p3.http, "/v0/tenant/add-hosts/import", &import_req)
-                        .await?;
-                    info!("add-hosts import on P3: {result}");
+                    // is not in this mesh. It carries one block at a time — the
+                    // source holds its export stream open, the joiner holds its
+                    // import stream open, and nothing is staged at either end.
+                    let mut seq: u64 = 1;
+                    let mut probed_bad_seq = false;
+                    let result = loop {
+                        anyhow::ensure!(seq < 512, "the relay did not converge");
+
+                        let block: Value = f
+                            .get_json(
+                                f.p1.http,
+                                &format!(
+                                    "/v0/tenant/{party_id}/acs/{target}\
+                                     ?base_serial={base_serial}&seq={seq}"
+                                ),
+                            )
+                            .await?;
+                        anyhow::ensure!(
+                            block.get("seq").and_then(Value::as_u64) == Some(seq),
+                            "the source served a block other than {seq}: {block}"
+                        );
+                        let end = block.get("end").and_then(Value::as_bool) == Some(true);
+
+                        // Once, mid-transfer: a block out of order must be
+                        // refused rather than fed to Canton. Neither stream can
+                        // rewind, so a gap would only surface mid-import with
+                        // the participant already disconnected.
+                        if !probed_bad_seq {
+                            probed_bad_seq = true;
+                            let bogus = json!({
+                                "party_id": party_id,
+                                "base_serial": base_serial,
+                                "seq": seq + 7,
+                                "chunk": "",
+                                "end": false,
+                                "package_ids": [],
+                            });
+                            let refused: anyhow::Result<Value> = f
+                                .post_json(f.p3.http, "/v0/tenant/add-hosts/import", &bogus)
+                                .await;
+                            anyhow::ensure!(
+                                refused.is_err(),
+                                "a block out of order must be refused, not imported"
+                            );
+                        }
+
+                        let import_req = json!({
+                            "party_id": party_id,
+                            "base_serial": base_serial,
+                            "seq": seq,
+                            "chunk": block
+                                .get("chunk")
+                                .cloned()
+                                .context("acs block missing chunk")?,
+                            "end": end,
+                            "total_len": block.get("total_len").cloned().unwrap_or(json!(0)),
+                            "sha256": block.get("sha256").cloned().unwrap_or(json!("")),
+                            "package_ids": block
+                                .get("package_ids")
+                                .cloned()
+                                .context("acs block missing package_ids")?,
+                        });
+                        let progress: Value = f
+                            .post_json(f.p3.http, "/v0/tenant/add-hosts/import", &import_req)
+                            .await?;
+
+                        if progress.get("complete").and_then(Value::as_bool) == Some(true) {
+                            anyhow::ensure!(
+                                end,
+                                "the joiner completed on a block that was not the end: {progress}"
+                            );
+                            break progress;
+                        }
+                        anyhow::ensure!(
+                            !end,
+                            "the joiner took the final block without completing: {progress}"
+                        );
+                        seq += 1;
+                    };
+                    info!("add-hosts import on P3 after {seq} block(s): {result}");
 
                     // Checked here, inside the step that does the import, rather
                     // than as a later Then. Scenario steps run in sequence, so a

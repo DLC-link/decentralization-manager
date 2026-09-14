@@ -264,8 +264,6 @@ pub enum Commands {
         /// bytes. The Noise chunked-transfer limit does not apply to that path,
         /// which goes over HTTP. The snapshot is assembled in memory on both
         /// ends, so this is a real memory commitment. Defaults to 512 MiB.
-        #[arg(long, env = "DECPM_TENANT_ACS_MAX_BYTES")]
-        tenant_acs_max_bytes: Option<usize>,
         /// How often to re-read the backlog purely to refresh the expiry gauge,
         /// in seconds, when no sweep is due. The gauge refreshes at whichever of
         /// this and the sweep interval is shorter. Defaults to 3600.

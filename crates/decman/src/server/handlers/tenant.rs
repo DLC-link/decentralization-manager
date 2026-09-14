@@ -28,7 +28,7 @@ use crate::{
         middleware::require_tenant_api_key,
         types::{
             ErrorResponse, LocalPartyAdoptOnboardRequest, LocalPartyAdoptRequest,
-            TenantAcsImportRequest, TenantAcsImportResponse, TenantAcsSnapshotResponse,
+            TenantAcsBlockResponse, TenantAcsImportRequest, TenantAcsImportResponse,
             TenantAddHostsOnboardRequest, TenantAddHostsOnboardResponse,
             TenantAddHostsPrepareResponse, TenantAddHostsRequest, TenantOnboardRequest,
             TenantOnboardResponse, TenantPartyStateResponse, TenantPrepareRequest,
@@ -50,8 +50,9 @@ use crate::{
         threshold::{ExternalPartyThresholdPayload, prepare_threshold, submit_threshold},
     },
     workflow::party_replication::{
-        ClearOutcome, collect_party_package_ids, import_party_acs, open_export_session,
+        ClearOutcome, collect_party_package_ids, open_export_session,
         pipe::{PipeBlock, PipeTrailer},
+        relay::{AcceptedBlock, ServedBlock},
         request_onboarding_flag_clear,
     },
 };
@@ -464,23 +465,35 @@ pub async fn tenant_add_hosts_onboard(
 // ACS replication, relayed by the wallet
 // ============================================================================
 
-/// Export the party's ACS for `target`, for the wallet to relay to it.
+/// Serve one block of the party's ACS for `target`, for the wallet to relay.
 ///
 /// Called on a host that already holds the party, AFTER the add-hosts topology
 /// is authorized: Canton scopes the snapshot to the joiner's activation, which
 /// must exist first. The offset it searches from was captured at prepare time,
 /// before the topology moved.
+///
+/// Block 1 opens a fresh `ExportPartyAcs` stream and this host keeps it open
+/// between requests, handing out successive blocks. Nothing is staged: one block
+/// is in flight and neither end accumulates, which is what stops the size of the
+/// party deciding whether the transfer is possible.
+///
+/// Forward-only, so there is no resume. The last block served is replayed if
+/// asked for again — that makes a single transport retry safe — but anything
+/// else is refused, and asking for block 1 again throws the stream away and
+/// starts a new export.
 #[utoipa::path(
     tag = "Tenant",
     params(
         ("party" = String, Path, description = "Full party id"),
         ("target" = String, Path, description = "Participant the snapshot is for"),
-        ("base_serial" = u32, Query, description = "The serial the add-hosts write was pinned to")
+        ("base_serial" = u32, Query, description = "The serial the add-hosts write was pinned to"),
+        ("seq" = u64, Query, description = "Block to serve, 1-based")
     ),
     responses(
-        (status = 200, description = "ACS snapshot for the target", body = TenantAcsSnapshotResponse),
-        (status = 400, description = "Bad target participant id", body = ErrorResponse),
+        (status = 200, description = "One block of the ACS", body = TenantAcsBlockResponse),
+        (status = 400, description = "Bad target participant id or seq", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 409, description = "Out of sync with this host's export; restart from block 1", body = ErrorResponse),
         (status = 500, description = "Export failed on this host", body = ErrorResponse)
     )
 )]
@@ -489,7 +502,7 @@ pub async fn tenant_acs_snapshot(
     http_req: HttpRequest,
     data: web::Data<AppState>,
     path: web::Path<(String, String)>,
-    query: web::Query<AcsBaseSerialQuery>,
+    query: web::Query<AcsBlockQuery>,
 ) -> impl Responder {
     if let Err(resp) = require_tenant_api_key(&http_req, &data) {
         return resp;
@@ -511,20 +524,34 @@ pub async fn tenant_acs_snapshot(
             });
         }
     };
+    if query.seq == 0 {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: "seq is 1-based; block 0 does not exist".to_string(),
+        });
+    }
 
-    // Drained from the block pipe the add-party path also uses, rather than a
-    // second export API. The wallet relay hands the snapshot over HTTP in one
-    // body here, so the blocks are reassembled before responding — which is why
-    // the drain is capped rather than left to run to whatever size the party is.
-    let snapshot = match drain_export(
-        &data.config,
-        &data.db,
-        &replication,
-        data.config.tenant_acs_max_bytes,
-    )
-    .await
-    {
-        Ok(snapshot) => snapshot,
+    let served = data
+        .relay_sessions
+        .serve_block(
+            &data.config,
+            &data.db,
+            &replication,
+            query.seq,
+            EXPORT_BLOCK_SIZE,
+            async || open_export_session(&data.config, &data.db, &replication).await,
+        )
+        .await;
+
+    let block = match served {
+        Ok(ServedBlock::Block(block)) => block,
+        Ok(ServedBlock::OutOfSync { expected, asked }) => {
+            return HttpResponse::Conflict().json(ErrorResponse {
+                error: format!(
+                    "this host's export is at block {expected}, not {asked}; the export stream \
+                     cannot rewind, so restart the transfer from block 1"
+                ),
+            });
+        }
         Err(e) => {
             tracing::error!("tenant acs snapshot: export failed: {e:#}");
             return HttpResponse::InternalServerError().json(ErrorResponse {
@@ -534,6 +561,8 @@ pub async fn tenant_acs_snapshot(
     };
 
     // No contracts means no packages to check, and the ledger scan is not free.
+    // Only on block 1: the answer does not change mid-transfer, and the scan is
+    // a ledger query that would otherwise run once per block.
     //
     // The scan is best-effort on purpose. It reads the party's contracts over
     // the Ledger API, which needs a credential for that party, and a node
@@ -542,7 +571,7 @@ pub async fn tenant_acs_snapshot(
     // deployment would block replication entirely; instead the response says
     // the preflight is unavailable and the joiner's own import still validates
     // every contract, just after it has disconnected rather than before.
-    let (package_ids, package_preflight) = if snapshot.is_empty() {
+    let (package_ids, package_preflight) = if query.seq != 1 {
         (Vec::new(), true)
     } else {
         match collect_party_package_ids(&data.config, &party_id, None).await {
@@ -558,27 +587,60 @@ pub async fn tenant_acs_snapshot(
         }
     };
 
-    HttpResponse::Ok().json(TenantAcsSnapshotResponse {
-        party_id,
-        snapshot: STANDARD.encode(&snapshot),
-        package_ids,
-        package_preflight,
-    })
+    let response = match block {
+        PipeBlock::Data { seq, bytes } => TenantAcsBlockResponse {
+            party_id,
+            seq,
+            chunk: STANDARD.encode(&bytes),
+            end: false,
+            total_len: 0,
+            sha256: String::new(),
+            package_ids,
+            package_preflight,
+        },
+        PipeBlock::End { seq, trailer } => TenantAcsBlockResponse {
+            party_id,
+            seq,
+            chunk: String::new(),
+            end: true,
+            total_len: trailer.total_len,
+            sha256: trailer.sha256,
+            package_ids,
+            package_preflight,
+        },
+    };
+    HttpResponse::Ok().json(response)
 }
 
-/// Import a relayed ACS snapshot on THIS host and clear its onboarding marker.
+/// Take one relayed ACS block on THIS host, importing it straight into Canton.
 ///
-/// The marker is what keeps the party suspended here until its contracts land,
-/// so the import and the clear belong together: a host that imported but stayed
-/// marked is not usable, and a host that cleared without importing would start
-/// confirming transactions it cannot validate.
+/// The wallet hands over block N; this host feeds it into the `ImportPartyAcs`
+/// stream it holds open for the whole transfer, and the call returns once Canton
+/// has taken it. Nothing is buffered or staged: the response is the backpressure
+/// that paces the wallet, and the size of the party never becomes a disk or
+/// memory commitment here.
+///
+/// Block 1 starts a fresh import. There is no resume — the source's export
+/// stream cannot rewind — so a broken transfer restarts from block 1 rather than
+/// continuing, exactly as the add-party path does.
+///
+/// The final block finishes the import and clears the onboarding marker in the
+/// same call. The two stay together: a host that imported but stayed marked is
+/// not usable, and one that cleared without importing would start confirming
+/// transactions it cannot validate.
+///
+/// **This host is off the synchronizer for the whole transfer.** `ImportPartyAcs`
+/// requires it, and the window is now paced by the wallet. A session that goes
+/// quiet is reaped, which fails the import and reconnects the participant.
 #[utoipa::path(
     tag = "Tenant",
     request_body = TenantAcsImportRequest,
     responses(
-        (status = 200, description = "Imported; marker_cleared says whether the party is live here", body = TenantAcsImportResponse),
+        (status = 200, description = "Block taken; complete says whether the import finished", body = TenantAcsImportResponse),
         (status = 400, description = "Bad base64, bad party id, or missing packages", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 404, description = "No authorized mapping for this party on this host", body = ErrorResponse),
+        (status = 409, description = "Out of sync with this host's import; restart from block 1", body = ErrorResponse),
         (status = 500, description = "Import failed on this participant", body = ErrorResponse)
     )
 )]
@@ -591,11 +653,16 @@ pub async fn tenant_acs_import(
     if let Err(resp) = require_tenant_api_key(&http_req, &data) {
         return resp;
     }
-    let snapshot = match STANDARD.decode(&body.snapshot) {
+    if body.seq == 0 {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: "seq is 1-based; block 0 does not exist".to_string(),
+        });
+    }
+    let chunk = match STANDARD.decode(&body.chunk) {
         Ok(bytes) => bytes,
         Err(e) => {
             return HttpResponse::BadRequest().json(ErrorResponse {
-                error: format!("snapshot is not valid base64: {e}"),
+                error: format!("chunk is not valid base64: {e}"),
             });
         }
     };
@@ -615,94 +682,137 @@ pub async fn tenant_acs_import(
     // Before anything disconnects this participant. `import_party_acs` checks
     // packages, drops the synchronizer connections, and only then does Canton
     // reject a party this node does not host — so without this check any holder
-    // of the tenant API key can take this node off the synchronizer by posting a
-    // snapshot for an arbitrary party id.
-    match read_party_to_participant(&data.config, &body.party_id).await {
-        Ok(Some(current)) => {
-            let self_uid = data.config.participant_id().to_string();
-            let onboarding_here = current
-                .mapping
-                .participants
-                .iter()
-                .any(|p| p.participant_uid == self_uid && p.onboarding.is_some());
-            if !onboarding_here {
-                return HttpResponse::BadRequest().json(ErrorResponse {
+    // of the tenant API key can take this node off the synchronizer by relaying
+    // a block for an arbitrary party id.
+    //
+    // Only on block 1: the check is a topology read, and repeating it per block
+    // would put a Canton round trip in front of every one.
+    if body.seq == 1 {
+        match read_party_to_participant(&data.config, &body.party_id).await {
+            Ok(Some(current)) => {
+                let self_uid = data.config.participant_id().to_string();
+                let onboarding_here = current
+                    .mapping
+                    .participants
+                    .iter()
+                    .any(|p| p.participant_uid == self_uid && p.onboarding.is_some());
+                if !onboarding_here {
+                    return HttpResponse::BadRequest().json(ErrorResponse {
+                        error: format!(
+                            "{party} is not being onboarded onto this participant; an import \
+                             would disconnect it from the synchronizer for a replication it is \
+                             not part of",
+                            party = body.party_id
+                        ),
+                    });
+                }
+            }
+            Ok(None) => {
+                return HttpResponse::NotFound().json(ErrorResponse {
                     error: format!(
-                        "{party} is not being onboarded onto this participant; an import would \
-                         disconnect it from the synchronizer for a replication it is not part of",
+                        "No authorized PartyToParticipant for {party}",
                         party = body.party_id
                     ),
                 });
             }
-        }
-        Ok(None) => {
-            return HttpResponse::NotFound().json(ErrorResponse {
-                error: format!(
-                    "No authorized PartyToParticipant for {party}",
-                    party = body.party_id
-                ),
-            });
-        }
-        Err(e) => {
-            tracing::error!("tenant acs import: topology read failed: {e:#}");
-            return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: "Failed to read the party's topology; see the host's logs".to_string(),
-            });
-        }
-    }
-
-    let imported = !snapshot.is_empty();
-    // The import pulls blocks rather than taking a buffer, so the relayed
-    // snapshot is served back to it a block at a time. It already holds the
-    // whole thing — the wallet carried it in one body — so this is a shim over
-    // the same protocol the Noise path streams.
-    let served = std::sync::Arc::new(snapshot);
-    if let Err(e) = import_party_acs(
-        &data.config,
-        &data.db,
-        &replication,
-        &body.package_ids,
-        move |seq| {
-            let served = std::sync::Arc::clone(&served);
-            async move { Ok(block_of(&served, seq)) }
-        },
-    )
-    .await
-    {
-        tracing::error!("tenant acs import: import failed: {e:#}");
-        return HttpResponse::InternalServerError().json(ErrorResponse {
-            error: "Failed to import the party's ACS on this host; see the host's logs".to_string(),
-        });
-    }
-
-    // Requested, not waited on. clear_onboarding_flag blocks up to ten minutes
-    // for Canton's safe time and wait_for_flag_cleared polls another minute on
-    // top; that is right for a workflow step and wrong for an HTTP handler.
-    // Canton schedules the clearance itself, so the caller polls /status.
-    let marker_cleared =
-        match request_onboarding_flag_clear(&data.config, &data.db, &replication).await {
-            Ok(ClearOutcome::Cleared) => true,
-            Ok(ClearOutcome::Proposed) => false,
             Err(e) => {
-                tracing::error!("tenant acs import: requesting the marker clear failed: {e:#}");
-                let did = if imported {
-                    "Imported the ACS"
-                } else {
-                    "The ACS was empty and needed no import"
-                };
+                tracing::error!("tenant acs import: topology read failed: {e:#}");
                 return HttpResponse::InternalServerError().json(ErrorResponse {
-                    error: format!(
-                        "{did}, but could not request the marker clear; see the host's logs"
-                    ),
+                    error: "Failed to read the party's topology; see the host's logs".to_string(),
                 });
             }
-        };
+        }
+    }
 
-    HttpResponse::Ok().json(TenantAcsImportResponse {
-        party_id: body.party_id.clone(),
-        imported,
-        marker_cleared,
-    })
+    let block = if body.end {
+        PipeBlock::End {
+            seq: body.seq,
+            trailer: PipeTrailer {
+                total_len: body.total_len,
+                sha256: body.sha256.clone(),
+            },
+        }
+    } else {
+        PipeBlock::Data {
+            seq: body.seq,
+            bytes: chunk,
+        }
+    };
+
+    let accepted = data
+        .relay_sessions
+        .accept_block(
+            &data.config,
+            &data.db,
+            &replication,
+            &body.package_ids,
+            block,
+        )
+        .await;
+
+    let imported = body.total_len > 0 || !body.end || body.seq > 1;
+    match accepted {
+        Ok(AcceptedBlock::Accepted { seq }) => HttpResponse::Ok().json(TenantAcsImportResponse {
+            party_id: body.party_id.clone(),
+            seq,
+            complete: false,
+            imported: false,
+            marker_cleared: false,
+        }),
+        Ok(AcceptedBlock::OutOfSync { expected, asked }) => {
+            HttpResponse::Conflict().json(ErrorResponse {
+                error: match expected {
+                    Some(expected) => format!(
+                        "this host is waiting for block {expected}, not {asked}; the import \
+                         stream cannot rewind, so restart the transfer from block 1"
+                    ),
+                    None => format!(
+                        "no ACS import is open on this host for {party}, so block {asked} has \
+                         nowhere to go; restart the transfer from block 1",
+                        party = body.party_id
+                    ),
+                },
+            })
+        }
+        Ok(AcceptedBlock::Complete) => {
+            // Requested, not waited on. Canton schedules the clearance itself
+            // when its safe time has not arrived, so holding the request open
+            // for it would turn one call into a ten-minute one. The caller polls
+            // /status.
+            let marker_cleared =
+                match request_onboarding_flag_clear(&data.config, &data.db, &replication).await {
+                    Ok(ClearOutcome::Cleared) => true,
+                    Ok(ClearOutcome::Proposed) => false,
+                    Err(e) => {
+                        tracing::error!(
+                            "tenant acs import: requesting the marker clear failed: {e:#}"
+                        );
+                        return HttpResponse::InternalServerError().json(ErrorResponse {
+                            error: "Imported the ACS, but could not request the marker clear; \
+                                    see the host's logs"
+                                .to_string(),
+                        });
+                    }
+                };
+            HttpResponse::Ok().json(TenantAcsImportResponse {
+                party_id: body.party_id.clone(),
+                seq: body.seq,
+                complete: true,
+                imported,
+                marker_cleared,
+            })
+        }
+        Err(e) => {
+            tracing::error!("tenant acs import: import failed: {e:#}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!(
+                    "The ACS import failed on this host; the participant has been reconnected \
+                     and the transfer must restart from block 1. See the host's logs. ({first})",
+                    first = e.to_string().lines().next().unwrap_or("")
+                ),
+            })
+        }
+    }
 }
 
 // ============================================================================
@@ -882,64 +992,6 @@ pub async fn tenant_party_state(
     }
 }
 
-/// Drain an export session into one buffer.
-///
-/// The tenant relay answers with the whole snapshot in a body, so the blocks are
-/// reassembled here. The pipe is still the transport underneath, which keeps one
-/// export protocol rather than two.
-async fn drain_export(
-    config: &crate::config::NodeConfig,
-    db: &sqlx::SqlitePool,
-    replication: &crate::workflow::party_replication::ReplicationTarget,
-    max_bytes: usize,
-) -> anyhow::Result<Vec<u8>> {
-    let mut session = open_export_session(config, db, replication).await?;
-    let mut out = Vec::new();
-    // Sequence numbers are 1-based: the session treats served_seq 0 as "nothing
-    // served yet" and refuses anything but served_seq + 1, since the Canton
-    // stream behind it cannot rewind.
-    let mut seq = 1u64;
-    while let PipeBlock::Data { bytes, .. } = session.block(seq, EXPORT_BLOCK_SIZE).await? {
-        out.extend_from_slice(&bytes);
-        // Checked per block rather than at the end: this response is assembled
-        // whole in memory, so an oversized party would OOM the node long before
-        // there was a length to reject.
-        anyhow::ensure!(
-            out.len() <= max_bytes,
-            "the party's ACS exceeds DECPM_TENANT_ACS_MAX_BYTES ({max_bytes} bytes)"
-        );
-        seq += 1;
-    }
-    Ok(out)
-}
-
-/// Serve block `seq` of an already-held snapshot, so the pull-based import can
-/// consume a buffer the wallet delivered in one piece.
-fn block_of(snapshot: &[u8], seq: u64) -> PipeBlock {
-    // 1-based, matching the session's contract, so block 1 is the first bytes.
-    let index = (seq.saturating_sub(1)) as usize;
-    let start = index.saturating_mul(EXPORT_BLOCK_SIZE);
-    if start >= snapshot.len() {
-        return PipeBlock::End {
-            seq,
-            trailer: PipeTrailer {
-                total_len: snapshot.len() as u64,
-                sha256: {
-                    use sha2::{Digest, Sha256};
-                    let mut h = Sha256::new();
-                    h.update(snapshot);
-                    hex::encode(h.finalize())
-                },
-            },
-        };
-    }
-    let end = (start + EXPORT_BLOCK_SIZE).min(snapshot.len());
-    PipeBlock::Data {
-        seq,
-        bytes: snapshot[start..end].to_vec(),
-    }
-}
-
 /// Block size for draining and re-serving a snapshot.
 const EXPORT_BLOCK_SIZE: usize = 1024 * 1024;
 
@@ -1086,13 +1138,14 @@ pub async fn tenant_local_party_adopt_onboard(
 // Helpers
 // ============================================================================
 
-/// `?base_serial=` on the ACS export endpoint.
-///
-/// Required rather than defaulted: it keys the replication's staged state, and
-/// guessing it would silently reuse another attempt's offsets.
+/// `?base_serial=&seq=` on the ACS block endpoint.
 #[derive(Debug, serde::Deserialize)]
-pub struct AcsBaseSerialQuery {
+pub struct AcsBlockQuery {
+    /// Required rather than defaulted: it keys this replication, and guessing
+    /// it would silently serve another attempt's export.
     pub base_serial: u32,
+    /// Which block to serve, 1-based.
+    pub seq: u64,
 }
 
 /// Base64-decode a raw Ed25519 public key into its fixed 32-byte array, or the

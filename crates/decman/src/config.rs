@@ -277,7 +277,6 @@ pub struct NodeConfig {
     /// Still bounded: the snapshot is assembled in memory on both ends, so this
     /// is a real memory commitment on the exporting and importing nodes. Raise
     /// it deliberately.
-    pub tenant_acs_max_bytes: usize,
     /// Output contracts one `Delegation_Assign` may create, which bounds the
     /// coupons per transaction (`/ beneficiary_count`). The ledger's real
     /// ceiling for this transaction shape is unmeasured — configurable so it can
@@ -328,9 +327,6 @@ impl Default for NodeConfig {
             noise_retry: NoiseRetryConfig::default(),
             reward_automation_interval_secs: 300,
             reward_expiry_read_interval_secs: 3600,
-            // 512 MiB: comfortably past the 16 MiB the Noise path allows, while
-            // still a bound a node operator can reason about.
-            tenant_acs_max_bytes: 512 * 1024 * 1024,
             reward_max_creates: 100,
             reward_min_expiry_margin_secs: 120,
             metrics_port: 9464,

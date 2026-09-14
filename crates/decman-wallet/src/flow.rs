@@ -486,61 +486,110 @@ pub async fn add_hosts(
             replicated = false;
             continue;
         }
-        // Any current host can serve the ACS — they all hold the party — so a
-        // source whose export fails costs a retry, not the joiner.
-        let mut snapshot = None;
-        for candidate in current_hosts {
-            match candidate
-                .client
-                .acs_snapshot(party_id, &host.participant_id, base_serial)
-                .await
-            {
-                Ok(found) => {
-                    snapshot = Some(found);
+        // Relay the ACS block by block. The source holds its Canton export
+        // stream open, the joiner holds its import stream open, and this loop
+        // carries one block between them — so neither node buffers the snapshot
+        // and the size of the party never decides whether the transfer is
+        // possible. The same shape the add-party path runs over Noise; here the
+        // wallet stands in for the channel those two nodes do not have.
+        //
+        // Forward-only, so there is no resume. A break restarts from block 1
+        // with a fresh export, which is what the export stream's inability to
+        // rewind forces and what the add-party path accepts too.
+        let mut seq = 1u64;
+        let mut failed = false;
+        // Fixed once the first block lands. Any current host can serve the
+        // export — they all hold the party — but blocks stitched from two
+        // exports are not a snapshot, so the fallback only applies before
+        // anything has been relayed.
+        let mut source: Option<&WalletHost> = None;
+        loop {
+            let block = match source {
+                Some(source) => match source
+                    .client
+                    .acs_block(party_id, &host.participant_id, base_serial, seq)
+                    .await
+                {
+                    Ok(block) => Some(block),
+                    Err(e) => {
+                        tracing::warn!(
+                            source = source.client.base_url(),
+                            host = host.client.base_url(),
+                            seq,
+                            "ACS export failed: {e}"
+                        );
+                        None
+                    }
+                },
+                None => {
+                    let mut found = None;
+                    for candidate in current_hosts {
+                        match candidate
+                            .client
+                            .acs_block(party_id, &host.participant_id, base_serial, seq)
+                            .await
+                        {
+                            Ok(block) => {
+                                source = Some(candidate);
+                                found = Some(block);
+                                break;
+                            }
+                            Err(e) => tracing::warn!(
+                                source = candidate.client.base_url(),
+                                host = host.client.base_url(),
+                                "ACS export failed: {e}"
+                            ),
+                        }
+                    }
+                    found
+                }
+            };
+            let Some(block) = block else {
+                failed = true;
+                break;
+            };
+            if seq == 1 && !block.package_preflight {
+                without_package_preflight.push(host.client.base_url().to_string());
+            }
+
+            let import = TenantAcsImportRequest {
+                party_id: party_id.to_string(),
+                // The same serial the topology write was pinned to, so a target
+                // removed and re-added does not inherit the earlier attempt's
+                // session.
+                base_serial,
+                seq: block.seq,
+                chunk: block.chunk,
+                end: block.end,
+                total_len: block.total_len,
+                sha256: block.sha256,
+                package_ids: block.package_ids,
+            };
+            // Returns once Canton has taken the block, which is what paces this
+            // loop. No readahead: the joiner would have to buffer it.
+            let progress = match host.client.acs_import(&import).await {
+                Ok(progress) => progress,
+                Err(e) => {
+                    tracing::warn!(host = host.client.base_url(), seq, "ACS import failed: {e}");
+                    failed = true;
                     break;
                 }
-                Err(e) => tracing::warn!(
-                    source = candidate.client.base_url(),
-                    host = host.client.base_url(),
-                    "ACS export failed: {e}"
-                ),
+            };
+
+            if progress.complete {
+                // `marker_cleared: false` is the ordinary answer, not a failure:
+                // the host asks Canton to clear and returns rather than holding
+                // the request open for the synchronizer's safe time. The party
+                // is hosted but unusable until the clear is authorized, so wait
+                // for it here.
+                if !progress.marker_cleared && !wait_for_marker_clear(host, party_id).await {
+                    failed = true;
+                }
+                break;
             }
+            seq += 1;
         }
-        let Some(snapshot) = snapshot else {
-            tracing::warn!(
-                host = host.client.base_url(),
-                "no current host could export the ACS"
-            );
-            replicated = false;
-            continue;
-        };
-        if !snapshot.package_preflight {
-            without_package_preflight.push(host.client.base_url().to_string());
-        }
-        let import = TenantAcsImportRequest {
-            party_id: party_id.to_string(),
-            // The same serial the topology write was pinned to. It keys this
-            // replication's staged state, so a target that was removed and
-            // re-added does not inherit the earlier attempt's offsets.
-            base_serial,
-            snapshot: snapshot.snapshot,
-            package_ids: snapshot.package_ids,
-        };
-        // `marker_cleared: false` is the ordinary answer, not a failure: the host
-        // asks Canton to clear and returns rather than holding the request open
-        // for the synchronizer's safe time. The party is hosted but unusable
-        // until the clear is authorized, so wait for it here.
-        let cleared = match host.client.acs_import(&import).await {
-            Ok(resp) if resp.marker_cleared => true,
-            Ok(_) => wait_for_marker_clear(host, party_id).await,
-            Err(e) => {
-                tracing::warn!(host = host.client.base_url(), "ACS import failed: {e}");
-                // A timed-out import may still have landed — the node keeps
-                // importing after reqwest gives up — so ask before concluding.
-                wait_for_marker_clear(host, party_id).await
-            }
-        };
-        if !cleared {
+        if failed {
             replicated = false;
         }
     }

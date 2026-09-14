@@ -389,6 +389,9 @@ mod tests {
             admin_role: Some("decman-admin".to_string()),
             party_credentials,
             bootstrap_mu: Arc::new(Mutex::new(())),
+            relay_sessions: Arc::new(
+                crate::workflow::party_replication::relay::RelaySessions::new(),
+            ),
             test_mode: true,
             refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
             discovery_permits: Arc::new(tokio::sync::Semaphore::new(

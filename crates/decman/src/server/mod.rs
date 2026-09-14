@@ -135,6 +135,12 @@ pub struct AppState {
     /// exemption and overwrite each other. Held by the auth middleware for
     /// the lifetime of a bootstrap request.
     pub bootstrap_mu: Arc<Mutex<()>>,
+    /// Wallet-relayed ACS transfers this node is part of, as source or joiner.
+    ///
+    /// Held here rather than per-request because both ends keep a Canton stream
+    /// open across HTTP calls: the source an `ExportPartyAcs`, the joiner an
+    /// `ImportPartyAcs` plus the synchronizer disconnect it requires.
+    pub relay_sessions: Arc<crate::workflow::party_replication::relay::RelaySessions>,
     /// Every in-flight workflow this node owns, keyed by `instance_name`.
     /// Replaces the single-tenant per-kind `HttpWorkflowState` singletons, the
     /// global in-flight gate, and the single `active_workflow` routing slot:
@@ -201,6 +207,9 @@ impl AppState {
             admin_role: None,
             party_credentials: Arc::new(RwLock::new(Vec::new())),
             bootstrap_mu: Arc::new(Mutex::new(())),
+            relay_sessions: Arc::new(
+                crate::workflow::party_replication::relay::RelaySessions::new(),
+            ),
             test_mode: true,
             refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
             discovery_permits: Arc::new(Semaphore::new(
@@ -1053,6 +1062,8 @@ pub async fn start_server(
     }
     let pending_invitations = Arc::new(RwLock::new(persisted_invitations));
 
+    let relay_sessions = Arc::new(crate::workflow::party_replication::relay::RelaySessions::new());
+
     let app_state = web::Data::new(AppState {
         db: db.clone(),
         config: config.clone(),
@@ -1065,6 +1076,7 @@ pub async fn start_server(
         admin_role,
         party_credentials: party_credentials.clone(),
         bootstrap_mu: Arc::new(Mutex::new(())),
+        relay_sessions: relay_sessions.clone(),
         workflows: workflows.clone(),
         // "test_mode" here means the permissive/wildcard-token mode; driven by
         // `--insecure` (or tests). See the `insecure` binding above.
@@ -1266,6 +1278,21 @@ pub async fn start_server(
                         .refresh_if_older_than(&health_config, node_health::BACKGROUND_REFRESH)
                         .await;
                 }
+            },
+        );
+    }
+
+    // A wallet-relayed transfer holds a Canton export stream open on the source
+    // and keeps the joiner off the synchronizer for the duration. A wallet that
+    // vanishes mid-transfer would leave both that way, so idle sessions are
+    // reaped — which fails the import and reconnects the participant.
+    {
+        let sessions = relay_sessions.clone();
+        spawn_supervised(
+            "ACS relay session reaper",
+            "a wallet that abandons a transfer leaves its joiner off the synchronizer",
+            async move {
+                crate::workflow::party_replication::relay::reap_forever(sessions).await;
             },
         );
     }

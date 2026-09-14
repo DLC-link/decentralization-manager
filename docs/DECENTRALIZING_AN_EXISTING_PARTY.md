@@ -56,10 +56,39 @@ have nothing to add.
 
 ### Phase 2 — state
 
-`GET /v0/tenant/{party}/acs/{target}` on a host that already holds the party,
-then `POST /v0/tenant/add-hosts/import` on the joiner. The wallet carries the
-snapshot: there is no host-to-host channel, because a partner's node is
-generally not in anyone else's mesh and the wallet already talks to all of them.
+`GET /v0/tenant/{party}/acs/{target}?seq=N` on a host that already holds the
+party, then `POST /v0/tenant/add-hosts/import` on the joiner, in a loop until
+the import reports `complete`. The wallet carries the snapshot: there is no
+host-to-host channel, because a partner's node is generally not in anyone else's
+mesh and the wallet already talks to all of them.
+
+**Relay block by block, and store nothing.** The source keeps its
+`ExportPartyAcs` stream open between requests and hands out successive blocks;
+the joiner keeps its `ImportPartyAcs` stream open and feeds each block straight
+in. The wallet is a dumb relay carrying one block at a time. This is the same
+pipe the add-party path runs between two nodes over Noise — the wallet only
+stands in for the channel these two nodes do not have.
+
+- **Nothing lands on disk or in memory at either end**, so the size of the party
+  stops deciding whether the transfer is possible. The staged alternative needs a
+  terabyte of scratch on two nodes for a terabyte ACS, on volumes sized for a
+  SQLite file and a keypair.
+- **The import returns when Canton has taken the block**, which is what paces the
+  wallet. There is no readahead, because a readahead is a buffer.
+- **There is no resume.** The export stream cannot rewind and Canton offers no
+  offset into `ImportPartyAcs`, so a break means a fresh export from block 1.
+  What is bounded is a single block failing: the source replays the block it
+  served last, so one transport retry is safe. Asking for block 1 again is the
+  signal to discard both sessions and start over, not an error.
+- **A block out of order is refused**, not fed to Canton. Neither stream can
+  seek, so a gap would only surface mid-import with the participant already
+  disconnected.
+
+**The joiner is off the synchronizer for the whole relay.** `ImportPartyAcs`
+requires it, and that window is now paced by the wallet rather than by the node.
+A relay session left idle for five minutes is reaped: the import fails and the
+participant is reconnected. A wallet that stalls therefore costs a restarted
+transfer, not a stranded participant.
 
 ### Phase 3 — activation
 
@@ -110,7 +139,8 @@ than letting them infer symmetry that is not there.
 | `package_preflight: false` | The source cannot read the party's contracts over the Ledger API, which is normal for an external party | Confirm the joiner has the party's DARs vetted **before** importing. Without it the import fails after disconnecting |
 | Import fails mid-window | The joiner disconnected and the import did not complete | The import reconnects and verifies health on its own. Retry it; the durable marker makes re-entry safe |
 | Joiner crash-loops after an import | Orphan ACS rows from an unclean shutdown | Manual repair. See `RepairCommitmentsUsingAcs` below |
-| Export refused as too large | The snapshot exceeds this path's cap | The wallet-relayed path is bounded by `DECPM_TENANT_ACS_MAX_BYTES` (512 MiB by default), not by the 16 MiB Noise limit. Raise it, remembering the snapshot is held in memory on both ends |
+| `409` from the ACS block or import endpoint | The two ends disagree about which block comes next | Neither stream can rewind. Restart the transfer from block 1; a fresh export is opened for it |
+| Import fails with the participant reconnected | The relay stalled and its session was reaped, or a block failed | Restart from block 1. The participant is put back on the synchronizer before the error is returned |
 
 ### Commitment mismatches after an import
 
@@ -124,9 +154,15 @@ partial import replaces one inconsistency with a different one.
 
 - **Replicate a party onto a node outside the mesh without the wallet.** The
   wallet is the transport by design.
-- **Stream an ACS.** The snapshot is assembled whole in memory on the exporting
-  and importing nodes, so `DECPM_TENANT_ACS_MAX_BYTES` is a memory commitment
-  rather than a transport limit. A genuinely streaming relay is still unbuilt.
+- **Resume a broken transfer.** A break restarts from block 1 with a fresh
+  export. Canton offers no offset into `ImportPartyAcs`, and re-exporting to skip
+  forward would depend on an export byte-ordering it does not document. The
+  add-party path accepts the same limit for the same reason.
+- **Survive a terabyte-scale ACS.** At that size the wall is the import, not the
+  transfer: Canton re-authenticates every contract while the joiner is
+  disconnected, which no transport change touches. Sequencer retention and the
+  node's volume size become the binding constraints, and shrinking the ACS beats
+  moving it faster.
 - **Prove a converted party can submit.** #388 proved Canton accepts the key.
   Whether the party then transacts with it is a different runtime path and is
   not yet covered by a test.
