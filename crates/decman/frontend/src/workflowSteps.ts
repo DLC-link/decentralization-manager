@@ -297,13 +297,15 @@ interface StepPosition {
 export const stepsForRun = (run: StepPosition): WorkflowStepInfo[] | null => {
   const steps = WORKFLOW_STEPS[run.kind];
   if (!steps || steps.length !== run.step_total) return null;
+  const at = steps[run.step_index];
+  if (!at) return null;
   const synthetic = syntheticStep(run.current_step);
+  // The run is not on the enum step its index names, so the dot has to carry
+  // the synthetic step rather than describe one that is not running.
   if (synthetic) {
-    // The run is not on the enum step this index names, so the dot has to
-    // carry the synthetic step rather than describe one that is not running.
     return steps.map((s, i) => (i === run.step_index ? synthetic : s));
   }
-  return steps[run.step_index]?.name === run.current_step ? steps : null;
+  return at.name === run.current_step ? steps : null;
 };
 
 /** Human label for the step a run sits on, PascalCase name as the fallback. */

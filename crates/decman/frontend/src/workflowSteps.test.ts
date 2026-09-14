@@ -119,6 +119,21 @@ describe("stepsForRun", () => {
     ).toBeNull();
   });
 
+  it("drops the list when a synthetic step carries an out-of-range index", () => {
+    // The synthetic branch replaces the entry at step_index; an index past the
+    // end replaces nothing, so it must be rejected like the enum path.
+    expect(
+      stepsForRun(
+        run({
+          kind: "Kick",
+          current_step: "Active",
+          step_index: WORKFLOW_STEPS.Kick.length,
+          step_total: WORKFLOW_STEPS.Kick.length,
+        }),
+      ),
+    ).toBeNull();
+  });
+
   it("does not treat an inherited Object key as a synthetic step", () => {
     expect(
       stepsForRun(

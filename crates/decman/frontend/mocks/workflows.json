@@ -242,8 +242,8 @@
       "kind": "Kick",
       "role": "Peer",
       "status": "cancelled",
-      "current_step": "CreateProposals",
-      "step_index": 2,
+      "current_step": "SignProposals",
+      "step_index": 3,
       "step_total": 6,
       "config_json": "{}",
       "expected_peers": [
