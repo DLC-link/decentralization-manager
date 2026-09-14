@@ -100,6 +100,9 @@ uuid = { version = "1.11", features = ["v4"] }
 wiremock = { version = "0.6" }
 x509-parser = { version = "0.18" }
 zeroize = { version = "1.8", features = ["derive"] }
+# Reads the main .dalf out of a DAR to pin `expected_main_package_id` on
+# upload. Already in the graph through utoipa-swagger-ui, so no new code.
+zip = { version = "3.0", default-features = false, features = ["deflate"] }
 
 canton-common = { package = "common", git = "https://github.com/DLC-link/canton-lib", rev = "651ea5221b4794f55bd152e9f3e762a92af69afd" }
 canton-proto-rs = { git = "https://github.com/DLC-link/canton-lib", rev = "651ea5221b4794f55bd152e9f3e762a92af69afd" }

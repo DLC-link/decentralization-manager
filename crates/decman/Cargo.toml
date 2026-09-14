@@ -83,6 +83,7 @@ utoipa-swagger-ui = { workspace = true }
 uuid = { workspace = true }
 x509-parser = { workspace = true }
 zeroize = { workspace = true }
+zip = { workspace = true }
 
 canton-common = { workspace = true }
 canton-proto-rs = { workspace = true }
