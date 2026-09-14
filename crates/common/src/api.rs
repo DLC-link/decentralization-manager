@@ -369,6 +369,10 @@ pub struct ExternalPartyInfo {
     pub host_count: u32,
     /// When the hosting mapping became effective, RFC 3339.
     pub created_at: Option<String>,
+    /// Whether this node still carries Canton's onboarding marker for the party.
+    /// `true` means the party is hosted here and suspended here — it holds none
+    /// of the party's contracts and confirms nothing yet.
+    pub onboarding: bool,
     /// The participants named by the hosting mapping, so the UI can show *which*
     /// nodes host the party rather than only how many. Ordered as the mapping
     /// lists them.
@@ -648,6 +652,37 @@ pub struct TenantThresholdOnboardRequest {
     pub signed_by: String,
 }
 
+/// Request to prepare a local party's conversion to an externally-signed one.
+///
+/// Only the node whose namespace owns the party can do this, and even it cannot
+/// do it alone: the returned hash must be signed by the key being adopted.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct LocalPartyAdoptRequest {
+    /// The local party. Its namespace must be this participant's.
+    pub party_id: String,
+    /// The raw 32-byte Ed25519 public key to adopt, base64-encoded.
+    pub public_key: String,
+    /// The serial the caller read from the party's current mapping.
+    pub base_serial: u32,
+}
+
+/// Request to submit the owner-signed conversion.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct LocalPartyAdoptOnboardRequest {
+    pub party_id: String,
+    pub base_serial: u32,
+    /// The adopted key, so the host can rebuild what the mapping must carry
+    /// rather than trusting the submitted bytes.
+    pub public_key: String,
+    pub topology_transactions: Vec<String>,
+    pub signatures: Vec<String>,
+    pub signed_by: String,
+}
+
 /// A hosted party's current topology, as this host sees it.
 ///
 /// Exists because `base_serial` is required by every write in this API and was
@@ -671,6 +706,15 @@ pub struct TenantPartyStateResponse {
     /// until it clears. A threshold above `host_count - onboarding_hosts` is one
     /// the party cannot currently meet.
     pub onboarding_hosts: u32,
+    /// Whether the party carries its own signing key, i.e. whether it is
+    /// externally signed.
+    ///
+    /// This is the line the runbook routes on: a local party without one is a
+    /// candidate for conversion, and one with it has already been converted (or
+    /// was external from the start). Nothing else on the node reported it, so
+    /// an operator learned which case they had by calling prepare and reading
+    /// the 400.
+    pub has_signing_key: bool,
 }
 
 /// Response for key status check

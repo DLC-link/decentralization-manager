@@ -173,6 +173,7 @@ async fn run() -> Result {
             noise_retry_max_attempts,
             noise_retry_backoff_ms,
             reward_automation_interval_secs,
+            tenant_acs_max_bytes,
             reward_expiry_read_interval_secs,
             reward_max_creates,
             reward_min_expiry_margin_secs,
@@ -303,6 +304,9 @@ async fn run() -> Result {
             }
             if let Some(v) = noise_retry_backoff_ms {
                 config.noise_retry.backoff_ms = *v;
+            }
+            if let Some(v) = tenant_acs_max_bytes {
+                config.tenant_acs_max_bytes = *v;
             }
             if let Some(v) = reward_automation_interval_secs {
                 config.reward_automation_interval_secs = *v;
