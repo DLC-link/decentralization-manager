@@ -24,12 +24,15 @@ import CancelIcon from "@mui/icons-material/Cancel";
 import PersonIcon from "@mui/icons-material/Person";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import ContentPasteIcon from "@mui/icons-material/ContentPaste";
+import DownloadIcon from "@mui/icons-material/Download";
+import UploadFileIcon from "@mui/icons-material/UploadFile";
 import { useSnackbar } from "../contexts";
 import { zebraRow } from "../styles";
 import { copyToClipboard } from "../clipboard";
 import { fieldHelpAdornment } from "./FieldHelp";
 import { StatusDot } from "./StatusDot";
 import { currentStepLabel, workflowKindLabel } from "../workflowSteps";
+import { PeersCsvDialog, type PeersCsvMode } from "./PeersCsvDialog";
 import type {
   NetworkConfig,
   Peer,
@@ -68,6 +71,7 @@ export const NetworkConfigAccordion = ({
   const [editing, setEditing] = useState(false);
   const [editedPeers, setEditedPeers] = useState<Peer[]>([]);
   const [saving, setSaving] = useState(false);
+  const [csvMode, setCsvMode] = useState<PeersCsvMode | null>(null);
   const { showSnackbar } = useSnackbar();
   const theme = useTheme();
   const isSmall = useMediaQuery(theme.breakpoints.down("sm"));
@@ -137,6 +141,9 @@ export const NetworkConfigAccordion = ({
         public_key: selfPublicKey,
       }
     : null;
+
+  const exportablePeers: Peer[] =
+    selfEntry && !selfPeer ? [selfEntry, ...config.peers] : config.peers;
 
   const startEditing = () => {
     setEditedPeers(config.peers.map((p) => ({ ...p })));
@@ -370,15 +377,41 @@ export const NetworkConfigAccordion = ({
                   Share my data
                 </Button>
               )}
+              <Button
+                size="small"
+                variant="outlined"
+                startIcon={<DownloadIcon />}
+                onClick={() => setCsvMode("export")}
+              >
+                Export CSV
+              </Button>
               {onSave && (
-                <Tooltip title="Edit peers">
-                  <IconButton size="small" onClick={startEditing}>
-                    <EditIcon fontSize="small" />
-                  </IconButton>
-                </Tooltip>
+                <>
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    startIcon={<UploadFileIcon />}
+                    onClick={() => setCsvMode("import")}
+                  >
+                    Import CSV
+                  </Button>
+                  <Tooltip title="Edit peers">
+                    <IconButton size="small" onClick={startEditing}>
+                      <EditIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                </>
               )}
             </Box>
           </Box>
+          <PeersCsvDialog
+            open={csvMode !== null}
+            mode={csvMode ?? "export"}
+            peers={csvMode === "import" ? config.peers : exportablePeers}
+            selfNodeId={selfNodeId}
+            onClose={() => setCsvMode(null)}
+            onSave={onSave}
+          />
           <Box sx={{ overflowX: "auto" }}>
             <Table size="small" sx={{ minWidth: 650 }}>
               <TableHead>
