@@ -6,9 +6,21 @@ import { PeersCsvDialog } from "./PeersCsvDialog";
 import { peersToCsv } from "../peerCsv";
 import type { Peer } from "../types";
 
-/** A 34-byte namespace and a 33-byte compressed key, as the backend parses. */
+/** A 34-byte namespace, the length CantonId parses. */
 const ns = (c: string): string => c.repeat(68);
-const key = (c: string): string => `02${c.repeat(64)}`;
+
+const KEYS: Record<string, string> = {
+  a: "020f9efa45c6192fbf7b5ee32f6717f587e99d3684256ecb874e71e95f253bd1d3",
+  b: "02b1b35b4a22127354c171105be3eb7c6e7063025602262232889be25cc9455f77",
+  c: "026454a47be758fd132c0260736055f5cc9a7a3fd026f5d8d7522f0ab62a2a47ee",
+  d: "0226cdb238f8e2add11a26832ca0621ae4c8d390601efcf047d2f2b0425120bb9b",
+  e: "03fb57d682b94bc9d3cb5f24e3fc2927cf23120c73ba683af24abb8ab81876ac5d",
+  f: "023dba7312b16d07747c11cdd7fb22af97f1805c75ee728cbf89472616699e3904",
+  "0": "021db6d4bcf3bb8921b3c8881da06d8b24c7bfc2570a69ec26423952339840c8f6",
+};
+
+/** A real point on the curve; the parser checks that, not just the shape. */
+const key = (c: string): string => KEYS[c] ?? KEYS.a;
 
 const ID = {
   alpha: `alpha::${ns("a")}`,

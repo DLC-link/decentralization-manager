@@ -1,3 +1,4 @@
+import { isNoisePublicKey } from "./noiseKey";
 import type { Peer } from "./types";
 
 export const PEER_CSV_COLUMNS = [
@@ -158,17 +159,6 @@ const isCantonId = (value: string): boolean => {
   return parts.length === 2 && /^[0-9a-fA-F]{68}$/.test(parts[1]);
 };
 
-// The shape secp256k1 keys have: hex, and either a 33-byte compressed key
-// behind an 02/03 prefix or a 65-byte uncompressed one behind 04. Whether the
-// point is actually on the curve is settled by `PublicKey::from_slice` on the
-// backend, which now rejects the POST rather than storing an unusable peer.
-const isNoisePublicKey = (value: string): boolean => {
-  if (!/^[0-9a-fA-F]+$/.test(value)) return false;
-  const prefix = value.slice(0, 2).toLowerCase();
-  if (value.length === 66) return prefix === "02" || prefix === "03";
-  return value.length === 130 && prefix === "04";
-};
-
 /**
  * The form the backend stores. `CantonId` parses the namespace as hex and
  * writes it back lower-case, so two spellings of one id collide on the peers
@@ -239,7 +229,7 @@ export const parsePeersCsv = (text: string): ParsedPeersCsv => {
       rejected.push({
         line,
         raw,
-        reason: `Invalid public_key "${publicKey}" (expected 66 or 130 hex characters)`,
+        reason: `Invalid public_key "${publicKey}" (not a secp256k1 public key)`,
       });
       continue;
     }
