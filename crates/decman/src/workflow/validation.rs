@@ -39,7 +39,7 @@ use crate::{
         onboarding::steps::proposals::create::{
             compute_decentralized_namespace, decode_keys_payload,
         },
-        signing_keys::vault_holds,
+        signing_keys::{own_namespace_key, vault_holds},
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
     },
 };
@@ -194,6 +194,7 @@ impl PeerExpectations {
     /// Errors on any mismatch with the accepted invitation.
     pub async fn check_onboarding_dns(
         &self,
+        config: &NodeConfig,
         storage: &SqlitePool,
         instance_name: &str,
         payload: &[u8],
@@ -214,7 +215,7 @@ impl PeerExpectations {
         }
 
         let own_namespace = self
-            .own_namespace(storage, instance_name)
+            .own_namespace(config, storage, instance_name)
             .await?
             .ok_or_else(|| {
                 anyhow::anyhow!(
@@ -378,7 +379,7 @@ impl PeerExpectations {
         // A lookup or decode failure is an error, not a legacy party: letting
         // it through would hand a coordinator this peer's signature on a
         // proposal that drops its own namespace.
-        match self.own_namespace(storage, instance_name).await? {
+        match self.own_namespace(config, storage, instance_name).await? {
             Some(own_namespace) if !namespace_def.owners.contains(&own_namespace) => {
                 anyhow::bail!(
                     "DNS proposal drops this node's namespace {own_namespace} from the owner set"
@@ -849,27 +850,50 @@ impl PeerExpectations {
     /// row when the run's artefacts are already gone.
     async fn own_namespace(
         &self,
+        config: &NodeConfig,
         storage: &SqlitePool,
         instance_name: &str,
     ) -> Result<Option<String>> {
-        let Some(keys) = self.own_keys(storage, instance_name).await? else {
-            return Ok(None);
-        };
-
         // An identity row recovered from the chain can only carry the party's
         // Daml key, and older builds wrote a copy of it where the namespace
         // key belongs. Reading that as a namespace fingerprint would compare a
-        // Daml key against the owner set and refuse every proposal, so a
-        // bundle without a namespace key counts as unrecorded instead.
-        if !keys[0].usage.contains(&(SigningKeyUsage::Namespace as i32)) {
-            tracing::warn!(
-                "this node's recorded key bundle for this party carries no namespace key \
-                 (recovered from the chain, which cannot supply one)"
-            );
-            return Ok(None);
+        // Daml key against the owner set and refuse every proposal, so such a
+        // bundle does not answer the question.
+        if let Some(keys) = self.own_keys(storage, instance_name).await?
+            && let Some(fingerprint) = namespace_fingerprint(&keys)
+        {
+            return Ok(Some(fingerprint));
         }
 
-        Ok(Some(utils::compute_fingerprint(&keys[0])))
+        // No usable local record. For a party that already exists the vault
+        // still answers it: the namespace key this node holds that the party's
+        // current owner set names. Skipping the check instead would let a
+        // coordinator swap this node's namespace out of the owner set with
+        // every other check still passing, which signs the node's own
+        // topology authority away.
+        let Some(dec_party_id) = self.dec_party_id.as_ref() else {
+            tracing::warn!(
+                "this node's keys are unrecorded for this run and it targets no existing \
+                 party, so its namespace cannot be resolved"
+            );
+            return Ok(None);
+        };
+
+        let synchronizer_id = utils::get_synchronizer_id(config).await?;
+        let resolved = own_namespace_key(config, dec_party_id, &synchronizer_id)
+            .await?
+            .map(|key| utils::compute_fingerprint(&key));
+        match &resolved {
+            Some(fingerprint) => tracing::info!(
+                "Resolved this node's namespace {fingerprint} for {dec_party_id} from the \
+                 vault; no usable local key record"
+            ),
+            None => tracing::warn!(
+                "this node holds no namespace key that {dec_party_id}'s owner set names, so \
+                 the owner-set check cannot be applied"
+            ),
+        }
+        Ok(resolved)
     }
 
     /// This node's `[namespace_key, daml_key]` bundle.
@@ -916,6 +940,24 @@ impl PeerExpectations {
         }
         Ok(Some(keys))
     }
+}
+
+/// The namespace fingerprint of a recorded `[namespace_key, daml_key]` bundle,
+/// or `None` when index `[0]` is not a namespace key.
+///
+/// A bundle recovered from the chain cannot carry a namespace key — the chain
+/// holds none — and older builds put a copy of the Daml key there instead.
+/// Taking that at face value compares a Daml fingerprint against the party's
+/// owner set, which refuses every proposal the node is asked to sign.
+fn namespace_fingerprint(keys: &[SigningPublicKey]) -> Option<String> {
+    let key = keys.first()?;
+    if !key.usage.contains(&(SigningKeyUsage::Namespace as i32)) {
+        tracing::warn!(
+            "this node's recorded key bundle for this party carries no namespace key at [0]"
+        );
+        return None;
+    }
+    Some(utils::compute_fingerprint(key))
 }
 
 /// Unwrap a coordinator-supplied `varint(len)||SignedTopologyTransaction`
@@ -1694,5 +1736,38 @@ mod tests {
                 .is_err()
         );
         Ok(())
+    }
+
+    /// The bundle `backfill_peer_keys_from_chain` used to write: a copy of the
+    /// Daml key where the namespace key belongs. Reading `[0]` as a namespace
+    /// made every legacy member refuse the DNS proposal.
+    #[test]
+    fn placeholder_bundle_yields_no_namespace() {
+        let daml = SigningPublicKey {
+            public_key: vec![7; 32],
+            usage: vec![SigningKeyUsage::Protocol as i32],
+            ..Default::default()
+        };
+
+        assert!(namespace_fingerprint(&[daml.clone(), daml]).is_none());
+    }
+
+    #[test]
+    fn real_bundle_yields_its_namespace_fingerprint() {
+        let namespace = SigningPublicKey {
+            public_key: vec![1; 32],
+            usage: vec![SigningKeyUsage::Namespace as i32],
+            ..Default::default()
+        };
+        let daml = SigningPublicKey {
+            public_key: vec![2; 32],
+            usage: vec![SigningKeyUsage::Protocol as i32],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            namespace_fingerprint(&[namespace.clone(), daml]),
+            Some(utils::compute_fingerprint(&namespace))
+        );
     }
 }

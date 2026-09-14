@@ -489,7 +489,7 @@ pub async fn start_peer(
                     continue;
                 }
                 match expectations
-                    .check_onboarding_dns(&db, &instance_name, &payload)
+                    .check_onboarding_dns(&node_config, &db, &instance_name, &payload)
                     .await
                 {
                     // Remember the namespace we authorized so the P2P

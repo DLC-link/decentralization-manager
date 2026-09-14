@@ -79,6 +79,61 @@ pub async fn vault_holds(config: &NodeConfig, fingerprint: &str) -> Result<bool>
     Ok(!response.private_keys_metadata.is_empty())
 }
 
+/// This node's namespace key for a party: the vault key with namespace usage
+/// whose fingerprint is in the party's decentralized-namespace owner set.
+///
+/// Returns `None` when the party's namespace definition cannot be read or no
+/// vault key matches — this node is then not an owner, or the key is gone.
+///
+/// # Errors
+///
+/// Errors when the vault cannot be listed.
+pub async fn own_namespace_key(
+    config: &NodeConfig,
+    dec_party_id: &CantonId,
+    synchronizer_id: &str,
+) -> Result<Option<SigningPublicKey>> {
+    let owners = match topology::fetch_namespace_definition(
+        config,
+        synchronizer_id,
+        &dec_party_id.namespace.to_hex(),
+    )
+    .await
+    {
+        Ok(definition) => definition.owners,
+        Err(e) => {
+            tracing::warn!("Cannot read the namespace definition for {dec_party_id}: {e:#}");
+            return Ok(None);
+        }
+    };
+
+    let mut vault_client = VaultServiceClient::new(config.admin_channel().await?);
+    let response = vault_client
+        .list_my_keys(tonic::Request::new(ListMyKeysRequest {
+            filters: Some(ListKeysFilters {
+                fingerprint: String::new(),
+                name: String::new(),
+                purpose: vec![],
+                usage_v30: vec![SigningKeyUsage::Namespace as i32],
+            }),
+            base_request: None,
+        }))
+        .await?
+        .into_inner();
+
+    for meta in response.private_keys_metadata {
+        if let Some(private_key_metadata::PublicKeyWithName::V30(named)) = meta.public_key_with_name
+            && let Some(pk) = named.public_key
+            && let Some(public_key::Key::SigningPublicKey(signing_key)) = pk.key
+            && owners.contains(&utils::compute_fingerprint(&signing_key))
+        {
+            return Ok(Some(signing_key));
+        }
+    }
+
+    Ok(None)
+}
+
 /// This node's own Daml signing-key fingerprint for a party: from its
 /// long-lived identity row, then the vault key named after the party, then —
 /// for any `candidates` the caller already holds — the one whose private half

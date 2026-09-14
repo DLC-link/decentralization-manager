@@ -5,10 +5,9 @@ use canton_proto_rs::com::{
     digitalasset::canton::{
         crypto::{
             admin::v30::{
-                ListKeysFilters, ListMyKeysRequest, private_key_metadata,
-                vault_service_client::VaultServiceClient,
+                ListKeysFilters, ListMyKeysRequest, vault_service_client::VaultServiceClient,
             },
-            v30::{SigningKeyUsage, SigningPublicKey, public_key},
+            v30::SigningPublicKey,
         },
         topology::admin::v30::{
             ListPartyToParticipantRequest,
@@ -27,6 +26,7 @@ use crate::{
     signing::{PreparedTransactionHash, SigningKeyContext, select_signer},
     utils,
     workflow::{
+        signing_keys::{own_namespace_key, vault_holds},
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
         topology,
     },
@@ -334,61 +334,6 @@ fn encode_messages_length_prefixed<M: prost::Message>(messages: &[M]) -> Vec<u8>
     buffer.to_vec()
 }
 
-/// This node's namespace key for a party: the vault key with namespace usage
-/// whose fingerprint is in the party's decentralized-namespace owner set.
-///
-/// Returns `None` when the party's namespace definition cannot be read or no
-/// vault key matches — this node is then not an owner, or the key is gone.
-///
-/// # Errors
-///
-/// Errors when the vault cannot be listed.
-async fn own_namespace_key(
-    config: &NodeConfig,
-    dec_party_id: &CantonId,
-    synchronizer_id: &str,
-) -> Result<Option<SigningPublicKey>> {
-    let owners = match topology::fetch_namespace_definition(
-        config,
-        synchronizer_id,
-        &dec_party_id.namespace.to_hex(),
-    )
-    .await
-    {
-        Ok(definition) => definition.owners,
-        Err(e) => {
-            tracing::warn!("Cannot read the namespace definition for {dec_party_id}: {e:#}");
-            return Ok(None);
-        }
-    };
-
-    let mut vault_client = VaultServiceClient::new(config.admin_channel().await?);
-    let response = vault_client
-        .list_my_keys(tonic::Request::new(ListMyKeysRequest {
-            filters: Some(ListKeysFilters {
-                fingerprint: String::new(),
-                name: String::new(),
-                purpose: vec![],
-                usage_v30: vec![SigningKeyUsage::Namespace as i32],
-            }),
-            base_request: None,
-        }))
-        .await?
-        .into_inner();
-
-    for meta in response.private_keys_metadata {
-        if let Some(private_key_metadata::PublicKeyWithName::V30(named)) = meta.public_key_with_name
-            && let Some(pk) = named.public_key
-            && let Some(public_key::Key::SigningPublicKey(signing_key)) = pk.key
-            && owners.contains(&utils::compute_fingerprint(&signing_key))
-        {
-            return Ok(Some(signing_key));
-        }
-    }
-
-    Ok(None)
-}
-
 /// On-chain backfill: recover the dec_party's protocol signing keys from
 /// Canton's topology store, then cross-reference them against this node's
 /// vault. The vault key whose fingerprint matches one of the on-chain
@@ -456,22 +401,9 @@ async fn backfill_peer_keys_from_chain(
     // 3. Walk the on-chain keys and pick the one our vault recognizes — that's
     //    this node's contribution. Other entries belong to peer participants
     //    and their private halves are not in our vault.
-    let mut vault_client = VaultServiceClient::new(config.admin_channel().await?);
     for key in &signing_keys {
         let fingerprint = utils::compute_fingerprint(key);
-        let resp = vault_client
-            .list_my_keys(tonic::Request::new(ListMyKeysRequest {
-                filters: Some(ListKeysFilters {
-                    fingerprint: fingerprint.clone(),
-                    name: String::new(),
-                    purpose: vec![],
-                    usage_v30: vec![],
-                }),
-                base_request: None,
-            }))
-            .await?
-            .into_inner();
-        if !resp.private_keys_metadata.is_empty() {
+        if vault_holds(config, &fingerprint).await? {
             tracing::info!(
                 "Recovered Daml signing key {fingerprint} for {dec_party_id} from the on-chain \
                  topology state"

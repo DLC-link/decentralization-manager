@@ -2459,6 +2459,11 @@ async fn list_my_owner_keys(
         .into_inner();
 
     let mut my_fingerprints = Vec::new();
+    // Every protocol key this node holds, by fingerprint. The by-name map
+    // below only finds a key minted under this tool's naming convention; a
+    // party old enough to predate it can hold the key under any name, and
+    // then only the fingerprint identifies it.
+    let mut my_protocol_fingerprints: HashSet<String> = HashSet::new();
     // Protocol-usage keys, indexed by the vault name onboarding / add-party
     // gave them (`<party prefix>-daml-transactions`). The name is how
     // `get_or_create_signing_key` finds the key again on a retry, so it is
@@ -2484,6 +2489,7 @@ async fn list_my_owner_keys(
                     pub_key_with_name.name.clone(),
                     compute_fingerprint(signing_key),
                 );
+                my_protocol_fingerprints.insert(compute_fingerprint(signing_key));
             }
         }
     }
@@ -2526,21 +2532,93 @@ async fn list_my_owner_keys(
         let Some(full_party_id) = namespace_to_party.get(&item.decentralized_namespace) else {
             continue;
         };
-        let signing_key = full_party_id.rsplit_once("::").and_then(|(prefix, _)| {
-            my_protocol_keys_by_name.get(&workflow::signing_keys::party_daml_key_name(prefix))
+        let owned: Vec<&String> = item
+            .owners
+            .iter()
+            .filter(|owner| my_fingerprints.contains(owner))
+            .collect();
+        if owned.is_empty() {
+            continue;
+        }
+
+        let named = full_party_id.rsplit_once("::").and_then(|(prefix, _)| {
+            my_protocol_keys_by_name
+                .get(&workflow::signing_keys::party_daml_key_name(prefix))
+                .cloned()
         });
-        for owner in &item.owners {
-            if my_fingerprints.contains(owner) {
-                entries.push(serde_json::json!({
-                    "party_id": full_party_id,
-                    "owner_key": owner,
-                    "signing_key": signing_key,
-                }));
+        // Falling back to the fingerprint matters for the parties that need it
+        // most: a peer that reports no key cannot be attributed by a
+        // coordinator, and no amount of refreshing repairs that.
+        let signing_key = match named {
+            Some(fingerprint) => Some(fingerprint),
+            None => {
+                party_signing_key_by_fingerprint(config, full_party_id, &my_protocol_fingerprints)
+                    .await
             }
+        };
+
+        for owner in owned {
+            entries.push(serde_json::json!({
+                "party_id": full_party_id,
+                "owner_key": owner,
+                "signing_key": signing_key,
+            }));
         }
     }
 
     Ok(serde_json::to_vec(&entries)?)
+}
+
+/// This node's Daml signing key for a party, identified by fingerprint rather
+/// than by vault name: the one key in the party's on-chain key list whose
+/// private half this node holds.
+///
+/// `mine` is every protocol-usage fingerprint in this node's vault. Answers
+/// `None` when the party's keys cannot be read or none of them is ours; the
+/// caller then reports no key, exactly as it did before this fallback existed.
+async fn party_signing_key_by_fingerprint(
+    config: &NodeConfig,
+    full_party_id: &str,
+    mine: &HashSet<String>,
+) -> Option<String> {
+    let resolve = async {
+        let party_id = CantonId::parse(full_party_id)?;
+        let synchronizer_id = utils::get_synchronizer_id(config).await?;
+        let mut keys = workflow::topology::fetch_p2p_mapping(config, &synchronizer_id, &party_id)
+            .await?
+            .party_signing_keys
+            .map(|k| k.keys)
+            .unwrap_or_default();
+        if keys.is_empty() {
+            keys =
+                workflow::topology::fetch_party_to_key_mapping(config, &synchronizer_id, &party_id)
+                    .await?
+                    .map(|mapping| mapping.signing_keys)
+                    .unwrap_or_default();
+        }
+        Ok::<_, anyhow::Error>(
+            keys.iter()
+                .map(compute_fingerprint)
+                .find(|fingerprint| mine.contains(fingerprint)),
+        )
+    };
+
+    match resolve.await {
+        Ok(Some(fingerprint)) => {
+            tracing::info!(
+                "Reporting Daml signing key {fingerprint} for {full_party_id}: matched by \
+                 fingerprint, not by vault name"
+            );
+            Some(fingerprint)
+        }
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!(
+                "Cannot match a vault key against {full_party_id}'s signing keys: {e:#}"
+            );
+            None
+        }
+    }
 }
 
 async fn list_local_packages(config: &NodeConfig) -> Result<Vec<u8>> {
