@@ -193,19 +193,24 @@ export const NetworkConfigAccordion = ({
       return;
     }
     const { rows, rejected } = parsePeersCsv(text);
+    const skipped = rejected
+      .map((r) => `line ${r.line}: ${r.reason}`)
+      .join("; ");
     if (rows.length === 0) {
       showSnackbar(
-        rejected[0]?.reason ??
-          "Expected: participant_id,name,address,port,public_key",
+        skipped || "Expected: participant_id,name,address,port,public_key",
         "error",
       );
       return;
     }
     setEditedPeers((peers) => [...peers, ...rows.map((r) => r.peer)]);
-    showSnackbar(
+    const added =
       rows.length === 1
         ? "Peer added from clipboard"
-        : `${rows.length} peers added from clipboard`,
+        : `${rows.length} peers added from clipboard`;
+    showSnackbar(
+      skipped ? `${added}. Skipped ${skipped}` : added,
+      skipped ? "error" : "info",
     );
   };
 

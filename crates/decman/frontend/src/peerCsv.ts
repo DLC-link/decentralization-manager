@@ -111,9 +111,16 @@ const splitRecords = (text: string): RawRecord[] => {
       continue;
     }
 
-    if (char === '"' && value === "" && !quoted) {
-      inQuotes = true;
-      quoted = true;
+    if (char === '"') {
+      if (value === "" && !quoted && !afterQuote) {
+        inQuotes = true;
+        quoted = true;
+      } else {
+        error ??= afterQuote
+          ? "Unexpected text after a closing quote"
+          : "Unexpected quote in an unquoted field";
+        value += char;
+      }
     } else if (char === ",") {
       endField();
     } else if (char === "\r") {
@@ -151,10 +158,26 @@ const isCantonId = (value: string): boolean => {
   return parts.length === 2 && /^[0-9a-fA-F]{68}$/.test(parts[1]);
 };
 
-// secp256k1::PublicKey::from_slice, which every Noise path runs on this field:
-// hex for a 33-byte compressed or 65-byte uncompressed key.
-const isNoisePublicKey = (value: string): boolean =>
-  /^[0-9a-fA-F]+$/.test(value) && (value.length === 66 || value.length === 130);
+// The shape secp256k1 keys have: hex, and either a 33-byte compressed key
+// behind an 02/03 prefix or a 65-byte uncompressed one behind 04. Whether the
+// point is actually on the curve is settled by `PublicKey::from_slice` on the
+// backend, which now rejects the POST rather than storing an unusable peer.
+const isNoisePublicKey = (value: string): boolean => {
+  if (!/^[0-9a-fA-F]+$/.test(value)) return false;
+  const prefix = value.slice(0, 2).toLowerCase();
+  if (value.length === 66) return prefix === "02" || prefix === "03";
+  return value.length === 130 && prefix === "04";
+};
+
+/**
+ * The form the backend stores. `CantonId` parses the namespace as hex and
+ * writes it back lower-case, so two spellings of one id collide on the peers
+ * primary key; keying on the raw string would import both and fail the POST.
+ */
+export const canonicalPeerId = (id: string): string => {
+  const parts = id.split("::");
+  return parts.length === 2 ? `${parts[0]}::${parts[1].toLowerCase()}` : id;
+};
 
 /**
  * Parse peers out of CSV text, tolerating an optional header row, blank lines
@@ -229,7 +252,8 @@ export const parsePeersCsv = (text: string): ParsedPeersCsv => {
       });
       continue;
     }
-    if (seen.has(participantId)) {
+    const canonicalId = canonicalPeerId(participantId);
+    if (seen.has(canonicalId)) {
       rejected.push({
         line,
         raw,
@@ -237,12 +261,12 @@ export const parsePeersCsv = (text: string): ParsedPeersCsv => {
       });
       continue;
     }
-    seen.add(participantId);
+    seen.add(canonicalId);
 
     rows.push({
       line,
       peer: {
-        participant_id: participantId,
+        participant_id: canonicalId,
         name: name || participantId,
         address,
         port,
@@ -260,11 +284,19 @@ export const parsePeersCsv = (text: string): ParsedPeersCsv => {
  * overwritten in place, the rest appended, peers absent from the import kept.
  */
 export const mergePeers = (existing: Peer[], imported: Peer[]): Peer[] => {
-  const byId = new Map(imported.map((p) => [p.participant_id, p]));
-  const merged = existing.map((p) => byId.get(p.participant_id) ?? p);
-  const existingIds = new Set(existing.map((p) => p.participant_id));
+  const byId = new Map(
+    imported.map((p) => [canonicalPeerId(p.participant_id), p]),
+  );
+  const merged = existing.map(
+    (p) => byId.get(canonicalPeerId(p.participant_id)) ?? p,
+  );
+  const existingIds = new Set(
+    existing.map((p) => canonicalPeerId(p.participant_id)),
+  );
   for (const peer of imported) {
-    if (!existingIds.has(peer.participant_id)) merged.push(peer);
+    if (!existingIds.has(canonicalPeerId(peer.participant_id))) {
+      merged.push(peer);
+    }
   }
   return merged;
 };

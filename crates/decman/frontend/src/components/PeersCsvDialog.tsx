@@ -22,6 +22,7 @@ import UploadFileIcon from "@mui/icons-material/UploadFile";
 import { useSnackbar } from "../contexts";
 import { zebraRow } from "../styles";
 import {
+  canonicalPeerId,
   downloadCsv,
   mergePeers,
   parsePeersCsv,
@@ -162,10 +163,12 @@ export const PeersCsvDialog = ({
     }
     if (read !== readId.current) return;
     const parsed = parsePeersCsv(text);
-    const existing = new Map(peers.map((p) => [p.participant_id, p]));
+    const existing = new Map(
+      peers.map((p) => [canonicalPeerId(p.participant_id), p]),
+    );
     setImportRows(
       parsed.rows.map(({ peer }) => {
-        const current = existing.get(peer.participant_id);
+        const current = existing.get(canonicalPeerId(peer.participant_id));
         return {
           peer,
           kind: !current

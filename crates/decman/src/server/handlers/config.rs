@@ -12,6 +12,7 @@ use crate::{
     config::{NetworkConfig, NodeConfig, Peer},
     db::schema::{Commitable, SchemaRead, SchemaWrite},
     error::Result,
+    noise::parse_public_key,
     server::{
         AppState,
         middleware::require_admin,
@@ -47,6 +48,7 @@ pub async fn get_network_config(data: web::Data<AppState>) -> impl Responder {
     request_body = Vec<Peer>,
     responses(
         (status = 200, description = "Network config saved", body = SuccessResponse),
+        (status = 400, description = "A peer carries an unparseable Noise public key", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
@@ -62,6 +64,13 @@ pub async fn save_network_config(
         return resp;
     }
     let peers = body.into_inner();
+
+    let bad_keys = peers_with_unparseable_keys(&peers);
+    if !bad_keys.is_empty() {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: format!("Invalid Noise public key for: {}", bad_keys.join(", ")),
+        });
+    }
 
     // Primary write: save to database
     if let Err(e) = save_peers_to_db(&data.db, &peers).await {
@@ -177,6 +186,19 @@ pub async fn metrics() -> impl Responder {
     }
 }
 
+/// Participant IDs whose Noise public key will not parse.
+///
+/// A key that is hex and the right length can still be off the curve. It stores
+/// fine and is then skipped by every Noise path, so the peer silently never
+/// connects; the write is the last place to catch it.
+fn peers_with_unparseable_keys(peers: &[Peer]) -> Vec<String> {
+    peers
+        .iter()
+        .filter(|p| parse_public_key(&p.public_key).is_err())
+        .map(|p| p.participant_id.to_string())
+        .collect()
+}
+
 async fn save_peers_to_db(db: &SqlitePool, peers: &[Peer]) -> Result {
     let mut tx = db.begin_transaction().await?;
     tx.delete_all_peers().await?;
@@ -190,7 +212,41 @@ async fn save_peers_to_db(db: &SqlitePool, peers: &[Peer]) -> Result {
 mod tests {
     use super::*;
     use actix_web::{App, http::StatusCode};
+    use common::canton_id::CantonId;
     use utoipa::PartialSchema;
+
+    // Compressed generator point: valid hex, valid length, and on the curve.
+    const VALID_KEY: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
+    fn peer(prefix: &str, public_key: &str) -> Result<Peer> {
+        Ok(Peer {
+            participant_id: CantonId::parse(&format!("{prefix}::{ns}", ns = "a".repeat(68)))?,
+            name: prefix.to_string(),
+            address: "peer.example.com".to_string(),
+            port: 9000,
+            public_key: public_key.to_string(),
+            party: None,
+        })
+    }
+
+    // Length and hex alone do not make a public key: an all-zero 33-byte value
+    // passes both and is not a point on the curve. Storing it leaves a peer the
+    // Noise paths quietly skip, so the POST has to refuse it.
+    #[test]
+    fn unparseable_public_keys_are_named_by_participant_id() -> Result {
+        let peers = [
+            peer("good", VALID_KEY)?,
+            peer("offcurve", &format!("02{}", "0".repeat(64)))?,
+            peer("nothex", "02zz")?,
+            peer("empty", "")?,
+        ];
+
+        let bad = peers_with_unparseable_keys(&peers);
+
+        assert_eq!(bad.len(), 3, "only the valid key should survive: {bad:?}");
+        assert!(bad.iter().all(|id| !id.starts_with("good::")));
+        Ok(())
+    }
 
     // The `/node-config` OpenAPI response is documented as `NodeConfigResponse`,
     // not the flattened `NodeConfig`. Guard that its schema builds (flatten can

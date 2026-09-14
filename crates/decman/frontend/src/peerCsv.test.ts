@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { mergePeers, parsePeersCsv, peersToCsv } from "./peerCsv";
+import {
+  canonicalPeerId,
+  mergePeers,
+  parsePeersCsv,
+  peersToCsv,
+} from "./peerCsv";
 import type { Peer } from "./types";
 
 /** A 34-byte namespace and a 33-byte compressed key, as the backend parses. */
@@ -165,6 +170,23 @@ describe("parsePeersCsv", () => {
     expect(rejected[0]?.reason).toContain("found 7");
   });
 
+  // The backend lower-cases the namespace when it stores a CantonId, so two
+  // spellings are one peer. Keying on the raw string would import both and
+  // collide on the peers primary key.
+  it("canonicalises the namespace so one id has one spelling", () => {
+    const upper = `participant1::${ns("A")}`;
+    const { rows, rejected } = parsePeersCsv(
+      [
+        `${upper},Upper,a.example.com,9000,${key("a")},`,
+        `${ID_A},Lower,z.example.com,9999,${key("b")},`,
+      ].join("\n"),
+    );
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.peer.participant_id).toBe(ID_A);
+    expect(rejected[0]?.reason).toContain("Duplicate participant_id");
+  });
+
   it("rejects malformed quoting rather than guessing at it", () => {
     const unterminated = parsePeersCsv(
       `${ID_A},"Never closed,a.example.com,9000,${key("a")},`,
@@ -179,6 +201,27 @@ describe("parsePeersCsv", () => {
     expect(trailing.rejected[0]?.reason).toBe(
       "Unexpected text after a closing quote",
     );
+
+    const bare = parsePeersCsv(
+      `${ID_A},Acme"Node,a.example.com,9000,${key("a")},`,
+    );
+    expect(bare.rows).toEqual([]);
+    expect(bare.rejected[0]?.reason).toBe(
+      "Unexpected quote in an unquoted field",
+    );
+  });
+
+  // Hex of the right length is not enough: a secp256k1 key carries an 02/03
+  // prefix compressed or 04 uncompressed. The curve check itself is the
+  // backend's, which now refuses the POST rather than storing a dead peer.
+  it("rejects a key whose SEC1 prefix is wrong", () => {
+    const rowFor = (k: string) =>
+      `${ID_A},One,a.example.com,9000,${k},`;
+
+    expect(parsePeersCsv(rowFor(`05${"a".repeat(64)}`)).rows).toEqual([]);
+    expect(parsePeersCsv(rowFor(`02${"a".repeat(128)}`)).rows).toEqual([]);
+    expect(parsePeersCsv(rowFor(`03${"a".repeat(64)}`)).rows).toHaveLength(1);
+    expect(parsePeersCsv(rowFor(`04${"a".repeat(128)}`)).rows).toHaveLength(1);
   });
 
   // peersToCsv quotes a value whose whitespace matters, so trimming it back
@@ -221,6 +264,13 @@ describe("parsePeersCsv", () => {
   });
 });
 
+describe("canonicalPeerId", () => {
+  it("lower-cases the namespace and leaves everything else alone", () => {
+    expect(canonicalPeerId(`Node::${ns("A")}`)).toBe(`Node::${ns("a")}`);
+    expect(canonicalPeerId("not-an-id")).toBe("not-an-id");
+  });
+});
+
 describe("mergePeers", () => {
   const existingA = peer({ participant_id: "a::1220", name: "A" });
   const existingB = peer({ participant_id: "b::1220", name: "B", port: 9001 });
@@ -241,6 +291,21 @@ describe("mergePeers", () => {
       existingA,
       existingB,
     ]);
+  });
+
+  // The same peer spelled with an upper-case namespace must update the row it
+  // already has, not append a second one the POST would reject.
+  it("matches an existing peer whose id differs only in case", () => {
+    const upper = peer({
+      participant_id: `a::${"A".repeat(68)}`,
+      name: "A renamed",
+    });
+    const existing = peer({ participant_id: `a::${"a".repeat(68)}`, name: "A" });
+
+    const merged = mergePeers([existing], [upper]);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0]?.name).toBe("A renamed");
   });
 
   it("keeps the existing order rather than the import order", () => {
