@@ -10,8 +10,6 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
-  Divider,
-  FormControlLabel,
   Table,
   TableBody,
   TableCell,
@@ -22,7 +20,7 @@ import {
 import DownloadIcon from "@mui/icons-material/Download";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import { useSnackbar } from "../contexts";
-import { cardTableSx, zebraRow } from "../styles";
+import { zebraRow } from "../styles";
 import {
   downloadCsv,
   mergePeers,
@@ -68,6 +66,29 @@ const kindChip: Record<
   update: { label: "Update", color: "warning" },
   unchanged: { label: "Unchanged", color: "default" },
 };
+
+// The theme pads a table's leading and trailing cell out to `--content-pad`,
+// which is viewport-derived and reaches ~180px on a wide screen. Inside a
+// dialog the dialog's own edge is the boundary, so pin the gutter instead.
+const GUTTER = 24;
+
+const tableSx = {
+  tableLayout: "fixed" as const,
+  "& .MuiTableCell-root": { height: 44 },
+  "& .MuiTableCell-root:first-of-type": { paddingLeft: `${GUTTER}px` },
+  "& .MuiTableCell-root:last-of-type": { paddingRight: `${GUTTER}px` },
+};
+
+// Only the free-text columns clip; a chip cell that inherits this loses the
+// end of its own label.
+const ellipsisSx = {
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+} as const;
+
+const truncateKey = (key: string): string =>
+  key.length > 16 ? `${key.slice(0, 10)}…${key.slice(-4)}` : key;
 
 const exportFilename = (): string =>
   `decman-peers-${new Date().toISOString().slice(0, 10)}.csv`;
@@ -212,176 +233,187 @@ export const PeersCsvDialog = ({
       <DialogTitle>
         {isImport ? "Import peers from CSV" : "Export peers as CSV"}
       </DialogTitle>
-      <DialogContent dividers>
-        {isImport && (
-          <Box sx={{ mb: 2 }}>
-            <input
-              ref={fileInput}
-              type="file"
-              accept=".csv,text/csv"
-              hidden
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) void handleFile(file);
-                // Clear the value so re-picking the same file fires onChange.
-                e.target.value = "";
-              }}
-            />
-            <Button
-              variant="outlined"
-              size="small"
-              startIcon={<UploadFileIcon />}
-              onClick={() => fileInput.current?.click()}
-              disabled={saving}
-            >
-              {filename ? "Choose a different file" : "Choose CSV file"}
-            </Button>
-            {filename && (
-              <Typography
-                component="span"
-                variant="body2"
-                color="text.secondary"
-                sx={{ ml: 2 }}
+      <DialogContent dividers sx={{ p: 0 }}>
+        <Box sx={{ px: `${GUTTER}px`, pt: 2, pb: rows.length === 0 ? 2 : 1 }}>
+          {isImport && (
+            <Box sx={{ mb: 2 }}>
+              <input
+                ref={fileInput}
+                type="file"
+                accept=".csv,text/csv"
+                hidden
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) void handleFile(file);
+                  // Clear the value so re-picking the same file fires onChange.
+                  e.target.value = "";
+                }}
+              />
+              <Button
+                variant="outlined"
+                size="small"
+                startIcon={<UploadFileIcon />}
+                onClick={() => fileInput.current?.click()}
+                disabled={saving}
               >
-                {filename}
-              </Typography>
-            )}
+                {filename ? "Choose a different file" : "Choose CSV file"}
+              </Button>
+              {filename && (
+                <Typography
+                  component="span"
+                  variant="body2"
+                  color="text.secondary"
+                  sx={{ ml: 2 }}
+                >
+                  {filename}
+                </Typography>
+              )}
+            </Box>
+          )}
+
+          {error && (
+            <Alert severity="error" sx={{ mb: 2 }}>
+              {error}
+            </Alert>
+          )}
+
+          {rejected.length > 0 && (
+            <Alert severity="warning" sx={{ mb: 2 }}>
+              <AlertTitle>
+                {rejected.length} row{plural(rejected.length)} skipped
+              </AlertTitle>
+              {rejected.map((r) => (
+                <Typography key={r.line} variant="body2">
+                  Line {r.line}: {r.reason}
+                </Typography>
+              ))}
+            </Alert>
+          )}
+
+          <Typography variant="body2" color="text.secondary">
+            {rows.length > 0
+              ? `${selectedPeers.length} of ${rows.length} selected`
+              : isImport
+                ? filename
+                  ? "No usable peers in this file."
+                  : "Choose a CSV file to see the peers it contains."
+                : "No peers configured yet."}
+          </Typography>
+        </Box>
+
+        {rows.length > 0 && (
+          <Box sx={{ pb: isImport ? 0 : 1 }}>
+            <Table size="small" sx={tableSx}>
+              <TableHead>
+                <TableRow>
+                  <TableCell padding="checkbox" sx={{ width: 56 }}>
+                    <Checkbox
+                      size="small"
+                      checked={allSelected}
+                      indeterminate={selectedPeers.length > 0 && !allSelected}
+                      onChange={toggleAll}
+                      disabled={saving}
+                      slotProps={{
+                        input: { "aria-label": "Select all peers" },
+                      }}
+                    />
+                  </TableCell>
+                  <TableCell sx={{ width: "22%" }}>Name</TableCell>
+                  <TableCell>Address</TableCell>
+                  <TableCell sx={{ width: 172 }}>Public Key</TableCell>
+                  {isImport && (
+                    <TableCell sx={{ width: 128 }}>Change</TableCell>
+                  )}
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {rows.map((row, idx) => {
+                  const id = row.peer.participant_id;
+                  const chip = kindChip[row.kind];
+                  return (
+                    <TableRow key={id} sx={zebraRow(idx)}>
+                      <TableCell padding="checkbox">
+                        <Checkbox
+                          size="small"
+                          checked={!deselected.has(id)}
+                          onChange={() => toggle(id)}
+                          disabled={saving}
+                          slotProps={{
+                            input: { "aria-label": `Select ${row.peer.name}` },
+                          }}
+                        />
+                      </TableCell>
+                      <TableCell title={row.peer.name} sx={ellipsisSx}>
+                        {row.peer.name}
+                        {row.isSelf && (
+                          <Typography
+                            component="span"
+                            variant="caption"
+                            color="text.secondary"
+                            sx={{ ml: 1 }}
+                          >
+                            (You)
+                          </Typography>
+                        )}
+                      </TableCell>
+                      {/* The port is the half worth reading, so the host
+                        * clips and the port stays pinned beside it. */}
+                      <TableCell title={`${row.peer.address}:${row.peer.port}`}>
+                        <Box sx={{ display: "flex", minWidth: 0 }}>
+                          <Box component="span" sx={ellipsisSx}>
+                            {row.peer.address}
+                          </Box>
+                          <Box component="span" sx={{ flexShrink: 0 }}>
+                            :{row.peer.port}
+                          </Box>
+                        </Box>
+                      </TableCell>
+                      <TableCell
+                        title={row.peer.public_key}
+                        sx={{
+                          ...ellipsisSx,
+                          fontFamily: "var(--font-mono)",
+                          fontSize: "0.75rem",
+                        }}
+                      >
+                        {truncateKey(row.peer.public_key)}
+                      </TableCell>
+                      {isImport && (
+                        <TableCell>
+                          <Chip
+                            size="small"
+                            label={chip.label}
+                            color={chip.color}
+                            variant={
+                              row.kind === "unchanged" ? "outlined" : "filled"
+                            }
+                            sx={{ height: 20, fontSize: "0.7rem" }}
+                          />
+                        </TableCell>
+                      )}
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
           </Box>
         )}
 
-        {error && (
-          <Alert severity="error" sx={{ mb: 2 }}>
-            {error}
-          </Alert>
-        )}
-
-        {rejected.length > 0 && (
-          <Alert severity="warning" sx={{ mb: 2 }}>
-            <AlertTitle>
-              {rejected.length} row{plural(rejected.length)} skipped
-            </AlertTitle>
-            {rejected.map((r) => (
-              <Typography key={r.line} variant="body2">
-                Line {r.line}: {r.reason}
-              </Typography>
-            ))}
-          </Alert>
-        )}
-
-        {rows.length === 0 ? (
-          <Typography variant="body2" color="text.secondary">
-            {isImport
-              ? filename
-                ? "No usable peers in this file."
-                : "Choose a CSV file to see the peers it contains."
-              : "No peers configured yet."}
-          </Typography>
-        ) : (
-          <>
-            <FormControlLabel
-              control={
-                <Checkbox
-                  size="small"
-                  checked={allSelected}
-                  indeterminate={selectedPeers.length > 0 && !allSelected}
-                  onChange={toggleAll}
-                  disabled={saving}
-                />
-              }
-              label={`${selectedPeers.length} of ${rows.length} selected`}
-            />
-            <Divider />
-            <Box sx={{ overflowX: "auto" }}>
-              <Table size="small" sx={{ ...cardTableSx, minWidth: 640 }}>
-                <TableHead>
-                  <TableRow>
-                    <TableCell padding="checkbox" />
-                    <TableCell sx={{ whiteSpace: "nowrap" }}>Name</TableCell>
-                    <TableCell sx={{ whiteSpace: "nowrap" }}>Address</TableCell>
-                    <TableCell sx={{ whiteSpace: "nowrap" }}>
-                      Public Key
-                    </TableCell>
-                    {isImport && (
-                      <TableCell sx={{ whiteSpace: "nowrap" }}>Change</TableCell>
-                    )}
-                  </TableRow>
-                </TableHead>
-                <TableBody>
-                  {rows.map((row, idx) => {
-                    const id = row.peer.participant_id;
-                    const chip = kindChip[row.kind];
-                    return (
-                      <TableRow key={id} sx={zebraRow(idx)}>
-                        <TableCell padding="checkbox">
-                          <Checkbox
-                            size="small"
-                            checked={!deselected.has(id)}
-                            onChange={() => toggle(id)}
-                            disabled={saving}
-                            slotProps={{
-                              input: {
-                                "aria-label": `Select ${row.peer.name}`,
-                              },
-                            }}
-                          />
-                        </TableCell>
-                        <TableCell sx={{ whiteSpace: "nowrap" }}>
-                          {row.peer.name}
-                          {row.isSelf && (
-                            <Typography
-                              component="span"
-                              variant="caption"
-                              color="text.secondary"
-                              sx={{ ml: 1 }}
-                            >
-                              (You)
-                            </Typography>
-                          )}
-                        </TableCell>
-                        <TableCell sx={{ whiteSpace: "nowrap" }}>
-                          {row.peer.address}:{row.peer.port}
-                        </TableCell>
-                        <TableCell
-                          sx={{
-                            fontFamily: "var(--font-mono)",
-                            fontSize: "0.75rem",
-                            maxWidth: 220,
-                            overflow: "hidden",
-                            textOverflow: "ellipsis",
-                          }}
-                        >
-                          {row.peer.public_key}
-                        </TableCell>
-                        {isImport && (
-                          <TableCell>
-                            <Chip
-                              size="small"
-                              label={chip.label}
-                              color={chip.color}
-                              variant={
-                                row.kind === "unchanged" ? "outlined" : "filled"
-                              }
-                              sx={{ height: 20, fontSize: "0.7rem" }}
-                            />
-                          </TableCell>
-                        )}
-                      </TableRow>
-                    );
-                  })}
-                </TableBody>
-              </Table>
-            </Box>
-            {isImport && (
-              <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
-                {changedCount === 0
-                  ? "The selected peers match what is already configured — importing changes nothing."
-                  : `${changedCount} peer${plural(changedCount)} will be added or updated. Peers missing from this file are kept.`}
-              </Typography>
-            )}
-          </>
-        )}
       </DialogContent>
-      <DialogActions>
+      <DialogActions sx={{ px: `${GUTTER}px`, gap: 1 }}>
+        {/* In the action bar rather than the scroll area: it is what the
+          * Import button is about to do, so it must not sit below the fold. */}
+        <Typography
+          variant="body2"
+          color="text.secondary"
+          sx={{ flexGrow: 1, mr: 2 }}
+        >
+          {!isImport || rows.length === 0
+            ? ""
+            : changedCount === 0
+              ? "Nothing to change — the selected peers already match."
+              : `${changedCount} peer${plural(changedCount)} to add or update. Peers not in the file are kept.`}
+        </Typography>
         <Button onClick={onClose} disabled={saving}>
           Cancel
         </Button>
@@ -389,7 +421,9 @@ export const PeersCsvDialog = ({
           variant="contained"
           startIcon={isImport ? <UploadFileIcon /> : <DownloadIcon />}
           onClick={isImport ? handleImport : handleExport}
-          disabled={saving || selectedPeers.length === 0 || (isImport && !onSave)}
+          disabled={
+            saving || selectedPeers.length === 0 || (isImport && !onSave)
+          }
         >
           {isImport
             ? saving

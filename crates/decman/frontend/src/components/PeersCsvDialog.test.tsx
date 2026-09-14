@@ -215,6 +215,41 @@ describe("PeersCsvDialog — import", () => {
     expect(onSave.mock.calls[0]?.[0]).toEqual([alpha, bravo, charlie]);
   });
 
+  // The summary counts only what the import would actually write, so an
+  // unchanged row and a deselected one must both drop out of it.
+  it("summarises how many peers the import would change", async () => {
+    const charlie = peer({
+      participant_id: "c::1220cccc",
+      name: "Charlie",
+      address: "charlie.example.com",
+      port: 9002,
+      public_key: "keyC",
+    });
+
+    renderDialog({ mode: "import", onSave: vi.fn() });
+    uploadCsv(peersToCsv([alpha, { ...bravo, port: 9100 }, charlie]));
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          "2 peers to add or update. Peers not in the file are kept.",
+        ),
+      ).toBeDefined(),
+    );
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select Charlie" }));
+    expect(
+      screen.getByText(
+        "1 peer to add or update. Peers not in the file are kept.",
+      ),
+    ).toBeDefined();
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select Bravo" }));
+    expect(
+      screen.getByText("Nothing to change — the selected peers already match."),
+    ).toBeDefined();
+  });
+
   it("reports the rows it skipped and keeps the good ones", async () => {
     renderDialog({ mode: "import", onSave: vi.fn() });
 
