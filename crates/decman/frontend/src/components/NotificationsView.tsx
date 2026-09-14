@@ -46,6 +46,11 @@ import {
   StatusPill,
   WorkflowPipeline,
 } from "./viz/ApprovalViz";
+import {
+  currentStepLabel,
+  stepsForRun,
+  workflowKindLabel,
+} from "../workflowSteps";
 import type {
   CancelConfirmationRequest,
   ConfirmActionRequest,
@@ -1516,7 +1521,7 @@ const WorkflowRunCard = ({
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error || "Failed to cancel");
       }
-      showSnackbar(`${run.kind} workflow cancelled`);
+      showSnackbar(`${workflowKindLabel(run.kind)} workflow cancelled`);
       onAfter();
     } catch (err) {
       showSnackbar(
@@ -1561,7 +1566,7 @@ const WorkflowRunCard = ({
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error || "Failed to retry");
       }
-      showSnackbar(`Retrying ${run.kind} workflow`);
+      showSnackbar(`Retrying ${workflowKindLabel(run.kind)} workflow`);
       onAfter();
     } catch (err) {
       showSnackbar(
@@ -1617,7 +1622,7 @@ const WorkflowRunCard = ({
             width: 168,
           }}
         >
-          {run.kind} workflow
+          {workflowKindLabel(run.kind)} workflow
         </Typography>
         {run.status === "failed" && run.error ? (
           <Box
@@ -1738,7 +1743,11 @@ const WorkflowRunCard = ({
       // terminal states have no such body, so they keep theirs.
       pill={isInProgress ? undefined : <StatusPill status={run.status} />}
       time={formatRelativeTime(run.updated_at)}
-      title={run.prefix ? `${run.kind} · ${run.prefix}` : run.kind}
+      title={
+        run.prefix
+          ? `${workflowKindLabel(run.kind)} · ${run.prefix}`
+          : workflowKindLabel(run.kind)
+      }
       facts={
         <>
           {(fromLine || peerCountLine) && (
@@ -1751,6 +1760,7 @@ const WorkflowRunCard = ({
               <WorkflowPipeline
                 current={run.step_index}
                 total={run.step_total}
+                steps={stepsForRun(run)}
               />
             </Box>
           )}
@@ -1764,7 +1774,7 @@ const WorkflowRunCard = ({
       footerLeft={
         isInProgress && run.current_step ? (
           <Typography sx={{ fontSize: 13, fontWeight: 600 }}>
-            {run.current_step}
+            {currentStepLabel(run)}
           </Typography>
         ) : undefined
       }
