@@ -13,25 +13,22 @@ use std::{
     time::Duration,
 };
 
-use anyhow::Context;
 use canton_proto_rs::com::digitalasset::canton::{
     protocol::v30::{
         DecentralizedNamespaceDefinition, PartyToKeyMapping, PartyToParticipant,
-        SignedTopologyTransaction, TopologyMapping, TopologyTransaction, enums, topology_mapping,
+        SignedTopologyTransaction, TopologyTransaction, enums, topology_mapping,
     },
     topology::admin::v30::{
-        AddTransactionsRequest, AuthorizeRequest, AuthorizeResponse, BaseQuery, ForceFlag,
-        GenerateTransactionsRequest, ListDecentralizedNamespaceDefinitionRequest,
-        ListPartyToKeyMappingRequest, ListPartyToParticipantRequest, SignTransactionsRequest,
-        SignTransactionsResponse, StoreId, Synchronizer, base_query, generate_transactions_request,
+        AddTransactionsRequest, AuthorizeRequest, AuthorizeResponse, BaseQuery,
+        ListDecentralizedNamespaceDefinitionRequest, ListPartyToKeyMappingRequest,
+        ListPartyToParticipantRequest, SignTransactionsRequest, SignTransactionsResponse, StoreId,
+        Synchronizer, base_query,
         list_party_to_key_mapping_response::result::Item as PartyToKeyItem,
         list_party_to_participant_response::result::Item as P2pItem, store_id, synchronizer,
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
         topology_manager_write_service_client::TopologyManagerWriteServiceClient,
     },
-    version::v1::{UntypedVersionedMessage, untyped_versioned_message},
 };
-use prost::Message;
 use sqlx::SqlitePool;
 
 use crate::{
@@ -276,18 +273,13 @@ pub async fn fetch_p2p_history(
 
 /// An [`AddTransactionsRequest`] submitting a single signed transaction to the
 /// synchronizer store.
-/// `force_changes` carries the [`ForceFlag`]s the transaction needs to pass
-/// Canton's validation. They matter here rather than at creation time because
-/// [`build_signed_proposal`] deliberately does not store the transaction, so
-/// this is the first time the synchronizer store validates it.
 pub fn add_transactions_request(
     synchronizer_id: &str,
     transaction: SignedTopologyTransaction,
-    force_changes: Vec<i32>,
 ) -> AddTransactionsRequest {
     AddTransactionsRequest {
         transactions: vec![transaction],
-        force_changes,
+        force_changes: vec![],
         store: Some(synchronizer_store_id(synchronizer_id)),
         wait_to_become_effective: None,
     }
@@ -296,91 +288,6 @@ pub fn add_transactions_request(
 // ---------------------------------------------------------------------------
 // Shared head-state topology reads
 // ---------------------------------------------------------------------------
-
-/// Build this node's signed topology proposal **without** publishing it.
-///
-/// `Authorize` would be shorter, but per `topology_manager_write_service.proto`
-/// it "propose[s] a transaction and distribute[s] it", authorizing it outright
-/// when this node alone holds enough signing keys. For a party whose namespace
-/// threshold is 1 that applies the mapping the moment the proposal is created,
-/// which is before any check the caller runs at submit time — and for a paired
-/// DNS and P2P that is how a migration half-applies.
-///
-/// `GenerateTransactions` builds the transaction and `SignTransactions` signs
-/// it "but will not be stored in the authorized store", so nothing reaches the
-/// synchronizer until `add_transactions` publishes it.
-///
-/// The transaction is marked a proposal: this node's signature alone is not
-/// the party's authorization, and the peers' signatures are merged in before
-/// submission.
-///
-/// # Errors
-///
-/// Errors when either RPC fails or returns other than the one transaction
-/// asked for.
-pub async fn build_signed_proposal(
-    config: &NodeConfig,
-    synchronizer_id: &str,
-    mapping: topology_mapping::Mapping,
-    force_flags: Vec<i32>,
-    label: &str,
-) -> Result<SignedTopologyTransaction> {
-    let mut write_client = TopologyManagerWriteServiceClient::new(config.admin_channel().await?);
-
-    let generated = write_client
-        .generate_transactions(tonic::Request::new(GenerateTransactionsRequest {
-            proposals: vec![generate_transactions_request::Proposal {
-                operation: enums::TopologyChangeOp::AddReplace as i32,
-                serial: 0,
-                store: Some(synchronizer_store_id(synchronizer_id)),
-                mapping: Some(generate_transactions_request::proposal::Mapping::V30(
-                    TopologyMapping {
-                        mapping: Some(mapping),
-                    },
-                )),
-            }],
-            base_request: None,
-        }))
-        .await?
-        .into_inner()
-        .generated_transactions;
-
-    let [generated] = generated.as_slice() else {
-        anyhow::bail!(
-            "{label}: GenerateTransactions returned {count} transaction(s), expected exactly 1",
-            count = generated.len()
-        );
-    };
-    let transaction = versioned_topology_transaction(&generated.serialized_transaction)
-        .with_context(|| format!("{label}: GenerateTransactions returned unusable bytes"))?;
-
-    let signed = sign_transactions_with_topology_retry(
-        config,
-        SignTransactionsRequest {
-            transactions: vec![SignedTopologyTransaction {
-                transaction,
-                signatures: vec![],
-                proposal: true,
-                multi_transaction_signatures: vec![],
-            }],
-            signed_by: vec![],
-            store: Some(synchronizer_store_id(synchronizer_id)),
-            force_flags,
-        },
-        label,
-    )
-    .await?
-    .transactions;
-
-    let [signed] = signed.as_slice() else {
-        anyhow::bail!(
-            "{label}: SignTransactions returned {count} transaction(s), expected exactly 1",
-            count = signed.len()
-        );
-    };
-
-    Ok(signed.clone())
-}
 
 /// Fetch the party's current `PartyToParticipant` mapping from the
 /// synchronizer head state. Errors if the party has no mapping.
@@ -730,71 +637,6 @@ pub fn dedupe_signatures(transaction: &mut SignedTopologyTransaction) {
         .retain(|sig| seen.insert(sig.signed_by.clone()));
 }
 
-/// The bytes to put in `SignedTopologyTransaction.transaction`, which holds a
-/// `TopologyTransaction` inside an `UntypedVersionedMessage` envelope.
-///
-/// `GenerateTransactions` documents its output only as "Serialized
-/// com.digitalasset.canton.protocol.v30.TopologyTransaction", so this accepts
-/// either shape: bytes that are already the envelope pass through, bare ones
-/// are wrapped.
-///
-/// The test is whether the decoded transaction carries a mapping, not whether
-/// it decodes at all. A bare `TopologyTransaction` also parses as an
-/// `UntypedVersionedMessage` — `operation` lands on `version` and `mapping` on
-/// the wrapper — so a plain decode would hand Canton silent garbage.
-///
-/// # Errors
-///
-/// Errors when the bytes are neither shape.
-fn versioned_topology_transaction(bytes: &[u8]) -> Result<Vec<u8>> {
-    if utils::decode_versioned::<TopologyTransaction>(bytes)
-        .is_ok_and(|transaction| transaction.mapping.is_some())
-    {
-        return Ok(bytes.to_vec());
-    }
-
-    let bare = TopologyTransaction::decode(bytes)
-        .context("not an UntypedVersionedMessage envelope, and not a TopologyTransaction")?;
-    if bare.mapping.is_none() {
-        anyhow::bail!("decoded a TopologyTransaction carrying no mapping");
-    }
-
-    Ok(UntypedVersionedMessage {
-        version: TOPOLOGY_TRANSACTION_PROTO_VERSION,
-        wrapper: Some(untyped_versioned_message::Wrapper::Data(bytes.to_vec())),
-    }
-    .encode_to_vec())
-}
-
-/// The `UntypedVersionedMessage` version a v30 `TopologyTransaction` is
-/// wrapped with, matching what the external-party flows already write.
-const TOPOLOGY_TRANSACTION_PROTO_VERSION: i32 = 30;
-
-/// The force flags a party's DNS and P2P proposals need at publish time.
-///
-/// A P2P that adds a member's Daml key carries a key Canton has not seen
-/// validated, which it refuses without this. The paired DNS is published the
-/// same way rather than through a second code path.
-///
-/// They belong at publish time because [`build_signed_proposal`] deliberately
-/// does not store the transaction, so `add_transactions` is the first time the
-/// synchronizer store validates it.
-pub fn party_proposal_force_flags() -> Vec<i32> {
-    vec![ForceFlag::AllowUnvalidatedSigningKeys as i32]
-}
-
-/// The signed pair a topology workflow publishes, with the force flags their
-/// publication needs.
-///
-/// Bundled because all three travel together from proposal creation to
-/// submission, and because the flags only mean anything alongside the
-/// transactions they let through.
-pub struct DnsP2pSubmission {
-    pub dns: SignedTopologyTransaction,
-    pub p2p: SignedTopologyTransaction,
-    pub force_changes: Vec<i32>,
-}
-
 /// Submit the aggregated DNS mapping, await its workflow-specific
 /// confirmation, then submit the P2P mapping and await its confirmation,
 /// finishing with the shared topology-propagation delay.
@@ -810,7 +652,8 @@ pub async fn submit_dns_then_p2p<DnsFut, P2pFut>(
     config: &NodeConfig,
     synchronizer_id: &str,
     label: &str,
-    submission: DnsP2pSubmission,
+    dns_transaction: SignedTopologyTransaction,
+    p2p_transaction: SignedTopologyTransaction,
     confirm_dns: impl FnOnce() -> DnsFut,
     confirm_p2p: impl FnOnce() -> P2pFut,
 ) -> Result
@@ -818,12 +661,6 @@ where
     DnsFut: Future<Output = Result>,
     P2pFut: Future<Output = Result>,
 {
-    let DnsP2pSubmission {
-        dns: dns_transaction,
-        p2p: p2p_transaction,
-        force_changes,
-    } = submission;
-
     let mut topology_write_client =
         TopologyManagerWriteServiceClient::new(config.admin_channel().await?);
 
@@ -832,7 +669,6 @@ where
         .add_transactions(tonic::Request::new(add_transactions_request(
             synchronizer_id,
             dns_transaction,
-            force_changes.clone(),
         )))
         .await?;
     confirm_dns().await?;
@@ -843,7 +679,6 @@ where
         .add_transactions(tonic::Request::new(add_transactions_request(
             synchronizer_id,
             p2p_transaction,
-            force_changes,
         )))
         .await?;
     confirm_p2p().await?;
@@ -939,52 +774,5 @@ mod tests {
             .map(|s| s.signed_by.as_str())
             .collect();
         assert_eq!(kept, ["a", "b", "c"]);
-    }
-
-    /// A `TopologyTransaction` and an `UntypedVersionedMessage` share field
-    /// numbers, so a bare transaction decodes as an envelope full of nonsense.
-    /// Wrapping has to key off the mapping, or Canton gets garbage and answers
-    /// `PROTO_DESERIALIZATION_FAILURE`.
-    fn transaction() -> TopologyTransaction {
-        TopologyTransaction {
-            operation: enums::TopologyChangeOp::AddReplace as i32,
-            serial: 7,
-            mapping: Some(TopologyMapping {
-                mapping: Some(topology_mapping::Mapping::DecentralizedNamespaceDefinition(
-                    DecentralizedNamespaceDefinition {
-                        decentralized_namespace: "1220ab".to_string(),
-                        threshold: 2,
-                        owners: vec!["1220cd".to_string(), "1220ef".to_string()],
-                    },
-                )),
-            }),
-        }
-    }
-
-    #[test]
-    fn wraps_a_bare_topology_transaction() -> Result {
-        let bare = transaction().encode_to_vec();
-
-        let wrapped = versioned_topology_transaction(&bare)?;
-
-        assert_eq!(
-            utils::decode_versioned::<TopologyTransaction>(&wrapped)?,
-            transaction()
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn passes_an_already_versioned_transaction_through() -> Result {
-        let versioned = UntypedVersionedMessage {
-            version: TOPOLOGY_TRANSACTION_PROTO_VERSION,
-            wrapper: Some(untyped_versioned_message::Wrapper::Data(
-                transaction().encode_to_vec(),
-            )),
-        }
-        .encode_to_vec();
-
-        assert_eq!(versioned_topology_transaction(&versioned)?, versioned);
-        Ok(())
     }
 }

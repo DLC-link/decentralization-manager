@@ -96,11 +96,8 @@ pub async fn submit_change(
         config,
         &synchronizer_id,
         "change-threshold",
-        topology::DnsP2pSubmission {
-            dns: dns_transaction,
-            p2p: p2p_transaction,
-            force_changes: topology::party_proposal_force_flags(),
-        },
+        dns_transaction,
+        p2p_transaction,
         || {
             wait_for_dns_in_topology(
                 config,

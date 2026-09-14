@@ -76,11 +76,8 @@ pub async fn submit_proposals(
         config,
         &synchronizer_id,
         "add-party",
-        topology::DnsP2pSubmission {
-            dns: dns_transaction,
-            p2p: p2p_transaction,
-            force_changes: topology::party_proposal_force_flags(),
-        },
+        dns_transaction,
+        p2p_transaction,
         || {
             wait_for_owners(
                 config,

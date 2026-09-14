@@ -375,9 +375,52 @@ pub async fn adopt_legacy_signing_keys(
         members = members.len()
     );
 
+    warn_if_namespace_applies_early(config, synchronizer_id, dec_party_id).await;
+
     let claims =
         known_signing_keys_by_member(config, db, dec_party_id, &mapping.signing_keys).await?;
     legacy_signing_keys_for_members(&mapping.signing_keys, members, &claims)
+}
+
+/// Warn when a legacy migration runs against a party whose namespace
+/// threshold is 1.
+///
+/// The workflows build their proposals with `Authorize`, which per
+/// `topology_manager_write_service.proto` distributes the transaction and
+/// authorizes it outright when this node alone holds enough signing keys. At
+/// threshold 1 the coordinator alone is enough, so the namespace change is in
+/// force as soon as the proposal is created — while the participant change
+/// still waits for every member's key to sign it, because a migration adds
+/// them all at once.
+///
+/// A member that never signs therefore leaves the party half-migrated, and
+/// the applied namespace carries the *new* threshold, so putting it right can
+/// need more signatures than are available. Above threshold 1 the namespace
+/// cannot apply early and the pre-submit signature check covers the rest.
+///
+/// Best effort: a threshold that cannot be read is not worth failing a run
+/// over, it only costs the operator this warning.
+async fn warn_if_namespace_applies_early(
+    config: &NodeConfig,
+    synchronizer_id: &str,
+    dec_party_id: &CantonId,
+) {
+    let namespace_hex = dec_party_id.namespace.to_hex();
+    match topology::fetch_namespace_definition(config, synchronizer_id, &namespace_hex).await {
+        Ok(definition) if definition.threshold <= 1 => tracing::warn!(
+            "{dec_party_id}'s namespace threshold is {threshold}, so this node's signature \
+             alone puts the namespace change in force the moment the proposal is created, \
+             before the participant change has every member's signature. Make sure every \
+             member is online and able to sign before this run continues; a member that \
+             drops out now leaves the party half-migrated",
+            threshold = definition.threshold
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(
+            "Cannot read {dec_party_id}'s namespace threshold to check whether the namespace \
+             change would apply early: {e:#}"
+        ),
+    }
 }
 
 /// The keys of `legacy_keys` that `members` claim, in member order — the set
