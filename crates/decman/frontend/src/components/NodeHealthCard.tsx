@@ -133,6 +133,9 @@ const LinkRow = ({ label, probe, link, token, bands, dotStatus }: LinkRowProps) 
             fontFamily: "var(--font-mono)",
             fontSize: "0.66rem",
             color: "text.disabled",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
           }}
         >
           {probe}
@@ -173,6 +176,30 @@ export const NodeHealthCard = ({ config, health, selfLatency }: NodeHealthCardPr
   // Ok components are the norm and say nothing; only faults earn a chip.
   const faults = participant?.components.filter((c) => c.state !== "Ok") ?? [];
   const synchronizers = health?.synchronizers ?? [];
+
+  // An empty list means three different things, and saying "not connected" for
+  // all of them would put a claim on screen the node never made: before the
+  // first poll nothing has been asked, and when the Admin API returns no
+  // status the participant was asked but did not answer.
+  const unlinked = !health
+    ? {
+        label: config.canton.synchronizer,
+        color: "text.disabled",
+        tooltip: "Configured synchronizer. Waiting for the first health poll.",
+      }
+    : !participant
+      ? {
+          label: "unknown",
+          color: "text.disabled",
+          tooltip:
+            "The Admin API returned no participant status, so the synchronizer connection could not be read.",
+        }
+      : {
+          label: "not connected",
+          color: "warning.main",
+          tooltip:
+            "The participant reports no synchronizer connection. Nothing confirms or settles while this is the case.",
+        };
 
   return (
     <Box>
@@ -266,19 +293,12 @@ export const NodeHealthCard = ({ config, health, selfLatency }: NodeHealthCardPr
                 ))}
               </Box>
             ) : (
-              <Tooltip
-                title="The participant reports no synchronizer connection. Nothing confirms or settles while this is the case."
-                arrow
-              >
+              <Tooltip title={unlinked.tooltip} arrow>
                 <Typography
                   tabIndex={0}
-                  sx={{
-                    ...VALUE_SX,
-                    color: health ? "warning.main" : "text.disabled",
-                    cursor: "help",
-                  }}
+                  sx={{ ...VALUE_SX, color: unlinked.color, cursor: "help" }}
                 >
-                  {health ? "not connected" : config.canton.synchronizer}
+                  {unlinked.label}
                 </Typography>
               </Tooltip>
             )}
@@ -357,7 +377,7 @@ export const NodeHealthCard = ({ config, health, selfLatency }: NodeHealthCardPr
               <>
                 <LinkRow
                   label="DecMan → Admin API"
-                  probe={`:${config.canton.admin_api_port} · ParticipantStatus`}
+                  probe={`${config.canton.admin_api_host}:${config.canton.admin_api_port} · ParticipantStatus`}
                   link={health.admin_api}
                   token={health.checked_at}
                   bands={CANTON_BANDS}
@@ -365,7 +385,7 @@ export const NodeHealthCard = ({ config, health, selfLatency }: NodeHealthCardPr
                 />
                 <LinkRow
                   label="DecMan → Ledger API"
-                  probe={`:${config.canton.ledger_api_port} · GetLedgerApiVersion`}
+                  probe={`${config.canton.ledger_api_host}:${config.canton.ledger_api_port} · GetLedgerApiVersion`}
                   link={health.ledger_api}
                   token={health.checked_at}
                   bands={CANTON_BANDS}

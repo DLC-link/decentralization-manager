@@ -49,8 +49,13 @@ pub const SNAPSHOT_TTL: Duration = Duration::from_secs(5);
 /// its job is alerting freshness, not UI smoothness.
 pub const BACKGROUND_REFRESH: Duration = Duration::from_secs(30);
 
-/// Bounds one gRPC probe. Both probes run concurrently, so this is also the
-/// worst-case time the handler can spend before answering.
+/// Bounds one gRPC probe end to end — channel establishment as well as the
+/// RPC. Both probes run concurrently, so this is also the worst-case time the
+/// handler can spend before answering.
+///
+/// It has to cover the connect: `NodeConfig::admin_channel` carries its own
+/// 10s connect timeout, so a cold cache (or the slot a failed probe cleared)
+/// would otherwise block far past this bound before the RPC timer started.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// A topology queue deeper than this reads as a backlog rather than the
@@ -282,8 +287,14 @@ impl HealthCache {
             return snapshot.clone();
         }
 
-        let (admin_link, status) = probe_admin_api(config, &mut inner.admin).await;
-        let ledger_link = probe_ledger_api(config, &mut inner.ledger).await;
+        // Reborrowed so the two probes can hold disjoint field borrows at
+        // once, which is what lets them overlap: run sequentially they would
+        // stack their timeouts and hold this mutex for twice as long.
+        let cache = &mut *inner;
+        let ((admin_link, status), ledger_link) = tokio::join!(
+            probe_admin_api(config, &mut cache.admin),
+            probe_ledger_api(config, &mut cache.ledger),
+        );
 
         let (participant, synchronizers) = match status {
             Some(response) => decode_participant_status(response),
@@ -368,7 +379,24 @@ fn elapsed_ms(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
+fn timed_out() -> String {
+    format!("no reply within {}s", PROBE_TIMEOUT.as_secs())
+}
+
 async fn probe_admin_api(
+    config: &NodeConfig,
+    slot: &mut Option<Channel>,
+) -> (LinkHealth, Option<ParticipantStatusResponse>) {
+    // The deadline wraps the connect too, not just the RPC. `slot` is emptied
+    // before the connect, so a probe that times out leaves nothing cached and
+    // the next attempt redials.
+    match tokio::time::timeout(PROBE_TIMEOUT, admin_status(config, slot)).await {
+        Ok(outcome) => outcome,
+        Err(_) => (LinkHealth::unreachable(timed_out()), None),
+    }
+}
+
+async fn admin_status(
     config: &NodeConfig,
     slot: &mut Option<Channel>,
 ) -> (LinkHealth, Option<ParticipantStatusResponse>) {
@@ -381,29 +409,27 @@ async fn probe_admin_api(
     };
 
     let mut client = ParticipantStatusServiceClient::new(channel.clone());
+    // Timed from here, so the reported latency is the RPC alone — a connect
+    // only happens on the first probe after a restart and would otherwise
+    // show up as a one-off spike.
     let started = Instant::now();
-    let call = client.participant_status(ParticipantStatusRequest {});
 
-    match tokio::time::timeout(PROBE_TIMEOUT, call).await {
-        Ok(Ok(response)) => {
+    match client.participant_status(ParticipantStatusRequest {}).await {
+        Ok(response) => {
             *slot = Some(channel);
             (
                 LinkHealth::answered(elapsed_ms(started), None),
                 Some(response.into_inner()),
             )
         }
-        Ok(Err(status)) if answered(&status) => {
+        Err(status) if answered(&status) => {
             *slot = Some(channel);
             (
                 LinkHealth::answered(elapsed_ms(started), Some(status.message().to_string())),
                 None,
             )
         }
-        Ok(Err(status)) => (LinkHealth::unreachable(status.message().to_string()), None),
-        Err(_) => (
-            LinkHealth::unreachable(format!("no reply within {}s", PROBE_TIMEOUT.as_secs())),
-            None,
-        ),
+        Err(status) => (LinkHealth::unreachable(status.message().to_string()), None),
     }
 }
 
@@ -413,6 +439,13 @@ async fn probe_admin_api(
 /// which is all the liveness signal this card needs and keeps party credentials
 /// out of a health probe.
 async fn probe_ledger_api(config: &NodeConfig, slot: &mut Option<Channel>) -> LinkHealth {
+    match tokio::time::timeout(PROBE_TIMEOUT, ledger_version(config, slot)).await {
+        Ok(link) => link,
+        Err(_) => LinkHealth::unreachable(timed_out()),
+    }
+}
+
+async fn ledger_version(config: &NodeConfig, slot: &mut Option<Channel>) -> LinkHealth {
     let channel = match slot.take() {
         Some(channel) => channel,
         None => match config.ledger_channel().await {
@@ -423,19 +456,20 @@ async fn probe_ledger_api(config: &NodeConfig, slot: &mut Option<Channel>) -> Li
 
     let mut client = VersionServiceClient::new(channel.clone());
     let started = Instant::now();
-    let call = client.get_ledger_api_version(GetLedgerApiVersionRequest {});
 
-    match tokio::time::timeout(PROBE_TIMEOUT, call).await {
-        Ok(Ok(_)) => {
+    match client
+        .get_ledger_api_version(GetLedgerApiVersionRequest {})
+        .await
+    {
+        Ok(_) => {
             *slot = Some(channel);
             LinkHealth::answered(elapsed_ms(started), None)
         }
-        Ok(Err(status)) if answered(&status) => {
+        Err(status) if answered(&status) => {
             *slot = Some(channel);
             LinkHealth::answered(elapsed_ms(started), Some(status.message().to_string()))
         }
-        Ok(Err(status)) => LinkHealth::unreachable(status.message().to_string()),
-        Err(_) => LinkHealth::unreachable(format!("no reply within {}s", PROBE_TIMEOUT.as_secs())),
+        Err(status) => LinkHealth::unreachable(status.message().to_string()),
     }
 }
 
@@ -774,6 +808,52 @@ mod tests {
             ),
             NodeHealthStatus::Degraded
         );
+    }
+
+    /// Accepts a connection and then says nothing. tonic waits for the HTTP/2
+    /// preface during `connect`, so this hangs channel establishment — the
+    /// path that used to escape `PROBE_TIMEOUT` and run to the 10s connect
+    /// timeout instead.
+    async fn silent_listener()
+    -> crate::error::Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let mut accepted = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                // Held open, never spoken to.
+                accepted.push(stream);
+            }
+        });
+        Ok((addr, server))
+    }
+
+    // Pins both halves of the handler's advertised bound: the deadline covers
+    // channel establishment, and the two probes overlap. A regression in
+    // either shows up as wall-clock — an unbounded connect runs to tonic's 10s
+    // timeout, and sequential probes take twice as long as concurrent ones.
+    #[tokio::test]
+    async fn a_silent_participant_cannot_outlast_the_probe_timeout() -> crate::error::Result {
+        let (addr, server) = silent_listener().await?;
+        let mut config = NodeConfig::default();
+        config.canton.admin_api_host = addr.ip().to_string();
+        config.canton.admin_api_port = addr.port();
+        config.canton.ledger_api_host = addr.ip().to_string();
+        config.canton.ledger_api_port = addr.port();
+
+        let started = Instant::now();
+        let snapshot = HealthCache::new().get(&config).await;
+        let elapsed = started.elapsed();
+        server.abort();
+
+        assert_eq!(snapshot.status, NodeHealthStatus::Down);
+        assert!(!snapshot.admin_api.reachable);
+        assert!(!snapshot.ledger_api.reachable);
+        assert!(
+            elapsed < PROBE_TIMEOUT + Duration::from_millis(750),
+            "snapshot took {elapsed:?}, past the concurrent {PROBE_TIMEOUT:?} bound"
+        );
+        Ok(())
     }
 
     #[test]
