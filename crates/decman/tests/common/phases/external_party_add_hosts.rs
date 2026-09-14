@@ -46,14 +46,6 @@ use crate::common::{
     Fixture, chaos::fresh_prefix, http::probe_workflow_status, scenario::Scenario,
 };
 
-/// Bytes per relayed range.
-///
-/// Deliberately far below the endpoint's 8 MiB default so this party's small ACS
-/// still takes several rounds. A range large enough to swallow the whole
-/// snapshot would exercise the endpoints while skipping the chunking entirely,
-/// which is the part most likely to be wrong.
-const RANGE_LIMIT: u64 = 512;
-
 /// Read side of `/external-parties`. The shipped `ExternalPartiesResponse` is
 /// serialize-only, so the test declares the fields it reads.
 #[derive(Debug, Deserialize)]
@@ -297,50 +289,41 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
 
                     // The wallet is the transport: no host-to-host channel is
                     // involved, which is the whole point for a partner node that
-                    // is not in this mesh.
-                    let mut offset: u64 = 0;
-                    let mut rounds = 0;
-                    // Set on the first range; the completion assertion below
-                    // reads whatever the last round saw.
-                    #[allow(unused_assignments)]
-                    let mut total_size = 0u64;
-                    let mut probed_bad_offset = false;
+                    // is not in this mesh. It carries one block at a time — the
+                    // source holds its export stream open, the joiner holds its
+                    // import stream open, and nothing is staged at either end.
+                    let mut seq: u64 = 1;
+                    let mut probed_bad_seq = false;
                     let result = loop {
-                        rounds += 1;
-                        anyhow::ensure!(rounds < 512, "the relay did not converge");
+                        anyhow::ensure!(seq < 512, "the relay did not converge");
 
-                        // A deliberately tiny range so this party's small ACS
-                        // still needs several of them. Without it the loop
-                        // completes on the first pass and the chunking — offset
-                        // advancement, staged appends, completion detection —
-                        // is never actually exercised.
-                        let range: Value = f
+                        let block: Value = f
                             .get_json(
                                 f.p1.http,
                                 &format!(
                                     "/v0/tenant/{party_id}/acs/{target}\
-                                     ?base_serial={base_serial}&offset={offset}&limit={RANGE_LIMIT}"
+                                     ?base_serial={base_serial}&seq={seq}"
                                 ),
                             )
                             .await?;
-                        total_size = range
-                            .get("total_size")
-                            .and_then(Value::as_u64)
-                            .context("acs range missing total_size")?;
-                        // Once, mid-transfer: a range at the wrong offset must be
-                        // refused rather than written. A hole would only surface
-                        // mid-import, with the participant already disconnected.
-                        if !probed_bad_offset && offset > 0 {
-                            probed_bad_offset = true;
+                        anyhow::ensure!(
+                            block.get("seq").and_then(Value::as_u64) == Some(seq),
+                            "the source served a block other than {seq}: {block}"
+                        );
+                        let end = block.get("end").and_then(Value::as_bool) == Some(true);
+
+                        // Once, mid-transfer: a block out of order must be
+                        // refused rather than fed to Canton. Neither stream can
+                        // rewind, so a gap would only surface mid-import with
+                        // the participant already disconnected.
+                        if !probed_bad_seq {
+                            probed_bad_seq = true;
                             let bogus = json!({
                                 "party_id": party_id,
                                 "base_serial": base_serial,
-                                "offset": offset + 7,
-                                "total_size": total_size,
-                                "chunk": range
-                                    .get("chunk")
-                                    .cloned()
-                                    .context("acs range missing chunk")?,
+                                "seq": seq + 7,
+                                "chunk": "",
+                                "end": false,
                                 "package_ids": [],
                             });
                             let refused: anyhow::Result<Value> = f
@@ -348,55 +331,44 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                                 .await;
                             anyhow::ensure!(
                                 refused.is_err(),
-                                "a range at the wrong offset must be refused, not written"
+                                "a block out of order must be refused, not imported"
                             );
                         }
 
                         let import_req = json!({
                             "party_id": party_id,
                             "base_serial": base_serial,
-                            "offset": offset,
-                            "total_size": total_size,
-                            "chunk": range
+                            "seq": seq,
+                            "chunk": block
                                 .get("chunk")
                                 .cloned()
-                                .context("acs range missing chunk")?,
-                            "package_ids": range
+                                .context("acs block missing chunk")?,
+                            "end": end,
+                            "total_len": block.get("total_len").cloned().unwrap_or(json!(0)),
+                            "sha256": block.get("sha256").cloned().unwrap_or(json!("")),
+                            "package_ids": block
                                 .get("package_ids")
                                 .cloned()
-                                .context("acs range missing package_ids")?,
+                                .context("acs block missing package_ids")?,
                         });
                         let progress: Value = f
                             .post_json(f.p3.http, "/v0/tenant/add-hosts/import", &import_req)
                             .await?;
 
                         if progress.get("complete").and_then(Value::as_bool) == Some(true) {
+                            anyhow::ensure!(
+                                end,
+                                "the joiner completed on a block that was not the end: {progress}"
+                            );
                             break progress;
                         }
-                        let received = progress
-                            .get("received")
-                            .and_then(Value::as_u64)
-                            .context("import progress missing received")?;
                         anyhow::ensure!(
-                            received > offset,
-                            "the joiner did not advance past {offset}"
+                            !end,
+                            "the joiner took the final block without completing: {progress}"
                         );
-                        offset = received;
+                        seq += 1;
                     };
-                    // The point of the loop: prove it really did take several
-                    // ranges, so a green run means the chunking works rather
-                    // than that it was skipped.
-                    if total_size > RANGE_LIMIT {
-                        anyhow::ensure!(
-                            rounds > 1,
-                            "a {total_size}-byte snapshot at {RANGE_LIMIT}-byte ranges must take \
-                             more than one round, took {rounds}"
-                        );
-                    }
-                    info!(
-                        "add-hosts import on P3 after {rounds} range(s) of {total_size} byte(s): \
-                         {result}"
-                    );
+                    info!("add-hosts import on P3 after {seq} block(s): {result}");
 
                     // Checked here, inside the step that does the import, rather
                     // than as a later Then. Scenario steps run in sequence, so a

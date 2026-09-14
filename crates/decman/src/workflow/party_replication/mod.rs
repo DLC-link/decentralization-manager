@@ -22,7 +22,7 @@ pub mod acs;
 pub mod offset;
 pub mod onboarding_flag;
 pub mod pipe;
-pub mod staging;
+pub mod relay;
 
 use sqlx::SqlitePool;
 

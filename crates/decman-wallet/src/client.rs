@@ -8,11 +8,11 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
 use common::{
     api::{
-        TenantAcsImportRequest, TenantAcsImportResponse, TenantAcsProgressResponse,
-        TenantAcsSnapshotResponse, TenantAddHostsOnboardRequest, TenantAddHostsOnboardResponse,
-        TenantAddHostsPrepareResponse, TenantAddHostsRequest, TenantOnboardRequest,
-        TenantOnboardResponse, TenantPartyStateResponse, TenantPrepareRequest,
-        TenantPrepareResponse, TenantThresholdOnboardRequest, TenantThresholdRequest,
+        TenantAcsBlockResponse, TenantAcsImportRequest, TenantAcsImportResponse,
+        TenantAddHostsOnboardRequest, TenantAddHostsOnboardResponse, TenantAddHostsPrepareResponse,
+        TenantAddHostsRequest, TenantOnboardRequest, TenantOnboardResponse,
+        TenantPartyStateResponse, TenantPrepareRequest, TenantPrepareResponse,
+        TenantThresholdOnboardRequest, TenantThresholdRequest,
     },
     canton_id::CantonId,
     types::WorkflowProgress,
@@ -138,34 +138,22 @@ impl TenantClient {
         self.post("/v0/tenant/add-hosts/onboard", req).await
     }
 
-    /// `GET /v0/tenant/{party}/acs/{target}?offset=` — one range of the party's
-    /// ACS scoped to a joining host, for this wallet to relay to it.
+    /// `GET /v0/tenant/{party}/acs/{target}?seq=` — one block of the party's ACS
+    /// scoped to a joining host, for this wallet to relay to it.
     ///
-    /// Ranged because the whole snapshot in one body is capped far below what the
-    /// export allows, and because a transfer that dies partway should resume
-    /// rather than restart.
-    pub async fn acs_range(
+    /// Blocks are 1-based and forward-only: the host holds the Canton export
+    /// stream open between calls and cannot rewind it. Asking for the block just
+    /// served replays it, which makes one transport retry safe; anything else is
+    /// a 409 and the transfer restarts from block 1.
+    pub async fn acs_block(
         &self,
         party_id: &str,
         target: &CantonId,
         base_serial: u32,
-        offset: u64,
-    ) -> Result<TenantAcsSnapshotResponse> {
+        seq: u64,
+    ) -> Result<TenantAcsBlockResponse> {
         self.get(&format!(
-            "/v0/tenant/{party_id}/acs/{target}?base_serial={base_serial}&offset={offset}"
-        ))
-        .await
-    }
-
-    /// `GET /v0/tenant/{party}/acs-progress` — how much of the snapshot this
-    /// host already holds, so a fresh run resumes rather than restarts.
-    pub async fn acs_progress(
-        &self,
-        party_id: &str,
-        base_serial: u32,
-    ) -> Result<TenantAcsProgressResponse> {
-        self.get(&format!(
-            "/v0/tenant/{party_id}/acs-progress?base_serial={base_serial}"
+            "/v0/tenant/{party_id}/acs/{target}?base_serial={base_serial}&seq={seq}"
         ))
         .await
     }

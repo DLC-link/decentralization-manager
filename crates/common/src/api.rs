@@ -552,36 +552,40 @@ pub struct TenantAddHostsOnboardResponse {
     pub serial: u32,
 }
 
-/// One range of the party's ACS snapshot, plus the packages needed to validate
-/// it.
+/// One block of the party's ACS, plus the packages needed to validate it.
 ///
-/// Ranged rather than whole because the snapshot used to travel base64-encoded
-/// in a single JSON body, which capped it far below what the export allowed:
-/// actix refuses a JSON body over 100 MiB and base64 inflates by 4/3, so
-/// anything past ~75 MiB was rejected outright. It also meant a transfer that
-/// died at 90% started again from nothing.
+/// The wallet is the transport: it reads block N here and hands block N to the
+/// joining host, which feeds it straight into its open `ImportPartyAcs` stream.
+/// Nothing lands on disk at either end, so the size of the party stops deciding
+/// whether the transfer is possible — the same property the add-party path gets
+/// from its node-to-node pipe.
 ///
-/// The wallet is the transport on purpose: the tenant API has no inter-node
-/// channel, and a partner's host is generally not in this node's Noise mesh.
+/// Forward-only. The export stream cannot rewind, so a broken transfer restarts
+/// from block 1 with a fresh export rather than resuming.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct TenantAcsSnapshotResponse {
-    /// The party the snapshot belongs to.
+pub struct TenantAcsBlockResponse {
+    /// The party the block belongs to.
     pub party_id: String,
-    /// The whole snapshot's size. `0` means the party holds no contracts and
-    /// the joiner skips the import entirely.
+    /// This block's sequence number, 1-based. Echoed so the wallet can prove a
+    /// response belongs to the block it asked for.
     #[cfg_attr(feature = "typegen", ts(type = "number"))]
-    pub total_size: u64,
-    /// Where this range starts.
-    #[cfg_attr(feature = "typegen", ts(type = "number"))]
-    pub offset: u64,
-    /// This range's bytes, base64-encoded. Shorter than requested means the end
-    /// of the snapshot.
+    pub seq: u64,
+    /// The block's bytes, base64-encoded. Empty on the final block.
     pub chunk: String,
+    /// Whether this is the final block. The wallet relays it like any other;
+    /// the joiner treats it as the end of the stream.
+    pub end: bool,
+    /// Total bytes the export produced. Only meaningful when `end`.
+    #[cfg_attr(feature = "typegen", ts(type = "number"))]
+    pub total_len: u64,
+    /// SHA-256 over everything the export produced, hex. Only meaningful when
+    /// `end`, and what lets the joiner prove after the fact what it fed Canton.
+    pub sha256: String,
     /// Package ids the joiner must have vetted before it can validate the
-    /// snapshot. Repeated on every range so a resumed transfer does not have to
-    /// have kept the first response.
+    /// snapshot. Repeated on every block so a wallet need not have kept the
+    /// first response.
     pub package_ids: Vec<String>,
     /// Whether `package_ids` is trustworthy.
     ///
@@ -599,67 +603,48 @@ pub struct TenantAcsSnapshotResponse {
     pub package_preflight: bool,
 }
 
-/// Request to append one range of a relayed ACS snapshot on the joining host.
-///
-/// The joiner imports and clears its onboarding marker once it holds
-/// `total_size` bytes, so the last range completes the replication and the
-/// earlier ones only accumulate.
+/// One relayed ACS block, handed to the joining host.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct TenantAcsImportRequest {
     /// The party being replicated onto this host.
     pub party_id: String,
-    /// The serial the add-hosts write was pinned to.
-    ///
-    /// Part of how this replication's staged state is keyed, so a target that
-    /// was removed and later re-added does not inherit the first attempt's
-    /// offsets — an offset predating the earlier activation makes the export
-    /// find the stale one and abort.
+    /// The serial the add-hosts write was pinned to. Keys this replication, so
+    /// a target that was removed and later re-added does not inherit the first
+    /// attempt's state.
     pub base_serial: u32,
-    /// Where this range starts. Must equal what the host already holds; a
-    /// mismatch is refused rather than written, because a snapshot with a hole
-    /// only fails once Canton is mid-import and the participant is disconnected.
+    /// This block's sequence number, 1-based. Block 1 starts a fresh import;
+    /// anything else must be the block this host is waiting for.
     #[cfg_attr(feature = "typegen", ts(type = "number"))]
-    pub offset: u64,
-    /// The whole snapshot's size, so the host knows when it has everything.
-    #[cfg_attr(feature = "typegen", ts(type = "number"))]
-    pub total_size: u64,
-    /// This range's bytes, base64-encoded.
+    pub seq: u64,
+    /// The block's bytes, base64-encoded. Empty on the final block.
     pub chunk: String,
+    /// Whether this is the final block.
+    pub end: bool,
+    /// The export's total length, from the source's final block.
+    #[serde(default)]
+    #[cfg_attr(feature = "typegen", ts(type = "number"))]
+    pub total_len: u64,
+    /// The export's SHA-256, from the source's final block.
+    #[serde(default)]
+    pub sha256: String,
     /// The package ids that came with it.
     #[serde(default)]
     pub package_ids: Vec<String>,
 }
 
-/// How far a joining host has got with a relayed snapshot.
-///
-/// A wallet asks this before it starts relaying, so a fresh run can continue an
-/// interrupted transfer instead of restarting it. Without it the wallet would
-/// begin at zero, be correctly refused, and have no way to act on the refusal.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct TenantAcsProgressResponse {
-    pub party_id: String,
-    /// Bytes already staged here. `0` means nothing has arrived, so relaying
-    /// starts from the beginning.
-    #[cfg_attr(feature = "typegen", ts(type = "number"))]
-    pub received: u64,
-}
-
-/// Outcome of importing the ACS and attempting the marker clear on this host.
+/// What the joining host did with a relayed block.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct TenantAcsImportResponse {
     pub party_id: String,
-    /// How many bytes this host now holds. A wallet resuming an interrupted
-    /// transfer continues from here rather than starting over.
+    /// The block this host took. The call returns only once Canton has consumed
+    /// it, which is what paces the wallet — neither end buffers.
     #[cfg_attr(feature = "typegen", ts(type = "number"))]
-    pub received: u64,
-    /// Whether the whole snapshot has arrived and the import ran. `false` while
-    /// ranges are still outstanding.
+    pub seq: u64,
+    /// Whether the final block landed and the import finished.
     pub complete: bool,
     /// Whether the snapshot was imported. `false` with `complete` means it was
     /// empty and the import was skipped, which is a success, not a failure.

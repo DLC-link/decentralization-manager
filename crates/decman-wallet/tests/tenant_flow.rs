@@ -519,39 +519,73 @@ async fn stub_add_hosts_onboard(server: &MockServer, serial: u32) {
 /// A stub source host that serves the party's ACS as ranges, and a joiner that
 /// accepts them and reports completion.
 async fn stub_acs_relay(source: &MockServer, joiner: &MockServer) {
+    stub_acs_source(source).await;
+    stub_import_blocks(joiner, true).await;
+}
+
+/// A source that serves the ACS in two blocks.
+///
+/// Two on purpose: a single-block stub would never exercise the loop advancing
+/// `seq`, which is the whole protocol.
+async fn stub_acs_source(source: &MockServer) {
     let snapshot = b"an-acs-snapshot".to_vec();
     let total = snapshot.len() as u64;
 
     Mock::given(method("GET"))
-        .and(wiremock::matchers::path_regex(
-            r"^/v0/tenant/.+/acs-progress$",
-        ))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "party_id": "alice::1220aa",
-            "received": 0,
-        })))
-        .mount(joiner)
-        .await;
-    Mock::given(method("GET"))
         .and(wiremock::matchers::path_regex(r"^/v0/tenant/.+/acs/.+$"))
+        .and(wiremock::matchers::query_param("seq", "1"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "party_id": "alice::1220aa",
-            "total_size": total,
-            "offset": 0,
+            "seq": 1,
             "chunk": STANDARD.encode(&snapshot),
+            "end": false,
+            "total_len": 0,
+            "sha256": "",
             "package_ids": ["pkg-one"],
             "package_preflight": true,
         })))
         .mount(source)
         .await;
-    Mock::given(method("POST"))
-        .and(path("/v0/tenant/add-hosts/import"))
+    Mock::given(method("GET"))
+        .and(wiremock::matchers::path_regex(r"^/v0/tenant/.+/acs/.+$"))
+        .and(wiremock::matchers::query_param("seq", "2"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "party_id": "alice::1220aa",
-            "received": total,
+            "seq": 2,
+            "chunk": "",
+            "end": true,
+            "total_len": total,
+            "sha256": "deadbeef",
+            "package_ids": ["pkg-one"],
+            "package_preflight": true,
+        })))
+        .mount(source)
+        .await;
+}
+
+/// A joiner that takes block 1 and completes on block 2.
+async fn stub_import_blocks(joiner: &MockServer, marker_cleared: bool) {
+    Mock::given(method("POST"))
+        .and(path("/v0/tenant/add-hosts/import"))
+        .and(wiremock::matchers::body_partial_json(json!({"seq": 1})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "party_id": "alice::1220aa",
+            "seq": 1,
+            "complete": false,
+            "imported": false,
+            "marker_cleared": false,
+        })))
+        .mount(joiner)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v0/tenant/add-hosts/import"))
+        .and(wiremock::matchers::body_partial_json(json!({"seq": 2})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "party_id": "alice::1220aa",
+            "seq": 2,
             "complete": true,
             "imported": true,
-            "marker_cleared": true,
+            "marker_cleared": marker_cleared,
         })))
         .mount(joiner)
         .await;
@@ -614,16 +648,9 @@ async fn add_hosts_waits_out_a_marker_the_import_did_not_clear() {
         stub_add_hosts_prepare(s, 5).await;
     }
     stub_add_hosts_onboard(&p3, 5).await;
-    Mock::given(method("GET"))
-        .and(wiremock::matchers::path_regex(
-            r"^/v0/tenant/.+/acs-progress$",
-        ))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "party_id": "alice::1220aa",
-            "received": 0,
-        })))
-        .mount(&p3)
-        .await;
+    stub_acs_source(&p1).await;
+    // Imported, clear only requested.
+    stub_import_blocks(&p3, false).await;
     Mock::given(method("GET"))
         .and(wiremock::matchers::path_regex(r"^/v0/tenant/.+/acs/.+$"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({

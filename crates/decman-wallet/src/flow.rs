@@ -486,128 +486,91 @@ pub async fn add_hosts(
             replicated = false;
             continue;
         }
-        // Relay the snapshot a range at a time. Neither end holds the whole
-        // thing in a request body, and a failure costs one range rather than the
-        // transfer.
+        // Relay the ACS block by block. The source holds its Canton export
+        // stream open, the joiner holds its import stream open, and this loop
+        // carries one block between them — so neither node buffers the snapshot
+        // and the size of the party never decides whether the transfer is
+        // possible. The same shape the add-party path runs over Noise; here the
+        // wallet stands in for the channel those two nodes do not have.
         //
-        // The joiner is the authority on progress: it reports how much it holds
-        // after every range and the next read starts from there. So a wallet
-        // that died mid-transfer resumes correctly on a fresh run without having
-        // persisted anything itself.
-        // Ask the joiner where it is before relaying anything. A fresh wallet
-        // run has no memory of a previous attempt, so without this it would
-        // start at zero, be correctly refused for an offset mismatch, and have
-        // nothing to do about it — the transfer would be resumable in the
-        // protocol and not in practice.
-        let mut offset = match host.client.acs_progress(party_id, base_serial).await {
-            Ok(progress) => {
-                if progress.received > 0 {
-                    tracing::info!(
-                        host = host.client.base_url(),
-                        received = progress.received,
-                        "resuming a partially relayed ACS"
-                    );
-                }
-                progress.received
-            }
-            Err(e) => {
-                tracing::warn!(
-                    host = host.client.base_url(),
-                    "could not read relay progress, starting from the beginning: {e}"
-                );
-                0
-            }
-        };
-        let mut seen_first_range = false;
+        // Forward-only, so there is no resume. A break restarts from block 1
+        // with a fresh export, which is what the export stream's inability to
+        // rewind forces and what the add-party path accepts too.
+        let mut seq = 1u64;
         let mut failed = false;
-        // Fixed once the first range lands. Any current host can serve the
-        // export — they all hold the party — but ranges stitched from two
-        // snapshots are not a snapshot, so the fallback only applies while
-        // nothing has been relayed yet. Candidates are tried in order, so a
-        // resumed run picks the same source the first one did.
+        // Fixed once the first block lands. Any current host can serve the
+        // export — they all hold the party — but blocks stitched from two
+        // exports are not a snapshot, so the fallback only applies before
+        // anything has been relayed.
         let mut source: Option<&WalletHost> = None;
         loop {
-            let range = match source {
-                Some(source) => {
-                    match source
-                        .client
-                        .acs_range(party_id, &host.participant_id, base_serial, offset)
-                        .await
-                    {
-                        Ok(range) => Some(range),
-                        Err(e) => {
-                            tracing::warn!(
-                                source = source.client.base_url(),
-                                host = host.client.base_url(),
-                                offset,
-                                "ACS export failed: {e}"
-                            );
-                            None
-                        }
+            let block = match source {
+                Some(source) => match source
+                    .client
+                    .acs_block(party_id, &host.participant_id, base_serial, seq)
+                    .await
+                {
+                    Ok(block) => Some(block),
+                    Err(e) => {
+                        tracing::warn!(
+                            source = source.client.base_url(),
+                            host = host.client.base_url(),
+                            seq,
+                            "ACS export failed: {e}"
+                        );
+                        None
                     }
-                }
+                },
                 None => {
                     let mut found = None;
                     for candidate in current_hosts {
                         match candidate
                             .client
-                            .acs_range(party_id, &host.participant_id, base_serial, offset)
+                            .acs_block(party_id, &host.participant_id, base_serial, seq)
                             .await
                         {
-                            Ok(range) => {
+                            Ok(block) => {
                                 source = Some(candidate);
-                                found = Some(range);
+                                found = Some(block);
                                 break;
                             }
-                            Err(e) => {
-                                tracing::warn!(
-                                    source = candidate.client.base_url(),
-                                    host = host.client.base_url(),
-                                    "ACS export failed: {e}"
-                                );
-                                // Only before any bytes have moved. Past that,
-                                // another host would serve a different export of
-                                // the same party, and ranges stitched from two
-                                // snapshots are not a snapshot.
-                                if offset > 0 {
-                                    break;
-                                }
-                            }
+                            Err(e) => tracing::warn!(
+                                source = candidate.client.base_url(),
+                                host = host.client.base_url(),
+                                "ACS export failed: {e}"
+                            ),
                         }
                     }
                     found
                 }
             };
-            let Some(range) = range else {
+            let Some(block) = block else {
                 failed = true;
                 break;
             };
-            if !seen_first_range {
-                seen_first_range = true;
-                if !range.package_preflight {
-                    without_package_preflight.push(host.client.base_url().to_string());
-                }
+            if seq == 1 && !block.package_preflight {
+                without_package_preflight.push(host.client.base_url().to_string());
             }
 
             let import = TenantAcsImportRequest {
                 party_id: party_id.to_string(),
-                // The same serial the topology write was pinned to. It keys this
-                // replication's staged state, so a target that was removed and
-                // re-added does not inherit the earlier attempt's offsets.
+                // The same serial the topology write was pinned to, so a target
+                // removed and re-added does not inherit the earlier attempt's
+                // session.
                 base_serial,
-                offset,
-                total_size: range.total_size,
-                chunk: range.chunk,
-                package_ids: range.package_ids,
+                seq: block.seq,
+                chunk: block.chunk,
+                end: block.end,
+                total_len: block.total_len,
+                sha256: block.sha256,
+                package_ids: block.package_ids,
             };
+            // Returns once Canton has taken the block, which is what paces this
+            // loop. No readahead: the joiner would have to buffer it.
             let progress = match host.client.acs_import(&import).await {
                 Ok(progress) => progress,
                 Err(e) => {
-                    tracing::warn!(
-                        host = host.client.base_url(),
-                        offset,
-                        "ACS import failed: {e}"
-                    );
+                    tracing::warn!(host = host.client.base_url(), seq, "ACS import failed: {e}");
                     failed = true;
                     break;
                 }
@@ -624,20 +587,7 @@ pub async fn add_hosts(
                 }
                 break;
             }
-
-            // No forward progress means another round would send the same bytes
-            // to the same offset forever.
-            if progress.received <= offset {
-                tracing::warn!(
-                    host = host.client.base_url(),
-                    offset,
-                    received = progress.received,
-                    "the joiner did not advance; abandoning this transfer rather than looping"
-                );
-                failed = true;
-                break;
-            }
-            offset = progress.received;
+            seq += 1;
         }
         if failed {
             replicated = false;

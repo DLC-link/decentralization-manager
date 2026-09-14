@@ -790,6 +790,9 @@ mod tests {
             admin_role: admin_role.map(str::to_string),
             party_credentials,
             bootstrap_mu: Arc::new(Mutex::new(())),
+            relay_sessions: Arc::new(
+                crate::workflow::party_replication::relay::RelaySessions::new(),
+            ),
             test_mode,
             refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
             discovery_permits: Arc::new(tokio::sync::Semaphore::new(
