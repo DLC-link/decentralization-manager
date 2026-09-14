@@ -31,44 +31,60 @@ const needsQuoting = (field: string): boolean =>
 const escapeField = (value: string): string =>
   needsQuoting(value) ? `"${value.replace(/"/g, '""')}"` : value;
 
+/** One peer as an RFC 4180 row, no trailing newline and no header. */
+export const peerToCsvRow = (peer: Peer): string =>
+  [
+    peer.participant_id,
+    peer.name,
+    peer.address,
+    String(peer.port),
+    peer.public_key,
+    peer.party ?? "",
+  ]
+    .map(escapeField)
+    .join(",");
+
 /** Serialise peers to RFC 4180 CSV, header row included. */
-export const peersToCsv = (peers: Peer[]): string => {
-  const lines = [PEER_CSV_COLUMNS.join(",")];
-  for (const peer of peers) {
-    lines.push(
-      [
-        peer.participant_id,
-        peer.name,
-        peer.address,
-        String(peer.port),
-        peer.public_key,
-        peer.party ?? "",
-      ]
-        .map(escapeField)
-        .join(","),
-    );
-  }
-  return `${lines.join("\r\n")}\r\n`;
-};
+export const peersToCsv = (peers: Peer[]): string =>
+  `${[PEER_CSV_COLUMNS.join(","), ...peers.map(peerToCsvRow)].join("\r\n")}\r\n`;
+
+interface Field {
+  value: string;
+  /** Opened with a quote, so its whitespace is data and must not be trimmed. */
+  quoted: boolean;
+}
+
+interface RawRecord {
+  line: number;
+  fields: Field[];
+  /** Set when the record is not well-formed CSV; it is rejected, not parsed. */
+  error?: string;
+}
 
 /** Split CSV text into records of fields, honouring quotes and doubled quotes. */
-const splitRecords = (text: string): { line: number; fields: string[] }[] => {
-  const records: { line: number; fields: string[] }[] = [];
-  let fields: string[] = [];
-  let field = "";
+const splitRecords = (text: string): RawRecord[] => {
+  const records: RawRecord[] = [];
+  let fields: Field[] = [];
+  let value = "";
   let quoted = false;
+  let inQuotes = false;
+  let afterQuote = false;
+  let error: string | undefined;
   let line = 1;
   let recordLine = 1;
   let started = false;
 
   const endField = () => {
-    fields.push(field);
-    field = "";
+    fields.push({ value, quoted });
+    value = "";
+    quoted = false;
+    afterQuote = false;
   };
   const endRecord = () => {
     endField();
-    records.push({ line: recordLine, fields });
+    records.push({ line: recordLine, fields, error });
     fields = [];
+    error = undefined;
     started = false;
   };
 
@@ -78,43 +94,67 @@ const splitRecords = (text: string): { line: number; fields: string[] }[] => {
       recordLine = line;
       started = true;
     }
-    if (quoted) {
+
+    if (inQuotes) {
       if (char === '"') {
         if (text[i + 1] === '"') {
-          field += '"';
+          value += '"';
           i++;
         } else {
-          quoted = false;
+          inQuotes = false;
+          afterQuote = true;
         }
       } else {
         if (char === "\n") line++;
-        field += char;
+        value += char;
       }
       continue;
     }
-    if (char === '"' && field === "") {
+
+    if (char === '"' && value === "" && !quoted) {
+      inQuotes = true;
       quoted = true;
     } else if (char === ",") {
       endField();
     } else if (char === "\r") {
-      // Swallowed; the \n that follows, or EOF, ends the record.
+      if (text[i + 1] !== "\n") {
+        endRecord();
+        line++;
+      }
     } else if (char === "\n") {
       endRecord();
       line++;
     } else {
-      field += char;
+      if (afterQuote) {
+        error ??= "Unexpected text after a closing quote";
+      }
+      value += char;
     }
   }
-  if (started || field !== "" || fields.length > 0) endRecord();
+  if (inQuotes) error ??= "Unterminated quoted field";
+  if (started || value !== "" || fields.length > 0) endRecord();
 
   return records;
 };
 
-const isHeaderRow = (fields: string[]): boolean =>
-  fields[0]?.trim().toLowerCase() === PEER_CSV_COLUMNS[0];
+const isHeaderRow = (fields: Field[]): boolean =>
+  fields[0]?.value.trim().toLowerCase() === PEER_CSV_COLUMNS[0];
 
-const isBlankRow = (fields: string[]): boolean =>
-  fields.every((f) => f.trim() === "");
+const isBlankRow = (fields: Field[]): boolean =>
+  fields.every((f) => f.value.trim() === "");
+
+// Mirrors CantonId::parse on the backend: exactly one "::" and a 34-byte
+// (68 hex character) namespace. A row the backend would refuse must not reach
+// the POST, or one bad row costs the whole import.
+const isCantonId = (value: string): boolean => {
+  const parts = value.split("::");
+  return parts.length === 2 && /^[0-9a-fA-F]{68}$/.test(parts[1]);
+};
+
+// secp256k1::PublicKey::from_slice, which every Noise path runs on this field:
+// hex for a 33-byte compressed or 65-byte uncompressed key.
+const isNoisePublicKey = (value: string): boolean =>
+  /^[0-9a-fA-F]+$/.test(value) && (value.length === 66 || value.length === 130);
 
 /**
  * Parse peers out of CSV text, tolerating an optional header row, blank lines
@@ -127,28 +167,41 @@ export const parsePeersCsv = (text: string): ParsedPeersCsv => {
   const seen = new Set<string>();
   let first = true;
 
-  for (const { line, fields } of splitRecords(text)) {
-    if (isBlankRow(fields)) continue;
+  for (const { line, fields, error } of splitRecords(text)) {
+    if (!error && isBlankRow(fields)) continue;
     const wasFirst = first;
     first = false;
-    if (wasFirst && isHeaderRow(fields)) continue;
+    if (!error && wasFirst && isHeaderRow(fields)) continue;
 
-    const raw = fields.join(",");
-    if (fields.length < 5) {
+    const raw = fields.map((f) => f.value).join(",");
+    if (error) {
+      rejected.push({ line, raw, reason: error });
+      continue;
+    }
+    if (fields.length < 5 || fields.length > PEER_CSV_COLUMNS.length) {
       rejected.push({
         line,
         raw,
-        reason: `Expected at least 5 columns (${PEER_CSV_COLUMNS.slice(0, 5).join(", ")}), found ${fields.length}`,
+        reason: `Expected 5 or ${PEER_CSV_COLUMNS.length} columns (${PEER_CSV_COLUMNS.join(", ")}), found ${fields.length}`,
       });
       continue;
     }
 
-    const [participantId, name, address, portText, publicKey, party] = fields.map(
-      (f) => f.trim(),
-    );
+    // Whitespace inside a quoted field is data — `peersToCsv` quotes exactly
+    // those values, so trimming them would change a peer on a round-trip.
+    const [participantId, name, address, portText, publicKey, party] =
+      fields.map((f) => (f.quoted ? f.value : f.value.trim()));
 
     if (!participantId) {
       rejected.push({ line, raw, reason: "Missing participant_id" });
+      continue;
+    }
+    if (!isCantonId(participantId)) {
+      rejected.push({
+        line,
+        raw,
+        reason: `Invalid participant_id "${participantId}" (expected prefix::<68 hex characters>)`,
+      });
       continue;
     }
     if (!address) {
@@ -157,6 +210,14 @@ export const parsePeersCsv = (text: string): ParsedPeersCsv => {
     }
     if (!publicKey) {
       rejected.push({ line, raw, reason: "Missing public_key" });
+      continue;
+    }
+    if (!isNoisePublicKey(publicKey)) {
+      rejected.push({
+        line,
+        raw,
+        reason: `Invalid public_key "${publicKey}" (expected 66 or 130 hex characters)`,
+      });
       continue;
     }
     const port = Number(portText);

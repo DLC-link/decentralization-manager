@@ -6,22 +6,40 @@ import { PeersCsvDialog } from "./PeersCsvDialog";
 import { peersToCsv } from "../peerCsv";
 import type { Peer } from "../types";
 
+/** A 34-byte namespace and a 33-byte compressed key, as the backend parses. */
+const ns = (c: string): string => c.repeat(68);
+const key = (c: string): string => `02${c.repeat(64)}`;
+
+const ID = {
+  alpha: `alpha::${ns("a")}`,
+  bravo: `bravo::${ns("b")}`,
+  charlie: `charlie::${ns("c")}`,
+  delta: `delta::${ns("d")}`,
+} as const;
+
 const peer = (over: Partial<Peer> = {}): Peer => ({
-  participant_id: "a::1220aaaa",
+  participant_id: ID.alpha,
   name: "Alpha",
   address: "alpha.example.com",
   port: 9000,
-  public_key: "keyA",
+  public_key: key("a"),
   ...over,
 });
 
 const alpha = peer();
 const bravo = peer({
-  participant_id: "b::1220bbbb",
+  participant_id: ID.bravo,
   name: "Bravo",
   address: "bravo.example.com",
   port: 9001,
-  public_key: "keyB",
+  public_key: key("b"),
+});
+const charlie = peer({
+  participant_id: ID.charlie,
+  name: "Charlie",
+  address: "charlie.example.com",
+  port: 9002,
+  public_key: key("c"),
 });
 
 const renderDialog = (props: Partial<Parameters<typeof PeersCsvDialog>[0]> = {}) =>
@@ -37,12 +55,30 @@ const renderDialog = (props: Partial<Parameters<typeof PeersCsvDialog>[0]> = {})
     </SnackbarProvider>,
   );
 
-/** Upload `content` as a .csv through the dialog's hidden file input. */
-const uploadCsv = (content: string) => {
-  const file = new File([content], "peers.csv", { type: "text/csv" });
+const upload = (file: File) => {
   const input = document.querySelector<HTMLInputElement>('input[type="file"]');
   if (!input) throw new Error("file input not rendered");
   fireEvent.change(input, { target: { files: [file] } });
+};
+
+/** Upload `content` as a .csv through the dialog's hidden file input. */
+const uploadCsv = (content: string) =>
+  upload(new File([content], "peers.csv", { type: "text/csv" }));
+
+/** A .csv whose read only completes once `release()` is called. */
+const slowCsv = (name: string, content: string) => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const file = new File([content], name, { type: "text/csv" });
+  Object.defineProperty(file, "text", {
+    value: async () => {
+      await gate;
+      return content;
+    },
+  });
+  return { file, release };
 };
 
 describe("PeersCsvDialog — export", () => {
@@ -87,7 +123,7 @@ describe("PeersCsvDialog — export", () => {
     expect(clicked).toHaveLength(1);
     expect(clicked[0]?.download).toMatch(/^decman-peers-\d{4}-\d{2}-\d{2}\.csv$/);
     const text = await blob?.text();
-    expect(text).toContain("a::1220aaaa,Alpha");
+    expect(text).toContain(`${ID.alpha},Alpha`);
     expect(text).not.toContain("Bravo");
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:peers");
   });
@@ -144,13 +180,6 @@ describe("PeersCsvDialog — import", () => {
   it("merges the selected rows into the existing peers", async () => {
     const onSave = vi.fn().mockResolvedValue(undefined);
     const onClose = vi.fn();
-    const charlie = peer({
-      participant_id: "c::1220cccc",
-      name: "Charlie",
-      address: "charlie.example.com",
-      port: 9002,
-      public_key: "keyC",
-    });
     const bravoMoved = { ...bravo, address: "bravo-2.example.com", port: 9100 };
 
     renderDialog({ mode: "import", onSave, onClose });
@@ -165,13 +194,6 @@ describe("PeersCsvDialog — import", () => {
   });
 
   it("labels each row as New, Update or Unchanged", async () => {
-    const charlie = peer({
-      participant_id: "c::1220cccc",
-      name: "Charlie",
-      address: "charlie.example.com",
-      port: 9002,
-      public_key: "keyC",
-    });
 
     renderDialog({ mode: "import", onSave: vi.fn() });
     uploadCsv(peersToCsv([alpha, { ...bravo, port: 9100 }, charlie]));
@@ -189,19 +211,12 @@ describe("PeersCsvDialog — import", () => {
 
   it("imports only the rows left selected", async () => {
     const onSave = vi.fn().mockResolvedValue(undefined);
-    const charlie = peer({
-      participant_id: "c::1220cccc",
-      name: "Charlie",
-      address: "charlie.example.com",
-      port: 9002,
-      public_key: "keyC",
-    });
     const delta = peer({
-      participant_id: "d::1220dddd",
+      participant_id: ID.delta,
       name: "Delta",
       address: "delta.example.com",
       port: 9003,
-      public_key: "keyD",
+      public_key: key("d"),
     });
 
     renderDialog({ mode: "import", onSave });
@@ -218,13 +233,6 @@ describe("PeersCsvDialog — import", () => {
   // The summary counts only what the import would actually write, so an
   // unchanged row and a deselected one must both drop out of it.
   it("summarises how many peers the import would change", async () => {
-    const charlie = peer({
-      participant_id: "c::1220cccc",
-      name: "Charlie",
-      address: "charlie.example.com",
-      port: 9002,
-      public_key: "keyC",
-    });
 
     renderDialog({ mode: "import", onSave: vi.fn() });
     uploadCsv(peersToCsv([alpha, { ...bravo, port: 9100 }, charlie]));
@@ -250,14 +258,60 @@ describe("PeersCsvDialog — import", () => {
     ).toBeDefined();
   });
 
+  // A peer's name is free text and the editor's blank template allows "", so a
+  // row must still show something and still be reachable by an accessible name.
+  it("falls back to the participant id when a peer has no name", async () => {
+    renderDialog({ mode: "import", onSave: vi.fn() });
+    uploadCsv(
+      `${ID.charlie},,charlie.example.com,9002,${key("c")},`.concat("\n"),
+    );
+
+    await waitFor(() => expect(screen.getByText(ID.charlie)).toBeDefined());
+    expect(
+      screen.getByRole("checkbox", { name: `Select ${ID.charlie}` }),
+    ).toBeDefined();
+  });
+
+  // Picking a second file before the first read resolves must not leave the
+  // dialog showing file B's name while holding file A's rows.
+  it("discards a slow read that a newer file has superseded", async () => {
+    renderDialog({ mode: "import", onSave: vi.fn() });
+
+    const stale = slowCsv("stale.csv", peersToCsv([charlie]));
+    upload(stale.file);
+    uploadCsv(peersToCsv([bravo]));
+
+    await waitFor(() => expect(screen.getByText("Bravo")).toBeDefined());
+    stale.release();
+    await waitFor(() => expect(screen.getByText("peers.csv")).toBeDefined());
+
+    expect(screen.queryByText("Charlie")).toBeNull();
+    expect(screen.getByText("1 of 1 selected")).toBeDefined();
+  });
+
+  it("says nothing is selected rather than nothing has changed", async () => {
+    renderDialog({ mode: "import", onSave: vi.fn() });
+    uploadCsv(peersToCsv([charlie]));
+
+    await waitFor(() => expect(screen.getByText("Charlie")).toBeDefined());
+    expect(
+      screen.getByText(
+        "1 peer to add or update. Peers not in the file are kept.",
+      ),
+    ).toBeDefined();
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select Charlie" }));
+    expect(screen.getByText("No peers selected.")).toBeDefined();
+  });
+
   it("reports the rows it skipped and keeps the good ones", async () => {
     renderDialog({ mode: "import", onSave: vi.fn() });
 
     uploadCsv(
       [
         "participant_id,name,address,port,public_key,party",
-        "c::1220cccc,Charlie,charlie.example.com,9002,keyC,",
-        ",Nameless,x.example.com,9000,keyX,",
+        `${ID.charlie},Charlie,charlie.example.com,9002,${key("c")},`,
+        `,Nameless,x.example.com,9000,${key("d")},`,
       ].join("\n"),
     );
 
@@ -271,13 +325,6 @@ describe("PeersCsvDialog — import", () => {
   it("keeps the dialog open and shows the error when the save fails", async () => {
     const onSave = vi.fn().mockRejectedValue(new Error("peers table is locked"));
     const onClose = vi.fn();
-    const charlie = peer({
-      participant_id: "c::1220cccc",
-      name: "Charlie",
-      address: "charlie.example.com",
-      port: 9002,
-      public_key: "keyC",
-    });
 
     renderDialog({ mode: "import", onSave, onClose });
     uploadCsv(peersToCsv([charlie]));

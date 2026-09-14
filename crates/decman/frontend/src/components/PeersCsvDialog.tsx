@@ -49,6 +49,8 @@ interface Row {
   peer: Peer;
   kind: RowKind;
   isSelf: boolean;
+  /** `name` is free text and may be empty, so rows fall back to the id. */
+  label: string;
 }
 
 const samePeer = (a: Peer, b: Peer): boolean =>
@@ -117,11 +119,15 @@ export const PeersCsvDialog = ({
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
+  // Bumped per file chosen, so a slow read of an earlier file cannot land
+  // after a later one and show file B while importing file A.
+  const readId = useRef(0);
   const { showSnackbar } = useSnackbar();
 
   const isImport = mode === "import";
 
   const reset = () => {
+    readId.current += 1;
     setImportRows([]);
     setRejected([]);
     setDeselected(new Set());
@@ -138,20 +144,23 @@ export const PeersCsvDialog = ({
             peer,
             kind: "unchanged" as const,
             isSelf: peer.participant_id === selfNodeId,
+            label: peer.name || peer.participant_id,
           })),
     [isImport, importRows, peers, selfNodeId],
   );
 
   const handleFile = async (file: File) => {
     reset();
+    const read = ++readId.current;
     setFilename(file.name);
     let text: string;
     try {
       text = await file.text();
     } catch {
-      setError(`Could not read ${file.name}.`);
+      if (read === readId.current) setError(`Could not read ${file.name}.`);
       return;
     }
+    if (read !== readId.current) return;
     const parsed = parsePeersCsv(text);
     const existing = new Map(peers.map((p) => [p.participant_id, p]));
     setImportRows(
@@ -165,6 +174,7 @@ export const PeersCsvDialog = ({
               ? "unchanged"
               : "update",
           isSelf: peer.participant_id === selfNodeId,
+          label: peer.name || peer.participant_id,
         };
       }),
     );
@@ -339,12 +349,12 @@ export const PeersCsvDialog = ({
                           onChange={() => toggle(id)}
                           disabled={saving}
                           slotProps={{
-                            input: { "aria-label": `Select ${row.peer.name}` },
+                            input: { "aria-label": `Select ${row.label}` },
                           }}
                         />
                       </TableCell>
-                      <TableCell title={row.peer.name} sx={ellipsisSx}>
-                        {row.peer.name}
+                      <TableCell title={row.label} sx={ellipsisSx}>
+                        {row.label}
                         {row.isSelf && (
                           <Typography
                             component="span"
@@ -410,9 +420,11 @@ export const PeersCsvDialog = ({
         >
           {!isImport || rows.length === 0
             ? ""
-            : changedCount === 0
-              ? "Nothing to change — the selected peers already match."
-              : `${changedCount} peer${plural(changedCount)} to add or update. Peers not in the file are kept.`}
+            : selectedPeers.length === 0
+              ? "No peers selected."
+              : changedCount === 0
+                ? "Nothing to change — the selected peers already match."
+                : `${changedCount} peer${plural(changedCount)} to add or update. Peers not in the file are kept.`}
         </Typography>
         <Button onClick={onClose} disabled={saving}>
           Cancel
