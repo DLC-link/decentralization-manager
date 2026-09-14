@@ -33,6 +33,26 @@ namespace is local to that participant.
 local party gives it a signing key; it does not make it a decentralized-namespace
 party, and no sequence of operations will.
 
+## Two offers: co-validation or failover
+
+`add-hosts/prepare` takes a `permission`, and it is the choice between the two
+products rather than a tuning knob.
+
+| `permission` | What the partner gets | What it costs them |
+|---|---|---|
+| `confirmation` (default) | Co-validation. Several hosts confirm for the party, and the threshold can rise above 1 afterwards | The party must sign its own submissions, so their application changes |
+| `submission` | Failover hosting. Any one host can submit for the party, so uptime improves | Nothing. Their application is untouched |
+
+**Lead with `submission` when the partner cannot change their application.** It
+is also a step toward the other one: add failover hosts now, convert and raise
+the threshold later.
+
+Its limit is real, not a detail. Threshold 1 means each host acts alone — that
+is hosting redundancy, not multi-party validation. And Canton refuses a
+Submission host once the threshold is above 1 (`topology.proto`: "if threshold >
+1, must be Confirmation or Observation"), so raising the threshold means moving
+those hosts to Confirmation first.
+
 ## Adding hosts to an external party
 
 Three phases, in the order Canton forces. Do not skip ahead: the export in
@@ -127,6 +147,37 @@ namespace plus the participant namespace — and for a converted local party tho
 are the same key. So the node can revoke the owner's key and resume acting as
 the party, on its own signature alone. Say this to the partner plainly rather
 than letting them infer symmetry that is not there.
+
+## What the partner's own node has to run
+
+For an **external** party the partner runs nothing. Their key is in their
+wallet, they sign hashes, and the hosting nodes do the topology work.
+
+For a **local** party they cannot avoid it. The conversion is authorized by
+their participant's namespace key, that key lives inside their Canton node's
+vault, and the only way to use it is `TopologyManagerWriteService.SignTransactions`
+over their Admin API. So something with Admin API access has to issue the write.
+
+**That something is DecMan, not a script.** The write is a versioned protobuf
+`TopologyTransaction` that Canton itself generates, then co-signs, then accepts —
+three round trips carrying binary payloads. `grpcurl` cannot realistically
+assemble them, so "Admin API access plus a short script" is not a viable
+substitute for running the binary, even briefly.
+
+The minimum is therefore:
+
+1. The partner runs DecMan against their participant's Admin API, long enough to
+   perform the conversion. It needs no ledger credential and no IdP — the whole
+   tenant path is tokenless on the Admin API.
+2. They call `local-party/adopt-key/prepare`, sign the returned hash with the key
+   they intend the party to answer to, and call `adopt-key/onboard`.
+3. After that they can stop it. Adding hosts and replicating the ACS are driven
+   by the wallet against the *hosting* nodes, not theirs.
+
+There is no `decman-cli` path for this. The CLI is an HTTP client for a DecMan
+API and holds no Canton client, so giving it one would mean a second
+implementation of the topology write. Running DecMan briefly is cheaper and has
+one code path.
 
 ## What can go wrong
 

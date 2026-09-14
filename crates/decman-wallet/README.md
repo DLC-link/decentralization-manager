@@ -87,6 +87,7 @@ Onboarding creates a party. `add_hosts` grows one, in the order Canton forces:
 topology, then state, then activation.
 
 ```rust
+use common::api::HostPermission;
 use decman_wallet::{add_hosts, raise_threshold};
 
 // Read the serial rather than remembering one: any PartyToParticipant write
@@ -94,7 +95,15 @@ use decman_wallet::{add_hosts, raise_threshold};
 let base_serial = current_hosts[0].client.party_state(&party_id).await?.serial;
 
 // The party gained a host, but a host with no contracts confirms nothing.
-let added = add_hosts(&current_hosts, &new_hosts, &key, &party_id, base_serial).await?;
+let added = add_hosts(
+    &current_hosts,
+    &new_hosts,
+    &key,
+    &party_id,
+    HostPermission::Confirmation,
+    base_serial,
+)
+.await?;
 assert!(added.replicated, "a joiner is hosted but still suspended");
 
 // Not `added.serial`. Clearing each joiner's onboarding marker is itself a
@@ -124,6 +133,16 @@ import failed — the party is hosted there and holds no contracts.
 `AddedHosts::without_package_preflight` names joiners whose source could not
 check their vetted packages up front, so their import validated after
 disconnecting rather than before. Empty is the good case.
+
+### Failover-only hosting
+
+`HostPermission::Submission` offers the other shape. Every host can submit for
+the party alone, so the party survives one node being down without its
+application changing — but nothing is co-validated: each host acts by itself and
+the threshold must stay 1. Canton refuses Submission hosting above threshold 1,
+so `raise_threshold` has no counterpart here. Use it when a partner wants uptime
+without changing how their party transacts; use `Confirmation` when the point is
+that no single host can act alone.
 
 ## Keys the wallet does not hold
 

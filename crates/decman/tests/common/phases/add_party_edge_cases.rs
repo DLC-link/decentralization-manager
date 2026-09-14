@@ -85,13 +85,30 @@ async fn validation_rejections(f: &Fixture) -> anyhow::Result<()> {
             json!({
                 "decentralized_party_id": party_id,
                 "new_participant_id": p3_uid,
-                // Party has 2 members; post-add max is 3.
+                // The bound is the members that can sign, which excludes the
+                // one being added — a threshold that counts it is the
+                // full-threshold bug and never becomes effective.
                 "new_threshold": 4_i64,
                 "previous_threshold": 2_i64,
             }),
             400,
             "new_threshold must be between",
             "threshold above member count",
+        ),
+        (
+            json!({
+                "decentralized_party_id": party_id,
+                "new_participant_id": p3_uid,
+                // The case that pins the change. A 2-member party gaining a
+                // third gives 3 members, so the old bound accepted 3 — and the
+                // add never became effective, because the joiner cannot confirm
+                // its own arrival. The bound is now the members that can sign.
+                "new_threshold": 3_i64,
+                "previous_threshold": 2_i64,
+            }),
+            400,
+            "new_threshold must be between",
+            "threshold counting the joining member",
         ),
         (
             json!({
