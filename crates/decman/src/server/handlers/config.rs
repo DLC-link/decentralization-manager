@@ -15,6 +15,7 @@ use crate::{
     server::{
         AppState,
         middleware::require_admin,
+        node_health::NodeHealthResponse,
         types::{ErrorResponse, LivenessResponse, SuccessResponse},
     },
 };
@@ -114,6 +115,26 @@ pub async fn get_node_config(data: web::Data<AppState>) -> impl Responder {
         build_version: crate::build_info::build_version(),
         build_time: crate::build_info::build_time(),
     })
+}
+
+/// Per-hop health of this node and the participant it drives.
+///
+/// Answers from a shared snapshot that is at most `SNAPSHOT_TTL` old, so the
+/// Config tab's poll costs one pair of gRPC probes per TTL however many
+/// browsers are watching. Never fails: an endpoint that could not be reached is
+/// reported as such in the body rather than as a 5xx, because "the Admin API is
+/// down" is the answer, not an error.
+#[utoipa::path(
+    tag = "Configuration",
+    responses(
+        (status = 200, description = "Node and participant health", body = NodeHealthResponse)
+    )
+)]
+#[get("/node-health")]
+pub async fn get_node_health(data: web::Data<AppState>) -> impl Responder {
+    HttpResponse::Ok()
+        .insert_header(CacheControl(vec![CacheDirective::NoStore]))
+        .json(data.health_cache.get(&data.config).await)
 }
 
 /// Liveness probe. Returns `200 {"status":"ok"}` and does no I/O, so the

@@ -624,6 +624,7 @@ mod tests {
             discovery_generations: Arc::new(RwLock::new(HashMap::new())),
             discovery_completed: Arc::new(RwLock::new(HashMap::new())),
             http_client: reqwest::Client::new(),
+            health_cache: crate::server::HealthCache::new(),
         });
         let app =
             test::init_service(App::new().app_data(state).service(discover_member_party)).await;
@@ -698,6 +699,7 @@ mod tests {
             discovery_generations: Arc::new(RwLock::new(HashMap::new())),
             discovery_completed: Arc::new(RwLock::new(HashMap::new())),
             http_client: reqwest::Client::new(),
+            health_cache: crate::server::HealthCache::new(),
         });
         let app = test::init_service(
             App::new()
@@ -770,6 +772,7 @@ mod tests {
             discovery_generations: Arc::new(RwLock::new(HashMap::new())),
             discovery_completed: Arc::new(RwLock::new(HashMap::new())),
             http_client: reqwest::Client::new(),
+            health_cache: crate::server::HealthCache::new(),
         });
         let app = test::init_service(App::new().app_data(state).service(get_party_config)).await;
 

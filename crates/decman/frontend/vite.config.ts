@@ -35,7 +35,7 @@ function mockApi(): Plugin {
   // First path segment of every backend REST route (see src/api.ts callers).
   const apiPrefixes = new Set([
     'auth-config', 'auth', 'node-config', 'network-config', 'network-info',
-    'healthz', 'participants-status', 'decentralized-parties', 'external-parties',
+    'healthz', 'node-health', 'participants-status', 'decentralized-parties', 'external-parties',
     'operator-info', 'keys',
     'packages', 'invitations', 'workflows', 'governance', 'holdings',
     'instruments', 'party-config', 'services', 'contracts', 'dars',

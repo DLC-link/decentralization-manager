@@ -1,0 +1,42 @@
+{
+  "status": "Degraded",
+  "checked_at": "2026-09-14T09:12:41.882Z",
+  "admin_api": {
+    "reachable": true,
+    "latency_ms": 4
+  },
+  "ledger_api": {
+    "reachable": true,
+    "latency_ms": 8,
+    "error": "no authorization token was provided"
+  },
+  "participant": {
+    "initialized": true,
+    "uid": "iBTC-validator-1",
+    "uptime_seconds": 533460,
+    "active": true,
+    "version": "3.5.8",
+    "topology_queues": {
+      "manager": 0,
+      "dispatcher": 0,
+      "clients": 2
+    },
+    "components": [
+      {
+        "name": "db-storage",
+        "state": "Ok"
+      },
+      {
+        "name": "sequencer-client",
+        "state": "Degraded",
+        "description": "catching up: 1240 events behind"
+      }
+    ]
+  },
+  "synchronizers": [
+    {
+      "physical_synchronizer_id": "global-domain::1220a91d",
+      "healthy": true
+    }
+  ]
+}

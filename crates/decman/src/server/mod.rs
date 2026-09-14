@@ -14,6 +14,7 @@ mod event_filters;
 mod handlers;
 mod ledger_paging;
 mod middleware;
+mod node_health;
 mod package_inventory;
 mod queries;
 mod record;
@@ -81,6 +82,11 @@ pub(crate) use types::*;
 // These wire DTOs are likewise reached externally as `dec_party_manager::server::…`,
 // by `gen-types` (TS generation) and, for `GovernanceResponse`, by the integration
 // tests under `tests/` — both are separate crates that can only see `pub` items.
+pub(crate) use node_health::HealthCache;
+pub use node_health::{
+    ComponentHealth, ComponentState, LinkHealth, NodeHealthResponse, NodeHealthStatus,
+    ParticipantHealth, SynchronizerHealth, TopologyQueues,
+};
 pub use types::{
     AcceptTransferDetails, ActionType, AppRewardBeneficiary, BillingParams, BurnRequestsResponse,
     ConfirmActionRequest, DomainConfirmation, DomainGovernanceAction, ExecuteActionRequest,
@@ -166,6 +172,10 @@ pub struct AppState {
     /// startup so its connection pool / keep-alives are reused across
     /// requests instead of paying TCP+TLS setup on every call.
     pub http_client: reqwest::Client,
+    /// Cached per-hop health of this node and the participant it drives, with
+    /// the warm gRPC channels the probes reuse. Shared so a Config tab open in
+    /// many browsers costs one probe per TTL, not one per browser.
+    pub health_cache: HealthCache,
 }
 
 #[cfg(test)]
@@ -199,6 +209,7 @@ impl AppState {
             discovery_generations: Arc::new(RwLock::new(HashMap::new())),
             discovery_completed: Arc::new(RwLock::new(HashMap::new())),
             http_client: reqwest::Client::new(),
+            health_cache: HealthCache::new(),
         }))
     }
 }
@@ -1065,6 +1076,7 @@ pub async fn start_server(
         discovery_generations: Arc::new(RwLock::new(HashMap::new())),
         discovery_completed: Arc::new(RwLock::new(HashMap::new())),
         http_client,
+        health_cache: HealthCache::new(),
     });
 
     // Boot-time workflow recovery. For any `workflow_runs` row that was
@@ -1191,6 +1203,7 @@ pub async fn start_server(
     });
 
     reward_automation::register_metrics();
+    node_health::register_metrics();
 
     // Separate from the API server, whose ingress forwards every path. 0 disables it.
     let metrics_port = config.metrics_port;
@@ -1234,6 +1247,27 @@ pub async fn start_server(
                 "binding the metrics port failed; this node reports no metrics"
             ),
         }
+
+        // Keeps the node-health gauges live while no browser is polling the
+        // Config tab, so an alert on them does not silently depend on someone
+        // having the tab open. Shares the snapshot cache with the handler, so a
+        // tick that a watching browser already paid for costs nothing.
+        let health_cache = app_state.health_cache.clone();
+        let health_config = config.clone();
+        spawn_supervised(
+            "node health refresh",
+            "the node-health gauges freeze at their last value",
+            async move {
+                let mut ticker = tokio::time::interval(node_health::BACKGROUND_REFRESH);
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    ticker.tick().await;
+                    health_cache
+                        .refresh_if_older_than(&health_config, node_health::BACKGROUND_REFRESH)
+                        .await;
+                }
+            },
+        );
     }
 
     tracing::info!("Starting HTTP server on {host}:{port}");
@@ -1274,6 +1308,7 @@ pub async fn start_server(
             .service(handlers::get_node_config)
             .service(handlers::get_decentralized_parties)
             .service(handlers::get_participants_status)
+            .service(handlers::get_node_health)
             .service(handlers::compare_peer_packages)
             .service(handlers::get_vetted_packages)
             .service(handlers::clear_acs_import_quarantine)
