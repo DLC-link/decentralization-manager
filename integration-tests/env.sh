@@ -38,11 +38,11 @@ export DECPM_REWARD_AUTOMATION_INTERVAL_SECS=3
 # there a coordinator step is a real Canton round trip.
 export DECPM_PEER_WAIT_POLL_DELAY_MS=500
 
-# Localnet
-LOCALNET_VERSION="0.6.12"
-LOCALNET_BUNDLE_URL="https://github.com/digital-asset/decentralized-canton-sync/releases/download/v${LOCALNET_VERSION}/${LOCALNET_VERSION}_splice-node.tar.gz"
-LOCALNET_CACHE_DIR="$SCRIPT_DIR/.localnet"
-LOCALNET_COMPOSE_DIR="$LOCALNET_CACHE_DIR/splice-node/docker-compose/localnet"
+# Localnet: the bundle version, the download and the compose invocation come
+# from hackathon/localnet.sh, which the hackathon quickstart sources too. One
+# definition, one cached bundle under <repo>/.localnet, no drift between what
+# CI boots and what a hackathon team boots.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../hackathon" && pwd)/localnet.sh"
 
 # Canton ports (compose.yaml: prefix + suffix, e.g. "3" + "901" = 3901)
 # dec-party-manager instance 1 → App Provider
@@ -185,63 +185,22 @@ cleanup() {
 # Localnet management
 # ============================================================================
 
-download_localnet() {
-    if [ -d "$LOCALNET_CACHE_DIR/splice-node" ]; then
-        echo "Localnet bundle already cached"
-        return 0
-    fi
-
-    echo "Downloading localnet bundle v${LOCALNET_VERSION}..."
-    mkdir -p "$LOCALNET_CACHE_DIR"
-    curl -fSL "$LOCALNET_BUNDLE_URL" -o "$LOCALNET_CACHE_DIR/splice-node.tar.gz"
-
-    echo "Extracting..."
-    tar xzf "$LOCALNET_CACHE_DIR/splice-node.tar.gz" -C "$LOCALNET_CACHE_DIR"
-    rm -f "$LOCALNET_CACHE_DIR/splice-node.tar.gz"
-
-    echo "Localnet bundle ready"
-}
-
-localnet_compose() {
-    export IMAGE_TAG="$LOCALNET_VERSION"
-    docker compose \
-        --env-file "$LOCALNET_COMPOSE_DIR/compose.env" \
-        --env-file "$LOCALNET_COMPOSE_DIR/env/common.env" \
-        -f "$LOCALNET_COMPOSE_DIR/compose.yaml" \
-        -f "$LOCALNET_COMPOSE_DIR/resource-constraints.yaml" \
-        --profile sv \
-        --profile app-provider \
-        --profile app-user \
-        "$@"
-}
-
 start_localnet() {
-    # Clean up any existing chain data from previous runs (keeps images)
+    # Tests own the ledger: wipe the chain data from any previous run first, so
+    # a suite never inherits parties, contracts or vetted DARs it did not
+    # create. The hackathon bundle deliberately does the opposite and keeps its
+    # state across a stop/start.
     echo "Cleaning up previous localnet data..."
-    localnet_compose down -v 2>/dev/null || true
+    localnet_wipe
 
     echo "Starting localnet..."
-    # Only start the services our tests actually use. The 3 active profiles
-    # (sv/app-provider/app-user) otherwise also bring up nginx + 7 web UI
-    # containers (wallet/ans/scan/sv UIs) which are pure browser-facing UIs
-    # — our tests hit Canton ledger/admin gRPC ports directly, never the
-    # nginx-fronted UI ports. canton -> postgres and splice -> canton are
-    # auto-started via depends_on; the UIs are not depended on by anything
-    # we use, so naming the three core services here drops the rest.
-    #
-    # --wait blocks until canton + splice healthchecks pass. Splice healthy
-    # means /api/validator/readyz returns OK, i.e. splice has registered the
-    # global synchronizer with all 3 participants. Without it, DecMan processes
-    # race ahead and get "No participant ID returned" / "synchronizer with
-    # alias global is unknown" — the UIs used to incidentally pad the wall
-    # clock during compose start; trimming them exposed the race.
-    localnet_compose up -d --wait canton splice postgres
+    localnet_start
 }
 
 stop_localnet() {
-    if [ -d "$LOCALNET_COMPOSE_DIR" ]; then
+    if [ -d "$LOCALNET_DIR" ]; then
         echo "Stopping localnet..."
-        localnet_compose down -v 2>/dev/null || true
+        localnet_wipe
     fi
 }
 

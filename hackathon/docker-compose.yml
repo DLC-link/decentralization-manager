@@ -1,0 +1,77 @@
+x-decman: &decman
+  image: ${DECMAN_IMAGE:?set DECMAN_IMAGE, or start the stack with hackathon/up.sh}
+  platform: ${DECMAN_PLATFORM:-linux/amd64}
+  networks:
+    - localnet
+  restart: unless-stopped
+
+x-decman-env: &decman-env
+  DECPM_CANTON_ADMIN_HOST: canton
+  DECPM_CANTON_LEDGER_HOST: canton
+  DECPM_CANTON_NETWORK: devnet
+  DECPM_CANTON_SYNCHRONIZER: global
+  DECPM_INSECURE: "true"
+  RUST_LOG: ${DECMAN_LOG:-dec_party_manager=info,tokio_noise=error,hyper_noise=error}
+
+networks:
+  localnet:
+    external: true
+    name: ${DOCKER_NETWORK:-localnet}
+
+volumes:
+  decman-1-data:
+  decman-2-data:
+  decman-3-data:
+
+# The UI ports bind to the loopback interface on purpose. These nodes run with
+# authentication disabled, so publishing them on every interface would hand
+# anyone on the same network full admin control of a team's party. To demo from
+# another machine, put a tunnel in front of them rather than widening this.
+services:
+  decman-1:
+    <<: *decman
+    container_name: decman-1
+    hostname: decman-1
+    ports:
+      - "127.0.0.1:8081:8081"
+    volumes:
+      - decman-1-data:/data
+    environment:
+      <<: *decman-env
+      DECPM_PORT: "8081"
+      DECPM_NOISE_PORT: "9001"
+      DECPM_PUBLIC_ADDRESS: decman-1
+      DECPM_CANTON_ADMIN_PORT: "3902"
+      DECPM_CANTON_LEDGER_PORT: "3901"
+
+  decman-2:
+    <<: *decman
+    container_name: decman-2
+    hostname: decman-2
+    ports:
+      - "127.0.0.1:8082:8082"
+    volumes:
+      - decman-2-data:/data
+    environment:
+      <<: *decman-env
+      DECPM_PORT: "8082"
+      DECPM_NOISE_PORT: "9002"
+      DECPM_PUBLIC_ADDRESS: decman-2
+      DECPM_CANTON_ADMIN_PORT: "2902"
+      DECPM_CANTON_LEDGER_PORT: "2901"
+
+  decman-3:
+    <<: *decman
+    container_name: decman-3
+    hostname: decman-3
+    ports:
+      - "127.0.0.1:8083:8083"
+    volumes:
+      - decman-3-data:/data
+    environment:
+      <<: *decman-env
+      DECPM_PORT: "8083"
+      DECPM_NOISE_PORT: "9003"
+      DECPM_PUBLIC_ADDRESS: decman-3
+      DECPM_CANTON_ADMIN_PORT: "4902"
+      DECPM_CANTON_LEDGER_PORT: "4901"
