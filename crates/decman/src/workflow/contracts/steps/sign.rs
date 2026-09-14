@@ -334,23 +334,6 @@ fn encode_messages_length_prefixed<M: prost::Message>(messages: &[M]) -> Vec<u8>
     buffer.to_vec()
 }
 
-/// On-chain backfill: recover the dec_party's protocol signing keys from
-/// Canton's topology store, then cross-reference them against this node's
-/// vault. The vault key whose fingerprint matches one of the on-chain
-/// signing keys is the Daml key this node contributes to the party.
-///
-/// The keys live in one of two places depending on when the party was
-/// onboarded: `PartyToParticipant.party_signing_keys` (Canton 3.4+ — what the
-/// current onboarding submits) or a separate legacy `PartyToKeyMapping`
-/// transaction (Canton 3.3 — parties onboarded before the switch; deprecated
-/// as of Canton 3.5, still served). Both are checked, newest format first.
-///
-/// Returns the same `varint(len)||SigningPublicKey` × 2 byte layout that
-/// `read_all_messages_from_bytes` expects. Index `[0]` is this node's
-/// namespace key for the party, resolved out of the vault against the
-/// party's owner set: the bundle outlives this call in `dec_party_identity`,
-/// and peer validation reads `[0]` to check that a DNS proposal keeps this
-/// node an owner.
 /// This node's namespace key for a party: the vault key with namespace usage
 /// whose fingerprint is in the party's decentralized-namespace owner set.
 ///
@@ -406,6 +389,23 @@ async fn own_namespace_key(
     Ok(None)
 }
 
+/// On-chain backfill: recover the dec_party's protocol signing keys from
+/// Canton's topology store, then cross-reference them against this node's
+/// vault. The vault key whose fingerprint matches one of the on-chain
+/// signing keys is the Daml key this node contributes to the party.
+///
+/// The keys live in one of two places depending on when the party was
+/// onboarded: `PartyToParticipant.party_signing_keys` (Canton 3.4+ — what the
+/// current onboarding submits) or a separate legacy `PartyToKeyMapping`
+/// transaction (Canton 3.3 — parties onboarded before the switch; deprecated
+/// as of Canton 3.5, still served). Both are checked, newest format first.
+///
+/// Returns the same `varint(len)||SigningPublicKey` × 2 byte layout that
+/// `read_all_messages_from_bytes` expects. Index `[0]` is this node's
+/// namespace key for the party, resolved out of the vault against the
+/// party's owner set: the bundle outlives this call in `dec_party_identity`,
+/// and peer validation reads `[0]` to check that a DNS proposal keeps this
+/// node an owner.
 async fn backfill_peer_keys_from_chain(
     config: &NodeConfig,
     dec_party_id: &CantonId,
