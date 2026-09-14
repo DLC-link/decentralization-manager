@@ -1005,15 +1005,29 @@ pub async fn start_add_party(
 
         match result {
             Ok(_) => {
+                // The run row is marked terminal BEFORE the in-memory status
+                // flips. The two are read by different callers — `/…/status`
+                // reads this lock, while the "already has a workflow in flight"
+                // guard scans the run rows — so flipping memory first opens a
+                // window where the API reports a run finished and refuses the
+                // next workflow for that party in the same breath. Doing the
+                // durable write first can only report a finished run as still
+                // running for an instant, which costs a poll rather than a
+                // rejected request.
+                mark_run_completed(&db, &instance_for_task).await;
                 {
                     let mut status = add_party_state_clone.status.write().await;
                     *status = WorkflowProgress::Completed;
                 }
                 tracing::info!("Add-party workflow completed successfully");
-                mark_run_completed(&db, &instance_for_task).await;
             }
             Err(e) => {
                 let msg = format!("{e}");
+                // Durable row first, in-memory status second — same ordering as the
+                // success path above, and for the same reason: a caller that reads
+                // Failed from `/…/status` and retries must not be refused by the
+                // in-flight guard, which scans the run rows.
+                mark_run_failed(&db, &instance_for_task, &msg).await;
                 {
                     let mut status = add_party_state_clone.status.write().await;
                     let mut error = add_party_state_clone.error.write().await;
@@ -1021,7 +1035,6 @@ pub async fn start_add_party(
                     *error = Some(msg.clone());
                 }
                 tracing::error!("Add-party workflow failed: {e}");
-                mark_run_failed(&db, &instance_for_task, &msg).await;
             }
         }
     });
@@ -1373,15 +1386,29 @@ pub async fn start_change_threshold(
 
         match result {
             Ok(_) => {
+                // The run row is marked terminal BEFORE the in-memory status
+                // flips. The two are read by different callers — `/…/status`
+                // reads this lock, while the "already has a workflow in flight"
+                // guard scans the run rows — so flipping memory first opens a
+                // window where the API reports a run finished and refuses the
+                // next workflow for that party in the same breath. Doing the
+                // durable write first can only report a finished run as still
+                // running for an instant, which costs a poll rather than a
+                // rejected request.
+                mark_run_completed(&db, &instance_for_task).await;
                 {
                     let mut status = change_state_clone.status.write().await;
                     *status = WorkflowProgress::Completed;
                 }
                 tracing::info!("Change-threshold workflow completed successfully");
-                mark_run_completed(&db, &instance_for_task).await;
             }
             Err(e) => {
                 let msg = format!("{e}");
+                // Durable row first, in-memory status second — same ordering as the
+                // success path above, and for the same reason: a caller that reads
+                // Failed from `/…/status` and retries must not be refused by the
+                // in-flight guard, which scans the run rows.
+                mark_run_failed(&db, &instance_for_task, &msg).await;
                 {
                     let mut status = change_state_clone.status.write().await;
                     let mut error = change_state_clone.error.write().await;
@@ -1389,7 +1416,6 @@ pub async fn start_change_threshold(
                     *error = Some(msg.clone());
                 }
                 tracing::error!("Change-threshold workflow failed: {e}");
-                mark_run_failed(&db, &instance_for_task, &msg).await;
             }
         }
     });
@@ -2340,12 +2366,21 @@ pub async fn start_contracts(
         // every concurrent read blocks for that duration on a slow runner.
         match result {
             Ok(_) => {
+                // The run row is marked terminal BEFORE the in-memory status
+                // flips. The two are read by different callers — `/…/status`
+                // reads this lock, while the "already has a workflow in flight"
+                // guard scans the run rows — so flipping memory first opens a
+                // window where the API reports a run finished and refuses the
+                // next workflow for that party in the same breath. Doing the
+                // durable write first can only report a finished run as still
+                // running for an instant, which costs a poll rather than a
+                // rejected request.
+                mark_run_completed(&db, &instance_for_task).await;
                 {
                     let mut status = contracts_state_clone.status.write().await;
                     *status = WorkflowProgress::Completed;
                 }
                 tracing::info!("Contracts workflow completed successfully");
-                mark_run_completed(&db, &instance_for_task).await;
 
                 // Refresh dec_party cache to pick up new contracts
                 let bg_config = config.clone();
@@ -2386,6 +2421,11 @@ pub async fn start_contracts(
             }
             Err(e) => {
                 let msg = format!("{e}");
+                // Durable row first, in-memory status second — same ordering as the
+                // success path above, and for the same reason: a caller that reads
+                // Failed from `/…/status` and retries must not be refused by the
+                // in-flight guard, which scans the run rows.
+                mark_run_failed(&db, &instance_for_task, &msg).await;
                 {
                     let mut status = contracts_state_clone.status.write().await;
                     let mut error = contracts_state_clone.error.write().await;
@@ -2393,7 +2433,6 @@ pub async fn start_contracts(
                     *error = Some(msg.clone());
                 }
                 tracing::error!("Contracts workflow failed: {e}");
-                mark_run_failed(&db, &instance_for_task, &msg).await;
             }
         }
     });
@@ -2639,15 +2678,29 @@ pub async fn start_dars(
         // across a DB await (see kick/onboarding/contracts handlers above).
         match result {
             Ok(_) => {
+                // The run row is marked terminal BEFORE the in-memory status
+                // flips. The two are read by different callers — `/…/status`
+                // reads this lock, while the "already has a workflow in flight"
+                // guard scans the run rows — so flipping memory first opens a
+                // window where the API reports a run finished and refuses the
+                // next workflow for that party in the same breath. Doing the
+                // durable write first can only report a finished run as still
+                // running for an instant, which costs a poll rather than a
+                // rejected request.
+                mark_run_completed(&db, &instance_for_task).await;
                 {
                     let mut status = dars_state_clone.status.write().await;
                     *status = WorkflowProgress::Completed;
                 }
                 tracing::info!("DARs distribution workflow completed successfully");
-                mark_run_completed(&db, &instance_for_task).await;
             }
             Err(e) => {
                 let msg = format!("{e}");
+                // Durable row first, in-memory status second — same ordering as the
+                // success path above, and for the same reason: a caller that reads
+                // Failed from `/…/status` and retries must not be refused by the
+                // in-flight guard, which scans the run rows.
+                mark_run_failed(&db, &instance_for_task, &msg).await;
                 {
                     let mut status = dars_state_clone.status.write().await;
                     let mut error = dars_state_clone.error.write().await;
@@ -2655,7 +2708,6 @@ pub async fn start_dars(
                     *error = Some(msg.clone());
                 }
                 tracing::error!("DARs distribution workflow failed: {e}");
-                mark_run_failed(&db, &instance_for_task, &msg).await;
             }
         }
     });
@@ -3766,6 +3818,96 @@ async fn send_contracts_invites(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::MIGRATOR;
+
+    /// A minimal coordinator run row for `party`, in progress.
+    fn in_progress_run(instance: &str, party: &CantonId) -> WorkflowRun {
+        WorkflowRun {
+            instance_name: instance.to_string(),
+            kind: WorkflowKind::Contracts,
+            role: WorkflowRole::Coordinator,
+            status: WorkflowProgress::InProgress,
+            current_step: "SubmitProposals".to_string(),
+            step_index: 0,
+            step_total: 1,
+            config_json: "{}".to_string(),
+            coordinator_pubkey: None,
+            coordinator_instance: None,
+            coordinator_name: None,
+            expected_peers: Vec::new(),
+            completed_peers: Vec::new(),
+            connected_peers: Vec::new(),
+            acs_progress: None,
+            dec_party_id: Some(party.clone()),
+            prefix: None,
+            participants: Vec::new(),
+            previous_threshold: None,
+            new_threshold: None,
+            kicked_participant: None,
+            added_participant: None,
+            package_names: Vec::new(),
+            dar_filenames: Vec::new(),
+            error: None,
+            dismissed: false,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    /// The invariant the completion ordering rests on: once a run row is
+    /// terminal, the in-flight guard must not see it.
+    ///
+    /// This is the half that made the ordering bug reachable. `/…/status` reads
+    /// the in-memory status while this guard reads the run rows, so marking the
+    /// row terminal *after* flipping memory left a window where the API reported
+    /// a run finished and refused the next workflow for the same party in the
+    /// same breath. The handlers now write the row first; this pins what that
+    /// write has to achieve.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_completed_run_is_not_in_flight_for_its_party(pool: SqlitePool) -> Result {
+        let party = pid(7)?;
+        let run = in_progress_run("contracts-1", &party);
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_workflow_run(&run).await?;
+        Commitable::commit(tx).await?;
+
+        // While it runs, a second workflow for the same party is refused — the
+        // guard's whole purpose.
+        let found = find_inprogress_run_for_party(&pool, &party).await;
+        assert_eq!(
+            found.map(|(run, _)| run),
+            Some("contracts-1".to_string()),
+            "an in-progress run must be reported as in flight"
+        );
+
+        mark_run_completed(&pool, "contracts-1").await;
+
+        assert!(
+            find_inprogress_run_for_party(&pool, &party).await.is_none(),
+            "a completed run must not block the next workflow for its party"
+        );
+        Ok(())
+    }
+
+    /// A failed run must not block the party either: the operator's next move
+    /// after reading Failed is to retry, and a guard that still counted it would
+    /// refuse that retry.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_run_is_not_in_flight_for_its_party(pool: SqlitePool) -> Result {
+        let party = pid(8)?;
+        let run = in_progress_run("contracts-2", &party);
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_workflow_run(&run).await?;
+        Commitable::commit(tx).await?;
+
+        mark_run_failed(&pool, "contracts-2", "boom").await;
+
+        assert!(
+            find_inprogress_run_for_party(&pool, &party).await.is_none(),
+            "a failed run must not block the retry it invites"
+        );
+        Ok(())
+    }
 
     fn pid(tag: u8) -> anyhow::Result<CantonId> {
         let ns = format!("1220{:0>64}", format!("{tag:02x}"));
