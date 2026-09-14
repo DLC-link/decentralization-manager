@@ -119,7 +119,7 @@ describe("currentStepLabel", () => {
     ).toBe("Copying contracts");
   });
 
-  it("falls back to a humanized name for an unlisted step", () => {
+  it("names the synthetic step a peer row starts on", () => {
     expect(
       currentStepLabel(
         run({
@@ -129,7 +129,7 @@ describe("currentStepLabel", () => {
           step_total: WORKFLOW_STEPS.Dars.length,
         }),
       ),
-    ).toBe("Active");
+    ).toBe("Waiting for the coordinator");
   });
 
   it("falls back when the step list is stale", () => {

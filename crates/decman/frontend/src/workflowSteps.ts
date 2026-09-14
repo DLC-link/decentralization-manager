@@ -239,6 +239,15 @@ export const WORKFLOW_STEPS: Record<WorkflowKind, WorkflowStepInfo[]> = {
   ],
 };
 
+/**
+ * Steps the backend writes that belong to no step enum. A peer row sits on
+ * `"Active"` from the moment the invite is accepted until the coordinator's
+ * first command lands.
+ */
+const SYNTHETIC_STEP_LABELS: Record<string, string> = {
+  Active: "Waiting for the coordinator",
+};
+
 /** `"SubmitClearOnboarding"` -> `"Submit clear onboarding"`. */
 export const humanizeEnumName = (name: string): string =>
   name
@@ -281,4 +290,5 @@ export const stepsForRun = (run: StepPosition): WorkflowStepInfo[] | null => {
 /** Human label for the step a run sits on, PascalCase name as the fallback. */
 export const currentStepLabel = (run: StepPosition): string =>
   stepsForRun(run)?.find((s) => s.name === run.current_step)?.label ??
+  SYNTHETIC_STEP_LABELS[run.current_step] ??
   humanizeEnumName(run.current_step);
