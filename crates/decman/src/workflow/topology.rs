@@ -16,13 +16,13 @@ use std::{
 use canton_proto_rs::com::digitalasset::canton::{
     protocol::v30::{
         DecentralizedNamespaceDefinition, PartyToKeyMapping, PartyToParticipant,
-        SignedTopologyTransaction, TopologyTransaction, enums, topology_mapping,
+        SignedTopologyTransaction, TopologyMapping, TopologyTransaction, enums, topology_mapping,
     },
     topology::admin::v30::{
-        AddTransactionsRequest, AuthorizeRequest, AuthorizeResponse, BaseQuery,
-        ListDecentralizedNamespaceDefinitionRequest, ListPartyToKeyMappingRequest,
-        ListPartyToParticipantRequest, SignTransactionsRequest, SignTransactionsResponse, StoreId,
-        Synchronizer, base_query,
+        AddTransactionsRequest, AuthorizeRequest, AuthorizeResponse, BaseQuery, ForceFlag,
+        GenerateTransactionsRequest, ListDecentralizedNamespaceDefinitionRequest,
+        ListPartyToKeyMappingRequest, ListPartyToParticipantRequest, SignTransactionsRequest,
+        SignTransactionsResponse, StoreId, Synchronizer, base_query, generate_transactions_request,
         list_party_to_key_mapping_response::result::Item as PartyToKeyItem,
         list_party_to_participant_response::result::Item as P2pItem, store_id, synchronizer,
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
@@ -273,13 +273,18 @@ pub async fn fetch_p2p_history(
 
 /// An [`AddTransactionsRequest`] submitting a single signed transaction to the
 /// synchronizer store.
+/// `force_changes` carries the [`ForceFlag`]s the transaction needs to pass
+/// Canton's validation. They matter here rather than at creation time because
+/// [`build_signed_proposal`] deliberately does not store the transaction, so
+/// this is the first time the synchronizer store validates it.
 pub fn add_transactions_request(
     synchronizer_id: &str,
     transaction: SignedTopologyTransaction,
+    force_changes: Vec<i32>,
 ) -> AddTransactionsRequest {
     AddTransactionsRequest {
         transactions: vec![transaction],
-        force_changes: vec![],
+        force_changes,
         store: Some(synchronizer_store_id(synchronizer_id)),
         wait_to_become_effective: None,
     }
@@ -288,6 +293,89 @@ pub fn add_transactions_request(
 // ---------------------------------------------------------------------------
 // Shared head-state topology reads
 // ---------------------------------------------------------------------------
+
+/// Build this node's signed topology proposal **without** publishing it.
+///
+/// `Authorize` would be shorter, but per `topology_manager_write_service.proto`
+/// it "propose[s] a transaction and distribute[s] it", authorizing it outright
+/// when this node alone holds enough signing keys. For a party whose namespace
+/// threshold is 1 that applies the mapping the moment the proposal is created,
+/// which is before any check the caller runs at submit time — and for a paired
+/// DNS and P2P that is how a migration half-applies.
+///
+/// `GenerateTransactions` builds the transaction and `SignTransactions` signs
+/// it "but will not be stored in the authorized store", so nothing reaches the
+/// synchronizer until `add_transactions` publishes it.
+///
+/// The transaction is marked a proposal: this node's signature alone is not
+/// the party's authorization, and the peers' signatures are merged in before
+/// submission.
+///
+/// # Errors
+///
+/// Errors when either RPC fails or returns other than the one transaction
+/// asked for.
+pub async fn build_signed_proposal(
+    config: &NodeConfig,
+    synchronizer_id: &str,
+    mapping: topology_mapping::Mapping,
+    force_flags: Vec<i32>,
+    label: &str,
+) -> Result<SignedTopologyTransaction> {
+    let mut write_client = TopologyManagerWriteServiceClient::new(config.admin_channel().await?);
+
+    let generated = write_client
+        .generate_transactions(tonic::Request::new(GenerateTransactionsRequest {
+            proposals: vec![generate_transactions_request::Proposal {
+                operation: enums::TopologyChangeOp::AddReplace as i32,
+                serial: 0,
+                store: Some(synchronizer_store_id(synchronizer_id)),
+                mapping: Some(generate_transactions_request::proposal::Mapping::V30(
+                    TopologyMapping {
+                        mapping: Some(mapping),
+                    },
+                )),
+            }],
+            base_request: None,
+        }))
+        .await?
+        .into_inner()
+        .generated_transactions;
+
+    let [generated] = generated.as_slice() else {
+        anyhow::bail!(
+            "{label}: GenerateTransactions returned {count} transaction(s), expected exactly 1",
+            count = generated.len()
+        );
+    };
+
+    let signed = sign_transactions_with_topology_retry(
+        config,
+        SignTransactionsRequest {
+            transactions: vec![SignedTopologyTransaction {
+                transaction: generated.serialized_transaction.clone(),
+                signatures: vec![],
+                proposal: true,
+                multi_transaction_signatures: vec![],
+            }],
+            signed_by: vec![],
+            store: Some(synchronizer_store_id(synchronizer_id)),
+            force_flags,
+        },
+        label,
+    )
+    .await?
+    .transactions;
+
+    let [signed] = signed.as_slice() else {
+        anyhow::bail!(
+            "{label}: SignTransactions returned {count} transaction(s), expected exactly 1",
+            count = signed.len()
+        );
+    };
+
+    Ok(signed.clone())
+}
 
 /// Fetch the party's current `PartyToParticipant` mapping from the
 /// synchronizer head state. Errors if the party has no mapping.
@@ -637,6 +725,31 @@ pub fn dedupe_signatures(transaction: &mut SignedTopologyTransaction) {
         .retain(|sig| seen.insert(sig.signed_by.clone()));
 }
 
+/// The force flags a party's DNS and P2P proposals need at publish time.
+///
+/// A P2P that adds a member's Daml key carries a key Canton has not seen
+/// validated, which it refuses without this. The paired DNS is published the
+/// same way rather than through a second code path.
+///
+/// They belong at publish time because [`build_signed_proposal`] deliberately
+/// does not store the transaction, so `add_transactions` is the first time the
+/// synchronizer store validates it.
+pub fn party_proposal_force_flags() -> Vec<i32> {
+    vec![ForceFlag::AllowUnvalidatedSigningKeys as i32]
+}
+
+/// The signed pair a topology workflow publishes, with the force flags their
+/// publication needs.
+///
+/// Bundled because all three travel together from proposal creation to
+/// submission, and because the flags only mean anything alongside the
+/// transactions they let through.
+pub struct DnsP2pSubmission {
+    pub dns: SignedTopologyTransaction,
+    pub p2p: SignedTopologyTransaction,
+    pub force_changes: Vec<i32>,
+}
+
 /// Submit the aggregated DNS mapping, await its workflow-specific
 /// confirmation, then submit the P2P mapping and await its confirmation,
 /// finishing with the shared topology-propagation delay.
@@ -652,8 +765,7 @@ pub async fn submit_dns_then_p2p<DnsFut, P2pFut>(
     config: &NodeConfig,
     synchronizer_id: &str,
     label: &str,
-    dns_transaction: SignedTopologyTransaction,
-    p2p_transaction: SignedTopologyTransaction,
+    submission: DnsP2pSubmission,
     confirm_dns: impl FnOnce() -> DnsFut,
     confirm_p2p: impl FnOnce() -> P2pFut,
 ) -> Result
@@ -661,6 +773,12 @@ where
     DnsFut: Future<Output = Result>,
     P2pFut: Future<Output = Result>,
 {
+    let DnsP2pSubmission {
+        dns: dns_transaction,
+        p2p: p2p_transaction,
+        force_changes,
+    } = submission;
+
     let mut topology_write_client =
         TopologyManagerWriteServiceClient::new(config.admin_channel().await?);
 
@@ -669,6 +787,7 @@ where
         .add_transactions(tonic::Request::new(add_transactions_request(
             synchronizer_id,
             dns_transaction,
+            force_changes.clone(),
         )))
         .await?;
     confirm_dns().await?;
@@ -679,6 +798,7 @@ where
         .add_transactions(tonic::Request::new(add_transactions_request(
             synchronizer_id,
             p2p_transaction,
+            force_changes,
         )))
         .await?;
     confirm_p2p().await?;

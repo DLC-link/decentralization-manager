@@ -1,13 +1,6 @@
 use canton_proto_rs::com::digitalasset::canton::{
     crypto::v30::SigningKeysWithThreshold,
-    protocol::v30::{
-        DecentralizedNamespaceDefinition, PartyToParticipant, TopologyMapping, enums,
-        topology_mapping,
-    },
-    topology::admin::v30::{
-        AuthorizeRequest, authorize_request,
-        topology_manager_write_service_client::TopologyManagerWriteServiceClient,
-    },
+    protocol::v30::{DecentralizedNamespaceDefinition, PartyToParticipant, topology_mapping},
 };
 use sqlx::SqlitePool;
 
@@ -131,58 +124,25 @@ pub async fn create_proposals(
         }),
     };
 
-    // Create proposals using topology manager
-    let mut topology_client = TopologyManagerWriteServiceClient::new(config.admin_channel().await?);
-
-    // Create DNS proposal
     tracing::info!("Creating DNS change-threshold proposal...");
-    let dns_request = tonic::Request::new(AuthorizeRequest {
-        r#type: Some(authorize_request::Type::Proposal(
-            authorize_request::Proposal {
-                change: enums::TopologyChangeOp::AddReplace as i32,
-                serial: 0,
-                mapping: Some(authorize_request::proposal::Mapping::V30(TopologyMapping {
-                    mapping: Some(topology_mapping::Mapping::DecentralizedNamespaceDefinition(
-                        new_namespace_def.clone(),
-                    )),
-                })),
-            },
-        )),
-        must_fully_authorize: false,
-        force_changes: vec![],
-        signed_by: vec![],
-        store: Some(topology::synchronizer_store_id(&synchronizer_id)),
-        wait_to_become_effective: None,
-    });
+    let dns_transaction = topology::build_signed_proposal(
+        config,
+        &synchronizer_id,
+        topology_mapping::Mapping::DecentralizedNamespaceDefinition(new_namespace_def.clone()),
+        topology::party_proposal_force_flags(),
+        "change-threshold DNS",
+    )
+    .await?;
 
-    let dns_response = topology_client.authorize(dns_request).await?.into_inner();
-    let dns_transaction = dns_response
-        .transaction
-        .ok_or_else(|| anyhow::anyhow!("No DNS transaction returned"))?;
-
-    // Create P2P proposal
     tracing::info!("Creating P2P change-threshold proposal...");
-    let p2p_request = tonic::Request::new(AuthorizeRequest {
-        r#type: Some(authorize_request::Type::Proposal(
-            authorize_request::Proposal {
-                change: enums::TopologyChangeOp::AddReplace as i32,
-                serial: 0,
-                mapping: Some(authorize_request::proposal::Mapping::V30(TopologyMapping {
-                    mapping: Some(topology_mapping::Mapping::PartyToParticipant(new_p2p)),
-                })),
-            },
-        )),
-        must_fully_authorize: false,
-        force_changes: vec![],
-        signed_by: vec![],
-        store: Some(topology::synchronizer_store_id(&synchronizer_id)),
-        wait_to_become_effective: None,
-    });
-
-    let p2p_response = topology_client.authorize(p2p_request).await?.into_inner();
-    let p2p_transaction = p2p_response
-        .transaction
-        .ok_or_else(|| anyhow::anyhow!("No P2P transaction returned"))?;
+    let p2p_transaction = topology::build_signed_proposal(
+        config,
+        &synchronizer_id,
+        topology_mapping::Mapping::PartyToParticipant(new_p2p),
+        topology::party_proposal_force_flags(),
+        "change-threshold P2P",
+    )
+    .await?;
 
     // Persist proposals + supporting data. Each protobuf is written with the
     // same `varint(len)||proto` framing the file path used, so

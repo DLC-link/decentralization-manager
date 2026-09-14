@@ -82,8 +82,11 @@ pub async fn submit_kick(config: &NodeConfig, storage: &SqlitePool, instance_nam
         config,
         &synchronizer_id,
         "kick",
-        dns_transaction,
-        p2p_transaction,
+        topology::DnsP2pSubmission {
+            dns: dns_transaction,
+            p2p: p2p_transaction,
+            force_changes: topology::party_proposal_force_flags(),
+        },
         || {
             wait_for_dns_in_topology(
                 config,

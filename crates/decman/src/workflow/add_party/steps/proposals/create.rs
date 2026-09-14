@@ -168,32 +168,24 @@ pub async fn create_proposals(
     };
 
     tracing::info!("Creating DNS add-party proposal...");
-    let dns_response = topology::authorize_with_topology_retry(
+    let dns_transaction = topology::build_signed_proposal(
         config,
-        proposal_request(
-            &synchronizer_id,
-            topology_mapping::Mapping::DecentralizedNamespaceDefinition(new_namespace_def.clone()),
-        ),
+        &synchronizer_id,
+        topology_mapping::Mapping::DecentralizedNamespaceDefinition(new_namespace_def.clone()),
+        topology::party_proposal_force_flags(),
         "add-party DNS",
     )
     .await?;
-    let dns_transaction = dns_response
-        .transaction
-        .ok_or_else(|| anyhow::anyhow!("No DNS transaction returned"))?;
 
     tracing::info!("Creating P2P add-party proposal...");
-    let p2p_response = topology::authorize_with_topology_retry(
+    let p2p_transaction = topology::build_signed_proposal(
         config,
-        proposal_request(
-            &synchronizer_id,
-            topology_mapping::Mapping::PartyToParticipant(new_p2p),
-        ),
+        &synchronizer_id,
+        topology_mapping::Mapping::PartyToParticipant(new_p2p),
+        topology::party_proposal_force_flags(),
         "add-party P2P",
     )
     .await?;
-    let p2p_transaction = p2p_response
-        .transaction
-        .ok_or_else(|| anyhow::anyhow!("No P2P transaction returned"))?;
 
     storage
         .write_artifact(
