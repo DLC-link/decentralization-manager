@@ -2,6 +2,7 @@ import { Fragment, useEffect, useState, type ReactNode } from "react";
 import { Box, Button, LinearProgress, Tooltip, Typography } from "@mui/material";
 import { alpha, keyframes, useTheme } from "@mui/material/styles";
 import type { AcsTransferProgress, WorkflowProgress } from "../../types";
+import type { WorkflowStepInfo } from "../../workflowSteps";
 
 type PillTone = "accent" | "neutral" | "success" | "danger";
 
@@ -367,11 +368,6 @@ export const ApprovalCard = ({
   );
 };
 
-/**
- * Live step pipeline for a running workflow: completed steps render as ✓, the
- * current as a green pulsing dot, the rest as empty circles. The current step
- * name is shown by the caller (in the footer), so this renders dots only.
- */
 /** How often the meter re-reads the clock, so "no movement for Nm" advances. */
 const ACS_TICK_MS = 5_000;
 
@@ -492,21 +488,62 @@ export const AcsTransferMeter = ({
   );
 };
 
+/**
+ * Live step pipeline for a running workflow: completed steps render as ✓, the
+ * current as a green pulsing dot, the rest as empty circles. `steps` labels the
+ * dots on hover; without it they stay bare, which is what a run whose step list
+ * the frontend cannot vouch for falls back to.
+ */
 export const WorkflowPipeline = ({
   current,
   total,
+  steps,
 }: {
   current: number;
   total: number;
+  steps?: WorkflowStepInfo[] | null;
 }) => {
   const theme = useTheme();
   if (total <= 0) return null;
-  const steps = Array.from({ length: total }, (_, i) => i);
+  const dots = Array.from({ length: total }, (_, i) => i);
   return (
     <Box sx={{ display: "flex", alignItems: "center", overflowX: "auto" }}>
-        {steps.map((i) => {
+        {dots.map((i) => {
           const done = i < current;
           const active = i === current;
+          const step = steps?.[i];
+          const dot = (
+            <Box
+              sx={{
+                flexShrink: 0,
+                width: 18,
+                height: 18,
+                borderRadius: "50%",
+                display: "grid",
+                placeItems: "center",
+                fontFamily: "var(--font-mono)",
+                fontSize: 10,
+                fontWeight: 700,
+                ...(done && {
+                  bgcolor: alpha(theme.palette.success.main, 0.16),
+                  color: "success.main",
+                  border: `1.5px solid ${theme.palette.success.main}`,
+                }),
+                ...(active && {
+                  bgcolor: "success.main",
+                  animation: `${pulse} 1.4s ease-in-out infinite`,
+                  [REDUCED]: { animation: "none" },
+                }),
+                ...(!done &&
+                  !active && {
+                    border: "1.5px solid",
+                    borderColor: "divider",
+                  }),
+              }}
+            >
+              {done ? "✓" : null}
+            </Box>
+          );
           return (
             <Fragment key={i}>
               {i > 0 && (
@@ -520,36 +557,29 @@ export const WorkflowPipeline = ({
                   }}
                 />
               )}
-              <Box
-                sx={{
-                  flexShrink: 0,
-                  width: 18,
-                  height: 18,
-                  borderRadius: "50%",
-                  display: "grid",
-                  placeItems: "center",
-                  fontFamily: "var(--font-mono)",
-                  fontSize: 10,
-                  fontWeight: 700,
-                  ...(done && {
-                    bgcolor: alpha(theme.palette.success.main, 0.16),
-                    color: "success.main",
-                    border: `1.5px solid ${theme.palette.success.main}`,
-                  }),
-                  ...(active && {
-                    bgcolor: "success.main",
-                    animation: `${pulse} 1.4s ease-in-out infinite`,
-                    [REDUCED]: { animation: "none" },
-                  }),
-                  ...(!done &&
-                    !active && {
-                      border: "1.5px solid",
-                      borderColor: "divider",
-                    }),
-                }}
-              >
-                {done ? "✓" : null}
-              </Box>
+              {step ? (
+                <Tooltip
+                  title={
+                    <>
+                      <Typography sx={{ fontSize: 12, fontWeight: 700 }}>
+                        {step.label}
+                      </Typography>
+                      <Typography sx={{ fontSize: 12 }}>
+                        {step.description}
+                      </Typography>
+                      <Typography sx={{ fontSize: 11, opacity: 0.7, mt: 0.5 }}>
+                        {`Step ${i + 1} of ${total} · ${
+                          done ? "done" : active ? "in progress" : "pending"
+                        }`}
+                      </Typography>
+                    </>
+                  }
+                >
+                  {dot}
+                </Tooltip>
+              ) : (
+                dot
+              )}
             </Fragment>
           );
         })}

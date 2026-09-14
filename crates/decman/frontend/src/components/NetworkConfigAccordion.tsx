@@ -29,6 +29,7 @@ import { zebraRow } from "../styles";
 import { copyToClipboard } from "../clipboard";
 import { fieldHelpAdornment } from "./FieldHelp";
 import { StatusDot } from "./StatusDot";
+import { currentStepLabel, workflowKindLabel } from "../workflowSteps";
 import type {
   NetworkConfig,
   Peer,
@@ -114,8 +115,11 @@ export const NetworkConfigAccordion = ({
   const statusTooltip = (st: ParticipantStatus | undefined): string => {
     let title = getStatusTooltip(st?.status);
     if (st?.latency_ms != null) title += ` — ${st.latency_ms} ms`;
-    if (st?.workflow)
-      title += ` — in ${st.workflow.kind} (${st.workflow.step})`;
+    if (st?.workflow) {
+      const w = st.workflow;
+      const step = currentStepLabel({ ...w, current_step: w.step });
+      title += ` — in ${workflowKindLabel(w.kind)} (${step})`;
+    }
     return title;
   };
 
@@ -451,7 +455,7 @@ export const NetworkConfigAccordion = ({
                         <Chip
                           size="small"
                           color="warning"
-                          label={`In workflow: ${st.workflow.kind}`}
+                          label={`In workflow: ${workflowKindLabel(st.workflow.kind)}`}
                           sx={{ ml: 1, height: 18, fontSize: "0.65rem" }}
                         />
                       )}

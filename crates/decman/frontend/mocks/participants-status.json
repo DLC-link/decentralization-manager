@@ -44,9 +44,9 @@
       "workflow": {
         "kind": "Onboarding",
         "role": "Peer",
-        "step": "AwaitingKeys",
+        "step": "CreateProposals",
         "step_index": 2,
-        "step_total": 5
+        "step_total": 8
       },
       "build_version": "v0.1.9"
     },

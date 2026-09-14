@@ -38,6 +38,7 @@ import { useSnackbar } from "./contexts";
 import { API_BASE, ADMIN_ACCESS } from "./constants";
 import { authenticatedFetch, pingLatency } from "./api";
 import { useHiddenParties } from "./useHiddenParties";
+import { workflowKindLabel } from "./workflowSteps";
 import { columnSx } from "./styles";
 import type {
   DecentralizedParty,
@@ -528,7 +529,7 @@ const App = () => {
       next.set(run.instance_name, run.status);
       const prior = prev.get(run.instance_name);
       if (prior === "inprogress" && run.status !== "inprogress") {
-        const label = `${run.kind} workflow`;
+        const label = `${workflowKindLabel(run.kind)} workflow`;
         if (run.status === "failed") {
           showSnackbar(
             `${label} failed: ${run.error || "Unknown error"}`,
