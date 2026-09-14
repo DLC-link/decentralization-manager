@@ -1,12 +1,12 @@
 {
   "state": {
     "contract_id": "00499f115c368b166283244cde318e3455533fbbca612e14b135308d7cc29a3408",
-    "governance_party": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
+    "governance_party": "cbtc-mint-authority::1220b1f9128e7d18cb579d6ebc52fdc49f788ffa84fd3f4f4044de7ed73e2bf00109",
     "members": [
-      "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
-      "utility-registrar::12206a58a9f547e2c9e833c6e261806a51c224cd7faab962ed4fee21df39fa06",
-      "dec-treasury::1220e5eff180952bf0ea0588c3d2ab779dcebc3c3cb5c5c70904d534cccd8862",
-      "ibtc-member-fra1::1220ba3790e06fa4524e56d2f223576013c73a660055439f9046b17c621c6c1d"
+      "cbtc-mint-authority::1220b1f9128e7d18cb579d6ebc52fdc49f788ffa84fd3f4f4044de7ed73e2bf00109",
+      "utility-registrar::122048489f16e6fc3a8d12acc154b12026fae3469c666860aabb88f84f07d089002a",
+      "dec-treasury::1220670469f0ab795a6ac2583f18267dad591fbda2a493e4dc956e932c913e00ddf4",
+      "ibtc-member-fra1::1220a1acf8c8e3be7e4a0a6f2cac5a620d1a6a8362671f665a372ef73d5c9427bac7"
     ],
     "threshold": 3,
     "action_confirmation_timeout_microseconds": 86400000000,

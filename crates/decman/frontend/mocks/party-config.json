@@ -1,6 +1,6 @@
 {
-  "dec_party_id": "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78",
-  "member_party_id": "ibtc-member-fra1::1220ba3790e06fa4524e56d2f223576013c73a660055439f9046b17c621c6c1d",
+  "dec_party_id": "cbtc-network::1220b1cfb0b06e502d45400a5b7bd6b2c4d8c8ea377cd022c8d45b4ccb4f2eede33b",
+  "member_party_id": "ibtc-member-fra1::1220a1acf8c8e3be7e4a0a6f2cac5a620d1a6a8362671f665a372ef73d5c9427bac7",
   "user_id": "svc-decman@ibtc",
   "keycloak_url": "https://keycloak.dev.canton.ibtc.network/auth",
   "keycloak_realm": "ibtc-catalyst-devnet",

@@ -1,7 +1,7 @@
 {
   "parties": [
     {
-      "party_id": "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78",
+      "party_id": "cbtc-network::1220b1cfb0b06e502d45400a5b7bd6b2c4d8c8ea377cd022c8d45b4ccb4f2eede33b",
       "threshold": 2,
       "owners": [
         "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
@@ -11,37 +11,37 @@
       "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
       "participants": [
         {
-          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d",
+          "participant_uid": "iBTC-validator-1::122042208735e3f23ef64a268afafa9276c05e5810c296e93444cdec4a635738a72f",
           "permission": "Submission",
           "owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2"
         },
         {
-          "participant_uid": "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+          "participant_uid": "iBTC-validator-2::1220a8c40594107def9ef1403d34e17a25018a411561038042d974766e506de1bdd4",
           "permission": "Submission",
           "owner_key": "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead"
         },
         {
-          "participant_uid": "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343",
+          "participant_uid": "iBTC-validator-3::122029739d4b281f74d7e7037387980ee36165085e5dd51c1617627bcfb6a434b830",
           "permission": "Submission",
           "owner_key": "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e"
         },
         {
-          "participant_uid": "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+          "participant_uid": "cn-validator-07::122038baa36e80ce0d445f3b49b67e965ea5f847469f571b220fedc9d99aa8d5fb9f",
           "permission": "Submission",
           "owner_key": "0261982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae7629"
         },
         {
-          "participant_uid": "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+          "participant_uid": "relay-zrh::122032e3df42c8378bef548df0fdccf4b16ed4c7fb966fd0ab18d0b05772a5704b25",
           "permission": "Submission",
           "owner_key": "02d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44eef8"
         },
         {
-          "participant_uid": "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9",
+          "participant_uid": "bsafe-tok3::122039e33739c64ad43fa23b83d26f59177e37e1e81b9ceb3674b8e9e6b56c443dd7",
           "permission": "Submission",
           "owner_key": "0210f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e916ed"
         },
         {
-          "participant_uid": "dec-syd1::1220ac2594b1f585253379f7fd2d121b204088b41ae60a31698a802fef37d5b8",
+          "participant_uid": "dec-syd1::122004fde4fda828384def7426720ab8ce41d2bff13131bb4d59ca48f9b91277dff4",
           "permission": "Submission",
           "owner_key": "02ac2594b1f585253379f7fd2d121b204088b41ae60a31698a802fef37d5b87027"
         }
@@ -277,7 +277,7 @@
       }
     },
     {
-      "party_id": "ibtc-admin::12209688b4410a59414d40a2a541644d22ac9e85a7f9438545749f65965a495f",
+      "party_id": "ibtc-admin::12206b74fe7904ce2f7e9458941081a2cdbb85529f1ef1716d9a8a22efb46f15714c",
       "threshold": 1,
       "owners": [
         "0210f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e916ed",
@@ -290,17 +290,17 @@
       "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
       "participants": [
         {
-          "participant_uid": "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+          "participant_uid": "cn-validator-07::122038baa36e80ce0d445f3b49b67e965ea5f847469f571b220fedc9d99aa8d5fb9f",
           "permission": "Submission",
           "owner_key": "0261982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae7629"
         },
         {
-          "participant_uid": "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+          "participant_uid": "relay-zrh::122032e3df42c8378bef548df0fdccf4b16ed4c7fb966fd0ab18d0b05772a5704b25",
           "permission": "Submission",
           "owner_key": "02d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44eef8"
         },
         {
-          "participant_uid": "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9",
+          "participant_uid": "bsafe-tok3::122039e33739c64ad43fa23b83d26f59177e37e1e81b9ceb3674b8e9e6b56c443dd7",
           "permission": "Submission",
           "owner_key": "0210f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e916ed"
         }
@@ -336,7 +336,7 @@
       }
     },
     {
-      "party_id": "treasury-rc7-2::1220fb3be8c3236d9258e9e1f25fc5d1a924cd368f7346a7a7ff4a82dd3eba54",
+      "party_id": "treasury-rc7-2::12200a48d3feb12530113b7223668f0d1bdf862c94cb664e9c1a93f4cd16e567ba98",
       "threshold": 1,
       "owners": [
         "02ecc57a74bf7229aaf620b544d7fb6f5b199b20b2581752bece576a50adeea867",
@@ -345,27 +345,27 @@
       "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
       "participants": [
         {
-          "participant_uid": "dec-syd1::1220ac2594b1f585253379f7fd2d121b204088b41ae60a31698a802fef37d5b8",
+          "participant_uid": "dec-syd1::122004fde4fda828384def7426720ab8ce41d2bff13131bb4d59ca48f9b91277dff4",
           "permission": "Submission",
           "owner_key": "02ac2594b1f585253379f7fd2d121b204088b41ae60a31698a802fef37d5b87027"
         },
         {
-          "participant_uid": "canton-nyc::12208651f1b033067b4c5cbe09328210794e2bef13d338de4bf0aca2af277b6d",
+          "participant_uid": "canton-nyc::122016247cef397323ea69ee6501e66e824e81c03b19f0460acaa3374748b319158c",
           "permission": "Submission",
           "owner_key": "028651f1b033067b4c5cbe09328210794e2bef13d338de4bf0aca2af277b6de873"
         },
         {
-          "participant_uid": "validator-sgp::122044a2d77adbb0679fa754a1e8493afae5d1597eada7404cf7a569263574db",
+          "participant_uid": "validator-sgp::1220dfe41ccf56a0ccf085399e11bca59b2c754654be3c82bf40d90e250c11ce6af6",
           "permission": "Submission",
           "owner_key": "0244a2d77adbb0679fa754a1e8493afae5d1597eada7404cf7a569263574db475b"
         },
         {
-          "participant_uid": "ibtc-fra-spare::12206b9220cb439e354deddd22af1f602a6ee3983b3a8956d0ef7dd07e958ebf",
+          "participant_uid": "ibtc-fra-spare::1220ec155c888ada79d19fad35124d30ed9d86cb90fc9d6be2e89668ec926fb2ccaa",
           "permission": "Submission",
           "owner_key": "026b9220cb439e354deddd22af1f602a6ee3983b3a8956d0ef7dd07e958ebf3ff6"
         },
         {
-          "participant_uid": "dec-saopaulo::1220ecc57a74bf7229aaf620b544d7fb6f5b199b20b2581752bece576a50adee",
+          "participant_uid": "dec-saopaulo::12209003476a43f9bfa80a7c1b830431cbc85a743437c9d3116a9139570896c5062b",
           "permission": "Submission",
           "owner_key": "02ecc57a74bf7229aaf620b544d7fb6f5b199b20b2581752bece576a50adeea867"
         }
@@ -401,7 +401,7 @@
       }
     },
     {
-      "party_id": "cbtc-attestor-pool::122070884b3eb2e563698a1e51f29ea9cec1d6b9d25272be0efd76cc715b769a",
+      "party_id": "cbtc-attestor-pool::1220f4fe6e00cef6f9c3b2b769049741ba341262389692f11f22d93659f377bb8346",
       "threshold": 4,
       "owners": [
         "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead",
@@ -414,17 +414,17 @@
       "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
       "participants": [
         {
-          "participant_uid": "ibtc-fra-spare::12206b9220cb439e354deddd22af1f602a6ee3983b3a8956d0ef7dd07e958ebf",
+          "participant_uid": "ibtc-fra-spare::1220ec155c888ada79d19fad35124d30ed9d86cb90fc9d6be2e89668ec926fb2ccaa",
           "permission": "Submission",
           "owner_key": "026b9220cb439e354deddd22af1f602a6ee3983b3a8956d0ef7dd07e958ebf3ff6"
         },
         {
-          "participant_uid": "dec-saopaulo::1220ecc57a74bf7229aaf620b544d7fb6f5b199b20b2581752bece576a50adee",
+          "participant_uid": "dec-saopaulo::12209003476a43f9bfa80a7c1b830431cbc85a743437c9d3116a9139570896c5062b",
           "permission": "Submission",
           "owner_key": "02ecc57a74bf7229aaf620b544d7fb6f5b199b20b2581752bece576a50adeea867"
         },
         {
-          "participant_uid": "canton-mum::1220649a6a537db9f061d24e3c98ef1c46cbe0605015fb2ec3d52ea6215ed0ee",
+          "participant_uid": "canton-mum::1220f3ffa802e6629f77946d7f58c2b2d8df9d28d8d6ca27c79b682bbe9bff548120",
           "permission": "Submission",
           "owner_key": "02649a6a537db9f061d24e3c98ef1c46cbe0605015fb2ec3d52ea6215ed0ee0e6c"
         }
@@ -435,7 +435,7 @@
       }
     },
     {
-      "party_id": "backend-signatory-0::12201bc2c8500d04c208285d5799eb60cf6a65e084033c9a78707a38c5a0ef60",
+      "party_id": "backend-signatory-0::12206a170defd106ff3d8c8c0f72ceaac8db6dfd037a824a3ea40737fc6516e5e381",
       "threshold": 3,
       "owners": [
         "02ac2594b1f585253379f7fd2d121b204088b41ae60a31698a802fef37d5b87027",
@@ -445,17 +445,17 @@
       "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
       "participants": [
         {
-          "participant_uid": "bsafe-cape::122015a048f5c1a6ede86d6ec87272554bbbd23f4a342ac191dc644612f35d6a",
+          "participant_uid": "bsafe-cape::12203e4773a51c0520ab9e446cc00c683ba1cc8c8f54647125c4fb6293229cdbbc0a",
           "permission": "Submission",
           "owner_key": "0215a048f5c1a6ede86d6ec87272554bbbd23f4a342ac191dc644612f35d6a60b2"
         },
         {
-          "participant_uid": "relay-dub::12202946e81d20be83b1f31e8df7d4cc139473b6e44143a79f4d92149eb0e50a",
+          "participant_uid": "relay-dub::1220b8fa6add9d783b83d854eb24e0e9b31526dc446cd1c943bb6cd0cccd0e345a8b",
           "permission": "Submission",
           "owner_key": "022946e81d20be83b1f31e8df7d4cc139473b6e44143a79f4d92149eb0e50abee0"
         },
         {
-          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d",
+          "participant_uid": "iBTC-validator-1::122042208735e3f23ef64a268afafa9276c05e5810c296e93444cdec4a635738a72f",
           "permission": "Submission",
           "owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2"
         }
@@ -466,7 +466,7 @@
       }
     },
     {
-      "party_id": "governance-core::1220b49bc40b5fc97a403d844155fd5074d3fb20e98a733ef85473b89831cce5",
+      "party_id": "governance-core::12207c6069f4e2396e1ca65deddfe9781c4e4b07b77206c23dd29a47a1ebd4fa7970",
       "threshold": 1,
       "owners": [
         "02649a6a537db9f061d24e3c98ef1c46cbe0605015fb2ec3d52ea6215ed0ee0e6c",
@@ -475,42 +475,42 @@
       "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
       "participants": [
         {
-          "participant_uid": "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+          "participant_uid": "iBTC-validator-2::1220a8c40594107def9ef1403d34e17a25018a411561038042d974766e506de1bdd4",
           "permission": "Submission",
           "owner_key": "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead"
         },
         {
-          "participant_uid": "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343",
+          "participant_uid": "iBTC-validator-3::122029739d4b281f74d7e7037387980ee36165085e5dd51c1617627bcfb6a434b830",
           "permission": "Submission",
           "owner_key": "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e"
         },
         {
-          "participant_uid": "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+          "participant_uid": "cn-validator-07::122038baa36e80ce0d445f3b49b67e965ea5f847469f571b220fedc9d99aa8d5fb9f",
           "permission": "Submission",
           "owner_key": "0261982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae7629"
         },
         {
-          "participant_uid": "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+          "participant_uid": "relay-zrh::122032e3df42c8378bef548df0fdccf4b16ed4c7fb966fd0ab18d0b05772a5704b25",
           "permission": "Submission",
           "owner_key": "02d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44eef8"
         },
         {
-          "participant_uid": "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9",
+          "participant_uid": "bsafe-tok3::122039e33739c64ad43fa23b83d26f59177e37e1e81b9ceb3674b8e9e6b56c443dd7",
           "permission": "Submission",
           "owner_key": "0210f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e916ed"
         },
         {
-          "participant_uid": "dec-syd1::1220ac2594b1f585253379f7fd2d121b204088b41ae60a31698a802fef37d5b8",
+          "participant_uid": "dec-syd1::122004fde4fda828384def7426720ab8ce41d2bff13131bb4d59ca48f9b91277dff4",
           "permission": "Submission",
           "owner_key": "02ac2594b1f585253379f7fd2d121b204088b41ae60a31698a802fef37d5b87027"
         },
         {
-          "participant_uid": "canton-nyc::12208651f1b033067b4c5cbe09328210794e2bef13d338de4bf0aca2af277b6d",
+          "participant_uid": "canton-nyc::122016247cef397323ea69ee6501e66e824e81c03b19f0460acaa3374748b319158c",
           "permission": "Submission",
           "owner_key": "028651f1b033067b4c5cbe09328210794e2bef13d338de4bf0aca2af277b6de873"
         },
         {
-          "participant_uid": "validator-sgp::122044a2d77adbb0679fa754a1e8493afae5d1597eada7404cf7a569263574db",
+          "participant_uid": "validator-sgp::1220dfe41ccf56a0ccf085399e11bca59b2c754654be3c82bf40d90e250c11ce6af6",
           "permission": "Submission",
           "owner_key": "0244a2d77adbb0679fa754a1e8493afae5d1597eada7404cf7a569263574db475b"
         }
@@ -530,7 +530,7 @@
       }
     },
     {
-      "party_id": "yield-btc::1220425311ae37972f78e3781dcd68f64665f39e3b55688ffc060f062f0d2670",
+      "party_id": "yield-btc::122010bcb8a6a1c9b30e216e0f9af219c1ff73eab012fb236f86f9ee2aeab133cbab",
       "threshold": 4,
       "owners": [
         "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e",
@@ -541,22 +541,22 @@
       "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
       "participants": [
         {
-          "participant_uid": "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+          "participant_uid": "relay-zrh::122032e3df42c8378bef548df0fdccf4b16ed4c7fb966fd0ab18d0b05772a5704b25",
           "permission": "Submission",
           "owner_key": "02d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44eef8"
         },
         {
-          "participant_uid": "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9",
+          "participant_uid": "bsafe-tok3::122039e33739c64ad43fa23b83d26f59177e37e1e81b9ceb3674b8e9e6b56c443dd7",
           "permission": "Submission",
           "owner_key": "0210f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e916ed"
         },
         {
-          "participant_uid": "dec-syd1::1220ac2594b1f585253379f7fd2d121b204088b41ae60a31698a802fef37d5b8",
+          "participant_uid": "dec-syd1::122004fde4fda828384def7426720ab8ce41d2bff13131bb4d59ca48f9b91277dff4",
           "permission": "Submission",
           "owner_key": "02ac2594b1f585253379f7fd2d121b204088b41ae60a31698a802fef37d5b87027"
         },
         {
-          "participant_uid": "canton-nyc::12208651f1b033067b4c5cbe09328210794e2bef13d338de4bf0aca2af277b6d",
+          "participant_uid": "canton-nyc::122016247cef397323ea69ee6501e66e824e81c03b19f0460acaa3374748b319158c",
           "permission": "Submission",
           "owner_key": "028651f1b033067b4c5cbe09328210794e2bef13d338de4bf0aca2af277b6de873"
         }
@@ -567,7 +567,7 @@
       }
     },
     {
-      "party_id": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
+      "party_id": "cbtc-mint-authority::1220b1f9128e7d18cb579d6ebc52fdc49f788ffa84fd3f4f4044de7ed73e2bf00109",
       "threshold": 3,
       "owners": [
         "028651f1b033067b4c5cbe09328210794e2bef13d338de4bf0aca2af277b6de873",
@@ -580,17 +580,17 @@
       "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
       "participants": [
         {
-          "participant_uid": "canton-nyc::12208651f1b033067b4c5cbe09328210794e2bef13d338de4bf0aca2af277b6d",
+          "participant_uid": "canton-nyc::122016247cef397323ea69ee6501e66e824e81c03b19f0460acaa3374748b319158c",
           "permission": "Submission",
           "owner_key": "028651f1b033067b4c5cbe09328210794e2bef13d338de4bf0aca2af277b6de873"
         },
         {
-          "participant_uid": "validator-sgp::122044a2d77adbb0679fa754a1e8493afae5d1597eada7404cf7a569263574db",
+          "participant_uid": "validator-sgp::1220dfe41ccf56a0ccf085399e11bca59b2c754654be3c82bf40d90e250c11ce6af6",
           "permission": "Submission",
           "owner_key": "0244a2d77adbb0679fa754a1e8493afae5d1597eada7404cf7a569263574db475b"
         },
         {
-          "participant_uid": "ibtc-fra-spare::12206b9220cb439e354deddd22af1f602a6ee3983b3a8956d0ef7dd07e958ebf",
+          "participant_uid": "ibtc-fra-spare::1220ec155c888ada79d19fad35124d30ed9d86cb90fc9d6be2e89668ec926fb2ccaa",
           "permission": "Submission",
           "owner_key": "026b9220cb439e354deddd22af1f602a6ee3983b3a8956d0ef7dd07e958ebf3ff6"
         }
@@ -610,7 +610,7 @@
       }
     },
     {
-      "party_id": "utility-registrar::12206a58a9f547e2c9e833c6e261806a51c224cd7faab962ed4fee21df39fa06",
+      "party_id": "utility-registrar::122048489f16e6fc3a8d12acc154b12026fae3469c666860aabb88f84f07d089002a",
       "threshold": 5,
       "owners": [
         "0215a048f5c1a6ede86d6ec87272554bbbd23f4a342ac191dc644612f35d6a60b2",
@@ -623,17 +623,17 @@
       "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
       "participants": [
         {
-          "participant_uid": "dec-saopaulo::1220ecc57a74bf7229aaf620b544d7fb6f5b199b20b2581752bece576a50adee",
+          "participant_uid": "dec-saopaulo::12209003476a43f9bfa80a7c1b830431cbc85a743437c9d3116a9139570896c5062b",
           "permission": "Submission",
           "owner_key": "02ecc57a74bf7229aaf620b544d7fb6f5b199b20b2581752bece576a50adeea867"
         },
         {
-          "participant_uid": "canton-mum::1220649a6a537db9f061d24e3c98ef1c46cbe0605015fb2ec3d52ea6215ed0ee",
+          "participant_uid": "canton-mum::1220f3ffa802e6629f77946d7f58c2b2d8df9d28d8d6ca27c79b682bbe9bff548120",
           "permission": "Submission",
           "owner_key": "02649a6a537db9f061d24e3c98ef1c46cbe0605015fb2ec3d52ea6215ed0ee0e6c"
         },
         {
-          "participant_uid": "bsafe-cape::122015a048f5c1a6ede86d6ec87272554bbbd23f4a342ac191dc644612f35d6a",
+          "participant_uid": "bsafe-cape::12203e4773a51c0520ab9e446cc00c683ba1cc8c8f54647125c4fb6293229cdbbc0a",
           "permission": "Submission",
           "owner_key": "0215a048f5c1a6ede86d6ec87272554bbbd23f4a342ac191dc644612f35d6a60b2"
         }
@@ -653,7 +653,7 @@
       }
     },
     {
-      "party_id": "dec-treasury::1220e5eff180952bf0ea0588c3d2ab779dcebc3c3cb5c5c70904d534cccd8862",
+      "party_id": "dec-treasury::1220670469f0ab795a6ac2583f18267dad591fbda2a493e4dc956e932c913e00ddf4",
       "threshold": 6,
       "owners": [
         "0261982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae7629",
@@ -666,17 +666,17 @@
       "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
       "participants": [
         {
-          "participant_uid": "relay-dub::12202946e81d20be83b1f31e8df7d4cc139473b6e44143a79f4d92149eb0e50a",
+          "participant_uid": "relay-dub::1220b8fa6add9d783b83d854eb24e0e9b31526dc446cd1c943bb6cd0cccd0e345a8b",
           "permission": "Submission",
           "owner_key": "022946e81d20be83b1f31e8df7d4cc139473b6e44143a79f4d92149eb0e50abee0"
         },
         {
-          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d",
+          "participant_uid": "iBTC-validator-1::122042208735e3f23ef64a268afafa9276c05e5810c296e93444cdec4a635738a72f",
           "permission": "Submission",
           "owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2"
         },
         {
-          "participant_uid": "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+          "participant_uid": "iBTC-validator-2::1220a8c40594107def9ef1403d34e17a25018a411561038042d974766e506de1bdd4",
           "permission": "Submission",
           "owner_key": "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead"
         }
@@ -687,7 +687,7 @@
       }
     },
     {
-      "party_id": "attestor-pool-eu::122091e27cd7ca81e72e5dd8bb97e026ff5151c1020c024ead4881ecdc7d98e9",
+      "party_id": "attestor-pool-eu::122014503eec9b603b493b8a267d34cd2dce3bcffc9097a7c1d95cb91dcd02484b00",
       "threshold": 2,
       "owners": [
         "0244a2d77adbb0679fa754a1e8493afae5d1597eada7404cf7a569263574db475b",
@@ -700,12 +700,12 @@
       "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
       "participants": [
         {
-          "participant_uid": "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343",
+          "participant_uid": "iBTC-validator-3::122029739d4b281f74d7e7037387980ee36165085e5dd51c1617627bcfb6a434b830",
           "permission": "Submission",
           "owner_key": "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e"
         },
         {
-          "participant_uid": "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+          "participant_uid": "cn-validator-07::122038baa36e80ce0d445f3b49b67e965ea5f847469f571b220fedc9d99aa8d5fb9f",
           "permission": "Submission",
           "owner_key": "0261982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae7629"
         }
@@ -749,7 +749,7 @@
       }
     },
     {
-      "party_id": "attestor-pool-us::12200756bbbb488bef27fa4c54b1042637f13d1e582644cf1d1b048308418608",
+      "party_id": "attestor-pool-us::12200e200c0f79d38c21914db3585b0cb678ad4b85afa30f7de9579bcf66ed68d20c",
       "threshold": 3,
       "owners": [
         "022946e81d20be83b1f31e8df7d4cc139473b6e44143a79f4d92149eb0e50abee0",
@@ -760,47 +760,47 @@
       "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
       "participants": [
         {
-          "participant_uid": "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9",
+          "participant_uid": "bsafe-tok3::122039e33739c64ad43fa23b83d26f59177e37e1e81b9ceb3674b8e9e6b56c443dd7",
           "permission": "Submission",
           "owner_key": "0210f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e916ed"
         },
         {
-          "participant_uid": "dec-syd1::1220ac2594b1f585253379f7fd2d121b204088b41ae60a31698a802fef37d5b8",
+          "participant_uid": "dec-syd1::122004fde4fda828384def7426720ab8ce41d2bff13131bb4d59ca48f9b91277dff4",
           "permission": "Submission",
           "owner_key": "02ac2594b1f585253379f7fd2d121b204088b41ae60a31698a802fef37d5b87027"
         },
         {
-          "participant_uid": "canton-nyc::12208651f1b033067b4c5cbe09328210794e2bef13d338de4bf0aca2af277b6d",
+          "participant_uid": "canton-nyc::122016247cef397323ea69ee6501e66e824e81c03b19f0460acaa3374748b319158c",
           "permission": "Submission",
           "owner_key": "028651f1b033067b4c5cbe09328210794e2bef13d338de4bf0aca2af277b6de873"
         },
         {
-          "participant_uid": "validator-sgp::122044a2d77adbb0679fa754a1e8493afae5d1597eada7404cf7a569263574db",
+          "participant_uid": "validator-sgp::1220dfe41ccf56a0ccf085399e11bca59b2c754654be3c82bf40d90e250c11ce6af6",
           "permission": "Submission",
           "owner_key": "0244a2d77adbb0679fa754a1e8493afae5d1597eada7404cf7a569263574db475b"
         },
         {
-          "participant_uid": "ibtc-fra-spare::12206b9220cb439e354deddd22af1f602a6ee3983b3a8956d0ef7dd07e958ebf",
+          "participant_uid": "ibtc-fra-spare::1220ec155c888ada79d19fad35124d30ed9d86cb90fc9d6be2e89668ec926fb2ccaa",
           "permission": "Submission",
           "owner_key": "026b9220cb439e354deddd22af1f602a6ee3983b3a8956d0ef7dd07e958ebf3ff6"
         },
         {
-          "participant_uid": "dec-saopaulo::1220ecc57a74bf7229aaf620b544d7fb6f5b199b20b2581752bece576a50adee",
+          "participant_uid": "dec-saopaulo::12209003476a43f9bfa80a7c1b830431cbc85a743437c9d3116a9139570896c5062b",
           "permission": "Submission",
           "owner_key": "02ecc57a74bf7229aaf620b544d7fb6f5b199b20b2581752bece576a50adeea867"
         },
         {
-          "participant_uid": "canton-mum::1220649a6a537db9f061d24e3c98ef1c46cbe0605015fb2ec3d52ea6215ed0ee",
+          "participant_uid": "canton-mum::1220f3ffa802e6629f77946d7f58c2b2d8df9d28d8d6ca27c79b682bbe9bff548120",
           "permission": "Submission",
           "owner_key": "02649a6a537db9f061d24e3c98ef1c46cbe0605015fb2ec3d52ea6215ed0ee0e6c"
         },
         {
-          "participant_uid": "bsafe-cape::122015a048f5c1a6ede86d6ec87272554bbbd23f4a342ac191dc644612f35d6a",
+          "participant_uid": "bsafe-cape::12203e4773a51c0520ab9e446cc00c683ba1cc8c8f54647125c4fb6293229cdbbc0a",
           "permission": "Submission",
           "owner_key": "0215a048f5c1a6ede86d6ec87272554bbbd23f4a342ac191dc644612f35d6a60b2"
         },
         {
-          "participant_uid": "relay-dub::12202946e81d20be83b1f31e8df7d4cc139473b6e44143a79f4d92149eb0e50a",
+          "participant_uid": "relay-dub::1220b8fa6add9d783b83d854eb24e0e9b31526dc446cd1c943bb6cd0cccd0e345a8b",
           "permission": "Submission",
           "owner_key": "022946e81d20be83b1f31e8df7d4cc139473b6e44143a79f4d92149eb0e50abee0"
         }
@@ -820,7 +820,7 @@
       }
     },
     {
-      "party_id": "delta-neutral::12206165f48ca9fac0fe2cfe6754855fe83331c3758a0eb58dfae2a1ea754061",
+      "party_id": "delta-neutral::1220d44a676cdf742492d87d359592a9e5da9c8d7972960d19b6470b5c871a94bed1",
       "threshold": 2,
       "owners": [
         "02d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44eef8",
@@ -829,27 +829,27 @@
       "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
       "participants": [
         {
-          "participant_uid": "validator-sgp::122044a2d77adbb0679fa754a1e8493afae5d1597eada7404cf7a569263574db",
+          "participant_uid": "validator-sgp::1220dfe41ccf56a0ccf085399e11bca59b2c754654be3c82bf40d90e250c11ce6af6",
           "permission": "Submission",
           "owner_key": "0244a2d77adbb0679fa754a1e8493afae5d1597eada7404cf7a569263574db475b"
         },
         {
-          "participant_uid": "ibtc-fra-spare::12206b9220cb439e354deddd22af1f602a6ee3983b3a8956d0ef7dd07e958ebf",
+          "participant_uid": "ibtc-fra-spare::1220ec155c888ada79d19fad35124d30ed9d86cb90fc9d6be2e89668ec926fb2ccaa",
           "permission": "Submission",
           "owner_key": "026b9220cb439e354deddd22af1f602a6ee3983b3a8956d0ef7dd07e958ebf3ff6"
         },
         {
-          "participant_uid": "dec-saopaulo::1220ecc57a74bf7229aaf620b544d7fb6f5b199b20b2581752bece576a50adee",
+          "participant_uid": "dec-saopaulo::12209003476a43f9bfa80a7c1b830431cbc85a743437c9d3116a9139570896c5062b",
           "permission": "Submission",
           "owner_key": "02ecc57a74bf7229aaf620b544d7fb6f5b199b20b2581752bece576a50adeea867"
         },
         {
-          "participant_uid": "canton-mum::1220649a6a537db9f061d24e3c98ef1c46cbe0605015fb2ec3d52ea6215ed0ee",
+          "participant_uid": "canton-mum::1220f3ffa802e6629f77946d7f58c2b2d8df9d28d8d6ca27c79b682bbe9bff548120",
           "permission": "Submission",
           "owner_key": "02649a6a537db9f061d24e3c98ef1c46cbe0605015fb2ec3d52ea6215ed0ee0e6c"
         },
         {
-          "participant_uid": "bsafe-cape::122015a048f5c1a6ede86d6ec87272554bbbd23f4a342ac191dc644612f35d6a",
+          "participant_uid": "bsafe-cape::12203e4773a51c0520ab9e446cc00c683ba1cc8c8f54647125c4fb6293229cdbbc0a",
           "permission": "Submission",
           "owner_key": "0215a048f5c1a6ede86d6ec87272554bbbd23f4a342ac191dc644612f35d6a60b2"
         }
@@ -893,7 +893,7 @@
       }
     },
     {
-      "party_id": "cbtc-bridge-ops::122004bfc64b77927e604442d546fcacfd00327e24d3d0e7bd08f272522e3579",
+      "party_id": "cbtc-bridge-ops::122040d2f97800f13ea83e1a927ccf3b9964e9f90a4ce7eac3de06516207bf185601",
       "threshold": 2,
       "owners": [
         "026b9220cb439e354deddd22af1f602a6ee3983b3a8956d0ef7dd07e958ebf3ff6",
@@ -902,17 +902,17 @@
       "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
       "participants": [
         {
-          "participant_uid": "canton-mum::1220649a6a537db9f061d24e3c98ef1c46cbe0605015fb2ec3d52ea6215ed0ee",
+          "participant_uid": "canton-mum::1220f3ffa802e6629f77946d7f58c2b2d8df9d28d8d6ca27c79b682bbe9bff548120",
           "permission": "Submission",
           "owner_key": "02649a6a537db9f061d24e3c98ef1c46cbe0605015fb2ec3d52ea6215ed0ee0e6c"
         },
         {
-          "participant_uid": "bsafe-cape::122015a048f5c1a6ede86d6ec87272554bbbd23f4a342ac191dc644612f35d6a",
+          "participant_uid": "bsafe-cape::12203e4773a51c0520ab9e446cc00c683ba1cc8c8f54647125c4fb6293229cdbbc0a",
           "permission": "Submission",
           "owner_key": "0215a048f5c1a6ede86d6ec87272554bbbd23f4a342ac191dc644612f35d6a60b2"
         },
         {
-          "participant_uid": "relay-dub::12202946e81d20be83b1f31e8df7d4cc139473b6e44143a79f4d92149eb0e50a",
+          "participant_uid": "relay-dub::1220b8fa6add9d783b83d854eb24e0e9b31526dc446cd1c943bb6cd0cccd0e345a8b",
           "permission": "Submission",
           "owner_key": "022946e81d20be83b1f31e8df7d4cc139473b6e44143a79f4d92149eb0e50abee0"
         }
@@ -923,7 +923,7 @@
       }
     },
     {
-      "party_id": "governance-dso::1220a29e9d3f2ba84279cd77d9d22083329944d446ae5515f70d5aae35a965d1",
+      "party_id": "governance-dso::122029a9e006ccbfb4c8a16a85b18b837d65db10f5d93ebef59877d468c2b0d35516",
       "threshold": 2,
       "owners": [
         "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
@@ -933,37 +933,37 @@
       "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
       "participants": [
         {
-          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d",
+          "participant_uid": "iBTC-validator-1::122042208735e3f23ef64a268afafa9276c05e5810c296e93444cdec4a635738a72f",
           "permission": "Submission",
           "owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2"
         },
         {
-          "participant_uid": "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+          "participant_uid": "iBTC-validator-2::1220a8c40594107def9ef1403d34e17a25018a411561038042d974766e506de1bdd4",
           "permission": "Submission",
           "owner_key": "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead"
         },
         {
-          "participant_uid": "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343",
+          "participant_uid": "iBTC-validator-3::122029739d4b281f74d7e7037387980ee36165085e5dd51c1617627bcfb6a434b830",
           "permission": "Submission",
           "owner_key": "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e"
         },
         {
-          "participant_uid": "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+          "participant_uid": "cn-validator-07::122038baa36e80ce0d445f3b49b67e965ea5f847469f571b220fedc9d99aa8d5fb9f",
           "permission": "Submission",
           "owner_key": "0261982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae7629"
         },
         {
-          "participant_uid": "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+          "participant_uid": "relay-zrh::122032e3df42c8378bef548df0fdccf4b16ed4c7fb966fd0ab18d0b05772a5704b25",
           "permission": "Submission",
           "owner_key": "02d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44eef8"
         },
         {
-          "participant_uid": "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9",
+          "participant_uid": "bsafe-tok3::122039e33739c64ad43fa23b83d26f59177e37e1e81b9ceb3674b8e9e6b56c443dd7",
           "permission": "Submission",
           "owner_key": "0210f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e916ed"
         },
         {
-          "participant_uid": "dec-syd1::1220ac2594b1f585253379f7fd2d121b204088b41ae60a31698a802fef37d5b8",
+          "participant_uid": "dec-syd1::122004fde4fda828384def7426720ab8ce41d2bff13131bb4d59ca48f9b91277dff4",
           "permission": "Submission",
           "owner_key": "02ac2594b1f585253379f7fd2d121b204088b41ae60a31698a802fef37d5b87027"
         }
@@ -999,7 +999,7 @@
       }
     },
     {
-      "party_id": "ibtc-custody-1::12207c53c8c7b5345cc5eb1394430246e229cefea50ad985ce133070f1c33312",
+      "party_id": "ibtc-custody-1::122043fe623d5be830b590aec3f53dcc90d4d4ed999ba57c94ed925cb4cbea86df4e",
       "threshold": 3,
       "owners": [
         "0210f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e916ed",
@@ -1010,37 +1010,37 @@
       "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
       "participants": [
         {
-          "participant_uid": "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+          "participant_uid": "cn-validator-07::122038baa36e80ce0d445f3b49b67e965ea5f847469f571b220fedc9d99aa8d5fb9f",
           "permission": "Submission",
           "owner_key": "0261982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae7629"
         },
         {
-          "participant_uid": "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+          "participant_uid": "relay-zrh::122032e3df42c8378bef548df0fdccf4b16ed4c7fb966fd0ab18d0b05772a5704b25",
           "permission": "Submission",
           "owner_key": "02d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44eef8"
         },
         {
-          "participant_uid": "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9",
+          "participant_uid": "bsafe-tok3::122039e33739c64ad43fa23b83d26f59177e37e1e81b9ceb3674b8e9e6b56c443dd7",
           "permission": "Submission",
           "owner_key": "0210f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e916ed"
         },
         {
-          "participant_uid": "dec-syd1::1220ac2594b1f585253379f7fd2d121b204088b41ae60a31698a802fef37d5b8",
+          "participant_uid": "dec-syd1::122004fde4fda828384def7426720ab8ce41d2bff13131bb4d59ca48f9b91277dff4",
           "permission": "Submission",
           "owner_key": "02ac2594b1f585253379f7fd2d121b204088b41ae60a31698a802fef37d5b87027"
         },
         {
-          "participant_uid": "canton-nyc::12208651f1b033067b4c5cbe09328210794e2bef13d338de4bf0aca2af277b6d",
+          "participant_uid": "canton-nyc::122016247cef397323ea69ee6501e66e824e81c03b19f0460acaa3374748b319158c",
           "permission": "Submission",
           "owner_key": "028651f1b033067b4c5cbe09328210794e2bef13d338de4bf0aca2af277b6de873"
         },
         {
-          "participant_uid": "validator-sgp::122044a2d77adbb0679fa754a1e8493afae5d1597eada7404cf7a569263574db",
+          "participant_uid": "validator-sgp::1220dfe41ccf56a0ccf085399e11bca59b2c754654be3c82bf40d90e250c11ce6af6",
           "permission": "Submission",
           "owner_key": "0244a2d77adbb0679fa754a1e8493afae5d1597eada7404cf7a569263574db475b"
         },
         {
-          "participant_uid": "ibtc-fra-spare::12206b9220cb439e354deddd22af1f602a6ee3983b3a8956d0ef7dd07e958ebf",
+          "participant_uid": "ibtc-fra-spare::1220ec155c888ada79d19fad35124d30ed9d86cb90fc9d6be2e89668ec926fb2ccaa",
           "permission": "Submission",
           "owner_key": "026b9220cb439e354deddd22af1f602a6ee3983b3a8956d0ef7dd07e958ebf3ff6"
         }
@@ -1084,7 +1084,7 @@
       }
     },
     {
-      "party_id": "settlement-processor::1220e633010b74266d40fe1634138fb0d9606288031626750fdf5978f5fffc85",
+      "party_id": "settlement-processor::1220e21212338eb8102a9a2449b95e7652161b3cd63315e9406599c21cc3a1a7e3e6",
       "threshold": 1,
       "owners": [
         "02ecc57a74bf7229aaf620b544d7fb6f5b199b20b2581752bece576a50adeea867",
@@ -1096,32 +1096,32 @@
       "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
       "participants": [
         {
-          "participant_uid": "dec-syd1::1220ac2594b1f585253379f7fd2d121b204088b41ae60a31698a802fef37d5b8",
+          "participant_uid": "dec-syd1::122004fde4fda828384def7426720ab8ce41d2bff13131bb4d59ca48f9b91277dff4",
           "permission": "Submission",
           "owner_key": "02ac2594b1f585253379f7fd2d121b204088b41ae60a31698a802fef37d5b87027"
         },
         {
-          "participant_uid": "canton-nyc::12208651f1b033067b4c5cbe09328210794e2bef13d338de4bf0aca2af277b6d",
+          "participant_uid": "canton-nyc::122016247cef397323ea69ee6501e66e824e81c03b19f0460acaa3374748b319158c",
           "permission": "Submission",
           "owner_key": "028651f1b033067b4c5cbe09328210794e2bef13d338de4bf0aca2af277b6de873"
         },
         {
-          "participant_uid": "validator-sgp::122044a2d77adbb0679fa754a1e8493afae5d1597eada7404cf7a569263574db",
+          "participant_uid": "validator-sgp::1220dfe41ccf56a0ccf085399e11bca59b2c754654be3c82bf40d90e250c11ce6af6",
           "permission": "Submission",
           "owner_key": "0244a2d77adbb0679fa754a1e8493afae5d1597eada7404cf7a569263574db475b"
         },
         {
-          "participant_uid": "ibtc-fra-spare::12206b9220cb439e354deddd22af1f602a6ee3983b3a8956d0ef7dd07e958ebf",
+          "participant_uid": "ibtc-fra-spare::1220ec155c888ada79d19fad35124d30ed9d86cb90fc9d6be2e89668ec926fb2ccaa",
           "permission": "Submission",
           "owner_key": "026b9220cb439e354deddd22af1f602a6ee3983b3a8956d0ef7dd07e958ebf3ff6"
         },
         {
-          "participant_uid": "dec-saopaulo::1220ecc57a74bf7229aaf620b544d7fb6f5b199b20b2581752bece576a50adee",
+          "participant_uid": "dec-saopaulo::12209003476a43f9bfa80a7c1b830431cbc85a743437c9d3116a9139570896c5062b",
           "permission": "Submission",
           "owner_key": "02ecc57a74bf7229aaf620b544d7fb6f5b199b20b2581752bece576a50adeea867"
         },
         {
-          "participant_uid": "canton-mum::1220649a6a537db9f061d24e3c98ef1c46cbe0605015fb2ec3d52ea6215ed0ee",
+          "participant_uid": "canton-mum::1220f3ffa802e6629f77946d7f58c2b2d8df9d28d8d6ca27c79b682bbe9bff548120",
           "permission": "Submission",
           "owner_key": "02649a6a537db9f061d24e3c98ef1c46cbe0605015fb2ec3d52ea6215ed0ee0e6c"
         }
@@ -1132,7 +1132,7 @@
       }
     },
     {
-      "party_id": "cc-preapproval::1220b6524bd0b5233fce738e4a3b4881781edb96342da2b8132acec82aee7d0d",
+      "party_id": "cc-preapproval::12208fe95c2a4a09b6801a45a250c9a75b7a4d8c03366a2213e2eb7f6f16fe022d1d",
       "threshold": 5,
       "owners": [
         "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead",
@@ -1146,32 +1146,32 @@
       "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
       "participants": [
         {
-          "participant_uid": "ibtc-fra-spare::12206b9220cb439e354deddd22af1f602a6ee3983b3a8956d0ef7dd07e958ebf",
+          "participant_uid": "ibtc-fra-spare::1220ec155c888ada79d19fad35124d30ed9d86cb90fc9d6be2e89668ec926fb2ccaa",
           "permission": "Submission",
           "owner_key": "026b9220cb439e354deddd22af1f602a6ee3983b3a8956d0ef7dd07e958ebf3ff6"
         },
         {
-          "participant_uid": "dec-saopaulo::1220ecc57a74bf7229aaf620b544d7fb6f5b199b20b2581752bece576a50adee",
+          "participant_uid": "dec-saopaulo::12209003476a43f9bfa80a7c1b830431cbc85a743437c9d3116a9139570896c5062b",
           "permission": "Submission",
           "owner_key": "02ecc57a74bf7229aaf620b544d7fb6f5b199b20b2581752bece576a50adeea867"
         },
         {
-          "participant_uid": "canton-mum::1220649a6a537db9f061d24e3c98ef1c46cbe0605015fb2ec3d52ea6215ed0ee",
+          "participant_uid": "canton-mum::1220f3ffa802e6629f77946d7f58c2b2d8df9d28d8d6ca27c79b682bbe9bff548120",
           "permission": "Submission",
           "owner_key": "02649a6a537db9f061d24e3c98ef1c46cbe0605015fb2ec3d52ea6215ed0ee0e6c"
         },
         {
-          "participant_uid": "bsafe-cape::122015a048f5c1a6ede86d6ec87272554bbbd23f4a342ac191dc644612f35d6a",
+          "participant_uid": "bsafe-cape::12203e4773a51c0520ab9e446cc00c683ba1cc8c8f54647125c4fb6293229cdbbc0a",
           "permission": "Submission",
           "owner_key": "0215a048f5c1a6ede86d6ec87272554bbbd23f4a342ac191dc644612f35d6a60b2"
         },
         {
-          "participant_uid": "relay-dub::12202946e81d20be83b1f31e8df7d4cc139473b6e44143a79f4d92149eb0e50a",
+          "participant_uid": "relay-dub::1220b8fa6add9d783b83d854eb24e0e9b31526dc446cd1c943bb6cd0cccd0e345a8b",
           "permission": "Submission",
           "owner_key": "022946e81d20be83b1f31e8df7d4cc139473b6e44143a79f4d92149eb0e50abee0"
         },
         {
-          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d",
+          "participant_uid": "iBTC-validator-1::122042208735e3f23ef64a268afafa9276c05e5810c296e93444cdec4a635738a72f",
           "permission": "Submission",
           "owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2"
         }
@@ -1215,7 +1215,7 @@
       }
     },
     {
-      "party_id": "cbtc-custody-eu::122042d0d7c4e92600533f99099660ac33fdd59965381605673796341b2a4701",
+      "party_id": "cbtc-custody-eu::12209eda4f8a0463452f22dc8ca1e8444780979e43b05a17bbaa4798286829528c1e",
       "threshold": 1,
       "owners": [
         "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
@@ -1224,12 +1224,12 @@
       "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
       "participants": [
         {
-          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d",
+          "participant_uid": "iBTC-validator-1::122042208735e3f23ef64a268afafa9276c05e5810c296e93444cdec4a635738a72f",
           "permission": "Submission",
           "owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2"
         },
         {
-          "participant_uid": "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+          "participant_uid": "iBTC-validator-2::1220a8c40594107def9ef1403d34e17a25018a411561038042d974766e506de1bdd4",
           "permission": "Submission",
           "owner_key": "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead"
         }
@@ -1249,7 +1249,7 @@
       }
     },
     {
-      "party_id": "cbtc-custody-us::1220e0a92fecbc2a6a5b13d99bfe2e71134587976be0fcfaadbfee0ae0128a05",
+      "party_id": "cbtc-custody-us::122046b720927b4e32aec05c08c92f6e0e26078923d3f0458aa8d7374de4c9d54097",
       "threshold": 2,
       "owners": [
         "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
@@ -1259,17 +1259,17 @@
       "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
       "participants": [
         {
-          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d",
+          "participant_uid": "iBTC-validator-1::122042208735e3f23ef64a268afafa9276c05e5810c296e93444cdec4a635738a72f",
           "permission": "Submission",
           "owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2"
         },
         {
-          "participant_uid": "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+          "participant_uid": "iBTC-validator-2::1220a8c40594107def9ef1403d34e17a25018a411561038042d974766e506de1bdd4",
           "permission": "Submission",
           "owner_key": "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead"
         },
         {
-          "participant_uid": "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343",
+          "participant_uid": "iBTC-validator-3::122029739d4b281f74d7e7037387980ee36165085e5dd51c1617627bcfb6a434b830",
           "permission": "Submission",
           "owner_key": "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e"
         }
@@ -1289,7 +1289,7 @@
       }
     },
     {
-      "party_id": "treasury-basis-btc::1220f6f48d14fe041563d9d47b660259db8d993e4788d160c547b0e241facf9f",
+      "party_id": "treasury-basis-btc::122060ee460d713ac5dfb6ee615731124f6965f7b3f72a4939ad7aa64d90a70900fe",
       "threshold": 3,
       "owners": [
         "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
@@ -1300,22 +1300,22 @@
       "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
       "participants": [
         {
-          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d",
+          "participant_uid": "iBTC-validator-1::122042208735e3f23ef64a268afafa9276c05e5810c296e93444cdec4a635738a72f",
           "permission": "Submission",
           "owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2"
         },
         {
-          "participant_uid": "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+          "participant_uid": "iBTC-validator-2::1220a8c40594107def9ef1403d34e17a25018a411561038042d974766e506de1bdd4",
           "permission": "Submission",
           "owner_key": "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead"
         },
         {
-          "participant_uid": "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343",
+          "participant_uid": "iBTC-validator-3::122029739d4b281f74d7e7037387980ee36165085e5dd51c1617627bcfb6a434b830",
           "permission": "Submission",
           "owner_key": "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e"
         },
         {
-          "participant_uid": "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+          "participant_uid": "cn-validator-07::122038baa36e80ce0d445f3b49b67e965ea5f847469f571b220fedc9d99aa8d5fb9f",
           "permission": "Submission",
           "owner_key": "0261982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae7629"
         }
@@ -1335,7 +1335,7 @@
       }
     },
     {
-      "party_id": "treasury-carry-eth::122041138f3c525b216bfdd347ce51e3acd5fca898301a51cdcf43cde0e2ab8f",
+      "party_id": "treasury-carry-eth::12209d105435281fb69f0f91429b655a447ad51b4a27652d495fa0a66de4c49e3104",
       "threshold": 1,
       "owners": [
         "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
@@ -1347,27 +1347,27 @@
       "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
       "participants": [
         {
-          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d",
+          "participant_uid": "iBTC-validator-1::122042208735e3f23ef64a268afafa9276c05e5810c296e93444cdec4a635738a72f",
           "permission": "Submission",
           "owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2"
         },
         {
-          "participant_uid": "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+          "participant_uid": "iBTC-validator-2::1220a8c40594107def9ef1403d34e17a25018a411561038042d974766e506de1bdd4",
           "permission": "Submission",
           "owner_key": "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead"
         },
         {
-          "participant_uid": "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343",
+          "participant_uid": "iBTC-validator-3::122029739d4b281f74d7e7037387980ee36165085e5dd51c1617627bcfb6a434b830",
           "permission": "Submission",
           "owner_key": "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e"
         },
         {
-          "participant_uid": "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+          "participant_uid": "cn-validator-07::122038baa36e80ce0d445f3b49b67e965ea5f847469f571b220fedc9d99aa8d5fb9f",
           "permission": "Submission",
           "owner_key": "0261982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae7629"
         },
         {
-          "participant_uid": "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+          "participant_uid": "relay-zrh::122032e3df42c8378bef548df0fdccf4b16ed4c7fb966fd0ab18d0b05772a5704b25",
           "permission": "Submission",
           "owner_key": "02d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44eef8"
         }
@@ -1387,7 +1387,7 @@
       }
     },
     {
-      "party_id": "attestor-pool-apac::1220867ad664f1dbae731553a136622fa71d8744fdd8622be7574e555cca4977",
+      "party_id": "attestor-pool-apac::1220c6c08252e895bc948683bad1255899b8e2cea74c30018940f5979808be178c7b",
       "threshold": 2,
       "owners": [
         "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
@@ -1400,32 +1400,32 @@
       "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
       "participants": [
         {
-          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d",
+          "participant_uid": "iBTC-validator-1::122042208735e3f23ef64a268afafa9276c05e5810c296e93444cdec4a635738a72f",
           "permission": "Submission",
           "owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2"
         },
         {
-          "participant_uid": "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+          "participant_uid": "iBTC-validator-2::1220a8c40594107def9ef1403d34e17a25018a411561038042d974766e506de1bdd4",
           "permission": "Submission",
           "owner_key": "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead"
         },
         {
-          "participant_uid": "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343",
+          "participant_uid": "iBTC-validator-3::122029739d4b281f74d7e7037387980ee36165085e5dd51c1617627bcfb6a434b830",
           "permission": "Submission",
           "owner_key": "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e"
         },
         {
-          "participant_uid": "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+          "participant_uid": "cn-validator-07::122038baa36e80ce0d445f3b49b67e965ea5f847469f571b220fedc9d99aa8d5fb9f",
           "permission": "Submission",
           "owner_key": "0261982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae7629"
         },
         {
-          "participant_uid": "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+          "participant_uid": "relay-zrh::122032e3df42c8378bef548df0fdccf4b16ed4c7fb966fd0ab18d0b05772a5704b25",
           "permission": "Submission",
           "owner_key": "02d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44eef8"
         },
         {
-          "participant_uid": "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9",
+          "participant_uid": "bsafe-tok3::122039e33739c64ad43fa23b83d26f59177e37e1e81b9ceb3674b8e9e6b56c443dd7",
           "permission": "Submission",
           "owner_key": "0210f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e916ed"
         }
@@ -1445,7 +1445,7 @@
       }
     },
     {
-      "party_id": "relay-fra1::12201d33028c4ab5dc7b0587279e3c82ea655c5618809f1131df08f455b2695e",
+      "party_id": "relay-fra1::122043c64c77e862ffd908ccbbae638f91ca43f5bc8937ed69a89b069e870628072b",
       "threshold": 3,
       "owners": [
         "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
@@ -1454,12 +1454,12 @@
       "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
       "participants": [
         {
-          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d",
+          "participant_uid": "iBTC-validator-1::122042208735e3f23ef64a268afafa9276c05e5810c296e93444cdec4a635738a72f",
           "permission": "Submission",
           "owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2"
         },
         {
-          "participant_uid": "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+          "participant_uid": "iBTC-validator-2::1220a8c40594107def9ef1403d34e17a25018a411561038042d974766e506de1bdd4",
           "permission": "Submission",
           "owner_key": "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead"
         }
@@ -1479,7 +1479,7 @@
       }
     },
     {
-      "party_id": "relay-sgp1::1220bc58b3b4b11dcb83f9d37b0632c696ada7728828ab67cd675b9a6b9aec2f",
+      "party_id": "relay-sgp1::1220392967bbc420d23c4e06977856359777125b954ab1e4a36b3d27cbf107038ca3",
       "threshold": 1,
       "owners": [
         "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
@@ -1489,17 +1489,17 @@
       "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
       "participants": [
         {
-          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d",
+          "participant_uid": "iBTC-validator-1::122042208735e3f23ef64a268afafa9276c05e5810c296e93444cdec4a635738a72f",
           "permission": "Submission",
           "owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2"
         },
         {
-          "participant_uid": "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+          "participant_uid": "iBTC-validator-2::1220a8c40594107def9ef1403d34e17a25018a411561038042d974766e506de1bdd4",
           "permission": "Submission",
           "owner_key": "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead"
         },
         {
-          "participant_uid": "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343",
+          "participant_uid": "iBTC-validator-3::122029739d4b281f74d7e7037387980ee36165085e5dd51c1617627bcfb6a434b830",
           "permission": "Submission",
           "owner_key": "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e"
         }
@@ -1519,7 +1519,7 @@
       }
     },
     {
-      "party_id": "dec-treasury-ops::12209e9c89dc1fcb9b8b2a523b6ef407cbf5a704ecd0ce59d9efcc2b3e82f03a",
+      "party_id": "dec-treasury-ops::12205b71290368828b09950712fc2e35efe88d5cfa0ea0f517741054ad7b0e4aeaa7",
       "threshold": 2,
       "owners": [
         "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
@@ -1530,22 +1530,22 @@
       "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
       "participants": [
         {
-          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d",
+          "participant_uid": "iBTC-validator-1::122042208735e3f23ef64a268afafa9276c05e5810c296e93444cdec4a635738a72f",
           "permission": "Submission",
           "owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2"
         },
         {
-          "participant_uid": "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+          "participant_uid": "iBTC-validator-2::1220a8c40594107def9ef1403d34e17a25018a411561038042d974766e506de1bdd4",
           "permission": "Submission",
           "owner_key": "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead"
         },
         {
-          "participant_uid": "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343",
+          "participant_uid": "iBTC-validator-3::122029739d4b281f74d7e7037387980ee36165085e5dd51c1617627bcfb6a434b830",
           "permission": "Submission",
           "owner_key": "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e"
         },
         {
-          "participant_uid": "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+          "participant_uid": "cn-validator-07::122038baa36e80ce0d445f3b49b67e965ea5f847469f571b220fedc9d99aa8d5fb9f",
           "permission": "Submission",
           "owner_key": "0261982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae7629"
         }
@@ -1565,7 +1565,7 @@
       }
     },
     {
-      "party_id": "ibtc-settlement::1220f4c32504087b6c93725108d630f7aa3d06cbe678545577773cfe6e6a7db2",
+      "party_id": "ibtc-settlement::122053b7644b996b75d931411ad9a0534f859c1ff3697c500d057b2ca15bf2c4c1b1",
       "threshold": 3,
       "owners": [
         "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
@@ -1577,27 +1577,27 @@
       "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
       "participants": [
         {
-          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d",
+          "participant_uid": "iBTC-validator-1::122042208735e3f23ef64a268afafa9276c05e5810c296e93444cdec4a635738a72f",
           "permission": "Submission",
           "owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2"
         },
         {
-          "participant_uid": "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+          "participant_uid": "iBTC-validator-2::1220a8c40594107def9ef1403d34e17a25018a411561038042d974766e506de1bdd4",
           "permission": "Submission",
           "owner_key": "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead"
         },
         {
-          "participant_uid": "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343",
+          "participant_uid": "iBTC-validator-3::122029739d4b281f74d7e7037387980ee36165085e5dd51c1617627bcfb6a434b830",
           "permission": "Submission",
           "owner_key": "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e"
         },
         {
-          "participant_uid": "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+          "participant_uid": "cn-validator-07::122038baa36e80ce0d445f3b49b67e965ea5f847469f571b220fedc9d99aa8d5fb9f",
           "permission": "Submission",
           "owner_key": "0261982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae7629"
         },
         {
-          "participant_uid": "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+          "participant_uid": "relay-zrh::122032e3df42c8378bef548df0fdccf4b16ed4c7fb966fd0ab18d0b05772a5704b25",
           "permission": "Submission",
           "owner_key": "02d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44eef8"
         }
@@ -1617,7 +1617,7 @@
       }
     },
     {
-      "party_id": "token-registry::1220a825252c346d5e9bb6d1833ed06b51858a5a1520378cc5ff7b5f9b52c32e",
+      "party_id": "token-registry::12204911e083d4289c3dc22720d2aa5a9a802ba7c2cfe05ad3b6cde966927854a65a",
       "threshold": 1,
       "owners": [
         "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
@@ -1630,32 +1630,32 @@
       "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
       "participants": [
         {
-          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d",
+          "participant_uid": "iBTC-validator-1::122042208735e3f23ef64a268afafa9276c05e5810c296e93444cdec4a635738a72f",
           "permission": "Submission",
           "owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2"
         },
         {
-          "participant_uid": "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+          "participant_uid": "iBTC-validator-2::1220a8c40594107def9ef1403d34e17a25018a411561038042d974766e506de1bdd4",
           "permission": "Submission",
           "owner_key": "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead"
         },
         {
-          "participant_uid": "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343",
+          "participant_uid": "iBTC-validator-3::122029739d4b281f74d7e7037387980ee36165085e5dd51c1617627bcfb6a434b830",
           "permission": "Submission",
           "owner_key": "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e"
         },
         {
-          "participant_uid": "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+          "participant_uid": "cn-validator-07::122038baa36e80ce0d445f3b49b67e965ea5f847469f571b220fedc9d99aa8d5fb9f",
           "permission": "Submission",
           "owner_key": "0261982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae7629"
         },
         {
-          "participant_uid": "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+          "participant_uid": "relay-zrh::122032e3df42c8378bef548df0fdccf4b16ed4c7fb966fd0ab18d0b05772a5704b25",
           "permission": "Submission",
           "owner_key": "02d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44eef8"
         },
         {
-          "participant_uid": "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9",
+          "participant_uid": "bsafe-tok3::122039e33739c64ad43fa23b83d26f59177e37e1e81b9ceb3674b8e9e6b56c443dd7",
           "permission": "Submission",
           "owner_key": "0210f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e916ed"
         }
@@ -1675,7 +1675,7 @@
       }
     },
     {
-      "party_id": "governance-rewards::12206d2f2a54b4e591a31d094aa6b3dbe1cd079618c8d875e5879e0e653ae229",
+      "party_id": "governance-rewards::122030b0dd23e76bbcb47934f3a7f6aaeff60b17f02e1513fecc2e957879639ec0c5",
       "threshold": 2,
       "owners": [
         "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
@@ -1684,12 +1684,12 @@
       "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
       "participants": [
         {
-          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d",
+          "participant_uid": "iBTC-validator-1::122042208735e3f23ef64a268afafa9276c05e5810c296e93444cdec4a635738a72f",
           "permission": "Submission",
           "owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2"
         },
         {
-          "participant_uid": "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+          "participant_uid": "iBTC-validator-2::1220a8c40594107def9ef1403d34e17a25018a411561038042d974766e506de1bdd4",
           "permission": "Submission",
           "owner_key": "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead"
         }
@@ -1709,7 +1709,7 @@
       }
     },
     {
-      "party_id": "utility-onboarding::122025e1d47ce3ac25ab10e1ff0e0be67b15b13a9170c64af60f33be6c224b81",
+      "party_id": "utility-onboarding::12207bc7775020db72dca2831ed4ccdac28fe123f9a5e8c0830a2822cebfd5940155",
       "threshold": 3,
       "owners": [
         "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
@@ -1719,17 +1719,17 @@
       "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
       "participants": [
         {
-          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d",
+          "participant_uid": "iBTC-validator-1::122042208735e3f23ef64a268afafa9276c05e5810c296e93444cdec4a635738a72f",
           "permission": "Submission",
           "owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2"
         },
         {
-          "participant_uid": "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+          "participant_uid": "iBTC-validator-2::1220a8c40594107def9ef1403d34e17a25018a411561038042d974766e506de1bdd4",
           "permission": "Submission",
           "owner_key": "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead"
         },
         {
-          "participant_uid": "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343",
+          "participant_uid": "iBTC-validator-3::122029739d4b281f74d7e7037387980ee36165085e5dd51c1617627bcfb6a434b830",
           "permission": "Submission",
           "owner_key": "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e"
         }
@@ -1749,7 +1749,7 @@
       }
     },
     {
-      "party_id": "mint-authority-2::12209451c3a4738d3ab31b7940763ccc3d5db1561f18978a17974197500aabfb",
+      "party_id": "mint-authority-2::1220c68f9a11e319b4104bdd32a7b8c33f3bfbbd4b75ff4d3b029e0fd7683de657c5",
       "threshold": 1,
       "owners": [
         "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
@@ -1760,22 +1760,22 @@
       "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
       "participants": [
         {
-          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d",
+          "participant_uid": "iBTC-validator-1::122042208735e3f23ef64a268afafa9276c05e5810c296e93444cdec4a635738a72f",
           "permission": "Submission",
           "owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2"
         },
         {
-          "participant_uid": "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+          "participant_uid": "iBTC-validator-2::1220a8c40594107def9ef1403d34e17a25018a411561038042d974766e506de1bdd4",
           "permission": "Submission",
           "owner_key": "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead"
         },
         {
-          "participant_uid": "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343",
+          "participant_uid": "iBTC-validator-3::122029739d4b281f74d7e7037387980ee36165085e5dd51c1617627bcfb6a434b830",
           "permission": "Submission",
           "owner_key": "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e"
         },
         {
-          "participant_uid": "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+          "participant_uid": "cn-validator-07::122038baa36e80ce0d445f3b49b67e965ea5f847469f571b220fedc9d99aa8d5fb9f",
           "permission": "Submission",
           "owner_key": "0261982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae7629"
         }
@@ -1795,7 +1795,7 @@
       }
     },
     {
-      "party_id": "burn-authority::12205d2797cc90d8f0bb89a0aede52f248a513cb61c0d2756a1f11b4b0f268be",
+      "party_id": "burn-authority::1220bcc543613bd8974b9fe34b74d82f467b78593a7138e9fc1636ecdb98695dc9b6",
       "threshold": 2,
       "owners": [
         "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
@@ -1807,27 +1807,27 @@
       "my_owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2",
       "participants": [
         {
-          "participant_uid": "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d",
+          "participant_uid": "iBTC-validator-1::122042208735e3f23ef64a268afafa9276c05e5810c296e93444cdec4a635738a72f",
           "permission": "Submission",
           "owner_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2"
         },
         {
-          "participant_uid": "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+          "participant_uid": "iBTC-validator-2::1220a8c40594107def9ef1403d34e17a25018a411561038042d974766e506de1bdd4",
           "permission": "Submission",
           "owner_key": "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead"
         },
         {
-          "participant_uid": "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343",
+          "participant_uid": "iBTC-validator-3::122029739d4b281f74d7e7037387980ee36165085e5dd51c1617627bcfb6a434b830",
           "permission": "Submission",
           "owner_key": "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e"
         },
         {
-          "participant_uid": "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+          "participant_uid": "cn-validator-07::122038baa36e80ce0d445f3b49b67e965ea5f847469f571b220fedc9d99aa8d5fb9f",
           "permission": "Submission",
           "owner_key": "0261982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae7629"
         },
         {
-          "participant_uid": "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+          "participant_uid": "relay-zrh::122032e3df42c8378bef548df0fdccf4b16ed4c7fb966fd0ab18d0b05772a5704b25",
           "permission": "Submission",
           "owner_key": "02d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44eef8"
         }

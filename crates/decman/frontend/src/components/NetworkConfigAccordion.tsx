@@ -24,12 +24,17 @@ import CancelIcon from "@mui/icons-material/Cancel";
 import PersonIcon from "@mui/icons-material/Person";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import ContentPasteIcon from "@mui/icons-material/ContentPaste";
+import DownloadIcon from "@mui/icons-material/Download";
+import UploadFileIcon from "@mui/icons-material/UploadFile";
+import { ADMIN_ACCESS } from "../constants";
 import { useSnackbar } from "../contexts";
 import { zebraRow } from "../styles";
 import { copyToClipboard } from "../clipboard";
 import { fieldHelpAdornment } from "./FieldHelp";
 import { StatusDot } from "./StatusDot";
 import { currentStepLabel, workflowKindLabel } from "../workflowSteps";
+import { PeersCsvDialog, type PeersCsvMode } from "./PeersCsvDialog";
+import { parsePeersCsv, peerToCsvRow } from "../peerCsv";
 import type {
   NetworkConfig,
   Peer,
@@ -68,6 +73,7 @@ export const NetworkConfigAccordion = ({
   const [editing, setEditing] = useState(false);
   const [editedPeers, setEditedPeers] = useState<Peer[]>([]);
   const [saving, setSaving] = useState(false);
+  const [csvMode, setCsvMode] = useState<PeersCsvMode | null>(null);
   const { showSnackbar } = useSnackbar();
   const theme = useTheme();
   const isSmall = useMediaQuery(theme.breakpoints.down("sm"));
@@ -138,6 +144,9 @@ export const NetworkConfigAccordion = ({
       }
     : null;
 
+  const exportablePeers: Peer[] =
+    selfEntry && !selfPeer ? [selfEntry, ...config.peers] : config.peers;
+
   const startEditing = () => {
     setEditedPeers(config.peers.map((p) => ({ ...p })));
     setEditing(true);
@@ -176,24 +185,33 @@ export const NetworkConfigAccordion = ({
   };
 
   const addPeerFromClipboard = async () => {
+    let text: string;
     try {
-      const text = await navigator.clipboard.readText();
-      const parts = text.trim().split(",");
-      if (parts.length < 5) {
-        showSnackbar(
-          "Invalid CSV format. Expected: participant_id,name,address,port,public_key",
-          "error",
-        );
-        return;
-      }
-      const [participant_id, name, address, portStr, public_key] = parts;
-      const port = parseInt(portStr) || 9000;
-      const newPeer: Peer = { participant_id, name, address, port, public_key };
-      setEditedPeers((peers) => [...peers, newPeer]);
-      showSnackbar("Peer added from clipboard");
+      text = await navigator.clipboard.readText();
     } catch {
       showSnackbar("Failed to read clipboard", "error");
+      return;
     }
+    const { rows, rejected } = parsePeersCsv(text);
+    const skipped = rejected
+      .map((r) => `line ${r.line}: ${r.reason}`)
+      .join("; ");
+    if (rows.length === 0) {
+      showSnackbar(
+        skipped || "Expected: participant_id,name,address,port,public_key",
+        "error",
+      );
+      return;
+    }
+    setEditedPeers((peers) => [...peers, ...rows.map((r) => r.peer)]);
+    const added =
+      rows.length === 1
+        ? "Peer added from clipboard"
+        : `${rows.length} peers added from clipboard`;
+    showSnackbar(
+      skipped ? `${added}. Skipped ${skipped}` : added,
+      skipped ? "error" : "info",
+    );
   };
 
   const removePeer = (index: number) => {
@@ -361,24 +379,55 @@ export const NetworkConfigAccordion = ({
                   variant="outlined"
                   startIcon={<ContentCopyIcon />}
                   onClick={async () => {
-                    const name = selfPeer?.name || truncateParticipantId(selfEntry.participant_id);
-                    const csvRow = `${selfEntry.participant_id},${name},${selfEntry.address},${selfEntry.port},${selfEntry.public_key},`;
-                    const success = await copyToClipboard(csvRow);
+                    const name =
+                      selfPeer?.name ||
+                      truncateParticipantId(selfEntry.participant_id);
+                    const success = await copyToClipboard(
+                      peerToCsvRow({ ...selfEntry, name }),
+                    );
                     showSnackbar(success ? "Copied to clipboard" : "Failed to copy");
                   }}
                 >
                   Share my data
                 </Button>
               )}
+              <Button
+                size="small"
+                variant="outlined"
+                startIcon={<DownloadIcon />}
+                onClick={() => setCsvMode("export")}
+              >
+                Export CSV
+              </Button>
               {onSave && (
-                <Tooltip title="Edit peers">
-                  <IconButton size="small" onClick={startEditing}>
-                    <EditIcon fontSize="small" />
-                  </IconButton>
-                </Tooltip>
+                <>
+                  {ADMIN_ACCESS && (
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      startIcon={<UploadFileIcon />}
+                      onClick={() => setCsvMode("import")}
+                    >
+                      Import CSV
+                    </Button>
+                  )}
+                  <Tooltip title="Edit peers">
+                    <IconButton size="small" onClick={startEditing}>
+                      <EditIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                </>
               )}
             </Box>
           </Box>
+          <PeersCsvDialog
+            open={csvMode !== null}
+            mode={csvMode ?? "export"}
+            peers={csvMode === "import" ? config.peers : exportablePeers}
+            selfNodeId={selfNodeId}
+            onClose={() => setCsvMode(null)}
+            onSave={ADMIN_ACCESS ? onSave : undefined}
+          />
           <Box sx={{ overflowX: "auto" }}>
             <Table size="small" sx={{ minWidth: 650 }}>
               <TableHead>
