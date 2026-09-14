@@ -58,21 +58,24 @@ describe("stepsForRun", () => {
           step_total: steps.length,
         }),
       ),
-    ).toBe(steps);
+    ).toEqual(steps);
   });
 
-  it("keeps the list for a peer row on the synthetic Active step", () => {
+  it("puts the synthetic step on the dot the peer row sits on", () => {
     const steps = WORKFLOW_STEPS.Kick;
-    expect(
-      stepsForRun(
-        run({
-          kind: "Kick",
-          current_step: "Active",
-          step_index: 0,
-          step_total: steps.length,
-        }),
-      ),
-    ).toBe(steps);
+    const got = stepsForRun(
+      run({
+        kind: "Kick",
+        current_step: "Active",
+        step_index: 0,
+        step_total: steps.length,
+      }),
+    );
+    // The peer is not waiting for members — it waits for the coordinator — so
+    // the dot it sits on must not describe WaitingForPeers.
+    expect(got?.[0].name).toBe("Active");
+    expect(got?.[0].label).toBe("Waiting for the coordinator");
+    expect(got?.slice(1)).toEqual(steps.slice(1));
   });
 
   it("drops the list when the backend reports a different step count", () => {
@@ -142,6 +145,19 @@ describe("stepsForRun", () => {
         }),
       ),
     ).toBeNull();
+  });
+});
+
+describe("synthetic steps", () => {
+  it("keeps the footer and the dot saying the same thing", () => {
+    const r = {
+      kind: "Kick" as const,
+      current_step: "Active",
+      step_index: 0,
+      step_total: WORKFLOW_STEPS.Kick.length,
+    };
+    const onDot = stepsForRun(r)?.[r.step_index];
+    expect(currentStepLabel(r)).toBe(onDot?.label);
   });
 });
 

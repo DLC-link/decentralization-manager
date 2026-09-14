@@ -244,14 +244,17 @@ export const WORKFLOW_STEPS: Record<WorkflowKind, WorkflowStepInfo[]> = {
  * `"Active"` from the moment the invite is accepted until the coordinator's
  * first command lands.
  */
-const SYNTHETIC_STEP_LABELS: Record<string, string> = {
-  Active: "Waiting for the coordinator",
+const SYNTHETIC_STEPS: Record<string, WorkflowStepInfo> = {
+  Active: {
+    name: "Active",
+    label: "Waiting for the coordinator",
+    description:
+      "This node accepted the invite. The coordinator has not sent it a command yet.",
+  },
 };
 
-const syntheticLabel = (name: string): string | undefined =>
-  Object.hasOwn(SYNTHETIC_STEP_LABELS, name)
-    ? SYNTHETIC_STEP_LABELS[name]
-    : undefined;
+const syntheticStep = (name: string): WorkflowStepInfo | undefined =>
+  Object.hasOwn(SYNTHETIC_STEPS, name) ? SYNTHETIC_STEPS[name] : undefined;
 
 /** `"SubmitClearOnboarding"` -> `"Submit clear onboarding"`. */
 export const humanizeEnumName = (name: string): string =>
@@ -282,18 +285,29 @@ interface StepPosition {
  * carries both the total and the name of the step it sits on, which is enough
  * to detect a stale copy and fall back to unlabelled dots instead of confident
  * wrong labels: the name at `step_index` has to be the one the run reports, so
- * a renamed or replaced step is caught even when the total holds. Only the
- * synthetic steps the backend writes outside any enum are exempt.
+ * a renamed or replaced step is caught even when the total holds. A synthetic
+ * step the backend writes outside any enum takes the place of the entry at its
+ * index, so the dot describes the state the run is actually in.
+ *
+ * A step reordered further down the list than the run has reached is the one
+ * case this cannot see, because no other step name is on the wire. Those
+ * labels self-correct: the run advances into the changed step, the name stops
+ * matching, and the dots go bare.
  */
 export const stepsForRun = (run: StepPosition): WorkflowStepInfo[] | null => {
   const steps = WORKFLOW_STEPS[run.kind];
   if (!steps || steps.length !== run.step_total) return null;
-  if (syntheticLabel(run.current_step) !== undefined) return steps;
+  const synthetic = syntheticStep(run.current_step);
+  if (synthetic) {
+    // The run is not on the enum step this index names, so the dot has to
+    // carry the synthetic step rather than describe one that is not running.
+    return steps.map((s, i) => (i === run.step_index ? synthetic : s));
+  }
   return steps[run.step_index]?.name === run.current_step ? steps : null;
 };
 
 /** Human label for the step a run sits on, PascalCase name as the fallback. */
 export const currentStepLabel = (run: StepPosition): string =>
   stepsForRun(run)?.find((s) => s.name === run.current_step)?.label ??
-  syntheticLabel(run.current_step) ??
+  syntheticStep(run.current_step)?.label ??
   humanizeEnumName(run.current_step);
