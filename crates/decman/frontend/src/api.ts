@@ -1,9 +1,14 @@
-import { clearToken, getToken } from "./auth";
+import { clearToken, getToken, refreshAccessToken } from "./auth";
 
 /**
  * Wrapper around fetch() that attaches the Bearer token from sessionStorage.
- * Drop-in replacement for fetch(). On 401 with a stale token we drop it and
- * reload so the AuthProvider kicks the user back to Keycloak login.
+ * Drop-in replacement for fetch(). On 401 we renew the token and retry once;
+ * only when the renewal fails do we drop the session and reload, so the
+ * AuthProvider kicks the user back to Keycloak login.
+ *
+ * The retry is what keeps a long request from ending the session: the access
+ * token lives five minutes, so a request still in flight when it lapses comes
+ * back 401 with a refresh token that is perfectly good.
  *
  * The reload is gated on having had a token: a 401 with no token in the
  * first place means the backend rejected an unauthenticated request, which
@@ -21,6 +26,12 @@ export async function authenticatedFetch(
   }
   const response = await fetch(input, { ...init, headers });
   if (token && response.status === 401) {
+    const renewed = await refreshAccessToken();
+    if (renewed) {
+      const retryHeaders = new Headers(init?.headers);
+      retryHeaders.set("Authorization", `Bearer ${renewed}`);
+      return fetch(input, { ...init, headers: retryHeaders });
+    }
     clearToken();
     window.location.reload();
   }

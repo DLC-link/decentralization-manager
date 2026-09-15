@@ -416,7 +416,11 @@ pub struct WorkflowRun {
     pub step_index: i64,
     pub step_total: i64,
     /// JSON-encoded copy of the original *Config struct that started the
-    /// workflow — the resume path round-trips it back through serde.
+    /// workflow — the resume path round-trips it back through serde. Kept off
+    /// the wire: a Dars config holds every DAR's bytes, so the 2-second
+    /// `/workflows` poll shipped 8 MB per tick. Everything the feed renders is
+    /// lifted out of it into the derived fields below.
+    #[serde(default, skip_serializing)]
     pub config_json: String,
     /// Hex pubkey of the coordinator. None for coordinator-side rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
