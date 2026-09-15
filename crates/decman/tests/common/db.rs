@@ -421,18 +421,6 @@ pub async fn dec_party_cache_updated_at(
     Ok(v)
 }
 
-pub async fn count_dec_party_identity(db_path: &Path, dec_party_id: &str) -> anyhow::Result<i64> {
-    let pool = open(db_path).await?;
-    let n: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM dec_party_identity WHERE dec_party_id = ?1")
-            .bind(dec_party_id)
-            .fetch_one(&pool)
-            .await
-            .context("count_dec_party_identity")?;
-    pool.close().await;
-    Ok(n)
-}
-
 /// How many `dec_party_participant` rows carry a key for a party.
 ///
 /// This is the long-lived key material an on-ledger party keeps: every
