@@ -232,6 +232,11 @@ hashing scheme version, `preparationTime`, `maxRecordTime`, `deadline = min(maxR
 preparationTime + tolerance) − 30 min`). `signers` = invitee node parties. The proposer signs
 locally and adds its own signature at execute time.
 
+The proposer advances when the counted acceptances plus itself reach
+`party_signing_keys.threshold`, not when every invitee has accepted. A contracts run needs
+threshold signatures, so one silent operator must not hold up a party that has the quorum to
+act. An explicit `Decline` still fails the run: silence and refusal are different answers.
+
 A member that accepted the proposal: requires `round.decPartyId == acceptedProposal.decPartyId`,
 `act_as == [that party]`, `maxRecordTime` present, `deadline > now`, its own key fingerprint
 ∈ `party_signing_keys` of the head P2P; recomputes the hash with `canton_hash`; decodes the

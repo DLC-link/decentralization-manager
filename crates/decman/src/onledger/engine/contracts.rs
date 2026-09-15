@@ -157,6 +157,16 @@ pub fn missing_invitees(invitees: &[CantonId], accepted: &BTreeSet<&CantonId>) -
         .collect()
 }
 
+/// Whether enough members accepted for the party to reach its signing
+/// threshold. The proposer signs its own rounds, so it counts as one.
+///
+/// A contracts run needs `party_signing_keys.threshold` signatures, not one
+/// per invitee. Waiting for every invitee lets one absent operator hold up a
+/// party that has the quorum to act.
+pub fn signing_quorum_reached(accepted_members: usize, required_signatures: usize) -> bool {
+    accepted_members.saturating_add(1) >= required_signatures
+}
+
 /// The pins whose main package id is not in `vetted`, by filename.
 pub fn unvetted_pins(pins: &[DarPin], vetted: &HashSet<String>) -> Vec<String> {
     pins.iter()
@@ -415,9 +425,19 @@ async fn wait_for_acceptances(
             }
         };
     let accepted: BTreeSet<&CantonId> = counted.iter().map(|a| &a.record.acceptor).collect();
-    let missing = missing_invitees(&proposal.record.invitees, &accepted);
-    if !missing.is_empty() {
-        tracing::debug!(instance = %run.instance_name, ?missing, "waiting for acceptances");
+    let head = head_p2p(ctx, dec_party_id).await?;
+    let required = match submission::required_signatures(&head) {
+        Ok(required) => required,
+        Err(e) => return fail_closed(ctx, run, meta, &e.to_string()).await,
+    };
+    if !signing_quorum_reached(counted.len(), required) {
+        tracing::debug!(
+            instance = %run.instance_name,
+            accepted = counted.len(),
+            required,
+            missing = ?missing_invitees(&proposal.record.invitees, &accepted),
+            "waiting for a signing quorum of acceptances"
+        );
         return Ok(());
     }
     // Members report their own Daml key; the cache a later kick reads is
@@ -1083,6 +1103,15 @@ mod tests {
             missing_invitees(&invitees, &accepted),
             vec![party("node-c")]
         );
+
+        // One absent operator must not hold up a party that has the quorum
+        // to act: the proposer signs, so two of three reach a threshold of 2.
+        assert!(signing_quorum_reached(1, 2));
+        assert!(signing_quorum_reached(2, 3));
+        assert!(!signing_quorum_reached(1, 3));
+        assert!(!signing_quorum_reached(0, 2));
+        // A single-signer party needs nobody but the proposer.
+        assert!(signing_quorum_reached(0, 1));
 
         let pins = [
             DarPin {
