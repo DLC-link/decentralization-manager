@@ -86,8 +86,9 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             .await
             .with_context(|| format!("reading {}", dar_path.display()))?,
     );
+    let dar_entries = json!([{"filename": "governance-core-v0-rc3-0.1.0.dar", "data": dar_b64}]);
     let req = json!({
-        "dar_files": [{"filename": "governance-core-v0-rc3-0.1.0.dar", "data": dar_b64}],
+        "dar_files": dar_entries,
         "peer_ids": [&f.p2.participant_id, &f.p3.participant_id],
     });
     let dars_instance = chaos::start_workflow_on(f, f.p1.http, "/dars/distribute", &req).await?;
@@ -148,6 +149,16 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     post_accept_invitation(f, f.p3.http, &p3_onb).await?;
     post_accept_invitation(f, f.p2.http, &p2_dars).await?;
     post_accept_invitation(f, f.p3.http, &p3_dars).await?;
+
+    // DAR bytes never travel between nodes. Each member uploads the same
+    // files against the run's pins, and the coordinator finishes when the
+    // topology shows the packages vetted everywhere (design D8).
+    let upload = json!({ "dar_files": dar_entries, "pin_instance": dars_instance });
+    let p2_upload = f.post_json::<_, serde_json::Value>(f.p2.http, "/dars/upload", &upload);
+    let p3_upload = f.post_json::<_, serde_json::Value>(f.p3.http, "/dars/upload", &upload);
+    let (r2, r3) = tokio::join!(p2_upload, p3_upload);
+    r2.context("POST /dars/upload on P2")?;
+    r3.context("POST /dars/upload on P3")?;
 
     // Both must reach Completed in the DB.
     chaos::say("G9", "waiting for both kinds to complete");
