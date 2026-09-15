@@ -16,6 +16,7 @@ use crate::{
         DeclineInvitationPayload, WorkflowKind, WorkflowProgress,
         peer_status::{LastSeen, bump},
     },
+    utils,
     workflow::{
         WorkflowState,
         add_party::AddPartyStep,
@@ -26,6 +27,7 @@ use crate::{
         onboarding::OnboardingStep,
         party_replication::pipe::{PipeBlock, encode_block},
         state::WorkflowStep,
+        topology,
     },
 };
 
@@ -148,6 +150,7 @@ fn peers_for_party_threshold(m: usize, expected_peers: usize) -> usize {
 /// every expected peer — also the fallback when the threshold can't be resolved.
 async fn resolve_peer_threshold(
     kind: WorkflowKind,
+    config: &NodeConfig,
     dec_party_id: Option<&CantonId>,
     db: &SqlitePool,
     expected_peers: usize,
@@ -164,8 +167,45 @@ async fn resolve_peer_threshold(
         // Existing M-of-N party: a quorum is enough.
         WorkflowKind::Kick | WorkflowKind::Contracts => {
             let party_id = dec_party_id?;
+            // A kick on a party whose keys are still in the deprecated
+            // `PartyToKeyMapping` moves every survivor's key inline, and
+            // Canton makes each added key sign the transaction that adds it.
+            // A quorum would leave the proposal short of signatures, so that
+            // kick needs every survivor, not a quorum.
+            if kind == WorkflowKind::Kick && party_keys_are_legacy(config, party_id).await {
+                tracing::info!(
+                    "{party_id} keeps its signing keys in a legacy PartyToKeyMapping; this \
+                     kick needs every surviving peer to sign, not a quorum"
+                );
+                return None;
+            }
             let m = lookup_party_threshold(db, party_id).await?;
             Some(peers_for_party_threshold(m, expected_peers))
+        }
+    }
+}
+
+/// Whether a party still keeps its signing keys in the deprecated
+/// `PartyToKeyMapping` instead of inline on its `PartyToParticipant`.
+///
+/// Answers `true` when the mapping cannot be read at all. The cost of being
+/// wrong that way is a run that waits for every peer; the cost of the other
+/// way is a run that advances without the signatures Canton demands.
+async fn party_keys_are_legacy(config: &NodeConfig, party_id: &CantonId) -> bool {
+    let synchronizer_id = match utils::get_synchronizer_id(config).await {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::warn!("Cannot resolve the synchronizer id to classify {party_id}: {e:#}");
+            return true;
+        }
+    };
+    match topology::fetch_p2p_mapping(config, &synchronizer_id, party_id).await {
+        Ok(mapping) => mapping
+            .party_signing_keys
+            .is_none_or(|keys| keys.keys.is_empty()),
+        Err(e) => {
+            tracing::warn!("Cannot read the P2P mapping for {party_id}: {e:#}");
+            true
         }
     }
 }
@@ -293,6 +333,7 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
 
         let peer_threshold = resolve_peer_threshold(
             S::kind(),
+            &node_config,
             persisted.as_ref().and_then(|run| run.dec_party_id.as_ref()),
             &db,
             expected_peers.len(),

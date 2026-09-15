@@ -19,7 +19,7 @@
 use std::collections::BTreeSet;
 
 use canton_proto_rs::com::digitalasset::canton::{
-    crypto::v30::SigningPublicKey,
+    crypto::v30::{SigningKeyUsage, SigningPublicKey},
     protocol::v30::{
         DecentralizedNamespaceDefinition, PartyToParticipant, SignedTopologyTransaction,
         TopologyTransaction, enums, topology_mapping,
@@ -39,6 +39,7 @@ use crate::{
         onboarding::steps::proposals::create::{
             compute_decentralized_namespace, decode_keys_payload,
         },
+        signing_keys::{own_namespace_key, vault_holds},
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
     },
 };
@@ -193,6 +194,7 @@ impl PeerExpectations {
     /// Errors on any mismatch with the accepted invitation.
     pub async fn check_onboarding_dns(
         &self,
+        config: &NodeConfig,
         storage: &SqlitePool,
         instance_name: &str,
         payload: &[u8],
@@ -213,7 +215,7 @@ impl PeerExpectations {
         }
 
         let own_namespace = self
-            .own_namespace(storage, instance_name)
+            .own_namespace(config, storage, instance_name)
             .await?
             .ok_or_else(|| {
                 anyhow::anyhow!(
@@ -259,6 +261,7 @@ impl PeerExpectations {
     /// Errors on any mismatch with the accepted invitation.
     pub async fn check_onboarding_p2p(
         &self,
+        config: &NodeConfig,
         storage: &SqlitePool,
         instance_name: &str,
         payload: &[u8],
@@ -306,8 +309,14 @@ impl PeerExpectations {
         self.check_p2p_membership(&mapping)?;
         self.check_onboarding_markers(&mapping)?;
         self.check_p2p_thresholds(&mapping)?;
-        self.check_own_daml_key(storage, instance_name, &mapping, WhenUnrecorded::Fail)
-            .await
+        self.check_own_daml_key(
+            config,
+            storage,
+            instance_name,
+            &mapping,
+            WhenUnrecorded::Fail,
+        )
+        .await
     }
 
     /// Validate the DNS + P2P proposal pair of a kick, add-party or
@@ -322,6 +331,7 @@ impl PeerExpectations {
     /// Errors on any mismatch with the accepted invitation.
     pub async fn check_party_proposals(
         &self,
+        config: &NodeConfig,
         storage: &SqlitePool,
         instance_name: &str,
         dns_payload: &[u8],
@@ -369,7 +379,7 @@ impl PeerExpectations {
         // A lookup or decode failure is an error, not a legacy party: letting
         // it through would hand a coordinator this peer's signature on a
         // proposal that drops its own namespace.
-        match self.own_namespace(storage, instance_name).await? {
+        match self.own_namespace(config, storage, instance_name).await? {
             Some(own_namespace) if !namespace_def.owners.contains(&own_namespace) => {
                 anyhow::bail!(
                     "DNS proposal drops this node's namespace {own_namespace} from the owner set"
@@ -397,8 +407,14 @@ impl PeerExpectations {
         // (#428), and it has to work out which key that is from local records.
         // Get it wrong and a remaining member's key goes instead: the counts
         // still match, so only the member whose key vanished can catch it.
-        self.check_own_daml_key(storage, instance_name, &mapping, WhenUnrecorded::Skip)
-            .await?;
+        self.check_own_daml_key(
+            config,
+            storage,
+            instance_name,
+            &mapping,
+            WhenUnrecorded::Skip,
+        )
+        .await?;
 
         tracing::info!(
             "{kind:?} proposals match the accepted invitation for {dec_party_id}",
@@ -753,6 +769,7 @@ impl PeerExpectations {
     /// it would be a member that cannot sign for the party it just authorized.
     async fn check_own_daml_key(
         &self,
+        config: &NodeConfig,
         storage: &SqlitePool,
         instance_name: &str,
         mapping: &PartyToParticipant,
@@ -767,9 +784,9 @@ impl PeerExpectations {
             None => {
                 tracing::warn!(
                     "this node's keys are unrecorded for this party (onboarded before the \
-                     identity table existed); skipping the party-signing-key check"
+                     identity table existed); checking the proposal against the vault instead"
                 );
-                return Ok(());
+                return self.check_vault_holds_a_party_key(config, mapping).await;
             }
         };
         let own_daml_fingerprint = utils::compute_fingerprint(&keys[1]);
@@ -791,18 +808,92 @@ impl PeerExpectations {
         Ok(())
     }
 
+    /// The fallback for a party this node has no local key record for: the
+    /// vault still knows whether this node holds the private half of one of
+    /// the proposed keys.
+    ///
+    /// Without it a legacy party's members cannot check the attribution at
+    /// all — the coordinator works out whose key is whose from its own
+    /// records, and a stale one would take a member's authority away
+    /// irreversibly, because inline keys override the mapping the member's
+    /// key still sits in.
+    ///
+    /// # Errors
+    ///
+    /// Errors when the proposal carries no signing keys, when the vault holds
+    /// none of them, or when the vault cannot be read.
+    async fn check_vault_holds_a_party_key(
+        &self,
+        config: &NodeConfig,
+        mapping: &PartyToParticipant,
+    ) -> Result {
+        let Some(signing_keys) = mapping.party_signing_keys.as_ref() else {
+            anyhow::bail!("P2P proposal carries no party signing keys");
+        };
+
+        for key in &signing_keys.keys {
+            if vault_holds(config, &utils::compute_fingerprint(key)).await? {
+                return Ok(());
+            }
+        }
+
+        anyhow::bail!(
+            "P2P proposal carries {count} party signing key(s) and this node holds the \
+             private half of none of them, so it would be left a member that cannot sign \
+             for the party",
+            count = signing_keys.keys.len()
+        )
+    }
+
     /// This node's namespace fingerprint for the run: from the keys it
     /// generated during onboarding, falling back to the long-lived identity
     /// row when the run's artefacts are already gone.
     async fn own_namespace(
         &self,
+        config: &NodeConfig,
         storage: &SqlitePool,
         instance_name: &str,
     ) -> Result<Option<String>> {
-        Ok(self
-            .own_keys(storage, instance_name)
+        // An identity row recovered from the chain can only carry the party's
+        // Daml key, and older builds wrote a copy of it where the namespace
+        // key belongs. Reading that as a namespace fingerprint would compare a
+        // Daml key against the owner set and refuse every proposal, so such a
+        // bundle does not answer the question.
+        if let Some(keys) = self.own_keys(storage, instance_name).await?
+            && let Some(fingerprint) = namespace_fingerprint(&keys)
+        {
+            return Ok(Some(fingerprint));
+        }
+
+        // No usable local record. For a party that already exists the vault
+        // still answers it: the namespace key this node holds that the party's
+        // current owner set names. Skipping the check instead would let a
+        // coordinator swap this node's namespace out of the owner set with
+        // every other check still passing, which signs the node's own
+        // topology authority away.
+        let Some(dec_party_id) = self.dec_party_id.as_ref() else {
+            tracing::warn!(
+                "this node's keys are unrecorded for this run and it targets no existing \
+                 party, so its namespace cannot be resolved"
+            );
+            return Ok(None);
+        };
+
+        let synchronizer_id = utils::get_synchronizer_id(config).await?;
+        let resolved = own_namespace_key(config, dec_party_id, &synchronizer_id)
             .await?
-            .map(|keys| utils::compute_fingerprint(&keys[0])))
+            .map(|key| utils::compute_fingerprint(&key));
+        match &resolved {
+            Some(fingerprint) => tracing::info!(
+                "Resolved this node's namespace {fingerprint} for {dec_party_id} from the \
+                 vault; no usable local key record"
+            ),
+            None => tracing::warn!(
+                "this node holds no namespace key that {dec_party_id}'s owner set names, so \
+                 the owner-set check cannot be applied"
+            ),
+        }
+        Ok(resolved)
     }
 
     /// This node's `[namespace_key, daml_key]` bundle.
@@ -849,6 +940,24 @@ impl PeerExpectations {
         }
         Ok(Some(keys))
     }
+}
+
+/// The namespace fingerprint of a recorded `[namespace_key, daml_key]` bundle,
+/// or `None` when index `[0]` is not a namespace key.
+///
+/// A bundle recovered from the chain cannot carry a namespace key — the chain
+/// holds none — and older builds put a copy of the Daml key there instead.
+/// Taking that at face value compares a Daml fingerprint against the party's
+/// owner set, which refuses every proposal the node is asked to sign.
+fn namespace_fingerprint(keys: &[SigningPublicKey]) -> Option<String> {
+    let key = keys.first()?;
+    if !key.usage.contains(&(SigningKeyUsage::Namespace as i32)) {
+        tracing::warn!(
+            "this node's recorded key bundle for this party carries no namespace key at [0]"
+        );
+        return None;
+    }
+    Some(utils::compute_fingerprint(key))
 }
 
 /// Unwrap a coordinator-supplied `varint(len)||SignedTopologyTransaction`
@@ -1150,7 +1259,7 @@ mod tests {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await?;
         assert!(
             expectations
-                .check_party_proposals(&pool, "run", &dns, &p2p_payload)
+                .check_party_proposals(&NodeConfig::default(), &pool, "run", &dns, &p2p_payload)
                 .await
                 .is_err()
         );
@@ -1312,7 +1421,7 @@ mod tests {
 
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await?;
         let error = expectations
-            .check_onboarding_p2p(&pool, "run", &payload, None)
+            .check_onboarding_p2p(&NodeConfig::default(), &pool, "run", &payload, None)
             .await
             .err()
             .map(|e| e.to_string())
@@ -1341,7 +1450,7 @@ mod tests {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await?;
         assert!(
             expectations
-                .check_onboarding_p2p(&pool, "run", &payload, None)
+                .check_onboarding_p2p(&NodeConfig::default(), &pool, "run", &payload, None)
                 .await
                 .is_err()
         );
@@ -1495,7 +1604,7 @@ mod tests {
 
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await?;
         let error = expectations
-            .check_party_proposals(&pool, "run", &dns, &p2p_payload)
+            .check_party_proposals(&NodeConfig::default(), &pool, "run", &dns, &p2p_payload)
             .await
             .err()
             .map(|e| e.to_string())
@@ -1627,5 +1736,38 @@ mod tests {
                 .is_err()
         );
         Ok(())
+    }
+
+    /// The bundle `backfill_peer_keys_from_chain` used to write: a copy of the
+    /// Daml key where the namespace key belongs. Reading `[0]` as a namespace
+    /// made every legacy member refuse the DNS proposal.
+    #[test]
+    fn placeholder_bundle_yields_no_namespace() {
+        let daml = SigningPublicKey {
+            public_key: vec![7; 32],
+            usage: vec![SigningKeyUsage::Protocol as i32],
+            ..Default::default()
+        };
+
+        assert!(namespace_fingerprint(&[daml.clone(), daml]).is_none());
+    }
+
+    #[test]
+    fn real_bundle_yields_its_namespace_fingerprint() {
+        let namespace = SigningPublicKey {
+            public_key: vec![1; 32],
+            usage: vec![SigningKeyUsage::Namespace as i32],
+            ..Default::default()
+        };
+        let daml = SigningPublicKey {
+            public_key: vec![2; 32],
+            usage: vec![SigningKeyUsage::Protocol as i32],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            namespace_fingerprint(&[namespace.clone(), daml]),
+            Some(utils::compute_fingerprint(&namespace))
+        );
     }
 }

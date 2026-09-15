@@ -32,7 +32,7 @@ pub async fn submit_kick(config: &NodeConfig, storage: &SqlitePool, instance_nam
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 
-    let (dns_transaction, p2p_transaction) = topology::aggregate_dns_p2p_signatures(
+    let (mut dns_transaction, mut p2p_transaction) = topology::aggregate_dns_p2p_signatures(
         storage,
         instance_name,
         topology::DnsP2pArtifactKinds {
@@ -60,6 +60,23 @@ pub async fn submit_kick(config: &NodeConfig, storage: &SqlitePool, instance_nam
     let party_id_raw = String::from_utf8(party_id_bytes)?.trim().to_string();
     let party_id = CantonId::parse(&party_id_raw)?;
     tracing::info!("Party ID: {party_id}");
+
+    // Dedupe by signing fingerprint before anything else looks at the
+    // transactions: a peer response can re-add the coordinator's own
+    // signature. Canton drops duplicates rather than refusing them, so this is
+    // about what the check below counts, not about being rejected on submit.
+    topology::dedupe_signatures(&mut dns_transaction);
+    topology::dedupe_signatures(&mut p2p_transaction);
+
+    // The DNS is submitted first, so a P2P that Canton will refuse for a
+    // missing signing-key signature has to stop the run before that happens.
+    topology::check_added_signing_keys_signed(
+        config,
+        &synchronizer_id,
+        &party_id,
+        &p2p_transaction,
+    )
+    .await?;
 
     topology::submit_dns_then_p2p(
         config,

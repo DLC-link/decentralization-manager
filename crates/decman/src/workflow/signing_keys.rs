@@ -15,8 +15,16 @@
 //!    `/decentralized-parties` refresh.
 //! 3. Elimination — a key claimed by no surviving member belongs to the one
 //!    being removed.
+//! 4. The vault — for a key list already in hand, whether this node holds a
+//!    private half decides which of those keys is its own, whatever the key
+//!    is named locally.
+//!
+//! A party onboarded before Canton 3.4 keeps its keys in a deprecated
+//! `PartyToKeyMapping` rather than inline on the `PartyToParticipant`;
+//! [`adopt_legacy_signing_keys`] attributes that list the same way, so the
+//! keys can move inline without carrying a departed member's along.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use canton_proto_rs::com::digitalasset::canton::crypto::{
     admin::v30::{
@@ -36,6 +44,7 @@ use crate::{
     workflow::{
         onboarding::steps::proposals::create::decode_keys_payload,
         storage::{WorkflowStorage, identity_kinds},
+        topology,
     },
 };
 
@@ -47,13 +56,96 @@ pub fn party_daml_key_name(party_id_prefix: &str) -> String {
     format!("{party_id_prefix}-daml-transactions")
 }
 
+/// Whether this node's vault holds the private half of a key.
+///
+/// # Errors
+///
+/// Errors when the vault cannot be listed.
+pub async fn vault_holds(config: &NodeConfig, fingerprint: &str) -> Result<bool> {
+    let mut vault_client = VaultServiceClient::new(config.admin_channel().await?);
+    let response = vault_client
+        .list_my_keys(tonic::Request::new(ListMyKeysRequest {
+            filters: Some(ListKeysFilters {
+                fingerprint: fingerprint.to_string(),
+                name: String::new(),
+                purpose: vec![],
+                usage_v30: vec![],
+            }),
+            base_request: None,
+        }))
+        .await?
+        .into_inner();
+
+    Ok(!response.private_keys_metadata.is_empty())
+}
+
+/// This node's namespace key for a party: the vault key with namespace usage
+/// whose fingerprint is in the party's decentralized-namespace owner set.
+///
+/// Returns `None` when the party's namespace definition cannot be read or no
+/// vault key matches — this node is then not an owner, or the key is gone.
+///
+/// # Errors
+///
+/// Errors when the vault cannot be listed.
+pub async fn own_namespace_key(
+    config: &NodeConfig,
+    dec_party_id: &CantonId,
+    synchronizer_id: &str,
+) -> Result<Option<SigningPublicKey>> {
+    let owners = match topology::fetch_namespace_definition(
+        config,
+        synchronizer_id,
+        &dec_party_id.namespace.to_hex(),
+    )
+    .await
+    {
+        Ok(definition) => definition.owners,
+        Err(e) => {
+            tracing::warn!("Cannot read the namespace definition for {dec_party_id}: {e:#}");
+            return Ok(None);
+        }
+    };
+
+    let mut vault_client = VaultServiceClient::new(config.admin_channel().await?);
+    let response = vault_client
+        .list_my_keys(tonic::Request::new(ListMyKeysRequest {
+            filters: Some(ListKeysFilters {
+                fingerprint: String::new(),
+                name: String::new(),
+                purpose: vec![],
+                usage_v30: vec![SigningKeyUsage::Namespace as i32],
+            }),
+            base_request: None,
+        }))
+        .await?
+        .into_inner();
+
+    for meta in response.private_keys_metadata {
+        if let Some(private_key_metadata::PublicKeyWithName::V30(named)) = meta.public_key_with_name
+            && let Some(pk) = named.public_key
+            && let Some(public_key::Key::SigningPublicKey(signing_key)) = pk.key
+            && owners.contains(&utils::compute_fingerprint(&signing_key))
+        {
+            return Ok(Some(signing_key));
+        }
+    }
+
+    Ok(None)
+}
+
 /// This node's own Daml signing-key fingerprint for a party: from its
-/// long-lived identity row, falling back to the vault key named after the
-/// party. Returns `None` when the node holds neither.
+/// long-lived identity row, then the vault key named after the party, then —
+/// for any `candidates` the caller already holds — the one whose private half
+/// is in this node's vault. Returns `None` when none of the three answer.
+///
+/// The last step is what saves a party whose key was minted under some other
+/// name: the name is a local convention, the vault is the fact.
 async fn own_signing_key_fingerprint(
     config: &NodeConfig,
     db: &SqlitePool,
     dec_party_id: &CantonId,
+    candidates: &[SigningPublicKey],
 ) -> Result<Option<String>> {
     let self_id = config.participant_id().to_string();
     if let Some(payload) = db
@@ -96,7 +188,56 @@ async fn own_signing_key_fingerprint(
     }
 
     tracing::warn!("No Daml signing key named '{name}' in this node's vault");
-    Ok(None)
+
+    // `candidates` is the whole legacy mapping, which also holds the keys of
+    // members that left, and a node that rotated its Daml key still holds the
+    // old one. So collect every match instead of taking the first: the mapping
+    // order must not decide which key this node claims.
+    let mut held: Vec<&SigningPublicKey> = Vec::new();
+    for candidate in candidates {
+        if vault_holds(config, &utils::compute_fingerprint(candidate)).await? {
+            held.push(candidate);
+        }
+    }
+
+    // A party signing key is a protocol key, so those win outright. Anything
+    // else is a guess, and a guess between several is worth saying out loud.
+    let protocol: Vec<&SigningPublicKey> = held
+        .iter()
+        .copied()
+        .filter(|key| key.usage.contains(&(SigningKeyUsage::Protocol as i32)))
+        .collect();
+    let considered = if protocol.is_empty() {
+        &held
+    } else {
+        &protocol
+    };
+
+    let Some(chosen) = considered.first() else {
+        return Ok(None);
+    };
+    let fingerprint = utils::compute_fingerprint(chosen);
+
+    if considered.len() > 1 {
+        tracing::warn!(
+            "This node holds {count} of {dec_party_id}'s signing keys under other names \
+             ({all}); taking {fingerprint}. A rotated key or a former member's key can look \
+             the same from here, so check that this is the key this node signs with",
+            count = considered.len(),
+            all = considered
+                .iter()
+                .map(|key| utils::compute_fingerprint(key))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    } else {
+        tracing::info!(
+            "This node holds {fingerprint}, one of the party's signing keys, under another \
+             name; taking it as its own Daml key for {dec_party_id}"
+        );
+    }
+
+    Ok(Some(fingerprint))
 }
 
 /// Which Daml signing-key fingerprint each member of a party contributed, as
@@ -109,6 +250,7 @@ pub async fn known_signing_keys_by_member(
     config: &NodeConfig,
     db: &SqlitePool,
     dec_party_id: &CantonId,
+    candidates: &[SigningPublicKey],
 ) -> Result<BTreeMap<String, String>> {
     let mut claims = BTreeMap::new();
 
@@ -127,7 +269,20 @@ pub async fn known_signing_keys_by_member(
     {
         match decode_keys_payload(&payload) {
             Ok(keys) if keys.len() == 2 => {
-                claims.insert(peer_id, utils::compute_fingerprint(&keys[1]));
+                let recorded = utils::compute_fingerprint(&keys[1]);
+                // An identity row is a bundle this node was handed; the cache
+                // is the fingerprint the peer read out of its own vault. Only
+                // the second is evidence the peer can still sign, so a
+                // disagreement is worth saying out loud before the row wins.
+                if let Some(attested) = claims.get(&peer_id)
+                    && attested != &recorded
+                {
+                    tracing::warn!(
+                        "{peer_id} reports Daml signing key {attested} for {dec_party_id} but \
+                         this node recorded {recorded}; taking the recorded one"
+                    );
+                }
+                claims.insert(peer_id, recorded);
             }
             Ok(keys) => tracing::warn!(
                 "PEER_PUBLIC_KEYS for {peer_id} on {dec_party_id} holds {count} keys, not 2",
@@ -143,7 +298,7 @@ pub async fn known_signing_keys_by_member(
 
     let self_id = config.participant_id().to_string();
     if !claims.contains_key(&self_id)
-        && let Some(own) = own_signing_key_fingerprint(config, db, dec_party_id).await?
+        && let Some(own) = own_signing_key_fingerprint(config, db, dec_party_id, candidates).await?
     {
         claims.insert(self_id, own);
     }
@@ -220,6 +375,190 @@ pub fn signing_keys_without_member(
         .filter(|(_, fingerprint)| *fingerprint != &target)
         .map(|(key, _)| key.clone())
         .collect())
+}
+
+/// Load the party's signing keys from its deprecated `PartyToKeyMapping` and
+/// attribute them to `members`.
+///
+/// Only for a party whose `PartyToParticipant` carries no inline
+/// `party_signing_keys` — see [`legacy_signing_keys_for_members`] for what the
+/// attribution rejects.
+///
+/// # Errors
+///
+/// Errors when the party has no `PartyToKeyMapping` either, or when the keys
+/// it holds cannot be attributed to every current member.
+pub async fn adopt_legacy_signing_keys(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    synchronizer_id: &str,
+    dec_party_id: &CantonId,
+    members: &[String],
+) -> Result<Vec<SigningPublicKey>> {
+    let mapping = topology::fetch_party_to_key_mapping(config, synchronizer_id, dec_party_id)
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Party {dec_party_id} carries neither inline party signing keys nor a legacy \
+                 PartyToKeyMapping, so its signing key set cannot be rebuilt"
+            )
+        })?;
+
+    tracing::info!(
+        "Party {dec_party_id} keeps its signing keys in a legacy PartyToKeyMapping: \
+         {keys} key(s) at threshold {threshold}, against {members} current member(s)",
+        keys = mapping.signing_keys.len(),
+        threshold = mapping.threshold,
+        members = members.len()
+    );
+
+    warn_if_namespace_applies_early(config, synchronizer_id, dec_party_id).await;
+
+    let claims =
+        known_signing_keys_by_member(config, db, dec_party_id, &mapping.signing_keys).await?;
+    legacy_signing_keys_for_members(&mapping.signing_keys, members, &claims)
+}
+
+/// Warn when a legacy migration runs against a party whose namespace
+/// threshold is 1.
+///
+/// The workflows build their proposals with `Authorize`, which per
+/// `topology_manager_write_service.proto` distributes the transaction and
+/// authorizes it outright when this node alone holds enough signing keys. At
+/// threshold 1 the coordinator alone is enough, so the namespace change is in
+/// force as soon as the proposal is created — while the participant change
+/// still waits for every member's key to sign it, because a migration adds
+/// them all at once.
+///
+/// A member that never signs therefore leaves the party half-migrated, and
+/// the applied namespace carries the *new* threshold, so putting it right can
+/// need more signatures than are available. Above threshold 1 the namespace
+/// cannot apply early and the pre-submit signature check covers the rest.
+///
+/// Best effort: a threshold that cannot be read is not worth failing a run
+/// over, it only costs the operator this warning.
+async fn warn_if_namespace_applies_early(
+    config: &NodeConfig,
+    synchronizer_id: &str,
+    dec_party_id: &CantonId,
+) {
+    let namespace_hex = dec_party_id.namespace.to_hex();
+    match topology::fetch_namespace_definition(config, synchronizer_id, &namespace_hex).await {
+        Ok(definition) if definition.threshold <= 1 => tracing::warn!(
+            "{dec_party_id}'s namespace threshold is {threshold}, so this node's signature \
+             alone puts the namespace change in force the moment the proposal is created, \
+             before the participant change has every member's signature. Make sure every \
+             member is online and able to sign before this run continues; a member that \
+             drops out now leaves the party half-migrated",
+            threshold = definition.threshold
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(
+            "Cannot read {dec_party_id}'s namespace threshold to check whether the namespace \
+             change would apply early: {e:#}"
+        ),
+    }
+}
+
+/// The keys of `legacy_keys` that `members` claim, in member order — the set
+/// a party's `PartyToParticipant` should carry inline.
+///
+/// A party onboarded before Canton 3.4 has no inline `party_signing_keys`, so
+/// a workflow that merges a new member's key into that empty set would
+/// propose a party whose only signing key is the new member's. The legacy
+/// `PartyToKeyMapping` holds the real keys, but nothing rewrites it when a
+/// member leaves, so it also holds the keys of everyone who was ever a
+/// member. Only a key a current member claims may move inline.
+///
+/// Inline keys take precedence over the legacy mapping, so a key left behind
+/// stops authorizing while the inline set is in force. It is shadowed rather
+/// than revoked: Canton reads the inline keys first and falls back to the
+/// mapping, so a later `PartyToParticipant` without inline keys would hand
+/// authority back to it. Every mapping this tool writes carries them, and
+/// removing the `PartyToKeyMapping` outright is tracked separately.
+///
+/// # Errors
+///
+/// Errors when a member's key is unknown to this node, when a member claims a
+/// key the mapping does not carry, or when two members claim the same key.
+/// Each of those would put a key set into topology that does not match the
+/// membership, which every peer refuses to sign.
+pub fn legacy_signing_keys_for_members(
+    legacy_keys: &[SigningPublicKey],
+    members: &[String],
+    claims: &BTreeMap<String, String>,
+) -> Result<Vec<SigningPublicKey>> {
+    let by_fingerprint: HashMap<String, &SigningPublicKey> = legacy_keys
+        .iter()
+        .map(|key| (utils::compute_fingerprint(key), key))
+        .collect();
+
+    let mut keys = Vec::with_capacity(members.len());
+    let mut taken = BTreeSet::new();
+    let mut unclaimed = Vec::new();
+    let mut unmatched = Vec::new();
+    let mut duplicated = Vec::new();
+    for member in members {
+        let Some(fingerprint) = claims.get(member) else {
+            unclaimed.push(member.clone());
+            continue;
+        };
+        match by_fingerprint.get(fingerprint) {
+            Some(key) if taken.insert(fingerprint.clone()) => keys.push((*key).clone()),
+            Some(_) => duplicated.push(format!("{member} ({fingerprint})")),
+            None => unmatched.push(format!("{member} ({fingerprint})")),
+        }
+    }
+
+    if !unclaimed.is_empty() {
+        anyhow::bail!(
+            "Cannot tell which Daml signing key these members contributed: {members}. \
+             Refresh /decentralized-parties so every member reports its signing key, then \
+             retry",
+            members = unclaimed.join(", ")
+        );
+    }
+    if !unmatched.is_empty() {
+        anyhow::bail!(
+            "These members claim a Daml signing key the party's PartyToKeyMapping does not \
+             carry, so it cannot be moved onto the PartyToParticipant: {members}",
+            members = unmatched.join(", ")
+        );
+    }
+    if !duplicated.is_empty() {
+        anyhow::bail!(
+            "These members claim a Daml signing key another member already claimed: \
+             {members}. One of the two attributions is wrong, and the party would end up \
+             with fewer keys than members",
+            members = duplicated.join(", ")
+        );
+    }
+
+    // Count distinct keys, not entries. A legacy mapping is allowed to repeat a
+    // key, and `by_fingerprint` collapses those while `legacy_keys` does not,
+    // so the raw length would report keys left behind that do not exist. An
+    // operator reading this during a one-shot migration deserves a true count.
+    let distinct = by_fingerprint.len();
+    if legacy_keys.len() != distinct {
+        tracing::info!(
+            "The party's PartyToKeyMapping lists {entries} entries for {distinct} distinct \
+             key(s); the repeats are counted once",
+            entries = legacy_keys.len()
+        );
+    }
+
+    let left_behind = distinct.saturating_sub(keys.len());
+    if left_behind > 0 {
+        tracing::warn!(
+            "Moving {adopted} of the party's {distinct} legacy signing keys onto the \
+             PartyToParticipant; the remaining {left_behind} are claimed by no current \
+             member. They stop authorizing while the inline keys are in force, which \
+             shadows the old mapping rather than emptying it",
+            adopted = keys.len()
+        );
+    }
+
+    Ok(keys)
 }
 
 #[cfg(test)]
@@ -336,5 +675,135 @@ mod tests {
                 "unexpected error: {error}"
             ),
         }
+    }
+
+    /// The mainnet case: the party predates inline signing keys and its
+    /// `PartyToKeyMapping` still holds the keys of members that have left.
+    /// Only the two keys the current members claim move inline.
+    #[test]
+    fn takes_only_the_keys_current_members_claim() -> Result {
+        let legacy = vec![key(1), key(2), key(3), key(4)];
+        let claims = claims(&[("p1", 1), ("p2", 2)]);
+
+        let adopted = legacy_signing_keys_for_members(&legacy, &uids(&["p1", "p2"]), &claims)?;
+
+        assert_eq!(
+            adopted
+                .iter()
+                .map(utils::compute_fingerprint)
+                .collect::<Vec<_>>(),
+            vec![fingerprint(1), fingerprint(2)]
+        );
+        Ok(())
+    }
+
+    /// Guessing here would hand the party a key set that does not match its
+    /// membership, so an unattributable member stops the run instead.
+    #[test]
+    fn refuses_a_member_whose_key_is_unknown() -> Result {
+        let legacy = vec![key(1), key(2), key(3)];
+        let claims = claims(&[("p1", 1)]);
+
+        let error = legacy_signing_keys_for_members(&legacy, &uids(&["p1", "p2"]), &claims)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+
+        assert!(error.contains("p2"), "unexpected error: {error}");
+        assert!(
+            error.contains("Refresh /decentralized-parties"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    /// A stale cached fingerprint must not silently drop a member's key.
+    #[test]
+    fn refuses_a_claim_the_legacy_mapping_does_not_carry() -> Result {
+        let legacy = vec![key(1), key(2)];
+        let claims = claims(&[("p1", 1), ("p2", 9)]);
+
+        let error = legacy_signing_keys_for_members(&legacy, &uids(&["p1", "p2"]), &claims)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+
+        assert!(
+            error.contains("PartyToKeyMapping does not"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn refuses_two_members_that_claim_the_same_key() -> Result {
+        let legacy = vec![key(1), key(2)];
+        let claims = claims(&[("p1", 1), ("p2", 1)]);
+
+        let error = legacy_signing_keys_for_members(&legacy, &uids(&["p1", "p2"]), &claims)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+
+        assert!(
+            error.contains("another member already claimed"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    /// Nothing pairs key *i* with member *i*: `SigningKeysWithThreshold` holds
+    /// a set, and Canton sorts it by fingerprint when it serializes. The order
+    /// is pinned here only so the proposal this tool builds is reproducible,
+    /// which makes a diff between two runs mean something.
+    #[test]
+    fn follows_the_member_order_not_the_claim_order() -> Result {
+        let legacy = vec![key(1), key(2), key(3)];
+        let claims = claims(&[("p1", 1), ("p2", 2), ("p3", 3)]);
+
+        let adopted =
+            legacy_signing_keys_for_members(&legacy, &uids(&["p3", "p1", "p2"]), &claims)?;
+
+        assert_eq!(
+            adopted
+                .iter()
+                .map(utils::compute_fingerprint)
+                .collect::<Vec<_>>(),
+            vec![fingerprint(3), fingerprint(1), fingerprint(2)]
+        );
+        Ok(())
+    }
+
+    /// A legacy party nobody ever left: every key is claimed, so none is left
+    /// behind and none of the three refusals applies.
+    #[test]
+    fn takes_every_key_when_no_member_has_left() -> Result {
+        let legacy = vec![key(1), key(2)];
+        let claims = claims(&[("p1", 1), ("p2", 2)]);
+
+        let adopted = legacy_signing_keys_for_members(&legacy, &uids(&["p1", "p2"]), &claims)?;
+
+        assert_eq!(adopted.len(), legacy.len());
+        Ok(())
+    }
+
+    /// Canton lets a legacy mapping repeat a key. The adopted set must still
+    /// be one key per member, and the count of what is left behind has to go
+    /// by distinct keys or it reports keys that do not exist.
+    #[test]
+    fn handles_a_mapping_that_repeats_a_key() -> Result {
+        let legacy = vec![key(1), key(2), key(1), key(2)];
+        let claims = claims(&[("p1", 1), ("p2", 2)]);
+
+        let adopted = legacy_signing_keys_for_members(&legacy, &uids(&["p1", "p2"]), &claims)?;
+
+        assert_eq!(
+            adopted
+                .iter()
+                .map(utils::compute_fingerprint)
+                .collect::<Vec<_>>(),
+            vec![fingerprint(1), fingerprint(2)]
+        );
+        Ok(())
     }
 }

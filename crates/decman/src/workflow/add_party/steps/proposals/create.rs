@@ -16,6 +16,7 @@ use crate::{
     workflow::{
         add_party::AddPartyConfig,
         onboarding::steps::proposals::create::decode_keys_payload,
+        signing_keys::adopt_legacy_signing_keys,
         storage::{WorkflowStorage, artifact_kinds},
         topology,
     },
@@ -118,17 +119,42 @@ pub async fn create_proposals(
         onboarding: Some(hosting_participant::Onboarding {}),
     });
 
-    // Merge the new member's Daml key into the party signing keys, deduped by
-    // fingerprint so a retried run can't double-add it.
-    let mut signing_keys = current_p2p
+    // A party onboarded before Canton 3.4 carries no inline signing keys: they
+    // sit in the deprecated PartyToKeyMapping instead. Merging into that empty
+    // set proposed a party whose only signing key was the new member's, which
+    // Canton refuses outright above a threshold of one.
+    let current_signing_keys = current_p2p
         .party_signing_keys
         .map(|sk| sk.keys)
         .unwrap_or_default();
+    let mut signing_keys = if current_signing_keys.is_empty() {
+        let members: Vec<String> = current_p2p
+            .participants
+            .iter()
+            .map(|p| p.participant_uid.clone())
+            .collect();
+        adopt_legacy_signing_keys(config, storage, &synchronizer_id, party_id, &members).await?
+    } else {
+        current_signing_keys
+    };
+
+    // Merge the new member's Daml key into the party signing keys, deduped by
+    // fingerprint so a retried run can't double-add it.
     if !signing_keys
         .iter()
         .any(|k| utils::compute_fingerprint(k) == new_daml_fingerprint)
     {
         signing_keys.push(new_daml_key);
+    }
+
+    if signing_keys.len() != new_participants.len() {
+        anyhow::bail!(
+            "Add-party would leave the party with {keys} signing key(s) for {members} \
+             member(s). Every member contributes exactly one, so the key set does not match \
+             the membership and the peers would refuse the proposal",
+            keys = signing_keys.len(),
+            members = new_participants.len()
+        );
     }
 
     let new_p2p = PartyToParticipant {
