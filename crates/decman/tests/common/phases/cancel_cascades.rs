@@ -4,11 +4,6 @@
 //! BEFORE P3 accepts, P1 cancels. Assert: P2's peer row flips to
 //! cancelled with an error mentioning cancellation, and P3 has no leftover
 //! pending Onboarding invitation.
-//!
-//! TODO(onledger-phases): this phase still describes the 1.x transport model —
-//! a member learns of a cancel when the proposal disappears from its ledger
-//! view, not from a delivered message (design D10).
-//! Rewrite it against the on-ledger steps before the suite runs green.
 
 use std::time::Duration;
 

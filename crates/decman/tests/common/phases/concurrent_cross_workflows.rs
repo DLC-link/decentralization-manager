@@ -16,11 +16,6 @@
 //!   node;
 //! - `coordinator_instance` persistence (migration 000014): peer-row
 //!   completion is asserted by looking rows up via that column.
-//!
-//! TODO(onledger-phases): this phase still describes the 1.x transport model —
-//! there is no mesh; cross-acceptance is now several `WorkflowProposal`s
-//! observed at once.
-//! Rewrite it against the on-ledger steps before the suite runs green.
 
 use std::{path::Path, time::Duration};
 

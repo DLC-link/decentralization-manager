@@ -9,11 +9,6 @@
 //! InProgress simultaneously. Defer accept on both kinds. Hard-kill P1,
 //! restart, accept on both kinds, and assert both reach Completed by polling
 //! the persisted rows (post-restart in-memory state can lag).
-//!
-//! TODO(onledger-phases): this phase still describes the 1.x transport model —
-//! `WorkflowRegistry` is gone; concurrency is the observer's per-run mutex
-//! (design D11).
-//! Rewrite it against the on-ledger steps before the suite runs green.
 
 use std::{path::Path, time::Duration};
 

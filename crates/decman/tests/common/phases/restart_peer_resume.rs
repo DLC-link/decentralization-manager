@@ -4,11 +4,6 @@
 //! hard-kill P2 right after its peer row reaches `inprogress`, restart
 //! it, and assert /onboarding/status reaches Completed and P2's row is the
 //! same one (created_at unchanged, exactly one row).
-//!
-//! TODO(onledger-phases): this phase still describes the 1.x transport model —
-//! a member no longer re-fires a trigger; the observer re-drives the row
-//! from the ledger (design D11).
-//! Rewrite it against the on-ledger steps before the suite runs green.
 
 use std::time::Duration;
 

@@ -5,11 +5,6 @@
 //! reaches Completed via the persisted DB row (the in-memory
 //! `<Kind>WorkflowState` is freshly constructed after restart and lags the
 //! DB on slow runners). Invariant: exactly one coordinator row.
-//!
-//! TODO(onledger-phases): this phase still describes the 1.x transport model —
-//! there is no task per run any more; the observer picks an in-progress row
-//! up on its next tick (design D11).
-//! Rewrite it against the on-ledger steps before the suite runs green.
 
 use std::time::Duration;
 

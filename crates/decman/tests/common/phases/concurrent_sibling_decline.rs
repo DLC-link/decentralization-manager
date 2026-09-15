@@ -9,11 +9,6 @@
 //!   broadcast (`broadcast_cancel_to_others`).
 //!
 //! Sibling A — accepted by both peers — must still complete everywhere.
-//!
-//! TODO(onledger-phases): this phase still describes the 1.x transport model —
-//! decline exercises `WorkflowProposal_Decline`; there is no decline
-//! routing over a connection (design D10).
-//! Rewrite it against the on-ledger steps before the suite runs green.
 
 use std::time::Duration;
 

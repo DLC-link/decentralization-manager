@@ -16,11 +16,6 @@
 //! Stalling is achieved by deferring `accept_invitation` rather than by
 //! pausing peer processes — the start handler pre-flight requires every
 //! invitee to have a visible registry entry, so peers must stay up.
-//!
-//! TODO(onledger-phases): this phase still describes the 1.x transport model —
-//! the 409 now comes from an in-progress `workflow_runs` row, not from a
-//! registry slot, and the step is `WaitingForAcceptances`.
-//! Rewrite it against the on-ledger steps before the suite runs green.
 
 use std::time::Duration;
 
