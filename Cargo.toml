@@ -110,7 +110,7 @@ decman-wallet = { path = "crates/decman-wallet" }
 keycloak = { git = "https://github.com/DLC-link/canton-lib", rev = "651ea5221b4794f55bd152e9f3e762a92af69afd" }
 
 [patch.crates-io]
-tokio-noise = { git = "https://github.com/DLC-link/tokio-noise", rev = "79d706d648fccd5bb8457f15a31d49593430d657" }
+tokio-noise = { git = "https://github.com/conduition/tokio-noise", rev = "a7dc4e543e4d117ee5f02125b0c898e1984973f2" }
 
 [profile.release]
 opt-level = 3
