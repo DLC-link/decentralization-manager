@@ -32,12 +32,8 @@ ignore = [
   # the 0.3 line — 0.3.27 is the last release ever published, and the patch
   # landed only in 0.4.16 — so this cannot be resolved by updating.
   #
-  # Two paths pull it:
-  #   * actix-http (actix-web 4), whose `http2` is a default feature. Not
-  #     removable from here.
-  #   * decman's own `hyper = "0.14"`, which has no caller left after the move
-  #     to on-ledger coordination and is kept only until a follow-up drops it.
-  #     Removing it does NOT clear the advisory: actix-http still pulls h2 0.3.
+  # One path pulls it: actix-http (actix-web 4), whose `http2` is a default
+  # feature. This repository cannot remove it.
   #
   # The h2 0.4 instance (AWS SDK / hyper 1.x) IS fixed, by the 0.4.16 bump in
   # the same change as this ignore.
