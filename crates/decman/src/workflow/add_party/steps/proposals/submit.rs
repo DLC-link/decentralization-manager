@@ -47,7 +47,8 @@ pub async fn submit_proposals(
 
     // Dedupe by signing fingerprint: the coordinator's own signature is
     // already on the original proposals, and a retried peer may have signed
-    // twice. Canton rejects duplicate signatures on a submitted transaction.
+    // twice. Canton drops duplicates when it parses the transaction, so this
+    // is about what the signature check below counts.
     topology::dedupe_signatures(&mut dns_transaction);
     topology::dedupe_signatures(&mut p2p_transaction);
 

@@ -189,18 +189,55 @@ async fn own_signing_key_fingerprint(
 
     tracing::warn!("No Daml signing key named '{name}' in this node's vault");
 
+    // `candidates` is the whole legacy mapping, which also holds the keys of
+    // members that left, and a node that rotated its Daml key still holds the
+    // old one. So collect every match instead of taking the first: the mapping
+    // order must not decide which key this node claims.
+    let mut held: Vec<&SigningPublicKey> = Vec::new();
     for candidate in candidates {
-        let fingerprint = utils::compute_fingerprint(candidate);
-        if vault_holds(config, &fingerprint).await? {
-            tracing::info!(
-                "This node holds {fingerprint}, one of the party's signing keys, under \
-                 another name; taking it as its own Daml key for {dec_party_id}"
-            );
-            return Ok(Some(fingerprint));
+        if vault_holds(config, &utils::compute_fingerprint(candidate)).await? {
+            held.push(candidate);
         }
     }
 
-    Ok(None)
+    // A party signing key is a protocol key, so those win outright. Anything
+    // else is a guess, and a guess between several is worth saying out loud.
+    let protocol: Vec<&SigningPublicKey> = held
+        .iter()
+        .copied()
+        .filter(|key| key.usage.contains(&(SigningKeyUsage::Protocol as i32)))
+        .collect();
+    let considered = if protocol.is_empty() {
+        &held
+    } else {
+        &protocol
+    };
+
+    let Some(chosen) = considered.first() else {
+        return Ok(None);
+    };
+    let fingerprint = utils::compute_fingerprint(chosen);
+
+    if considered.len() > 1 {
+        tracing::warn!(
+            "This node holds {count} of {dec_party_id}'s signing keys under other names \
+             ({all}); taking {fingerprint}. A rotated key or a former member's key can look \
+             the same from here, so check that this is the key this node signs with",
+            count = considered.len(),
+            all = considered
+                .iter()
+                .map(|key| utils::compute_fingerprint(key))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    } else {
+        tracing::info!(
+            "This node holds {fingerprint}, one of the party's signing keys, under another \
+             name; taking it as its own Daml key for {dec_party_id}"
+        );
+    }
+
+    Ok(Some(fingerprint))
 }
 
 /// Which Daml signing-key fingerprint each member of a party contributed, as
@@ -433,8 +470,12 @@ async fn warn_if_namespace_applies_early(
 /// member leaves, so it also holds the keys of everyone who was ever a
 /// member. Only a key a current member claims may move inline.
 ///
-/// Inline keys take precedence over the legacy mapping, so the keys left
-/// behind stop authorizing for the party once the proposal is in force.
+/// Inline keys take precedence over the legacy mapping, so a key left behind
+/// stops authorizing while the inline set is in force. It is shadowed rather
+/// than revoked: Canton reads the inline keys first and falls back to the
+/// mapping, so a later `PartyToParticipant` without inline keys would hand
+/// authority back to it. Every mapping this tool writes carries them, and
+/// removing the `PartyToKeyMapping` outright is tracked separately.
 ///
 /// # Errors
 ///
@@ -698,8 +739,10 @@ mod tests {
         Ok(())
     }
 
-    /// The proposal pairs key *i* with member *i*, so the output has to
-    /// follow `members`, not the map's own ordering.
+    /// Nothing pairs key *i* with member *i*: `SigningKeysWithThreshold` holds
+    /// a set, and Canton sorts it by fingerprint when it serializes. The order
+    /// is pinned here only so the proposal this tool builds is reproducible,
+    /// which makes a diff between two runs mean something.
     #[test]
     fn follows_the_member_order_not_the_claim_order() -> Result {
         let legacy = vec![key(1), key(2), key(3)];

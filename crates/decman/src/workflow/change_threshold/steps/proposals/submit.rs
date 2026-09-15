@@ -77,8 +77,8 @@ pub async fn submit_change(
 
     // Dedupe by signing fingerprint before anything else looks at the
     // transactions: a peer response can re-add the coordinator's own
-    // signature, and Canton rejects a duplicate outright — which, with the DNS
-    // already in force, is the half-apply the check below exists to prevent.
+    // signature. Canton drops duplicates rather than refusing them, so this is
+    // about what the check below counts, not about being rejected on submit.
     topology::dedupe_signatures(&mut dns_transaction);
     topology::dedupe_signatures(&mut p2p_transaction);
 

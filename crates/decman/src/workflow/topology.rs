@@ -312,17 +312,29 @@ pub async fn fetch_p2p_mapping(
 
     // Same pinning as `fetch_party_to_key_mapping`: `filter_party` matches on
     // a prefix, and the head state can hold a `Remove`.
-    response
-        .results
-        .into_iter()
-        .find_map(|r| {
-            if r.context?.operation != enums::TopologyChangeOp::AddReplace as i32 {
-                return None;
-            }
-            let P2pItem::V30(mapping) = r.item?;
-            (mapping.party == party_id.to_string()).then_some(mapping)
-        })
-        .ok_or_else(|| anyhow::anyhow!("No P2P mapping found for party {party_id}"))
+    let mut without_context = 0usize;
+    let mapping = response.results.into_iter().find_map(|r| {
+        let Some(context) = r.context else {
+            without_context += 1;
+            return None;
+        };
+        if context.operation != enums::TopologyChangeOp::AddReplace as i32 {
+            return None;
+        }
+        let P2pItem::V30(mapping) = r.item?;
+        (mapping.party == party_id.to_string()).then_some(mapping)
+    });
+
+    match mapping {
+        Some(mapping) => Ok(mapping),
+        // Saying "no mapping" for a malformed response sends the reader after
+        // the wrong problem entirely.
+        None if without_context > 0 => anyhow::bail!(
+            "Canton returned {without_context} P2P row(s) with no context for {party_id}, \
+             so none could be checked for being an add-or-replace of this party"
+        ),
+        None => anyhow::bail!("No P2P mapping found for party {party_id}"),
+    }
 }
 
 /// Fetch the deprecated `PartyToKeyMapping` for a party from the
@@ -402,9 +414,18 @@ pub async fn check_added_signing_keys_signed(
         .iter()
         .map(utils::compute_fingerprint)
         .collect();
+    // A signature can arrive in either field: `topology.proto` requires one of
+    // the two, and Canton merges both when it parses the transaction. Reading
+    // only `signatures` would name a key that did in fact sign.
     let signers: HashSet<&str> = transaction
         .signatures
         .iter()
+        .chain(
+            transaction
+                .multi_transaction_signatures
+                .iter()
+                .flat_map(|multi| multi.signatures.iter()),
+        )
         .map(|s| s.signed_by.as_str())
         .collect();
 
