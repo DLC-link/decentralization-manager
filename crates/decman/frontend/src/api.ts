@@ -1,4 +1,9 @@
-import { clearToken, getToken, refreshAccessToken } from "./auth";
+import {
+  clearToken,
+  currentSession,
+  getToken,
+  refreshAccessToken,
+} from "./auth";
 
 /**
  * Wrapper around fetch() that attaches the Bearer token from sessionStorage.
@@ -21,12 +26,15 @@ export async function authenticatedFetch(
 ): Promise<Response> {
   const headers = new Headers(init?.headers);
   const token = getToken();
+  // Whose request this is. A 401 that comes back after the session changed
+  // must not be renewed or retried under whoever holds the page now.
+  const session = currentSession();
   if (token) {
     headers.set("Authorization", `Bearer ${token}`);
   }
   const response = await fetch(input, { ...init, headers });
   if (token && response.status === 401) {
-    const renewal = await refreshAccessToken();
+    const renewal = await refreshAccessToken(session);
     if (renewal.status === "renewed") {
       const retryHeaders = new Headers(init?.headers);
       retryHeaders.set("Authorization", `Bearer ${renewal.token}`);
