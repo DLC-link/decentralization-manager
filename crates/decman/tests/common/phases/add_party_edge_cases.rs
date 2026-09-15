@@ -6,16 +6,15 @@
 //! - request validation: bad thresholds, adding self, adding a participant
 //!   that isn't a configured peer, a party with no cached membership;
 //! - decline cascade: the NEW MEMBER declines → the coordinator run fails
-//!   fast and the existing member's pending card is dropped by the
-//!   instance-stamped CancelInvite broadcast;
+//!   fast, the existing member's pending card goes away, and the run is
+//!   already terminal, so a per-instance cancel refuses it;
 //! - cancel cascade: `/add-party/cancel` aborts the run, drops the
 //!   un-accepted card on one peer, and cancels the accepted peer run on the
 //!   other.
 //!
-//! TODO(onledger-phases): this phase still describes the 1.x transport model —
-//! no coordinator task idles any more; an in-progress row is driven by the
-//! observer (design D11).
-//! Rewrite it against the on-ledger steps before the suite runs green.
+//! Every card here comes from the `WorkflowProposal` projection and every
+//! teardown from the ledger: the observer drives an in-progress row, and no
+//! coordinator task idles (design D10, D11).
 
 use std::time::Duration;
 
@@ -210,11 +209,10 @@ async fn decline_cascade(f: &Fixture) -> anyhow::Result<()> {
         .await
         .context("waiting for P2's add-party card to be dropped after decline")?;
 
-    // A declined run's coordinator TASK keeps idling in WaitingForPeers (the
-    // decline only fails the row), and the legacy per-kind status/cancel
-    // endpoints pick the lowest-instance registered run — so reap it via the
-    // unambiguous per-instance cancel (also covering that endpoint for
-    // AddParty) before the next scenario starts its own run.
+    // Nothing is left to reap. The decline fails the row and finishes the
+    // WorkflowProposal, so the run is already terminal and the per-instance
+    // cancel must refuse it. A 200 here would mean a declined run still
+    // counts as in flight.
     let (status, body) = f
         .post_expect_status(
             f.p1.http,
@@ -223,8 +221,9 @@ async fn decline_cascade(f: &Fixture) -> anyhow::Result<()> {
         )
         .await?;
     anyhow::ensure!(
-        status.as_u16() == 200,
-        "per-instance cancel of the declined run returned {status}: {body}"
+        status.as_u16() == 409,
+        "per-instance cancel of the declined run returned {status}: {body} \
+         (expected 409: the decline already ended it)"
     );
 
     chaos::dismiss_p1(f, &instance).await;

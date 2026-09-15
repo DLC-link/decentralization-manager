@@ -200,6 +200,29 @@ pub async fn workflow_run_status(
     Ok(s)
 }
 
+/// The `current_step` of a workflow run. `None` if there is no row.
+///
+/// A member's progress lives on the run row, not in `workflow_artifacts`:
+/// only the contracts engine writes artefacts now, so a phase that waits
+/// for a member to reach a step reads this.
+pub async fn workflow_run_step(
+    db_path: &Path,
+    instance_name: &str,
+    role: &str,
+) -> anyhow::Result<Option<String>> {
+    let pool = open(db_path).await?;
+    let s: Option<String> = sqlx::query_scalar(
+        "SELECT current_step FROM workflow_runs WHERE instance_name = ?1 AND role = ?2",
+    )
+    .bind(instance_name)
+    .bind(role)
+    .fetch_optional(&pool)
+    .await
+    .context("workflow_run_step")?;
+    pool.close().await;
+    Ok(s)
+}
+
 /// The `error` recorded on a workflow run (the message a failed run stored).
 /// `None` if there's no row or the column is NULL.
 pub async fn workflow_run_error(
