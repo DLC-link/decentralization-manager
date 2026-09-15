@@ -31,92 +31,15 @@ pub fn topology_retry_delay_secs() -> u64 {
         .unwrap_or(TOPOLOGY_RETRY_DELAY_SECS)
 }
 
-/// Maximum number of consecutive failures before a peer-side workflow step
-/// aborts the whole workflow.
+/// Maximum number of consecutive failures of one run step before the
+/// observer marks the run `Failed`.
 ///
-/// The peer event loop in `src/workflow/mod.rs` retries each step on
-/// Canton-side errors (the most common being
-/// `TOPOLOGY_NO_APPROPRIATE_SIGNING_KEY_IN_STORE` when the synchronizer
-/// hasn't fully reconciled a freshly-restarted participant's signing keys
-/// yet). The previous hardcoded 3-attempt × 2s budget (6s window) was
-/// tuned for localnet's docker-compose Canton, which reconciles in ms.
-/// On devnet's kubectl-tunneled Canton — especially right after a chaos
-/// phase restart — the reconciliation can take 10–20s; all three attempts
-/// can land inside the same slow window and the peer aborts unnecessarily.
-///
-/// 6 attempts × 2s = 12s gives the same retry cadence with twice the
-/// total window, which has comfortably covered the observed Canton
-/// reconciliation lag in lived devnet runs. Production behavior on a
-/// healthy synchronizer is unchanged because the first attempt continues
-/// to succeed the vast majority of the time.
+/// Canton-side transients (the most common being
+/// `TOPOLOGY_NO_APPROPRIATE_SIGNING_KEY_IN_STORE` while a freshly restarted
+/// participant reconciles its signing keys) take 10 to 20 seconds on a
+/// kubectl-tunneled devnet, so the budget is six attempts at the observer
+/// cadence. A healthy synchronizer succeeds on the first attempt.
 pub const MAX_CONSECUTIVE_STEP_FAILURES: usize = 6;
-
-/// How many consecutive "no active workflow" replies (HTTP 503 from the
-/// coordinator's always-on listener) a peer tolerates before abandoning a
-/// resumed run.
-///
-/// A peer reaches the listener but finds no workflow registered in two cases:
-///   1. Transient — the coordinator restarted and `recover_in_progress_workflows`
-///      hasn't re-registered the active-workflow slot yet (a sub-second-to-a-few-
-///      seconds window after the listener starts accepting).
-///   2. Permanent — the coordinator's workflow was cancelled or dismissed while
-///      this peer was offline, so the slot will never be populated.
-///
-/// Replying `Wait` to case 2 would leave the peer polling forever, keeping its
-/// run InProgress and the node perpetually "busy" to invite / pre-flight checks.
-/// We instead give up after this many polls. The counter resets on any real
-/// reply, so case 1 rides through. 4 polls × 5s ≈ 20s: long enough to cover a
-/// slow resume, short enough that a dismissed run is cleaned up promptly.
-/// Minimum dec-party-manager version every workflow participant must run.
-///
-/// 0.1.9 introduced concurrent multi-instance workflows with a breaking Noise
-/// wire format (version byte + instance routing); older builds cannot even
-/// parse the new frames. Workflow starts probe every invitee's `Health` and
-/// refuse to send invites unless each one POSITIVELY reports a version >= this
-/// — an old build answers the (unparseable-to-it) probe with a 503, so
-/// "no verifiable version" is treated as incompatible rather than assumed OK.
-pub const MIN_PEER_VERSION: &str = "0.1.9";
-
-/// Retry budget for the peer's decline notification to the coordinator.
-///
-/// Deliberately NOT the fast-transport `noise_retry` profile (2 attempts,
-/// 250 ms backoff): a coordinator run only becomes routable once its spawned
-/// task has sent invites, slept its peer-grace period, and called
-/// `set_active` — ~2s after start. A peer declining the moment the invite
-/// card appears (a real operator pattern, reproduced by G14 in CI) hits that
-/// window and gets 503s; the fast profile's retries are exhausted inside it
-/// and the coordinator's human-paced run then hangs forever. 5 attempts at
-/// 2s spacing rides out any plausible init window.
-pub const DECLINE_NOTIFY_MAX_ATTEMPTS: usize = 5;
-pub const DECLINE_NOTIFY_BACKOFF_SECS: u64 = 2;
-
-pub const MAX_CONSECUTIVE_NO_WORKFLOW_POLLS: usize = 4;
-
-/// Delay before a peer re-polls the coordinator after a `Wait` reply, in
-/// milliseconds.
-/// Default value; the actual delay is read via [`peer_wait_poll_delay_ms`].
-pub const PEER_WAIT_POLL_DELAY_MS: u64 = 2000;
-
-/// How long a peer waits before asking the coordinator for its next command
-/// again, configurable via the `DECPM_PEER_WAIT_POLL_DELAY_MS` env var.
-/// Defaults to [`PEER_WAIT_POLL_DELAY_MS`] (2000) when unset or unparseable.
-///
-/// This is the cadence of the peer event loop in `workflow/mod.rs`: whenever
-/// the coordinator has no command ready it answers `Wait`, and the peer sleeps
-/// this long before asking again. It therefore quantizes every multi-step
-/// workflow — a run that needs N polls cannot finish faster than N times this
-/// value, whatever the work actually costs.
-///
-/// 2s is right against a real synchronizer, where each coordinator step is a
-/// 10-30s Canton round trip and the poll is noise. On a single-container
-/// localnet the step lands in milliseconds, so the quantization *is* the
-/// runtime; the integration-test harness lowers it.
-pub fn peer_wait_poll_delay_ms() -> u64 {
-    std::env::var("DECPM_PEER_WAIT_POLL_DELAY_MS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(PEER_WAIT_POLL_DELAY_MS)
-}
 
 /// Canton protocol version used for key export and topology operations.
 /// Bumped 34 -> 35 alongside the localnet 0.6.7 -> 0.6.11 test target; the
@@ -272,11 +195,9 @@ pub fn acs_spool_dir(data_dir: &std::path::Path) -> std::path::PathBuf {
 }
 
 // Base directory names (relative to root directory)
-/// Data directory name (contains the Noise key, SQLite database, and DARs)
+/// Data directory name (contains the SQLite database, the DARs, and the ACS
+/// spool). A transport key file left by a 1.8.x build is never read or modified.
 pub const DATA_DIR: &str = "data";
-
-/// Noise private key filename (inside data/)
-pub const NOISE_KEY_FILENAME: &str = "noise.key";
 
 /// SQLite database filename (inside data/)
 pub const DB_FILENAME: &str = "decpm.db";

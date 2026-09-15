@@ -1,13 +1,14 @@
-import { isNoisePublicKey } from "./noiseKey";
 import type { Peer } from "./types";
 
+/**
+ * The columns operators exchange. One row is also the single-peer identity
+ * string the "Share my identity" button copies, so a pasted row and a pasted
+ * file take the same path.
+ */
 export const PEER_CSV_COLUMNS = [
   "participant_id",
+  "node_party_id",
   "name",
-  "address",
-  "port",
-  "public_key",
-  "party",
 ] as const;
 
 export interface ParsedPeerRow {
@@ -34,14 +35,7 @@ const escapeField = (value: string): string =>
 
 /** One peer as an RFC 4180 row, no trailing newline and no header. */
 export const peerToCsvRow = (peer: Peer): string =>
-  [
-    peer.participant_id,
-    peer.name,
-    peer.address,
-    String(peer.port),
-    peer.public_key,
-    peer.party ?? "",
-  ]
+  [peer.participant_id, peer.party ?? "", peer.name]
     .map(escapeField)
     .join(",");
 
@@ -171,7 +165,7 @@ export const canonicalPeerId = (id: string): string => {
 
 /**
  * Parse peers out of CSV text, tolerating an optional header row, blank lines
- * and a missing trailing `party` column. A row that cannot become a peer is
+ * and a missing trailing `name` column. A row that cannot become a peer is
  * returned in `rejected` rather than failing the whole file.
  */
 export const parsePeersCsv = (text: string): ParsedPeersCsv => {
@@ -191,19 +185,20 @@ export const parsePeersCsv = (text: string): ParsedPeersCsv => {
       rejected.push({ line, raw, reason: error });
       continue;
     }
-    if (fields.length < 5 || fields.length > PEER_CSV_COLUMNS.length) {
+    if (fields.length < 2 || fields.length > PEER_CSV_COLUMNS.length) {
       rejected.push({
         line,
         raw,
-        reason: `Expected 5 or ${PEER_CSV_COLUMNS.length} columns (${PEER_CSV_COLUMNS.join(", ")}), found ${fields.length}`,
+        reason: `Expected 2 or ${PEER_CSV_COLUMNS.length} columns (${PEER_CSV_COLUMNS.join(", ")}), found ${fields.length}`,
       });
       continue;
     }
 
     // Whitespace inside a quoted field is data — `peersToCsv` quotes exactly
     // those values, so trimming them would change a peer on a round-trip.
-    const [participantId, name, address, portText, publicKey, party] =
-      fields.map((f) => (f.quoted ? f.value : f.value.trim()));
+    const [participantId, nodeParty, name] = fields.map((f) =>
+      f.quoted ? f.value : f.value.trim(),
+    );
 
     if (!participantId) {
       rejected.push({ line, raw, reason: "Missing participant_id" });
@@ -217,28 +212,17 @@ export const parsePeersCsv = (text: string): ParsedPeersCsv => {
       });
       continue;
     }
-    if (!address) {
-      rejected.push({ line, raw, reason: "Missing address" });
+    // A peer without a node party cannot be invited to a run, so the import
+    // refuses the row rather than storing one that every workflow rejects.
+    if (!nodeParty) {
+      rejected.push({ line, raw, reason: "Missing node_party_id" });
       continue;
     }
-    if (!publicKey) {
-      rejected.push({ line, raw, reason: "Missing public_key" });
-      continue;
-    }
-    if (!isNoisePublicKey(publicKey)) {
+    if (!isCantonId(nodeParty)) {
       rejected.push({
         line,
         raw,
-        reason: `Invalid public_key "${publicKey}" (not a secp256k1 public key)`,
-      });
-      continue;
-    }
-    const port = Number(portText);
-    if (!Number.isInteger(port) || port < 1 || port > 65535) {
-      rejected.push({
-        line,
-        raw,
-        reason: `Invalid port "${portText}" (expected 1-65535)`,
+        reason: `Invalid node_party_id "${nodeParty}" (expected prefix::<68 hex characters>)`,
       });
       continue;
     }
@@ -258,10 +242,7 @@ export const parsePeersCsv = (text: string): ParsedPeersCsv => {
       peer: {
         participant_id: canonicalId,
         name: name || participantId,
-        address,
-        port,
-        ...(party ? { party } : {}),
-        public_key: publicKey,
+        party: canonicalPeerId(nodeParty),
       },
     });
   }

@@ -7,10 +7,11 @@
 //! [`KindDriver`] for its kind and role. The driver does one bounded piece of
 //! work and returns. Cancel, dismiss, and retry are row operations.
 //!
-//! Until migration `000021` adds the on-ledger columns, a run's on-ledger
-//! fields live in `config_json` under the [`RUN_META_KEY`] object
-//! ([`RunMeta`]). The observer ignores rows without one, which is how it
-//! tells an on-ledger run from a Noise-era row.
+//! A run's on-ledger fields ([`RunMeta`]) live in the `proposal_cid`,
+//! `coordinator_party`, `coordinator_participant`, `member_variant`, and
+//! `topology_hashes_json` columns of `workflow_runs` (migration 000021). The
+//! observer ignores a row without a `proposal_cid`, which is how it tells an
+//! on-ledger run from a legacy row that predates the 2.0 upgrade.
 
 pub mod add_party;
 pub mod change_threshold;
@@ -27,7 +28,6 @@ use common::{
     canton_id::CantonId,
     types::{WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun},
 };
-use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
 use crate::{
@@ -51,13 +51,6 @@ use super::{
     topology,
     validation::HeadState,
 };
-
-/// The `config_json` key that carries [`RunMeta`].
-///
-/// TODO(migration 000021): move these fields to the `proposal_cid`,
-/// `coordinator_party`, `coordinator_participant`, `member_variant`, and
-/// `topology_hashes_json` columns and delete this key.
-pub const RUN_META_KEY: &str = "onledger";
 
 /// The last step of every step list.
 pub const COMPLETE_STEP: &str = "Complete";
@@ -242,54 +235,48 @@ pub struct StartedRun {
 // Run metadata
 // ---------------------------------------------------------------------------
 
-/// Which member steps a peer row follows (design section 6).
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "PascalCase")]
-pub enum MemberVariant {
-    /// The add-party participant being added.
-    Joiner,
-    /// Any other invitee.
-    Member,
-}
+/// Which member steps a peer row follows (design section 6). The wire DTO
+/// and the column share one type.
+pub use common::types::MemberVariant;
 
-impl MemberVariant {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Joiner => "Joiner",
-            Self::Member => "Member",
-        }
-    }
-}
-
-/// The on-ledger fields of a run row.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+/// The on-ledger fields of a run row (migration 000021 columns).
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunMeta {
     pub proposal_cid: String,
     pub coordinator_party: CantonId,
     pub coordinator_participant: CantonId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub member_variant: Option<MemberVariant>,
     /// Topology transaction hashes this run pinned, by mapping (`dnd`,
     /// `p2p`, `clear`).
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub topology_hashes: BTreeMap<String, String>,
 }
 
-/// The on-ledger fields of a run, or `None` for a row the engine does not
-/// drive.
-pub fn read_run_meta(run: &WorkflowRun) -> Option<RunMeta> {
-    let value: serde_json::Value = serde_json::from_str(&run.config_json).ok()?;
-    serde_json::from_value(value.get(RUN_META_KEY)?.clone()).ok()
+impl RunMeta {
+    /// Copy the fields onto a run row.
+    fn apply(&self, run: &mut WorkflowRun) {
+        run.proposal_cid = Some(self.proposal_cid.clone());
+        run.coordinator_party = Some(self.coordinator_party.clone());
+        run.coordinator_participant = Some(self.coordinator_participant.to_string());
+        run.member_variant = self.member_variant;
+        run.topology_hashes = self.topology_hashes.clone();
+    }
 }
 
-fn with_meta(config_json: &str, meta: &RunMeta) -> Result<String> {
-    let mut value: serde_json::Value =
-        serde_json::from_str(config_json).unwrap_or_else(|_| serde_json::json!({}));
-    if !value.is_object() {
-        value = serde_json::json!({});
-    }
-    value[RUN_META_KEY] = serde_json::to_value(meta).context("encode run meta")?;
-    serde_json::to_string(&value).context("encode config_json")
+/// The on-ledger fields of a run, or `None` for a row the engine does not
+/// drive: a row without a proposal, without a coordinator party, or whose
+/// `coordinator_participant` is not a Canton id (a legacy transport pubkey
+/// the migration could not map).
+pub fn read_run_meta(run: &WorkflowRun) -> Option<RunMeta> {
+    let proposal_cid = run.proposal_cid.clone().filter(|c| !c.is_empty())?;
+    let coordinator_party = run.coordinator_party.clone()?;
+    let coordinator_participant = CantonId::parse(run.coordinator_participant.as_deref()?).ok()?;
+    Some(RunMeta {
+        proposal_cid,
+        coordinator_party,
+        coordinator_participant,
+        member_variant: run.member_variant,
+        topology_hashes: run.topology_hashes.clone(),
+    })
 }
 
 /// Replace a run's on-ledger fields.
@@ -300,7 +287,7 @@ pub async fn write_run_meta(db: &SqlitePool, instance_name: &str, meta: &RunMeta
     let Some(mut run) = db.get_workflow_run(instance_name).await? else {
         bail!("workflow run {instance_name} not found");
     };
-    run.config_json = with_meta(&run.config_json, meta)?;
+    meta.apply(&mut run);
     run.updated_at = now_secs();
     let mut tx = db.begin_transaction().await?;
     tx.upsert_workflow_run(&run).await?;
@@ -601,18 +588,6 @@ pub trait KindDriver {
     async fn tick_member(ctx: &TickCtx<'_>, run: &WorkflowRun, meta: &RunMeta) -> Result<()>;
 }
 
-/// A stub tick: log at debug level and return, so a run that reaches an
-/// unimplemented step stays `InProgress` without noise in the logs.
-pub(crate) fn not_implemented(run: &WorkflowRun) {
-    tracing::debug!(
-        instance = %run.instance_name,
-        kind = %run.kind,
-        role = %run.role,
-        step = %run.current_step,
-        "step machine not implemented yet"
-    );
-}
-
 /// What [`drive`] did with a row.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Driven {
@@ -900,7 +875,11 @@ fn check_thresholds(req: &StartRequest, targets: &ResolvedTargets) -> Result<()>
                 .map(|d| d.owners.len())
                 .unwrap_or(targets.participants.len());
             match req {
-                StartRequest::AddParty { .. } => head + 1,
+                // The joiner carries Canton's onboarding marker until its ACS
+                // import completes, so it signs nothing. A party mapping added
+                // at threshold = the post-add owner count never reaches its
+                // threshold, and the run stalls with no signal saying why.
+                StartRequest::AddParty { .. } => head,
                 StartRequest::Kick { .. } => head.saturating_sub(1),
                 _ => head,
             }
@@ -939,8 +918,7 @@ async fn invitee_parties(db: &SqlitePool, participants: &[CantonId]) -> Result<V
         let party = peers
             .iter()
             .find(|peer| peer.participant_id == *p)
-            .and_then(|peer| peer.party.as_deref())
-            .and_then(|s| CantonId::parse(s).ok());
+            .and_then(|peer| peer.party.clone());
         match party {
             Some(party) => parties.push(party),
             None => missing.push((p.clone(), "no node party in the peers table".to_string())),
@@ -990,12 +968,8 @@ fn describe(req: &StartRequest, targets: &ResolvedTargets) -> String {
 }
 
 /// The `config_json` of a coordinator row: the fields the API layer lifts
-/// for the run card, plus [`RunMeta`].
-fn coordinator_config_json(
-    req: &StartRequest,
-    targets: &ResolvedTargets,
-    meta: &RunMeta,
-) -> Result<String> {
+/// for the run card.
+fn coordinator_config_json(req: &StartRequest, targets: &ResolvedTargets) -> Result<String> {
     let participants = &targets.participants;
     let base = match req {
         StartRequest::Onboarding {
@@ -1077,7 +1051,7 @@ fn coordinator_config_json(
             "participants": participants,
         }),
     };
-    with_meta(&base.to_string(), meta)
+    Ok(base.to_string())
 }
 
 async fn dispatch_preflight(ol: &OnLedger, req: &StartRequest) -> Result<()> {
@@ -1195,7 +1169,7 @@ pub async fn start_run(ol: &OnLedger, req: StartRequest) -> Result<StartedRun> {
     };
     let steps = steps_for(req.kind(), WorkflowRole::Coordinator, None);
     let now = now_secs();
-    let run = WorkflowRun {
+    let mut run = WorkflowRun {
         instance_name: instance_name.clone(),
         kind: req.kind(),
         role: WorkflowRole::Coordinator,
@@ -1203,10 +1177,12 @@ pub async fn start_run(ol: &OnLedger, req: StartRequest) -> Result<StartedRun> {
         current_step: steps[0].to_string(),
         step_index: 0,
         step_total: i64::try_from(steps.len()).unwrap_or(0),
-        config_json: coordinator_config_json(&req, &targets, &meta)?,
-        // TODO(migration 000021): `coordinator_participant`. Until then the
-        // old column carries this node's participant id.
-        coordinator_pubkey: Some(identity.participant_id.to_string()),
+        config_json: coordinator_config_json(&req, &targets)?,
+        coordinator_participant: None,
+        coordinator_party: None,
+        proposal_cid: None,
+        member_variant: None,
+        topology_hashes: BTreeMap::new(),
         coordinator_instance: None,
         coordinator_name: None,
         expected_peers: targets.invitee_participants.clone(),
@@ -1230,6 +1206,7 @@ pub async fn start_run(ol: &OnLedger, req: StartRequest) -> Result<StartedRun> {
         created_at: now,
         updated_at: now,
     };
+    meta.apply(&mut run);
     let mut tx = ol.db().begin_transaction().await?;
     tx.upsert_workflow_run(&run).await?;
     Commitable::commit(tx).await?;
@@ -1273,8 +1250,8 @@ pub fn member_variant_for(
 }
 
 /// The `config_json` of a peer row: the invitation fields the API layer
-/// lifts for the run card, plus [`RunMeta`].
-fn peer_config_json(proposal: &WorkflowProposalRecord, meta: &RunMeta) -> Result<String> {
+/// lifts for the run card.
+fn peer_config_json(proposal: &WorkflowProposalRecord) -> String {
     let base = serde_json::json!({
         "prefix": proposal.prefix,
         "participants": proposal.participants,
@@ -1286,7 +1263,7 @@ fn peer_config_json(proposal: &WorkflowProposalRecord, meta: &RunMeta) -> Result
         "previous_threshold": proposal.previous_threshold,
         "package_names": proposal.package_names,
     });
-    with_meta(&base.to_string(), meta)
+    base.to_string()
 }
 
 /// What `accept_invitation` produced.
@@ -1368,7 +1345,7 @@ pub async fn accept_invitation(ol: &OnLedger, proposal_cid: &str) -> Result<Acce
     };
     let steps = steps_for(record.kind, WorkflowRole::Peer, member_variant);
     let now = now_secs();
-    let run = WorkflowRun {
+    let mut run = WorkflowRun {
         instance_name: instance_name.clone(),
         kind: record.kind,
         role: WorkflowRole::Peer,
@@ -1376,9 +1353,12 @@ pub async fn accept_invitation(ol: &OnLedger, proposal_cid: &str) -> Result<Acce
         current_step: steps[0].to_string(),
         step_index: 0,
         step_total: i64::try_from(steps.len()).unwrap_or(0),
-        config_json: peer_config_json(record, &meta)?,
-        // TODO(migration 000021): `coordinator_participant`.
-        coordinator_pubkey: Some(record.proposer_participant.clone()),
+        config_json: peer_config_json(record),
+        coordinator_participant: None,
+        coordinator_party: None,
+        proposal_cid: None,
+        member_variant: None,
+        topology_hashes: BTreeMap::new(),
         coordinator_instance: Some(record.run_id.clone()),
         coordinator_name: None,
         expected_peers: record
@@ -1406,6 +1386,7 @@ pub async fn accept_invitation(ol: &OnLedger, proposal_cid: &str) -> Result<Acce
         created_at: now,
         updated_at: now,
     };
+    meta.apply(&mut run);
     tx.upsert_workflow_run(&run).await?;
     tx.delete_pending_invitation(proposal_cid).await?;
     Commitable::commit(tx).await?;
@@ -1575,7 +1556,11 @@ mod tests {
             step_index: 0,
             step_total: 7,
             config_json: config_json.into(),
-            coordinator_pubkey: None,
+            coordinator_participant: None,
+            coordinator_party: None,
+            proposal_cid: None,
+            member_variant: None,
+            topology_hashes: BTreeMap::new(),
             coordinator_instance: None,
             coordinator_name: None,
             expected_peers: vec![],
@@ -1619,18 +1604,28 @@ mod tests {
     }
 
     #[test]
-    fn run_meta_round_trips_through_config_json_and_keeps_other_fields() {
-        let json = with_meta(r#"{"party_id_prefix":"cbtc","threshold":2}"#, &meta()).expect("json");
-        let value: serde_json::Value = serde_json::from_str(&json).expect("value");
-        assert_eq!(value["party_id_prefix"], "cbtc");
-        assert_eq!(value["threshold"], 2);
-        let run = run_with(&json);
+    fn run_meta_round_trips_through_the_row_columns() {
+        let mut run = run_with(r#"{"party_id_prefix":"cbtc","threshold":2}"#);
+        meta().apply(&mut run);
         assert_eq!(read_run_meta(&run), Some(meta()));
-        assert!(read_run_meta(&run_with(r#"{"party_id_prefix":"cbtc"}"#)).is_none());
-        assert!(read_run_meta(&run_with("not json")).is_none());
-        // A non-object config is replaced, not appended to.
-        let repaired = with_meta("[1,2]", &meta()).expect("json");
-        assert!(read_run_meta(&run_with(&repaired)).is_some());
+        // The card fields stay where the API layer reads them.
+        assert_eq!(
+            run.config_json,
+            r#"{"party_id_prefix":"cbtc","threshold":2}"#
+        );
+
+        // A row the engine does not drive: no proposal, no party, or a
+        // coordinator that is not a Canton id (a legacy transport pubkey).
+        assert!(read_run_meta(&run_with("{}")).is_none());
+        let mut no_party = run.clone();
+        no_party.coordinator_party = None;
+        assert!(read_run_meta(&no_party).is_none());
+        let mut legacy_pubkey = run.clone();
+        legacy_pubkey.coordinator_participant = Some("03abcdef".into());
+        assert!(read_run_meta(&legacy_pubkey).is_none());
+        let mut empty_cid = run;
+        empty_cid.proposal_cid = Some(String::new());
+        assert!(read_run_meta(&empty_cid).is_none());
     }
 
     #[test]
@@ -1869,7 +1864,7 @@ mod tests {
     }
 
     #[test]
-    fn coordinator_config_json_carries_the_card_fields_and_the_meta() {
+    fn coordinator_config_json_carries_the_card_fields() {
         let req = StartRequest::AddParty {
             dec_party_id: CantonId::parse(&format!("cbtc::{NS}")).expect("id"),
             new_participant_id: participant(4),
@@ -1883,18 +1878,17 @@ mod tests {
             threshold: Some(3),
             ..Default::default()
         };
-        let json = coordinator_config_json(&req, &targets, &meta()).expect("json");
+        let json = coordinator_config_json(&req, &targets).expect("json");
         let value: serde_json::Value = serde_json::from_str(&json).expect("value");
         assert_eq!(value["new_threshold"], 3);
         assert_eq!(value["previous_threshold"], 2);
         assert_eq!(value["participants"].as_array().map(Vec::len), Some(3));
-        assert_eq!(value[RUN_META_KEY]["proposal_cid"], "00proposal");
-        assert_eq!(value[RUN_META_KEY]["member_variant"], "Joiner");
+        assert!(value.get("onledger").is_none(), "meta lives in the columns");
     }
 
     #[test]
     fn peer_config_json_mirrors_the_invitation_fields() {
-        let json = peer_config_json(&proposal_full(), &meta()).expect("json");
+        let json = peer_config_json(&proposal_full());
         let value: serde_json::Value = serde_json::from_str(&json).expect("value");
         assert_eq!(value["prefix"], "cbtc");
         assert_eq!(value["dar_filenames"][0], "governance-core-v1-0.1.0.dar");
@@ -1902,10 +1896,6 @@ mod tests {
         assert_eq!(value["new_threshold"], 2);
         assert_eq!(value["previous_threshold"], 3);
         assert_eq!(value["package_names"][0], "governance-core-v1");
-        assert_eq!(
-            value[RUN_META_KEY]["coordinator_party"],
-            party("node-a").to_string()
-        );
     }
 
     #[test]

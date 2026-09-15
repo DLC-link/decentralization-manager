@@ -1,28 +1,35 @@
 import { Box, Tooltip } from "@mui/material";
-import type { ConnectionStatus } from "../types";
+
+/**
+ * How a dot reads, independent of what produced it. Node-health probes and
+ * peer heartbeats report different vocabularies but share one indicator, so
+ * each wire enum maps onto this tone instead of driving the colors directly.
+ * `toneForPeer` in `../peers` maps a peer's status.
+ */
+export type DotTone = "self" | "live" | "ok" | "warn" | "bad" | "idle";
 
 interface StatusDotProps {
-  status?: ConnectionStatus;
+  tone?: DotTone;
   /** Tooltip text; when set the dot shows a help cursor. */
   title?: string;
   /** Dot diameter in px. */
   size?: number;
 }
 
-// Peer connection indicator. Only a live (Connected) peer emits the soft
-// pulsing halo — the one continuous motion blessed by the BitSafe design
-// system. Offline / failed / local states are static, colored by state:
-// connected (green), unreachable (red), handshake-failed (amber), you (accent).
-// Honors prefers-reduced-motion.
-const STATUS: Record<ConnectionStatus, { color: string; pulse: boolean }> = {
-  Connected: { color: "success.main", pulse: true },
-  CurrentNode: { color: "primary.main", pulse: false },
-  Unreachable: { color: "error.main", pulse: false },
-  HandshakeFailed: { color: "warning.main", pulse: false },
+// Only a probe that just answered emits the soft pulsing halo — the one
+// continuous motion blessed by the BitSafe design system. Every other state is
+// static and colored by tone. Honors prefers-reduced-motion.
+const TONE: Record<DotTone, { color: string; pulse: boolean }> = {
+  self: { color: "primary.main", pulse: false },
+  live: { color: "success.main", pulse: true },
+  ok: { color: "success.main", pulse: false },
+  warn: { color: "warning.main", pulse: false },
+  bad: { color: "error.main", pulse: false },
+  idle: { color: "text.disabled", pulse: false },
 };
 
-export const StatusDot = ({ status, title, size = 9 }: StatusDotProps) => {
-  const cfg = (status && STATUS[status]) || { color: "text.disabled", pulse: false };
+export const StatusDot = ({ tone, title, size = 9 }: StatusDotProps) => {
+  const cfg = TONE[tone ?? "idle"];
 
   const dot = (
     <Box

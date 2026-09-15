@@ -101,6 +101,9 @@ pub struct OnLedger {
     pending_invitations: RwLock<Vec<PendingInvitation>>,
     /// Pending topology proposals nobody asked this node about; UI only.
     unsolicited: RwLock<Vec<UnsolicitedProposal>>,
+    /// Participants whose acceptance of a proposal is visible, by proposal
+    /// contract id. Feeds `WorkflowRun::connected_peers`; UI only.
+    accepted_participants: RwLock<HashMap<String, Vec<common::canton_id::CantonId>>>,
     /// One lock per in-progress run, so one driver at a time touches it.
     run_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
@@ -151,6 +154,7 @@ impl OnLedger {
             registry: Arc::new(RwLock::new(PeerHealthSnapshot::default())),
             pending_invitations: RwLock::new(Vec::new()),
             unsolicited: RwLock::new(Vec::new()),
+            accepted_participants: RwLock::new(HashMap::new()),
             run_locks: Mutex::new(HashMap::new()),
         })
     }
@@ -274,6 +278,28 @@ impl OnLedger {
     /// Replace the unsolicited list. The observer calls this every minute.
     pub async fn set_unsolicited(&self, list: Vec<UnsolicitedProposal>) {
         *self.unsolicited.write().await = list;
+    }
+
+    /// The participants that accepted `proposal_cid`, as the observer last
+    /// saw them (`GET /workflows` `connected_peers`).
+    pub async fn accepted_participants(
+        &self,
+        proposal_cid: &str,
+    ) -> Vec<common::canton_id::CantonId> {
+        self.accepted_participants
+            .read()
+            .await
+            .get(proposal_cid)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Replace the acceptance map. The observer calls this every tick.
+    pub async fn set_accepted_participants(
+        &self,
+        map: HashMap<String, Vec<common::canton_id::CantonId>>,
+    ) {
+        *self.accepted_participants.write().await = map;
     }
 
     /// The lock of one run. Callers `try_lock` it and skip the run when it

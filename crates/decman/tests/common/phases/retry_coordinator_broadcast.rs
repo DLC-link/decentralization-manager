@@ -6,6 +6,11 @@
 //! to `failed` while it's down, restart it. Restart peers. POST
 //! /workflows/{instance}/retry on P1. Assert all three workflow_runs rows
 //! reach Completed.
+//!
+//! TODO(onledger-phases): this phase still describes the 1.x transport model —
+//! retry no longer broadcasts; it re-reads the accepted serial and
+//! re-proposes (design D10).
+//! Rewrite it against the on-ledger steps before the suite runs green.
 
 use std::time::Duration;
 

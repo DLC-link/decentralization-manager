@@ -10,8 +10,8 @@ use ratatui::widgets::{
 
 use common::types::{
     ConnectionStatus, DecentralizedParty, PackageInfo, PeerErrorKind, PeerPackageComparison,
-    PendingInvitation, Permission, VettedPackageInfo, WAITING_FOR_PEERS_STEP, WorkflowProgress,
-    WorkflowRole, WorkflowRun,
+    PendingInvitation, Permission, VettedPackageInfo, WAITING_FOR_ACCEPTANCES_STEP,
+    WorkflowProgress, WorkflowRole, WorkflowRun,
 };
 
 use crate::api::{
@@ -887,12 +887,27 @@ fn parties_table<'a>(parties: &[&DecentralizedParty], block: Block<'a>) -> Table
         .row_highlight_style(highlight_style())
 }
 
-/// Build the peers table, mirroring the frontend's network panel. The active
-/// workflow (if any) is shown inline next to the peer name, as the frontend
-/// does, so the name column keeps its width on narrow terminals.
+/// Format a heartbeat age in seconds as a short "time ago" label. Nodes no
+/// longer probe each other, so this is the age of a registry heartbeat, not a
+/// liveness measurement (design D3).
+fn heartbeat_age(secs: Option<i64>) -> String {
+    match secs {
+        None => "—".to_owned(),
+        // A clock skew between the two nodes can date a heartbeat in the future.
+        Some(age) if age <= 0 => "now".to_owned(),
+        Some(age) if age < 60 => format!("{age}s ago"),
+        Some(age) if age < 3600 => format!("{m}m ago", m = age / 60),
+        Some(age) if age < 86400 => format!("{h}h ago", h = age / 3600),
+        Some(age) => format!("{d}d ago", d = age / 86400),
+    }
+}
+
+/// Build the peers table, mirroring the frontend's network panel. A peer is
+/// identified by its participant and its node party, the two values operators
+/// exchange out of band (design D2).
 fn peers_table<'a>(peers: &'a [PeerView], block: Block<'a>) -> Table<'a> {
     let header =
-        Row::new(["STATUS", "PEER", "ADDRESS", "LATENCY", "VERSION"]).style(header_style());
+        Row::new(["STATUS", "PEER", "NODE PARTY", "HEARTBEAT", "VERSION"]).style(header_style());
 
     let rows = peers.iter().map(|peer| {
         let (color, label) = status_display(peer.status);
@@ -901,37 +916,33 @@ fn peers_table<'a>(peers: &'a [PeerView], block: Block<'a>) -> Table<'a> {
             Span::styled(label, Style::default().fg(color)),
         ]));
 
-        let mut name = vec![Span::raw(peer.name.clone())];
-        if let Some(workflow) = &peer.workflow {
-            name.push(Span::styled(
-                format!("  ▸ {workflow}"),
-                Style::default().fg(Color::DarkGray),
-            ));
-        }
+        let party = peer.party.as_deref().map_or_else(
+            // A peer without a node party cannot be invited; say so in place.
+            || {
+                Span::styled(
+                    "(not configured)".to_owned(),
+                    Style::default().fg(Color::DarkGray),
+                )
+            },
+            |party| Span::raw(party.to_owned()),
+        );
 
         Row::new(vec![
             status,
-            Cell::from(Line::from(name)),
-            Cell::from(format!(
-                "{addr}:{port}",
-                addr = peer.address,
-                port = peer.port
-            )),
-            Cell::from(
-                peer.latency_ms
-                    .map_or_else(|| "—".to_owned(), |ms| format!("{ms} ms")),
-            ),
+            Cell::from(peer.name.clone()),
+            Cell::from(Line::from(party)),
+            Cell::from(heartbeat_age(peer.heartbeat_age_secs)),
             Cell::from(peer.version.clone().unwrap_or_else(|| "—".to_owned())),
         ])
     });
 
-    // ADDRESS flexes to fill the width (host:port strings are long); the peer
-    // name column is fixed and comfortably fits a name plus its workflow note.
+    // NODE PARTY flexes to fill the width (party ids are long); the peer name
+    // column is fixed.
     let widths = [
         Constraint::Length(14),
         Constraint::Length(30),
         Constraint::Fill(1),
-        Constraint::Length(9),
+        Constraint::Length(10),
         Constraint::Length(9),
     ];
 
@@ -1063,27 +1074,22 @@ fn truncate(value: &str, max: usize) -> String {
 /// the string the package-checker popup previously rendered verbatim.
 fn peer_error_label(kind: PeerErrorKind) -> &'static str {
     match kind {
-        PeerErrorKind::TcpConnectTimeout => "tcp_connect_timeout",
-        PeerErrorKind::TcpConnectFailed => "tcp_connect_failed",
-        PeerErrorKind::RequestTimeout => "request_timeout",
-        PeerErrorKind::Transport => "transport",
-        PeerErrorKind::HandshakeFailed => "handshake_failed",
-        PeerErrorKind::BadStatus => "bad_status",
-        PeerErrorKind::DecodeFailed => "decode_failed",
-        PeerErrorKind::InvalidPublicKey => "invalid_public_key",
+        PeerErrorKind::TopologyReadFailed => "topology_read_failed",
+        PeerErrorKind::NoVettedPackages => "no_vetted_packages",
         PeerErrorKind::Other => "other",
     }
 }
 
-/// Map a peer status to its display color and label. `None` means no status was
-/// reported for the peer, rendered as "Unknown".
+/// Map a peer status to its display color and label (design D3). `None` means
+/// the status endpoint reported nothing for the peer, rendered as "Unknown" —
+/// the same label the endpoint uses for a peer with no registry entry.
 fn status_display(status: Option<ConnectionStatus>) -> (Color, &'static str) {
     match status {
         Some(ConnectionStatus::CurrentNode) => (logo::ORANGE, "This node"),
-        Some(ConnectionStatus::Connected) => (Color::Green, "Connected"),
-        Some(ConnectionStatus::Unreachable) => (Color::Red, "Unreachable"),
-        Some(ConnectionStatus::HandshakeFailed) => (Color::Red, "Handshake"),
-        None => (Color::DarkGray, "Unknown"),
+        Some(ConnectionStatus::Active) => (Color::Green, "Active"),
+        Some(ConnectionStatus::Stale) => (Color::Yellow, "Stale"),
+        Some(ConnectionStatus::Unvetted) => (Color::Red, "Unvetted"),
+        Some(ConnectionStatus::Unknown) | None => (Color::DarkGray, "Unknown"),
     }
 }
 
@@ -1399,7 +1405,8 @@ fn peer_list_popup(frame: &mut Frame, area: Rect, state: &NetworkEditState) {
                 style,
             ),
             Span::styled(
-                format!("  {}:{}", peer.address, peer.port),
+                // The node party is what an invitation names, so show it here.
+                format!("  {}", peer.party.as_deref().unwrap_or("(no node party)")),
                 Style::default().fg(Color::DarkGray),
             ),
         ]));
@@ -1442,10 +1449,7 @@ fn peer_form_popup(frame: &mut Frame, area: Rect, form: &PeerForm) {
     let fields = [
         ("Participant id", form.participant_id.as_str()),
         ("Name", form.name.as_str()),
-        ("Address", form.address.as_str()),
-        ("Port", form.port.as_str()),
-        ("Public key", form.public_key.as_str()),
-        ("Party (optional)", form.party.as_str()),
+        ("Node party", form.party.as_str()),
     ];
     let mut lines: Vec<Line> = fields
         .iter()
@@ -2377,25 +2381,32 @@ fn change_threshold_popup(frame: &mut Frame, area: Rect, form: &ChangeThresholdF
     frame.render_widget(paragraph, rect);
 }
 
-/// This node's Noise key status and DSO network identity. Both sections render
-/// independently, so an unreachable DSO API still shows the local key status.
+/// This node's coordination identity and DSO network identity. Both sections
+/// render independently, so an unreachable DSO API still shows the identity.
 fn node_info_popup(frame: &mut Frame, area: Rect, data: &NodeInfoData) {
     let error_line =
         |error: &str| Line::styled(format!("Error: {error}"), Style::default().fg(Color::Red));
 
-    let mut lines = vec![dim_line("Node keys")];
-    match &data.key {
-        Ok(status) => {
-            lines.push(detail_kv(
-                "Noise keys",
-                if status.has_keys {
-                    "present".to_owned()
-                } else {
-                    "not generated".to_owned()
-                },
-            ));
-            if let Some(key) = status.public_key.as_deref().filter(|key| !key.is_empty()) {
-                lines.push(detail_kv("Public key", key.to_owned()));
+    let mut lines = vec![dim_line("Node identity")];
+    match &data.identity {
+        Ok(identity) => {
+            lines.push(detail_kv("Participant", identity.participant_id.clone()));
+            match identity.node_party_id.as_deref() {
+                Some(party) if identity.configured => {
+                    lines.push(detail_kv("Node party", party.to_owned()));
+                }
+                // Without a node party this node coordinates nothing, so name
+                // the fix rather than showing an empty row.
+                _ => lines.push(detail_kv(
+                    "Node party",
+                    "not configured (PUT /node-identity)".to_owned(),
+                )),
+            }
+            if let Some(user) = identity.user_id.as_deref().filter(|u| !u.is_empty()) {
+                lines.push(detail_kv("Ledger API user", user.to_owned()));
+            }
+            if let Some(permission) = identity.hosting_permission {
+                lines.push(detail_kv("Hosting", permission.to_string()));
             }
         }
         Err(error) => lines.push(error_line(error)),
@@ -2467,7 +2478,7 @@ fn peers_progress(run: &WorkflowRun) -> Option<String> {
     if run.role != WorkflowRole::Coordinator || run.expected_peers.is_empty() {
         return None;
     }
-    let (done, label) = if run.current_step == WAITING_FOR_PEERS_STEP {
+    let (done, label) = if run.current_step == WAITING_FOR_ACCEPTANCES_STEP {
         (run.connected_peers.len(), "joined")
     } else {
         (run.completed_peers.len(), "done")
@@ -2561,7 +2572,7 @@ fn invitation_detail_lines(invitation: &PendingInvitation) -> Vec<Line<'static>>
     }
     lines.push(detail_kv(
         "Coordinator",
-        invitation.coordinator_pubkey.clone(),
+        invitation.coordinator_participant.clone(),
     ));
     if let Some(prefix) = invitation.prefix.as_deref().filter(|p| !p.is_empty()) {
         lines.push(detail_kv("Prefix", prefix.to_owned()));
@@ -2612,6 +2623,8 @@ fn invitation_detail_lines(invitation: &PendingInvitation) -> Vec<Line<'static>>
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use common::canton_id::CantonId;
     use common::types::{
         AuditLogEntry, ContractInfo, InvitationType, ParticipantInfo, PeerPackageResult,
@@ -2707,12 +2720,10 @@ mod tests {
         PeerView {
             participant_id: "alpha::1220".to_owned(),
             name: "alpha".to_owned(),
-            address: "10.0.0.1".to_owned(),
-            port: 9001,
-            status: Some(ConnectionStatus::Connected),
-            latency_ms: Some(12),
+            party: Some("alpha-node::1220".to_owned()),
+            status: Some(ConnectionStatus::Active),
+            heartbeat_age_secs: Some(12),
             version: Some("1.2.3".to_owned()),
-            workflow: None,
             is_self: false,
         }
     }
@@ -2756,9 +2767,19 @@ mod tests {
     fn peers_table_renders_status_and_columns() {
         let rendered = render_peers(&[sample_peer()]);
         assert!(rendered.contains("alpha"));
-        assert!(rendered.contains("Connected"));
-        assert!(rendered.contains("10.0.0.1:9001"));
-        assert!(rendered.contains("12 ms"));
+        assert!(rendered.contains("Active"));
+        assert!(rendered.contains("alpha-node::1220"));
+        assert!(rendered.contains("12s ago"));
+    }
+
+    #[test]
+    fn peers_table_names_a_peer_without_a_node_party() {
+        let mut peer = sample_peer();
+        peer.party = None;
+        peer.status = Some(ConnectionStatus::Unknown);
+        let rendered = render_peers(&[peer]);
+        assert!(rendered.contains("not configured"));
+        assert!(rendered.contains("Unknown"));
     }
 
     #[test]
@@ -2786,7 +2807,11 @@ mod tests {
                 step_index: 2,
                 step_total: 3,
                 config_json: String::new(),
-                coordinator_pubkey: None,
+                coordinator_participant: None,
+                coordinator_party: None,
+                proposal_cid: None,
+                member_variant: None,
+                topology_hashes: BTreeMap::new(),
                 coordinator_instance: None,
                 coordinator_name: None,
                 expected_peers: Vec::new(),
@@ -2816,7 +2841,11 @@ mod tests {
                 step_index: 5,
                 step_total: 6,
                 config_json: String::new(),
-                coordinator_pubkey: None,
+                coordinator_participant: None,
+                coordinator_party: None,
+                proposal_cid: None,
+                member_variant: None,
+                topology_hashes: BTreeMap::new(),
                 coordinator_instance: None,
                 coordinator_name: None,
                 expected_peers: Vec::new(),
@@ -2840,9 +2869,12 @@ mod tests {
             FeedItem::Invitation(PendingInvitation {
                 id: "inv-1".to_owned(),
                 invitation_type: InvitationType::Onboarding,
-                coordinator_pubkey: "1220deadbeef".to_owned(),
+                coordinator_participant: "alpha::1220".to_owned(),
+                coordinator_party: None,
+                proposal_cid: "inv-1".to_owned(),
                 coordinator_name: Some("alice".to_owned()),
                 received_at: 0,
+                expires_at: None,
                 prefix: Some("treasury-rc5".to_owned()),
                 participants: Vec::new(),
                 dar_filenames: Vec::new(),
@@ -3188,13 +3220,16 @@ mod tests {
     }
 
     #[test]
-    fn node_info_popup_renders_keys_and_network() {
-        use crate::api::{KeyStatus, NetworkInfo};
+    fn node_info_popup_renders_identity_and_network() {
+        use crate::api::{NetworkInfo, NodeIdentityView};
 
         let overlay = Overlay::NodeInfo(Box::new(NodeInfoData {
-            key: Ok(KeyStatus {
-                has_keys: true,
-                public_key: Some("deadbeefcafe".to_owned()),
+            identity: Ok(NodeIdentityView {
+                configured: true,
+                node_party_id: Some("decman-node::1220".to_owned()),
+                participant_id: "alpha::1220".to_owned(),
+                user_id: Some("decman-node".to_owned()),
+                hosting_permission: Some(Permission::Submission),
             }),
             network: Ok(NetworkInfo {
                 dso_party_id: "DSO::1220".to_owned(),
@@ -3203,25 +3238,38 @@ mod tests {
         }));
         let rendered = render(|frame, area| draw_overlay(frame, area, &overlay, "⠋"));
         assert!(rendered.contains("Node info"));
-        assert!(rendered.contains("present"));
-        assert!(rendered.contains("deadbeefcafe"));
+        assert!(rendered.contains("decman-node::1220"));
+        assert!(rendered.contains("submission"));
         assert!(rendered.contains("DSO"));
     }
 
     #[test]
-    fn node_info_popup_shows_network_error_but_keeps_keys() {
-        use crate::api::KeyStatus;
+    fn node_info_popup_shows_network_error_but_keeps_identity() {
+        use crate::api::NodeIdentityView;
 
         let overlay = Overlay::NodeInfo(Box::new(NodeInfoData {
-            key: Ok(KeyStatus {
-                has_keys: false,
-                public_key: None,
+            identity: Ok(NodeIdentityView {
+                configured: false,
+                node_party_id: None,
+                participant_id: "alpha::1220".to_owned(),
+                user_id: None,
+                hosting_permission: None,
             }),
             network: Err("DSO API unreachable".to_owned()),
         }));
         let rendered = render(|frame, area| draw_overlay(frame, area, &overlay, "⠋"));
-        assert!(rendered.contains("not generated"));
+        assert!(rendered.contains("not configured"));
         assert!(rendered.contains("Error"));
+    }
+
+    #[test]
+    fn heartbeat_age_reads_as_a_time_ago() {
+        assert_eq!(heartbeat_age(None), "—");
+        assert_eq!(heartbeat_age(Some(-2)), "now");
+        assert_eq!(heartbeat_age(Some(12)), "12s ago");
+        assert_eq!(heartbeat_age(Some(3_000)), "50m ago");
+        assert_eq!(heartbeat_age(Some(7_200)), "2h ago");
+        assert_eq!(heartbeat_age(Some(200_000)), "2d ago");
     }
 
     #[test]
@@ -3284,11 +3332,15 @@ mod tests {
             kind: WorkflowKind::Onboarding,
             role: WorkflowRole::Coordinator,
             status: WorkflowProgress::InProgress,
-            current_step: WAITING_FOR_PEERS_STEP.to_owned(),
+            current_step: WAITING_FOR_ACCEPTANCES_STEP.to_owned(),
             step_index: 0,
             step_total: 7,
             config_json: String::new(),
-            coordinator_pubkey: None,
+            coordinator_participant: None,
+            coordinator_party: None,
+            proposal_cid: None,
+            member_variant: None,
+            topology_hashes: BTreeMap::new(),
             coordinator_instance: None,
             coordinator_name: None,
             expected_peers: vec![canton_id("p1"), canton_id("p2"), canton_id("p3")],
@@ -3334,7 +3386,11 @@ mod tests {
             step_index: 1,
             step_total: 7,
             config_json: String::new(),
-            coordinator_pubkey: None,
+            coordinator_participant: None,
+            coordinator_party: None,
+            proposal_cid: None,
+            member_variant: None,
+            topology_hashes: BTreeMap::new(),
             coordinator_instance: None,
             coordinator_name: None,
             expected_peers: Vec::new(),
@@ -3553,10 +3609,7 @@ mod tests {
             peers: vec![PeerEntry {
                 participant_id: "alpha::1220".to_owned(),
                 name: "alpha".to_owned(),
-                address: "10.0.0.1".to_owned(),
-                port: 9001,
-                public_key: "abcd".to_owned(),
-                party: None,
+                party: Some("alpha-node::1220".to_owned()),
             }],
             selected: 0,
             adding: None,
@@ -3565,7 +3618,7 @@ mod tests {
         let rendered = render(|frame, area| draw_overlay(frame, area, &overlay, "⠋"));
         assert!(rendered.contains("Network peers"));
         assert!(rendered.contains("alpha"));
-        assert!(rendered.contains("10.0.0.1:9001"));
+        assert!(rendered.contains("alpha-node::1220"));
     }
 
     #[test]
@@ -3576,9 +3629,6 @@ mod tests {
             adding: Some(PeerForm {
                 participant_id: String::new(),
                 name: String::new(),
-                address: String::new(),
-                port: String::new(),
-                public_key: String::new(),
                 party: String::new(),
                 cursor: 0,
             }),
@@ -3587,7 +3637,7 @@ mod tests {
         let rendered = render(|frame, area| draw_overlay(frame, area, &overlay, "⠋"));
         assert!(rendered.contains("Add peer"));
         assert!(rendered.contains("Participant id"));
-        assert!(rendered.contains("Public key"));
+        assert!(rendered.contains("Node party"));
     }
 
     #[test]

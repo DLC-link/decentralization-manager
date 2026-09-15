@@ -10,6 +10,11 @@
 //! Distinct from G1 (coordinator restarts pre-accept) and G2 (peer restarts
 //! AFTER accepting, mid-flight): this is the only phase exercising invitation
 //! persistence across a peer process restart.
+//!
+//! TODO(onledger-phases): this phase still describes the 1.x transport model —
+//! an invitation is a `WorkflowProposal` contract the observer re-projects
+//! after a restart, so persistence is the ledger's job, not the node's.
+//! Rewrite it against the on-ledger steps before the suite runs green.
 
 use std::time::Duration;
 

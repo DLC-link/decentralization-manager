@@ -4,8 +4,8 @@
 # DecMan lifecycle: bare processes spawned by common.sh's start_nodes (same model
 # as localnet, with Canton endpoints pointing at tunneled-localhost ports
 # instead of localnet's docker-compose ports). Each DecMan picks its
-# DECPM_CANTON_* / DECPM_KEYCLOAK_* / DECPM_NOISE_PORT from the child env that
-# start_nodes assembles.
+# DECPM_CANTON_* / DECPM_KEYCLOAK_* from the child env that start_nodes
+# assembles.
 
 set -eu
 
@@ -14,8 +14,8 @@ source "$SCRIPT_DIR/common.sh"
 
 # ---------------------------------------------------------------------------
 # Source per-participant .env files for the shared Keycloak vars + per-DecMan
-# member-party credentials (P{N}_MEMBER_*). The DECPM_CANTON_*_HOST/PORT and
-# DECPM_NOISE_PORT keys are duplicated across .env files with per-participant
+# member-party credentials (P{N}_MEMBER_*). The DECPM_CANTON_*_HOST/PORT keys
+# are duplicated across .env files with per-participant
 # values; sourcing all three sequentially leaves the last one's values in env,
 # which is fine since we override them per-DecMan via P{N}_CANTON_* exports below.
 # ---------------------------------------------------------------------------
@@ -151,8 +151,6 @@ export DECPM_REWARD_AUTOMATION_INTERVAL_SECS=15
 # ---------------------------------------------------------------------------
 # Per-participant ports.
 # - HTTP: 8081/8082/8083 (DecMan's own HTTP API)
-# - Noise: 9000/9001/9002 (per-DecMan Noise listener; matches DECPM_NOISE_PORT
-#   values in the per-participant .env files)
 # - Metrics: 9464/9465/9466 (per-DecMan Prometheus listener)
 # - Canton ledger:  5001/5011/5021 (tunneled to participant-ibtc-devnet-{1,2,3}
 #   service port 5001 via kubectl port-forward)
@@ -161,7 +159,6 @@ export DECPM_REWARD_AUTOMATION_INTERVAL_SECS=15
 # inherit them.
 # ---------------------------------------------------------------------------
 export P1_HTTP=8081  P2_HTTP=8082  P3_HTTP=8083
-export P1_NOISE=9000 P2_NOISE=9001 P3_NOISE=9002
 export P1_METRICS=9464 P2_METRICS=9465 P3_METRICS=9466
 export P1_CANTON_LEDGER=5001 P1_CANTON_ADMIN=5002
 export P2_CANTON_LEDGER=5011 P2_CANTON_ADMIN=5012

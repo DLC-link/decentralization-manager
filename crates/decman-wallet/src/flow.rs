@@ -499,8 +499,8 @@ pub async fn add_hosts(
         // stream open, the joiner holds its import stream open, and this loop
         // carries one block between them — so neither node buffers the snapshot
         // and the size of the party never decides whether the transfer is
-        // possible. The same shape the add-party path runs over Noise; here the
-        // wallet stands in for the channel those two nodes do not have.
+        // possible. The wallet stands in for a channel the two hosts do not
+        // have.
         //
         // Forward-only, so there is no resume. A break restarts from block 1
         // with a fresh export, which is what the export stream's inability to

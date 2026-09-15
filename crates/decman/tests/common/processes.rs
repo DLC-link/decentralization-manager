@@ -26,7 +26,6 @@ pub struct NodeSpawn {
     pub binary: PathBuf,
     pub data_dir: PathBuf,
     pub http_port: u16,
-    pub noise_port: u16,
     pub metrics_port: u16,
     pub canton_admin_port: u16,
     pub canton_ledger_port: u16,
@@ -56,10 +55,9 @@ fn read_pid(key: &str) -> Result<u32> {
 
 impl Fixture {
     pub fn node_spawn(&self, participant: u8) -> Result<NodeSpawn> {
-        let (http, noise, metrics, ledger, admin, pid_var) = match participant {
+        let (http, metrics, ledger, admin, pid_var) = match participant {
             1 => (
                 "P1_HTTP",
-                "P1_NOISE",
                 "P1_METRICS",
                 "P1_CANTON_LEDGER",
                 "P1_CANTON_ADMIN",
@@ -67,7 +65,6 @@ impl Fixture {
             ),
             2 => (
                 "P2_HTTP",
-                "P2_NOISE",
                 "P2_METRICS",
                 "P2_CANTON_LEDGER",
                 "P2_CANTON_ADMIN",
@@ -75,7 +72,6 @@ impl Fixture {
             ),
             3 => (
                 "P3_HTTP",
-                "P3_NOISE",
                 "P3_METRICS",
                 "P3_CANTON_LEDGER",
                 "P3_CANTON_ADMIN",
@@ -90,7 +86,6 @@ impl Fixture {
             binary,
             data_dir,
             http_port: read_port(http)?,
-            noise_port: read_port(noise)?,
             metrics_port: read_port(metrics)?,
             canton_admin_port: read_port(admin)?,
             canton_ledger_port: read_port(ledger)?,
@@ -117,8 +112,8 @@ pub async fn kill_pid(pid: u32) -> Result<()> {
 }
 
 /// Block (with deadline) until `pid` is no longer alive — i.e., `kill -0`
-/// returns non-zero. Used immediately after `kill_pid` to make sure the
-/// HTTP/Noise ports are released before respawning.
+/// returns non-zero. Used immediately after `kill_pid` to make sure the HTTP
+/// port is released before respawning.
 pub async fn wait_for_exit(pid: u32, deadline: Duration) -> Result<()> {
     let start = Instant::now();
     loop {
@@ -164,23 +159,10 @@ async fn healthz_ok(client: &reqwest::Client, http_port: u16) -> bool {
 /// Block (with deadline) until the HTTP listener port is accepting TCP
 /// connections AND `/healthz` answers 200.
 ///
-/// HTTP-only by design — the Noise *invite* listener's bound state is not
-/// a reliable signal that DecMan is healthy after a chaos restart. DecMan's
-/// restart-resume path (`src/server/mod.rs`) detects in-progress
-/// `workflow_runs` rows and resumes them as coordinators, which pauses the
-/// Noise invite listener and drops its TCP socket — workflow-specific Noise
-/// servers take exclusive control of port 9000 instead. On devnet, where
-/// each workflow step makes a Canton round trip taking 10-30s, the invite
-/// listener can stay paused well past any plausible deadline. Polling for
-/// the Noise port in this state used to false-fail with
-/// "ports not bound: http=true noise=false" on G1 (restart_coordinator_resume).
-///
-/// HTTP listener coming up is the right "DecMan completed bootstrap" signal:
-/// it's bound exactly once in src/server/mod.rs after Canton's participant
-/// ID lookup, DB migrations, and the auth/workflow-state init pass. From
-/// that point forward, DecMan is reachable on the HTTP plane; the Noise plane
-/// might or might not be bound depending on what workflow_runs were
-/// recovered from disk.
+/// The HTTP listener coming up is the "DecMan completed bootstrap" signal: it
+/// is bound exactly once in src/server/mod.rs after Canton's participant ID
+/// lookup, DB migrations, and the auth init pass. A node opens no other
+/// listener — it coordinates only through Canton.
 pub async fn wait_for_server(http_port: u16, deadline: Duration) -> Result<()> {
     let start = Instant::now();
     let client = reqwest::Client::new();
@@ -188,13 +170,10 @@ pub async fn wait_for_server(http_port: u16, deadline: Duration) -> Result<()> {
         if TcpStream::connect(("127.0.0.1", http_port)).await.is_ok()
             && healthz_ok(&client, http_port).await
         {
-            // Short settle on top of the readiness probe. This was a blind 8s
-            // standing in for two things: DecMan finishing bootstrap, which
-            // `/healthz` now answers precisely, and the Noise mesh
-            // re-converging, which is not this function's job —
-            // `chaos::post_onboarding` retries a 422 peer-mesh pre-flight 12
-            // times and `ensure_nodes_healthy` repairs a node that never came
-            // back.
+            // Short settle on top of the readiness probe. `/healthz` answers
+            // bootstrap precisely; the observer still needs a tick to publish
+            // this node's registry entry, which `ensure_nodes_healthy` waits
+            // for.
             sleep(Duration::from_secs(1)).await;
             return Ok(());
         }
@@ -209,8 +188,7 @@ pub async fn wait_for_server(http_port: u16, deadline: Duration) -> Result<()> {
 /// Returns the new PID; also appends it to `$DEV_DIR/restarted-pids` so the
 /// bash cleanup trap can SIGKILL it if cargo test exits abnormally.
 pub async fn spawn_node(spawn: &NodeSpawn, restarted_pids_file: &PathBuf) -> Result<u32> {
-    let rust_log = std::env::var("RUST_LOG")
-        .unwrap_or_else(|_| "dec_party_manager=info,tokio_noise=error,hyper_noise=error".into());
+    let rust_log = std::env::var("RUST_LOG").unwrap_or_else(|_| "dec_party_manager=info".into());
     // Same per-participant log file as bash bringup (integration-tests/common.sh::start_nodes).
     // Open in append mode so chaos-phase respawns accumulate into one timeline
     // per participant, matching the bash side's `>> "$log_file" 2>&1`.
@@ -243,7 +221,11 @@ pub async fn spawn_node(spawn: &NodeSpawn, restarted_pids_file: &PathBuf) -> Res
         )
         .env("DECPM_CANTON_NETWORK", "devnet")
         .env("DECPM_METRICS_PORT", spawn.metrics_port.to_string())
-        .env("DECPM_NOISE_PORT", spawn.noise_port.to_string())
+        // Same coordination cadence the shell harness sets, so a respawned
+        // node heartbeats and polls as fast as the phases expect.
+        .env("DECPM_HEARTBEAT_INTERVAL_SECS", "5")
+        .env("DECPM_HEARTBEAT_MIN_INTERVAL_SECS", "1")
+        .env("DECPM_OBSERVER_POLL_SECS", "1")
         .envs(
             spawn
                 .extra_env

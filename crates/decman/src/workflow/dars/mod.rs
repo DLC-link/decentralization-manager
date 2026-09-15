@@ -1,11 +1,12 @@
 pub mod config;
-pub mod coordinator;
 
 pub use config::DarsConfig;
 
-use crate::{noise::MessageType, server::WorkflowKind, workflow::state::WorkflowStep};
+use crate::{server::WorkflowKind, workflow::state::WorkflowStep};
 
-/// DARs upload workflow steps
+/// DARs workflow steps of the 1.x transport. Kept for the run cards of rows that
+/// predate the 2.0 upgrade; the on-ledger engine has its own step lists
+/// (`crate::onledger::engine::dars`).
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum DarsStep {
     /// Waiting for all peers to connect
@@ -17,14 +18,6 @@ pub enum DarsStep {
 }
 
 impl WorkflowStep for DarsStep {
-    fn to_command(&self) -> Option<MessageType> {
-        match self {
-            Self::UploadDars => Some(MessageType::UploadDars),
-            Self::Complete => Some(MessageType::Disconnect),
-            Self::WaitingForPeers => None,
-        }
-    }
-
     fn next(&self) -> Option<Self> {
         match self {
             Self::WaitingForPeers => Some(Self::UploadDars),

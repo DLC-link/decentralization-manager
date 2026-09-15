@@ -295,6 +295,8 @@ jobs:
       # id, and the DAR-verification step above already pins those identical.
       - name: Verify Daml upgrade lineage
         run: ~/.dpm/bin/dpm upgrade-check --both */.daml/dist/*.dar ../releases/v1/*.dar
+      - name: Test decman-coordination
+        run: cd decman-coordination-test && ~/.dpm/bin/dpm test
       - name: Test governance-core
         run: cd governance-core-test && ~/.dpm/bin/dpm test
       - name: Test governance-token-custody

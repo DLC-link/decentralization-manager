@@ -22,9 +22,6 @@
 #     container's localhost is itself, so the .env's `localhost` can't reach the
 #     host's port-forwards. host.docker.internal points at the host. (The port
 #     numbers still come from each .env.)
-#   - DECPM_PUBLIC_ADDRESS -> the compose service name: the address a node
-#     advertises so its peers can dial its Noise listener over the shared
-#     bridge network.
 
 services:
   participant-1:
@@ -46,7 +43,6 @@ services:
       DECPM_PORT: "8081"
       DECPM_CANTON_ADMIN_HOST: host.docker.internal
       DECPM_CANTON_LEDGER_HOST: host.docker.internal
-      DECPM_PUBLIC_ADDRESS: participant-1
     extra_hosts:
       - "host.docker.internal:host-gateway"
     entrypoint: ["dec-party-manager", "serve"]
@@ -70,7 +66,6 @@ services:
       DECPM_PORT: "8082"
       DECPM_CANTON_ADMIN_HOST: host.docker.internal
       DECPM_CANTON_LEDGER_HOST: host.docker.internal
-      DECPM_PUBLIC_ADDRESS: participant-2
     extra_hosts:
       - "host.docker.internal:host-gateway"
     entrypoint: ["dec-party-manager", "serve"]
@@ -94,7 +89,6 @@ services:
       DECPM_PORT: "8083"
       DECPM_CANTON_ADMIN_HOST: host.docker.internal
       DECPM_CANTON_LEDGER_HOST: host.docker.internal
-      DECPM_PUBLIC_ADDRESS: participant-3
     extra_hosts:
       - "host.docker.internal:host-gateway"
     entrypoint: ["dec-party-manager", "serve"]

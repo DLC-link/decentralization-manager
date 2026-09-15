@@ -32,22 +32,23 @@ import { zebraRow } from "../styles";
 import { copyToClipboard } from "../clipboard";
 import { fieldHelpAdornment } from "./FieldHelp";
 import { StatusDot } from "./StatusDot";
-import { currentStepLabel, workflowKindLabel } from "../workflowSteps";
 import { PeersCsvDialog, type PeersCsvMode } from "./PeersCsvDialog";
 import { parsePeersCsv, peerToCsvRow } from "../peerCsv";
+import { NO_NODE_PARTY, heartbeatAge, toneForPeer } from "../peers";
 import type {
   NetworkConfig,
   Peer,
   ParticipantStatus,
   NodeConfig,
-  KeyStatusResponse,
+  NodeIdentityResponse,
   ConnectionStatus,
 } from "../types";
 
 interface NetworkConfigAccordionProps {
   config: NetworkConfig;
   nodeConfig?: NodeConfig;
-  keyStatus?: KeyStatusResponse;
+  /** This node's own identity, for the "you" row and the share button. */
+  nodeIdentity?: NodeIdentityResponse;
   participantStatuses?: ParticipantStatus[];
   /** Our own round-trip latency to the backend (ms), shown on the "you" row. */
   selfLatencyMs?: number;
@@ -57,15 +58,13 @@ interface NetworkConfigAccordionProps {
 const emptyPeer: Peer = {
   participant_id: "",
   name: "",
-  address: "localhost",
-  port: 9000,
-  public_key: "",
+  party: "",
 };
 
 export const NetworkConfigAccordion = ({
   config,
   nodeConfig,
-  keyStatus,
+  nodeIdentity,
   participantStatuses,
   selfLatencyMs,
   onSave,
@@ -80,13 +79,12 @@ export const NetworkConfigAccordion = ({
   const isMedium = useMediaQuery(theme.breakpoints.down("md"));
 
   const selfNodeId = nodeConfig?.node.participant_id;
-  const selfPublicKey = keyStatus?.public_key || "";
-  const selfPort = nodeConfig?.node.port ?? 9000;
+  const selfNodeParty = nodeIdentity?.node_party_id ?? "";
 
-  const truncateKey = (key: string): string => {
-    if (!key) return "-";
-    const len = isSmall ? 6 : isMedium ? 8 : 12;
-    return `${key.slice(0, len)}...${key.slice(-4)}`;
+  const truncateParty = (party?: string): string => {
+    if (!party) return NO_NODE_PARTY;
+    const len = isSmall ? 8 : isMedium ? 14 : 24;
+    return party.length > len + 6 ? `${party.slice(0, len)}...${party.slice(-6)}` : party;
   };
 
   // Truncate participant ID: prefix::1220...last4
@@ -102,31 +100,29 @@ export const NetworkConfigAccordion = ({
   const getStat = (id: string): ParticipantStatus | undefined =>
     participantStatuses?.find((s) => s.id === id);
 
+  // A peer's status is the age of its registry heartbeat, not a connection:
+  // nodes never dial each other (design D3).
   const getStatusTooltip = (status: ConnectionStatus | undefined): string => {
     switch (status) {
-      case "Connected":
-        return "Connected via Noise protocol";
       case "CurrentNode":
         return "This is the current node";
-      case "Unreachable":
-        return "Cannot reach peer (TCP connection failed)";
-      case "HandshakeFailed":
-        return "Noise handshake failed - check if the public key is correct";
+      case "Active":
+        return "The peer published a recent heartbeat";
+      case "Stale":
+        return "No recent heartbeat. The peer may be down, or it may have stopped publishing";
+      case "Unvetted":
+        return "The peer's participant has not vetted the coordination package, so it cannot be invited";
       default:
-        return "Status unknown";
+        return "No registry entry visible. The peer may not have added you yet";
     }
   };
 
-  // Tooltip enriched with round-trip latency and the peer's active workflow.
+  // Tooltip enriched with the heartbeat age.
   const statusTooltip = (st: ParticipantStatus | undefined): string => {
-    let title = getStatusTooltip(st?.status);
-    if (st?.latency_ms != null) title += ` — ${st.latency_ms} ms`;
-    if (st?.workflow) {
-      const w = st.workflow;
-      const step = currentStepLabel({ ...w, current_step: w.step });
-      title += ` — in ${workflowKindLabel(w.kind)} (${step})`;
-    }
-    return title;
+    const title = getStatusTooltip(st?.status);
+    return st?.heartbeat_age_secs == null
+      ? title
+      : `${title} — last heartbeat ${heartbeatAge(st.heartbeat_age_secs)}`;
   };
 
   // Build display list: self first, then other peers
@@ -135,13 +131,11 @@ export const NetworkConfigAccordion = ({
 
   // Create self entry if not in peers list
   const selfEntry: Peer | null = selfNodeId
-    ? selfPeer || {
+    ? (selfPeer ?? {
         participant_id: selfNodeId,
         name: selfNodeId,
-        address: nodeConfig?.node.public_address || nodeConfig?.node.listen_address || "localhost",
-        port: selfPort,
-        public_key: selfPublicKey,
-      }
+        party: selfNodeParty,
+      })
     : null;
 
   const exportablePeers: Peer[] =
@@ -198,7 +192,7 @@ export const NetworkConfigAccordion = ({
       .join("; ");
     if (rows.length === 0) {
       showSnackbar(
-        skipped || "Expected: participant_id,name,address,port,public_key",
+        skipped || "Expected: participant_id,node_party_id,name",
         "error",
       );
       return;
@@ -230,7 +224,7 @@ export const NetworkConfigAccordion = ({
                 key={index}
                 sx={{
                   display: "grid",
-                  gridTemplateColumns: "1fr 1fr 1fr 100px 1fr auto",
+                  gridTemplateColumns: "1fr 1fr 1.5fr auto",
                   gap: 1,
                   alignItems: "center",
                 }}
@@ -265,47 +259,15 @@ export const NetworkConfigAccordion = ({
                 />
                 <TextField
                   size="small"
-                  label="Address"
-                  value={peer.address}
-                  onChange={(e) => updatePeer(index, "address", e.target.value)}
+                  label="Node Party"
+                  value={peer.party ?? ""}
+                  error={!peer.party?.trim()}
+                  onChange={(e) => updatePeer(index, "party", e.target.value)}
                   slotProps={{
                     input: {
                       endAdornment: fieldHelpAdornment(
-                        "The hostname or IP address where your local node's Noise client will connect to this peer.",
-                        "Help for Address",
-                      ),
-                    },
-                  }}
-                />
-                <TextField
-                  size="small"
-                  label="Port"
-                  type="number"
-                  value={peer.port}
-                  onChange={(e) =>
-                    updatePeer(index, "port", parseInt(e.target.value) || 0)
-                  }
-                  slotProps={{
-                    input: {
-                      endAdornment: fieldHelpAdornment(
-                        "The TCP port the peer's Noise server is listening on. Combined with Address to dial the peer.",
-                        "Help for Port",
-                      ),
-                    },
-                  }}
-                />
-                <TextField
-                  size="small"
-                  label="Public Key"
-                  value={peer.public_key}
-                  onChange={(e) =>
-                    updatePeer(index, "public_key", e.target.value)
-                  }
-                  slotProps={{
-                    input: {
-                      endAdornment: fieldHelpAdornment(
-                        "The peer's Noise public key (hex-encoded). Used to derive the pre-shared key that secures the encrypted channel.",
-                        "Help for Public Key",
+                        "The peer's node party, like \"node1::1220abc...\". Your node names it as an observer of every contract it writes for this peer, so a peer without one cannot be invited to a workflow.",
+                        "Help for Node Party",
                       ),
                     },
                   }}
@@ -374,22 +336,33 @@ export const NetworkConfigAccordion = ({
             <Typography variant="subtitle1">Peers:</Typography>
             <Box sx={{ display: "flex", gap: 1 }}>
               {selfEntry && (
-                <Button
-                  size="small"
-                  variant="outlined"
-                  startIcon={<ContentCopyIcon />}
-                  onClick={async () => {
-                    const name =
-                      selfPeer?.name ||
-                      truncateParticipantId(selfEntry.participant_id);
-                    const success = await copyToClipboard(
-                      peerToCsvRow({ ...selfEntry, name }),
-                    );
-                    showSnackbar(success ? "Copied to clipboard" : "Failed to copy");
-                  }}
+                <Tooltip
+                  title={
+                    selfEntry.party
+                      ? "Copy participant_id,node_party_id,name for a peer to paste"
+                      : "Set this node's identity first: a peer needs your node party to invite you"
+                  }
                 >
-                  Share my data
-                </Button>
+                  {/* The span keeps the tooltip alive over a disabled button. */}
+                  <span>
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      startIcon={<ContentCopyIcon />}
+                      disabled={!selfEntry.party}
+                      onClick={async () => {
+                        const name =
+                          selfPeer?.name || truncateParticipantId(selfEntry.participant_id);
+                        const success = await copyToClipboard(
+                          peerToCsvRow({ ...selfEntry, name }),
+                        );
+                        showSnackbar(success ? "Copied to clipboard" : "Failed to copy");
+                      }}
+                    >
+                      Share my identity
+                    </Button>
+                  </span>
+                </Tooltip>
               )}
               <Button
                 size="small"
@@ -434,8 +407,8 @@ export const NetworkConfigAccordion = ({
                 <TableRow>
                   <TableCell sx={{ py: 1, width: 50 }}>Status</TableCell>
                   <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>Name</TableCell>
-                  <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>Address</TableCell>
-                  <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>Public Key</TableCell>
+                  <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>Node Party</TableCell>
+                  <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>Heartbeat</TableCell>
                   <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>Version</TableCell>
                 </TableRow>
               </TableHead>
@@ -472,13 +445,21 @@ export const NetworkConfigAccordion = ({
                       </Tooltip>
                     )}
                   </TableCell>
-                  <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>
-                    {selfEntry.address}:{selfEntry.port}
-                  </TableCell>
                   <TableCell
-                    sx={{ fontFamily: "var(--font-mono)", fontSize: "0.75rem", py: 1 }}
+                    sx={{
+                      fontFamily: "var(--font-mono)",
+                      fontSize: "0.75rem",
+                      py: 1,
+                      whiteSpace: "nowrap",
+                      color: selfEntry.party ? undefined : "text.disabled",
+                    }}
                   >
-                    {truncateKey(selfEntry.public_key)}
+                    {truncateParty(selfEntry.party)}
+                  </TableCell>
+                  {/* This node publishes its own heartbeat; it never reads one
+                    * back for itself. */}
+                  <TableCell sx={{ py: 1, whiteSpace: "nowrap", color: "text.disabled" }}>
+                    —
                   </TableCell>
                   <TableCell
                     sx={{ fontFamily: "var(--font-mono)", fontSize: "0.75rem", py: 1, whiteSpace: "nowrap" }}
@@ -496,38 +477,32 @@ export const NetworkConfigAccordion = ({
                 return (
                   <TableRow key={p.participant_id} sx={zebraRow(idx)}>
                     <TableCell sx={{ py: 1 }}>
-                      <StatusDot status={st?.status} title={statusTooltip(st)} />
+                      <StatusDot tone={toneForPeer(st?.status)} title={statusTooltip(st)} />
                     </TableCell>
                     <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>
                       {p.name || truncateParticipantId(p.participant_id)}
-                      {st?.workflow && (
+                      {!p.party && (
                         <Chip
                           size="small"
                           color="warning"
-                          label={`In workflow: ${workflowKindLabel(st.workflow.kind)}`}
+                          label="No node party"
                           sx={{ ml: 1, height: 18, fontSize: "0.65rem" }}
                         />
                       )}
-                      {st?.latency_ms != null && (
-                        <Typography
-                          component="span"
-                          sx={{
-                            ml: 1,
-                            color: "text.secondary",
-                            fontSize: "0.7rem",
-                          }}
-                        >
-                          {st.latency_ms} ms
-                        </Typography>
-                      )}
-                    </TableCell>
-                    <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>
-                      {p.address}:{p.port}
                     </TableCell>
                     <TableCell
-                      sx={{ fontFamily: "var(--font-mono)", fontSize: "0.75rem", py: 1 }}
+                      sx={{
+                        fontFamily: "var(--font-mono)",
+                        fontSize: "0.75rem",
+                        py: 1,
+                        whiteSpace: "nowrap",
+                        color: p.party ? undefined : "text.disabled",
+                      }}
                     >
-                      {truncateKey(p.public_key)}
+                      {truncateParty(p.party)}
+                    </TableCell>
+                    <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>
+                      {heartbeatAge(st?.heartbeat_age_secs)}
                     </TableCell>
                     <TableCell
                       sx={{ fontFamily: "var(--font-mono)", fontSize: "0.75rem", py: 1, whiteSpace: "nowrap" }}

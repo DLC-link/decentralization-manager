@@ -140,3 +140,105 @@ pub struct RegistryResponse {
     /// another operator added this node before this operator added them.
     pub inbound: Vec<DecmanNodeView>,
 }
+
+/// One pending topology proposal in the synchronizer store that no
+/// `WorkflowProposal` this node accepted explains (`GET /proposals/unsolicited`).
+/// UI only: the observer never signs from this list.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct UnsolicitedProposal {
+    /// `DecentralizedNamespaceDefinition` or `PartyToParticipant`.
+    pub mapping: String,
+    /// The namespace or the party id.
+    pub key: String,
+    /// Canton hex of the topology transaction hash.
+    pub hash_hex: String,
+    pub serial: u32,
+    /// Fingerprints that already signed the proposal.
+    pub signed_by: Vec<String>,
+    /// Micros since the epoch, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequenced_at: Option<i64>,
+}
+
+/// Response of `GET /proposals/unsolicited`.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct UnsolicitedProposalsResponse {
+    pub proposals: Vec<UnsolicitedProposal>,
+}
+
+/// One `AcsManifest` as `GET /acs-manifests/{party}` reports it (design D9).
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct AcsManifestView {
+    pub contract_id: String,
+    /// The node party that exported the snapshot.
+    pub exporter: CantonId,
+    pub exporter_participant: String,
+    pub dec_party_id: String,
+    pub target_participant: String,
+    pub activation_serial: i64,
+    pub size_bytes: i64,
+    pub sha256_hex: String,
+    pub package_ids: Vec<String>,
+    /// Unix seconds.
+    pub exported_at: i64,
+}
+
+/// Response of `GET /acs-manifests/{party}`.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct AcsManifestsResponse {
+    pub manifests: Vec<AcsManifestView>,
+}
+
+/// Response of `POST /acs-import/{party}`.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct AcsImportResponse {
+    /// Bytes received and fed to the import.
+    pub size_bytes: i64,
+    /// Lowercase hex SHA-256 of the received bytes.
+    pub sha256_hex: String,
+    /// The manifest the upload matched.
+    pub manifest_contract_id: String,
+}
+
+/// Where the startup coordination-DAR upload is (design D8).
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+#[serde(rename_all = "snake_case")]
+pub enum CoordinationDarPhase {
+    /// The task has not run yet.
+    Pending,
+    /// `DECPM_AUTO_UPLOAD_COORDINATION_DAR` is off; the operator uploads.
+    Disabled,
+    /// Trying; `attempts` and `last_error` say how it goes.
+    Uploading,
+    /// The coordination package is vetted on this participant.
+    Ready,
+}
+
+/// The startup coordination-DAR task as `GET /node-health` reports it.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct CoordinationDarStatus {
+    pub phase: CoordinationDarPhase,
+    pub filename: String,
+    pub main_package_id: String,
+    pub uploaded: bool,
+    pub vetted: bool,
+    pub attempts: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    /// Unix seconds of the last change.
+    pub updated_at: i64,
+}

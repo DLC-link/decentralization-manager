@@ -641,10 +641,10 @@ where
                 PipeBlock::Data { bytes, .. } => {
                     hasher.update(&bytes);
                     fed += bytes.len() as u64;
-                    // Re-chunk into the import stream: a transport block may be
+                    // Re-chunk into the import stream: a spool block may be
                     // larger than Canton's inbound gRPC message cap (4 MiB by
                     // default), which the block size deliberately can be, since
-                    // it is tuned against the Noise handler timeout instead.
+                    // it is tuned for file throughput instead.
                     for chunk in bytes.chunks(IMPORT_CHUNK_SIZE) {
                         // A closed receiver means the RPC already failed; that
                         // error is the informative one, so stop and let it

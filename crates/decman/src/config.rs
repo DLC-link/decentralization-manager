@@ -6,7 +6,7 @@ use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity
 
 use crate::{
     canton_id::CantonId,
-    consts::{DARS_DIR, DATA_DIR, DB_FILENAME, NOISE_KEY_FILENAME},
+    consts::{DARS_DIR, DATA_DIR, DB_FILENAME},
     error::Result,
 };
 
@@ -18,7 +18,9 @@ pub struct NetworkConfig {
     pub peers: Vec<Peer>,
 }
 
-/// A peer in the network
+/// A peer in the network (design D2). Operators exchange one string per
+/// peer, `participant_id,node_party_id,name`; nothing else is needed because
+/// nodes coordinate only through Canton.
 #[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct Peer {
@@ -26,27 +28,16 @@ pub struct Peer {
     pub participant_id: CantonId,
     /// Human-readable name
     pub name: String,
-    /// Network address (hostname or IP)
-    pub address: String,
-    /// Port for Noise protocol communication
-    pub port: u16,
-    /// Hex-encoded Noise static public key
-    pub public_key: String,
-    /// Canton party ID (optional, can be allocated dynamically if not provided)
+    /// The peer's node party (design D1). A peer without one cannot be
+    /// invited to a workflow.
     #[serde(default)]
-    pub party: Option<String>,
+    pub party: Option<CantonId>,
 }
 
 impl NetworkConfig {
     /// Construct a NetworkConfig from a list of peers (e.g., loaded from DB)
     pub fn from_peers(peers: Vec<Peer>) -> Self {
         Self { peers }
-    }
-
-    /// Get the governance threshold for multi-sig operations
-    /// Returns majority threshold: (n/2 + 1)
-    pub fn governance_threshold(&self) -> u32 {
-        ((self.peers.len() / 2) + 1) as u32
     }
 }
 
@@ -213,62 +204,6 @@ pub struct PartyCredentials {
     pub packages: PackageConfig,
 }
 
-/// Timeout configuration
-#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct Timeouts {
-    pub handshake_timeout_secs: u64,
-    pub message_timeout_secs: u64,
-    pub connection_retry_attempts: u32,
-    pub connection_retry_delay_secs: u64,
-}
-
-impl Default for Timeouts {
-    fn default() -> Self {
-        Self {
-            handshake_timeout_secs: 30,
-            message_timeout_secs: 120,
-            connection_retry_attempts: 3,
-            connection_retry_delay_secs: 5,
-        }
-    }
-}
-
-/// Configuration for the bounded retry wrapper around peer Noise calls
-/// (`send_noise_message_with_retry`). Defaults match the spec working
-/// hypothesis: 5s × 2 attempts, 250ms backoff between attempts.
-#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct NoiseRetryConfig {
-    /// Per-attempt timeout in seconds (applied independently to TCP connect
-    /// and to the Noise/HTTP request budget).
-    pub per_attempt_timeout_secs: u64,
-    /// Total attempts (initial + retries). 2 means "1 retry."
-    pub max_attempts: usize,
-    /// Fixed backoff between attempts in milliseconds.
-    pub backoff_ms: u64,
-}
-
-impl Default for NoiseRetryConfig {
-    fn default() -> Self {
-        Self {
-            per_attempt_timeout_secs: 5,
-            max_attempts: 2,
-            backoff_ms: 250,
-        }
-    }
-}
-
-impl NoiseRetryConfig {
-    pub fn per_attempt_timeout(&self) -> std::time::Duration {
-        std::time::Duration::from_secs(self.per_attempt_timeout_secs)
-    }
-
-    pub fn backoff(&self) -> std::time::Duration {
-        std::time::Duration::from_millis(self.backoff_ms)
-    }
-}
-
 /// Settings for the unsafe HS256 ("HMAC") token decman presents to Canton
 /// when running in [`NodeConfig::insecure`] mode. Point Canton's unsafe auth
 /// service at the same `secret`/`audience` to have it accept the token.
@@ -300,8 +235,6 @@ impl Default for InsecureAuthConfig {
 pub struct NodeConfig {
     pub node: NodeInfo,
     pub canton: CantonConfig,
-    pub timeouts: Timeouts,
-    pub noise_retry: NoiseRetryConfig,
     /// Tick interval (seconds) for the CIP-104 Mode A reward-assignment
     /// automation loop. Enablement is on-ledger (presence of a
     /// `CouponReassignmentDelegation`), so this only controls cadence. Default 300s.
@@ -315,10 +248,8 @@ pub struct NodeConfig {
     /// Ceiling on an ACS snapshot the wallet relays over the tenant API, in
     /// bytes.
     ///
-    /// Distinct from the Noise chunked-transfer limit, which bounds the decparty
-    /// add-party path because that snapshot really does cross a Noise
-    /// connection. The tenant path goes over HTTP, so the Noise limit never
-    /// applied to it and only constrained it by accident of shared code.
+    /// The decparty add-party path has no equivalent ceiling: its operator
+    /// streams the snapshot through a file, so nothing assembles it in memory.
     ///
     /// Still bounded: the snapshot is assembled in memory on both ends, so this
     /// is a real memory commitment on the exporting and importing nodes. Raise
@@ -369,8 +300,6 @@ impl Default for NodeConfig {
         Self {
             node: NodeInfo::default(),
             canton: CantonConfig::default(),
-            timeouts: Timeouts::default(),
-            noise_retry: NoiseRetryConfig::default(),
             reward_automation_interval_secs: 300,
             reward_expiry_read_interval_secs: 3600,
             reward_max_creates: 100,
@@ -387,40 +316,13 @@ impl Default for NodeConfig {
 }
 
 /// Node-specific information
-#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Default, Serialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct NodeInfo {
     /// Canton participant ID for this node (e.g., "participant1::1220...").
     /// Always resolved before serving, so it is non-null on the wire.
     #[cfg_attr(feature = "typegen", ts(type = "string"))]
     pub participant_id: Option<CantonId>,
-    /// Address to listen on for Noise protocol connections
-    pub listen_address: String,
-    /// Port to listen on for Noise protocol connections
-    pub port: u16,
-    /// Public address that other peers should use to connect to this node
-    pub public_address: Option<String>,
-}
-
-impl NodeInfo {
-    /// Get the public address for this node (for sharing with peers).
-    /// Falls back to listen_address if public_address is not set.
-    pub fn public_address(&self) -> &str {
-        self.public_address
-            .as_deref()
-            .unwrap_or(&self.listen_address)
-    }
-}
-
-impl Default for NodeInfo {
-    fn default() -> Self {
-        Self {
-            participant_id: None,
-            listen_address: "0.0.0.0".to_string(),
-            port: 9000,
-            public_address: None,
-        }
-    }
 }
 
 /// Default Keycloak configuration values for a network
@@ -639,11 +541,6 @@ impl NodeConfig {
     /// Get the data directory
     pub fn data_dir(&self) -> PathBuf {
         self.root_dir.join(DATA_DIR)
-    }
-
-    /// Get the path to the noise key file
-    pub fn key_file_path(&self) -> PathBuf {
-        self.data_dir().join(NOISE_KEY_FILENAME)
     }
 
     /// Get the dars directory
@@ -978,61 +875,38 @@ mod tls_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::canton_id::{NAMESPACE_LENGTH, Namespace};
 
-    fn test_peer(index: u8, pub_key: &str) -> Peer {
+    fn test_peer(index: u8) -> Peer {
         let namespace = format!("1220{:0>64}", format!("{index:02x}"));
         Peer {
             participant_id: CantonId::parse(&format!("node{index}::{namespace}")).unwrap(),
             name: format!("Node {index}"),
-            address: format!("10.0.1.{index}"),
-            port: 9000,
-            public_key: pub_key.to_string(),
-            party: None,
+            party: CantonId::parse(&format!("node{index}-party::{namespace}")).ok(),
         }
     }
 
+    /// The peer JSON is what the UI and the CLI post to `/network-config`, so
+    /// the field set is a wire contract: exactly `participant_id`, `name`,
+    /// and `party`, with `party` optional on the way in.
     #[test]
-    fn test_governance_threshold() {
-        let network = NetworkConfig {
-            peers: vec![
-                test_peer(1, "abc123"),
-                test_peer(2, "def456"),
-                test_peer(3, "ghi789"),
-            ],
-        };
+    fn peer_wire_shape_is_participant_name_party() -> anyhow::Result<()> {
+        let peer = test_peer(1);
+        let json = serde_json::to_value(&peer)?;
+        let keys: Vec<&str> = json
+            .as_object()
+            .map(|o| o.keys().map(String::as_str).collect())
+            .unwrap_or_default();
+        assert_eq!(keys, ["name", "participant_id", "party"]);
 
-        assert_eq!(network.governance_threshold(), 2);
-    }
+        let without_party: Peer = serde_json::from_value(serde_json::json!({
+            "participant_id": peer.participant_id.to_string(),
+            "name": "Node 1",
+        }))?;
+        assert!(without_party.party.is_none());
 
-    fn dummy_peer() -> Peer {
-        Peer {
-            participant_id: CantonId::new(
-                "node".to_string(),
-                Namespace::new([0u8; NAMESPACE_LENGTH]),
-            ),
-            name: "n".to_string(),
-            address: "127.0.0.1".to_string(),
-            port: 9000,
-            public_key: "deadbeef".to_string(),
-            party: None,
-        }
-    }
-
-    #[test]
-    fn governance_threshold_is_strict_majority_across_sizes() {
-        // (n/2 + 1): a strict majority for both odd and even member counts.
-        // The even cases (2->2, 4->3, 6->4) require strictly more than half,
-        // which is exactly where off-by-one majority bugs hide. n=0 yields 1
-        // by the formula — documented here as the degenerate-empty behavior.
-        for (n, expected) in [(0u32, 1u32), (1, 1), (2, 2), (3, 2), (4, 3), (5, 3), (6, 4)] {
-            let network = NetworkConfig::from_peers((0..n).map(|_| dummy_peer()).collect());
-            assert_eq!(
-                network.governance_threshold(),
-                expected,
-                "threshold for {n} peers"
-            );
-        }
+        let network = NetworkConfig::from_peers(vec![test_peer(1), test_peer(2)]);
+        assert_eq!(network.peers.len(), 2);
+        Ok(())
     }
 
     #[test]

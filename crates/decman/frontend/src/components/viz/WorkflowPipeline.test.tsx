@@ -8,7 +8,10 @@ import { WORKFLOW_STEPS } from "../../workflowSteps";
 // and MUI's portalled tooltips would leak into the next test.
 afterEach(cleanup);
 
-const STEPS = WORKFLOW_STEPS.AddParty;
+// The coordinator's add-party list: the longest one, so it exercises every
+// dot state in a single render.
+const STEPS = WORKFLOW_STEPS.AddParty.Coordinator;
+const indexOf = (name: string): number => STEPS.findIndex((s) => s.name === name);
 
 /** The step dots, in order. Dots and connectors alternate in the DOM. */
 const dotsOf = (container: HTMLElement): HTMLElement[] =>
@@ -24,7 +27,7 @@ const hoverDot = async (container: HTMLElement, i: number): Promise<string> => {
 
 describe("WorkflowPipeline", () => {
   it("reveals the current step behind its dot on hover", async () => {
-    const current = STEPS.findIndex((s) => s.name === "SyncAcs");
+    const current = indexOf("AwaitReplication");
     const { container } = render(
       <WorkflowPipeline current={current} total={STEPS.length} steps={STEPS} />,
     );
@@ -32,7 +35,7 @@ describe("WorkflowPipeline", () => {
 
     const tip = await hoverDot(container, current);
     expect(tip).toContain("Copying contracts");
-    expect(tip).toContain("imports the party's active contracts");
+    expect(tip).toContain("publishes a manifest");
     expect(tip).toContain(`Step ${current + 1} of ${STEPS.length} · in progress`);
   });
 
@@ -41,7 +44,7 @@ describe("WorkflowPipeline", () => {
       <WorkflowPipeline current={2} total={STEPS.length} steps={STEPS} />,
     );
     const tip = await hoverDot(container, 0);
-    expect(tip).toContain("Waiting for members");
+    expect(tip).toContain("Generating keys");
     expect(tip).toContain("· done");
   });
 
@@ -61,11 +64,12 @@ describe("WorkflowPipeline", () => {
     const { container } = render(
       <WorkflowPipeline current={2} total={STEPS.length} steps={STEPS} />,
     );
-    const dot = dotsOf(container)[6];
+    const at = indexOf("AwaitReplication");
+    const dot = dotsOf(container)[at];
     expect(dot.tabIndex).toBe(0);
     expect(dot.getAttribute("aria-label")).toContain("Copying contracts");
     expect(dot.getAttribute("aria-label")).toContain(
-      `Step 7 of ${STEPS.length} · pending`,
+      `Step ${at + 1} of ${STEPS.length} · pending`,
     );
   });
 

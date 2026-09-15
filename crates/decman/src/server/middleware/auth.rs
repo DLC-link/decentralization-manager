@@ -388,11 +388,6 @@ mod tests {
         Data::new(AppState {
             db,
             config: NodeConfig::default(),
-            peer_status: Arc::new(RwLock::new(HashMap::new())),
-            last_seen: Arc::new(RwLock::new(HashMap::new())),
-            peer_job_sender: tokio::sync::mpsc::unbounded_channel().0,
-            workflows: crate::server::WorkflowRegistry::new(),
-            pending_invitations: Arc::new(RwLock::new(Vec::new())),
             auth: Arc::new(RwLock::new(None)),
             token_validator: validator,
             admin_role: Some("decman-admin".to_string()),

@@ -9,7 +9,7 @@ use tracing::info;
 use crate::common::{
     Fixture,
     http::{probe_workflow_run_visible, probe_workflow_status},
-    invitations::{InvitationIds, post_accept_invitation, probe_pending_invitation},
+    invitations::{InvitationIds, post_accept_invitation, probe_pending_invitation_card},
     scenario::Scenario,
 };
 
@@ -184,8 +184,10 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(60),
             |f, ctx| {
                 Box::pin(async move {
-                    let id = probe_pending_invitation(f, f.p2.http, InvitationType::Dars).await?;
-                    ctx.p2 = Some(id);
+                    let card =
+                        probe_pending_invitation_card(f, f.p2.http, InvitationType::Dars).await?;
+                    ctx.run_id = card.workflow_instance.clone();
+                    ctx.p2 = Some(card.id);
                     Some(Ok(()))
                 })
             },
@@ -195,8 +197,10 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(60),
             |f, ctx| {
                 Box::pin(async move {
-                    let id = probe_pending_invitation(f, f.p3.http, InvitationType::Dars).await?;
-                    ctx.p3 = Some(id);
+                    let card =
+                        probe_pending_invitation_card(f, f.p3.http, InvitationType::Dars).await?;
+                    ctx.run_id = ctx.run_id.take().or(card.workflow_instance.clone());
+                    ctx.p3 = Some(card.id);
                     Some(Ok(()))
                 })
             },
@@ -220,6 +224,28 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 r3.context("accept Dars on P3")?;
                 Ok(())
             })
+        })
+        // No DAR bytes travel between nodes any more: the proposer pins each
+        // file by hash, and every member's operator uploads its own copy. The
+        // run completes when the topology store shows the packages vetted
+        // everywhere, so without this step the coordinator waits for ever.
+        .when("P2 + P3 upload the pinned DARs locally", {
+            let entries = entries.clone();
+            move |f, ctx| {
+                let entries = entries.clone();
+                let run_id = ctx.run_id.clone();
+                Box::pin(async move {
+                    let run_id = run_id.context("Dars run id not captured from the invitation")?;
+                    let req = json!({ "dar_files": entries, "pin_instance": run_id });
+                    let p2 = f.post_json(f.p2.http, "/dars/upload", &req);
+                    let p3 = f.post_json(f.p3.http, "/dars/upload", &req);
+                    let (r2, r3): (anyhow::Result<Value>, anyhow::Result<Value>) =
+                        tokio::join!(p2, p3);
+                    r2.context("POST /dars/upload on P2")?;
+                    r3.context("POST /dars/upload on P3")?;
+                    Ok(())
+                })
+            }
         })
         .then(
             "dars/distribute workflow reaches completed",

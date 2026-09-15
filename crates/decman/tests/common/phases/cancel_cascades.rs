@@ -4,6 +4,11 @@
 //! BEFORE P3 accepts, P1 cancels. Assert: P2's peer row flips to
 //! cancelled with an error mentioning cancellation, and P3 has no leftover
 //! pending Onboarding invitation.
+//!
+//! TODO(onledger-phases): this phase still describes the 1.x transport model —
+//! a member learns of a cancel when the proposal disappears from its ledger
+//! view, not from a delivered message (design D10).
+//! Rewrite it against the on-ledger steps before the suite runs green.
 
 use std::time::Duration;
 
@@ -24,7 +29,7 @@ struct Ctx {
     /// Coordinator-side instance_name on P1 (`<prefix>-creation`).
     instance_name: String,
     /// Peer-side instance_name on P2 — synthesized by accept_invitation
-    /// as `peer-onboarding-<pubkey>-<epoch>`. Captured once the
+    /// as `peer-onboarding-{participant_short}-{runId}`. Captured once the
     /// inprogress row is observable so subsequent steps can refer to it
     /// after it flips to `cancelled`.
     p2_peer_instance: Option<String>,

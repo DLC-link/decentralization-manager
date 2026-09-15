@@ -15,6 +15,7 @@ import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
 import { useSnackbar } from "../contexts";
 import { fieldHelpAdornment } from "./FieldHelp";
+import { peerSubtitle } from "../peers";
 import type { OnboardingStatusResponse, Peer, NodeConfig } from "../types";
 
 interface OnboardingDialogProps {
@@ -141,13 +142,15 @@ export const OnboardingDialog = ({
     (p) => p.participant_id !== selfNodeId,
   );
 
-  // Apply the free-text filter (name or address) to the selectable peers.
+  // Apply the free-text filter (name, participant, or node party) to the
+  // selectable peers.
   const visiblePeers = selectablePeers.filter((p) => {
     const q = filter.trim().toLowerCase();
     if (!q) return true;
     return (
       (p.name || p.participant_id).toLowerCase().includes(q) ||
-      `${p.address}:${p.port}`.toLowerCase().includes(q)
+      p.participant_id.toLowerCase().includes(q) ||
+      (p.party ?? "").toLowerCase().includes(q)
     );
   });
 
@@ -636,7 +639,7 @@ export const OnboardingDialog = ({
                               textOverflow: "ellipsis",
                             }}
                           >
-                            {peer.address}:{peer.port}
+                            {peerSubtitle(peer)}
                           </Typography>
                         </Box>
                       </Box>

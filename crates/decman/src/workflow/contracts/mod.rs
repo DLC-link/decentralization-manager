@@ -1,6 +1,4 @@
 pub mod config;
-pub mod coordinator;
-pub mod peer;
 pub mod steps;
 
 pub use config::{ContractDefinition, ContractsConfig, DarFile, FieldDefinition};
@@ -8,9 +6,11 @@ pub use steps::{
     execute_submissions, prepare_submissions, sign_submissions, upload_dars, upload_dars_from_bytes,
 };
 
-use crate::{noise::MessageType, server::WorkflowKind, workflow::state::WorkflowStep};
+use crate::{server::WorkflowKind, workflow::state::WorkflowStep};
 
-/// Contracts workflow steps (contract deployment only)
+/// Contracts workflow steps of the 1.x transport. Kept for the run cards of rows
+/// that predate the 2.0 upgrade; the on-ledger engine has its own step
+/// lists (`crate::onledger::engine::contracts`).
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ContractsStep {
     /// Waiting for all peers to connect
@@ -26,14 +26,6 @@ pub enum ContractsStep {
 }
 
 impl WorkflowStep for ContractsStep {
-    fn to_command(&self) -> Option<MessageType> {
-        match self {
-            Self::SignSubmissions => Some(MessageType::SignSubmissions),
-            Self::Complete => Some(MessageType::Disconnect),
-            Self::WaitingForPeers | Self::PrepareSubmissions | Self::ExecuteSubmissions => None,
-        }
-    }
-
     fn next(&self) -> Option<Self> {
         match self {
             Self::WaitingForPeers => Some(Self::PrepareSubmissions),

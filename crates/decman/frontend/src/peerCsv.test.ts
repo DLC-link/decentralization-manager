@@ -11,28 +11,15 @@ import type { Peer } from "./types";
 /** A 34-byte namespace, the length CantonId parses. */
 const ns = (c: string): string => c.repeat(68);
 
-const KEYS: Record<string, string> = {
-  a: "020f9efa45c6192fbf7b5ee32f6717f587e99d3684256ecb874e71e95f253bd1d3",
-  b: "02b1b35b4a22127354c171105be3eb7c6e7063025602262232889be25cc9455f77",
-  c: "026454a47be758fd132c0260736055f5cc9a7a3fd026f5d8d7522f0ab62a2a47ee",
-  d: "0226cdb238f8e2add11a26832ca0621ae4c8d390601efcf047d2f2b0425120bb9b",
-  e: "03fb57d682b94bc9d3cb5f24e3fc2927cf23120c73ba683af24abb8ab81876ac5d",
-  f: "023dba7312b16d07747c11cdd7fb22af97f1805c75ee728cbf89472616699e3904",
-  "0": "021db6d4bcf3bb8921b3c8881da06d8b24c7bfc2570a69ec26423952339840c8f6",
-};
-
-/** A real point on the curve; the parser checks that, not just the shape. */
-const key = (c: string): string => KEYS[c] ?? KEYS.a;
-
 const ID_A = `participant1::${ns("a")}`;
 const ID_B = `participant2::${ns("b")}`;
+const PARTY_A = `node1::${ns("c")}`;
+const PARTY_B = `node2::${ns("d")}`;
 
 const peer = (over: Partial<Peer> = {}): Peer => ({
   participant_id: ID_A,
   name: "Node One",
-  address: "node1.example.com",
-  port: 9000,
-  public_key: key("a"),
+  party: PARTY_A,
   ...over,
 });
 
@@ -40,39 +27,30 @@ describe("peersToCsv", () => {
   it("writes a header and one row per peer", () => {
     const csv = peersToCsv([
       peer(),
-      peer({ participant_id: ID_B, name: "Node Two", port: 9001 }),
+      peer({ participant_id: ID_B, party: PARTY_B, name: "Node Two" }),
     ]);
 
     expect(csv.split("\r\n")).toEqual([
-      "participant_id,name,address,port,public_key,party",
-      `${ID_A},Node One,node1.example.com,9000,${key("a")},`,
-      `${ID_B},Node Two,node1.example.com,9001,${key("a")},`,
+      "participant_id,node_party_id,name",
+      `${ID_A},${PARTY_A},Node One`,
+      `${ID_B},${PARTY_B},Node Two`,
       "",
     ]);
   });
 
   it("quotes fields containing a comma, a quote, a newline or edge whitespace", () => {
-    const csv = peersToCsv([
-      peer({ name: 'Acme, Inc. "HQ"\nEU', address: " padded.example.com " }),
-    ]);
+    const csv = peersToCsv([peer({ name: 'Acme, Inc. "HQ"\nEU' })]);
 
     expect(csv).toContain('"Acme, Inc. ""HQ""\nEU"');
-    expect(csv).toContain('" padded.example.com "');
-  });
-
-  it("emits the optional party column when set", () => {
-    const party = `alice::${ns("c")}`;
-    const csv = peersToCsv([peer({ party })]);
-
-    expect(csv).toContain(`${key("a")},${party}`);
+    expect(peersToCsv([peer({ name: " padded " })])).toContain('" padded "');
   });
 });
 
 describe("parsePeersCsv", () => {
   it("round-trips what peersToCsv produced, quoting included", () => {
     const peers = [
-      peer({ name: 'Acme, Inc. "HQ"', party: `alice::${ns("c")}` }),
-      peer({ participant_id: ID_B, name: "Node Two", port: 65535 }),
+      peer({ name: 'Acme, Inc. "HQ"' }),
+      peer({ participant_id: ID_B, party: PARTY_B, name: "Node Two" }),
     ];
 
     const { rows, rejected } = parsePeersCsv(peersToCsv(peers));
@@ -83,7 +61,7 @@ describe("parsePeersCsv", () => {
 
   it("accepts a file with no header row", () => {
     const { rows, rejected } = parsePeersCsv(
-      `${ID_B},Node Two,node2.example.com,9001,${key("b")},\n`,
+      `${ID_B},${PARTY_B},Node Two\n`,
     );
 
     expect(rejected).toEqual([]);
@@ -91,22 +69,23 @@ describe("parsePeersCsv", () => {
     expect(rows[0]?.peer.participant_id).toBe(ID_B);
   });
 
-  it("accepts a row without the trailing party column", () => {
-    const { rows, rejected } = parsePeersCsv(
-      `${ID_A},Node One,node1.example.com,9000,${key("a")}`,
-    );
+  // One copied row is the identity string the "Share my identity" button
+  // produces, so a paste of it has to import exactly as a file would.
+  it("accepts a row without the trailing name column", () => {
+    const { rows, rejected } = parsePeersCsv(`${ID_A},${PARTY_A}`);
 
     expect(rejected).toEqual([]);
-    expect(rows[0]?.peer.party).toBeUndefined();
+    expect(rows[0]?.peer.party).toBe(PARTY_A);
+    expect(rows[0]?.peer.name).toBe(ID_A);
   });
 
   it("skips blank lines and tolerates CRLF or LF endings", () => {
     const { rows, rejected } = parsePeersCsv(
-      "participant_id,name,address,port,public_key,party\r\n" +
+      "participant_id,node_party_id,name\r\n" +
         "\r\n" +
-        `${ID_A},One,a.example.com,9000,${key("a")},\r\n` +
+        `${ID_A},${PARTY_A},One\r\n` +
         "\n" +
-        `${ID_B},Two,b.example.com,9001,${key("b")},\n`,
+        `${ID_B},${PARTY_B},Two\n`,
     );
 
     expect(rejected).toEqual([]);
@@ -114,7 +93,7 @@ describe("parsePeersCsv", () => {
   });
 
   it("falls back to the participant id when the name is blank", () => {
-    const { rows } = parsePeersCsv(`${ID_A},,a.example.com,9000,${key("a")},`);
+    const { rows } = parsePeersCsv(`${ID_A},${PARTY_A},`);
 
     expect(rows[0]?.peer.name).toBe(ID_A);
   });
@@ -124,40 +103,34 @@ describe("parsePeersCsv", () => {
   it("rejects bad rows individually and keeps the good ones", () => {
     const { rows, rejected } = parsePeersCsv(
       [
-        "participant_id,name,address,port,public_key,party",
-        `${ID_A},One,a.example.com,9000,${key("a")},`,
-        `,Nameless,a.example.com,9000,${key("a")},`,
-        `participant3::${ns("c")},Three,,9000,${key("c")},`,
-        `participant4::${ns("d")},Four,d.example.com,9000,,`,
-        `participant5::${ns("e")},Five,e.example.com,not-a-port,${key("e")},`,
-        `participant6::${ns("f")},Six,f.example.com,70000,${key("f")},`,
-        `participant7::${ns("0")},Seven`,
-        `${ID_B},Two,b.example.com,9001,${key("b")},`,
+        "participant_id,node_party_id,name",
+        `${ID_A},${PARTY_A},One`,
+        `,${PARTY_A},Nameless`,
+        `participant3::${ns("e")},,Three`,
+        `participant4::${ns("f")}`,
+        `${ID_B},${PARTY_B},Two`,
       ].join("\n"),
     );
 
     expect(rows.map((r) => r.peer.name)).toEqual(["One", "Two"]);
-    expect(rejected.map((r) => r.line)).toEqual([3, 4, 5, 6, 7, 8]);
+    expect(rejected.map((r) => r.line)).toEqual([3, 4, 5]);
     expect(rejected[0]?.reason).toBe("Missing participant_id");
-    expect(rejected[1]?.reason).toBe("Missing address");
-    expect(rejected[2]?.reason).toBe("Missing public_key");
-    expect(rejected[3]?.reason).toContain('Invalid port "not-a-port"');
-    expect(rejected[4]?.reason).toContain('Invalid port "70000"');
-    expect(rejected[5]?.reason).toContain("Expected 5 or 6 columns");
+    expect(rejected[1]?.reason).toBe("Missing node_party_id");
+    expect(rejected[2]?.reason).toContain("Expected 2 or 3 columns");
   });
 
-  // The backend deserializes participant_id as CantonId and runs public_key
-  // through secp256k1, so a row it would refuse has to be caught here — one
-  // such row otherwise fails the POST and costs every valid row with it.
-  it("rejects ids and keys the backend would refuse", () => {
+  // The backend deserializes both ids as CantonId, so a row it would refuse has
+  // to be caught here — one such row otherwise fails the POST and costs every
+  // valid row with it.
+  it("rejects ids the backend would refuse", () => {
     const { rows, rejected } = parsePeersCsv(
       [
-        `not-a-canton-id,One,a.example.com,9000,${key("a")},`,
-        `nons::abcdef,Two,b.example.com,9000,${key("b")},`,
-        `two::sep::${ns("c")},Three,c.example.com,9000,${key("c")},`,
-        `participant4::${ns("d")},Four,d.example.com,9000,not-hex,`,
-        `participant5::${ns("e")},Five,e.example.com,9000,${"ab".repeat(20)},`,
-        `${ID_A},Good,a.example.com,9000,${key("a")},`,
+        `not-a-canton-id,${PARTY_A},One`,
+        `nons::abcdef,${PARTY_A},Two`,
+        `two::sep::${ns("e")},${PARTY_A},Three`,
+        `participant4::${ns("f")},not-a-canton-id,Four`,
+        `participant5::${ns("0")},nons::abcdef,Five`,
+        `${ID_A},${PARTY_A},Good`,
       ].join("\n"),
     );
 
@@ -167,19 +140,17 @@ describe("parsePeersCsv", () => {
       expect(r.reason).toContain("Invalid participant_id");
     }
     for (const r of rejected.slice(3)) {
-      expect(r.reason).toContain("Invalid public_key");
+      expect(r.reason).toContain("Invalid node_party_id");
     }
   });
 
-  // A stray unquoted comma shifts every field after it. Binding the first six
-  // and dropping the rest would save a peer with someone else's key.
+  // A stray unquoted comma shifts every field after it. Binding the first three
+  // and dropping the rest would save a peer under someone else's node party.
   it("rejects a row with more columns than the format has", () => {
-    const { rows, rejected } = parsePeersCsv(
-      `${ID_A},Acme, Inc.,a.example.com,9000,${key("a")},`,
-    );
+    const { rows, rejected } = parsePeersCsv(`${ID_A},${PARTY_A},Acme, Inc.`);
 
     expect(rows).toEqual([]);
-    expect(rejected[0]?.reason).toContain("found 7");
+    expect(rejected[0]?.reason).toContain("found 4");
   });
 
   // The backend lower-cases the namespace when it stores a CantonId, so two
@@ -188,10 +159,7 @@ describe("parsePeersCsv", () => {
   it("canonicalises the namespace so one id has one spelling", () => {
     const upper = `participant1::${ns("A")}`;
     const { rows, rejected } = parsePeersCsv(
-      [
-        `${upper},Upper,a.example.com,9000,${key("a")},`,
-        `${ID_A},Lower,z.example.com,9999,${key("b")},`,
-      ].join("\n"),
+      [`${upper},${PARTY_A},Upper`, `${ID_A},${PARTY_B},Lower`].join("\n"),
     );
 
     expect(rows).toHaveLength(1);
@@ -200,79 +168,55 @@ describe("parsePeersCsv", () => {
   });
 
   it("rejects malformed quoting rather than guessing at it", () => {
-    const unterminated = parsePeersCsv(
-      `${ID_A},"Never closed,a.example.com,9000,${key("a")},`,
-    );
+    const unterminated = parsePeersCsv(`${ID_A},${PARTY_A},"Never closed`);
     expect(unterminated.rows).toEqual([]);
     expect(unterminated.rejected[0]?.reason).toBe("Unterminated quoted field");
 
-    const trailing = parsePeersCsv(
-      `${ID_A},"Acme"Corp,a.example.com,9000,${key("a")},`,
-    );
+    const trailing = parsePeersCsv(`${ID_A},${PARTY_A},"Acme"Corp`);
     expect(trailing.rows).toEqual([]);
     expect(trailing.rejected[0]?.reason).toBe(
       "Unexpected text after a closing quote",
     );
 
-    const bare = parsePeersCsv(
-      `${ID_A},Acme"Node,a.example.com,9000,${key("a")},`,
-    );
+    const bare = parsePeersCsv(`${ID_A},${PARTY_A},Acme"Node`);
     expect(bare.rows).toEqual([]);
     expect(bare.rejected[0]?.reason).toBe(
       "Unexpected quote in an unquoted field",
     );
   });
 
-  // A key that is hex and the right length can still be off the curve, and the
-  // backend refuses the whole POST for one of those — so a row carrying one has
-  // to be caught here and skipped like any other bad row.
-  it("rejects a key that is well-formed hex but not on the curve", () => {
-    const rowFor = (k: string) => `${ID_A},One,a.example.com,9000,${k},`;
-
-    expect(parsePeersCsv(rowFor(`02${"0".repeat(64)}`)).rejected[0]?.reason).toContain(
-      "not a secp256k1 public key",
-    );
-    expect(parsePeersCsv(rowFor(`05${key("a").slice(2)}`)).rows).toEqual([]);
-    expect(parsePeersCsv(rowFor(key("a"))).rows).toHaveLength(1);
-  });
-
   // peersToCsv quotes a value whose whitespace matters, so trimming it back
   // off would silently rewrite that peer and show it as an Update.
   it("keeps whitespace that was quoted and trims whitespace that was not", () => {
-    const padded = peer({ address: " padded.example.com " });
+    const padded = peer({ name: " Node One " });
     const { rows } = parsePeersCsv(peersToCsv([padded]));
-    expect(rows[0]?.peer.address).toBe(" padded.example.com ");
+    expect(rows[0]?.peer.name).toBe(" Node One ");
 
-    const loose = parsePeersCsv(
-      `${ID_A} , Node One , a.example.com , 9000 , ${key("a")} ,`,
-    );
+    const loose = parsePeersCsv(`${ID_A} , ${PARTY_A} , Node One `);
     expect(loose.rejected).toEqual([]);
     expect(loose.rows[0]?.peer).toMatchObject({
       participant_id: ID_A,
+      party: PARTY_A,
       name: "Node One",
-      address: "a.example.com",
-      port: 9000,
     });
   });
 
   it("rejects the second row that repeats a participant id", () => {
     const { rows, rejected } = parsePeersCsv(
-      [
-        `${ID_A},One,a.example.com,9000,${key("a")},`,
-        `${ID_A},One again,z.example.com,9999,${key("b")},`,
-      ].join("\n"),
+      [`${ID_A},${PARTY_A},One`, `${ID_A},${PARTY_B},One again`].join("\n"),
     );
 
     expect(rows).toHaveLength(1);
-    expect(rows[0]?.peer.address).toBe("a.example.com");
+    expect(rows[0]?.peer.name).toBe("One");
     expect(rejected[0]?.reason).toContain("Duplicate participant_id");
   });
 
   it("returns nothing for an empty file or a header-only file", () => {
     expect(parsePeersCsv("")).toEqual({ rows: [], rejected: [] });
-    expect(
-      parsePeersCsv("participant_id,name,address,port,public_key,party\r\n"),
-    ).toEqual({ rows: [], rejected: [] });
+    expect(parsePeersCsv("participant_id,node_party_id,name\r\n")).toEqual({
+      rows: [],
+      rejected: [],
+    });
   });
 });
 
@@ -285,10 +229,14 @@ describe("canonicalPeerId", () => {
 
 describe("mergePeers", () => {
   const existingA = peer({ participant_id: "a::1220", name: "A" });
-  const existingB = peer({ participant_id: "b::1220", name: "B", port: 9001 });
+  const existingB = peer({ participant_id: "b::1220", name: "B" });
 
   it("updates a peer in place and appends the new ones", () => {
-    const updatedB = peer({ participant_id: "b::1220", name: "B", port: 9999 });
+    const updatedB = peer({
+      participant_id: "b::1220",
+      name: "B",
+      party: PARTY_B,
+    });
     const newC = peer({ participant_id: "c::1220", name: "C" });
 
     expect(mergePeers([existingA, existingB], [updatedB, newC])).toEqual([

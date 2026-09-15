@@ -67,8 +67,8 @@ export const KickDialog = ({
     // On the first poll, force a server-side refresh — the cached
     // `/decentralized-parties` response can be missing the owner_key if
     // the previous resolve happened while the participant being kicked
-    // was offline. Force=true triggers a fresh peer-Noise round-trip plus
-    // the topology-derived fallback so the next poll usually has the key.
+    // was offline. Force=true triggers a fresh topology read plus
+    // the cached fallback so the next poll usually has the key.
     let firstFetch = true;
     const fetchOwnerKey = async () => {
       try {
@@ -272,7 +272,7 @@ export const KickDialog = ({
             slotProps={{
               input: {
                 endAdornment: fieldHelpAdornment(
-                  "The participant's namespace fingerprint, looked up automatically from the participant via Noise or from Canton's topology. This is the key that gets removed from the decentralized namespace.",
+                  "The participant's namespace fingerprint, read automatically from Canton's topology store. This is the key that gets removed from the decentralized namespace.",
                   "Help for Namespace Fingerprint",
                 ),
               },

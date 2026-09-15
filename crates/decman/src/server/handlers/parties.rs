@@ -23,25 +23,22 @@ use canton_proto_rs::com::digitalasset::canton::{
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
     },
 };
+use common::coordination::PeerHealthStatus;
 use serde::Deserialize;
 use sqlx::SqlitePool;
 
 use crate::{
     auth::WorkflowAuth,
     canton_id::CantonId,
-    config::{NetworkConfig, NodeConfig, PartyCredentials, default_package_config},
+    config::{NodeConfig, PartyCredentials, Peer, default_package_config},
     db::{
         rows::{DecPartyContractRow, DecPartyParticipantRow, DecPartyRow},
         schema::{Commitable, SchemaRead, SchemaWrite},
     },
     error::Result,
-    noise::{
-        Message, MessageType, NoiseError, NoiseKeypair, parse_public_key, send_noise_message,
-        send_noise_message_with_chunked_response, send_noise_message_with_retry,
-    },
+    onledger::registry::{self, PeerHealthSnapshot},
     server::{
         AppState,
-        health::classify_health_reply,
         package_inventory::fetch_vetted_packages,
         queries::{
             contract_templates_all, fetch_package_versions, get_contracts, get_party_metadata,
@@ -593,17 +590,17 @@ pub async fn get_decentralized_parties(
             // its contracts alive at once, on top of the response body (#415).
             let body = HttpResponse::Ok().json(&response);
 
-            // Owner-key resolution fans out to every peer over Noise, so it
-            // stays off the request path. Only for a cacheable read: it writes
-            // into the rows that read just cached, and a windowed or
+            // Owner-key resolution reads the topology store per namespace,
+            // so it stays off the request path. Only for a cacheable read: it
+            // writes into the rows that read just cached, and a windowed or
             // contract-bearing request caches nothing, so resolving for it
-            // would put a peer fan-out behind every page of the approvals
+            // would put a topology fan-out behind every page of the approvals
             // view (#424).
             if opts.is_cacheable() && !response.parties.is_empty() {
                 let data = data.clone();
                 let parties = response.parties;
                 tokio::spawn(async move {
-                    resolve_owner_keys_from_peers(&data.config, &data.db, &parties).await;
+                    resolve_owner_keys_from_topology(&data.config, &data.db, &parties).await;
                 });
             }
             body
@@ -712,7 +709,7 @@ async fn await_in_flight_discovery(
     }
 }
 
-/// Background task: discover, cache, then resolve owner keys from peers.
+/// Background task: discover, cache, then resolve owner keys from topology.
 async fn refresh_and_cache_parties(data: &web::Data<AppState>, prefix: &str) {
     let auth = data.auth.read().await.clone();
     let party_creds = data.party_credentials.read().await.clone();
@@ -729,7 +726,7 @@ async fn refresh_and_cache_parties(data: &web::Data<AppState>, prefix: &str) {
     .await
     {
         Discovery::Done(response) => {
-            resolve_owner_keys_from_peers(&data.config, &data.db, &response.parties).await;
+            resolve_owner_keys_from_topology(&data.config, &data.db, &response.parties).await;
         }
         Discovery::InFlight | Discovery::AtCapacity | Discovery::Superseded => {
             tracing::debug!("Skipped background refresh for prefix '{prefix}'");
@@ -740,224 +737,22 @@ async fn refresh_and_cache_parties(data: &web::Data<AppState>, prefix: &str) {
     }
 }
 
-/// Query each peer via Noise for their owner keys, then update the DB
-pub async fn resolve_owner_keys_from_peers(
+/// Resolve the owner keys the cache lacks (design D4).
+///
+/// The synchronizer topology store is the source: each participant's
+/// `NamespaceDelegation` entries name the keys under its namespace, and the
+/// one that is also an owner of the party's `DecentralizedNamespaceDefinition`
+/// is its owner key. The Daml signing key of a participant cannot be read
+/// from topology; it arrives in that participant's `WorkflowAcceptance`, and
+/// the engine records it (`onledger::keys::record_member_keys`).
+pub async fn resolve_owner_keys_from_topology(
     config: &NodeConfig,
     db: &SqlitePool,
     parties: &[DecentralizedParty],
 ) {
-    tracing::debug!("Resolving owner keys from peers...");
-
-    let peers = match db.get_all_peers().await {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!("Failed to load peers for owner key resolution: {e}");
-            return;
-        }
-    };
-
-    let keypair = match NoiseKeypair::from_file(&config.key_file_path()).await {
-        Ok(kp) => kp,
-        Err(e) => {
-            tracing::warn!("Failed to load keypair for owner key resolution: {e}");
-            return;
-        }
-    };
-
-    let current_participant_id = config.participant_id().to_string();
-    let known_party_ids: HashSet<String> = parties.iter().map(|p| p.party_id.to_string()).collect();
-
-    for peer in &peers {
-        let peer_uid = peer.participant_id.to_string();
-        if peer_uid == current_participant_id || peer.public_key.is_empty() {
-            continue;
-        }
-
-        let peer_pub_key = match parse_public_key(&peer.public_key) {
-            Ok(pk) => pk,
-            Err(e) => {
-                tracing::warn!("Failed to parse public key for {peer_uid}: {e}");
-                continue;
-            }
-        };
-
-        let psk = keypair.derive_psk(&peer_pub_key);
-        // Tell the peer which parties we want owner_keys for. See #149: peer
-        // used to enumerate the whole synchronizer to build a namespace→party
-        // map; we now pass the namespaces (via the full party_ids) directly so
-        // the peer can skip that scan.
-        let request_payload = match serde_json::to_vec(
-            &parties
-                .iter()
-                .map(|p| p.party_id.to_string())
-                .collect::<Vec<_>>(),
-        ) {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!("Failed to serialise RequestOwnerKeys payload: {e}");
-                continue;
-            }
-        };
-        let msg = Message::new(MessageType::RequestOwnerKeys, request_payload);
-
-        tracing::debug!("Requesting owner keys from {peer_uid}");
-        let response = match tokio::time::timeout(
-            Duration::from_secs(10),
-            send_noise_message(
-                &peer.address,
-                peer.port,
-                &psk,
-                current_participant_id.as_bytes(),
-                &msg,
-            ),
-        )
-        .await
-        {
-            Ok(Ok(bytes)) => bytes,
-            Ok(Err(e)) => {
-                tracing::warn!(
-                    peer = %peer_uid,
-                    endpoint = %format!("{}:{}", peer.address, peer.port),
-                    "RequestOwnerKeys failed: {e} — {hint}",
-                    hint = peer_failure_hint(&e)
-                );
-                continue;
-            }
-            Err(_) => {
-                tracing::warn!(
-                    peer = %peer_uid,
-                    endpoint = %format!("{}:{}", peer.address, peer.port),
-                    "RequestOwnerKeys timed out after 10s — {hint}",
-                    hint = peer_failure_hint(&NoiseError::RequestTimeout)
-                );
-                continue;
-            }
-        };
-
-        // A 200 with an empty body. The peer accepted the request and then
-        // said nothing, which used to surface as "message too short: got 0" and
-        // read like a protocol bug in the peer.
-        //
-        // A denied request is NOT this case: it arrives as a 503, so
-        // `send_noise_message` returns `BadStatusCode` above and never reaches
-        // here. This arm is a peer that answered 200 with no frame at all, or a
-        // proxy that terminated the request and returned an empty 200.
-        if response.is_empty() {
-            tracing::warn!(
-                peer = %peer_uid,
-                endpoint = %format!("{}:{}", peer.address, peer.port),
-                "RequestOwnerKeys got an empty reply — {hint}",
-                hint = peer_failure_hint(&NoiseError::InvalidMessage)
-            );
-            continue;
-        }
-
-        let response_msg = match Message::from_bytes(&response) {
-            Ok(m) if m.msg_type == MessageType::OwnerKeys => m,
-            Ok(m) if m.msg_type == MessageType::Error => {
-                // An Error frame under 200 OK. The listener's own deny paths
-                // send that frame with a 503, so those surface as
-                // `BadStatusCode(_, Some(reason))` above rather than here. This
-                // arm catches a peer that reports the error in the body while
-                // still answering 200. Either way, prefer its words to a guess.
-                tracing::warn!(
-                    peer = %peer_uid,
-                    endpoint = %format!("{}:{}", peer.address, peer.port),
-                    "RequestOwnerKeys refused by the peer: {reason}",
-                    reason = String::from_utf8_lossy(&m.payload)
-                );
-                continue;
-            }
-            Ok(m) => {
-                tracing::warn!(
-                    peer = %peer_uid,
-                    endpoint = %format!("{}:{}", peer.address, peer.port),
-                    "RequestOwnerKeys got an unexpected response type {:?} — the peer may be on a \
-                     different wire format",
-                    m.msg_type
-                );
-                continue;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    peer = %peer_uid,
-                    endpoint = %format!("{}:{}", peer.address, peer.port),
-                    "RequestOwnerKeys reply did not parse: {e} — {hint}",
-                    hint = peer_failure_hint(&NoiseError::InvalidMessage)
-                );
-                continue;
-            }
-        };
-
-        let entries: Vec<serde_json::Value> = match serde_json::from_slice(&response_msg.payload) {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::warn!("Failed to deserialize owner keys from {peer_uid}: {e}");
-                continue;
-            }
-        };
-
-        tracing::debug!(
-            "Received {} owner key entries from {peer_uid}",
-            entries.len()
-        );
-
-        // Update DB with the owner keys
-        let peer_uid = peer.participant_id.to_string();
-        if let Ok(mut tx) = db.begin_transaction().await {
-            for entry in &entries {
-                let Some(party_id) = entry["party_id"].as_str() else {
-                    continue;
-                };
-                let Some(owner_key) = entry["owner_key"].as_str() else {
-                    continue;
-                };
-
-                if !known_party_ids.contains(party_id) {
-                    continue;
-                }
-                let Ok(party_id_canton) = CantonId::parse(party_id) else {
-                    tracing::debug!(
-                        "Skipping owner-key update from {peer_uid}: bad party_id {party_id}"
-                    );
-                    continue;
-                };
-                if let Err(e) = tx
-                    .update_participant_owner_key(&party_id_canton, &peer_uid, owner_key)
-                    .await
-                {
-                    tracing::debug!("Failed to update owner key for {peer_uid}: {e}");
-                }
-
-                // Absent from peers that predate the field. Nothing else can
-                // supply it — the party's signing keys carry no owner — so a
-                // kick coordinated here falls back to elimination until this
-                // peer answers a later refresh.
-                let Some(signing_key) = entry["signing_key"].as_str() else {
-                    continue;
-                };
-                if let Err(e) = tx
-                    .update_participant_signing_key(&party_id_canton, &peer_uid, signing_key)
-                    .await
-                {
-                    tracing::debug!("Failed to update signing key for {peer_uid}: {e}");
-                }
-            }
-            if let Err(e) = Commitable::commit(tx).await {
-                tracing::debug!("Failed to commit owner key updates: {e}");
-            }
-        }
-    }
-
-    // Topology-driven fallback: covers the case where the participant whose
-    // owner_key we need is offline / unreachable via Noise. The mapping
-    // (participant_uid → owner_key in a party) is recoverable from public
-    // synchronizer state — each participant publishes `NamespaceDelegation`
-    // entries listing the signing keys delegated under its namespace, and
-    // one of those fingerprints is what appears in the party's `owners`
-    // list. This is independent of peer reachability.
+    tracing::debug!("Resolving owner keys from topology...");
     if let Err(e) = supplement_owner_keys_from_topology(config, db, parties).await {
-        tracing::debug!("Topology-based owner-key fallback skipped: {e:#}");
+        tracing::debug!("Topology-based owner-key resolution skipped: {e:#}");
     }
 }
 
@@ -1814,7 +1609,7 @@ async fn fetch_decentralized_parties(
                         let owner_key = if participant_uid.to_string() == self_uid {
                             Some(my_owner_key.clone())
                         } else {
-                            None // resolved later via Noise polling of peers
+                            None // resolved later from topology and acceptances
                         };
                         Some(ParticipantInfo {
                             participant_uid,
@@ -1929,7 +1724,9 @@ pub async fn get_vetted_packages(data: web::Data<AppState>) -> impl Responder {
     }
 }
 
-/// Check connectivity status of all participants
+/// Health of every configured peer, from the registry snapshot the observer
+/// refreshes (design D3). No I/O per request beyond the peers table, so the
+/// 2 s poll from every browser costs no ledger read.
 #[utoipa::path(
     tag = "Parties",
     responses(
@@ -1939,123 +1736,88 @@ pub async fn get_vetted_packages(data: web::Data<AppState>) -> impl Responder {
 )]
 #[get("/participants-status")]
 pub async fn get_participants_status(data: web::Data<AppState>) -> impl Responder {
-    match check_participants_status(&data.config, &data.db).await {
-        Ok(response) => HttpResponse::Ok().json(response),
+    let peers = match data.db.get_all_peers().await {
+        Ok(p) => p,
         Err(e) => {
-            tracing::error!("Failed to check participants status: {e}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
+            tracing::error!("Failed to load peers for participants status: {e}");
+            return HttpResponse::InternalServerError().json(ErrorResponse {
                 error: format!("Failed to check participants status: {e}"),
-            })
+            });
         }
+    };
+    let snapshot = data.onledger.registry_snapshot().await;
+    let has_identity = data.onledger.identity().await.is_some();
+    HttpResponse::Ok().json(ParticipantsStatusResponse {
+        statuses: project_participant_statuses(
+            data.config.participant_id(),
+            &peers,
+            &snapshot,
+            has_identity,
+            now_secs(),
+        ),
+    })
+}
+
+/// The `ConnectionStatus` of a registry verdict.
+fn connection_status_of(health: PeerHealthStatus) -> ConnectionStatus {
+    match health {
+        PeerHealthStatus::Active => ConnectionStatus::Active,
+        PeerHealthStatus::Stale => ConnectionStatus::Stale,
+        PeerHealthStatus::Unknown => ConnectionStatus::Unknown,
+        PeerHealthStatus::Unvetted => ConnectionStatus::Unvetted,
     }
 }
 
-async fn check_participants_status(
-    config: &NodeConfig,
-    db: &SqlitePool,
-) -> Result<ParticipantsStatusResponse> {
-    let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
-    let current_participant_id = config.participant_id();
-    let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
-
-    let mut status_futures = Vec::new();
-
-    for peer in network_config.peers.iter() {
-        let peer_id = peer.participant_id.to_string();
-        let is_self = peer.participant_id == *current_participant_id;
-
-        if is_self {
-            status_futures.push(tokio::spawn(async move {
-                ParticipantStatus {
-                    id: peer_id,
+/// One status row per configured peer, left-joined on the snapshot (pure).
+///
+/// This node reads as `CurrentNode` with its own version. A peer without a
+/// snapshot entry, and every peer while this node has no node identity, is
+/// `Unknown`: without an identity the observer cannot read the registry, so
+/// the snapshot says nothing about anyone.
+pub(crate) fn project_participant_statuses(
+    self_participant: &CantonId,
+    peers: &[Peer],
+    snapshot: &PeerHealthSnapshot,
+    has_identity: bool,
+    now_secs: i64,
+) -> Vec<ParticipantStatus> {
+    peers
+        .iter()
+        .map(|peer| {
+            if peer.participant_id == *self_participant {
+                return ParticipantStatus {
+                    id: peer.participant_id.to_string(),
                     status: ConnectionStatus::CurrentNode,
-                    latency_ms: None,
-                    workflow: None,
+                    node_party: peer.party.clone(),
+                    last_seen_at: None,
+                    heartbeat_age_secs: None,
                     version: Some(crate::build_info::SEMVER.to_string()),
                     build_version: Some(crate::build_info::build_version().to_string()),
-                }
-            }));
-            continue;
-        }
-
-        let peer_pub_key = parse_public_key(&peer.public_key).ok();
-        let psk = peer_pub_key.map(|pk| keypair.derive_psk(&pk));
-        let identity = current_participant_id.to_string();
-        let address = peer.address.clone();
-        let port = peer.port;
-        let noise_retry_cfg = config.noise_retry.clone();
-
-        status_futures.push(tokio::spawn(async move {
-            let (Some(psk), Some(_)) = (psk, peer_pub_key) else {
-                // Public key parse failed — no PSK available; classify as handshake-side.
-                return ParticipantStatus {
-                    id: peer_id,
-                    status: ConnectionStatus::HandshakeFailed,
-                    latency_ms: None,
-                    workflow: None,
-                    version: None,
-                    build_version: None,
                 };
-            };
-
-            let started = std::time::Instant::now();
-            match send_noise_message_with_retry(
-                &address,
-                port,
-                &psk,
-                identity.as_bytes(),
-                &Message::new_empty(MessageType::Health),
-                &noise_retry_cfg,
-            )
-            .await
-            {
-                Ok(response) => {
-                    // A successful Noise round-trip means the peer is reachable;
-                    // classify_health_reply extracts its workflow state (or None
-                    // if the peer is on older code that doesn't answer Health).
-                    let latency_ms = u64::try_from(started.elapsed().as_millis()).ok();
-                    let reply = classify_health_reply(&response);
-                    ParticipantStatus {
-                        id: peer_id,
-                        status: reply.status,
-                        latency_ms,
-                        workflow: reply.workflow,
-                        version: reply.version,
-                        build_version: reply.build_version,
-                    }
-                }
-                Err(e) => {
-                    // Map NoiseError -> ConnectionStatus (binary semantics — Unreachable
-                    // covers transport-side failures; HandshakeFailed covers everything
-                    // else, matching prior behavior of this endpoint).
-                    let status = match &e {
-                        NoiseError::TcpConnectionTimeout(_)
-                        | NoiseError::TcpConnectionFailed(_)
-                        | NoiseError::Io(_)
-                        | NoiseError::Hyper(_)
-                        | NoiseError::RequestTimeout => ConnectionStatus::Unreachable,
-                        _ => ConnectionStatus::HandshakeFailed,
-                    };
-                    ParticipantStatus {
-                        id: peer_id,
-                        status,
-                        latency_ms: None,
-                        workflow: None,
-                        version: None,
-                        build_version: None,
-                    }
-                }
             }
-        }));
-    }
-
-    let results = futures::future::join_all(status_futures).await;
-    let statuses: Vec<ParticipantStatus> = results.into_iter().filter_map(|r| r.ok()).collect();
-
-    Ok(ParticipantsStatusResponse { statuses })
+            let health = snapshot.get(&peer.participant_id).filter(|_| has_identity);
+            let last_seen_at = health
+                .and_then(|h| h.last_active_at)
+                .map(|micros| micros.div_euclid(1_000_000));
+            ParticipantStatus {
+                id: peer.participant_id.to_string(),
+                status: health
+                    .map(|h| connection_status_of(h.status))
+                    .unwrap_or(ConnectionStatus::Unknown),
+                node_party: health
+                    .and_then(|h| h.node_party.clone())
+                    .or_else(|| peer.party.clone()),
+                last_seen_at,
+                heartbeat_age_secs: last_seen_at.map(|t| (now_secs - t).max(0)),
+                version: health.and_then(|h| h.version.clone()),
+                build_version: health.and_then(|h| h.build_version.clone()),
+            }
+        })
+        .collect()
 }
 
-/// Compare locally uploaded packages with peer nodes via Noise protocol
+/// Compare the packages uploaded here with what every peer has vetted, read
+/// from the synchronizer topology store (design D8).
 #[utoipa::path(
     tag = "Packages",
     responses(
@@ -2076,78 +1838,11 @@ pub async fn compare_peer_packages(data: web::Data<AppState>) -> impl Responder 
     }
 }
 
-/// Pure mapping from `NoiseError` to the wire-stable `PeerErrorKind`.
-///
-/// What an operator should check, for a peer request that failed.
-///
-/// The raw error names a symptom — `snow error: input error`,
-/// `Message too short: got 0` — and an operator reading it has no way to get
-/// from there to an action. Each arm below names the thing to go and look at.
-///
-/// Exhaustive for the same reason as [`peer_error_kind_from_noise_err`]: a new
-/// `NoiseError` variant must be given a hint rather than silently inheriting a
-/// vague one.
-fn peer_failure_hint(err: &NoiseError) -> &'static str {
-    match err {
-        NoiseError::TcpConnectionTimeout(_) | NoiseError::TcpConnectionFailed(_) => {
-            "nothing is accepting connections on that address — check the peer is up and that \
-             its advertised host/port reach it from here"
-        }
-        NoiseError::RequestTimeout => {
-            "connected, but the peer never answered — it may be overloaded, or wedged mid-request"
-        }
-        NoiseError::Noise(_) | NoiseError::HandshakeFailed | NoiseError::DecryptionError => {
-            "the Noise handshake failed — this node's key or the derived PSK does not match what \
-             the peer expects, so check each side has the other's current public key"
-        }
-        NoiseError::BadStatusCode(..) => {
-            "the peer answered but refused the request — it may not have this node registered as \
-             a peer, or a load balancer in front of it has no healthy backend"
-        }
-        NoiseError::InvalidMessage => {
-            "the peer answered with something this build cannot parse — most often an empty body \
-             from a denied request or an unhealthy proxy, or a peer on an older wire format"
-        }
-        NoiseError::JsonSerialization(_) => {
-            "the peer's payload did not deserialize — likely a version skew between the two builds"
-        }
-        NoiseError::Io(_) | NoiseError::Hyper(_) => {
-            "the connection broke mid-request — check for a proxy or firewall closing idle \
-             connections between the two nodes"
-        }
-        NoiseError::Http(_)
-        | NoiseError::InvalidUri(_)
-        | NoiseError::UriParsingError(_)
-        | NoiseError::UnknownPeer(_)
-        | NoiseError::Anyhow(_) => {
-            "check this peer's address, port and public key in the peers table"
-        }
-    }
-}
-
-/// Exhaustive match (no wildcard) — adding a new `NoiseError` variant will
-/// fail to compile here until it's explicitly classified.
-fn peer_error_kind_from_noise_err(err: &NoiseError) -> PeerErrorKind {
-    match err {
-        NoiseError::TcpConnectionTimeout(_) => PeerErrorKind::TcpConnectTimeout,
-        NoiseError::TcpConnectionFailed(_) => PeerErrorKind::TcpConnectFailed,
-        NoiseError::RequestTimeout => PeerErrorKind::RequestTimeout,
-        NoiseError::Io(_) | NoiseError::Hyper(_) => PeerErrorKind::Transport,
-        NoiseError::Noise(_) | NoiseError::HandshakeFailed | NoiseError::DecryptionError => {
-            PeerErrorKind::HandshakeFailed
-        }
-        NoiseError::BadStatusCode(..) => PeerErrorKind::BadStatus,
-        NoiseError::InvalidMessage | NoiseError::JsonSerialization(_) => {
-            PeerErrorKind::DecodeFailed
-        }
-        NoiseError::Http(_)
-        | NoiseError::InvalidUri(_)
-        | NoiseError::UriParsingError(_)
-        | NoiseError::UnknownPeer(_)
-        | NoiseError::Anyhow(_) => PeerErrorKind::Other,
-    }
-}
-
+/// Local packages from the participant's `PackageService`, and every peer's
+/// vetted packages from the topology store. A peer is `reachable` when its
+/// topology read succeeded and returned at least one package; the names and
+/// versions of its packages are joined from the local package list, so a
+/// package this node does not hold shows with an empty name.
 async fn fetch_peer_packages(
     config: &NodeConfig,
     db: &SqlitePool,
@@ -2170,93 +1865,78 @@ async fn fetch_peer_packages(
             version: p.version,
         })
         .collect();
-
-    let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
-    let keypair = Arc::new(NoiseKeypair::from_file(&config.key_file_path()).await?);
-    let current_participant_id = config.participant_id();
-
-    let invite_message = Message::new_empty(MessageType::ListPackages);
-    let noise_retry_cfg = config.noise_retry.clone();
-
-    let peer_futures: Vec<_> = network_config
-        .peers
+    let local_index: HashMap<&str, &PackageInfo> = local_packages
         .iter()
-        .filter(|p| p.participant_id != *current_participant_id && !p.public_key.is_empty())
-        .map(|peer| {
-            let keypair = Arc::clone(&keypair);
-            let peer = peer.clone();
-            let msg = invite_message.clone();
-            let noise_retry_cfg = noise_retry_cfg.clone();
-            async move {
-                let peer_pub_key = match parse_public_key(&peer.public_key) {
-                    Ok(pk) => pk,
-                    Err(_) => {
-                        return PeerPackageResult {
-                            participant_id: peer.participant_id.to_string(),
-                            name: peer.name.clone(),
-                            reachable: false,
-                            error_kind: Some(PeerErrorKind::InvalidPublicKey),
-                            packages: vec![],
-                        };
-                    }
-                };
-
-                let psk = keypair.derive_psk(&peer_pub_key);
-                let identity = current_participant_id.to_string();
-
-                match send_noise_message_with_chunked_response(
-                    &peer.address,
-                    peer.port,
-                    &psk,
-                    identity.as_bytes(),
-                    &msg,
-                    &noise_retry_cfg,
-                )
-                .await
-                {
-                    Ok(response) => {
-                        if let Ok(response_msg) = Message::from_bytes(&response)
-                            && response_msg.msg_type == MessageType::Data
-                            && let Ok(packages) =
-                                serde_json::from_slice::<Vec<PackageInfo>>(&response_msg.payload)
-                        {
-                            return PeerPackageResult {
-                                participant_id: peer.participant_id.to_string(),
-                                name: peer.name.clone(),
-                                reachable: true,
-                                error_kind: None,
-                                packages,
-                            };
-                        }
-                        // 200 OK but unexpected message shape — `error_kind` stays
-                        // None per the documented invariant; widening this case is
-                        // tracked as Future work item 5 in the spec.
-                        PeerPackageResult {
-                            participant_id: peer.participant_id.to_string(),
-                            name: peer.name.clone(),
-                            reachable: true,
-                            error_kind: None,
-                            packages: vec![],
-                        }
-                    }
-                    Err(e) => PeerPackageResult {
-                        participant_id: peer.participant_id.to_string(),
-                        name: peer.name.clone(),
-                        reachable: false,
-                        error_kind: Some(peer_error_kind_from_noise_err(&e)),
-                        packages: vec![],
-                    },
-                }
-            }
-        })
+        .map(|p| (p.package_id.as_str(), p))
         .collect();
 
-    let peers = futures::future::join_all(peer_futures).await;
+    let peers = db.get_all_peers().await?;
+    let current_participant_id = config.participant_id();
+    let mut results = Vec::with_capacity(peers.len());
+    for peer in peers
+        .iter()
+        .filter(|p| p.participant_id != *current_participant_id)
+    {
+        let read = registry::fetch_vetted_packages_for(config, &peer.participant_id).await;
+        results.push(peer_package_result(peer, read, &local_index));
+    }
 
     Ok(PeerPackageComparison {
         local_packages,
-        peers,
+        peers: results,
     })
+}
+
+/// One comparison row from a topology read (pure).
+fn peer_package_result(
+    peer: &Peer,
+    read: Result<HashSet<String>>,
+    local_index: &HashMap<&str, &PackageInfo>,
+) -> PeerPackageResult {
+    let participant_id = peer.participant_id.to_string();
+    let name = peer.name.clone();
+    match read {
+        Ok(ids) if ids.is_empty() => PeerPackageResult {
+            participant_id,
+            name,
+            reachable: false,
+            error_kind: Some(PeerErrorKind::NoVettedPackages),
+            packages: vec![],
+        },
+        Ok(ids) => {
+            let mut packages: Vec<PackageInfo> = ids
+                .into_iter()
+                .map(|id| match local_index.get(id.as_str()) {
+                    Some(local) => (*local).clone(),
+                    None => PackageInfo {
+                        package_id: id,
+                        name: String::new(),
+                        version: String::new(),
+                    },
+                })
+                .collect();
+            packages.sort_by(|a, b| {
+                (&a.name, &a.version, &a.package_id).cmp(&(&b.name, &b.version, &b.package_id))
+            });
+            PeerPackageResult {
+                participant_id,
+                name,
+                reachable: true,
+                error_kind: None,
+                packages,
+            }
+        }
+        Err(e) => {
+            tracing::warn!(peer = %participant_id, error = %format!("{e:#}"), "vetted-package read failed");
+            PeerPackageResult {
+                participant_id,
+                name,
+                reachable: false,
+                error_kind: Some(PeerErrorKind::TopologyReadFailed),
+                packages: vec![],
+            }
+        }
+    }
 }
 
 /// Query the local participant's vault for namespace key fingerprints.
@@ -2270,8 +1950,6 @@ async fn get_local_namespace_fingerprints(config: &NodeConfig) -> Result<HashSet
 
 #[cfg(test)]
 mod tests {
-    use http::StatusCode;
-
     use super::*;
     use crate::{config::Network, db::MIGRATOR};
 
@@ -2623,56 +2301,6 @@ mod tests {
     }
 
     #[test]
-    fn peer_error_kind_mapping_known_variants() {
-        // Construct one easily-instantiable example of each PeerErrorKind
-        // category and assert the mapping. Hard-to-construct NoiseError
-        // variants (Hyper, Noise, JsonSerialization, Http, InvalidUri) are
-        // not exercised here — the helper's exhaustive match is what
-        // guarantees they're classified. This test catches accidental
-        // arm-swap regressions in the easy variants.
-        let pairs: Vec<(NoiseError, PeerErrorKind)> = vec![
-            (
-                NoiseError::TcpConnectionTimeout("x".into()),
-                PeerErrorKind::TcpConnectTimeout,
-            ),
-            (NoiseError::RequestTimeout, PeerErrorKind::RequestTimeout),
-            (
-                NoiseError::TcpConnectionFailed("x".into()),
-                PeerErrorKind::TcpConnectFailed,
-            ),
-            (
-                NoiseError::Io(std::io::Error::other("x")),
-                PeerErrorKind::Transport,
-            ),
-            (NoiseError::HandshakeFailed, PeerErrorKind::HandshakeFailed),
-            (NoiseError::DecryptionError, PeerErrorKind::HandshakeFailed),
-            (
-                NoiseError::BadStatusCode(StatusCode::INTERNAL_SERVER_ERROR, None),
-                PeerErrorKind::BadStatus,
-            ),
-            (NoiseError::InvalidMessage, PeerErrorKind::DecodeFailed),
-            (
-                NoiseError::UriParsingError("x".into()),
-                PeerErrorKind::Other,
-            ),
-            (NoiseError::UnknownPeer("x".into()), PeerErrorKind::Other),
-        ];
-        for (err, expected) in &pairs {
-            let got = peer_error_kind_from_noise_err(err);
-            assert_eq!(got, *expected, "for variant {err:?}");
-        }
-    }
-
-    #[test]
-    fn anyhow_variant_falls_through_to_other() {
-        let err = NoiseError::Anyhow(anyhow::anyhow!("anything"));
-        assert!(matches!(
-            peer_error_kind_from_noise_err(&err),
-            PeerErrorKind::Other
-        ));
-    }
-
-    #[test]
     fn party_to_participant_fallback_scopes_to_local_participant() {
         // The no-local-knowledge onboarding fallback has to use an empty party
         // filter, but still post-filters the result to this participant.
@@ -2750,58 +2378,143 @@ mod tests {
         Ok(())
     }
 
-    /// Every hint must name something to go and look at. The failure this
-    /// guards is a new `NoiseError` variant being handed a vague catch-all,
-    /// which is how the logs got unactionable in the first place (#332).
-    #[test]
-    fn every_peer_failure_hint_is_actionable() {
-        let cases = [
-            NoiseError::TcpConnectionFailed("x".into()),
-            NoiseError::TcpConnectionTimeout("x".into()),
-            NoiseError::RequestTimeout,
-            NoiseError::HandshakeFailed,
-            NoiseError::DecryptionError,
-            NoiseError::BadStatusCode(StatusCode::SERVICE_UNAVAILABLE, None),
-            NoiseError::InvalidMessage,
-            NoiseError::UnknownPeer("x".into()),
-        ];
-        for e in &cases {
-            let hint = peer_failure_hint(e);
-            assert!(!hint.is_empty(), "no hint for {e:?}");
-            // "check", "the peer", an instruction of some kind — not a restatement.
-            assert!(
-                hint.len() > 30,
-                "hint for {e:?} is too terse to act on: {hint}"
-            );
+    fn status_peer(n: u8, party: bool) -> Peer {
+        let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
+        Peer {
+            participant_id: CantonId::parse(&format!("participant{n}::{ns}")).expect("id"),
+            name: format!("Node {n}"),
+            party: party
+                .then(|| CantonId::parse(&format!("node{n}::{ns}")).ok())
+                .flatten(),
         }
+    }
 
-        // The two that used to be indistinguishable must not read alike.
-        assert_ne!(
-            peer_failure_hint(&NoiseError::InvalidMessage),
-            peer_failure_hint(&NoiseError::TcpConnectionFailed("x".into())),
+    fn health(status: PeerHealthStatus, last_active_at: Option<i64>) -> registry::PeerHealth {
+        registry::PeerHealth {
+            node_party: None,
+            version: Some("2.0.0".into()),
+            build_version: Some("2.0.0-dev".into()),
+            coordination_version: Some(1),
+            last_active_at,
+            heartbeat_interval_secs: Some(3600),
+            vetted: status != PeerHealthStatus::Unvetted,
+            status,
+        }
+    }
+
+    /// Self reads as `CurrentNode` with this build's version, a peer with an
+    /// entry carries the registry verdict and its heartbeat age, and a peer
+    /// the snapshot does not know is `Unknown`.
+    #[test]
+    fn participant_statuses_left_join_the_snapshot() {
+        let me = status_peer(1, false);
+        let active = status_peer(2, true);
+        let unknown = status_peer(3, true);
+        let mut snapshot = PeerHealthSnapshot::default();
+        snapshot.entries.insert(
+            active.participant_id.clone(),
+            health(PeerHealthStatus::Stale, Some(1_000 * 1_000_000)),
+        );
+
+        let statuses = project_participant_statuses(
+            &me.participant_id,
+            &[me.clone(), active.clone(), unknown.clone()],
+            &snapshot,
+            true,
+            1_300,
+        );
+
+        assert_eq!(statuses.len(), 3);
+        assert_eq!(statuses[0].status, ConnectionStatus::CurrentNode);
+        assert_eq!(
+            statuses[0].version.as_deref(),
+            Some(crate::build_info::SEMVER)
+        );
+        assert_eq!(statuses[1].status, ConnectionStatus::Stale);
+        assert_eq!(statuses[1].last_seen_at, Some(1_000));
+        assert_eq!(statuses[1].heartbeat_age_secs, Some(300));
+        assert_eq!(statuses[1].node_party, active.party);
+        assert_eq!(statuses[1].version.as_deref(), Some("2.0.0"));
+        assert_eq!(statuses[2].status, ConnectionStatus::Unknown);
+        assert!(statuses[2].last_seen_at.is_none());
+        assert!(statuses[2].version.is_none());
+    }
+
+    /// Without a node identity the observer reads nothing, so every peer is
+    /// `Unknown` even when a stale snapshot is still in memory.
+    #[test]
+    fn participant_statuses_are_unknown_without_a_node_identity() {
+        let me = status_peer(1, false);
+        let peer = status_peer(2, true);
+        let mut snapshot = PeerHealthSnapshot::default();
+        snapshot.entries.insert(
+            peer.participant_id.clone(),
+            health(PeerHealthStatus::Active, Some(1_000 * 1_000_000)),
+        );
+
+        let statuses = project_participant_statuses(
+            &me.participant_id,
+            &[me.clone(), peer.clone()],
+            &snapshot,
+            false,
+            1_100,
+        );
+
+        assert_eq!(statuses[1].status, ConnectionStatus::Unknown);
+        assert!(statuses[1].heartbeat_age_secs.is_none());
+        assert_eq!(
+            statuses[1].node_party, peer.party,
+            "the peers table still names the party"
         );
     }
 
-    /// The peer's own reason reaches the operator through Display, which is
-    /// what `{e}` in the fan-out warnings renders.
     #[test]
-    fn bad_status_code_surfaces_the_peers_reason() {
-        let bare = NoiseError::BadStatusCode(StatusCode::SERVICE_UNAVAILABLE, None);
-        let bare_rendered = format!("{bare}");
-        assert!(
-            bare_rendered.starts_with("Bad status code: 503"),
-            "unexpected Display: {bare_rendered}"
+    fn every_registry_verdict_has_a_connection_status() {
+        assert_eq!(
+            connection_status_of(PeerHealthStatus::Active),
+            ConnectionStatus::Active
         );
-        assert!(!bare_rendered.contains("peer said"));
+        assert_eq!(
+            connection_status_of(PeerHealthStatus::Unvetted),
+            ConnectionStatus::Unvetted
+        );
+    }
 
-        let with_reason = NoiseError::BadStatusCode(
-            StatusCode::SERVICE_UNAVAILABLE,
-            Some("request rejected: unknown sender".to_string()),
+    /// The comparison joins names from the local package list, reports an
+    /// empty vetting set as unreachable with `NoVettedPackages`, and a failed
+    /// read as `TopologyReadFailed`.
+    #[test]
+    fn peer_package_results_follow_the_topology_read() {
+        let peer = status_peer(2, true);
+        let local = PackageInfo {
+            package_id: "pkg-a".into(),
+            name: "governance-core".into(),
+            version: "0.1.0".into(),
+        };
+        let index: HashMap<&str, &PackageInfo> = [("pkg-a", &local)].into_iter().collect();
+
+        let ok = peer_package_result(
+            &peer,
+            Ok(["pkg-b".to_string(), "pkg-a".to_string()]
+                .into_iter()
+                .collect()),
+            &index,
         );
-        let rendered = format!("{with_reason}");
-        assert!(
-            rendered.contains("unknown sender"),
-            "reason missing from Display: {rendered}"
-        );
+        assert!(ok.reachable);
+        assert_eq!(ok.error_kind, None);
+        assert_eq!(ok.packages.len(), 2);
+        // Unnamed packages sort first (empty name), the known one carries its name.
+        assert_eq!(ok.packages[0].package_id, "pkg-b");
+        assert!(ok.packages[0].name.is_empty());
+        assert_eq!(ok.packages[1].name, "governance-core");
+
+        let empty = peer_package_result(&peer, Ok(HashSet::new()), &index);
+        assert!(!empty.reachable);
+        assert_eq!(empty.error_kind, Some(PeerErrorKind::NoVettedPackages));
+
+        let failed = peer_package_result(&peer, Err(anyhow::anyhow!("boom")), &index);
+        assert!(!failed.reachable);
+        assert_eq!(failed.error_kind, Some(PeerErrorKind::TopologyReadFailed));
+        assert!(failed.packages.is_empty());
     }
 }

@@ -1,13 +1,15 @@
 # `onledger`: Canton-native coordination
 
-This module is the on-ledger foundation of the Noise sunset
-(`docs/NOISE_SUNSET_DESIGN.md`, section 4). Part 1 gives one node identity,
-one Daml codec, one Ledger API client, the registry, and the proposal
-lifecycle. Part 2 adds the topology co-sign primitives, the member
-validation rules, the run engine and its per-kind driver contract, the
-observer loop, and the signatures of the contracts, DAR, and ACS pieces.
-The per-kind step bodies (`engine/{onboarding,...}.rs`) and the bodies of
-`submission.rs`, `dars.rs`, `acs.rs` are stubs for the kind agents.
+This module is how decman coordinates: only through Canton, never over a
+connection between nodes (`docs/NOISE_SUNSET_DESIGN.md`, section 4). It holds
+one node identity, one Daml codec, one Ledger API client, the registry, and
+the proposal lifecycle; the topology co-sign primitives, the member validation
+rules, the run engine and its per-kind drivers, the observer loop, and the
+contracts, DAR, and ACS pieces.
+
+The API listings below name each function and its signature. Where a listing
+and the source disagree, the source wins — read the module doc comment of the
+file in question.
 
 Every timestamp in this module is an `i64` of **microseconds since the epoch**
 (the Ledger API `Timestamp` unit) unless a name or comment says seconds.
@@ -27,11 +29,11 @@ Every timestamp in this module is an `i64` of **microseconds since the epoch**
 | `validation.rs` | `Expectations` and the pure per-kind checks a member runs before it co-signs (design section 5). |
 | `keys.rs` | The dual-usage party key and its root delegation, the local identity for validation, and the `dec_party_participant` key caches (design D4). |
 | `engine/mod.rs` | `StartRequest`, `start_run`, `accept_invitation`, `decline_invitation`, `cancel_run`, `retry_run`, `RunMeta`, `TickCtx`, `KindDriver`, row helpers, quorum arithmetic. |
-| `engine/{onboarding,add_party,kick,change_threshold,contracts,dars}.rs` | One `KindDriver` per kind with the section-6 step lists. Tick bodies are stubs. |
+| `engine/{onboarding,add_party,kick,change_threshold,contracts,dars}.rs` | One `KindDriver` per kind: the section-6 step lists, the preflight, and the coordinator and member tick bodies. |
 | `observer.rs` | `spawn_observer`: the polling loop, per-run `try_lock`, metrics. |
-| `submission.rs` | Design D7 types and signatures (contracts rounds). Pure helpers and ACS reads implemented; ledger writes are stubs. |
-| `dars.rs` | Design D8 types and signatures (DAR pins, embedded coordination DAR). Pure helpers implemented; participant calls are stubs. |
-| `acs.rs` | Design D9 types and signatures (spool, manifests, import). Path helpers and the manifest read implemented; the rest are stubs. |
+| `submission.rs` | Design D7: prepare, open, verify, sign, and execute a contracts `SubmissionRound`. |
+| `dars.rs` | Design D8: DAR reading and pinning, local upload and vetting, vetting reports, and the startup upload of the coordination DAR. |
+| `acs.rs` | Design D9: ACS export and spool, `AcsManifest` publish and verify, import, and the joiner sync decision. |
 
 ## Storage
 
@@ -119,7 +121,7 @@ impl OnLedger {
     pub async fn heartbeat_if_due(&self) -> Result<Option<String>>;         // observer tick
     pub async fn read_registry(&self) -> Result<RegistryResponse>;          // GET /registry
 
-    // Part 2 caches, replaced by the observer loop
+    // Caches the observer loop refreshes
     pub async fn pending_invitations(&self) -> Vec<PendingInvitation>;      // GET /invitations
     pub async fn set_pending_invitations(&self, list: Vec<PendingInvitation>);
     pub async fn remove_pending_invitation(&self, proposal_cid: &str);
@@ -394,10 +396,11 @@ holds. A second counted acceptance from one acceptor is an error (fail
 closed). `project_pending_invitations` returns the whole table afterwards;
 the caller replaces `AppState.pending_invitations` with it.
 
-Transitional rule: until migration `000021` renames the column, an on-ledger
-`pending_invitations` row stores the proposer's participant id in
-`coordinator_pubkey`, and `id` is the proposal contract id. Rows whose
-`coordinator_pubkey` is not a Canton id are Noise rows and are left alone.
+A `pending_invitations` row (migration `000021`) has `id = proposal_cid`,
+`coordinator_participant` (the proposer's claimed participant),
+`coordinator_party` (the proposal signatory), `proposal_cid`, and
+`expires_at` (seconds). Every row is a projection; a row whose proposal is
+no longer projected is removed.
 
 ## HTTP surface (`server/handlers/node_identity.rs`)
 
@@ -485,9 +488,8 @@ pub fn mapping_bytes(m: &TopologyMapping) -> Vec<u8>;
 `workflow::topology::authorize_with_topology_retry` with
 `must_fully_authorize = false`, `signed_by = []`, no force flags, and the
 synchronizer store. `cosign_by_hash` maps `TOPOLOGY_TRANSACTION_NOT_FOUND`
-to `NotFound` (retry next poll). `UnsolicitedProposal` belongs in
-`common/src/coordination.rs` (TODO in the source); it lives here until that
-file is open for edits. The repository holds no external vector for the
+to `NotFound` (retry next poll). `UnsolicitedProposal` lives in
+`common/src/coordination.rs`, is exported by `gen-types`, and is re-exported here. The repository holds no external vector for the
 topology hash; the unit test pins the construction
 `sha256(be32(11) || bytes)` against an independently computed value.
 
@@ -616,7 +618,6 @@ skipped with a warning until the next parties refresh creates it.
 ## `engine/mod.rs`
 
 ```rust
-pub const RUN_META_KEY: &str = "onledger";            // config_json key of RunMeta (until migration 000021)
 pub const COMPLETE_STEP: &str = "Complete";
 pub const WAITING_FOR_ACCEPTANCES_STEP: &str = "WaitingForAcceptances";
 
@@ -705,10 +706,11 @@ its run when the proposal vanished, expired, or a decline breaks the quorum
 exercises `Finish { succeeded = false }`; a peer completes or cancels its
 row from the `WorkflowOutcome` when the proposal vanished.
 
-Transitional rule: `RunMeta` lives in `config_json["onledger"]` and
-`coordinator_pubkey` carries the coordinator's participant id. Migration
-`000021` moves both to their own columns; the `TODO(migration 000021)`
-comments mark every site.
+`RunMeta` lives in the `proposal_cid`, `coordinator_party`,
+`coordinator_participant`, `member_variant`, and `topology_hashes_json`
+columns of `workflow_runs` (migration `000021`); `common::types::WorkflowRun`
+carries them, and `read_run_meta` returns `None` for a row without a
+proposal or whose `coordinator_participant` is not a Canton id.
 
 ## `engine/{kind}.rs`
 
@@ -754,17 +756,17 @@ pub const DEADLINE_SAFETY_MARGIN_MICROS: i64;    // 30 min
 pub struct PreparedRound { index, description, prepared_transaction_hex, prepared_hash_hex, hashing_scheme_version, preparation_time, max_record_time, deadline }
 pub struct VerifiedSignature { signed_by, signature: Vec<u8>, format, algorithm, participant_id }
 pub fn deadline_for(preparation_time, max_record_time, tolerance_micros) -> i64;            // implemented
-pub async fn read_record_time_tolerance(config, sync_id) -> Result<i64>;                     // stub
-pub async fn prepare_rounds(ol, run, dec_party_id, contracts) -> Result<Vec<PreparedRound>>; // stub
-pub async fn open_rounds(client, run_id, signers, dec_party_id, act_as, rounds) -> Result<Vec<String>>;  // stub
+pub async fn read_record_time_tolerance(config, sync_id) -> Result<i64>;
+pub async fn prepare_rounds(ol, run, dec_party_id, contracts) -> Result<Vec<PreparedRound>>;
+pub async fn open_rounds(client, run_id, signers, dec_party_id, act_as, rounds) -> Result<Vec<String>>;
 pub async fn read_rounds_for_run(client, run_id) -> Result<Vec<ActiveContract<SubmissionRoundRecord>>>;  // implemented
 pub async fn read_signatures_for_round(client, round_cid) -> Result<Vec<ActiveContract<SubmissionSignatureRecord>>>;  // implemented
-pub fn verify_signature(head_p2p, sig, hash) -> Result<VerifiedSignature>;                  // stub
+pub fn verify_signature(head_p2p, sig, hash) -> Result<VerifiedSignature>;
 pub fn dedupe_verified(sigs) -> BTreeMap<String, VerifiedSignature>;                        // implemented
-pub async fn execute_round(ol, dec_party_id, round, signatures) -> Result<String>;          // stub
+pub async fn execute_round(ol, dec_party_id, round, signatures) -> Result<String>;
 pub async fn close_round(client, round_cid, result) -> Result<()>;                          // implemented
-pub fn check_round(round, accepted, head_p2p, own_key_fp, now_micros) -> Result<()>;        // stub (member rules)
-pub async fn sign_round(ol, round, dec_party_id) -> Result<String>;                         // stub
+pub fn check_round(round, accepted, head_p2p, own_key_fp, now_micros) -> Result<()>;
+pub async fn sign_round(ol, round, dec_party_id) -> Result<String>;
 pub async fn archive_own_signatures(client, active_round_cids) -> Result<usize>;            // implemented
 ```
 
@@ -777,10 +779,10 @@ pub fn hash_dar(bytes) -> String;                                 // lowercase h
 pub fn decode_dar_files(files: &[DarFile]) -> Result<Vec<(String, Vec<u8>)>>;
 pub fn pin_dar_files(files, main_package_ids: &BTreeMap<String, String>) -> Result<Vec<DarPin>>;
 pub fn matching_pin<'a>(pins: &'a [DarPin], bytes) -> Option<&'a DarPin>;
-pub async fn upload_and_vet_locally(config, filename, bytes, expected_main_package_id: Option<&str>) -> Result<String>;  // stub
-pub async fn unvetted_pins_by_participant(config, participants, pins) -> Result<BTreeMap<CantonId, Vec<String>>>;      // stub
+pub async fn upload_and_vet_locally(config, filename, bytes, expected_main_package_id: Option<&str>) -> Result<String>;
+pub async fn unvetted_pins_by_participant(config, participants, pins) -> Result<BTreeMap<CantonId, Vec<String>>>;
 pub struct CoordinationDarState { uploaded, vetted, attempts, last_error }
-pub async fn ensure_coordination_dar(config) -> Result<CoordinationDarState>;               // stub
+pub async fn ensure_coordination_dar(config) -> Result<CoordinationDarState>;
 ```
 
 ## `acs.rs` (design D9)
@@ -789,14 +791,14 @@ pub async fn ensure_coordination_dar(config) -> Result<CoordinationDarState>;   
 pub struct SpoolFile { path, size_bytes, sha256_hex, package_ids }
 pub fn spool_dir(config) -> PathBuf;                                                        // consts::acs_spool_dir
 pub fn spool_path(config, party, target, activation_serial) -> PathBuf;                     // {prefix}-{namespace}-{target prefix}-{serial}.acs.gz
-pub async fn capture_export_offset(db, config, run, party, joiner, base_serial) -> Result<i64>;   // stub
-pub async fn export_snapshot(config, party, target, begin_offset_exclusive, path) -> Result<SpoolFile>;  // stub
-pub async fn publish_manifest(client, observers, party, target, activation_serial, file) -> Result<String>;  // stub
+pub async fn capture_export_offset(db, config, run, party, joiner, base_serial) -> Result<i64>;
+pub async fn export_snapshot(config, party, target, begin_offset_exclusive, path) -> Result<SpoolFile>;
+pub async fn publish_manifest(client, observers, party, target, activation_serial, file) -> Result<String>;
 pub async fn read_manifests(client, party) -> Result<Vec<ActiveContract<AcsManifestRecord>>>;   // implemented
-pub fn verify_manifest(manifest, exporter_hosting, head_p2p, peers, joiner, activation_serial) -> Result<()>;  // stub (D9 rules 1-4)
-pub async fn import_snapshot(config, db, party, manifest, path) -> Result<()>;              // stub
-pub async fn clear_onboarding_flag(config, party, pre_activation_offset) -> Result<()>;     // stub
-pub async fn cleanup_spool(config, party, target) -> Result<usize>;                         // stub
+pub fn verify_manifest(manifest, exporter_hosting, head_p2p, peers, joiner, activation_serial) -> Result<()>;
+pub async fn import_snapshot(config, db, party, manifest, path) -> Result<()>;
+pub async fn clear_onboarding_flag(config, party, pre_activation_offset) -> Result<()>;
+pub async fn cleanup_spool(config, party, target) -> Result<usize>;
 ```
 
 ## Verification

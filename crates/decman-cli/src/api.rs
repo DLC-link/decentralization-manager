@@ -1,11 +1,11 @@
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use common::types::{
     AuditLogEntry, AuthConfigResponse, ConnectionStatus, DecentralizedParty, ParticipantStatus,
-    ParticipantsStatusResponse, PeerPackageComparison, PendingInvitation, VettedPackageInfo,
-    WorkflowInfo, WorkflowKind, WorkflowRun,
+    ParticipantsStatusResponse, PeerPackageComparison, PendingInvitation, Permission,
+    VettedPackageInfo, WorkflowKind, WorkflowRun,
 };
 use reqwest::StatusCode;
 use reqwest::blocking::{Client, Response};
@@ -57,14 +57,16 @@ fn sort_vetted(packages: &mut [VettedPackageInfo]) {
 pub struct PeerView {
     pub participant_id: String,
     pub name: String,
-    pub address: String,
-    pub port: u16,
+    /// The peer's node party, when the operator configured one. A peer without
+    /// a node party cannot be invited to a workflow.
+    pub party: Option<String>,
     /// Live connectivity status, or `None` when no status was reported for this
     /// peer (rendered as "Unknown").
     pub status: Option<ConnectionStatus>,
-    pub latency_ms: Option<u64>,
+    /// Seconds since the peer's last registry heartbeat. Nodes no longer probe
+    /// each other, so the age of the heartbeat is the freshness signal.
+    pub heartbeat_age_secs: Option<i64>,
     pub version: Option<String>,
-    pub workflow: Option<String>,
     pub is_self: bool,
 }
 
@@ -75,16 +77,14 @@ struct NetworkConfigResponse {
     peers: Vec<PeerConfig>,
 }
 
-/// A configured peer (name, address) from `/network-config`.
+/// A configured peer (name, node party) from `/network-config`.
 #[derive(Debug, Deserialize)]
 struct PeerConfig {
     participant_id: String,
     #[serde(default)]
     name: String,
     #[serde(default)]
-    address: String,
-    #[serde(default)]
-    port: u16,
+    party: Option<String>,
 }
 
 /// `/node-config` response: this node's own identity and version. The backend
@@ -100,12 +100,6 @@ struct NodeConfigResponse {
 #[derive(Debug, Deserialize)]
 struct NodeIdentity {
     participant_id: String,
-    #[serde(default)]
-    public_address: Option<String>,
-    #[serde(default)]
-    listen_address: String,
-    #[serde(default)]
-    port: u16,
 }
 
 /// Display name for a peer: its configured name, else the id prefix.
@@ -121,19 +115,6 @@ fn display_name(name: &str, participant_id: &str) -> String {
     }
 }
 
-/// Format a peer's active workflow as `Kind (step)` (or just `Kind`).
-fn format_workflow(workflow: &WorkflowInfo) -> String {
-    if workflow.step.is_empty() {
-        workflow.kind.to_string()
-    } else {
-        format!(
-            "{kind} ({step})",
-            kind = workflow.kind,
-            step = workflow.step
-        )
-    }
-}
-
 /// Merge this node and the configured peers with their live statuses, putting
 /// this node first. If this node is not in the peer list, it is synthesized
 /// from `/node-config` so it is always shown — exactly like the web frontend.
@@ -141,7 +122,6 @@ fn merge_peers(
     node: &NodeConfigResponse,
     peers: &[PeerConfig],
     statuses: &[ParticipantStatus],
-    self_latency_ms: Option<u64>,
 ) -> Vec<PeerView> {
     let by_id: HashMap<&str, &ParticipantStatus> =
         statuses.iter().map(|s| (s.id.as_str(), s)).collect();
@@ -162,41 +142,35 @@ fn merge_peers(
             PeerView {
                 participant_id: peer.participant_id.clone(),
                 name: display_name(&peer.name, &peer.participant_id),
-                address: peer.address.clone(),
-                port: peer.port,
+                // The configured party wins: it is what this node invites. The
+                // status snapshot only echoes it back.
+                party: peer
+                    .party
+                    .clone()
+                    .or_else(|| live.and_then(|s| s.node_party.as_ref().map(ToString::to_string))),
                 status,
-                // Peers report a measured round-trip; self uses our own
-                // API round-trip instead (a peer never probes itself).
-                latency_ms: if is_self {
-                    self_latency_ms
+                // This node never heartbeats to itself, so its own row has no age.
+                heartbeat_age_secs: if is_self {
+                    None
                 } else {
-                    live.and_then(|s| s.latency_ms)
+                    live.and_then(|s| s.heartbeat_age_secs)
                 },
                 version: live
                     .and_then(|s| s.version.clone())
                     .or_else(|| if is_self { node.version.clone() } else { None }),
-                workflow: live.and_then(|s| s.workflow.as_ref()).map(format_workflow),
                 is_self,
             }
         })
         .collect();
 
     if !self_seen {
-        let address = node
-            .node
-            .public_address
-            .clone()
-            .filter(|a| !a.is_empty())
-            .unwrap_or_else(|| node.node.listen_address.clone());
         views.push(PeerView {
             participant_id: self_id.to_owned(),
             name: display_name("", self_id),
-            address,
-            port: node.node.port,
+            party: None,
             status: Some(ConnectionStatus::CurrentNode),
-            latency_ms: self_latency_ms,
+            heartbeat_age_secs: None,
             version: node.version.clone(),
-            workflow: None,
             is_self: true,
         });
     }
@@ -354,14 +328,20 @@ struct OperatorInfoResponse {
     party_id: String,
 }
 
-/// `/keys/status` response: whether this node's Noise keypair exists and, if so,
-/// its public key (the value peers configure to reach this node).
+/// `/node-identity` response: the node party this node signs its coordination
+/// contracts with, and how this participant hosts it (design D1).
 #[derive(Clone, Debug, Deserialize)]
-pub struct KeyStatus {
+pub struct NodeIdentityView {
     #[serde(default)]
-    pub has_keys: bool,
+    pub configured: bool,
     #[serde(default)]
-    pub public_key: Option<String>,
+    pub node_party_id: Option<String>,
+    #[serde(default)]
+    pub participant_id: String,
+    #[serde(default)]
+    pub user_id: Option<String>,
+    #[serde(default)]
+    pub hosting_permission: Option<Permission>,
 }
 
 /// `/network-info` response: the DSO identity this node is bound to. The
@@ -410,20 +390,14 @@ pub struct DiscoverResult {
     pub primary_party: Option<String>,
 }
 
-/// A fully-detailed configured peer, for the network-config editor (the
-/// merged [`PeerView`] drops `public_key` / `party`, which editing needs).
+/// A configured peer as the network-config editor holds it (design D2): the
+/// three values operators exchange out of band.
 #[derive(Clone, Debug, Deserialize)]
 pub struct PeerEntry {
     #[serde(default)]
     pub participant_id: String,
     #[serde(default)]
     pub name: String,
-    #[serde(default)]
-    pub address: String,
-    #[serde(default)]
-    pub port: u16,
-    #[serde(default)]
-    pub public_key: String,
     #[serde(default)]
     pub party: Option<String>,
 }
@@ -771,19 +745,10 @@ impl DecmanClient {
     /// Returns an error if login or either request fails, the API returns a
     /// non-success status, or a response cannot be parsed.
     pub fn fetch_peers(&mut self) -> Result<Vec<PeerView>> {
-        // Time one round-trip to our own API as the self-node latency (the web
-        // frontend shows the same "you" latency), so this node's row is not blank.
-        let start = Instant::now();
         let node: NodeConfigResponse = self.get_json("/node-config")?;
-        let self_latency_ms = u64::try_from(start.elapsed().as_millis()).ok();
         let config: NetworkConfigResponse = self.get_json("/network-config")?;
         let statuses: ParticipantsStatusResponse = self.get_json("/participants-status")?;
-        Ok(merge_peers(
-            &node,
-            &config.peers,
-            &statuses.statuses,
-            self_latency_ms,
-        ))
+        Ok(merge_peers(&node, &config.peers, &statuses.statuses))
     }
 
     /// Fetch the Daml packages (DARs) vetted on this node, sorted like the
@@ -1192,14 +1157,14 @@ impl DecmanClient {
         Ok(response.party_id)
     }
 
-    /// Fetch this node's Noise key status (existence + public key).
+    /// Fetch this node's node-party identity (design D1).
     ///
     /// # Errors
     ///
     /// Returns an error if login or the request fails, the API returns a
     /// non-success status, or the response cannot be parsed.
-    pub fn fetch_key_status(&mut self) -> Result<KeyStatus> {
-        self.get_json("/keys/status")
+    pub fn fetch_node_identity(&mut self) -> Result<NodeIdentityView> {
+        self.get_json("/node-identity")
     }
 
     /// Fetch the DSO network identity this node is bound to.
@@ -1767,22 +1732,20 @@ mod tests {
         NodeConfigResponse {
             node: NodeIdentity {
                 participant_id: participant_id.to_owned(),
-                public_address: Some("node.local".to_owned()),
-                listen_address: "0.0.0.0".to_owned(),
-                port: 9000,
             },
             version: Some("0.9.1".to_owned()),
         }
     }
 
-    fn status(id: &str, workflow: Option<WorkflowInfo>) -> ParticipantStatus {
+    fn status(id: &str, heartbeat_age_secs: Option<i64>) -> ParticipantStatus {
         ParticipantStatus {
             id: id.to_owned(),
-            status: ConnectionStatus::Connected,
-            latency_ms: Some(12),
+            status: ConnectionStatus::Active,
+            node_party: None,
+            last_seen_at: Some(1_700_000_000),
+            heartbeat_age_secs,
             version: Some("1.2.3".to_owned()),
             build_version: Some("v1.2.3".to_owned()),
-            workflow,
         }
     }
 
@@ -1793,41 +1756,30 @@ mod tests {
             PeerConfig {
                 participant_id: "peer1::1220".to_owned(),
                 name: "alpha".to_owned(),
-                address: "10.0.0.1".to_owned(),
-                port: 9001,
+                party: Some("alpha-node::1220".to_owned()),
             },
             PeerConfig {
                 participant_id: "self::1220".to_owned(),
                 name: "me".to_owned(),
-                address: "127.0.0.1".to_owned(),
-                port: 9000,
+                party: None,
             },
         ];
-        let statuses = [status(
-            "peer1::1220",
-            Some(WorkflowInfo {
-                kind: common::types::WorkflowKind::Onboarding,
-                role: common::types::WorkflowRole::Peer,
-                step: "Sign".to_owned(),
-                step_index: 0,
-                step_total: 0,
-            }),
-        )];
+        let statuses = [status("peer1::1220", Some(12))];
 
         // Act
-        let views = merge_peers(&node("self::1220"), &peers, &statuses, Some(7));
+        let views = merge_peers(&node("self::1220"), &peers, &statuses);
 
-        // Assert — self first, peer status/latency/workflow mapped.
+        // Assert — self first, peer status and heartbeat age mapped.
         assert_eq!(views.len(), 2);
         assert_eq!(views[0].name, "me");
         assert!(views[0].is_self);
         assert_eq!(views[0].status, Some(ConnectionStatus::CurrentNode));
-        // Self shows our own API round-trip latency, not a peer probe.
-        assert_eq!(views[0].latency_ms, Some(7));
+        // This node never heartbeats to itself.
+        assert_eq!(views[0].heartbeat_age_secs, None);
         assert_eq!(views[1].name, "alpha");
-        assert_eq!(views[1].status, Some(ConnectionStatus::Connected));
-        assert_eq!(views[1].latency_ms, Some(12));
-        assert_eq!(views[1].workflow.as_deref(), Some("Onboarding (Sign)"));
+        assert_eq!(views[1].status, Some(ConnectionStatus::Active));
+        assert_eq!(views[1].heartbeat_age_secs, Some(12));
+        assert_eq!(views[1].party.as_deref(), Some("alpha-node::1220"));
     }
 
     #[test]
@@ -1836,22 +1788,22 @@ mod tests {
         let peers = [PeerConfig {
             participant_id: "ghost::1220".to_owned(),
             name: "ghost".to_owned(),
-            address: "10.0.0.9".to_owned(),
-            port: 9009,
+            party: None,
         }];
 
         // Act
-        let views = merge_peers(&node("self::1220"), &peers, &[], Some(9));
+        let views = merge_peers(&node("self::1220"), &peers, &[]);
 
         // Assert — self synthesized and listed first; missing status → None (Unknown).
         assert_eq!(views.len(), 2);
         assert!(views[0].is_self);
         assert_eq!(views[0].status, Some(ConnectionStatus::CurrentNode));
         assert_eq!(views[0].version.as_deref(), Some("0.9.1"));
-        assert_eq!(views[0].latency_ms, Some(9));
+        assert_eq!(views[0].heartbeat_age_secs, None);
         assert!(!views[1].is_self);
         assert_eq!(views[1].name, "ghost");
         assert_eq!(views[1].status, None);
+        assert_eq!(views[1].party, None);
     }
 
     #[test]

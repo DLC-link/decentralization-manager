@@ -20,7 +20,7 @@ use common::{api::*, coordination::*, types::*};
 use dec_party_manager::{
     config::{
         Auth0Config, CantonConfig, CantonTlsConfig, KeycloakConfig, Network, NetworkConfig,
-        NodeConfig, NodeInfo, NoiseRetryConfig, Peer, Timeouts,
+        NodeConfig, NodeInfo, Peer,
     },
     server::{
         AcceptTransferDetails, ActionType, AppRewardBeneficiary, BillingParams,
@@ -50,7 +50,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     export![
         ActiveCouponReassignmentDelegation,
-        AddPartyInvitePayload,
         AddPartyRequest,
         AuditLogEntry,
         AuditLogResponse,
@@ -63,7 +62,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         CancelProposalRequest,
         ChainAuditEntry,
         ChainAuditResponse,
-        ChangeThresholdInvitePayload,
         ChangeThresholdRequest,
         Claim,
         ConnectionStatus,
@@ -71,18 +69,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ContractInfo,
         ContractQueryResponse,
         ContractWithBlob,
-        ContractsInvitePayload,
         ContractsRequest,
         CredentialInfo,
         CredentialOfferInfo,
         CredentialOffersResponse,
         CredentialsResponse,
         DarFile,
-        DarsInvitePayload,
         DarsRequest,
         DecentralizedPartiesResponse,
         DecentralizedParty,
-        DeclineInvitationPayload,
         DisclosedContractInput,
         DiscoverMemberPartyRequest,
         DiscoverMemberPartyResponse,
@@ -104,17 +99,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         InstrumentsResponse,
         InvitationActionRequest,
         InvitationType,
-        KeyStatusResponse,
-        KickInvitePayload,
         KickRequest,
         KnownMember,
         KnownMembersResponse,
+        MemberVariant,
         MessageResponse,
-        MissingEdgeKind,
-        MissingPeerEdge,
         NetworkInfo,
-        OnboardingInvitePayload,
-        OnboardingMeshErrorResponse,
         OnboardingRequest,
         OperatorInfo,
         PackageConfig,
@@ -160,12 +150,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         WorkflowRun,
         WorkflowRunsResponse,
         WorkflowStatusResponse,
-        // on-ledger coordination (node identity, registry)
+        // on-ledger coordination (node identity, registry, proposals, ACS)
+        AcsImportResponse,
+        AcsManifestView,
+        AcsManifestsResponse,
+        CoordinationDarPhase,
+        CoordinationDarStatus,
         DecmanNodeView,
         NodeIdentityRequest,
         NodeIdentityResponse,
         PeerHealthStatus,
         RegistryResponse,
+        UnsolicitedProposal,
+        UnsolicitedProposalsResponse,
         // decman governance / decimal cluster
         AcceptTransferDetails,
         ActionType,
@@ -210,9 +207,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         NodeConfig,
         NodeConfigResponse,
         NodeInfo,
-        NoiseRetryConfig,
         Peer,
-        Timeouts,
     ];
 
     // Bundle: concatenate every generated file, dropping ts-rs's `//` header and

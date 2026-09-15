@@ -69,7 +69,7 @@ pub async fn inject_inprogress_coordinator_run(
     let result = sqlx::query(
         "INSERT INTO workflow_runs (
             instance_name, kind, role, status, current_step, step_index, step_total,
-            config_json, coordinator_pubkey, expected_peers_json, completed_peers_json,
+            config_json, coordinator_participant, expected_peers_json, completed_peers_json,
             dec_party_id, error, dismissed, created_at, updated_at
          ) VALUES (?1, ?2, 'Coordinator', 'inprogress', ?3, 2, 5,
                    '{}', NULL, '[]', '[]', NULL, NULL, 0,
@@ -142,8 +142,8 @@ pub async fn count_workflow_runs_inprogress(
 
 /// Resolve the peer-side instance_name for the current inprogress run
 /// of `kind`. Peers mint their own synthetic instance_name on accept
-/// (e.g. `peer-onboarding-<pubkey>-<epoch>`), so chaos phases can't
-/// guess it from the coordinator's prefix. The partial unique index
+/// (`peer-{kind}-{coordinator_participant_short}-{coordinator_runId}`, design
+/// section 12), so chaos phases can't guess it from the coordinator's prefix. The partial unique index
 /// `(kind, role) WHERE status='inprogress'` guarantees at most one match.
 pub async fn current_inprogress_peer_instance(
     db_path: &Path,

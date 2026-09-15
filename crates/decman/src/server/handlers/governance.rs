@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 use anyhow::Context;
@@ -39,10 +39,10 @@ use super::token_standard::{AmuletRulesContract, GovernanceQuery, fetch_amulet_r
 use crate::{
     auth::WorkflowAuth,
     canton_id::CantonId,
-    config::{NetworkConfig, NodeConfig, PackageConfig, default_package_config},
+    config::{CredentialKind, NodeConfig, PackageConfig, default_package_config},
     db::{rows::ChainAuditCacheRow, schema::SchemaRead},
     error::Result,
-    noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
+    onledger::daml::codec::{WorkflowAcceptanceRecord, WorkflowProposalRecord},
     server::{
         AppState,
         audit::{AuditEvent, AuditParams, spawn_audit_log},
@@ -315,27 +315,22 @@ pub async fn get_known_members(
     }
 }
 
+/// Which member party each participant uses for `dec_party_id`: this node's
+/// own from `party_credentials`, every peer's from the `memberParty` it put
+/// on a `WorkflowAcceptance` for a proposal about that party (design D6).
+/// A peer without a visible acceptance reports `None`.
 async fn collect_known_members(
     data: &web::Data<AppState>,
     dec_party_id: &CantonId,
 ) -> Result<Vec<KnownMember>> {
-    let dec_party_str = dec_party_id.to_string();
-    let network_config = NetworkConfig::from_peers(data.db.get_all_peers().await?);
-    let keypair = NoiseKeypair::from_file(&data.config.key_file_path()).await?;
     let self_id = data.config.participant_id();
-    let identity_bytes = self_id.to_string();
-    let request = Message::new(
-        MessageType::RequestMemberParty,
-        dec_party_str.as_bytes().to_vec(),
-    );
-
     let mut out = Vec::new();
 
     {
         let creds = data.party_credentials.read().await;
         let self_member = creds
             .iter()
-            .find(|c| c.dec_party_id == *dec_party_id)
+            .find(|c| c.kind == CredentialKind::Decparty && c.dec_party_id == *dec_party_id)
             .map(|c| c.member_party_id.clone());
         out.push(KnownMember {
             participant_uid: self_id.clone(),
@@ -343,72 +338,70 @@ async fn collect_known_members(
         });
     }
 
-    for peer in &network_config.peers {
+    let claims = match data.onledger.client().await {
+        Ok(client) => {
+            let proposals = client.list_active::<WorkflowProposalRecord>().await?;
+            let acceptances = client.list_active::<WorkflowAcceptanceRecord>().await?;
+            member_parties_from_acceptances(
+                &proposals
+                    .into_iter()
+                    .map(|p| (p.contract_id, p.record))
+                    .collect::<Vec<_>>(),
+                &acceptances
+                    .into_iter()
+                    .map(|a| a.record)
+                    .collect::<Vec<_>>(),
+                dec_party_id,
+            )
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, "no node identity; peers report no member party");
+            HashMap::new()
+        }
+    };
+
+    for peer in data.db.get_all_peers().await? {
         if peer.participant_id == *self_id {
             continue;
         }
-        if peer.public_key.is_empty() {
-            out.push(KnownMember {
-                participant_uid: peer.participant_id.clone(),
-                member_party_id: None,
-            });
-            continue;
-        }
-        let peer_pub_key = match parse_public_key(&peer.public_key) {
-            Ok(pk) => pk,
-            Err(e) => {
-                tracing::warn!(
-                    "Skipping member-party query to {pid}: invalid public key: {e}",
-                    pid = peer.participant_id,
-                );
-                out.push(KnownMember {
-                    participant_uid: peer.participant_id.clone(),
-                    member_party_id: None,
-                });
-                continue;
-            }
-        };
-
-        let psk = keypair.derive_psk(&peer_pub_key);
-        let response = match send_noise_message(
-            &peer.address,
-            peer.port,
-            &psk,
-            identity_bytes.as_bytes(),
-            &request,
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to query member party from {pid}: {e}",
-                    pid = peer.participant_id,
-                );
-                out.push(KnownMember {
-                    participant_uid: peer.participant_id.clone(),
-                    member_party_id: None,
-                });
-                continue;
-            }
-        };
-
-        let member_party = match Message::from_bytes(&response) {
-            Ok(msg) if msg.msg_type == MessageType::MemberPartyResponse => {
-                String::from_utf8(msg.payload)
-                    .ok()
-                    .filter(|s| !s.is_empty())
-                    .and_then(|s| CantonId::parse(&s).ok())
-            }
-            _ => None,
-        };
         out.push(KnownMember {
-            participant_uid: peer.participant_id.clone(),
-            member_party_id: member_party,
+            member_party_id: claims.get(&peer.participant_id.to_string()).cloned(),
+            participant_uid: peer.participant_id,
         });
     }
 
     Ok(out)
+}
+
+/// `participantId -> memberParty` from the acceptances of proposals about
+/// `dec_party_id` (pure). The newest acceptance per participant wins.
+fn member_parties_from_acceptances(
+    proposals: &[(String, WorkflowProposalRecord)],
+    acceptances: &[WorkflowAcceptanceRecord],
+    dec_party_id: &CantonId,
+) -> HashMap<String, CantonId> {
+    let party = dec_party_id.to_string();
+    let about_party: HashSet<&str> = proposals
+        .iter()
+        .filter(|(_, p)| p.dec_party_id.as_deref() == Some(party.as_str()))
+        .map(|(cid, _)| cid.as_str())
+        .collect();
+    let mut newest: HashMap<String, (i64, CantonId)> = HashMap::new();
+    for a in acceptances {
+        if !about_party.contains(a.proposal.as_str()) {
+            continue;
+        }
+        let Some(member) = a.member_party.clone() else {
+            continue;
+        };
+        let entry = newest
+            .entry(a.participant_id.clone())
+            .or_insert_with(|| (a.accepted_at, member.clone()));
+        if a.accepted_at > entry.0 {
+            *entry = (a.accepted_at, member);
+        }
+    }
+    newest.into_iter().map(|(k, (_, v))| (k, v)).collect()
 }
 
 /// Get paginated governance audit trail

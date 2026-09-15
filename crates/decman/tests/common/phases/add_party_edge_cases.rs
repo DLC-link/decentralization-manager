@@ -11,6 +11,11 @@
 //! - cancel cascade: `/add-party/cancel` aborts the run, drops the
 //!   un-accepted card on one peer, and cancels the accepted peer run on the
 //!   other.
+//!
+//! TODO(onledger-phases): this phase still describes the 1.x transport model —
+//! no coordinator task idles any more; an in-progress row is driven by the
+//! observer (design D11).
+//! Rewrite it against the on-ledger steps before the suite runs green.
 
 use std::time::Duration;
 

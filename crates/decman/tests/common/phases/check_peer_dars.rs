@@ -5,9 +5,9 @@ use tracing::info;
 
 use crate::common::{Fixture, scenario::Scenario};
 
-// Peers become reachable over the Noise mesh a few seconds after the
-// configure_peers restart; keep a generous margin for a loaded CI runner (#242).
-const MESH_CONVERGENCE_DEADLINE: Duration = Duration::from_secs(120);
+// A peer's vetted packages become visible a few seconds after it uploads them;
+// keep a generous margin for a loaded CI runner (#242).
+const VETTING_DEADLINE: Duration = Duration::from_secs(120);
 
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: check_peer_dars");
@@ -19,7 +19,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         )
         .then(
             "P1 sees P2 and P3 reachable with packages",
-            MESH_CONVERGENCE_DEADLINE,
+            VETTING_DEADLINE,
             |f, _| {
                 let port = f.p1.http;
                 let peer_a = f.p2.participant_id.clone();
@@ -29,7 +29,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         )
         .then(
             "P2 sees P1 and P3 reachable with packages",
-            MESH_CONVERGENCE_DEADLINE,
+            VETTING_DEADLINE,
             |f, _| {
                 let port = f.p2.http;
                 let peer_a = f.p1.participant_id.clone();
@@ -39,7 +39,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         )
         .then(
             "P3 sees P1 and P2 reachable with packages",
-            MESH_CONVERGENCE_DEADLINE,
+            VETTING_DEADLINE,
             |f, _| {
                 let port = f.p3.http;
                 let peer_a = f.p1.participant_id.clone();
@@ -48,51 +48,12 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             },
         )
         .run(f)
-        .await?;
-
-    Scenario::new("participants-status reports each peer Connected on every node")
-        .given("3-node mesh up (from previous phase)", |_f, _| {
-            Box::pin(async move { Ok(()) })
-        })
-        .then(
-            "P1 reports P2 and P3 Connected, self CurrentNode",
-            Duration::from_secs(60),
-            |f, _| {
-                let port = f.p1.http;
-                let self_id = f.p1.participant_id.clone();
-                let peers = vec![f.p2.participant_id.clone(), f.p3.participant_id.clone()];
-                Box::pin(
-                    async move { probe_participants_status(&*f, port, &self_id, &peers).await },
-                )
-            },
-        )
-        .then(
-            "P2 reports P1 and P3 Connected, self CurrentNode",
-            Duration::from_secs(60),
-            |f, _| {
-                let port = f.p2.http;
-                let self_id = f.p2.participant_id.clone();
-                let peers = vec![f.p1.participant_id.clone(), f.p3.participant_id.clone()];
-                Box::pin(
-                    async move { probe_participants_status(&*f, port, &self_id, &peers).await },
-                )
-            },
-        )
-        .then(
-            "P3 reports P1 and P2 Connected, self CurrentNode",
-            Duration::from_secs(60),
-            |f, _| {
-                let port = f.p3.http;
-                let self_id = f.p3.participant_id.clone();
-                let peers = vec![f.p1.participant_id.clone(), f.p2.participant_id.clone()];
-                Box::pin(
-                    async move { probe_participants_status(&*f, port, &self_id, &peers).await },
-                )
-            },
-        )
-        .run(f)
         .await
 }
+
+// TODO(onledger-phases): add a scenario that asserts `/participants-status`
+// reports each peer `Active` once its registry heartbeat lands (design D3).
+// It replaces the reachability scenario this phase used to carry.
 
 async fn probe_compare_peers(
     f: &Fixture,
@@ -133,8 +94,8 @@ fn classify_compare_peers(
         let packages = peer.get("packages")?.as_array()?;
 
         if !reachable {
-            // Not yet reachable — the Noise mesh is still converging; keep
-            // polling until the deadline (mirrors probe_participants_status).
+            // The topology read has not answered yet, or the peer has vetted
+            // nothing so far; keep polling until the deadline.
             return None;
         }
         if let Some(ek) = error_kind
@@ -144,23 +105,22 @@ fn classify_compare_peers(
                 "peer {id} reachable but error_kind set: {ek:?}"
             )));
         }
-        // Distinguish "still propagating" from "responded with empty list":
-        // if the peer reports reachable + zero packages while local has
-        // some, that's the silent decode-failure path (Future work item 5
-        // in the spec). Surface it as a terminal error so the failure
+        // Distinguish "still propagating" from "read an empty list": a peer
+        // that reports reachable with zero packages while this node has some
+        // is a terminal read failure, not a slow one. Surface it so the
         // message is actionable instead of a deadline timeout.
         if packages.is_empty() && local_count > 0 {
             return Some(Err(anyhow::anyhow!(
                 "peer {id} reachable but reported zero packages while local has {local_count} \
-                 — likely decode failure (see spec Future work item 5)"
+                 — the vetted-packages read returned nothing"
             )));
         }
         // (We deliberately do NOT assert packages.len() == local_count: in
         // any real Canton localnet, peers have different sets of
         // Canton-internal packages installed beyond the DARs we explicitly
         // distribute. SV nodes in particular bootstrap many more packages.
-        // The decode-failure check above (empty packages on a reachable
-        // peer with non-empty local) is the meaningful invariant.)
+        // The empty-read check above (empty packages on a reachable peer
+        // with non-empty local) is the meaningful invariant.)
 
         if id == expected_peer_a {
             seen_a = true;
@@ -174,43 +134,6 @@ fn classify_compare_peers(
     }
 
     if seen_a && seen_b { Some(Ok(())) } else { None }
-}
-
-async fn probe_participants_status(
-    f: &Fixture,
-    port: u16,
-    self_id: &str,
-    expected_peer_ids: &[String],
-) -> Option<anyhow::Result<()>> {
-    let v: Value = f.probe_get_json(port, "/participants-status").await?;
-    let statuses = v.get("statuses")?.as_array()?;
-
-    if statuses.len() != expected_peer_ids.len() + 1 {
-        return None;
-    }
-
-    for s in statuses {
-        let id = s.get("id")?.as_str()?;
-        let status = s.get("status")?.as_str()?;
-        if id == self_id {
-            if status != "CurrentNode" {
-                return Some(Err(anyhow::anyhow!(
-                    "self {self_id} reported status {status}, expected CurrentNode"
-                )));
-            }
-        } else if expected_peer_ids.iter().any(|p| p == id) {
-            if status != "Connected" {
-                // Could be transient — keep polling until deadline.
-                return None;
-            }
-        } else {
-            return Some(Err(anyhow::anyhow!(
-                "unexpected participant id in participants-status: {id}"
-            )));
-        }
-    }
-
-    Some(Ok(()))
 }
 
 #[cfg(test)]
@@ -253,13 +176,13 @@ mod tests {
 
     #[test]
     fn unreachable_peer_keeps_polling() {
-        // Regression for #242: a transient unreachable peer while the Noise
-        // mesh converges must keep polling, not fail the scenario.
+        // Regression for #242: a peer whose topology read has not answered
+        // yet must keep polling, not fail the scenario.
         let v = response(
             3,
             json!([
                 peer("A", true, json!(null), 5),
-                peer("B", false, json!("transport"), 0),
+                peer("B", false, json!("topology_read_failed"), 0),
             ]),
         );
         assert!(classify_compare_peers(&v, "A", "B").is_none());
@@ -277,9 +200,9 @@ mod tests {
         match classify_compare_peers(&v, "A", "B") {
             Some(Err(e)) => {
                 let chain = format!("{e:#}");
-                assert!(chain.contains("decode failure"), "got: {chain}");
+                assert!(chain.contains("returned nothing"), "got: {chain}");
             }
-            other => panic!("expected terminal decode-failure error, got {other:?}"),
+            other => panic!("expected a terminal empty-read error, got {other:?}"),
         }
     }
 
@@ -289,7 +212,7 @@ mod tests {
             3,
             json!([
                 peer("A", true, json!(null), 5),
-                peer("B", true, json!("transport"), 5),
+                peer("B", true, json!("topology_read_failed"), 5),
             ]),
         );
         assert!(matches!(classify_compare_peers(&v, "A", "B"), Some(Err(_))));

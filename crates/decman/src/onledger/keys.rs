@@ -13,7 +13,7 @@
 //! then the local caches, then the legacy vault names, so both models work.
 //!
 //! The vault helpers were copied from
-//! `workflow/onboarding/steps/generate_keys.rs`, which the Noise removal
+//! `workflow/onboarding/steps/generate_keys.rs`, which the 2.0 rewrite
 //! deletes.
 
 use std::collections::{BTreeMap, BTreeSet};

@@ -41,7 +41,6 @@ use canton_proto_rs::com::digitalasset::canton::{
 use common::canton_id::CantonId;
 use prost::Message;
 use prost_types::Timestamp;
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -714,23 +713,9 @@ pub async fn wait_owner_root_delegations(
 // ---------------------------------------------------------------------------
 
 /// A pending proposal this node did not ask for. Read-only; the observer
-/// never signs from this list.
-///
-/// TODO(common/src/coordination.rs): this DTO belongs next to
-/// `RegistryResponse` so `GET /proposals/unsolicited` and `gen-types` export
-/// it. Kept here until that file is open for edits.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct UnsolicitedProposal {
-    /// `DecentralizedNamespaceDefinition` or `PartyToParticipant`.
-    pub mapping: String,
-    /// The namespace or the party id.
-    pub key: String,
-    pub hash_hex: String,
-    pub serial: u32,
-    pub signed_by: Vec<String>,
-    /// Micros since the epoch, when known.
-    pub sequenced_at: Option<i64>,
-}
+/// never signs from this list. The DTO lives in `common` so `gen-types`
+/// exports it; other `onledger` modules import it from here.
+pub use common::coordination::UnsolicitedProposal;
 
 /// Every pending DND and P2P proposal in the synchronizer store.
 ///

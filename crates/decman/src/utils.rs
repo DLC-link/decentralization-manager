@@ -560,7 +560,7 @@ pub async fn create_directories(paths: &[&Path]) -> Result {
 ///
 /// Each slice is prefixed with a 4-byte big-endian length.
 /// This is used for combining multiple data items into a single payload
-/// for transmission over the noise protocol.
+/// for storage as one artefact blob.
 pub fn encode_length_prefixed(items: &[&[u8]]) -> Vec<u8> {
     let total_len: usize = items.iter().map(|item| 4 + item.len()).sum();
     let mut payload = Vec::with_capacity(total_len);

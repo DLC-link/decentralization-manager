@@ -6,10 +6,7 @@ use crate::{
     canton_id::CantonId,
     config::{PartyCredentials, Peer},
     error::Result,
-    server::{
-        InvitationType, PendingInvitation, WorkflowKind, WorkflowProgress, WorkflowRole,
-        WorkflowRun,
-    },
+    server::{PendingInvitation, WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun},
 };
 
 /// Read operations on the database
@@ -26,9 +23,6 @@ pub trait SchemaRead {
 
     /// Get all party credentials
     async fn get_all_party_credentials(&self) -> Result<Vec<PartyCredentials>>;
-
-    /// Get a peer by its Noise public key
-    async fn get_peer_by_public_key(&self, public_key: &str) -> Result<Option<Peer>>;
 
     /// Get party credentials by decentralized party ID
     async fn get_party_credentials(
@@ -306,20 +300,6 @@ pub trait Commitable {
 
     /// Delete a pending invitation by its id (no-op if absent)
     async fn delete_pending_invitation(&mut self, id: &str) -> Result;
-
-    /// Delete every pending invitation matching a coordinator's Noise pubkey
-    async fn delete_pending_invitations_by_coordinator(
-        &mut self,
-        coordinator_pubkey: &str,
-    ) -> Result;
-
-    /// Delete every pending invitation of one type from one coordinator —
-    /// used to replace a superseded invite when a fresh one arrives.
-    async fn delete_pending_invitations_by_type_and_coordinator(
-        &mut self,
-        invitation_type: InvitationType,
-        coordinator_pubkey: &str,
-    ) -> Result;
 
     /// Insert or replace a workflow run. Used on initial start, on every
     /// state-machine advance, and on resume.

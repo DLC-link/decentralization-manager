@@ -1,38 +1,12 @@
 pub mod config;
-pub mod coordinator;
-pub mod peer;
-pub mod steps;
 
 pub use config::AddPartyConfig;
-pub use steps::{author_clear_proposal, generate_keys, sign_clear_proposal, sign_proposals};
 
-use crate::{
-    auth::WorkflowAuth, canton_id::CantonId, noise::MessageType, server::WorkflowKind,
-    workflow::state::WorkflowStep,
-};
+use crate::{server::WorkflowKind, workflow::state::WorkflowStep};
 
-/// Resolve a ledger-API token for `party` from the node's auth registry.
-/// Best-effort: the token only feeds the begin-offset capture's primary
-/// tier; without one the capture degrades to the admin-API tiers.
-pub(crate) async fn resolve_ledger_token(
-    auth: &Option<WorkflowAuth>,
-    party: &CantonId,
-) -> Option<String> {
-    let auth = auth.as_ref()?;
-    match auth.get_credentials(party).await {
-        Ok(creds) => Some(creds.token),
-        Err(e) => {
-            tracing::warn!(
-                "No ledger credentials for {party} ({e}); offset capture will use \
-                 the tokenless tiers"
-            );
-            None
-        }
-    }
-}
-
-/// Add-party workflow steps (adding a new member to an existing
-/// decentralized party).
+/// Add-party workflow steps of the 1.x transport. Kept for the run cards of rows
+/// that predate the 2.0 upgrade; the on-ledger engine has its own step
+/// lists (`crate::onledger::engine::add_party`).
 ///
 /// Peer-gated steps come in two shapes:
 /// - **all-peer** (`SignProposals`, `SignClearOnboarding`): every invited
@@ -80,24 +54,6 @@ pub enum AddPartyStep {
 }
 
 impl WorkflowStep for AddPartyStep {
-    fn to_command(&self) -> Option<MessageType> {
-        match self {
-            Self::GenerateNewMemberKeys => Some(MessageType::GenerateAddPartyKeys),
-            Self::SignProposals => Some(MessageType::SignAddParty),
-            Self::SyncAcs => Some(MessageType::ImportAcs),
-            Self::ProposeClearOnboarding => Some(MessageType::ClearOnboardingFlag),
-            Self::SignClearOnboarding => Some(MessageType::SignClearOnboarding),
-            Self::Complete => Some(MessageType::Disconnect),
-            Self::WaitingForPeers
-            | Self::ExportState
-            | Self::CreateProposals
-            | Self::SubmitProposals
-            | Self::PrepareClearOnboarding
-            | Self::PrepareClearSign
-            | Self::SubmitClearOnboarding => None,
-        }
-    }
-
     fn next(&self) -> Option<Self> {
         match self {
             Self::WaitingForPeers => Some(Self::GenerateNewMemberKeys),
@@ -276,30 +232,10 @@ mod tests {
         assert_eq!(expected_index, AddPartyStep::step_total());
     }
 
-    /// Peer-gated steps must all map to a command, and no two consecutive
-    /// peer-gated steps may share the chain without a coordinator step in
-    /// between *unless* the coordinator prepared the payload beforehand. The
-    /// structural invariant we can check here: every `requires_peers` step
-    /// has a command, and Prepare steps have none.
+    /// Prepare steps are coordinator-only beats, never peer-gated.
     #[test]
-    fn peer_gated_steps_have_commands() {
-        let mut step = AddPartyStep::WaitingForPeers;
-        loop {
-            if step.requires_peers() {
-                assert!(
-                    step.to_command().is_some(),
-                    "{step:?} is peer-gated but has no command"
-                );
-            }
-            match step.next() {
-                Some(next) => step = next,
-                None => break,
-            }
-        }
-        assert!(
-            AddPartyStep::PrepareClearOnboarding.to_command().is_none(),
-            "Prepare steps are coordinator-only beats"
-        );
-        assert!(AddPartyStep::PrepareClearSign.to_command().is_none());
+    fn prepare_steps_are_not_peer_gated() {
+        assert!(!AddPartyStep::PrepareClearOnboarding.requires_peers());
+        assert!(!AddPartyStep::PrepareClearSign.requires_peers());
     }
 }

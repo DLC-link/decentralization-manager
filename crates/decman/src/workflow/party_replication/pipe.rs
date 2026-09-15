@@ -173,73 +173,6 @@ impl ExportSession {
     }
 }
 
-/// Wire encoding of a served block, sent as the `AcsBlock` / `AcsBlockEnd`
-/// payload.
-///
-/// `Data` is `[seq u64][bytes]`; `End` is `[seq u64][total u64][sha256 hex]`.
-/// The sequence number rides along so the target can prove the response
-/// belongs to the block it asked for rather than a stale one.
-pub fn encode_block(block: &PipeBlock) -> (bool, Vec<u8>) {
-    match block {
-        PipeBlock::Data { seq, bytes } => {
-            let mut out = Vec::with_capacity(8 + bytes.len());
-            out.extend_from_slice(&seq.to_be_bytes());
-            out.extend_from_slice(bytes);
-            (false, out)
-        }
-        PipeBlock::End { seq, trailer } => {
-            let digest = trailer.sha256.as_bytes();
-            let mut out = Vec::with_capacity(16 + digest.len());
-            out.extend_from_slice(&seq.to_be_bytes());
-            out.extend_from_slice(&trailer.total_len.to_be_bytes());
-            out.extend_from_slice(digest);
-            (true, out)
-        }
-    }
-}
-
-/// Decode an `AcsBlock` payload into `(seq, bytes)`.
-///
-/// # Errors
-/// Returns an error if the payload is too short to carry a sequence number.
-pub fn decode_data(payload: &[u8]) -> Result<(u64, Vec<u8>)> {
-    if payload.len() < 8 {
-        anyhow::bail!(
-            "ACS block payload is {} bytes, need at least 8",
-            payload.len()
-        );
-    }
-    let mut seq = [0u8; 8];
-    seq.copy_from_slice(&payload[..8]);
-    Ok((u64::from_be_bytes(seq), payload[8..].to_vec()))
-}
-
-/// Decode an `AcsBlockEnd` payload into `(seq, trailer)`.
-///
-/// # Errors
-/// Returns an error if the payload is too short or the digest is not UTF-8.
-pub fn decode_end(payload: &[u8]) -> Result<(u64, PipeTrailer)> {
-    if payload.len() < 16 {
-        anyhow::bail!(
-            "ACS block-end payload is {} bytes, need at least 16",
-            payload.len()
-        );
-    }
-    let mut seq = [0u8; 8];
-    seq.copy_from_slice(&payload[..8]);
-    let mut total = [0u8; 8];
-    total.copy_from_slice(&payload[8..16]);
-    let sha256 = String::from_utf8(payload[16..].to_vec())
-        .map_err(|e| anyhow::anyhow!("ACS pipe trailer digest is not UTF-8: {e}"))?;
-    Ok((
-        u64::from_be_bytes(seq),
-        PipeTrailer {
-            total_len: u64::from_be_bytes(total),
-            sha256,
-        },
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,63 +184,22 @@ mod tests {
         }
     }
 
-    /// A data block must survive the wire unchanged, sequence number included —
-    /// the target appends it into an import stream it cannot rewind.
+    /// The two block shapes stay distinct values: an empty data block is not
+    /// an end block, and a trailer keeps both halves.
     #[test]
-    fn data_blocks_round_trip() -> Result {
-        let block = PipeBlock::Data {
-            seq: u64::from(u32::MAX) + 7,
-            bytes: b"active contract bytes".to_vec(),
-        };
-        let (is_end, payload) = encode_block(&block);
-        assert!(!is_end);
-
-        let (seq, bytes) = decode_data(&payload)?;
-        assert_eq!(seq, u64::from(u32::MAX) + 7);
-        assert_eq!(bytes, b"active contract bytes");
-        Ok(())
-    }
-
-    /// The trailer carries the only proof the target gets that it fed Canton
-    /// the whole snapshot, so both halves must survive exactly.
-    #[test]
-    fn end_blocks_round_trip() -> Result {
-        let digest = "a".repeat(64);
-        let block = PipeBlock::End {
-            seq: 9,
-            trailer: trailer(1_099_511_627_776, &digest),
-        };
-        let (is_end, payload) = encode_block(&block);
-        assert!(is_end);
-
-        let (seq, got) = decode_end(&payload)?;
-        assert_eq!(seq, 9);
-        assert_eq!(got.total_len, 1_099_511_627_776);
-        assert_eq!(got.sha256, digest);
-        Ok(())
-    }
-
-    /// A truncated frame must be rejected rather than silently decoded into a
-    /// zero offset, which would feed Canton bytes at the wrong position.
-    #[test]
-    fn short_payloads_are_rejected() {
-        assert!(decode_data(&[0u8; 7]).is_err());
-        assert!(decode_end(&[0u8; 15]).is_err());
-    }
-
-    /// An empty data block is distinguishable from an end block: only the
-    /// message type says the export is finished, so a zero-length read in the
-    /// middle of a stream must not be mistaken for completion.
-    #[test]
-    fn an_empty_data_block_is_not_an_end_block() -> Result {
-        let (is_end, payload) = encode_block(&PipeBlock::Data {
+    fn block_shapes_are_distinct() {
+        let empty = PipeBlock::Data {
             seq: 3,
             bytes: Vec::new(),
-        });
-        assert!(!is_end);
-        let (seq, bytes) = decode_data(&payload)?;
-        assert_eq!(seq, 3);
-        assert!(bytes.is_empty());
-        Ok(())
+        };
+        let end = PipeBlock::End {
+            seq: 3,
+            trailer: trailer(0, &"a".repeat(64)),
+        };
+        assert_ne!(empty, end);
+        if let PipeBlock::End { trailer: t, .. } = end {
+            assert_eq!(t.total_len, 0);
+            assert_eq!(t.sha256.len(), 64);
+        }
     }
 }

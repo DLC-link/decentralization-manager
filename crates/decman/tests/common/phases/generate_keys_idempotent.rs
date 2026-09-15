@@ -4,6 +4,11 @@
 //! its `peer_public_keys` artifact), capture the artifact payload, kill
 //! and restart P2, drive to completion, and verify the dec_party_identity
 //! row was created (proving the keys persisted across the restart).
+//!
+//! TODO(onledger-phases): this phase still describes the 1.x transport model —
+//! the phase waits for a `peer_public_keys` artefact; a member now records
+//! its key on the `WorkflowProposal` acceptance instead.
+//! Rewrite it against the on-ledger steps before the suite runs green.
 
 use std::time::Duration;
 

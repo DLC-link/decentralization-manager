@@ -783,11 +783,6 @@ mod tests {
         Data::new(AppState {
             db,
             config,
-            peer_status: Arc::new(RwLock::new(HashMap::new())),
-            last_seen: Arc::new(RwLock::new(HashMap::new())),
-            peer_job_sender: tokio::sync::mpsc::unbounded_channel().0,
-            workflows: crate::server::WorkflowRegistry::new(),
-            pending_invitations: Arc::new(RwLock::new(Vec::new())),
             auth: Arc::new(RwLock::new(Some(WorkflowAuth::Mock(Arc::new(
                 MockAuthRegistry::new(party_credentials.clone()),
             ))))),

@@ -1250,7 +1250,7 @@ mod tests {
     /// toward the limit, so the walk keeps reading for the ones that are.
     #[tokio::test]
     async fn walk_skips_non_governance_events() {
-        let noise = Transaction {
+        let not_governance = Transaction {
             events: vec![EventEnvelope {
                 event: Some(Event::Created(CreatedEvent {
                     offset: 40,
@@ -1264,7 +1264,7 @@ mod tests {
         };
         let pages = vec![
             TransactionPage {
-                transactions: vec![noise],
+                transactions: vec![not_governance],
                 next_page_token: Some(b"next".to_vec()),
                 ..Default::default()
             },

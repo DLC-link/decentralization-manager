@@ -64,14 +64,7 @@ pub fn desired_node_record(
         .iter()
         .filter(|p| p.participant_id != identity.participant_id)
         .filter(|p| vetted_peers.contains(&p.participant_id))
-        .filter_map(|p| p.party.as_deref())
-        .filter_map(|party| match CantonId::parse(party) {
-            Ok(id) => Some(id),
-            Err(e) => {
-                tracing::warn!(party, error = %e, "peer party is not a Canton id; skipping");
-                None
-            }
-        })
+        .filter_map(|p| p.party.clone())
         .filter(|id| *id != identity.node_party)
         .collect();
     observers.sort();
@@ -576,7 +569,7 @@ pub fn build_snapshot(
         .iter()
         .filter(|p| p.participant_id != *self_participant)
     {
-        let node_party = peer.party.as_deref().and_then(|p| CantonId::parse(p).ok());
+        let node_party = peer.party.clone();
         let is_vetted = vetted.contains(&peer.participant_id);
         let matched = node_party.as_ref().and_then(|party| {
             by_signatory.get(party).copied().filter(|e| {
@@ -712,11 +705,7 @@ pub fn registry_response(
     now: i64,
     stale_factor: u64,
 ) -> RegistryResponse {
-    let known: HashSet<CantonId> = peers
-        .iter()
-        .filter_map(|p| p.party.as_deref())
-        .filter_map(|p| CantonId::parse(p).ok())
-        .collect();
+    let known: HashSet<CantonId> = peers.iter().filter_map(|p| p.party.clone()).collect();
     let mut peer_views = Vec::new();
     let mut inbound = Vec::new();
     for entry in entries {
@@ -764,10 +753,7 @@ mod tests {
         Peer {
             participant_id: participant(n),
             name: format!("Node {n}"),
-            address: String::new(),
-            port: 0,
-            public_key: String::new(),
-            party: party_prefix.map(|p| party(p).to_string()),
+            party: party_prefix.map(party),
         }
     }
 
@@ -967,23 +953,18 @@ mod tests {
             crate::onledger::identity::tests::mock_identity("node-a", participant(1)).await;
         let mut config = NodeConfig::default();
         config.node.participant_id = Some(participant(1));
-        // Peer 6 names a party that is not a Canton id at all.
-        let mut malformed = peer(6, None);
-        malformed.party = Some("not-a-canton-id".to_string());
         let peers = vec![
             peer(1, Some("node-a")), // self: never an observer
             peer(3, Some("node-c")), // vetted, named
             peer(2, Some("node-b")), // vetted, named; sorts before node-c
             peer(4, Some("node-d")), // not vetted
             peer(5, None),           // vetted, no party
-            malformed,
         ];
         let vetted: HashSet<CantonId> = [
             participant(1),
             participant(2),
             participant(3),
             participant(5),
-            participant(6),
         ]
         .into_iter()
         .collect();

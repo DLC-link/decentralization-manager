@@ -11,8 +11,7 @@
 //!    coordinated onboarding, the new member's on the node that ran
 //!    add-party, and its own on every node.
 //! 2. `dec_party_participant.signing_key` — each peer's own fingerprint as it
-//!    reported it over the `OwnerKeys` exchange, cached by the
-//!    `/decentralized-parties` refresh.
+//!    reported it in its `WorkflowAcceptance`, recorded by the engine.
 //! 3. Elimination — a key claimed by no surviving member belongs to the one
 //!    being removed.
 
@@ -27,17 +26,41 @@ use canton_proto_rs::com::digitalasset::canton::crypto::{
 };
 use sqlx::SqlitePool;
 
+use prost::Message;
+
 use crate::{
     canton_id::CantonId,
     config::NodeConfig,
     db::schema::SchemaRead,
     error::Result,
     utils,
-    workflow::{
-        onboarding::steps::proposals::create::decode_keys_payload,
-        storage::{WorkflowStorage, identity_kinds},
-    },
+    workflow::storage::{WorkflowStorage, identity_kinds},
 };
+
+/// Decode a key bundle: consecutive `varint(len)||SigningPublicKey`
+/// messages, the shape `dec_party_identity` stores for every member.
+///
+/// # Errors
+/// Returns an error when a length prefix runs past the payload or a message
+/// is not a `SigningPublicKey`.
+pub(crate) fn decode_keys_payload(payload: &[u8]) -> Result<Vec<SigningPublicKey>> {
+    let mut cursor: &[u8] = payload;
+    let mut keys = Vec::with_capacity(2);
+    while !cursor.is_empty() {
+        let len = prost::encoding::decode_varint(&mut cursor)? as usize;
+        if cursor.len() < len {
+            anyhow::bail!(
+                "Truncated key payload: expected {len} bytes, only {remaining} remain",
+                remaining = cursor.len()
+            );
+        }
+        let (msg_bytes, rest) = cursor.split_at(len);
+        let key = SigningPublicKey::decode(msg_bytes)?;
+        keys.push(key);
+        cursor = rest;
+    }
+    Ok(keys)
+}
 
 /// Vault name of the Daml signing key a node holds for the party with this
 /// id prefix. Onboarding and add-party both mint the key under this name, and

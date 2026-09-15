@@ -14,7 +14,7 @@
 //! caller from driving the same run at the same time.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     sync::{Arc, LazyLock},
     time::{Duration, Instant},
 };
@@ -220,6 +220,8 @@ pub async fn tick(ol: &OnLedger, state: &mut ObserverState) -> TickReport {
     let Some(snapshot) = note("proposals", ProposalSnapshot::read(&client, db).await) else {
         return report;
     };
+    ol.set_accepted_participants(accepted_participants(&snapshot))
+        .await;
 
     // 4. Invitations: undecided proposals that name this node.
     let now = now_micros();
@@ -310,6 +312,32 @@ pub async fn tick(ol: &OnLedger, state: &mut ObserverState) -> TickReport {
 
     tracing::debug!(?report, "observer tick done");
     report
+}
+
+/// Which participants accepted each proposal, for the run cards (pure).
+///
+/// An acceptance counts here when its acceptor is an invitee and its
+/// participant is in the proposal's participant list; hosting is not
+/// verified, because this feeds a display and never a signature.
+pub fn accepted_participants(
+    snapshot: &ProposalSnapshot,
+) -> HashMap<String, Vec<common::canton_id::CantonId>> {
+    let mut out: HashMap<String, Vec<common::canton_id::CantonId>> = HashMap::new();
+    for proposal in &snapshot.proposals {
+        let record = &proposal.record;
+        let mut accepted: Vec<common::canton_id::CantonId> = snapshot
+            .acceptances
+            .iter()
+            .filter(|a| a.record.proposal == proposal.contract_id)
+            .filter(|a| record.invitees.contains(&a.record.acceptor))
+            .filter(|a| record.participants.contains(&a.record.participant_id))
+            .filter_map(|a| common::canton_id::CantonId::parse(&a.record.participant_id).ok())
+            .collect();
+        accepted.sort();
+        accepted.dedup();
+        out.insert(proposal.contract_id.clone(), accepted);
+    }
+    out
 }
 
 /// Drive one run under its lock; `None` when another caller holds it.

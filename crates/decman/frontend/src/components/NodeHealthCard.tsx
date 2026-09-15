@@ -1,10 +1,11 @@
 import { Box, Chip, Tooltip, Typography } from "@mui/material";
 import { CopyableText } from "./CopyableText";
 import { LatencySpark, type LatencyTone } from "./LatencySpark";
-import { StatusDot } from "./StatusDot";
+import { StatusDot, type DotTone } from "./StatusDot";
 import { useLatencyHistory } from "../useLatencyHistory";
 import type {
   ComponentHealth,
+  CoordinationDarStatus,
   LinkHealth,
   NodeConfig,
   NodeHealthResponse,
@@ -45,12 +46,37 @@ const VERDICT: Record<
   {
     label: string;
     color: "success" | "warning" | "error";
-    dot: "Connected" | "HandshakeFailed" | "Unreachable";
+    dot: DotTone;
   }
 > = {
-  Healthy: { label: "Healthy", color: "success", dot: "Connected" },
-  Degraded: { label: "Degraded", color: "warning", dot: "HandshakeFailed" },
-  Down: { label: "Down", color: "error", dot: "Unreachable" },
+  Healthy: { label: "Healthy", color: "success", dot: "live" },
+  Degraded: { label: "Degraded", color: "warning", dot: "warn" },
+  Down: { label: "Down", color: "error", dot: "bad" },
+};
+
+/**
+ * The coordination-DAR chip, or `null` when the package is vetted and there is
+ * nothing to say. `undefined` input means a node that predates the field.
+ */
+const coordinationDarChip = (
+  dar: CoordinationDarStatus | undefined,
+): { label: string; color: "warning" | "error"; tooltip: string } | null => {
+  if (!dar || dar.phase === "ready") return null;
+  const upload = "Upload it through POST /dars/upload, or enable the automatic upload.";
+  if (dar.phase === "disabled") {
+    return {
+      label: "coordination DAR · not uploaded",
+      color: "warning",
+      tooltip: `The automatic upload is off and the package is not vetted here. ${upload}`,
+    };
+  }
+  return {
+    label: `coordination DAR · ${dar.phase}`,
+    color: dar.last_error ? "error" : "warning",
+    tooltip: dar.last_error
+      ? `Attempt ${dar.attempts} failed: ${dar.last_error}`
+      : `Uploading ${dar.filename}. Until it is vetted this node publishes no registry entry and can start no workflow.`,
+  };
 };
 
 const COMPONENT_COLOR: Record<ComponentHealth["state"], "default" | "warning" | "error"> = {
@@ -98,11 +124,11 @@ interface LinkRowProps {
   /** History token: changes on every observation of this link. */
   token: string | number;
   bands: { good: number; warn: number };
-  /** Self is always reachable if the page rendered at all. */
-  dotStatus: "Connected" | "CurrentNode" | "Unreachable";
+  /** Tone for a probe that answered; an unreachable one always reads `bad`. */
+  dotTone: DotTone;
 }
 
-const LinkRow = ({ label, probe, link, token, bands, dotStatus }: LinkRowProps) => {
+const LinkRow = ({ label, probe, link, token, bands, dotTone }: LinkRowProps) => {
   const history = useLatencyHistory(link.reachable ? link.latency_ms : null, token);
   const tone = link.reachable ? toneFor(link.latency_ms, bands) : "bad";
   const reading = link.reachable && link.latency_ms != null ? `${link.latency_ms} ms` : "no reply";
@@ -125,7 +151,7 @@ const LinkRow = ({ label, probe, link, token, bands, dotStatus }: LinkRowProps) 
         borderColor: "divider",
       }}
     >
-      <StatusDot status={link.reachable ? dotStatus : "Unreachable"} title={tooltip} />
+      <StatusDot tone={link.reachable ? dotTone : "bad"} title={tooltip} />
       <Box sx={{ minWidth: 0 }}>
         <Typography sx={{ fontSize: "0.85rem" }}>{label}</Typography>
         <Typography
@@ -175,6 +201,10 @@ export const NodeHealthCard = ({ config, health, selfLatency }: NodeHealthCardPr
   const participant = health?.participant;
   // Ok components are the norm and say nothing; only faults earn a chip.
   const faults = participant?.components.filter((c) => c.state !== "Ok") ?? [];
+  // The coordination package gates everything: without it this node publishes
+  // no registry entry and can start no workflow (design D8). A vetted package
+  // is the norm, so only the states that block work earn a chip.
+  const coordinationDar = coordinationDarChip(health?.coordination_dar);
   const synchronizers = health?.synchronizers ?? [];
 
   // An empty list means three different things, and saying "not connected" for
@@ -239,7 +269,7 @@ export const NodeHealthCard = ({ config, health, selfLatency }: NodeHealthCardPr
                 textTransform: "uppercase",
               }}
             >
-              <StatusDot status={verdict.dot} />
+              <StatusDot tone={verdict.dot} />
               {verdict.label}
             </Box>
           )}
@@ -332,7 +362,7 @@ export const NodeHealthCard = ({ config, health, selfLatency }: NodeHealthCardPr
                 py: 0.9,
               }}
             >
-              <StatusDot status="CurrentNode" title="Round-trip from this browser to your node" />
+              <StatusDot tone="self" title="Round-trip from this browser to your node" />
               <Box sx={{ minWidth: 0 }}>
                 <Typography sx={{ fontSize: "0.85rem" }}>Browser → DecMan</Typography>
                 <Typography
@@ -381,7 +411,7 @@ export const NodeHealthCard = ({ config, health, selfLatency }: NodeHealthCardPr
                   link={health.admin_api}
                   token={health.checked_at}
                   bands={CANTON_BANDS}
-                  dotStatus="Connected"
+                  dotTone="live"
                 />
                 <LinkRow
                   label="DecMan → Ledger API"
@@ -389,13 +419,14 @@ export const NodeHealthCard = ({ config, health, selfLatency }: NodeHealthCardPr
                   link={health.ledger_api}
                   token={health.checked_at}
                   bands={CANTON_BANDS}
-                  dotStatus="Connected"
+                  dotTone="live"
                 />
               </>
             )}
           </Box>
 
           {(faults.length > 0 ||
+            coordinationDar !== null ||
             participant?.initialized === false ||
             participant?.active === false) && (
             <Box
@@ -408,6 +439,16 @@ export const NodeHealthCard = ({ config, health, selfLatency }: NodeHealthCardPr
                 borderColor: "divider",
               }}
             >
+              {coordinationDar && (
+                <Tooltip title={coordinationDar.tooltip} arrow>
+                  <Chip
+                    size="small"
+                    color={coordinationDar.color}
+                    label={coordinationDar.label}
+                    sx={{ height: 20, fontFamily: "var(--font-mono)", fontSize: "0.68rem" }}
+                  />
+                </Tooltip>
+              )}
               {participant?.initialized === false && (
                 <Chip
                   size="small"

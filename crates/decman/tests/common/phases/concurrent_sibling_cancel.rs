@@ -13,6 +13,11 @@
 //!
 //! This is the e2e for the scoped-cancel work (instance-stamped CancelInvite +
 //! `coordinator_instance` on peer rows + `POST /workflows/{instance}/cancel`).
+//!
+//! TODO(onledger-phases): this phase still describes the 1.x transport model —
+//! cancel archives the `WorkflowProposal`; there is no per-instance
+//! `CancelInvite` message (design D10).
+//! Rewrite it against the on-ledger steps before the suite runs green.
 
 use std::time::Duration;
 

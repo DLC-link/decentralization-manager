@@ -436,11 +436,8 @@ fn invitation_type_of(kind: WorkflowKind) -> InvitationType {
     }
 }
 
-/// The `PendingInvitation` card for one proposal.
-///
-/// `id` is the proposal contract id. Until migration 000021 renames the
-/// column, `coordinator_pubkey` carries the proposer's participant id; a
-/// value that parses as a Canton id therefore marks an on-ledger row.
+/// The `PendingInvitation` card for one proposal. `id` and `proposal_cid`
+/// are the proposal contract id.
 pub fn invitation_from_proposal(
     proposal: &ActiveProposal,
     peers: &[Peer],
@@ -462,9 +459,12 @@ pub fn invitation_from_proposal(
     PendingInvitation {
         id: proposal.contract_id.clone(),
         invitation_type: invitation_type_of(r.kind),
-        coordinator_pubkey: r.proposer_participant.clone(),
+        coordinator_participant: r.proposer_participant.clone(),
+        coordinator_party: Some(r.proposer.clone()),
+        proposal_cid: proposal.contract_id.clone(),
         coordinator_name,
         received_at,
+        expires_at: Some(r.expires_at.div_euclid(MICROS_PER_SEC)),
         prefix: r.prefix.clone(),
         participants: parse_all(&r.participants),
         dar_filenames: r.dar_pins.iter().map(|p| p.filename.clone()).collect(),
@@ -479,16 +479,10 @@ pub fn invitation_from_proposal(
     }
 }
 
-/// Whether a stored invitation row came from the on-ledger projection.
-fn is_onledger_row(inv: &PendingInvitation) -> bool {
-    CantonId::parse(&inv.coordinator_pubkey).is_ok()
-}
-
 /// Which rows [`project_pending_invitations`] writes and removes (pure).
 ///
 /// A proposal is projected when it invites this node, has no decision, and
-/// has not expired. An on-ledger row whose proposal is no longer projected is
-/// removed. Rows from the Noise path are left alone.
+/// has not expired. A row whose proposal is no longer projected is removed.
 pub fn plan_projection(
     proposals: &[ActiveProposal],
     decisions: &[ProposalDecisionEntry],
@@ -515,7 +509,7 @@ pub fn plan_projection(
     let live: HashSet<&str> = keep.iter().map(|i| i.id.as_str()).collect();
     let remove: Vec<String> = existing
         .iter()
-        .filter(|e| is_onledger_row(e) && !live.contains(e.id.as_str()))
+        .filter(|e| !live.contains(e.id.as_str()))
         .map(|e| e.id.clone())
         .collect();
     (keep, remove)
@@ -760,9 +754,6 @@ mod tests {
         Peer {
             participant_id: CantonId::parse(&format!("participant{n}::{ns}")).expect("id"),
             name: name.into(),
-            address: String::new(),
-            port: 0,
-            public_key: String::new(),
             party: None,
         }
     }
@@ -772,10 +763,16 @@ mod tests {
         let inv = invitation_from_proposal(&proposal(), &[peer_row(1, "Alpha")], 77);
         let r = proposal_full();
         assert_eq!(inv.id, "00proposal");
+        assert_eq!(inv.proposal_cid, "00proposal");
         assert_eq!(inv.invitation_type, InvitationType::Onboarding);
-        assert_eq!(inv.coordinator_pubkey, r.proposer_participant);
+        assert_eq!(inv.coordinator_participant, r.proposer_participant);
+        assert_eq!(inv.coordinator_party.as_ref(), Some(&r.proposer));
         assert_eq!(inv.coordinator_name.as_deref(), Some("Alpha"));
         assert_eq!(inv.received_at, 77);
+        assert_eq!(
+            inv.expires_at,
+            Some(r.expires_at.div_euclid(MICROS_PER_SEC))
+        );
         assert_eq!(inv.prefix, r.prefix);
         assert_eq!(inv.participants.len(), 3);
         assert_eq!(inv.dar_filenames, vec!["governance-core-v1-0.1.0.dar"]);
@@ -790,7 +787,7 @@ mod tests {
     }
 
     #[test]
-    fn projection_skips_decided_and_expired_and_removes_stale_onledger_rows() {
+    fn projection_skips_decided_and_expired_and_removes_stale_rows() {
         let live = proposal();
         let mut decided = proposal();
         decided.contract_id = "00decided".into();
@@ -811,17 +808,12 @@ mod tests {
             &[],
             3,
         );
-        let noise_row = PendingInvitation {
-            id: "uuid-1".into(),
-            coordinator_pubkey: "03abcdef".into(),
-            ..invitation_from_proposal(&proposal(), &[], 3)
-        };
         let earlier_live = invitation_from_proposal(&live, &[], 3);
 
         let (keep, remove) = plan_projection(
             &[live, decided, expired],
             &decisions,
-            &[stale_onledger, noise_row, earlier_live],
+            &[stale_onledger, earlier_live],
             &[],
             1_000 * MICROS_PER_SEC,
         );

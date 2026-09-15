@@ -72,7 +72,7 @@ pub trait TransactionSigner: Send + Sync {
 ///
 /// Returns a boxed trait object because the backend is picked at *runtime*
 /// from the key's custody, so the concrete type differs per call; the one
-/// dynamic dispatch is noise next to the signing RPCs themselves.
+/// dynamic dispatch costs nothing next to the signing RPCs themselves.
 ///
 /// Takes the caller's already-open admin-API `channel` so the export backend
 /// reuses one connection instead of opening a second. Async because the KMS

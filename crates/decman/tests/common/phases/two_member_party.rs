@@ -12,6 +12,12 @@
 //! P2 **and** P3, i.e. the full mesh, where invited == configured. This phase
 //! invites a strict subset (just P2), reproducing the "1 coordinator + 1
 //! regular peer" party from the report. It must now reach `completed`.
+//!
+//! TODO(onledger-phases): this phase still describes the 1.x transport model —
+//! the stall message and the `WaitingForPeers` step name are gone; the step
+//! is `WaitingForAcceptances` and a coordinator waits for acceptances, not
+//! connections.
+//! Rewrite it against the on-ledger steps before the suite runs green.
 
 use std::time::Duration;
 

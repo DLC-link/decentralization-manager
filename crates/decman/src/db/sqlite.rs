@@ -21,10 +21,7 @@ use crate::{
     canton_id::CantonId,
     config::{PartyCredentials, Peer},
     error::Result,
-    server::{
-        InvitationType, PendingInvitation, WorkflowKind, WorkflowProgress, WorkflowRole,
-        WorkflowRun,
-    },
+    server::{PendingInvitation, WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun},
 };
 
 pub static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
@@ -141,15 +138,6 @@ impl SchemaRead for SqlitePool {
             .await?;
 
         Ok(count.0)
-    }
-
-    async fn get_peer_by_public_key(&self, public_key: &str) -> Result<Option<Peer>> {
-        let row = sqlx::query_as::<_, PeerRow>("SELECT * FROM peers WHERE public_key = ?")
-            .bind(public_key)
-            .fetch_optional(self)
-            .await?;
-
-        row.map(|r| r.into_domain()).transpose()
     }
 
     async fn get_all_party_credentials(&self) -> Result<Vec<PartyCredentials>> {
@@ -658,18 +646,12 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
             INSERT INTO peers (
                 participant_id,
                 name,
-                address,
-                port,
-                public_key,
                 party
-            ) VALUES (?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?)
             ",
         )
         .bind(&row.participant_id)
         .bind(&row.name)
-        .bind(&row.address)
-        .bind(row.port)
-        .bind(&row.public_key)
         .bind(&row.party)
         .execute(&mut **self)
         .await?;
@@ -1066,7 +1048,10 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
             INSERT OR REPLACE INTO pending_invitations (
                 id,
                 invitation_type,
-                coordinator_pubkey,
+                coordinator_participant,
+                coordinator_party,
+                proposal_cid,
+                expires_at,
                 received_at,
                 prefix,
                 participants,
@@ -1079,12 +1064,15 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 dec_party_id,
                 package_names,
                 workflow_instance
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ",
         )
         .bind(&row.id)
         .bind(&row.invitation_type)
-        .bind(&row.coordinator_pubkey)
+        .bind(&row.coordinator_participant)
+        .bind(&row.coordinator_party)
+        .bind(&row.proposal_cid)
+        .bind(row.expires_at)
         .bind(row.received_at)
         .bind(&row.prefix)
         .bind(&row.participants)
@@ -1112,41 +1100,13 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         Ok(())
     }
 
-    async fn delete_pending_invitations_by_coordinator(
-        &mut self,
-        coordinator_pubkey: &str,
-    ) -> Result {
-        sqlx::query("DELETE FROM pending_invitations WHERE coordinator_pubkey = ?")
-            .bind(coordinator_pubkey)
-            .execute(&mut **self)
-            .await?;
-
-        Ok(())
-    }
-
-    async fn delete_pending_invitations_by_type_and_coordinator(
-        &mut self,
-        invitation_type: InvitationType,
-        coordinator_pubkey: &str,
-    ) -> Result {
-        sqlx::query(
-            "DELETE FROM pending_invitations WHERE invitation_type = ? AND coordinator_pubkey = ?",
-        )
-        .bind(invitation_type.to_string())
-        .bind(coordinator_pubkey)
-        .execute(&mut **self)
-        .await?;
-
-        Ok(())
-    }
-
     async fn upsert_workflow_run(&mut self, run: &WorkflowRun) -> Result {
         let row = WorkflowRunRow::from_domain(run)?;
 
-        // ON CONFLICT(instance_name) so re-saving the same run (resume,
-        // step advance, etc.) replaces in place. Migration 000013 dropped the
-        // partial unique index that once forbade two InProgress runs per
-        // (kind, role) — concurrency is governed by the in-memory registry.
+        // ON CONFLICT(instance_name) so re-saving the same run (step advance,
+        // meta write) replaces in place. Migration 000013 dropped the partial
+        // unique index that once forbade two InProgress runs per (kind, role);
+        // the observer's per-run lock governs concurrency.
         sqlx::query(
             r"
             INSERT INTO workflow_runs (
@@ -1158,7 +1118,11 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 step_index,
                 step_total,
                 config_json,
-                coordinator_pubkey,
+                coordinator_participant,
+                coordinator_party,
+                proposal_cid,
+                topology_hashes_json,
+                member_variant,
                 coordinator_instance,
                 expected_peers_json,
                 completed_peers_json,
@@ -1167,7 +1131,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 dismissed,
                 created_at,
                 updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(instance_name) DO UPDATE SET
                 kind                     = excluded.kind,
                 role                     = excluded.role,
@@ -1176,10 +1140,14 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 step_index               = excluded.step_index,
                 step_total               = excluded.step_total,
                 config_json              = excluded.config_json,
-                coordinator_pubkey       = excluded.coordinator_pubkey,
+                coordinator_participant  = excluded.coordinator_participant,
+                coordinator_party        = excluded.coordinator_party,
+                proposal_cid             = excluded.proposal_cid,
+                topology_hashes_json     = excluded.topology_hashes_json,
+                member_variant           = excluded.member_variant,
                 coordinator_instance     = excluded.coordinator_instance,
-                expected_peers_json  = excluded.expected_peers_json,
-                completed_peers_json = excluded.completed_peers_json,
+                expected_peers_json      = excluded.expected_peers_json,
+                completed_peers_json     = excluded.completed_peers_json,
                 dec_party_id             = excluded.dec_party_id,
                 error                    = excluded.error,
                 dismissed                = excluded.dismissed,
@@ -1194,7 +1162,11 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         .bind(row.step_index)
         .bind(row.step_total)
         .bind(&row.config_json)
-        .bind(&row.coordinator_pubkey)
+        .bind(&row.coordinator_participant)
+        .bind(&row.coordinator_party)
+        .bind(&row.proposal_cid)
+        .bind(&row.topology_hashes_json)
+        .bind(&row.member_variant)
         .bind(&row.coordinator_instance)
         .bind(&row.expected_peers_json)
         .bind(&row.completed_peers_json)
@@ -1406,8 +1378,8 @@ mod tests {
         },
         error::Result,
         server::{
-            InvitationType, PendingInvitation, WorkflowKind, WorkflowProgress, WorkflowRole,
-            WorkflowRun,
+            InvitationType, MemberVariant, PendingInvitation, WorkflowKind, WorkflowProgress,
+            WorkflowRole, WorkflowRun,
         },
         workflow::storage::WorkflowStorage,
     };
@@ -1421,10 +1393,7 @@ mod tests {
         Peer {
             participant_id: CantonId::parse(&format!("node{index}::{ns}")).unwrap(),
             name: format!("Node {index}"),
-            address: format!("10.0.0.{index}"),
-            port: 9000 + index as u16,
-            public_key: format!("03{index:02x}abcdef"),
-            party: None,
+            party: CantonId::parse(&format!("node{index}-party::{ns}")).ok(),
         }
     }
 
@@ -1589,7 +1558,19 @@ mod tests {
         let peers = pool.get_all_peers().await?;
         assert_eq!(peers.len(), 2);
         assert_eq!(peers[0].name, "Node 1");
-        assert_eq!(peers[1].port, 9002);
+        assert_eq!(peers[1].party, test_peer(2).party);
+
+        // A peer without a node party is stored and read back as such.
+        let mut tx = pool.begin_transaction().await?;
+        tx.insert_peer(&Peer {
+            party: None,
+            ..test_peer(3)
+        })
+        .await?;
+        Commitable::commit(tx).await?;
+        let peers = pool.get_all_peers().await?;
+        assert_eq!(peers.len(), 3);
+        assert!(peers[2].party.is_none());
 
         Ok(())
     }
@@ -1605,22 +1586,6 @@ mod tests {
 
         assert!(pool.get_peer(&id).await?.is_some());
         assert!(pool.get_peer("nonexistent::1220bb").await?.is_none());
-
-        Ok(())
-    }
-
-    #[sqlx::test(migrator = "MIGRATOR")]
-    async fn test_get_peer_by_public_key(pool: SqlitePool) -> Result {
-        let mut tx = pool.begin_transaction().await?;
-        tx.insert_peer(&test_peer(1)).await?;
-        tx.insert_peer(&test_peer(2)).await?;
-        Commitable::commit(tx).await?;
-
-        let found = pool.get_peer_by_public_key("0301abcdef").await?;
-        assert!(found.is_some());
-        assert_eq!(found.unwrap().name, "Node 1");
-
-        assert!(pool.get_peer_by_public_key("nonexistent").await?.is_none());
 
         Ok(())
     }
@@ -2535,11 +2500,14 @@ mod tests {
         assert!(pool.get_all_pending_invitations().await?.is_empty());
 
         let inv_a = PendingInvitation {
-            id: "onboarding-aaaaaaaaaaaaaaaa".to_string(),
+            id: "00aaaaaaaaaaaaaaaa".to_string(),
             invitation_type: InvitationType::Onboarding,
-            coordinator_pubkey: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            coordinator_participant: format!("node1::{TEST_NS}"),
+            coordinator_party: CantonId::parse(&format!("node1-party::{TEST_NS}")).ok(),
+            proposal_cid: "00aaaaaaaaaaaaaaaa".to_string(),
             coordinator_name: None,
             received_at: 1000,
+            expires_at: Some(5000),
             prefix: Some("my-party".to_string()),
             participants: vec![
                 CantonId::parse(&format!("node1::{TEST_NS}")).unwrap(),
@@ -2556,11 +2524,14 @@ mod tests {
             workflow_instance: Some("my-party-creation".to_string()),
         };
         let inv_b = PendingInvitation {
-            id: "kick-bbbbbbbbbbbbbbbb".to_string(),
+            id: "00bbbbbbbbbbbbbbbb".to_string(),
             invitation_type: InvitationType::Kick,
-            coordinator_pubkey: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+            coordinator_participant: format!("node2::{TEST_NS}"),
+            coordinator_party: None,
+            proposal_cid: "00bbbbbbbbbbbbbbbb".to_string(),
             coordinator_name: None,
             received_at: 2000,
+            expires_at: None,
             prefix: None,
             participants: Vec::new(),
             dar_filenames: Vec::new(),
@@ -2580,11 +2551,14 @@ mod tests {
         Commitable::commit(tx).await?;
 
         let inv_c = PendingInvitation {
-            id: "dars-cccccccccccccccc".to_string(),
+            id: "00cccccccccccccccc".to_string(),
             invitation_type: InvitationType::Dars,
-            coordinator_pubkey: "cccccccccccccccccccccccccccccccc".to_string(),
+            coordinator_participant: format!("node3::{TEST_NS}"),
+            coordinator_party: None,
+            proposal_cid: "00cccccccccccccccc".to_string(),
             coordinator_name: None,
             received_at: 3000,
+            expires_at: None,
             prefix: None,
             participants: Vec::new(),
             dar_filenames: vec!["app.dar".to_string(), "lib.dar".to_string()],
@@ -2606,9 +2580,18 @@ mod tests {
         assert_eq!(loaded[0].id, inv_a.id);
         assert_eq!(loaded[0].prefix.as_deref(), Some("my-party"));
         assert_eq!(loaded[0].participants.len(), 2);
+        assert_eq!(
+            loaded[0].coordinator_participant,
+            inv_a.coordinator_participant
+        );
+        assert_eq!(loaded[0].coordinator_party, inv_a.coordinator_party);
+        assert_eq!(loaded[0].proposal_cid, inv_a.id);
+        assert_eq!(loaded[0].expires_at, Some(5000));
         assert_eq!(loaded[1].invitation_type, InvitationType::Kick);
         assert!(loaded[1].prefix.is_none());
         assert!(loaded[1].participants.is_empty());
+        assert!(loaded[1].coordinator_party.is_none());
+        assert!(loaded[1].expires_at.is_none());
         assert_eq!(loaded[2].invitation_type, InvitationType::Dars);
         assert_eq!(loaded[2].dar_filenames, vec!["app.dar", "lib.dar"]);
 
@@ -2618,14 +2601,8 @@ mod tests {
         assert_eq!(pool.get_all_pending_invitations().await?.len(), 2);
 
         let mut tx = pool.begin_transaction().await?;
-        tx.delete_pending_invitations_by_coordinator(&inv_b.coordinator_pubkey)
-            .await?;
-        Commitable::commit(tx).await?;
-        assert_eq!(pool.get_all_pending_invitations().await?.len(), 1);
-
-        let mut tx = pool.begin_transaction().await?;
-        tx.delete_pending_invitations_by_coordinator(&inv_c.coordinator_pubkey)
-            .await?;
+        tx.delete_pending_invitation(&inv_b.id).await?;
+        tx.delete_pending_invitation(&inv_c.id).await?;
         Commitable::commit(tx).await?;
         assert!(pool.get_all_pending_invitations().await?.is_empty());
 
@@ -2638,11 +2615,14 @@ mod tests {
         // the peer card is as rich as the coordinator's. Confirm all three
         // round-trip through the DB (validates migration 000011).
         let inv = PendingInvitation {
-            id: "contracts-dddddddddddddddd".to_string(),
+            id: "00dddddddddddddddd".to_string(),
             invitation_type: InvitationType::Contracts,
-            coordinator_pubkey: "dddddddddddddddddddddddddddddddd".to_string(),
+            coordinator_participant: format!("node4::{TEST_NS}"),
+            coordinator_party: None,
+            proposal_cid: "00dddddddddddddddd".to_string(),
             coordinator_name: None,
             received_at: 4000,
+            expires_at: None,
             prefix: None,
             participants: vec![
                 CantonId::parse(&format!("node1::{TEST_NS}")).unwrap(),
@@ -2711,7 +2691,11 @@ mod tests {
             step_index: 0,
             step_total: 7,
             config_json: r#"{"foo":"bar"}"#.to_string(),
-            coordinator_pubkey: Some("aaaa".to_string()),
+            coordinator_participant: Some(format!("node1::{TEST_NS}")),
+            coordinator_party: None,
+            proposal_cid: None,
+            member_variant: None,
+            topology_hashes: Default::default(),
             coordinator_instance: None,
             coordinator_name: None,
             expected_peers: vec![
@@ -2735,6 +2719,125 @@ mod tests {
             created_at: 1000,
             updated_at: 1000,
         }
+    }
+
+    /// Migration 000021: the on-ledger columns the observer drives a run
+    /// from survive a persist/load round-trip through SQLite.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_workflow_run_onledger_columns_roundtrip(pool: SqlitePool) -> Result {
+        let mut run = test_run("peer-addparty-node1-cbtc-add-party-1", "AddParty", "Peer");
+        run.coordinator_party = Some(CantonId::parse(&format!("node1-party::{TEST_NS}"))?);
+        run.proposal_cid = Some("00proposal".to_string());
+        run.member_variant = Some(MemberVariant::Joiner);
+        run.topology_hashes
+            .insert("p2p".to_string(), "1220cd".to_string());
+
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_workflow_run(&run).await?;
+        Commitable::commit(tx).await?;
+
+        let loaded = pool.get_workflow_run(&run.instance_name).await?.unwrap();
+        assert_eq!(loaded.coordinator_participant, run.coordinator_participant);
+        assert_eq!(loaded.coordinator_party, run.coordinator_party);
+        assert_eq!(loaded.proposal_cid.as_deref(), Some("00proposal"));
+        assert_eq!(loaded.member_variant, Some(MemberVariant::Joiner));
+        assert_eq!(loaded.topology_hashes, run.topology_hashes);
+        Ok(())
+    }
+
+    /// Apply the migrations through version 20 with the real migrator, seed
+    /// the tables the 1.x build wrote, then let the full migrator apply
+    /// 000021 and check every statement of design section 8.
+    #[sqlx::test(migrations = false)]
+    async fn migration_000021_rewrites_a_legacy_database(pool: SqlitePool) -> Result {
+        let through_20 = sqlx::migrate::Migrator {
+            migrations: std::borrow::Cow::Owned(
+                MIGRATOR
+                    .iter()
+                    .filter(|m| m.version <= 20)
+                    .cloned()
+                    .collect(),
+            ),
+            ignore_missing: MIGRATOR.ignore_missing,
+            locking: MIGRATOR.locking,
+            no_tx: MIGRATOR.no_tx,
+        };
+        through_20.run(&pool).await?;
+
+        let ns = TEST_NS;
+        sqlx::raw_sql(&format!(
+            "INSERT INTO peers (participant_id, name, address, port, public_key, party)
+             VALUES ('node1::{ns}', 'Node 1', '10.0.0.1', 9001, '0301abcdef', NULL);
+             INSERT INTO workflow_runs (instance_name, kind, role, status, current_step, step_index,
+                 step_total, config_json, coordinator_pubkey, expected_peers_json,
+                 completed_peers_json, dec_party_id, error, dismissed, created_at, updated_at)
+             VALUES
+               ('live', 'Kick', 'Coordinator', 'inprogress', 'WaitingForPeers', 0, 6, '{{}}', NULL,
+                '[]', '[]', NULL, NULL, 0, 1, 1),
+               ('peer-known', 'Kick', 'Peer', 'completed', 'Complete', 5, 6, '{{}}', '0301abcdef',
+                '[]', '[]', NULL, NULL, 0, 1, 1),
+               ('peer-unknown', 'Kick', 'Peer', 'failed', 'Complete', 5, 6, '{{}}', '03ff',
+                '[]', '[]', NULL, 'boom', 0, 1, 1);
+             INSERT INTO pending_invitations (id, invitation_type, coordinator_pubkey, received_at)
+             VALUES ('kick-0301abcdef', 'Kick', '0301abcdef', 1);"
+        ))
+        .execute(&pool)
+        .await?;
+
+        MIGRATOR.run(&pool).await?;
+
+        // 2. The in-progress run is failed with the operator-facing text.
+        let (status, error): (String, Option<String>) =
+            sqlx::query_as("SELECT status, error FROM workflow_runs WHERE instance_name = 'live'")
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(status, "failed");
+        assert!(
+            error
+                .unwrap_or_default()
+                .contains("upgrade. Dismiss this card"),
+            "the interrupted run names the upgrade"
+        );
+
+        // 3 + 4. The pubkey with a peer row became that peer's participant id;
+        //        an unmatched pubkey is left as it was.
+        let (known,): (Option<String>,) = sqlx::query_as(
+            "SELECT coordinator_participant FROM workflow_runs WHERE instance_name = 'peer-known'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(known.as_deref(), Some(format!("node1::{ns}").as_str()));
+        let (unknown,): (Option<String>,) = sqlx::query_as(
+            "SELECT coordinator_participant FROM workflow_runs WHERE instance_name = 'peer-unknown'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(unknown.as_deref(), Some("03ff"));
+
+        // 5. The new run columns exist and read back through the row type.
+        let runs = pool.get_visible_workflow_runs().await?;
+        assert_eq!(runs.len(), 3);
+        assert!(runs.iter().all(|r| r.proposal_cid.is_none()));
+
+        // 6. Invitation cards are gone and the table has the new columns.
+        assert!(pool.get_all_pending_invitations().await?.is_empty());
+        sqlx::query(
+            "SELECT coordinator_participant, coordinator_party, proposal_cid, expires_at              FROM pending_invitations",
+        )
+        .fetch_all(&pool)
+        .await?;
+
+        // 7. The peer columns are gone and the row still reads.
+        let peers = pool.get_all_peers().await?;
+        assert_eq!(peers.len(), 1);
+        assert!(peers[0].party.is_none());
+        let columns: Vec<(String,)> =
+            sqlx::query_as("SELECT name FROM pragma_table_info('peers') ORDER BY name")
+                .fetch_all(&pool)
+                .await?;
+        let names: Vec<&str> = columns.iter().map(|c| c.0.as_str()).collect();
+        assert_eq!(names, ["name", "participant_id", "party"]);
+        Ok(())
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
@@ -3215,76 +3318,6 @@ mod tests {
         let b_participants = pool.get_all_dec_party_participants("net-b").await?;
         assert_eq!(b_participants.len(), 2);
         assert!(b_participants.iter().all(|p| p.dec_party_id == party_b_str));
-
-        Ok(())
-    }
-
-    // ====================================================================
-    // delete_pending_invitations_by_type_and_coordinator
-    // ====================================================================
-
-    #[sqlx::test(migrator = "MIGRATOR")]
-    async fn test_delete_pending_invitations_by_type_and_coordinator(pool: SqlitePool) -> Result {
-        let coordinator = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string();
-
-        // Two invites from the SAME coordinator, DIFFERENT invitation_type.
-        let onboarding = PendingInvitation {
-            id: "onboarding-eeeeeeeeeeeeeeee".to_string(),
-            invitation_type: InvitationType::Onboarding,
-            coordinator_pubkey: coordinator.clone(),
-            coordinator_name: None,
-            received_at: 1000,
-            prefix: Some("my-party".to_string()),
-            participants: Vec::new(),
-            dar_filenames: Vec::new(),
-            dar_hashes: Vec::new(),
-            kicked_participant: None,
-            new_participant: None,
-            new_threshold: None,
-            previous_threshold: None,
-            dec_party_id: None,
-            package_names: Vec::new(),
-            workflow_instance: None,
-        };
-        let dars = PendingInvitation {
-            id: "dars-eeeeeeeeeeeeeeee".to_string(),
-            invitation_type: InvitationType::Dars,
-            coordinator_pubkey: coordinator.clone(),
-            coordinator_name: None,
-            received_at: 2000,
-            prefix: None,
-            participants: Vec::new(),
-            dar_filenames: vec!["app.dar".to_string()],
-            dar_hashes: Vec::new(),
-            kicked_participant: None,
-            new_participant: None,
-            new_threshold: None,
-            previous_threshold: None,
-            dec_party_id: None,
-            package_names: Vec::new(),
-            workflow_instance: None,
-        };
-
-        let mut tx = pool.begin_transaction().await?;
-        tx.upsert_pending_invitation(&onboarding).await?;
-        tx.upsert_pending_invitation(&dars).await?;
-        Commitable::commit(tx).await?;
-        assert_eq!(pool.get_all_pending_invitations().await?.len(), 2);
-
-        // Delete only the Onboarding type → the Dars invite from the same
-        // coordinator must survive (proves the `AND invitation_type` clause).
-        let mut tx = pool.begin_transaction().await?;
-        tx.delete_pending_invitations_by_type_and_coordinator(
-            InvitationType::Onboarding,
-            &coordinator,
-        )
-        .await?;
-        Commitable::commit(tx).await?;
-
-        let remaining = pool.get_all_pending_invitations().await?;
-        assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].id, dars.id);
-        assert_eq!(remaining[0].invitation_type, InvitationType::Dars);
 
         Ok(())
     }

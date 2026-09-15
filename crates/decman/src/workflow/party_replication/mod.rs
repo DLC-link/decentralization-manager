@@ -70,8 +70,8 @@ pub struct ReplicationArtifacts {
 /// Where a replication's durable artefacts live.
 ///
 /// `workflow_artifacts.instance_name` is a foreign key into `workflow_runs`,
-/// which suits the Noise workflows — every artefact belongs to a run the
-/// coordinator persisted. The tenant API has no run, so its artefacts have
+/// which suits the add-party workflow — every artefact belongs to a run row
+/// the engine persisted. The tenant API has no run, so its artefacts have
 /// nothing to point at and the foreign key refuses them. They go to a
 /// table of the same shape without one.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -149,8 +149,8 @@ impl ReplicationTarget {
     ) -> Result<bool> {
         match self.store {
             ArtifactStore::WorkflowRun => {
-                // The Noise workflows serialise their steps through the
-                // coordinator, so a read-then-write is not racing anything.
+                // The observer drives one run under one lock, so a
+                // read-then-write is not racing anything.
                 if db
                     .read_artifact(&self.instance_name, kind, scope)
                     .await?

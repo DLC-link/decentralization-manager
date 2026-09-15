@@ -3,9 +3,9 @@
 //! There are two distinct notions of "version" here, and they must not be
 //! conflated:
 //!
-//! * [`SEMVER`] is the Cargo package version. It is the *compatibility*
-//!   version peers exchange over Noise and gate on (`MIN_PEER_VERSION`), so it
-//!   must stay a parseable semver and is compiled in via `CARGO_PKG_VERSION`.
+//! * [`SEMVER`] is the Cargo package version. Every node publishes it in its
+//!   on-ledger `DecmanNode` registry entry, so it must stay a parseable
+//!   semver and is compiled in via `CARGO_PKG_VERSION`.
 //! * [`build_version`] and [`build_time`] are *display only*. CI passes the
 //!   pushed image tag (releases) or short commit SHA (per-commit dev images)
 //!   plus a build timestamp as Docker `--build-arg`s, which the runtime

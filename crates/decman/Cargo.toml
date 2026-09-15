@@ -1,6 +1,6 @@
 [package]
 name = "decman"
-version = "1.8.0"
+version = "2.0.0"
 edition = "2024"
 license = "Apache-2.0"
 
@@ -55,7 +55,6 @@ futures = { workspace = true }
 hex = { workspace = true }
 http = { workspace = true }
 hyper = { workspace = true }
-hyper-noise = { workspace = true }
 jsonwebtoken = { workspace = true }
 mime_guess = { workspace = true }
 p256 = { workspace = true }
@@ -64,7 +63,6 @@ prost = { workspace = true }
 prost-types = { workspace = true }
 reqwest = { version = "0.13", features = ["form", "json"] }
 rust-embed = { workspace = true }
-secp256k1 = { workspace = true }
 semver = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -72,7 +70,6 @@ sha2 = { workspace = true }
 sqlx = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-tokio-noise = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -102,7 +99,6 @@ insta = { workspace = true }
 # (tests/common/tls_proxy.rs), which puts a Canton admin API behind TLS so the
 # TLS client path has coverage on a plaintext localnet. Test-only.
 rcgen = { workspace = true }
-static_assertions = { workspace = true }
 tempfile = { workspace = true }
 tokio-rustls = { workspace = true }
 wiremock = { workspace = true }

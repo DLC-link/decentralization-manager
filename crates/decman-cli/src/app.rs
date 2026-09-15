@@ -21,8 +21,9 @@ use common::types::{
 
 use crate::api::{
     AuthSettings, ChainAuditEntry, DecmanClient, DiscoverResult, DomainGovAction, ExecuteParams,
-    FeedItem, GovAction, GovConfirmation, GovState, GovernanceConfirmations, Holding, KeyStatus,
-    KnownMember, NetworkInfo, PartyAuthStatus, PartyConfigView, PeerEntry, PeerView, party_name,
+    FeedItem, GovAction, GovConfirmation, GovState, GovernanceConfirmations, Holding, KnownMember,
+    NetworkInfo, NodeIdentityView, PartyAuthStatus, PartyConfigView, PeerEntry, PeerView,
+    party_name,
 };
 use crate::composer::{
     self, Composer, ComposerContext, ComposerSubmit, FieldKind, PickerOption, PickerSource,
@@ -91,11 +92,12 @@ pub fn run_login(terminal: &mut DefaultTerminal, profiles: &[Profile]) -> Result
     }
 }
 
-/// How often the background thread re-probes peers (matches the web frontend).
+/// How often the background thread re-reads the peer status (matches the web
+/// frontend).
 pub const PEER_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Longest the input loop blocks before redrawing, so background updates
-/// (loaded data, live peer latency, spinner) appear without a keypress.
+/// (loaded data, fresh peer status, spinner) appear without a keypress.
 const TICK: Duration = Duration::from_millis(200);
 
 /// A request to the background fetcher.
@@ -195,10 +197,11 @@ pub enum Update {
     PickerOptions(Vec<(PickerSource, Result<Vec<PickerOption>, String>)>),
 }
 
-/// This node's key status and DSO network identity, each fetched independently
-/// so one failing (e.g. the DSO API is unreachable) does not hide the other.
+/// This node's coordination identity and DSO network identity, each fetched
+/// independently so one failing (e.g. the DSO API is unreachable) does not hide
+/// the other.
 pub struct NodeInfoData {
-    pub key: Result<KeyStatus, String>,
+    pub identity: Result<NodeIdentityView, String>,
     pub network: Result<NetworkInfo, String>,
 }
 
@@ -381,11 +384,8 @@ pub struct GovActionRequest {
 pub struct PeerForm {
     pub participant_id: String,
     pub name: String,
-    pub address: String,
-    pub port: String,
-    pub public_key: String,
     pub party: String,
-    /// 0..=5 select a field; 6 is the submit row.
+    /// 0..=2 select a field; 3 is the submit row.
     pub cursor: usize,
 }
 
@@ -394,9 +394,6 @@ impl PeerForm {
         Self {
             participant_id: String::new(),
             name: String::new(),
-            address: String::new(),
-            port: String::new(),
-            public_key: String::new(),
             party: String::new(),
             cursor: 0,
         }
@@ -899,7 +896,7 @@ fn handle_request(client: &mut DecmanClient, request: Request) -> Update {
             Update::Discovered(client.discover_member_party(*body).map_err(err))
         }
         Request::NodeInfo => Update::NodeInfo(Box::new(NodeInfoData {
-            key: client.fetch_key_status().map_err(err),
+            identity: client.fetch_node_identity().map_err(err),
             network: client.fetch_network_info().map_err(err),
         })),
         Request::PickerOptions { party_id, sources } => {
@@ -1074,30 +1071,20 @@ fn confirmation_cids(confirmations: &[GovConfirmation]) -> Vec<String> {
 
 /// Validate the add-peer form into a [`PeerEntry`], or return the index of the
 /// first invalid field so the cursor can land on it. Required: participant id
-/// (0), address (2), a non-zero `u16` port (3) and public key (4); name (1) and
-/// party (5) are optional.
+/// (0) and node party (2); a peer without a node party cannot be invited to a
+/// workflow (design D2). The name (1) is optional.
 fn validate_peer_form(form: &PeerForm) -> Result<PeerEntry, usize> {
     if form.participant_id.trim().is_empty() {
         return Err(0);
     }
-    if form.address.trim().is_empty() {
+    let party = form.party.trim();
+    if party.is_empty() {
         return Err(2);
     }
-    let port: u16 = match form.port.trim().parse() {
-        Ok(port) if port > 0 => port,
-        _ => return Err(3),
-    };
-    if form.public_key.trim().is_empty() {
-        return Err(4);
-    }
-    let party = form.party.trim();
     Ok(PeerEntry {
         participant_id: form.participant_id.trim().to_owned(),
         name: form.name.trim().to_owned(),
-        address: form.address.trim().to_owned(),
-        port,
-        public_key: form.public_key.trim().to_owned(),
-        party: (!party.is_empty()).then(|| party.to_owned()),
+        party: Some(party.to_owned()),
     })
 }
 
@@ -1111,9 +1098,6 @@ fn peers_to_json(peers: &[PeerEntry]) -> Value {
                 json!({
                     "participant_id": peer.participant_id,
                     "name": peer.name,
-                    "address": peer.address,
-                    "port": peer.port,
-                    "public_key": peer.public_key,
                     "party": peer.party,
                 })
             })
@@ -2243,28 +2227,22 @@ impl App {
                 Some(form) => match key.code {
                     KeyCode::Esc => state.adding = None,
                     KeyCode::Up => form.cursor = form.cursor.saturating_sub(1),
-                    KeyCode::Down | KeyCode::Tab if form.cursor < 6 => form.cursor += 1,
-                    KeyCode::Enter if form.cursor >= 6 => match validate_peer_form(form) {
+                    KeyCode::Down | KeyCode::Tab if form.cursor < 3 => form.cursor += 1,
+                    KeyCode::Enter if form.cursor >= 3 => match validate_peer_form(form) {
                         // Only add a valid peer; otherwise land the cursor on
-                        // the first invalid field rather than writing port 0.
+                        // the first invalid field rather than writing a peer
+                        // that no workflow can invite.
                         Ok(peer) => {
                             state.peers.push(peer);
                             state.adding = None;
                         }
                         Err(invalid_field) => form.cursor = invalid_field,
                     },
-                    KeyCode::Enter if form.cursor < 6 => form.cursor += 1,
+                    KeyCode::Enter if form.cursor < 3 => form.cursor += 1,
                     KeyCode::Char(c) => match form.cursor {
                         0 => form.participant_id.push(c),
                         1 => form.name.push(c),
-                        2 => form.address.push(c),
-                        3 => {
-                            if c.is_ascii_digit() {
-                                form.port.push(c);
-                            }
-                        }
-                        4 => form.public_key.push(c),
-                        5 => form.party.push(c),
+                        2 => form.party.push(c),
                         _ => {}
                     },
                     KeyCode::Backspace => match form.cursor {
@@ -2275,15 +2253,6 @@ impl App {
                             form.name.pop();
                         }
                         2 => {
-                            form.address.pop();
-                        }
-                        3 => {
-                            form.port.pop();
-                        }
-                        4 => {
-                            form.public_key.pop();
-                        }
-                        5 => {
                             form.party.pop();
                         }
                         _ => {}
@@ -3607,32 +3576,45 @@ mod tests {
     }
 
     #[test]
-    fn validate_peer_form_rejects_blank_and_zero_port() {
+    fn validate_peer_form_requires_id_and_party() {
         let full = PeerForm {
             participant_id: "alpha::1220".to_owned(),
             name: "alpha".to_owned(),
-            address: "10.0.0.1".to_owned(),
-            port: "9001".to_owned(),
-            public_key: "abcd".to_owned(),
-            party: String::new(),
+            party: "alpha-node::1220".to_owned(),
             cursor: 0,
         };
         match validate_peer_form(&full) {
-            Ok(peer) => assert_eq!(peer.port, 9001),
+            Ok(peer) => {
+                assert_eq!(peer.participant_id, "alpha::1220");
+                assert_eq!(peer.party.as_deref(), Some("alpha-node::1220"));
+            }
             Err(field) => panic!("expected a valid peer, got invalid field {field}"),
         }
 
-        // Blank port → cursor should land on the port field (index 3).
-        let mut blank_port = full;
-        blank_port.port = String::new();
-        assert!(matches!(validate_peer_form(&blank_port), Err(3)));
+        // Blank party → cursor lands on the party field (index 2).
+        let mut no_party = full;
+        no_party.party = String::new();
+        assert!(matches!(validate_peer_form(&no_party), Err(2)));
 
         // Missing participant id → field 0.
         let mut no_id = PeerForm::blank();
-        no_id.address = "10.0.0.1".to_owned();
-        no_id.port = "9001".to_owned();
-        no_id.public_key = "abcd".to_owned();
+        no_id.party = "alpha-node::1220".to_owned();
         assert!(matches!(validate_peer_form(&no_id), Err(0)));
+    }
+
+    #[test]
+    fn peers_to_json_carries_the_three_exchanged_values() {
+        let peers = [PeerEntry {
+            participant_id: "alpha::1220".to_owned(),
+            name: "alpha".to_owned(),
+            party: Some("alpha-node::1220".to_owned()),
+        }];
+        let json = peers_to_json(&peers);
+        let entry = &json.as_array().expect("array")[0];
+        assert_eq!(entry["participant_id"], "alpha::1220");
+        assert_eq!(entry["name"], "alpha");
+        assert_eq!(entry["party"], "alpha-node::1220");
+        assert!(entry.get("address").is_none());
     }
 
     fn party_config_form() -> PartyConfigForm {

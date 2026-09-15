@@ -17,15 +17,16 @@ ignore = [
   #
   # Unfixable by updating: 0.3.27 is the last 0.3.x release ever published and
   # the patch landed only in 0.4.16. It arrives via actix-http (actix-web 4,
-  # `http2` on by default) and via hyper 0.14, which hyper-noise 0.0.3 requires
-  # with `features = ["full"]` — so the feature cannot be switched off from
-  # here either. Unlike the other entries in this file, cargo-deny flags this
-  # one too, i.e. it really is in the compiled graph, not just the lockfile.
+  # `http2` on by default) and via decman's own hyper 0.14, which no longer has
+  # a caller and is kept only until a follow-up drops it. Dropping hyper does
+  # not clear the advisory, because actix-http still pulls h2 0.3. Unlike the
+  # other entries in this file, cargo-deny flags this one too, i.e. it really
+  # is in the compiled graph, not just the lockfile.
   #
   # The separate h2 0.4 instance (AWS SDK / hyper 1.x) is fixed by the 0.4.16
   # bump that accompanies this ignore.
   #
-  # Drop when hyper-noise moves off hyper 0.14 or actix-web ships an h2 0.4
-  # release. Tracked in #351.
+  # Drop when decman moves to hyper 1.x or actix-web ships an h2 0.4 release.
+  # Tracked in #351.
   "RUSTSEC-2026-0258",
 ]

@@ -62,7 +62,7 @@ cargo build --profile release-ci
 # ---------------------------------------------------------------------------
 # Source devnet.env.sh — it sources common.sh itself,
 # validates Keycloak credentials, exports all per-participant port variables
-# (P{1,2,3}_HTTP, P{1,2,3}_NOISE, P{1,2,3}_CANTON_*), exports BINARY and
+# (P{1,2,3}_HTTP, P{1,2,3}_CANTON_*), exports BINARY and
 # DEV_DIR, and defines start_canton_tunnels / stop_canton_tunnels,
 # download_localnet / start_localnet / stop_localnet, and cleanup.
 # common.sh defines setup_directories, start_nodes, configure_peers, stop_nodes,
@@ -104,7 +104,8 @@ trap _bring_up_failure_cleanup EXIT
 #   start_localnet     → opens kubectl port-forwards to Canton participants
 #   setup_directories  → mkdirs $DEV_DIR/participant-{1,2,3}
 #   start_nodes        → spawns 3 DecMan processes, populates PIDS[]
-#   configure_peers    → posts peer config + restarts nodes
+#   configure_peers    → sets node identities, posts peer config, waits for
+#                        the registry to converge
 # ---------------------------------------------------------------------------
 download_localnet
 start_localnet

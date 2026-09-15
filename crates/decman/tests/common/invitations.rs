@@ -1,5 +1,8 @@
 use anyhow::Context;
-use common::{api::PendingInvitationsResponse, types::InvitationType};
+use common::{
+    api::PendingInvitationsResponse,
+    types::{InvitationType, PendingInvitation},
+};
 use serde_json::json;
 
 use super::Fixture;
@@ -11,6 +14,8 @@ use super::Fixture;
 pub struct InvitationIds {
     pub p2: Option<String>,
     pub p3: Option<String>,
+    /// The coordinator's run id, when a phase needs to name the run itself.
+    pub run_id: Option<String>,
 }
 
 /// Single-shot probe for a pending invitation of `invitation_type`.
@@ -28,6 +33,21 @@ pub async fn probe_pending_invitation(
         .into_iter()
         .find(|i| i.invitation_type == invitation_type)
         .map(|i| i.id)
+}
+
+/// The whole card, for a caller that needs more than the id.
+///
+/// The DARs flow needs `workflow_instance`: a member uploads its own copy of
+/// each pinned DAR, and the upload names the run whose pins it must match.
+pub async fn probe_pending_invitation_card(
+    f: &Fixture,
+    port: u16,
+    invitation_type: InvitationType,
+) -> Option<PendingInvitation> {
+    let r: PendingInvitationsResponse = f.probe_get_json(port, "/invitations").await?;
+    r.invitations
+        .into_iter()
+        .find(|i| i.invitation_type == invitation_type)
 }
 
 pub async fn post_accept_invitation(
