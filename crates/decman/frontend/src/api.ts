@@ -26,12 +26,15 @@ export async function authenticatedFetch(
   }
   const response = await fetch(input, { ...init, headers });
   if (token && response.status === 401) {
-    const renewed = await refreshAccessToken();
-    if (renewed) {
+    const renewal = await refreshAccessToken();
+    if (renewal.status === "renewed") {
       const retryHeaders = new Headers(init?.headers);
-      retryHeaders.set("Authorization", `Bearer ${renewed}`);
+      retryHeaders.set("Authorization", `Bearer ${renewal.token}`);
       return fetch(input, { ...init, headers: retryHeaders });
     }
+    // `stale` means another session owns the page now. This 401 answers a
+    // request from the session before it, so it may not touch the new one.
+    if (renewal.status === "stale") return response;
     clearToken();
     window.location.reload();
   }

@@ -54,6 +54,11 @@ function KeycloakAuthProvider({
   const sessionLive = useRef(true);
 
   useEffect(() => {
+    // Reopened before the guard below: StrictMode runs effect, cleanup, effect,
+    // and the second pass returns here early. Left closed, the `init()` still
+    // running from the first pass would register a refresher that can never
+    // renew, and every 401 in a dev build would reload the page.
+    sessionLive.current = true;
     if (initStarted.current) return;
     initStarted.current = true;
 
@@ -133,8 +138,10 @@ function KeycloakAuthProvider({
               10_000,
             );
             refreshTimer.current = setTimeout(() => {
+              if (!sessionLive.current) return;
               kc.updateToken(60)
                 .then((refreshed: boolean) => {
+                  if (!sessionLive.current) return;
                   if (refreshed && kc.token) {
                     setToken(kc.token);
                     if (kc.refreshToken) setRefreshToken(kc.refreshToken);
@@ -176,6 +183,7 @@ function KeycloakAuthProvider({
 
   const logout = useCallback(() => {
     sessionLive.current = false;
+    clearTimeout(refreshTimer.current);
     setTokenRefresher(null);
     clearToken();
     setTokenState(null);

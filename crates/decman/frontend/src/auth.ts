@@ -29,8 +29,18 @@ export function setIdToken(token: string): void {
 /** Renews the access token and returns it, or null if the session is gone. */
 type TokenRefresher = () => Promise<string | null>;
 
+/**
+ * Outcome of a renewal. `stale` is not a failure: the session was replaced
+ * while the renewal ran, so the answer belongs to nobody and the caller must
+ * leave the new session alone rather than log it out.
+ */
+export type TokenRenewal =
+  | { status: "renewed"; token: string }
+  | { status: "failed" }
+  | { status: "stale" };
+
 let refresher: TokenRefresher | null = null;
-let refreshInFlight: Promise<string | null> | null = null;
+let refreshInFlight: Promise<TokenRenewal> | null = null;
 let session = 0;
 
 /**
@@ -49,17 +59,17 @@ export function setTokenRefresher(fn: TokenRefresher | null): void {
  * Renew the access token, sharing one refresh between concurrent callers:
  * every poller on the page hits its 401 in the same second.
  */
-export function refreshAccessToken(): Promise<string | null> {
+export function refreshAccessToken(): Promise<TokenRenewal> {
   const renew = refresher;
-  if (!renew) return Promise.resolve(null);
+  if (!renew) return Promise.resolve({ status: "failed" });
   if (!refreshInFlight) {
     const mine = session;
     refreshInFlight = renew()
       .catch(() => null)
-      .then((token) => {
-        if (mine !== session) return null;
+      .then((token): TokenRenewal => {
+        if (mine !== session) return { status: "stale" };
         refreshInFlight = null;
-        return token;
+        return token ? { status: "renewed", token } : { status: "failed" };
       });
   }
   return refreshInFlight;
