@@ -31,13 +31,18 @@ type TokenRefresher = () => Promise<string | null>;
 
 let refresher: TokenRefresher | null = null;
 let refreshInFlight: Promise<string | null> | null = null;
+let session = 0;
 
 /**
  * Register how `authenticatedFetch` renews an expired token. Only the auth
- * provider can do it — it owns the Keycloak / Auth0 client.
+ * provider can do it — it owns the Keycloak / Auth0 client. Registering
+ * (`null` on logout) starts a new session, so a refresh still running for the
+ * old one cannot hand its token to the new one.
  */
 export function setTokenRefresher(fn: TokenRefresher | null): void {
   refresher = fn;
+  session += 1;
+  refreshInFlight = null;
 }
 
 /**
@@ -45,11 +50,17 @@ export function setTokenRefresher(fn: TokenRefresher | null): void {
  * every poller on the page hits its 401 in the same second.
  */
 export function refreshAccessToken(): Promise<string | null> {
-  if (!refresher) return Promise.resolve(null);
+  const renew = refresher;
+  if (!renew) return Promise.resolve(null);
   if (!refreshInFlight) {
-    refreshInFlight = refresher().finally(() => {
-      refreshInFlight = null;
-    });
+    const mine = session;
+    refreshInFlight = renew()
+      .catch(() => null)
+      .then((token) => {
+        if (mine !== session) return null;
+        refreshInFlight = null;
+        return token;
+      });
   }
   return refreshInFlight;
 }

@@ -49,6 +49,9 @@ function KeycloakAuthProvider({
   const [loading, setLoading] = useState(true);
   const initStarted = useRef(false);
   const refreshTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  // Goes false the moment the session ends, so a renewal that is already in
+  // flight cannot write the old user's token back after a logout.
+  const sessionLive = useRef(true);
 
   useEffect(() => {
     if (initStarted.current) return;
@@ -108,12 +111,13 @@ function KeycloakAuthProvider({
           // throttled background tab or a sleeping laptop fires it late, and
           // whatever request lands first must not lose the session over it.
           setTokenRefresher(async () => {
+            if (!sessionLive.current) return null;
             try {
               await kc.updateToken(30);
             } catch {
               return null;
             }
-            if (!kc.token) return null;
+            if (!sessionLive.current || !kc.token) return null;
             setToken(kc.token);
             if (kc.refreshToken) setRefreshToken(kc.refreshToken);
             if (kc.idToken) setIdToken(kc.idToken);
@@ -165,11 +169,14 @@ function KeycloakAuthProvider({
     init();
     return () => {
       clearTimeout(refreshTimer.current);
+      sessionLive.current = false;
       setTokenRefresher(null);
     };
   }, [config]);
 
   const logout = useCallback(() => {
+    sessionLive.current = false;
+    setTokenRefresher(null);
     clearToken();
     setTokenState(null);
     if (keycloak) {
@@ -201,6 +208,9 @@ function Auth0AuthProvider({ children }: { children: ReactNode }) {
   } = useAuth0();
   const [token, setTokenState] = useState<string | null>(getToken());
   const [tokenLoading, setTokenLoading] = useState(true);
+  // Same session latch as the Keycloak provider: a renewal already in flight
+  // must not write the old user's token back after a logout.
+  const sessionLive = useRef(true);
 
   useEffect(() => {
     if (isLoading) return;
@@ -212,9 +222,12 @@ function Auth0AuthProvider({ children }: { children: ReactNode }) {
       return;
     }
 
+    sessionLive.current = true;
     setTokenRefresher(async () => {
+      if (!sessionLive.current) return null;
       try {
         const t = await getAccessTokenSilently({ cacheMode: "off" });
+        if (!sessionLive.current) return null;
         setToken(t);
         setTokenState(t);
         return t;
@@ -235,10 +248,15 @@ function Auth0AuthProvider({ children }: { children: ReactNode }) {
       })
       .finally(() => setTokenLoading(false));
 
-    return () => setTokenRefresher(null);
+    return () => {
+      sessionLive.current = false;
+      setTokenRefresher(null);
+    };
   }, [isAuthenticated, isLoading, getAccessTokenSilently]);
 
   const logout = useCallback(() => {
+    sessionLive.current = false;
+    setTokenRefresher(null);
     clearToken();
     setTokenState(null);
     auth0Logout({ logoutParams: { returnTo: window.location.origin } });
