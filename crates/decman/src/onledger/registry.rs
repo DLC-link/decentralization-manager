@@ -305,26 +305,59 @@ impl PublishOutcome {
     }
 }
 
+/// Whether a submission failed because the contract it named was already
+/// archived. Canton reports this as `LOCAL_VERDICT_INACTIVE_CONTRACTS`; the
+/// gRPC status code varies by path, so the error identifier is what is matched.
+fn is_inactive_contract(error: &anyhow::Error) -> bool {
+    format!("{error:#}").contains("LOCAL_VERDICT_INACTIVE_CONTRACTS")
+}
+
 /// This node's current `DecmanNode`, the newest by offset when several exist.
 ///
+/// A duplicate is self-inflicted: `submit_and_wait` returns before this node's
+/// own create is guaranteed visible to the next active-contract read, so a tick
+/// that reads too early creates a second entry. Peers would then see two entries
+/// for one node and read whichever they met first, so the extras are retired
+/// here rather than merely reported.
+///
 /// # Errors
-/// Returns an error when the read fails.
+/// Returns an error when the read fails. Retiring an extra is best effort: a
+/// failure there leaves the duplicate for the next tick.
 pub async fn read_own_entry(
     client: &CoordinationClient,
 ) -> Result<Option<ActiveContract<DecmanNodeRecord>>> {
-    let mine: Vec<_> = client
+    let mut mine: Vec<_> = client
         .list_active::<DecmanNodeRecord>()
         .await?
         .into_iter()
         .filter(|c| c.record.node == *client.node_party())
         .collect();
-    if mine.len() > 1 {
+    mine.sort_by_key(|c| c.offset);
+    let newest = mine.pop();
+    if !mine.is_empty() {
         tracing::warn!(
-            count = mine.len(),
-            "several DecmanNode entries signed by this node are active; using the newest"
+            extra = mine.len(),
+            "several DecmanNode entries signed by this node are active; retiring the older ones"
         );
+        for stale in &mine {
+            if let Err(e) = client
+                .exercise(
+                    CoordinationTemplate::DecmanNode,
+                    &stale.contract_id,
+                    choices::DECMAN_NODE_RETIRE,
+                    unit_argument(),
+                )
+                .await
+            {
+                tracing::warn!(
+                    contract_id = %stale.contract_id,
+                    error = %format!("{e:#}"),
+                    "could not retire a duplicate DecmanNode entry"
+                );
+            }
+        }
     }
-    Ok(mine.into_iter().max_by_key(|c| c.offset))
+    Ok(newest)
 }
 
 /// Create this node's entry when absent, or `DecmanNode_Update` it when any
@@ -351,7 +384,7 @@ pub async fn publish_or_update(
         }
         Some(current) if needs_update(&current.record, desired) => {
             let args = DecmanNodeUpdateArgs::from_desired(desired);
-            let outcome = client
+            let outcome = match client
                 .exercise(
                     CoordinationTemplate::DecmanNode,
                     &current.contract_id,
@@ -359,7 +392,17 @@ pub async fn publish_or_update(
                     args.to_value(),
                 )
                 .await
-                .context("DecmanNode_Update")?;
+            {
+                Ok(outcome) => outcome,
+                // The heartbeat consumes and re-creates the same contract, so a
+                // tick that read the entry just before one landed exercises an
+                // archived id. The next tick reads the new entry and updates it.
+                Err(e) if is_inactive_contract(&e) => {
+                    tracing::debug!("DecmanNode moved under the update; retrying next tick");
+                    return Ok(PublishOutcome::Unchanged(current.contract_id));
+                }
+                Err(e) => return Err(e.context("DecmanNode_Update")),
+            };
             let cid = outcome
                 .created_contract_id
                 .unwrap_or_else(|| current.contract_id.clone());
