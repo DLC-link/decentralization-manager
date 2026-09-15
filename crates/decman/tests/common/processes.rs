@@ -188,7 +188,12 @@ pub async fn wait_for_server(http_port: u16, deadline: Duration) -> Result<()> {
 /// Returns the new PID; also appends it to `$DEV_DIR/restarted-pids` so the
 /// bash cleanup trap can SIGKILL it if cargo test exits abnormally.
 pub async fn spawn_node(spawn: &NodeSpawn, restarted_pids_file: &PathBuf) -> Result<u32> {
-    let rust_log = std::env::var("RUST_LOG").unwrap_or_else(|_| "dec_party_manager=info".into());
+    // A respawned node keeps the node log level, not the runner's quiet
+    // preset. Its file is the only record of what it did after a chaos
+    // restart, and the chaos phases are where that matters most.
+    // integration-tests/common.sh sets the same default.
+    let rust_log = std::env::var("DECPM_NODE_RUST_LOG")
+        .unwrap_or_else(|_| "dec_party_manager=info,dec_party_manager::onledger=debug".into());
     // Same per-participant log file as bash bringup (integration-tests/common.sh::start_nodes).
     // Open in append mode so chaos-phase respawns accumulate into one timeline
     // per participant, matching the bash side's `>> "$log_file" 2>&1`.

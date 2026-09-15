@@ -150,6 +150,67 @@ impl Fixture {
         Ok(body)
     }
 
+    /// GET a binary body. The ACS export streams a gzip file, which the
+    /// operator carries to the joining node by hand.
+    pub async fn get_bytes(&self, port: u16, path: &str) -> anyhow::Result<Vec<u8>> {
+        let jwt = self.refresher.token().await.context("acquire bearer")?;
+        let url = format!("http://localhost:{port}{path}");
+        let res = self
+            .client
+            .get(&url)
+            .header(AUTHORIZATION, format!("Bearer {jwt}"))
+            .send()
+            .await
+            .with_context(|| format!("GET {url}"))?;
+        let status = res.status();
+        let bytes = res
+            .bytes()
+            .await
+            .with_context(|| format!("read body GET {url}"))?;
+        if !status.is_success() {
+            anyhow::bail!(
+                "GET {url} returned {status}: {}",
+                String::from_utf8_lossy(&bytes)
+            );
+        }
+        Ok(bytes.to_vec())
+    }
+
+    /// POST a binary body, the other half of the operator's carry.
+    pub async fn post_bytes<R>(&self, port: u16, path: &str, body: Vec<u8>) -> anyhow::Result<R>
+    where
+        R: DeserializeOwned,
+    {
+        let jwt = self.refresher.token().await.context("acquire bearer")?;
+        let url = format!("http://localhost:{port}{path}");
+        let res = self
+            .client
+            .post(&url)
+            .header(CONTENT_TYPE, "application/gzip")
+            .header(AUTHORIZATION, format!("Bearer {jwt}"))
+            .body(body)
+            .send()
+            .await
+            .with_context(|| format!("POST {url}"))?;
+        let status = res.status();
+        let bytes = res
+            .bytes()
+            .await
+            .with_context(|| format!("read body POST {url}"))?;
+        if !status.is_success() {
+            anyhow::bail!(
+                "POST {url} returned {status}: {}",
+                String::from_utf8_lossy(&bytes)
+            );
+        }
+        serde_json::from_slice::<R>(&bytes).with_context(|| {
+            format!(
+                "deserialize POST {url}: {}",
+                String::from_utf8_lossy(&bytes)
+            )
+        })
+    }
+
     pub async fn put_json<B, R>(&self, port: u16, path: &str, body: &B) -> anyhow::Result<R>
     where
         B: Serialize + ?Sized,
