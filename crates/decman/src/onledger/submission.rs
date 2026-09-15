@@ -277,7 +277,7 @@ pub async fn record_time_tolerance_or_default(config: &NodeConfig, synchronizer_
 /// TODO(onledger/mod.rs): `OnLedger` holds the live `WorkflowAuth` in a
 /// private field. Expose it as `OnLedger::auth()` and replace this rebuild,
 /// which authenticates against Keycloak once per call.
-async fn dec_party_credentials(
+pub(crate) async fn dec_party_credentials(
     ol: &OnLedger,
     dec_party_id: &CantonId,
 ) -> Result<PartyAuthCredentials> {

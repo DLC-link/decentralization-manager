@@ -795,7 +795,7 @@ pub struct SpoolFile { path, size_bytes, sha256_hex, package_ids }
 pub fn spool_dir(config) -> PathBuf;                                                        // consts::acs_spool_dir
 pub fn spool_path(config, party, target, activation_serial) -> PathBuf;                     // {prefix}-{namespace}-{target prefix}-{serial}.acs.gz
 pub async fn capture_export_offset(db, config, run, party, joiner, base_serial) -> Result<i64>;
-pub async fn export_snapshot(config, party, target, begin_offset_exclusive, path) -> Result<SpoolFile>;
+pub async fn export_snapshot(config, party, target, begin_offset_exclusive, path, ledger_token: Option<&str>) -> Result<SpoolFile>;
 pub async fn publish_manifest(client, observers, party, target, activation_serial, file) -> Result<String>;
 pub async fn read_manifests(client, party) -> Result<Vec<ActiveContract<AcsManifestRecord>>>;   // implemented
 pub fn verify_manifest(manifest, exporter_hosting, head_p2p, peers, joiner, activation_serial) -> Result<()>;

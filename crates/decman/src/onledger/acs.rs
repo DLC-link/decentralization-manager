@@ -450,11 +450,12 @@ async fn snapshot_package_ids(
     config: &NodeConfig,
     party: &CantonId,
     size_bytes: i64,
+    ledger_token: Option<&str>,
 ) -> Vec<String> {
     if size_bytes == 0 {
         return Vec::new();
     }
-    match collect_party_package_ids(config, &party.to_string(), None).await {
+    match collect_party_package_ids(config, &party.to_string(), ledger_token).await {
         Ok(ids) => ids,
         Err(e) => {
             tracing::warn!(
@@ -493,11 +494,12 @@ pub async fn export_snapshot(
     target: &CantonId,
     begin_offset_exclusive: i64,
     path: &Path,
+    ledger_token: Option<&str>,
 ) -> Result<SpoolFile> {
     let session = open_export_at(config, party, target, begin_offset_exclusive).await?;
     let trailer = spool_session(session, path).await?;
     let size = i64::try_from(trailer.total_len).unwrap_or(i64::MAX);
-    let package_ids = snapshot_package_ids(config, party, size).await;
+    let package_ids = snapshot_package_ids(config, party, size, ledger_token).await;
     tracing::info!(%party, %target, bytes = trailer.total_len, path = %path.display(), "ACS snapshot spooled");
     Ok(spool_file_from(
         path,
@@ -518,11 +520,12 @@ pub async fn export_to_spool(
     db: &SqlitePool,
     replication: &ReplicationTarget,
     path: &Path,
+    ledger_token: Option<&str>,
 ) -> Result<SpoolFile> {
     let session = open_export_session(config, db, replication).await?;
     let trailer = spool_session(session, path).await?;
     let size = i64::try_from(trailer.total_len).unwrap_or(i64::MAX);
-    let package_ids = snapshot_package_ids(config, &replication.party_id, size).await;
+    let package_ids = snapshot_package_ids(config, &replication.party_id, size, ledger_token).await;
     tracing::info!(
         party = %replication.party_id,
         target = %replication.target_participant_id,
@@ -550,15 +553,17 @@ pub async fn spool_or_export(
     db: &SqlitePool,
     replication: &ReplicationTarget,
     path: &Path,
+    ledger_token: Option<&str>,
 ) -> Result<SpoolFile> {
     if fs::try_exists(path).await? {
         let (size, sha256_hex) = hash_file(path).await?;
         let size_i64 = i64::try_from(size).unwrap_or(i64::MAX);
-        let package_ids = snapshot_package_ids(config, &replication.party_id, size_i64).await;
+        let package_ids =
+            snapshot_package_ids(config, &replication.party_id, size_i64, ledger_token).await;
         tracing::info!(path = %path.display(), bytes = size, "reusing the existing spool file");
         return Ok(spool_file_from(path, size, sha256_hex, package_ids));
     }
-    export_to_spool(config, db, replication, path).await
+    export_to_spool(config, db, replication, path, ledger_token).await
 }
 
 /// Size and lowercase sha256 of a file.

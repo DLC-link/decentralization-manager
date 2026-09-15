@@ -1032,7 +1032,19 @@ async fn publish_manifest_once(
     let path = acs::spool_path(config, &facts.party, &facts.joiner, serial);
     let replication =
         acs::replication_target(&facts.party, &facts.joiner, run.instance_name.clone());
-    let file = acs::spool_or_export(config, ctx.db(), &replication, &path).await?;
+    // The party's own ledger credential, so the manifest can name the
+    // packages its contracts need. Without it the joiner learns about a
+    // missing package during the import instead of before it.
+    let token = match crate::onledger::submission::dec_party_credentials(ctx.ol, &facts.party).await
+    {
+        Ok(creds) => Some(creds.token),
+        Err(e) => {
+            tracing::warn!(party = %facts.party, error = %format!("{e:#}"), "no ledger credential for the party; the manifest will name no packages");
+            None
+        }
+    };
+    let file =
+        acs::spool_or_export(config, ctx.db(), &replication, &path, token.as_deref()).await?;
     let observers = manifest_observers(&proposal.record, &ctx.identity.node_party);
     acs::publish_manifest(
         ctx.client,
