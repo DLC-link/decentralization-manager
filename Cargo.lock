@@ -2878,7 +2878,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -4260,7 +4260,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
@@ -4298,7 +4298,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.52.0",
 ]
@@ -6009,7 +6009,7 @@ dependencies = [
 [[package]]
 name = "tokio-noise"
 version = "0.0.5"
-source = "git+https://github.com/DLC-link/tokio-noise?rev=79d706d648fccd5bb8457f15a31d49593430d657#79d706d648fccd5bb8457f15a31d49593430d657"
+source = "git+https://github.com/conduition/tokio-noise?rev=a7dc4e543e4d117ee5f02125b0c898e1984973f2#a7dc4e543e4d117ee5f02125b0c898e1984973f2"
 dependencies = [
  "log",
  "snow",
@@ -6860,7 +6860,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
