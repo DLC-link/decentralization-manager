@@ -7,17 +7,24 @@ import {
   setTokenRefresher,
 } from "./auth";
 
-/** jsdom's `location.reload` throws "not implemented", so stand one in. */
+/**
+ * jsdom's `location.reload` is "not implemented", and its own property cannot
+ * be redefined (`vi.spyOn` on it throws "Cannot redefine property"), so swap
+ * the whole `location` for the duration of a test.
+ */
+const realLocation = Object.getOwnPropertyDescriptor(window, "location");
 const stubReload = () => {
   const reload = vi.fn();
   Object.defineProperty(window, "location", {
     value: { ...window.location, reload },
+    configurable: true,
     writable: true,
   });
   return reload;
 };
 
 afterEach(() => {
+  if (realLocation) Object.defineProperty(window, "location", realLocation);
   setTokenRefresher(null);
   sessionStorage.clear();
   vi.restoreAllMocks();
@@ -101,6 +108,18 @@ describe("authenticatedFetch", () => {
     await refreshAccessToken();
 
     expect(refresher).toHaveBeenCalledTimes(2);
+  });
+
+  it("drops a renewal that lands after the user logged out", async () => {
+    let finish: (token: string | null) => void = () => {};
+    setTokenRefresher(() => new Promise<string | null>((r) => (finish = r)));
+    const pending = refreshAccessToken();
+
+    // Logout unregisters the refresher while the renewal is still running.
+    setTokenRefresher(null);
+    finish("previous-session-token");
+
+    await expect(pending).resolves.toBeNull();
   });
 
   it("leaves an unauthenticated 401 alone", async () => {
