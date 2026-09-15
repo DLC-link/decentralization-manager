@@ -15,6 +15,7 @@ import {
   getIdToken,
   setIdToken,
   clearToken,
+  setTokenRefresher,
 } from "../auth";
 import { LoginPage } from "../components/LoginPage";
 import type { AuthConfig } from "../types";
@@ -48,8 +49,16 @@ function KeycloakAuthProvider({
   const [loading, setLoading] = useState(true);
   const initStarted = useRef(false);
   const refreshTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  // Goes false the moment the session ends, so a renewal that is already in
+  // flight cannot write the old user's token back after a logout.
+  const sessionLive = useRef(true);
 
   useEffect(() => {
+    // Reopened before the guard below: StrictMode runs effect, cleanup, effect,
+    // and the second pass returns here early. Left closed, the `init()` still
+    // running from the first pass would register a refresher that can never
+    // renew, and every 401 in a dev build would reload the page.
+    sessionLive.current = true;
     if (initStarted.current) return;
     initStarted.current = true;
 
@@ -92,6 +101,12 @@ function KeycloakAuthProvider({
             : {}),
         });
 
+        // Unmounted while Keycloak was initialising. The latch reopens on
+        // every effect pass, so it is still closed only after a real unmount,
+        // and this init must not register a refresher or a timer over
+        // whatever mounted after it.
+        if (!sessionLive.current) return;
+
         // Restore the original app route after Keycloak's URL cleanup.
         if (cleanHash) {
           window.history.replaceState(null, "", cleanHash);
@@ -103,6 +118,24 @@ function KeycloakAuthProvider({
           if (kc.idToken) setIdToken(kc.idToken);
           setTokenState(kc.token);
 
+          // Renew on demand too: the timer below is the happy path, but a
+          // throttled background tab or a sleeping laptop fires it late, and
+          // whatever request lands first must not lose the session over it.
+          setTokenRefresher(async () => {
+            if (!sessionLive.current) return null;
+            try {
+              await kc.updateToken(30);
+            } catch {
+              return null;
+            }
+            if (!sessionLive.current || !kc.token) return null;
+            setToken(kc.token);
+            if (kc.refreshToken) setRefreshToken(kc.refreshToken);
+            if (kc.idToken) setIdToken(kc.idToken);
+            setTokenState(kc.token);
+            return kc.token;
+          });
+
           function scheduleRefresh() {
             const exp = kc.tokenParsed?.exp;
             if (!exp) return;
@@ -111,8 +144,10 @@ function KeycloakAuthProvider({
               10_000,
             );
             refreshTimer.current = setTimeout(() => {
+              if (!sessionLive.current) return;
               kc.updateToken(60)
                 .then((refreshed: boolean) => {
+                  if (!sessionLive.current) return;
                   if (refreshed && kc.token) {
                     setToken(kc.token);
                     if (kc.refreshToken) setRefreshToken(kc.refreshToken);
@@ -122,6 +157,7 @@ function KeycloakAuthProvider({
                   scheduleRefresh();
                 })
                 .catch(() => {
+                  if (!sessionLive.current) return;
                   clearToken();
                   setTokenState(null);
                 });
@@ -145,10 +181,17 @@ function KeycloakAuthProvider({
     }
 
     init();
-    return () => clearTimeout(refreshTimer.current);
+    return () => {
+      clearTimeout(refreshTimer.current);
+      sessionLive.current = false;
+      setTokenRefresher(null);
+    };
   }, [config]);
 
   const logout = useCallback(() => {
+    sessionLive.current = false;
+    clearTimeout(refreshTimer.current);
+    setTokenRefresher(null);
     clearToken();
     setTokenState(null);
     if (keycloak) {
@@ -180,6 +223,9 @@ function Auth0AuthProvider({ children }: { children: ReactNode }) {
   } = useAuth0();
   const [token, setTokenState] = useState<string | null>(getToken());
   const [tokenLoading, setTokenLoading] = useState(true);
+  // Same session latch as the Keycloak provider: a renewal already in flight
+  // must not write the old user's token back after a logout.
+  const sessionLive = useRef(true);
 
   useEffect(() => {
     if (isLoading) return;
@@ -191,20 +237,50 @@ function Auth0AuthProvider({ children }: { children: ReactNode }) {
       return;
     }
 
+    // Per-run flag as well as the latch: this effect re-runs whenever Auth0
+    // hands back a new `getAccessTokenSilently`, and the latch alone cannot
+    // tell an earlier run's pending promise from the current run's.
+    let cancelled = false;
+    sessionLive.current = true;
+    setTokenRefresher(async () => {
+      if (cancelled || !sessionLive.current) return null;
+      try {
+        const t = await getAccessTokenSilently({ cacheMode: "off" });
+        if (cancelled || !sessionLive.current) return null;
+        setToken(t);
+        setTokenState(t);
+        return t;
+      } catch {
+        return null;
+      }
+    });
+
     getAccessTokenSilently()
       .then((t) => {
+        if (cancelled) return;
         setToken(t);
         setTokenState(t);
       })
       .catch((err) => {
+        if (cancelled) return;
         console.error("Auth0 token retrieval failed:", err);
         clearToken();
         setTokenState(null);
       })
-      .finally(() => setTokenLoading(false));
+      .finally(() => {
+        if (!cancelled) setTokenLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+      sessionLive.current = false;
+      setTokenRefresher(null);
+    };
   }, [isAuthenticated, isLoading, getAccessTokenSilently]);
 
   const logout = useCallback(() => {
+    sessionLive.current = false;
+    setTokenRefresher(null);
     clearToken();
     setTokenState(null);
     auth0Logout({ logoutParams: { returnTo: window.location.origin } });

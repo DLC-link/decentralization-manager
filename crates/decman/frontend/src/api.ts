@@ -1,9 +1,19 @@
-import { clearToken, getToken } from "./auth";
+import {
+  clearToken,
+  currentSession,
+  getToken,
+  refreshAccessToken,
+} from "./auth";
 
 /**
  * Wrapper around fetch() that attaches the Bearer token from sessionStorage.
- * Drop-in replacement for fetch(). On 401 with a stale token we drop it and
- * reload so the AuthProvider kicks the user back to Keycloak login.
+ * Drop-in replacement for fetch(). On 401 we renew the token and retry once;
+ * only when the renewal fails do we drop the session and reload, so the
+ * AuthProvider kicks the user back to Keycloak login.
+ *
+ * The retry is what keeps a long request from ending the session: the access
+ * token lives five minutes, so a request still in flight when it lapses comes
+ * back 401 with a refresh token that is perfectly good.
  *
  * The reload is gated on having had a token: a 401 with no token in the
  * first place means the backend rejected an unauthenticated request, which
@@ -16,11 +26,23 @@ export async function authenticatedFetch(
 ): Promise<Response> {
   const headers = new Headers(init?.headers);
   const token = getToken();
+  // Whose request this is. A 401 that comes back after the session changed
+  // must not be renewed or retried under whoever holds the page now.
+  const session = currentSession();
   if (token) {
     headers.set("Authorization", `Bearer ${token}`);
   }
   const response = await fetch(input, { ...init, headers });
   if (token && response.status === 401) {
+    const renewal = await refreshAccessToken(session);
+    if (renewal.status === "renewed") {
+      const retryHeaders = new Headers(init?.headers);
+      retryHeaders.set("Authorization", `Bearer ${renewal.token}`);
+      return fetch(input, { ...init, headers: retryHeaders });
+    }
+    // `stale` means another session owns the page now. This 401 answers a
+    // request from the session before it, so it may not touch the new one.
+    if (renewal.status === "stale") return response;
     clearToken();
     window.location.reload();
   }
