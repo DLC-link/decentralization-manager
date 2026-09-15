@@ -5,18 +5,18 @@ A web application for managing decentralized parties in Canton blockchain networ
 ## Features
 
 - **Web-Based Management UI**: React frontend for managing decentralized parties
-- **Multi-Party Onboarding**: Coordinated workflow for creating decentralized party namespaces
-- **Contract Deployment**: Upload DAR files and deploy governance contracts with multi-party signing
+- **Canton-Native Coordination**: nodes never connect to each other. The synchronizer topology store holds the signatures, and Daml contracts hold the workflow intent
+- **Multi-Party Onboarding**: invitation-based workflow that creates a decentralized party namespace
+- **Contract Deployment**: hash-pinned DAR files and governance contracts that the party's members sign together
 - **Governance Actions**: View and manage governance confirmations with threshold-based execution
-- **Participant Management**: View party membership, kick participants with threshold-based voting
+- **Participant Management**: view party membership, add a member, remove a member, and change the signing threshold
+- **Node Registry**: every node publishes a `DecmanNode` contract and heartbeats on it, so operators see each peer as Active, Stale, Unknown, or Unvetted
 - **OAuth Authentication (Keycloak or Auth0)**: Supports M2M (client_credentials) and password flows for Ledger API access; per-node choice of provider for both frontend gating and outbound Canton tokens
-- **Secure P2P Communication**: Noise Protocol Framework for encrypted coordinator-peer communication
-- **Real-time Status**: Live peer connectivity monitoring and workflow progress tracking
 - **Canton Integration**: Native gRPC integration with Canton Admin and Ledger APIs
 
 ## Documentation
 
-- [Architecture Overview](docs/ARCHITECTURE.md) -- System architecture, core concepts, communication protocol, and technical constraints
+- [Architecture Overview](docs/ARCHITECTURE.md) -- System architecture, core concepts, the coordination model, and technical constraints
 - [User Guide](USER_GUIDE.md) -- Walkthrough of the web UI for day-to-day party and governance operations
 - [Decentralizing an Existing Party](docs/DECENTRALIZING_AN_EXISTING_PARTY.md) -- Adding hosts to a party that already exists, and converting a local party
 - [Custom Daml Templates](docs/CUSTOM_DAML_TEMPLATES.md) -- Authoring and deploying your own Daml governance templates
@@ -26,28 +26,44 @@ A web application for managing decentralized parties in Canton blockchain networ
 
 ## Architecture
 
-The application runs as an HTTP server with an embedded React frontend. Multiple instances coordinate via the Noise Protocol:
+The application runs as an HTTP server with an embedded React frontend. Each
+node talks only to its own Canton participant, over the Admin API and the
+Ledger API. No node ever opens a connection to another node. Canton holds the
+coordination in two places:
 
-- **Coordinator**: Initiates workflows and orchestrates multi-party operations
-- **Peers**: Respond to coordinator commands, sign proposals, and execute local operations
-- **Automatic Key Management**: Noise keypairs are generated automatically on first run
+- **Synchronizer topology store**: the proposer writes a topology change as a
+  partially signed proposal. Every member co-signs it by transaction hash.
+  Canton merges the signatures by fingerprint, and the change becomes
+  effective.
+- **Daml contracts**: the `decman-coordination-v1` package holds the workflow
+  intent. A run starts as a `WorkflowProposal` whose invitees are observers.
+  The invitees accept or decline it on the ledger.
+
+Two roles exist per run:
+
+- **Coordinator (proposer)**: creates the proposal, writes the topology
+  change, and executes the prepared submission.
+- **Member (invitee)**: accepts the proposal, validates each change against
+  it, and co-signs the change.
 
 ```
-┌─────────────────┐     Noise Protocol      ┌─────────────────┐
-│  Participant 1  │◄───────────────────────►│  Participant 2  │
-│   (Coordinator) │                         │     (Peer)      │
-│   HTTP :8081    │                         │   HTTP :8082    │
-│   Noise :9001   │                         │   Noise :9002   │
-└────────┬────────┘                         └────────┬────────┘
-         │                                           │
-         │              Canton Network               │
-         └───────────────────┬───────────────────────┘
-                             │
-                    ┌────────▼────────┐
-                    │  Canton Nodes   │
-                    │  (Admin/Ledger  │
-                    │      APIs)      │
-                    └─────────────────┘
+┌──────────────────┐   ┌──────────────────┐   ┌──────────────────┐
+│  decman node 1   │   │  decman node 2   │   │  decman node 3   │
+│    HTTP :8081    │   │    HTTP :8082    │   │    HTTP :8083    │
+└────────┬─────────┘   └────────┬─────────┘   └────────┬─────────┘
+         │ Admin +              │ Admin +              │ Admin +
+         │ Ledger API           │ Ledger API           │ Ledger API
+┌────────▼─────────┐   ┌────────▼─────────┐   ┌────────▼─────────┐
+│  participant 1   │   │  participant 2   │   │  participant 3   │
+└────────┬─────────┘   └────────┬─────────┘   └────────┬─────────┘
+         │                      │                      │
+         └──────────────────────┼──────────────────────┘
+                                │
+                ┌───────────────▼────────────────┐
+                │     Canton synchronizer        │
+                │  topology store + Daml         │
+                │  transactions                  │
+                └────────────────────────────────┘
 ```
 
 ## Quick Start
@@ -70,7 +86,6 @@ DECPM_CANTON_ADMIN_HOST=localhost \
 DECPM_CANTON_ADMIN_PORT=5002 \
 DECPM_CANTON_LEDGER_HOST=localhost \
 DECPM_CANTON_LEDGER_PORT=5001 \
-DECPM_NOISE_PORT=9001 \
 cargo run -p decman -- serve
 
 # Or with a .env file in the data directory
@@ -82,6 +97,44 @@ DECPM_PORT=8081 ./target/release/dec-party-manager -d ./development/participant-
 ```
 
 Open http://localhost:8081 in your browser.
+
+### Setting the node identity
+
+A fresh node coordinates nothing until it has a **node party**. The node party
+is a normal Canton party. This node's participant hosts it with Submission
+permission. The node signs every coordination contract with it: the registry
+entry, the proposals, the acceptances, the submission signatures, and the ACS
+manifests.
+
+1. Allocate the node party on your participant with Submission permission.
+2. Grant the Ledger API user `CanActAs` and `CanReadAs` on that party.
+3. Save the identity:
+
+```bash
+curl -X PUT http://localhost:8081/node-identity \
+  -H "Content-Type: application/json" \
+  -d '{
+    "node_party_id": "node1::1220abc...",
+    "user_id": "ledger-api-user",
+    "keycloak_url": "https://keycloak.example.com",
+    "keycloak_realm": "my-realm",
+    "keycloak_client_id": "my-client",
+    "keycloak_client_secret": "secret-value"
+  }'
+
+# Read it back, with the hosting permission this participant reports
+curl http://localhost:8081/node-identity
+```
+
+The handler reads the head `PartyToParticipant` before it saves anything, and
+refuses a party this participant does not host with Submission permission.
+`PUT /node-identity` needs the admin role. It is exempt from authentication
+only while `party_credentials` is entirely empty, which is the state of a fresh
+node.
+
+The node stores the identity as a `party_credentials` row with `kind = 'node'`.
+That row mints outbound Canton tokens only. The JWT validator leaves it out of
+the trusted issuers, so a node identity never widens who may log in.
 
 ### Running with Docker
 
@@ -104,7 +157,6 @@ docker run -p 8080:8080 -v ./data:/data \
   -e DECPM_CANTON_ADMIN_PORT=5002 \
   -e DECPM_CANTON_LEDGER_HOST=canton-node \
   -e DECPM_CANTON_LEDGER_PORT=5001 \
-  -e DECPM_NOISE_PORT=9001 \
   -e DECPM_CANTON_SYNCHRONIZER=global \
   -e DECPM_CANTON_NETWORK=devnet \
   dec-party-manager
@@ -114,8 +166,8 @@ Published releases ship that same binary as two images, `…:<tag>` and
 `…:<tag>-nonroot`; the second runs as uid 65532 and defaults `DECPM_DIR` to
 `/home/nonroot`, so its mount goes at `/home/nonroot/data` and the host
 directory has to belong to that uid. The `chown` is recursive because a `./data`
-left behind by the root image holds root-owned files — the SQLite database and
-the mode-0600 Noise key — that uid 65532 could otherwise not open:
+left behind by the root image holds root-owned files — the SQLite database, the
+DAR directory, and the ACS spool — that uid 65532 could otherwise not open:
 
 ```bash
 mkdir -p ./data && sudo chown -R 65532:65532 ./data
@@ -149,12 +201,24 @@ All node configuration is done via environment variables (prefixed `DECPM_*`) or
 participant-dir/
 ├── .env               # Optional environment file (loaded automatically)
 └── data/
-    ├── noise.key      # Auto-generated Noise keypair
-    ├── decpm.db       # SQLite database (peers, party credentials)
-    └── dars/          # DAR files for contract deployment
+    ├── decpm.db       # SQLite database (peers, credentials, workflow runs)
+    ├── dars/          # DAR files for contract deployment
+    └── acs/           # ACS snapshots spooled for an add-party handoff
 ```
 
-The database file path can be overridden with the `--db` CLI flag.
+The database file path can be overridden with the `--db` CLI flag. The spool
+directory can be moved with `DECPM_ACS_SPOOL_DIR`.
+
+### Ports
+
+| Port | Purpose | Variable |
+|------|---------|----------|
+| 8080 | HTTP API and web UI | `DECPM_PORT` |
+| 9464 | Prometheus metrics at `/metrics`, on its own listener | `DECPM_METRICS_PORT` (`0` disables it) |
+
+A node opens no other listener. No peer connects to it, so neither port has to
+be reachable from another operator's network. The node dials out to its own
+Canton participant and to its identity provider.
 
 ### Environment Variables
 
@@ -169,9 +233,8 @@ The database file path can be overridden with the `--db` CLI flag.
 | `DECPM_ADMIN_ROLE` | Role name that gates sensitive endpoints (unset skips the role check) | _(none)_ |
 | `DECPM_ALLOWED_ORIGIN` | Origin permitted by CORS (e.g. `https://decman.example.com`) | _(none, same-origin only)_ |
 | `DECPM_LOG_FORMAT` | Log format. `text` gives the readable console format for local work; any other value gives one JSON object per line | `json` |
-| `DECPM_LISTEN_ADDRESS` | Address to listen on for Noise protocol connections | `0.0.0.0` |
-| `DECPM_NOISE_PORT` | Port for Noise protocol connections | `9000` |
-| `DECPM_PUBLIC_ADDRESS` | Public address that peers use to connect to this node | _(falls back to listen address)_ |
+| `DECPM_JWT_ROLE_CLAIM` | JWT claim holding an array of role names, for a provider that needs a namespaced custom claim | _(standard role carriers)_ |
+| `DECPM_TENANT_API_KEYS` | Comma-separated bearer keys for the wallet-facing `/v0/tenant/*` endpoints. Empty disables the tenant API outside insecure mode | _(none)_ |
 | `DECPM_CANTON_ADMIN_HOST` | Canton Admin API host | `127.0.0.1` |
 | `DECPM_CANTON_ADMIN_PORT` | Canton Admin API port | `5002` |
 | `DECPM_CANTON_LEDGER_HOST` | Canton Ledger API host | `127.0.0.1` |
@@ -195,17 +258,22 @@ The database file path can be overridden with the `--db` CLI flag.
 | `DECPM_AUTH0_DOMAIN` | Auth0 tenant domain for frontend auth (mutually exclusive with `DECPM_KEYCLOAK_*`) | _(none)_ |
 | `DECPM_AUTH0_CLIENT_ID` | Auth0 SPA client ID for frontend auth | _(none)_ |
 | `DECPM_AUTH0_AUDIENCE` | Auth0 API audience the SPA's access tokens target | _(none)_ |
+| `DECPM_AUTH0_SCOPE` | Extra space-separated scopes the SPA requests. Auth0 RBAC returns a permission in `scope` only when the client asks for it | _(none)_ |
 | `DECPM_INSECURE` | Run without an IdP: accept any inbound token and present an unsafe HS256 token to Canton (CLI flag `--insecure`). **Never use in production.** See [Insecure mode](#insecure-mode-local-development-without-an-idp) | `false` |
 | `DECPM_CANTON_HMAC_SECRET` | HS256 secret decman signs the unsafe Canton token with, in insecure mode. Must match Canton's unsafe auth-service secret | `unsafe` |
 | `DECPM_CANTON_HMAC_AUDIENCE` | `aud` claim for the unsafe Canton token, in insecure mode. Must match Canton's `target-audience` | `https://canton.network.global` |
 | `DECPM_CANTON_HMAC_SUBJECT` | `sub` claim / ledger user for the unsafe Canton token, in insecure mode | `ledger-api-user` |
-| `DECPM_TIMEOUT_HANDSHAKE` | Noise handshake timeout in seconds | `30` |
-| `DECPM_TIMEOUT_MESSAGE` | Noise message timeout in seconds | `120` |
-| `DECPM_TIMEOUT_RETRY_ATTEMPTS` | Connection retry attempts | `3` |
-| `DECPM_TIMEOUT_RETRY_DELAY` | Connection retry delay in seconds | `5` |
-| `DECPM_NOISE_RETRY_TIMEOUT_SEC` | Per-attempt timeout for the bounded peer-Noise retry wrapper, in seconds | `5` |
-| `DECPM_NOISE_RETRY_MAX_ATTEMPTS` | Total attempts (initial + retries) for the bounded peer-Noise retry wrapper | `2` |
-| `DECPM_NOISE_RETRY_BACKOFF_MS` | Backoff between attempts of the bounded peer-Noise retry wrapper, in milliseconds | `250` |
+| `DECPM_OBSERVER_POLL_SECS` | Seconds between observer ticks. A tick reads the ledger, co-signs pending topology proposals, and drives every run. Mainnet guidance is `10` | `3` |
+| `DECPM_HEARTBEAT_INTERVAL_SECS` | Seconds between heartbeats on this node's `DecmanNode` registry contract | `3600` |
+| `DECPM_HEARTBEAT_MIN_INTERVAL_SECS` | Floor the `DecmanNode` template enforces between two heartbeats. Clamped to `[1, DECPM_HEARTBEAT_INTERVAL_SECS]` | `60` |
+| `DECPM_PEER_STALE_FACTOR` | A peer reads as `Stale` once its last heartbeat is older than this many of its own heartbeat intervals | `3` |
+| `DECPM_PROPOSAL_TTL_SECS` | Lifetime of a `WorkflowProposal`. An invitee cannot accept it after it expires | `604800` |
+| `DECPM_AUTO_UPLOAD_COORDINATION_DAR` | Upload and vet the embedded coordination DAR in a startup task. `/node-health` reports the result | `true` |
+| `DECPM_ACS_SPOOL_DIR` | Directory that holds exported ACS snapshots for an add-party handoff | _(defaults to `{dir}/data/acs`)_ |
+| `DECPM_COORDINATION_PACKAGE_REF` | Package reference the coordination templates resolve against | `#decman-coordination-v1` |
+| `DECPM_TOPOLOGY_RETRY_MAX_ATTEMPTS` | Attempts a topology propagation check makes before it gives up | `30` |
+| `DECPM_TOPOLOGY_RETRY_DELAY_SECS` | Delay between two topology propagation attempts, in seconds | `2` |
+| `DECPM_TOPOLOGY_PROPAGATION_DELAY_SECS` | Wait after a topology change becomes effective, in seconds, so the sequencer's topology state settles | `30` |
 | `DECPM_REWARD_AUTOMATION_INTERVAL_SECS` | How often the CIP-104 reward automation sweeps each decparty for unassigned coupons, in seconds. Enablement is on-ledger, so this sets cadence only | `300` |
 | `DECPM_REWARD_EXPIRY_READ_INTERVAL_SECS` | How often the automation re-reads the backlog purely to refresh `decman_reward_oldest_unassigned_expires_in_seconds`, in seconds, when no sweep is due. Both expiry alert rules read that gauge, so this bounds how stale their input can get. A sweep reads the ledger too, so the gauge refreshes at whichever interval is shorter | `3600` |
 | `DECPM_REWARD_MAX_CREATES` | Output contracts one `Delegation_Assign` may create, which bounds the coupons per transaction. Lower it if assigns start failing | `100` |
@@ -266,8 +334,7 @@ This replaces the older `--features test-mode` build — no special build is req
 ### Example `.env` File
 
 ```env
-DECPM_NOISE_PORT=9001
-DECPM_PUBLIC_ADDRESS=10.0.0.1
+DECPM_PORT=8081
 DECPM_CANTON_ADMIN_HOST=localhost
 DECPM_CANTON_ADMIN_PORT=5002
 DECPM_CANTON_LEDGER_HOST=localhost
@@ -278,7 +345,21 @@ DECPM_CANTON_NETWORK=devnet
 
 ### Network Peers
 
-Peers are stored in the SQLite database and managed via the `/network-config` API endpoint:
+A peer is three values: the participant id, the node party, and a display name.
+There is no address, no port, and no key, because no node dials another node.
+
+Operators exchange one string per peer out of band:
+
+```
+participant_id,node_party_id,name
+```
+
+The **Share my identity** button in the UI copies that string. **Add peer**
+pastes it. Both operators do this, because each side names the other's node
+party as an observer of its own coordination contracts.
+
+Peers are stored in the SQLite database and managed via the `/network-config`
+API endpoint:
 
 ```bash
 # Configure peers
@@ -288,18 +369,12 @@ curl -X POST http://localhost:8081/network-config \
     {
       "participant_id": "participant1::1220abc...",
       "name": "Participant 1",
-      "address": "10.0.0.1",
-      "port": 9001,
-      "public_key": "03ab12cd...",
-      "party": null
+      "party": "node1::1220abc..."
     },
     {
       "participant_id": "participant2::1220def...",
       "name": "Participant 2",
-      "address": "10.0.0.2",
-      "port": 9002,
-      "public_key": "02ef34ab...",
-      "party": null
+      "party": "node2::1220def..."
     }
   ]'
 
@@ -309,10 +384,17 @@ curl http://localhost:8081/network-config
 
 - `participant_id`: Canton participant UID (e.g., `participant::1220...`)
 - `name`: Display name
-- `address`: Hostname or IP address for Noise connections
-- `port`: Noise protocol port
-- `public_key`: Hex-encoded secp256k1 public key (auto-populated from `/keys/status` endpoint)
-- `party`: Canton party ID (populated after onboarding)
+- `party`: the peer's node party. A peer without one cannot be invited to a
+  workflow.
+
+Before this node names a peer's node party as an observer, it reads the head
+`PartyToParticipant` of that party. It refuses the peer unless the claimed
+participant hosts the party with Submission permission.
+
+`GET /registry` shows what the peers publish. It groups the `DecmanNode`
+entries three ways: this node's own entry, the entries of configured peers, and
+inbound entries. An inbound entry has a signatory that is not a configured peer
+yet.
 
 ### Party Credentials
 
@@ -351,58 +433,82 @@ curl http://localhost:8081/party-config/decparty::1220abc...
 
 ## Workflows
 
+Every workflow follows the same shape. The proposer creates a
+`WorkflowProposal` with the invitees as observers. Each invitee accepts or
+declines it on the ledger. The proposer then writes the topology change into
+the synchronizer store as a partially signed proposal, and every member
+co-signs it by transaction hash.
+
+The proposer checks every invitee before it starts a run. It answers HTTP 409
+when an invitee has not vetted the coordination package, has no visible
+registry entry, or reports an older coordination version. The error names the
+participants that still have to upgrade.
+
+How many acceptances a run needs:
+
+- Onboarding, add-party and DAR runs need every invitee.
+- Kick and change-threshold need `max(previous threshold, new threshold)` owner
+  signatures, and the proposer counts as one of them.
+
 ### Creating a Decentralized Party (Onboarding)
 
-1. Configure all participant nodes with each other's connection details via the `/network-config` API
+1. Set each node's identity, and add every peer on every node
 2. Start all participant servers
 3. On the coordinator's UI, click **Create Party**, enter a party ID prefix, and
    select the peers to invite
 4. Optionally adjust the **Threshold** — how many of the party's owners must sign
    topology changes. It defaults to a majority (`ceil(owners / 2)`, shown and
    editable in the dialog)
-5. The coordinator invites peers and orchestrates:
-   - Cryptographic key generation (namespace + Daml signing keys)
-   - Topology proposal creation (DNS and P2P mappings)
-   - Multi-party signing
-   - Proposal submission to Canton
+5. Each invitee accepts the proposal from its notifications view
+6. Every member generates one dual-usage key and publishes its root namespace
+   delegation. The proposer then writes the decentralized namespace change,
+   and the members co-sign it. The proposer writes the party mapping last.
 
 ### Deploying Contracts
 
 1. From a party card in the UI, click **Deploy Contracts**
 2. Upload DAR files via the file picker
 3. Configure contract definitions (operator party, templates, fields)
-4. The coordinator orchestrates:
-   - DAR distribution and upload to all participants
-   - Ledger submission preparation
-   - Multi-party signing of submissions
-   - Execution on the Canton ledger
+4. Each invitee accepts, then uploads the same pinned DAR files locally
+5. The proposer prepares each transaction and opens a `SubmissionRound`. Each
+   member verifies the hash and signs. The proposer executes once the party's
+   signing threshold is met.
+
+### Distributing DARs
+
+1. From the packages panel, click **Distribute DARs** and pick the files
+2. The proposer pins every file by its sha256 and its main package id, and
+   uploads it to its own participant
+3. Each invitee accepts and uploads the same files through `POST /dars/upload`
+   with `pin_instance` set to the run id
+4. The run completes when the topology store shows every pinned package vetted
+   on every participant. No DAR bytes travel between nodes.
 
 ### Removing a Participant (Kick)
 
 1. From a party card, click **Kick Participant**
 2. Select the participant to remove
-3. The coordinator orchestrates:
-   - Export current namespace state
-   - Create updated topology proposals (reduced threshold, removed P2P mapping)
-   - Multi-party signing by remaining members
-   - Proposal submission
+3. The proposer writes the namespace change without that owner, and then the
+   party mapping without that host. The remaining members co-sign both. The
+   kicked node sees the change as an unsolicited proposal.
 
 ### Adding a Participant (Add Party)
 
 1. From a party card, click **Add member** and choose the participant to add
-2. The coordinator orchestrates:
-   - Key generation on the new member
-   - Updated topology proposals (added owner + P2P mapping) signed by all members
-   - ACS replication to the new member and clearing of its onboarding flag
+2. The joining node generates its key and publishes its root namespace
+   delegation
+3. Every member co-signs the namespace and party changes, which mark the
+   joining participant `Onboarding`
+4. Each current host exports an ACS snapshot and publishes an `AcsManifest`.
+   The joining operator downloads the snapshot with `GET /acs-export` and
+   uploads it with `POST /acs-import`. An empty snapshot skips the transfer.
 
 ### Changing the Threshold (Change Threshold)
 
 1. From a party card, click **Change Threshold** and enter the new value
-2. The coordinator orchestrates:
-   - Export current namespace state
-   - Re-issue the DNS and P2P mappings with the new threshold (same members)
-   - Multi-party signing by a quorum of the current owners
-   - Proposal submission
+2. The proposer re-issues the namespace and party mappings with the new
+   threshold and the same members
+3. A quorum of the current owners co-signs both mappings
 
 ## API Endpoints
 
@@ -419,9 +525,16 @@ The table below is a curated subset. A complete, interactive API reference is av
 | `/network-config` | POST | Updates network peer list (saved to SQLite) |
 | `/party-config/{dec_party_id}` | GET | Returns party credentials (secrets masked) |
 | `/party-config` | PUT | Saves or updates party credentials (to SQLite) |
+| `/node-identity` | GET | Returns this node's node party and how the participant hosts it (admin role) |
+| `/node-identity` | PUT | Sets or replaces the node identity (admin role) |
+| `/registry` | GET | Returns the `DecmanNode` entries this node sees: its own, its peers', and inbound (admin role) |
 | `/decentralized-parties` | GET | Lists decentralized parties (filtered by `prefix` query param) |
-| `/participants-status` | GET | Returns peer connectivity status |
-| `/keys/status` | GET | Returns Noise keypair status |
+| `/participants-status` | GET | Returns each peer's registry status and heartbeat age |
+| `/node-health` | GET | Returns node and participant health, including the startup coordination-DAR upload |
+| `/proposals/unsolicited` | GET | Returns pending topology proposals that no accepted workflow explains |
+| `/acs-manifests/{party}` | GET | Returns the `AcsManifest` records published for a party (admin role) |
+| `/acs-export/{party}/{target}` | GET | Streams the party's ACS snapshot for a joining participant (admin role) |
+| `/acs-import/{party}` | POST | Imports a relayed ACS snapshot and clears the onboarding flag (admin role) |
 | `/onboarding` | POST | Starts onboarding workflow |
 | `/onboarding/status` | GET | Returns onboarding progress |
 | `/contracts` | POST | Starts contracts workflow |
@@ -458,10 +571,11 @@ The table below is a curated subset. A complete, interactive API reference is av
 | `/contracts/query` | GET | Queries active contracts by template |
 | `/packages` | GET | Returns configured package IDs for a party |
 | `/token-standard-contracts` | POST | Queries token standard contracts |
-| `/dars/upload` | POST | Uploads DARs to the current node only |
-| `/dars/distribute` | POST | Distributes DARs across all participants |
+| `/dars/upload` | POST | Uploads DARs to this node. With `pin_instance` the files must match that run's pins |
+| `/dars/distribute` | POST | Starts a DARs run: pins each file and invites the peers to upload it |
 | `/dars/distribute/status` | GET | Returns DARs distribution workflow progress |
 | `/packages/vetted` | GET | Returns packages uploaded on this node |
+| `/packages/compare-peers` | GET | Compares vetted packages per participant, read from the topology store |
 | `/external-parties` | GET | Lists the external (co-validated) parties this node hosts |
 | `/v0/tenant/prepare` | POST | Wallet-facing: builds an external party's onboarding topology and returns the hash to sign |
 | `/v0/tenant/onboard` | POST | Wallet-facing: validates the wallet's signed topology, co-signs, and submits it |
@@ -484,8 +598,10 @@ separate tenant API key rather than the operator JWT, and are driven by
 
 This repository is a Cargo workspace with four crates under `crates/`:
 
-- **`decman`** — the server (HTTP API, Noise P2P, Canton gRPC, workflows) and
-  the embedded React frontend. Its binary is `dec-party-manager`.
+- **`decman`** — the server (HTTP API, Canton gRPC, on-ledger coordination,
+  workflows) and the embedded React frontend. Its binary is
+  `dec-party-manager`. The coordination module is documented in
+  [crates/decman/src/onledger/README.md](crates/decman/src/onledger/README.md).
 - **`common`** — shared wire DTOs, the Canton-ID helpers, and the external-party
   fingerprint derivation, consumed by the other crates. Kept dependency-light;
   OpenAPI (`utoipa`) schema derives are behind its `openapi` feature.
@@ -531,7 +647,7 @@ plugins, and the kick workflow.
 # Quiet mode (default) — focused Given-When-Then trace
 ./integration-tests/run.sh
 
-# Verbose mode — full INFO from dec-party-manager + Canton/Noise libs
+# Verbose mode — full INFO from dec-party-manager and the test crate
 ./integration-tests/run.sh --verbose
 
 # Custom RUST_LOG (overrides both presets)
@@ -543,9 +659,9 @@ RUST_LOG=debug ./integration-tests/run.sh
 
 #### Quiet mode (default)
 
-Quiet mode is the recommended way to run the suite — it surfaces only
-what a tester needs to verify a passing run, suppressing the
-dec-party-manager INFO chatter and Canton/Noise convergence warnings.
+Quiet mode is the recommended way to run the suite. It prints only what a
+tester needs to verify a passing run, and it suppresses the dec-party-manager
+INFO chatter and the Canton convergence warnings.
 
 The suite is organised into two layers:
 
@@ -632,9 +748,10 @@ deadline elapses). A failure renders as
 
 The exact `RUST_LOG` quiet preset is:
 ```
-warn,hyper_noise::server=error,
+warn,
 governance_workflows::common::scenario=info,
-governance_workflows::common::phases=info
+governance_workflows::common::phases=info,
+governance_workflows::common::chaos=info
 ```
 
 The trace itself is rendered with a minimal format locally — just the message text, no timestamps, targets, levels, or structured fields. CI runs (auto-detected via the `CI` env var that GitHub Actions sets) get the full structured format with timestamps + structured fields for log archives and JSON parsing. To force the full format locally, set `INTEGRATION_TEST_FULL_LOG=1`.
@@ -643,43 +760,39 @@ The trace itself is rendered with a minimal format locally — just the message 
 
 Use `--verbose` when diagnosing a stuck or failing run. Sets:
 ```
-dec_party_manager=info,tokio_noise=error,hyper_noise=error,
-governance_workflows=info
+dec_party_manager=info,governance_workflows=info
 ```
 
-Surfaces all dec-party-manager INFO output (peer connections, Noise
-handshakes, workflow internals). The cargo test runner is also INFO,
-so individual test cases narrate.
+This prints all dec-party-manager INFO output: the observer ticks, the
+proposal and co-signature traffic, and the workflow internals. The cargo test
+runner is also INFO, so individual test cases narrate.
 
-#### Expected WARN noise during chaos phases
+#### Expected WARN output during chaos phases
 
 The chaos phases (`restart_coordinator_resume`, `restart_peer_resume`,
-`invite_survives_peer_restart`, `retry_with_offline_peer`,
-`restart_with_concurrent_kinds`, `peer_health_flip`) kill and restart nodes
-on purpose. The lines below are the surviving nodes correctly reporting what
-the test just did to their peers, so read them as part of the scenario rather
-than as findings. Anything **not** on this list is worth a look.
+`invite_survives_peer_restart`, `restart_with_concurrent_kinds`,
+`concurrent_sibling_cancel`, `concurrent_sibling_decline`) kill and restart
+nodes on purpose. A killed node stops answering its own participant, so its
+observer loop warns until it comes back. Read those lines as part of the
+scenario rather than as findings.
 
-(`peer_3_strikes_abort` is named G8 in the suite but is currently a skipped
-stub — it needs a raw-Noise-frame injection harness — so it kills nothing and
-emits none of this.)
-
-Grep the message text to find these; the emitting function is named so the
+Grep the message text to find them; the emitting module is named so the
 reference survives the code moving.
 
 | Line | Emitted by | Why it fires |
 |---|---|---|
-| `Failed to send <label> to <participant>: TCP connection failed: … Connection refused` | `handlers::workflows::broadcast_simple_message` | The peer was killed by the phase. One shared broadcast helper, so `<label>` is whichever message was in flight — `CancelInvite`, `RetryWorkflow`, an invite. |
-| `Onboarding rejected: N missing peer mesh edge(s)` | `handlers::workflows::start_onboarding` | The mesh is genuinely incomplete while a node is down. |
-| `Participant owner_key unresolved after onboarding` | `handlers::workflows::start_onboarding` | The run was interrupted before it reached key resolution. |
-| `Best-effort CancelInvite to <peer> after decline failed` | `noise::server::broadcast_cancel_to_others` | Best-effort by name: the peer it would notify is the one that was killed. |
+| `observer stage failed` | `onledger::observer` | One stage of a tick could not read or write the ledger while the node was down or still starting. |
+| `driving a run failed; retry next tick` | `onledger::observer` | A run's driver hit a transient error. The next tick drives the same run again. |
+| `run failed` | `onledger::engine` | The step-failure budget ran out, which is the outcome a "leave the peer offline" phase asserts. |
 
-Each is a real condition the code detects correctly, which is why none is
-downgraded — in production every one of them warrants a WARN. The two
-alternatives weighed in #175, plumbing a "chaos window" hint down to the
-emitting code or tagging the lines with a structured `chaos_expected` field,
-both founder on the same point: the code emitting the warning has no way to
-know that a test killed the peer.
+Each is a real condition the code detects correctly, so none is downgraded. In
+production every one of them warrants a WARN, and the code that emits it
+cannot know that a test killed the node.
+
+A chaos restart also changes what the HTTP API answers. A restarted node needs
+a few observer ticks to republish its registry entry, so `POST /onboarding` can
+answer 409 in that window. `chaos::post_onboarding` retries for exactly that
+reason.
 
 When triaging a chaos-phase failure the signal is the scenario trace
 (`ERROR Scenario "<name>" failed at <KIND> "<step>"`) and its `anyhow` cause
@@ -690,7 +803,7 @@ trail, not the WARN cluster around it.
 `docker`, `docker compose v2`, `jq`, `curl`, `lsof`. The script
 verifies these up front and bails with a clear message if any are
 missing or if a previous run leaked a manager process holding one of
-the HTTP/Noise ports (8081–8083, 9001–9003).
+the HTTP ports (8081–8083) or metrics ports (9464–9466).
 
 ### Integration tests on devnet
 

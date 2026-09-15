@@ -401,7 +401,8 @@ The implemented flow is the one listed above, and it does not branch on repair
 mode. Step by step it is documented in
 [ARCHITECTURE.md](ARCHITECTURE.md#add-party-add-a-host-to-an-existing-decentralized-party);
 the code lives in
-[`crates/decman/src/workflow/add_party/`](../crates/decman/src/workflow/add_party/).
+[`crates/decman/src/onledger/engine/add_party.rs`](../crates/decman/src/onledger/engine/add_party.rs)
+and [`crates/decman/src/onledger/acs.rs`](../crates/decman/src/onledger/acs.rs).
 
 The `Recommended Approach` diagram and `User Experience Implications` list that
 stood here described the repair-mode design and were removed. What still holds
@@ -412,8 +413,12 @@ of them:
 2. **Downtime**: the joining node disconnects from the synchronizer for the
    duration of the import, which briefly pauses that whole node. The party
    keeps transacting on its other hosts.
-3. **File transfer**: the ACS snapshot travels over the authenticated Noise
-   channel between member nodes, capped at 16 MiB assembled.
+3. **File transfer**: the operator moves the snapshot file. A current host
+   publishes an `AcsManifest` on the ledger that pins the size, the sha256, and
+   the package ids. The joining operator downloads the file with
+   `GET /acs-export/{party}/{target}` and uploads it with
+   `POST /acs-import/{party}`. Both endpoints stream to disk through the admin
+   HTTP port, so the snapshot has no fixed size cap.
 
 What no longer holds: no participant restarts, and no participant enters repair
 mode.

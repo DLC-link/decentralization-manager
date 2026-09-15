@@ -46,60 +46,107 @@ The system defaults to a majority threshold for both topology changes and govern
 
 ### Key Types
 
-The system manages three distinct key types:
+The system manages these key types:
 
 | Key | Algorithm | Purpose |
 |-----|-----------|---------|
-| Namespace key | Ed25519 (Canton) | Signs topology proposals (DNS, P2P) |
-| Daml signing key | Ed25519 (Canton) | Signs ledger transactions |
-| Noise key | secp256k1 | Authenticates P2P communication between nodes |
+| Party key | Ed25519 (Canton), usages `[Namespace, Protocol]` | Signs the party's topology changes and its ledger transactions |
+| Legacy namespace key | Ed25519 (Canton) | Signs topology changes for a party created before 2.0 |
+| Legacy Daml signing key | Ed25519 (Canton) | Signs ledger transactions for a party created before 2.0 |
+
+For every new decentralized party each member generates one vault key named
+`{prefix}-key`. That one key carries both usages, so it signs topology changes
+and ledger transactions. Its self-signed root `NamespaceDelegation` publishes
+the public key into the synchronizer topology store. The proposer reads the key
+from that delegation and copies it into `PartyToParticipant.party_signing_keys`.
+
+A party created before 2.0 keeps its two keys, `{prefix}-namespace` and
+`{prefix}-daml-transactions`, and keeps working. Every key lookup reads the
+chain first, then the local cache, then the legacy vault name.
+
+One dual-usage key has a second effect. The namespace owner fingerprint equals
+the party signing-key fingerprint, so a kick names its target on-chain.
 
 ## System Components
 
 ```
-                                 Internet
-                                    |
-           +------------------------+------------------------+
-           |                        |                        |
-   +--------------+         +--------------+         +--------------+
-   | Participant 1|         | Participant 2|         | Participant 3|
-   |              |         |              |         |              |
-   | +----------+ |  Noise  | +----------+ |  Noise  | +----------+ |
-   | |HTTP :8080| |<------->| |HTTP :8080| |<------->| |HTTP :8080| |
-   | |Noise:9000| |  (P2P)  | |Noise:9000| |  (P2P)  | |Noise:9000| |
-   | +----+-----+ |         | +----+-----+ |         | +----+-----+ |
-   |      |       |         |      |       |         |      |       |
-   |      v       |         |      v       |         |      v       |
-   | +----------+ |         | +----------+ |         | +----------+ |
-   | |Canton    | |         | |Canton    | |         | |Canton    | |
-   | |Admin API | |         | |Admin API | |         | |Admin API | |
-   | |Ledger API| |         | |Ledger API| |         | |Ledger API| |
-   | +----------+ |         | +----------+ |         | +----------+ |
-   +--------------+         +--------------+         +--------------+
+   +--------------------+   +--------------------+   +--------------------+
+   |    Operator 1      |   |    Operator 2      |   |    Operator 3      |
+   |  +--------------+  |   |  +--------------+  |   |  +--------------+  |
+   |  | decman :8080 |  |   |  | decman :8080 |  |   |  | decman :8080 |  |
+   |  | observer loop|  |   |  | observer loop|  |   |  | observer loop|  |
+   |  +------+-------+  |   |  +------+-------+  |   |  +------+-------+  |
+   |         |          |   |         |          |   |         |          |
+   |  +------v-------+  |   |  +------v-------+  |   |  +------v-------+  |
+   |  | Participant  |  |   |  | Participant  |  |   |  | Participant  |  |
+   |  | Admin API    |  |   |  | Admin API    |  |   |  | Admin API    |  |
+   |  | Ledger API   |  |   |  | Ledger API   |  |   |  | Ledger API   |  |
+   |  +------+-------+  |   |  +------+-------+  |   |  +------+-------+  |
+   +---------|----------+   +---------|----------+   +---------|----------+
+             |                        |                        |
+             +------------+-----------+------------+-----------+
+                          |                        |
+              +-----------v------------------------v-----------+
+              |             Canton synchronizer                |
+              |   topology store      |    Daml transactions   |
+              +------------------------------------------------+
 ```
+
+Each operator runs one decman process beside one Canton participant. That
+process talks to its own participant only. Two decman processes never open a
+connection to each other. Both write to the same synchronizer and read from it.
 
 ### HTTP Server (actix-web)
 
-The HTTP server serves the embedded React frontend and exposes REST endpoints for managing decentralized parties. Key responsibilities:
+The HTTP server serves the embedded React frontend and exposes REST endpoints
+for managing decentralized parties. It listens on TCP 8080, and it is the only
+port decman opens. Key responsibilities:
+
 - Serving the single-page application (embedded at compile time via `build.rs`)
 - Proxying topology and governance queries to Canton APIs
-- Triggering and monitoring multi-party workflows
+- Starting, cancelling, and reporting multi-party runs
 - Managing authentication tokens via Keycloak or Auth0
+- Streaming an ACS snapshot out on `GET /acs-export/{party}/{target}` and in on
+  `POST /acs-import/{party}`, both under the admin role
 
 Payload limit: 100 MB (for DAR file uploads).
 
-### Noise Protocol Server
+### Node identity
 
-Each node runs a Noise Protocol server for secure peer-to-peer communication:
+Each node has one **node party**. The node party is a normal Canton party. Its
+own participant hosts it with Submission permission, so it can submit Daml
+commands. decman stores it as a `party_credentials` row with `kind = 'node'`.
 
-- **Handshake pattern**: `NN_PSK2` (no static keys in handshake, PSK injected at message 2)
-- **PSK derivation**: ECDH shared secret from secp256k1 keys (`SharedSecret::new(peer_pubkey, our_secret)`)
-- **Identity**: Peers identify via compressed secp256k1 public key (33 bytes)
-- **Transport**: HTTP-over-Noise via `hyper-noise` (each message is an HTTP request/response)
+The node party signs the registry entry, workflow proposals, acceptances,
+declines, submission rounds, signatures, ACS manifests, and heartbeats. It
+exists before any decentralized party exists.
 
-The server handles two categories of connections:
-1. **Heartbeat pings** -- peers ping each other every 5 seconds to track connectivity
-2. **Workflow messages** -- coordinator sends commands, peers return results
+| Route | Auth | Purpose |
+|---|---|---|
+| `GET /node-identity` | admin | Report the node party, its participant, and its hosting permission |
+| `PUT /node-identity` | admin | Set the node party |
+
+`PUT /node-identity` needs the admin role. It skips authentication only while
+`party_credentials` is entirely empty, which is the first-run case. An upgraded
+node already holds decparty rows, so its operator sets the node identity with an
+admin JWT. The handler reads the head `PartyToParticipant` of the party. It
+rejects the party unless this participant hosts it with Submission permission.
+
+A `kind = 'node'` row never adds a trusted JWT issuer. `GET /auth/status`, the
+party lists, and the inbound trusted-issuer set all skip it.
+
+### Peer exchange
+
+Operators exchange one string per peer: `participant_id,node_party_id,name`.
+The UI button "Share my identity" copies that string. "Add peer" pastes it.
+
+The `peers` table holds the participant id, the name, and the node party. It
+holds no address, no port, and no key, because no node dials another node. A
+peer without a node party cannot join a run.
+
+This node verifies the claim before it names a peer's node party as an
+observer. It calls `ListPartyToParticipant` on the tokenless Admin API. It
+requires the claimed participant to host that party with Submission permission.
 
 ### Canton gRPC Client
 
@@ -108,8 +155,8 @@ The application communicates with Canton via gRPC using the following services:
 **Admin API services:**
 | Service | Purpose |
 |---------|---------|
-| `TopologyManagerReadService` | Query DNS, P2P, and other topology mappings |
-| `TopologyManagerWriteService` | Submit topology proposals and authorize transactions |
+| `TopologyManagerReadService` | Query DNS, P2P, namespace delegations, vetted packages, and pending proposals |
+| `TopologyManagerWriteService` | Propose topology changes and co-sign them by transaction hash |
 | `VaultService` | Manage key vaults (generate keys, sign, export) |
 | `IdentityInitializationService` | Query participant ID |
 | `SynchronizerConnectivityService` | Discover synchronizer IDs, disconnect and reconnect during ACS import |
@@ -119,397 +166,498 @@ The application communicates with Canton via gRPC using the following services:
 **Ledger API services:**
 | Service | Purpose |
 |---------|---------|
-| `CommandService` | Submit and execute Daml commands |
-| `StateService` | Query active contracts |
+| `CommandService` | Create and exercise coordination contracts as the node party |
+| `StateService` | Read the active coordination contracts |
 | `UserManagementService` | Query user rights |
 | `PartyManagementService` (`ledger.api.v2.admin`) | Query party metadata and annotations |
 | `InteractiveSubmissionService` | Prepare and execute multi-party interactive submissions |
 | `UpdateService` | Read transaction updates by offset |
 | `EventQueryService` | Look up create/archive events for a contract |
 
-### Workflow Engine
+### Observer loop and run engine
 
-Each workflow type is modeled as a state machine with a defined step sequence. The engine:
-1. Advances through steps sequentially
-2. Sends commands to peers at steps that require their participation
-3. Waits for all peer responses before advancing
-4. Executes coordinator-only steps (proposal creation, submission) locally
+One background task drives every run. It replaces the command channel that
+decman 1.x ran between nodes. The [observer tick](#the-observer-tick) section
+lists what it does each time it wakes.
 
-## Coordinator / Peer Model
+Each workflow kind has one step machine with a proposer side and a member side.
+The engine reads state and writes the next action; it holds no long-lived task
+per run. The observer calls it once per tick under a per-run lock, and skips a
+run that another tick still holds.
 
-The system uses a coordinator/peer pattern for multi-party operations. Any participant can serve either role -- it is determined per-workflow, not per-node.
+`workflow_runs` is the UI projection. Each row names its `proposal_cid`, the
+proposer's party and participant, the member variant, and the pinned topology
+hashes. Cancel, dismiss, and retry are row operations, and the engine re-reads
+the row before every ledger write.
 
-### Coordinator
+## Coordination through Canton
 
-The coordinator is the participant that initiates a workflow. Responsibilities:
-- Sends invitations to selected peers via Noise protocol
-- Waits for peers to accept and connect
-- Orchestrates the step sequence (sends commands, collects results)
-- Performs coordinator-only operations (proposal creation, Canton submissions)
-- Runs a Noise server that peers poll for commands
+decman nodes coordinate through two Canton facilities. The synchronizer topology
+store carries partially signed topology proposals. Daml contracts carry the
+workflow intent and every operator decision.
 
-### Peer
+### The topology-proposal path
 
-An peer participates in a workflow initiated by another participant. Responsibilities:
-- Receives an invitation via heartbeat connection
-- User accepts/declines via UI (stored as pending invitation)
-- Connects to coordinator's Noise server as a client
-- Polls for commands via `GetNextCommand` message
-- Executes commands locally (key generation, signing)
-- Sends results back to coordinator
+A topology change needs signatures from several namespace owners. Canton merges
+those signatures itself, so decman never collects them over a channel of its own.
 
-### Invitation Flow
+| # | Actor | Action |
+|---|-------|--------|
+| 1 | Proposer | Reads the accepted mapping from the synchronizer store at serial `S` |
+| 2 | Proposer | Calls `Authorize` with the new mapping at serial `S + 1` and `must_fully_authorize = false` |
+| 3 | Synchronizer | Stores the transaction as a proposal and propagates it to every member |
+| 4 | Member | Lists the pending proposals for that mapping and validates the content |
+| 5 | Member | Calls `Authorize { transaction_hash }`, which adds its own signature |
+| 6 | Canton | Merges the signatures by fingerprint and applies the change once the threshold is met |
+| 7 | Everyone | Polls the accepted state until serial `S + 1` is effective |
 
-```
-Coordinator                           Peer
-    |                                     |
-    |--- InviteOnboarding (Noise) ------->|
-    |<-- Ack ----------------------------|
-    |                                     |
-    |    [User sees pending invitation    |
-    |     in UI and clicks "Accept"]      |
-    |                                     |
-    |<-- GetNextCommand (polling) --------|
-    |--- Wait / Command ----------------->|
-    |<-- Data / StatusUpdate -------------|
-    |    ...                              |
-    |--- Disconnect --------------------->|
-```
+Every read targets the synchronizer store with `operation = ADD_REPLACE` and
+`time_query = Snapshot(MaxValue)`. The proposer computes the transaction hash
+locally as `multihash_sha256(be32(11) || versioned transaction bytes)`. A member
+signs that hash and never resubmits the mapping.
 
-### Coordinator / Peer Trust Model
+Order matters. The proposer proposes the `DecentralizedNamespaceDefinition`
+first and waits until it is effective. Only then does it propose the
+`PartyToParticipant`. Canton rejects a `PartyToParticipant` under a
+decentralized namespace whose definition is not yet effective. Before it
+proposes a namespace definition, the proposer waits until every owner's root
+`NamespaceDelegation` is effective in the synchronizer store.
 
-A coordinator drives the protocol; a peer executes what it is told. The two are
-not equally trusted, and the boundary matters because a peer's Canton
-participant holds keys that can authorize topology changes for the
-decentralized party.
+Canton offers no way to withdraw a topology proposal. Cancel therefore archives
+the `WorkflowProposal` only. Members then stop co-signing, because they no
+longer find the accepted proposal. A cancelled onboarding never becomes
+effective, because it still needs the invitees. A cancelled kick or
+change-threshold that already reached the threshold **still becomes effective**,
+and the UI says so.
 
-**What the coordinator is trusted for.** Sequencing the run: deciding which
-step happens when, aggregating signatures, and submitting the result. It also
-builds the payloads — the topology proposals, the DAR bytes, the prepared
-ledger submissions.
+`GET /proposals/unsolicited` lists the pending topology proposals that no
+accepted `WorkflowProposal` explains. The observer refreshes that list every 60
+seconds for the UI, and it never signs from it.
 
-**What the coordinator is not trusted for.** The *content* of those payloads. A
-coordinator that is compromised, or simply running modified code, can put
-anything in them. The Noise channel proves who the coordinator is, not that
-what it sends is what the peer's operator agreed to.
+### The Daml coordination package
 
-**Where the peer's consent lives.** The invitation. The operator sees the
-party, the members, the threshold, the participant being added or removed and
-the DAR filenames and hashes, and accepts once per run. That invitation is
-persisted on the peer's `workflow_runs` row and is the reference for
-everything that follows (`workflow::validation::PeerExpectations`).
+The `decman-coordination-v1` package holds every contract that the nodes
+exchange. One node party signs each template, and the nodes that need it observe
+it.
 
-**What the peer checks before it signs or installs anything:**
+| Template | Signatory | Observers | Purpose |
+|----------|-----------|-----------|---------|
+| `DecmanNode` | node party | peer node parties | The registry entry: participant id, display name, version, coordination version, peer list, and last heartbeat |
+| `WorkflowProposal` | proposer | invitees | One run's intent: kind, participants, party, threshold, base serials, DAR pins, package names, and expiry |
+| `WorkflowAcceptance` | acceptor | proposer, invitees | One invitee's consent, with its participant id and its key fingerprints |
+| `WorkflowDecline` | decliner | proposer, invitees | One invitee's refusal and its reason |
+| `WorkflowOutcome` | proposer | invitees | The run's final result, success or failure |
+| `SubmissionRound` | proposer | signers | One prepared ledger transaction: hex bytes, hash, hashing scheme, preparation time, max record time, and deadline |
+| `SubmissionSignature` | signer | proposer, signers | One member's signature over a round, with its key fingerprint, format, and algorithm |
+| `AcsManifest` | exporter | party members | One ACS snapshot's pin: party, target participant, activation serial, size, sha256, and package ids |
 
-- The command belongs to the accepted workflow kind. A Contracts invitation
-  cannot be used to drive a kick.
-- Topology proposals decode to the expected mapping kind, target the accepted
-  party, carry exactly the accepted member set, keep this node's namespace
-  among the owners, and use the accepted threshold. For onboarding — where the
-  party does not exist yet — the peer instead checks that the decentralized
-  namespace really is the hash of the proposed owner set, and that the P2P
-  proposal is for the namespace it signed in the DNS step.
-- Prepared ledger submissions are re-hashed locally from the transaction that
-  accompanies them (`canton_hash`), so a signature can only ever authorize the
-  transaction the peer can inspect, and that transaction must act as the
-  accepted party. A hashing scheme this node cannot reproduce is refused
-  rather than signed blind.
-- DAR files match the filenames *and* the SHA-256 hashes named in the
-  invitation, so a coordinator cannot get different code vetted under an
-  accepted name.
+Choices follow the same shape. `DecmanNode` offers `Heartbeat`, `Update`, and
+`Retire`. `WorkflowProposal` offers `Accept`, `Decline`, `Cancel`, and `Finish`.
+`SubmissionRound` offers `Sign` and `Close`. Each record template offers an
+`Archive` choice for its own signatory, and the observer sweeps finished records.
 
-Any mismatch fails the step. Repeated mismatches abort the peer run.
+Canton rejects a create whose observer participant has not vetted the package.
+A node therefore names a peer as observer only after that peer's participant
+vets `decman-coordination-v1`. It retries the unvetted peer on the next tick. A
+startup task uploads and vets the embedded DAR locally, unless
+`DECPM_AUTO_UPLOAD_COORDINATION_DAR` is `false`. `POST /dars/upload` remains the
+manual path.
 
-**What this does not cover.** The checks bound what a coordinator can obtain a
-signature for; they do not make the coordinator trustworthy. Three gaps remain,
-and they are load-bearing enough to state rather than imply:
+### The observer tick
 
-- **A peer cannot verify the other members' namespaces or signing keys.** It
-  only ever sends its own key bundle to the coordinator and never sees the
-  others', so it can confirm that it was not excluded but not that the rest of
-  the owner set and key set belong to the members named in the invitation. A
-  DNS proposal needs `threshold` signatures rather than all of them, so a
-  namespace or key belonging to a member that does not sign this round can be
-  substituted without any signer noticing. Closable for kick / add-party /
-  change-threshold by comparing against the current on-chain state
-  (DLC-link/decentralization-manager#420, #422); not closable for onboarding
-  without a protocol change, because no on-chain state exists yet.
-- **The contracts workflow constrains who a transaction acts as, not what it
-  does.** The peer recomputes the hash and pins `act_as` to the accepted dec
-  party, so it can only ever authorize the transaction it can read — but the
-  accepted package names are never compared against the transaction's nodes, so
-  any create or exercise acting as that party passes
-  (DLC-link/decentralization-manager#423).
-- **An older coordinator may send an invitation without the DAR hashes.** The
-  peer then checks filenames only and logs a warning, so a network mid-upgrade
-  keeps working. This is the only leniency left for an absent field, alongside
-  the onboarding threshold; every other absent pin fails closed.
+One background task ticks every `DECPM_OBSERVER_POLL_SECS` seconds. The default
+is 3 seconds, and mainnet guidance is 10. Each tick does this, in order:
 
-Governance confirm/execute is not covered here and does not need to be: the peer
-builds those commands locally and the Daml layer re-validates them against the
-on-ledger proposal.
+1. Loads the node identity, and idles when the operator has not set one.
+2. Refreshes the peer health snapshot, publishes or updates this node's `DecmanNode`, and heartbeats when due.
+3. Reads the in-progress rows of `workflow_runs`.
+4. Reads every proposal, acceptance, decline, and outcome this node can see.
+5. Projects the undecided proposals into `pending_invitations` and the UI cache.
+6. Drives each run under a per-run `try_lock`, and skips a run that another tick still holds.
+7. Every 60 seconds, scans the unfiltered topology proposals and archives this node's finished records.
 
-## Communication Protocol
+The loop exports metrics under the `decman_observer_*` prefix. They cover a tick
+counter, a tick-duration histogram, and a last-tick gauge. They also cover a
+driven-runs counter, an error counter by stage, and a no-identity counter.
 
-### Wire Format
+A member never signs from a cached match. It re-reads the `WorkflowProposal` as
+active, its own run row as in-progress, and the pinned hash, in the same tick as
+the signature.
 
-All Noise protocol messages use a binary wire format:
+## Node Registry and Peer Health
 
-```
-+------------------+--------------------+------------------+
-| MessageType (2B) | PayloadLength (4B) | Payload (var)    |
-| big-endian u16   | big-endian u32     | raw bytes        |
-+------------------+--------------------+------------------+
-```
+Every node publishes one `DecmanNode` contract and names its peers as observers.
+The contract carries the node's participant id, display name, decman version,
+build version, coordination version, peer list, and last heartbeat time.
 
-Minimum message size: 6 bytes (type + length with zero payload).
+The node exercises `DecmanNode_Heartbeat` on a timer. The cadence is
+`DECPM_HEARTBEAT_INTERVAL_SECS`, and the template refuses a heartbeat that
+arrives sooner than `minHeartbeatIntervalSecs`. The node exercises
+`DecmanNode_Update` only when a published field differs from the desired value.
 
-### Message Categories
+`GET /registry` lists three groups: this node's own entry, the entries signed by
+a configured peer, and the inbound entries. An inbound entry is one whose
+signatory is not in the peers table, which means that operator added this node
+first.
 
-**Commands (0x0001 - 0x000F, 0x0020 - 0x002F):** Sent by coordinator to peers.
+`GET /participants-status` reports one status per configured peer, from the
+snapshot that the observer refreshes:
 
-| Code | Name | Payload | Description |
-|------|------|---------|-------------|
-| 0x0001 | UploadDars | Encoded DAR files | Upload DAR files to local Canton node |
-| 0x0002 | GenerateKeys | JSON OnboardingConfig | Generate namespace + Daml keys |
-| 0x0003 | SignDns | Binary DNS proposal | Sign DNS topology proposal |
-| 0x0004 | SignP2p | Binary P2P proposal | Sign P2P topology proposals |
-| 0x0005 | SignSubmissions | Config + prepared files | Sign ledger submissions |
-| 0x0006 | StatusUpdate | UTF-8 status text | Status update from peer |
-| 0x0007 | Disconnect | (empty) | Workflow complete, disconnect |
-| 0x0008 | GetNextCommand | (empty) | Peer polls for next command |
-| 0x0009 | SignKick | Config + kick proposals | Sign kick topology proposals |
-| 0x000A | Ping | (empty) | Heartbeat ping |
-| 0x000B | ListPackages | (empty) | Request peer's uploaded package list |
-| 0x000C | RequestOwnerKeys | (empty) | Request a peer's namespace owner keys |
-| 0x000D | ListPeers | (empty) | Request a peer's known-peer list |
-| 0x000E | RequestMemberParty | (empty) | Request a peer's member party |
-| 0x000F | Health | (empty) | Health probe |
-| 0x0020 | GenerateAddPartyKeys | JSON add-party config | New member generates its namespace + Daml keys (others skip) |
-| 0x0021 | SignAddParty | Config + add-party proposals | Sign the add-party DNS + P2P proposals |
-| 0x0022 | ImportAcs | ACS snapshot | New member imports the party's ACS (others skip) |
-| 0x0023 | ClearOnboardingFlag | JSON clear config | New member drives `ClearPartyOnboardingFlag` (others skip) |
-| 0x0024 | SignClearOnboarding | Clearing proposal or skip marker | Sign the onboarding-flag clearing proposal |
-| 0x0025 | SignChangeThreshold | Config + threshold proposals | Sign the change-threshold DNS + P2P proposals |
+| Status | Meaning |
+|--------|---------|
+| `CurrentNode` | This node |
+| `Active` | An entry is visible and its last heartbeat is recent |
+| `Stale` | An entry is visible, but its age exceeds `DECPM_PEER_STALE_FACTOR` times the peer's heartbeat interval |
+| `Unknown` | The peer has vetted the coordination package, but no entry signed by its node party is visible |
+| `Unvetted` | The peer's participant has not vetted the coordination package |
 
-**Invites (0x0010 - 0x001F):** Sent during heartbeat to invite peers.
+The value is a heartbeat age, not a liveness probe. The UI labels it "last
+heartbeat N ago". An entry counts for a peer only when its signatory equals the
+peer's node party and its participant claim equals the peer's participant. The
+hosting check must also report Submission permission.
 
-| Code | Name | Description |
-|------|------|-------------|
-| 0x0010 | InviteOnboarding | Invite to onboarding workflow |
-| 0x0011 | InviteKick | Invite to kick workflow |
-| 0x0012 | InviteContracts | Invite to contracts workflow |
-| 0x0013 | InviteDars | Invite to DARs upload workflow |
-| 0x0014 | CancelInvite | Cancel a previously sent invitation |
-| 0x0015 | RetryWorkflow | Coordinator tells peers to retry a failed run |
-| 0x0016 | DeclineInvitation | Peer declines an invitation (frees coordinator's run) |
-| 0x0017 | InviteAddParty | Invite to add a new member to a decentralized party |
-| 0x0018 | InviteChangeThreshold | Invite to change a decentralized party's threshold |
+A proposer refuses to start a run unless every invitee passes three tests. The
+invitee has vetted the coordination package. Its registry entry is visible. Its
+`coordinationVersion` is at least the proposer's. The start handler returns 409
+and names each participant that fails, and it distinguishes "no entry visible"
+from "entry too old".
 
-**Responses (0x0100 - 0x01FF):** Replies from coordinator or peer.
+## Proposer and Members
 
-| Code | Name | Description |
-|------|------|-------------|
-| 0x0101 | Ack | Acknowledgement |
-| 0x0102 | Data | Generic data payload |
-| 0x0103 | Error | Error message |
-| 0x0104 | Ready | Peer is ready |
-| 0x0105 | Wait | No command ready, poll again |
-| 0x0106 | Pong | Heartbeat response |
-| 0x0107 | OwnerKeys | Namespace owner keys (reply to RequestOwnerKeys) |
-| 0x0108 | PeerList | Known-peer list (reply to ListPeers) |
-| 0x0109 | MemberPartyResponse | Member party (reply to RequestMemberParty) |
-| 0x010A | HealthResponse | Health status (reply to Health) |
-| 0x010B | Busy | Node is busy with another workflow |
+One node proposes a run; the other nodes are its members. Any node can take
+either role, and each run decides the roles anew. The HTTP and database layers
+still name the proposer role `Coordinator`.
 
-**Data Transfers (0x0200 - 0x02FF):** Peer data uploads to coordinator.
+### The proposer
 
-| Code | Name | Description |
-|------|------|-------------|
-| 0x0201 | KeysUpload | Generated public keys |
-| 0x0202 | DnsSignature | Signed DNS proposal |
-| 0x0203 | P2pSignatures | Signed P2P proposals |
-| 0x0204 | SubmissionSignatures | Signed ledger submissions |
-| 0x0205 | KickSignatures | Signed kick proposals |
-| 0x0206 | AddPartyKeysUpload | New member's generated keys + participant id |
-| 0x0207 | AddPartySignatures | Signed add-party DNS + P2P pair |
-| 0x0208 | AddPartyClearSignatures | Signed onboarding-flag clearing proposal |
-| 0x0209 | AddPartyClearProposal | The clearing proposal the new member authored |
-| 0x020A | ChangeThresholdSignatures | Signed change-threshold DNS + P2P pair |
+The proposer starts a run. It generates its own key when the kind needs one,
+creates the `WorkflowProposal`, and names the invitees as observers. It then
+waits for acceptances, writes each topology change into the synchronizer store,
+and polls until the change is effective. For a contracts run it prepares each
+transaction, opens a `SubmissionRound`, counts the verified signatures, and
+executes. It exercises `WorkflowProposal_Finish` at the end.
 
-**Chunked Transfer (0x0300 - 0x03FF):** For payloads exceeding 1 MiB.
+### A member
 
-| Code | Name | Payload | Description |
-|------|------|---------|-------------|
-| 0x0300 | ChunkedCommand | command_type(2B) + total_size(4B) + chunk_count(4B) | Announce chunked transfer |
-| 0x0301 | GetChunk | chunk_index(4B) | Request specific chunk |
-| 0x0302 | Chunk | chunk_index(4B) + chunk_data(var) | Chunk data response |
+A member sees the proposal as an invitation card. Its operator accepts or
+declines once. On accept, decman writes the decision locally, generates the key
+when the kind needs one, and exercises `WorkflowProposal_Accept` with its key
+material. After that the node co-signs every topology proposal that matches what
+its operator accepted.
 
-Chunk size: 1 MiB (`CHUNK_SIZE`). Chunking is required for payloads exceeding `MAX_PAYLOAD_SIZE` (1 MiB). An assembled chunked response is capped at 16 MiB (`MAX_CHUNKED_TOTAL_SIZE`).
+The operator consents once per run, not once per signature. The proposal expires
+at `expiresAt`, which defaults to seven days. The node marks a mapping spent
+once its change is effective at `base + 1`.
 
-### Security
+### Trust model
 
-- **PSK derivation**: Each peer pair derives a unique PSK via secp256k1 ECDH. The coordinator's secret key and the peer's public key (or vice versa) produce a shared secret used as the Noise PSK.
-- **Peer allowlist**: Only peers registered in the database can establish connections. Unknown public keys are rejected.
-- **Transport encryption**: All data is encrypted by the Noise protocol after handshake completion.
+The proposer decides the order of a run. It does not decide what a member
+signs. A member's participant holds keys that authorize topology changes for the
+decentralized party, so the member checks the content itself.
+
+**What a member checks before it co-signs a topology proposal:**
+
+- **The accepted proposal.** The `WorkflowProposal` is still active on the
+  ledger, has not expired, and its kind matches the mapping at hand. The member
+  re-reads it in the same tick as the signature.
+- **The counted acceptances.** Each acceptance names this proposal and this
+  proposer. Its acceptor is an invitee, and its `participantId` is one of the
+  proposal's participants. That participant hosts the acceptor with Submission
+  permission. One acceptor may contribute one acceptance, and a second one fails
+  the run closed.
+- **The base serial.** The accepted mapping's serial equals the proposal's
+  `dndBaseSerial` or `p2pBaseSerial`, and the pending serial is exactly one
+  higher. A different serial means the topology changed during the run, so the
+  member fails the run.
+- **The `ADD_REPLACE` operation.** A `REMOVE` with unchanged content falls back
+  to party-namespace authorization, so the member pins the operation and refuses
+  anything else.
+- **The signature set.** The proposer's own owner fingerprint is among the
+  signers, and this node's fingerprint is not yet there.
+- **The mapping contents**, per kind:
+
+| Kind | Namespace definition | Party mapping |
+|------|----------------------|---------------|
+| Onboarding | The owners are the proposer's fingerprint plus one per counted acceptance, the namespace is the hash of that owner set, and the threshold matches the proposal | The party is `prefix::namespace`, each host is a counted participant at Confirmation, and each key is the owner's root-delegation key |
+| Add party | The owners are the head owners plus the joiner's fingerprint | The hosts are the head hosts plus the joiner at Confirmation and `Onboarding`, every head host is unchanged, and the keys gain the joiner's root-delegation key |
+| Kick | The owners are the head owners minus exactly the kicked fingerprint | The hosts are the head hosts minus the kicked participant, every survivor is unchanged, and exactly one key leaves |
+| Change threshold | Equal to the head, except the threshold | Equal to the head, except both thresholds |
+
+The member compares hosts as full `(participant_uid, permission, onboarding)`
+tuples, and keys as full `SigningPublicKey` byte sets. It refuses to sign on any
+mismatch. It then fails its run with the reason and shows that reason in the UI.
+
+**What a member checks before it signs a contracts round.** It requires the
+round's party to be the accepted party and `act_as` to name that party. It
+requires its own key fingerprint to be in the head `party_signing_keys`. It
+recomputes the hash from the transaction with `canton_hash` and compares. It
+decodes the transaction and requires every root node to be a `Create` whose
+package name is in the accepted `packageNames`. It refuses a round past its
+deadline, and it refuses a hashing scheme that it cannot reproduce.
+
+**What a member checks before it imports an ACS snapshot.** It requires the
+named participant to host the manifest's exporter with Submission permission. That participant is a current host of the party and is not itself
+onboarding. The exporter equals the node party recorded for that participant.
+The activation serial is the earliest serial that marks the joiner `Onboarding`.
+The file's size and sha256 match the manifest, and this node has vetted every
+package that the manifest names.
+
+**What a member still cannot check:**
+
+- **Legacy kick attribution.** On a party created before 2.0, the namespace
+  owner fingerprints differ from the party signing keys. A member then proves
+  only that exactly one key leaves, that the key is not its own, and that no
+  survivor claims it. It reads the link between the removed key and the named
+  participant from its own `dec_party_participant` cache, not from the chain.
+- **The arguments of a contract.** A member confirms that every root node
+  creates a contract of an accepted package, acting as the accepted party. It
+  does not compare the field values against anything that its operator approved.
+- **The completeness of an ACS snapshot.** The joiner verifies the manifest and
+  the file. It cannot prove that the snapshot holds every contract that the party
+  held at the activation serial.
+- **The proposer's code.** The checks bound what a signature can authorize. They
+  do not make the proposer honest.
+
+Governance confirm and execute stay outside this model. A member builds those
+commands locally, and the Daml layer re-validates them against the on-ledger
+proposal.
 
 ## Workflows
 
+Six run kinds share the shape that the previous chapter describes. The proposer
+creates a `WorkflowProposal`, the invitees accept or decline, and the proposer
+drives the rest. The step names below are the `current_step` values that the UI
+shows.
+
 ### Onboarding (Decentralized Party Creation)
 
-Creates a new decentralized party with multiple hosting participants.
+This run creates a new decentralized party across several participants.
 
-**Steps:**
+**Proposer steps:**
 
-| # | Step | Actor | Description |
-|---|------|-------|-------------|
-| 1 | WaitingForPeers | Coordinator | Wait for all invited peers to connect |
-| 2 | GenerateKeys | All | Each participant generates namespace + Daml signing keys via Canton Admin API |
-| 3 | CreateProposals | Coordinator | Compute decentralized namespace hash, create DNS and P2P topology proposals |
-| 4 | SignDns | All | Each participant signs the DNS proposal with their namespace key |
-| 5 | SubmitDns | Coordinator | Submit signed DNS proposal to Canton, wait for topology propagation (30s) |
-| 6 | SignP2p | All | Each participant signs P2P proposals with their namespace key |
-| 7 | SubmitFinal | Coordinator | Re-sign the aggregate against the synchronizer store (the coordinator's namespace key only resolves once the DNS is active), verify the owner threshold is met, submit signed P2P proposals, wait for propagation |
-| 8 | Complete | All | Disconnect peers, workflow finished |
+| # | Step | Description |
+|---|------|-------------|
+| 1 | GenerateKeys | Generate the dual-usage party key and publish its root `NamespaceDelegation` |
+| 2 | WaitingForAcceptances | Wait until every invitee has a counted acceptance |
+| 3 | ProposeNamespace | Read each owner's root delegation, then propose the namespace definition at serial 1 |
+| 4 | AwaitNamespace | Poll until the namespace definition is effective |
+| 5 | ProposeParty | Propose the party mapping at serial 1, with every owner's key |
+| 6 | AwaitParty | Poll until the party mapping is effective |
+| 7 | Complete | Exercise `WorkflowProposal_Finish` and close the run |
+
+**Member steps:**
+
+| # | Step | Description |
+|---|------|-------------|
+| 1 | GenerateKeys | Generate the dual-usage party key, wait for its root delegation, then accept the proposal |
+| 2 | CoSignNamespace | Validate the pending namespace definition and co-sign it by hash |
+| 3 | CoSignParty | Validate the pending party mapping and co-sign it by hash |
+| 4 | Complete | Close the run |
 
 **Canton API calls:**
-- `VaultService.GenerateKey` -- Generate namespace and signing keys (step 2)
-- `VaultService.ExportKeyPair` -- Export public keys for proposal creation (step 2)
-- `TopologyManagerWriteService.Authorize` -- Sign topology proposals (steps 4, 6)
-- `TopologyManagerWriteService.AddTransactions` -- Submit signed proposals (steps 5, 7)
+- `VaultService.GenerateKey` -- the `{prefix}-key` vault key (step 1)
+- `TopologyManagerWriteService.Authorize` -- publish the root `NamespaceDelegation` to the Authorized store (step 1)
+- `CommandService.SubmitAndWaitForTransaction` -- create, accept, and finish the proposal
+- `TopologyManagerReadService.ListNamespaceDelegation` -- read each owner's public key (proposer step 3)
+- `TopologyManagerWriteService.Authorize` -- propose and co-sign both mappings
+- `TopologyManagerReadService.ListDecentralizedNamespaceDefinition` / `ListPartyToParticipant` -- poll for the effect
+
+**Quorum:** every invitee must accept.
 
 **Minimum participants:** 2
 
 ### Kick (Remove Participant)
 
-Removes a participant from an existing decentralized party.
+This run removes a participant from an existing decentralized party. The
+invitees are the remaining members. The kicked node sees the topology proposal as unsolicited.
 
-**Steps:**
+**Proposer steps:**
 
-| # | Step | Actor | Description |
-|---|------|-------|-------------|
-| 1 | WaitingForPeers | Coordinator | Wait for remaining members to connect |
-| 2 | ExportState | Coordinator | Export current DNS and P2P topology state |
-| 3 | CreateProposals | Coordinator | Create new DNS (reduced owners) and P2P (removed member) proposals |
-| 4 | SignProposals | All remaining | Each remaining member signs the kick proposals |
-| 5 | SubmitKick | Coordinator | Submit signed proposals to Canton |
-| 6 | Complete | All | Disconnect peers |
+| # | Step | Description |
+|---|------|-------------|
+| 1 | WaitingForAcceptances | Wait until enough members accept to reach the quorum |
+| 2 | ProposeChanges | Propose the reduced namespace definition, then the reduced party mapping |
+| 3 | AwaitChanges | Poll until both mappings are effective |
+| 4 | Complete | Finish the proposal and close the run |
 
-**Canton API calls:**
-- `TopologyManagerReadService.ListDecentralizedNamespaceDefinition` -- Read current DNS (step 2)
-- `TopologyManagerReadService.ListPartyToParticipant` -- Read current P2P mappings (step 2)
-- `TopologyManagerWriteService.Authorize` -- Sign proposals (step 4)
-- `TopologyManagerWriteService.AddTransactions` -- Submit proposals (step 5)
-
-**Minimum participants:** 2
-
-### Contracts (DAR Upload + Contract Creation)
-
-Deploys DAR packages and creates Daml contracts on the ledger.
-
-**Steps:**
-
-| # | Step | Actor | Description |
-|---|------|-------|-------------|
-| 1 | WaitingForPeers | Coordinator | Wait for all participants to connect |
-| 2 | UploadDars | All | Each participant uploads DAR files to their local Canton node |
-| 3 | PrepareSubmissions | Coordinator | Prepare ledger command submissions from contract definitions |
-| 4 | SignSubmissions | All | Each participant signs the prepared submissions |
-| 5 | ExecuteSubmissions | Coordinator | Execute signed submissions on the Canton ledger |
-| 6 | Complete | All | Disconnect peers |
+**Member steps:** `CoSignChanges`, then `Complete`. The member validates each
+mapping against the head state and co-signs it by hash.
 
 **Canton API calls:**
-- `PackageService.UploadDarFile` -- Upload DAR packages (step 2)
-- `InteractiveSubmissionService.PrepareSubmission` -- Prepare ledger command submissions (step 3)
-- `InteractiveSubmissionService.ExecuteSubmissionAndWaitForTransaction` -- Execute signed multi-party submissions (step 5)
+- `TopologyManagerReadService.ListDecentralizedNamespaceDefinition` / `ListPartyToParticipant` -- read the head state and poll for the effect
+- `TopologyManagerWriteService.Authorize` -- propose and co-sign both mappings
+- `CommandService.SubmitAndWaitForTransaction` -- the proposal, the acceptances, and the outcome
 
-**Minimum participants:** 3
+**Quorum:** `max(previous threshold, new threshold)` owner signatures per
+mapping, counting the proposer. The proposer leaves `WaitingForAcceptances` one
+acceptance short of that number, because its own signature counts. Later
+acceptances still co-sign.
 
-### DARs (DAR Upload Only)
+**Minimum participants:** 2 (remaining members)
 
-Uploads DAR packages to all participants without deploying contracts.
+### Contracts (Contract Creation)
 
-**Steps:**
+This run creates Daml contracts under a decentralized party. Each member signs
+the prepared transaction with its own party key.
 
-| # | Step | Actor | Description |
-|---|------|-------|-------------|
-| 1 | WaitingForPeers | Coordinator | Wait for all participants to connect |
-| 2 | UploadDars | All | Each participant uploads DAR files to their local Canton node |
-| 3 | Complete | All | Disconnect peers |
+**Proposer steps:**
+
+| # | Step | Description |
+|---|------|-------------|
+| 1 | WaitingForAcceptances | Wait until every invitee has a counted acceptance |
+| 2 | AwaitDars | Wait until every participant has vetted the contracts' packages |
+| 3 | PrepareSubmissions | Prepare one transaction per contract definition and open one `SubmissionRound` for each |
+| 4 | CollectSignatures | Verify each `SubmissionSignature` against the head `party_signing_keys` and dedupe by fingerprint |
+| 5 | ExecuteSubmissions | Execute each round once the party's signing threshold is met, then close it |
+| 6 | Complete | Finish the proposal and close the run |
+
+**Member steps:** `UploadDars`, `SignSubmissions`, then `Complete`. The member
+uploads the packages locally, checks each round, signs it with its party key,
+and exercises `SubmissionRound_Sign`.
 
 **Canton API calls:**
-- `PackageService.UploadDarFile` -- Upload DAR packages (step 2)
+- `PackageService.UploadDarFile` -- upload the packages locally (member step 1)
+- `TopologyManagerReadService.ListVettedPackages` -- observe vetting per participant (proposer step 2)
+- `InteractiveSubmissionService.PrepareSubmission` -- prepare each transaction (proposer step 3)
+- `VaultService.Sign` -- sign a round with the party key (member step 2)
+- `InteractiveSubmissionService.ExecuteSubmissionAndWaitForTransaction` -- execute one round with the verified signatures (proposer step 5)
+
+**The signing window.** The proposer prepares with `max_record_time = now + 20h`
+and reads the synchronizer's `preparationTimeRecordTimeTolerance`. The round's
+deadline is `min(maxRecordTime, preparationTime + tolerance)` minus 30 minutes.
+The proposer re-prepares an expired round, and the members sign it again.
+
+**Quorum:** the party's `party_signing_keys.threshold` verified signatures. The
+proposer refuses a start when the participants in the run cannot reach that
+number.
+
+### DARs (Package Distribution)
+
+This run distributes DAR packages to every participant. decman never sends DAR
+bytes to another node.
+
+**Proposer steps:**
+
+| # | Step | Description |
+|---|------|-------------|
+| 1 | WaitingForAcceptances | Wait until every invitee has a counted acceptance |
+| 2 | AwaitVetting | Poll each participant's vetted packages until every pin is vetted everywhere |
+| 3 | Complete | Finish the proposal and close the run |
+
+**Member steps:** `UploadDars`, then `Complete`.
+
+`POST /dars/distribute` pins each file by filename, sha256, main package id, and
+size. The proposal carries those pins, and the proposer uploads the files to its
+own participant. Each other operator obtains the same files and uploads them
+through `POST /dars/upload` with `pin_instance` set to the run id. The handler
+refuses a file whose sha256 matches no pending pin, and it always passes the
+pinned main package id to Canton.
+
+**Canton API calls:**
+- `PackageService.UploadDarFile` -- upload a pinned file locally
+- `TopologyManagerReadService.ListVettedPackages` -- observe vetting per participant
+
+**Quorum:** every invitee must accept.
 
 **Minimum participants:** 2
 
 ### Add Party (Add a Host to an Existing Decentralized Party)
 
-Adds a hosting participant to a decentralized party that already exists, and
-replicates the party's active contracts to it. The party keeps transacting on
+This run adds a hosting participant to a decentralized party that already
+exists, and it replicates the party's active contracts to that participant. The party keeps transacting on
 its existing hosts throughout: Canton's `HostingParticipant.Onboarding` marker
 suspends it only on the joining node.
 
-**Steps:**
+**Proposer steps:**
 
-| # | Step | Actor | Description |
-|---|------|-------|-------------|
-| 1 | WaitingForPeers | Coordinator | Wait for the existing members and the joiner to connect |
-| 2 | GenerateNewMemberKeys | New member | Generate namespace + Daml signing keys and upload the public halves |
-| 3 | ExportState | Coordinator | Read the current DNS + P2P state, validate the add, capture the ledger offset |
-| 4 | CreateProposals | Coordinator | Build the updated DNS + P2P proposals, with the joiner marked `Onboarding` |
-| 5 | SignProposals | All | Every member signs both proposals with its namespace key |
-| 6 | SubmitProposals | Coordinator | Submit DNS then P2P, then export the party's ACS |
-| 7 | SyncAcs | New member | Disconnect from the synchronizer, import the ACS, reconnect (skipped when the ACS is empty) |
-| 8 | PrepareClearOnboarding | Coordinator | Swap the command payload for the clear-flag phase |
-| 9 | ProposeClearOnboarding | New member | Author the `ClearPartyOnboardingFlag` transaction past Canton's safe time |
-| 10 | PrepareClearSign | Coordinator | Turn the authored proposal into a signing round (or a skip marker) |
-| 11 | SignClearOnboarding | All | Every member signs the clearing proposal |
-| 12 | SubmitClearOnboarding | Coordinator | Submit it and wait for the marker to drop |
-| 13 | Complete | All | Disconnect peers, workflow finished |
+| # | Step | Description |
+|---|------|-------------|
+| 1 | GenerateKeys | Nothing to generate; the proposer is a current owner and advertised its key in the proposal |
+| 2 | WaitingForAcceptances | Wait until every invitee has a counted acceptance |
+| 3 | ProposeChanges | Propose the widened namespace definition, then the party mapping with the joiner marked `Onboarding` |
+| 4 | AwaitChanges | Poll until both mappings are effective |
+| 5 | AwaitReplication | Wait until the joiner clears its `Onboarding` marker |
+| 6 | Complete | Finish the proposal and close the run |
+
+**Joiner steps:**
+
+| # | Step | Description |
+|---|------|-------------|
+| 1 | GenerateKeys | Generate the dual-usage party key, wait for its root delegation, then accept the proposal |
+| 2 | CoSignChanges | Capture the pre-activation offset, validate both mappings, and co-sign them |
+| 3 | SyncAcs | Import the snapshot, or skip it when the manifest reports zero bytes |
+| 4 | ClearOnboarding | Exercise `ClearPartyOnboardingFlag` and poll until the party reports `onboarded` |
+| 5 | Complete | Close the run |
+
+**Member steps (every other current host):**
+
+| # | Step | Description |
+|---|------|-------------|
+| 1 | CoSignChanges | Capture the export offset first, then validate and co-sign both mappings |
+| 2 | PublishManifest | Export the snapshot to the spool directory and publish an `AcsManifest` |
+| 3 | Complete | Close the run |
+
+**The snapshot handoff.** decman never sends ACS bytes to another node. A current
+host exports the snapshot to `DECPM_ACS_SPOOL_DIR` and publishes the manifest.
+The joining operator downloads the file with
+`GET /acs-export/{party}/{target}?serial=N` from that host and uploads it with
+`POST /acs-import/{party}?serial=N&exporter=<participant>` on its own node. Both
+routes need an admin JWT and stream gzip. The joiner skips the transfer when the
+manifest reports zero bytes, and it clears the flag at once. decman deletes the
+spool files once the joiner reports `onboarded`, or once the operator dismisses
+the run.
 
 **Canton API calls:**
-- `VaultService.GenerateKey` / `ExportKeyPair` -- New member's keys (step 2)
-- `TopologyManagerWriteService.Authorize` / `AddTransactions` -- Proposals (steps 5, 6, 11, 12)
-- `PartyManagementService.GetHighestOffsetByTimestamp` -- Capture the export offset (step 3)
-- `PartyManagementService.ExportPartyAcs` -- Export the snapshot, scoped to the joiner (step 6)
-- `SynchronizerConnectivityService.DisconnectSynchronizer` / `ReconnectSynchronizers` -- Bracket the import (step 7)
-- `PartyManagementService.ImportPartyAcs` -- Import the snapshot (step 7)
-- `PackageService.ListPackages` -- Preflight the joiner's vetted packages before the import (step 7)
-- `PartyManagementService.ClearPartyOnboardingFlag` -- Clear the marker (steps 9, 12)
+- `VaultService.GenerateKey` -- the joiner's party key (joiner step 1)
+- `TopologyManagerWriteService.Authorize` -- propose and co-sign both mappings
+- `PartyManagementService.GetHighestOffsetByTimestamp` -- capture the export offset (member step 1)
+- `PartyManagementService.ExportPartyAcs` -- export the snapshot, scoped to the joiner (member step 2)
+- `PackageService.ListPackages` -- check the joiner's vetted packages before the import (joiner step 3)
+- `SynchronizerConnectivityService.DisconnectSynchronizer` / `ReconnectSynchronizers` -- bracket the import (joiner step 3)
+- `PartyManagementService.ImportPartyAcs` -- import the snapshot (joiner step 3)
+- `PartyManagementService.ClearPartyOnboardingFlag` -- clear the marker (joiner step 4)
 
-**Minimum participants:** 2 (an existing member + the joiner)
+**Quorum:** every invitee must accept.
 
-**Restriction:** the workflow requires a `DecentralizedNamespaceDefinition` and a
-Noise quorum of member nodes. It cannot add a host to a local party or to an
-external party. It fails at `ExportState` for any other party type.
+**Minimum participants:** 2 (an existing member and the joiner)
+
+**Restriction:** the run needs a `DecentralizedNamespaceDefinition`. It cannot
+add a host to a local party or to an external party. The preflight refuses any
+other party type.
 
 ### Change Threshold
 
-Changes the signing threshold of an existing decentralized party's namespace.
+This run changes the signing threshold of an existing decentralized party.
 
-**Steps:**
+**Proposer steps:** `WaitingForAcceptances`, `ProposeChanges`, `AwaitChanges`,
+then `Complete`. Both mappings equal the head state, except the threshold.
 
-| # | Step | Actor | Description |
-|---|------|-------|-------------|
-| 1 | WaitingForPeers | Coordinator | Wait for the party's members to connect |
-| 2 | ExportState | Coordinator | Read the current DNS state and validate the new threshold |
-| 3 | CreateProposals | Coordinator | Build the new-threshold DNS + P2P proposals |
-| 4 | SignProposals | All | Every member signs the proposals |
-| 5 | Submit | Coordinator | Submit the change and wait for propagation |
-| 6 | Complete | All | Disconnect peers |
+**Member steps:** `CoSignChanges`, then `Complete`.
 
 **Canton API calls:**
-- `TopologyManagerWriteService.Authorize` -- Sign the proposals (step 4)
-- `TopologyManagerWriteService.AddTransactions` -- Submit the change (step 5)
+- `TopologyManagerReadService.ListDecentralizedNamespaceDefinition` / `ListPartyToParticipant` -- read the head state and poll for the effect
+- `TopologyManagerWriteService.Authorize` -- propose and co-sign both mappings
+
+**Quorum:** `max(previous threshold, new threshold)` owner signatures per
+mapping, counting the proposer.
 
 **Minimum participants:** 2 (party members)
+
+### Cancel, decline, and retry
+
+| Action | Actor | Effect |
+|--------|-------|--------|
+| Cancel | Proposer | Exercises `WorkflowProposal_Cancel` and marks the run `Cancelled`. Members see the proposal vanish and cancel their rows. A topology proposal that already reached the threshold still becomes effective |
+| Decline | Invitee | Exercises `WorkflowProposal_Decline`. For onboarding, add-party, contracts, and DARs this fails the run for everyone. For kick and change-threshold it fails the run only when the remaining invitees cannot reach the quorum |
+| Retry | Proposer or member | Re-runs the same ensure loop. The proposer re-reads the accepted serial and re-proposes only when its proposal is gone and the base serial still holds. A member re-issues `Authorize { transaction_hash }` |
+| Dismiss | Either | Removes the card. The run is already terminal |
 
 ### External Party Onboarding (Tenant API)
 
 Creates a **co-validated** party: hosted on several participants at once but
-controlled by a single Ed25519 key its owner holds. This is not a Noise
-workflow. It is stateless HTTP, driven by the wallet, with Canton itself as the
-only coordination store.
+controlled by a single Ed25519 key its owner holds. This run uses no
+`WorkflowProposal`. It is stateless HTTP, driven by the wallet, with Canton
+itself as the only coordination store.
 
 **Steps:**
 
@@ -765,14 +913,34 @@ Weights are decimal strings and must sum to exactly 1.0; `SetProviderAppRewardBe
 - **Canton Admin API access required**: The application needs access to privileged Admin API endpoints (topology management, key vaults, package upload). This is not the public Ledger API -- it requires high node-level privileges.
 - **7 Admin API services used**: TopologyManagerRead, TopologyManagerWrite, Vault, IdentityInitialization, SynchronizerConnectivity, PackageService, PartyManagement
 - **Canton protocol version**: 35 (hardcoded for key export and topology operations)
-- **Network ports**: TCP 8080 (HTTP server) + TCP 9000 (Noise P2P)
+- **Network ports**: TCP 8080 for the HTTP server. decman opens no other port, and it accepts no inbound connection from another decman node.
+- **Coordination package**: every participant must vet `decman-coordination-v1` before it can take part in a run.
+- **Node party**: every node needs one node party that its own participant hosts with Submission permission.
 
 ### Timing Constraints
 
+- **Observer tick**: 3 seconds by default, raised to 10 on mainnet (`DECPM_OBSERVER_POLL_SECS`)
+- **Heartbeat interval**: 3600 seconds by default (`DECPM_HEARTBEAT_INTERVAL_SECS`), with a template floor of 60 seconds (`DECPM_HEARTBEAT_MIN_INTERVAL_SECS`)
+- **Staleness**: a peer reads `Stale` after 3 heartbeat intervals (`DECPM_PEER_STALE_FACTOR`)
+- **Proposal lifetime**: 7 days (`DECPM_PROPOSAL_TTL_SECS`)
 - **Topology propagation delay**: 30 seconds after the effective time of a topology change before it can be used. Without this wait, transactions may be rejected with `LOCAL_VERDICT_TIMEOUT`.
 - **Topology retry settings**: 30 attempts with 2-second delays when polling for topology state changes
-- **Heartbeat interval**: 5-second ping cycle for peer connectivity monitoring
-- **Noise timeouts**: 10-second request timeout, 25-second chunk-fetch timeout, 45-second handler timeout, 30-second handshake timeout (configurable), 120-second message timeout (configurable)
+- **Contracts signing window**: `max_record_time` is 20 hours out, and the round's deadline is 30 minutes before the earlier of that time and `preparationTime + preparationTimeRecordTimeTolerance`
+- **Unsolicited scan**: every 60 seconds, alongside the archive sweep
+- **Step failure budget**: 6 consecutive failures of one step before the observer fails the run
+
+### Configuration
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `DECPM_OBSERVER_POLL_SECS` | `3` | Seconds between observer ticks |
+| `DECPM_HEARTBEAT_INTERVAL_SECS` | `3600` | Seconds between heartbeats |
+| `DECPM_HEARTBEAT_MIN_INTERVAL_SECS` | `60` | The floor the template enforces, clamped to the interval |
+| `DECPM_PEER_STALE_FACTOR` | `3` | Heartbeat intervals before a peer reads `Stale` |
+| `DECPM_PROPOSAL_TTL_SECS` | `604800` | Lifetime of a `WorkflowProposal`, in seconds |
+| `DECPM_AUTO_UPLOAD_COORDINATION_DAR` | `true` | Whether a startup task uploads and vets the embedded coordination DAR |
+| `DECPM_ACS_SPOOL_DIR` | `{data}/acs` | Where add-party snapshots are spooled |
+| `DECPM_COORDINATION_PACKAGE_REF` | `#decman-coordination-v1` | The coordination package reference |
 
 ### Participant Minimums
 
@@ -780,18 +948,26 @@ Weights are decimal strings and must sum to exactly 1.0; `SetProviderAppRewardBe
 |----------|---------------------|
 | Onboarding | 2 |
 | Kick | 2 (remaining members) |
-| Contracts | 3 |
+| Contracts | Enough hosts to reach the party's signing threshold |
 | DARs | 2 |
 | Add Party | 2 (an existing member + the joiner). The threshold may not count the joiner: it carries Canton's onboarding marker until its ACS import completes, and a write at threshold = post-add member count never becomes effective |
 | Change Threshold | 2 (party members) |
 
+Onboarding, add-party, and DARs need every invitee to accept. Kick and
+change-threshold need `max(previous threshold, new threshold)` owner signatures,
+counting the proposer. Contracts needs the party's
+`party_signing_keys.threshold` verified signatures.
+
 ### Known Limitations
 
-- **ACS sync for existing contracts**: Adding a new member to a party that already has active contracts requires Active Contract Set (ACS) export/import. The add-party workflow does this with Canton offline party replication (`ExportPartyAcs` / `ImportPartyAcs` plus the `HostingParticipant.Onboarding` marker), so no repair mode and no participant restart are needed. The importing node does disconnect from the synchronizer for the duration of the import, which briefly pauses that node; the party keeps transacting on its other hosts. If the party has no active contracts, the workflow skips the sync.
-- **Add-party is decentralized-party only**: The workflow requires a `DecentralizedNamespaceDefinition` and a Noise quorum of member nodes. It cannot add a host to a local or an already-onboarded external party. See [Canton Party Replication](CANTON_PARTY_REPLICATION.md).
-- **A local party cannot be decentralized in place**: its namespace is its participant's root key, and a party id embeds its namespace permanently. The tenant API can give such a party an owner-held signing key (see [External Party Onboarding](#external-party-onboarding-tenant-api)), which makes it externally signed and co-validatable, but its source node keeps sole control of its topology forever. An existing *external* party can gain hosts and have its contracts replicated to them.
-- **ACS transfer size**: The snapshot travels over the Noise chunked-transfer path, which caps an assembled response at 16 MiB (`MAX_CHUNKED_TOTAL_SIZE`). A party with a large ACS exceeds this.
-- **Coordinator single point of progress**: A workflow makes no progress while its coordinator is offline. The run is persisted, so the coordinator resumes it on restart; peers retry 3 times before aborting.
+- **ACS sync for existing contracts**: Adding a new member to a party that already has active contracts requires Active Contract Set (ACS) export and import. The add-party run uses Canton offline party replication (`ExportPartyAcs` / `ImportPartyAcs` plus the `HostingParticipant.Onboarding` marker), so no repair mode and no participant restart are needed. The importing node disconnects from the synchronizer for the duration of the import, which briefly pauses that node. The party keeps transacting on its other hosts. If the party has no active contracts, the run skips the sync.
+- **An operator moves the ACS snapshot**: decman never sends ACS bytes to another node. One operator downloads the file from a current host and uploads it to the joiner. Both nodes need spool space for the snapshot, so a party with a large ACS needs a sized `DECPM_ACS_SPOOL_DIR`.
+- **Add-party is decentralized-party only**: The run requires a `DecentralizedNamespaceDefinition`. It cannot add a host to a local or an already-onboarded external party. See [Canton Party Replication](CANTON_PARTY_REPLICATION.md).
+- **A local party cannot be decentralized in place**: its namespace is its participant's root key, and a party id embeds its namespace permanently. The tenant API can give such a party an owner-held signing key, which makes it externally signed and co-validatable (see [External Party Onboarding](#external-party-onboarding-tenant-api)). Its source node still keeps sole control of its topology forever. An existing *external* party can gain hosts and have its contracts replicated to them.
+- **A run advances only while the proposer's node runs**: members co-sign on their own, so their signatures still reach the synchronizer. Nobody else proposes the next mapping or executes a contracts round. decman persists the run, so the observer resumes it when the proposer's node restarts.
+- **Every invitee must be ready before a run starts**: the proposer returns 409 unless each invitee passes three tests. The invitee has vetted the coordination package, published a registry entry, and reported a high enough coordination version.
+- **Legacy kick attribution**: on a party created before 2.0, a member cannot prove on-chain that the removed key belongs to the named participant. It falls back to its own cache. A party created on 2.0 uses one dual-usage key, which closes the gap.
+- **Contract arguments are unchecked**: a member confirms that every root node creates a contract of an accepted package, acting as the accepted party (DLC-link/decentralization-manager#423). It does not compare the field values against anything that its operator approved.
 
 ### Daml Package Dependencies
 
@@ -799,6 +975,7 @@ The system depends on the following Daml packages:
 
 | Package ID | Purpose |
 |------------|---------|
+| `#decman-coordination-v1` | DecmanNode, WorkflowProposal and its records, SubmissionRound, AcsManifest |
 | `#governance-core-<version>` | GovernanceRules, GovernableAction interface, GenericVoteProposal |
 | `#governance-token-custody-<version>` | TransferProposal, AcceptTransferProposal, preapproval proposals |
 | `#governance-utility-onboarding-<version>` | SetupUtility, six granular onboarding proposals, MintProposal, BurnProposal |
@@ -808,3 +985,23 @@ The system depends on the following Daml packages:
 | `#utility-commercials-v0` | DelegatedBatchedMarkersProxy (required by `CreateDelegatedBatchedMarkersProxy`) |
 
 Package IDs prefixed with `#` use symbolic lookup (resolved at runtime by Canton).
+
+## History
+
+decman 1.x ran a Noise transport on TCP 9000. Nodes dialled each other, and a
+coordinator pushed commands, proposals, DAR bytes, and ACS snapshots over that
+channel. decman 2.0 removed it. Every operation now runs through the
+synchronizer topology store and the Daml coordination package, which this
+document describes.
+
+The removal deleted these environment variables: `DECPM_LISTEN_ADDRESS`,
+`DECPM_NOISE_PORT`, `DECPM_PUBLIC_ADDRESS`, `DECPM_TIMEOUT_*`,
+`DECPM_NOISE_RETRY_*`, `DECPM_PEER_WAIT_POLL_DELAY_MS`, and
+`DECPM_ACS_BLOCK_BYTES`. It deleted the matching CLI flags, and clap rejects an
+unknown flag, so an old deployment manifest fails to start. It also deleted the
+`address`, `port`, and `public_key` columns of the `peers` table, and
+`GET /keys/status`.
+
+Upgrading operators set a node identity, re-exchange peer strings, and confirm
+that `GET /registry` lists each peer. See the runbook in
+[NOISE_SUNSET_DESIGN.md](NOISE_SUNSET_DESIGN.md), section D12.

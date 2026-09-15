@@ -13,7 +13,7 @@ For background, read these first:
 A custom template is fully supported by DecMan when:
 
 1. It implements the `GovernableAction` interface from `governance-action-v1` (`Governance.Action`).
-2. Its DAR can be distributed to every participant via `POST /dars/distribute`.
+2. Its DAR can be pinned for every participant via `POST /dars/distribute`, and each operator uploads that exact file locally.
 3. Its proposal contract can either be (a) created via `POST /contracts` using the field-type system, or (b) created by an external Daml script / app that the governance party can read.
 4. It can be confirmed via `POST /governance/confirm` with `governance_type: "core_domain"` (no DecMan code change needed — confirmation works on the `ContractId GovernableAction` produced by step 3).
 5. It can be executed via `POST /governance/execute` with `governance_type: "core_domain"`, producing a `GovernanceExecutionResult` audit record.
@@ -147,7 +147,7 @@ Notes:
 
 ### `multi-package.yaml`
 
-Add your package so `daml build --all` picks it up:
+Add your package so `dpm build --all` picks it up:
 
 ```yaml
 packages:
@@ -165,22 +165,27 @@ packages:
 
 ```bash
 cd daml
-daml build --all
+dpm build --all
 # DAR will be at daml/my-package/.daml/dist/my-package-v0-0.1.0.dar
 ```
 
-### 2. Distribute it to every participant
+### 2. Get the DAR onto every participant
 
-DecMan provides two endpoints for getting a DAR onto Canton:
+**DAR bytes never travel between nodes.** A distribution run pins each file on
+the ledger by its sha256 and its main package id. Every operator then uploads
+that exact file to their own participant. The run completes when the topology
+store shows the package vetted on every participant.
 
-- `POST /dars/upload` — uploads the DAR to *this node only*. Accepts `DarsRequest` with `peer_ids` ignored.
-- `POST /dars/distribute` — runs a multi-party workflow that uploads the DAR to every participant. Requires `peer_ids` to be **non-empty**; the handler rejects an empty array with 400.
+DecMan provides two endpoints:
 
-For production, always use `/dars/distribute` so every node has the same package vetted at the same time:
+- `POST /dars/distribute` — the coordinator pins the files and invites every peer. It requires a non-empty `peer_ids` and a non-empty `dar_files`, and rejects an empty array with 400.
+- `POST /dars/upload` — uploads a DAR to *this node only*. With `pin_instance` set to the run id, the file must match a pin of that run. Without it, the call is a plain local upload.
+
+The coordinator starts the run and uploads its own copy:
 
 ```bash
 BASE64=$(base64 -i daml/my-package/.daml/dist/my-package-v0-0.1.0.dar)
-curl -X POST http://localhost:8080/dars/distribute \
+curl -X POST http://coordinator:8080/dars/distribute \
   -H 'Content-Type: application/json' \
   -d "{
     \"dar_files\": [{\"filename\":\"my-package-v0-0.1.0.dar\",\"data\":\"${BASE64}\"}],
@@ -188,25 +193,51 @@ curl -X POST http://localhost:8080/dars/distribute \
   }"
 
 # poll status
-curl http://localhost:8080/dars/distribute/status
+curl http://coordinator:8080/dars/distribute/status
 ```
 
-After distribution, verify the package id is vetted on every node:
+The run id is the coordinator's `instance_name`, which the start response
+returns. Send the same file to every peer operator out of band. Each of them
+accepts the invitation, reads the run id from `coordinator_instance` on their
+own run row (`GET /workflows`), and uploads the file under it:
+
+```bash
+BASE64=$(base64 -i my-package-v0-0.1.0.dar)
+curl -X POST http://node2:8080/dars/upload \
+  -H 'Content-Type: application/json' \
+  -d "{
+    \"dar_files\":    [{\"filename\":\"my-package-v0-0.1.0.dar\",\"data\":\"${BASE64}\"}],
+    \"pin_instance\": \"<run-id>\"
+  }"
+```
+
+The invitation lists `dar_filenames` and `dar_hashes`, so an operator can check
+the sha256 before uploading. The handler refuses a file whose sha256 matches no
+pending pin (409), and it always passes the pin's main package id to Canton. A
+rebuilt DAR therefore fails the upload: ship the bytes the coordinator pinned,
+not a fresh build.
+
+After every operator uploads, verify the package id is vetted on every node:
 
 ```bash
 curl http://localhost:8080/packages/vetted
-curl http://localhost:8080/packages/compare-peers   # admin-only — catches missing/extra packages across peers
+curl http://localhost:8080/packages/compare-peers   # admin-only — reads vetted packages per participant from the topology store
 ```
 
 ### 3. Register the package id for the party (optional)
 
-`PUT /party-config` accepts a `packages` map that DecMan threads through governance endpoints. The keys are hard-coded in `crates/decman/src/config.rs::PackageConfig`:
+`PUT /party-config` accepts a `packages` map that DecMan threads through governance endpoints. The keys are hard-coded in `PackageConfig` (`crates/common/src/api.rs`, re-exported as `crate::config::PackageConfig`):
 
 ```
-governance_action, governance_core, governance_token_custody,
-governance_utility_credential, governance_utility_onboarding,
-utility_credential, utility_credential_app, utility_registry
+governance_action, governance_core, governance_rewards,
+governance_token_custody, governance_utility_credential,
+governance_utility_onboarding, utility_credential,
+utility_credential_app, utility_registry
 ```
+
+The coordination package is **not** in that map. `decman-coordination-v1` is
+node-level, not per party: `consts::COORDINATION_PACKAGE_REF` names it, and
+`DECPM_COORDINATION_PACKAGE_REF` overrides it.
 
 Custom packages are **not** in that map. That is fine — for the `core_domain` flow, only `governance_core` is dereferenced by name (to target `GovernanceRules`); the proposal's own package id is implied by the contract id and never needs to be resolved by DecMan.
 
@@ -226,7 +257,7 @@ If your decentralized party doesn't yet have a `GovernanceRules` contract, creat
 
 > ⚠️ Do **not** use `{ "type": "attestors_set" }` for `members`. Despite the name, that variant emits a raw `GenMap<Party, Unit>` (used by some CBTC-style templates), not the `DA.Set.Types:Set Party` record wrapper that `members` expects. Always use `party_set` for `Set Party` fields. See the field-type table below.
 
-Minimal request — 3 members, threshold 2, 30-minute confirmation window. The DAR for `governance-core` must already be uploaded (via `/dars/distribute`) before this call; `POST /contracts` does **not** take a `dar_files` field:
+Minimal request — 3 members, threshold 2, 30-minute confirmation window. The `governance-core` DAR must already be vetted on every participant (see step 2) before this call; `POST /contracts` does **not** take a `dar_files` field:
 
 ```bash
 curl -X POST http://coordinator:8080/contracts \
@@ -286,7 +317,7 @@ The serializer is defined at [`crates/decman/src/workflow/contracts/steps/prepar
 
 Example body for the `PauseProposal` template above (instantiated as a proposal — note that proposals are usually created by a single party, so a dedicated multi-party `/contracts` workflow is overkill; this path is mainly for the *infrastructure* contracts a custom package ships with — `GovernanceRules`-style admin templates, configuration contracts, etc.):
 
-DARs must be uploaded ahead of this call via `/dars/distribute`; `POST /contracts` itself takes no `dar_files` field.
+Every DAR must be vetted on every participant ahead of this call (see step 2); `POST /contracts` itself takes no `dar_files` field.
 
 ```bash
 curl -X POST http://localhost:8080/contracts \
@@ -475,7 +506,7 @@ Mirror the layout of `daml/governance-core-test` — a separate `<your-package>-
 Run from the `daml/` directory:
 
 ```bash
-daml build --all && daml test --all
+dpm build --all && dpm test --all
 ```
 
 ### Rust / integration tests
@@ -515,8 +546,8 @@ Practical implication for custom templates: prefer short `actionConfirmationTime
 A consolidated trace of the lifecycle for the `PauseProposal` template introduced above:
 
 ```bash
-# 0. Build and distribute the DAR (peer_ids must be non-empty for /dars/distribute)
-(cd daml && daml build --all)
+# 0. Build the DAR and pin it for every peer (peer_ids must be non-empty)
+(cd daml && dpm build --all)
 BASE64=$(base64 -i daml/my-package/.daml/dist/my-package-v0-0.1.0.dar)
 curl -X POST http://coordinator:8080/dars/distribute \
   -H 'Content-Type: application/json' \

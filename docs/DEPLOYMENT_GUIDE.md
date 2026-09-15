@@ -2,7 +2,21 @@
 
 How to deploy a Dec Party Manager node to Kubernetes from scratch.
 
-Configuration is supplied entirely through environment variables (no mounted TOML file or ConfigMap). The HTTP admin UI is served behind an Ingress and gated by an identity provider (Keycloak or Auth0), while the Noise transport port is exposed publicly so other participants can reach you. The node generates a Noise keypair on first start and persists its database and keypair on a PersistentVolume, so a node keeps its identity across restarts and image upgrades.
+You set every configuration value through an environment variable. The node
+reads no TOML file and no ConfigMap.
+
+The node serves **one port, 8080**. That port carries the HTTP admin UI and the
+API. An Ingress fronts it, and an identity provider gates it — Keycloak or
+Auth0. A separate metrics port stays inside the cluster.
+
+**Nodes never connect to each other.** They coordinate through Canton. The
+synchronizer topology store carries partially signed topology proposals, and
+Daml contracts carry the workflow intent. So a node needs no public address, no
+peer-to-peer port, and no transport key.
+
+The node keeps its SQLite database and its ACS spool directory on a
+PersistentVolume. It therefore keeps its state across restarts and image
+upgrades.
 
 This guide assumes:
 - One participant per cluster (the most common external setup).
@@ -15,10 +29,11 @@ This guide assumes:
 1. **Pull the latest image tag** and prepare the manifests (Secret, Deployment + PVC, Service, Ingress).
 2. **Set up the identity-provider client** that gates the admin UI (one public SPA client per deployment).
 3. **Apply the manifests** and let the node start clean.
-4. **Share public keys** with the other participants and add them as peers in the UI.
-5. **Enter party credentials** (per-party IdP client info) through the UI.
+4. **Set the node identity**: allocate the node party, grant its rights, and `PUT /node-identity`.
+5. **Exchange identity strings** with the other operators and add each one as a peer.
+6. **Enter party credentials** (per-party IdP client info) through the UI.
 
-The longest step is usually the cross-team coordination needed to exchange Noise public keys once everyone is deployed.
+The longest step is usually the cross-team coordination needed to exchange identity strings once everyone is deployed.
 
 ## 1 — Get the image
 
@@ -57,19 +72,18 @@ inspects the image expects — a bare `runAsNonRoot: true` with no `runAsUser`
 rejects the plain tag, because the image itself declares uid 0. The plain tag
 stays for existing pins and for clusters that set `runAsUser` in the pod spec.
 
-Neither one needs root: the binary binds 8080 and 9000, both above 1024, and
-writes only under its data directory. Give the data volume an `fsGroup` so uid
+Neither one needs root: the binary binds 8080 and the metrics port 9464, both
+above 1024, and writes only under its data directory. Give the data volume an `fsGroup` so uid
 65532 can write to it — the Deployment example does, and that example runs
 either tag as 65532 because it pins `runAsUser` itself.
 
 ### Moving an existing node to uid 65532
 
-A volume written by the root image holds root-owned files, and `fsGroup` does
-not fix that on its own: it re-owns the contents to the **group** and adds group
-write, but the user owner stays root. `data/noise.key` is the one that bites.
-The node re-asserts mode 0600 on it at every start, and uid 65532 cannot chmod a
-file it does not own, so the pod fails with `Failed to chmod key file`. Without
-`fsGroup` it fails one step earlier, on the read.
+A volume written by the root image holds root-owned files. `fsGroup` does not
+fix that on its own: it re-owns the contents to the **group** and adds group
+write, but the user owner stays root. The SQLite database is the file that fails
+first. uid 65532 cannot open a root-owned `data/decpm.db` for writing, so the
+node cannot run its migrations and the pod exits.
 
 Chown the volume once, with a throwaway root init container ahead of the
 existing one:
@@ -137,7 +151,7 @@ In **Advanced → Proof Key for Code Exchange Code Challenge Method**, set the v
 
 If you set `DECPM_ADMIN_ROLE` in the Secret (recommended for any shared deployment), also create a realm role with that exact name and assign it to whichever users should have admin powers. Without `DECPM_ADMIN_ROLE` set, every authenticated user is treated as admin.
 
-Per-party Keycloak clients used to fetch Canton ledger tokens are **different** — they are confidential clients (with a secret), one per decentralized party, and you wire them up through the admin UI in Step 5, not here.
+Per-party Keycloak clients used to fetch Canton ledger tokens are **different** — they are confidential clients (with a secret), one per decentralized party, and you wire them up through the admin UI in Step 6, not here.
 
 ### Auth0
 
@@ -213,7 +227,7 @@ carriers with no configuration at all.
 
 ## 3 — Apply the manifests
 
-Below is the core single-participant manifest set. Replace every `<...>` placeholder with values for your environment, save as a file, and apply with `kubectl apply -f <file>.yaml`. Public exposure of the Noise port is environment-specific and is covered under "Service" below.
+Below is the core single-participant manifest set. Replace every `<...>` placeholder with values for your environment, save as a file, and apply with `kubectl apply -f <file>.yaml`. Only port 8080 needs to reach the operator, and the Ingress carries it.
 
 ### 3a. Namespace (skip if it already exists)
 
@@ -234,11 +248,8 @@ metadata:
   namespace: <your-namespace>
 type: Opaque
 stringData:
-  # Public address that peers use to reach this node over the Noise transport.
-  # Must be reachable from the public internet on the Noise port (9000 by default).
-  DECPM_PUBLIC_ADDRESS: "<your-public-host>"
-
   # Canton participant node connection (Admin + Ledger gRPC APIs).
+  # The node reaches its own participant only. It never dials another node.
   DECPM_CANTON_ADMIN_HOST: "<canton-admin-host>"
   DECPM_CANTON_ADMIN_PORT: "5002"
   DECPM_CANTON_LEDGER_HOST: "<canton-ledger-host>"
@@ -276,16 +287,39 @@ stringData:
   # same-origin only, which is correct for the Ingress setup below.
   # DECPM_ALLOWED_ORIGIN: "https://<your-ui-host>"
 
-  # Noise transport timeouts (seconds). Defaults are usually fine.
-  DECPM_TIMEOUT_HANDSHAKE: "30"
-  DECPM_TIMEOUT_MESSAGE: "120"
-  DECPM_TIMEOUT_RETRY_ATTEMPTS: "3"
-  DECPM_TIMEOUT_RETRY_DELAY: "5"
+  # Coordination settings. Each one has a working default, so set one only
+  # when you need a different value. See the configuration reference below.
+  # DECPM_OBSERVER_POLL_SECS: "10"          # mainnet guidance; default 3
+  # DECPM_HEARTBEAT_INTERVAL_SECS: "3600"
+  # DECPM_HEARTBEAT_MIN_INTERVAL_SECS: "60"
+  # DECPM_PEER_STALE_FACTOR: "3"
+  # DECPM_PROPOSAL_TTL_SECS: "604800"
+  # Upload and vet the embedded coordination DAR at startup. Leave it on
+  # unless your participant refuses uploads from decman.
+  # DECPM_AUTO_UPLOAD_COORDINATION_DAR: "true"
+  # Where add-party ACS snapshots are spooled. Default: {DECPM_DIR}/data/acs.
+  # Keep it on the PersistentVolume; see "Sizing the volume" below.
+  # DECPM_ACS_SPOOL_DIR: "/app/data/acs"
 ```
 
 ### 3c. Deployment + PersistentVolumeClaim
 
-The PVC holds the SQLite database and the Noise keypair — keep it for the lifetime of the node. Deleting it regenerates the keypair (changing your public key, which forces every peer to re-add you) and wipes the peer list and party credentials.
+The PVC holds the SQLite database and the ACS spool directory — keep it for the lifetime of the node. Deleting it wipes the node identity, the peer list, the party credentials, and every workflow run.
+
+**Sizing the volume.** The database stays small. It holds peers, credentials,
+and run rows, not ledger data. The ACS spool decides the size.
+
+An add-party run writes one gzip snapshot of the party's active contract set per
+joining participant. The node deletes that file once it observes the joiner as
+`onboarded == true`, or once the operator dismisses the run. A party with no
+contracts writes an empty snapshot, and the run then skips the transfer.
+
+Both sides of an add-party run use the spool. A current host writes the export
+there, and the joining node streams the upload into it before it imports.
+
+Size the volume for the largest snapshot you expect, times the number of
+add-party runs you expect at the same time, plus 1 GiB of headroom. The example
+below requests 5 GiB, which suits a party of a few hundred thousand contracts.
 
 ```yaml
 apiVersion: v1
@@ -298,7 +332,7 @@ spec:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 1Gi
+      storage: 5Gi
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -368,8 +402,6 @@ spec:
           ports:
             - name: http
               containerPort: 8080
-            - name: noise
-              containerPort: 9000
             - name: metrics
               containerPort: 9464
               protocol: TCP
@@ -381,7 +413,7 @@ spec:
             limits:   { memory: "1Gi", cpu: "500m" }
           env:
             - name: RUST_LOG
-              value: dec_party_manager=info,tokio_noise=error,hyper_noise=error
+              value: dec_party_manager=info
             # Logs are JSON on stdout by default. The collector indexes the
             # fields as attributes only where a log pipeline parses the line,
             # so this environment needs its own decman pipeline in dlc-infra.
@@ -403,9 +435,11 @@ spec:
 
 ### 3d. Service
 
-The deployment uses two Services. The first is a `ClusterIP` that backs the Ingress for the HTTP admin UI; the second is a `LoadBalancer` that exposes the Noise port (9000) to the public internet so peers can reach you. Splitting them keeps `DECPM_PUBLIC_ADDRESS` pointed at a stable, dedicated endpoint and avoids putting the admin UI on a raw load balancer.
+The deployment needs **one** Service: a `ClusterIP` that backs the Ingress for
+the HTTP admin UI. Nodes never dial each other, so nothing has to reach this
+pod from outside the cluster except your own operators.
 
-Neither Service exposes the metrics port. The metrics listener has no
+The Service does not expose the metrics port. The metrics listener has no
 authentication, and it answers any caller that can reach it. Keep port 9464
 inside the cluster: bind it to a private interface, or block it in the host
 firewall or security group. An operator with no metrics collector should set
@@ -423,33 +457,15 @@ spec:
     - name: http
       port: 80
       targetPort: 8080
-    - name: noise
-      port: 9000
-      targetPort: 9000
-  selector:
-    app.kubernetes.io/name: dec-party-manager
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: dec-party-manager-noise
-  namespace: <your-namespace>
-  annotations:
-    # AWS EKS example — use the cloud-provider annotation appropriate for
-    # your cluster (or omit for a Classic ELB / on-prem MetalLB).
-    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
-spec:
-  type: LoadBalancer
-  ports:
-    - name: noise
-      port: 9000
-      targetPort: 9000
-      protocol: TCP
   selector:
     app.kubernetes.io/name: dec-party-manager
 ```
 
-After applying, read the LoadBalancer's external hostname (or IP) with `kubectl -n <your-namespace> get svc dec-party-manager-noise` and set `DECPM_PUBLIC_ADDRESS` in the Secret to that value, then restart the Deployment so the new env is picked up. If you are not on EKS, replace the annotation with whatever your cluster's cloud-provider integration expects, or use a `NodePort` / MetalLB / external load balancer of your choice — the only requirement is that peers can reach port 9000 at `DECPM_PUBLIC_ADDRESS` over raw TCP. The HTTP UI does not need to be exposed publicly — it is reached through the Ingress (next).
+> [!NOTE]
+> A node upgraded from 1.8.x still carries a `dec-party-manager-noise`
+> LoadBalancer Service and a second port on its ClusterIP Service. Delete both
+> after the cutover. The 2.0 binary binds no port 9000, so that load balancer
+> forwards to a closed port and still costs money.
 
 ### 3e. Ingress (Traefik example)
 
@@ -485,20 +501,173 @@ kubectl -n <your-namespace> rollout status deploy/dec-party-manager
 
 Once the pod is `Running`, hit `https://<your-ui-host>` in a browser. Your identity provider should challenge for login.
 
-## 4 — Establish peers
+## 4 — Set the node identity
 
-On first start the node generates a Noise keypair. None of the other participants know your public key yet, and you do not yet know any of theirs. The peer list is built by exchanging public keys out-of-band.
+Each node has one **node party**. The node party signs everything this node
+writes on the ledger: its registry entry, its workflow proposals, its
+acceptances, its submission signatures, its ACS manifests, and its heartbeats.
+A node coordinates nothing until you set its node party.
 
-The UI makes the round-trip simple. For each participant in your network:
+The node party is a normal Canton party with three requirements:
+
+- Your participant hosts it with **Submission** permission. A Confirmation-only
+  host cannot submit Daml commands, so `PUT /node-identity` rejects it.
+- A Ledger API user holds `CanActAs` and `CanReadAs` on it.
+- It exists before any decentralized party exists.
+
+### 4a. Allocate the party on your participant
+
+Allocate it through your participant's own admin path — the Canton console, the
+JSON Ledger API, or your platform's tooling. Use a stable party-id hint such as
+`decman-node-1`. Canton appends your participant's namespace, so the full id
+looks like `decman-node-1::1220abc...`.
+
+Then grant the Ledger API user both rights on that party. Substitute your own
+user id for `<ledger-api-user>`:
+
+```json
+{
+  "userId": "<ledger-api-user>",
+  "rights": [
+    { "kind": { "CanActAs":  { "value": { "party": "decman-node-1::1220abc..." } } } },
+    { "kind": { "CanReadAs": { "value": { "party": "decman-node-1::1220abc..." } } } }
+  ],
+  "identityProviderId": ""
+}
+```
+
+Post that body to `/v2/users/<ledger-api-user>/rights` on the JSON Ledger API,
+or grant the same two rights from the Canton console.
+
+### 4b. Tell decman about it
+
+`PUT /node-identity` stores the party and the credentials decman uses to mint
+its ledger tokens. The endpoint requires the admin role. It is exempt from
+authentication only while the credentials table is entirely empty, which is the
+case on a node you have just deployed:
+
+```bash
+curl -X PUT https://<your-ui-host>/node-identity \
+  -H 'Authorization: Bearer <admin-jwt>' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "node_party_id":          "decman-node-1::1220abc...",
+    "user_id":                "<ledger-api-user>",
+    "keycloak_url":           "https://<your-keycloak-host>",
+    "keycloak_realm":         "<your-realm>",
+    "keycloak_client_id":     "<node-party-client-id>",
+    "keycloak_client_secret": "<node-party-client-secret>"
+  }'
+```
+
+The client here is a **confidential** client that mints Canton ledger tokens for
+the node party, not the public SPA client from Step 2. Auth0 deployments send
+`auth0_domain`, `auth0_audience`, `auth0_client_id`, and `auth0_client_secret`
+instead.
+
+Before it stores anything, the handler reads the head `PartyToParticipant` of
+the node party. It returns 400 unless this participant hosts the party with
+Submission permission, and the message names what it found instead.
+
+Check the result:
+
+```bash
+curl -H 'Authorization: Bearer <admin-jwt>' https://<your-ui-host>/node-identity
+```
+
+A configured node answers `configured: true` with its `node_party_id`, its
+`participant_id`, and its `hosting_permission`.
+
+### 4c. The coordination DAR
+
+Every node runs the same Daml package, `decman-coordination-v1`. Its templates
+carry the registry entries, the workflow proposals, the submission rounds, and
+the ACS manifests.
+
+The binary embeds the DAR. At startup a background task uploads it to your
+participant and vets it. The task retries with a growing backoff until the
+package is vetted, so a participant that is still starting costs you nothing.
+`DECPM_AUTO_UPLOAD_COORDINATION_DAR` controls the task and defaults to `true`.
+
+`GET /node-health` reports the task under `coordination_dar`. Its `phase` is
+`pending`, `disabled`, `uploading`, or `ready`, and `last_error` names the last
+failure.
+
+Wait for `ready` before you go on:
+
+```bash
+curl -H 'Authorization: Bearer <admin-jwt>' https://<your-ui-host>/node-health \
+  | jq '.coordination_dar'
+```
+
+Set `DECPM_AUTO_UPLOAD_COORDINATION_DAR=false` when your policy forbids an
+automatic upload. You then upload the DAR yourself through `POST /dars/upload`,
+and `phase` reports `disabled` until you do.
+
+This package is a prerequisite for coordination, not a convenience. Canton
+rejects a contract whose observer's participant has not vetted the package. A
+node therefore leaves an unvetted peer out of its registry entry, and retries on
+the next observer tick.
+
+## 5 — Exchange peer identities
+
+Operators exchange **one string per peer**, out of band:
+
+```
+participant_id,node_party_id,name
+```
+
+That is the whole exchange. There is no address, no port, and no key, because
+nodes never open a connection to each other.
+
+For each participant in your network:
 
 1. Open the **Network** panel.
-2. Click **Share my data** — this copies your own peer entry (participant id, friendly name, public address, Noise port, public key) to the clipboard as JSON.
-3. Send that JSON to your peer through whatever out-of-band channel you use (chat, email, ticket).
-4. When a peer sends you their JSON, click **Paste from Clipboard** in your **Network** panel and save. The peer is added with all the right fields filled in.
+2. Click **Share my identity**. The button copies your own
+   `participant_id,node_party_id,name` string to the clipboard. It stays
+   disabled until you set the node identity in Step 4.
+3. Send that string to the other operator through whatever out-of-band channel
+   you use (chat, email, ticket).
+4. When an operator sends you theirs, click **Paste from Clipboard** in your
+   **Network** panel and save.
 
-Repeat with every participant. The "Participants Status" indicators turn green within seconds once both sides have added each other.
+The peers table then holds a participant id, a name, and a node party per peer.
+A peer without a node party cannot be invited to a workflow.
 
-## 5 — Enter party credentials
+### How to read the peer status
+
+Each node publishes one `DecmanNode` contract that names its peers as observers,
+and re-creates it on a heartbeat timer. Your node reads the entries its peers
+published and reports one status per peer:
+
+| Status | Meaning |
+|---|---|
+| `Active` | The peer's entry is visible and its last heartbeat is recent. |
+| `Stale` | The entry is visible, but the last heartbeat is older than `DECPM_PEER_STALE_FACTOR` × the peer's heartbeat interval. |
+| `Unknown` | The peer has vetted the package, but no entry of theirs is visible. They have not added you yet. |
+| `Unvetted` | The peer's participant has not vetted the coordination package. |
+
+`GET /registry` returns the entries themselves, in three buckets. `self_entry`
+holds your own. `peers` holds the entries a configured peer signed. `inbound`
+holds entries whose signatory you have not added as a peer yet.
+
+Each entry carries the publisher's version, its heartbeat interval, its
+`last_active_at`, and its `hosting_verified` flag.
+
+The status describes the age of a heartbeat, not a live connection. A peer turns
+`Active` only after **both** sides add each other. You see a peer's entry only
+when that peer named your node party as an observer of it.
+
+Vetting comes before the mutual add. A node names a peer as observer only after
+that peer's participant has vetted the coordination package, so an `Unvetted`
+peer never reaches `Active`.
+
+A proposer checks every invitee before it starts a workflow. It refuses with a
+409 unless the invitee has vetted the package, has published a visible registry
+entry, and reports a coordination version it understands. The 409 names each
+participant that is not ready.
+
+## 6 — Enter party credentials
 
 For each decentralized party your node manages, open the "Party Config" dialog and enter the Keycloak settings (URL, realm, client ID, client secret). The application uses these to obtain Canton ledger tokens on behalf of each party.
 
@@ -508,14 +677,13 @@ Most variables have a default that's only useful for local development (loopback
 
 | Variable | Code default | Set for K8s? | Notes |
 |---|---|---|---|
-| `DECPM_LISTEN_ADDRESS` | `0.0.0.0` | optional | Noise transport bind address |
-| `DECPM_NOISE_PORT` | `9000` | optional | Noise transport port |
+| `DECPM_HOST` | `0.0.0.0` | optional | HTTP bind address for the admin UI and API |
+| `DECPM_PORT` | `8080` | optional | HTTP port for the admin UI and API |
 | `DECPM_METRICS_PORT` | `9464` | optional | Prometheus metrics port, separate from the API port. `0` serves no metrics. The listener is unauthenticated, so keep the port off the public internet (see [Service](#3d-service)) |
 | `DECPM_REWARD_AUTOMATION_INTERVAL_SECS` | `300` | optional | How often the CIP-104 reward automation sweeps each decparty for unassigned coupons |
 | `DECPM_REWARD_EXPIRY_READ_INTERVAL_SECS` | `3600` | optional | How often the automation re-reads the backlog purely to refresh `decman_reward_oldest_unassigned_expires_in_seconds`. Both expiry alert rules read that gauge, so this bounds how stale their input can get. A sweep reads the ledger too, so the gauge refreshes at whichever interval is shorter |
 | `DECPM_REWARD_MAX_CREATES` | `100` | optional | Output contracts one `Delegation_Assign` may create, bounding the coupons per transaction. Lower it if assigns start failing |
 | `DECPM_REWARD_MIN_EXPIRY_MARGIN_SECS` | `120` | optional | Time a coupon must have left before expiry to be assigned |
-| `DECPM_PUBLIC_ADDRESS` | falls back to `DECPM_LISTEN_ADDRESS` | **yes** | Hostname peers use to reach this node from the public internet |
 | `DECPM_CANTON_ADMIN_HOST` | `127.0.0.1` | **yes** | Canton Admin API host |
 | `DECPM_CANTON_ADMIN_PORT` | `5002` | optional | Canton Admin API port |
 | `DECPM_CANTON_LEDGER_HOST` | `127.0.0.1` | **yes** | Canton Ledger API host |
@@ -543,57 +711,118 @@ Most variables have a default that's only useful for local development (loopback
 | `DECPM_ADMIN_ROLE` | unset | recommended | IdP role required for privileged endpoints. If unset, every authenticated caller is treated as admin. |
 | `DECPM_ALLOWED_ORIGIN` | same-origin | optional | CORS origin if UI host ≠ API host |
 | `DECPM_DB_ENCRYPTION_KEY` | unset | recommended | Random passphrase (hashed via SHA-256) protecting party secrets at rest. If unset, secrets are stored in plaintext in the SQLite DB. |
-| `DECPM_TIMEOUT_HANDSHAKE` | `30` | optional | Noise handshake timeout (seconds) |
-| `DECPM_TIMEOUT_MESSAGE` | `120` | optional | Noise message timeout (seconds) |
-| `DECPM_TIMEOUT_RETRY_ATTEMPTS` | `3` | optional | Connection retry attempts |
-| `DECPM_TIMEOUT_RETRY_DELAY` | `5` | optional | Connection retry delay (seconds) |
 | `DECPM_LOG_FORMAT` | `json` | optional | Leave it unset in a cluster, because the log pipeline parses JSON only. `text` gives the console format for local work |
 
 ¹ Required only for the chosen provider. Set the `DECPM_KEYCLOAK_*` trio **or** the `DECPM_AUTH0_*` trio, not both.
 
-## Note: keeping the existing Noise keypair
+### Coordination settings
 
-If you would rather not regenerate your Noise keypair (so peers don't have to update their entry for you), you can preserve the keypair file from your old PVC. The keypair is stored as a file in the data directory (not in the SQLite database), so it survives a clean redeploy as long as you keep the same PVC mounted at `/app`.
+These control how the node coordinates through Canton. Every one has a working
+default; set one only to change that default.
 
-The peer list and party credentials do **not** carry over: those live in the SQLite database, which the new format introduces. The first time the new application starts on the preserved PVC it will create a fresh database alongside the existing keypair file. You will still need to re-establish peers (Step 5) and re-enter party credentials (Step 6) — the only thing you save is the round-trip with peers having to update their entry for you.
+| Variable | Code default | Set for K8s? | Notes |
+|---|---|---|---|
+| `DECPM_OBSERVER_POLL_SECS` | `3` | recommended | How often the observer loop polls the ledger and the topology store. Raise it to `10` on mainnet, where a shorter poll buys little and costs Admin API calls. Minimum 1 |
+| `DECPM_HEARTBEAT_INTERVAL_SECS` | `3600` | optional | How often this node re-creates its `DecmanNode` registry contract. Every heartbeat is a Daml transaction, so a short interval costs traffic. Minimum 1 |
+| `DECPM_HEARTBEAT_MIN_INTERVAL_SECS` | `60` | optional | Floor the template enforces between two heartbeats, written into the contract. Clamped to `[1, DECPM_HEARTBEAT_INTERVAL_SECS]` |
+| `DECPM_PEER_STALE_FACTOR` | `3` | optional | A peer reads as `Stale` once its last heartbeat is older than this multiple of its own heartbeat interval. Minimum 1 |
+| `DECPM_PROPOSAL_TTL_SECS` | `604800` | optional | Lifetime of a `WorkflowProposal`, seven days by default. An invitee cannot accept a proposal past its `expiresAt`. Minimum 1 |
+| `DECPM_AUTO_UPLOAD_COORDINATION_DAR` | `true` | optional | Upload and vet the embedded `decman-coordination-v1` DAR at startup. Set `false` when your policy requires a manual upload through `POST /dars/upload` |
+| `DECPM_COORDINATION_PACKAGE_REF` | `#decman-coordination-v1` | optional | Package reference the node resolves the coordination templates through. Change it only to run a forked package |
+| `DECPM_ACS_SPOOL_DIR` | `{DECPM_DIR}/data/acs` | optional | Directory for add-party ACS snapshots. Keep it on the PersistentVolume; see "Sizing the volume" above |
 
-## Upgrading an existing mesh to concurrent workflows
+### Removed in 2.0
 
-The concurrent multi-instance workflow release changes the **Noise wire
-format**: every frame now starts with a protocol-version byte and carries an
-instance-routing field. Frames from older builds are rejected with an explicit
-"protocol version mismatch" error (and old builds cannot parse new frames). A mixed-version mesh
-does not degrade gracefully — every cross-node call (heartbeats, invites,
-workflow commands) fails until all nodes run the same side of the change.
+The 2.0 binary rejects an unknown CLI argument, and it ignores these variables.
+Delete them from your Secret and your Deployment during the cutover:
 
-**Upgrade lockstep, not rolling:**
+`DECPM_LISTEN_ADDRESS`, `DECPM_NOISE_PORT`, `DECPM_PUBLIC_ADDRESS`,
+`DECPM_TIMEOUT_HANDSHAKE`, `DECPM_TIMEOUT_MESSAGE`,
+`DECPM_TIMEOUT_RETRY_ATTEMPTS`, `DECPM_TIMEOUT_RETRY_DELAY`,
+every `DECPM_NOISE_RETRY_*`, `DECPM_PEER_WAIT_POLL_DELAY_MS`, and
+`DECPM_ACS_BLOCK_BYTES`.
 
-1. Ensure no workflow is in flight on any node (finish or cancel + dismiss
-   everything in the feed).
-2. Stop **all** dec-party-manager processes in the mesh.
-3. Upgrade every node to the new image/binary.
-4. Start them all again. SQLite migrations `000013` (drops the
-   one-InProgress-run-per-kind index) and `000014` (adds
-   `coordinator_instance` to `workflow_runs`) apply automatically on boot.
+## Cutover from 1.8.x to 2.0
 
-Peer-side rows created before the upgrade have no `coordinator_instance`;
-their resumed command streams route via a single-active-run fallback, which
-cannot be disambiguated if the coordinator is already running several
-workflows — another reason to upgrade with nothing in flight.
+1.8.x nodes coordinate over a direct connection between nodes. 2.0 nodes
+coordinate through Canton. The two builds share no coordination path, so the
+network cuts over as a group.
 
-Both directions of the incompatibility are guarded at runtime: a 0.1.9+
-coordinator refuses to start a workflow (409, naming the peers) unless every
-invitee positively reports >= 0.1.9, and a 0.1.9+ node denies requests from
-older builds with an explicit version-mismatch error in its logs.
+A mixed window is nonetheless safe, because both builds refuse to start a
+workflow the other side cannot finish. An old build refuses once an invitee's
+listener is gone. A new build refuses (409) until every invitee has vetted the
+coordination package and published a registry entry. Nothing half-runs.
 
-Downgrading requires reversing migration `000014` and `000013`; note the
-`000013` down-migration fails while concurrent InProgress rows exist (finish
-or dismiss them first).
+Migration `000021` marks every `inprogress` run failed, with a message that
+tells the operator to dismiss the card and start the operation again.
+
+### Before the window, while every node still runs 1.8.x
+
+1. Call `GET /decentralized-parties?refresh=true` on every node. Treat a NULL
+   `dec_party_participant.signing_key` for any member as a blocker: that node
+   cannot attribute its own Daml key after the cutover. Fix it before you
+   upgrade.
+2. Drain the network. `GET /workflows` and `GET /invitations` must come back
+   empty on every node. Finish, cancel, or dismiss whatever is left.
+
+### Inside the window, on every node
+
+3. Delete the removed environment variables and the removed CLI arguments from
+   your manifests. The 2.0 binary rejects an unknown argument and does not
+   start.
+4. Stop the node, retag the image to 2.0.0, and start it. Migrations `000020`
+   and `000021` run on boot.
+5. Set the node identity with an admin JWT (see Step 4 above). The bootstrap
+   exemption does not apply to an upgraded node, which already holds credential
+   rows.
+6. Wait until `GET /node-health` reports `coordination_dar.phase == "ready"`.
+7. Exchange `participant_id,node_party_id,name` with every operator and re-add
+   every peer (see Step 5 above). The upgrade drops the address, port, and key
+   columns, so every peer row needs a node party.
+
+### After the window
+
+8. Verify on every node that `GET /registry` lists every peer under `peers` and
+   that `inbound` is empty. An entry under `inbound` means that operator added
+   you before you added them.
+9. Verify that `GET /packages/vetted` reports `decman-coordination-v1` under
+   `package_name` on every node.
+10. Delete the `dec-party-manager-noise` LoadBalancer Service, the second port
+    on the ClusterIP Service, and any firewall rule for port 9000.
+11. Start workflows. A 409 names the members that still run 1.8.x.
+
+### Rollback
+
+Rollback is manual and lossy. The 2.0 build never reads or writes
+`data/noise.key`. A node that kept its volume therefore still holds its own
+transport key. The addresses and keys of its **peers** are gone, because
+migration `000021` drops those three columns.
+
+1. Stop the node.
+2. Apply `crates/decman/migrations/000021_noise_sunset.down.sql` with
+   `sqlite3` against `data/decpm.db`.
+3. Delete the version-21 row from `_sqlx_migrations`. Leave migration `000020`
+   in place: it only adds a column and a table that 1.8.x ignores.
+4. Restart 1.8.x and re-enter every peer by hand: address, port, and public
+   key come back empty.
+
+The down migration restores the three peer columns with empty defaults and
+renames `coordinator_participant` back to `coordinator_pubkey`. It does not
+restore the values those columns held, and it does not un-fail the runs that
+migration `000021` marked failed.
 
 ## Troubleshooting
 
 - **Pod is `CrashLoopBackOff`**: `kubectl logs` will usually show a missing required env var. Compare against the configuration reference above.
 - **UI loads but login fails**: confirm `<your-ui-host>` is registered as a valid redirect URI on your IdP client, and that the `DECPM_KEYCLOAK_*` (or `DECPM_AUTH0_*`) env vars match the IdP. For Auth0, the SPA application must also have the configured audience listed in its Allowed Callback / API Authorization.
-- **Peers shown as unreachable**: check that the Noise port (9000) is exposed publicly, that `DECPM_PUBLIC_ADDRESS` resolves to that endpoint, and that the peer has your current public key.
+- **A peer reads as `Unvetted`**: that peer's participant has not vetted `decman-coordination-v1`. Ask the operator to check `GET /node-health` on their node. Your node leaves an unvetted peer out of its own registry entry until they vet it.
+- **A peer reads as `Unknown`**: the peer has vetted the package, but no registry entry of theirs is visible to you. They have not added you as a peer yet. Send them your identity string again, and confirm the `node_party_id` in it matches what they saved.
+- **A peer reads as `Stale`**: the peer's last heartbeat is older than `DECPM_PEER_STALE_FACTOR` × its heartbeat interval. The peer's node is down, or its observer loop is stuck. Check that node's logs. A stale peer is not a network fault: nodes hold no connection to each other.
+- **Every peer reads as `Unknown` and the UI shows a "configure node identity" banner**: this node has no node identity. Run Step 4.
+- **`PUT /node-identity` returns 400**: this participant does not host the party with Submission permission. The message names the permission it found. Re-allocate the party on this participant, or raise its permission.
+- **Starting a workflow returns 409**: an invitee is not ready. The message names each participant and why — no vetted package, no visible registry entry, or a coordination version that is too old.
+- **`coordination_dar.phase` stays `uploading`**: read `last_error` in the same object. The two usual causes are a participant that is not connected to the synchronizer, and an Admin API that refuses the upload. The task keeps retrying, so fix the cause and wait.
+- **`POST /acs-import` returns 404**: no `AcsManifest` from that exporter names this participant at that activation serial. Check the `exporter` and `serial` query parameters against `GET /acs-manifests/{party}`.
+- **`POST /acs-import` returns 400**: the uploaded file does not match the manifest. The snapshot was re-exported, or the download truncated. Download it again with `GET /acs-export/{party}/{target}` and retry.
 - **Every Canton call fails with `transport error` / `BrokenPipe`, immediately and permanently**: the channel's TLS setting does not match what the endpoint speaks. A plaintext client against a TLS listener has its connection closed on the first bytes, which looks identical to the participant being down. Confirm with `grpcurl -plaintext <host>:<port> list` — if that fails but `grpcurl <host>:<port> list` succeeds, the endpoint is TLS: set `DECPM_CANTON_ADMIN_TLS=true` (and `DECPM_CANTON_LEDGER_TLS=true` for the ledger API), plus `..._TLS_CA_CERT` when a private CA issued the certificate. The connect error message names the variable to change in either direction.
 - **Privileged endpoints return 403**: you have `DECPM_ADMIN_ROLE` set but the calling user doesn't have that role assigned in the IdP, or the role never reaches the token. On Auth0, decode the access token and check for the role in `permissions`, `scope`, or your `DECPM_JWT_ROLE_CLAIM`; a token carrying only `openid profile email` means no carrier is configured (see **Admin role**). Correct the carrier, grant the role, or unset the admin-role gate.
