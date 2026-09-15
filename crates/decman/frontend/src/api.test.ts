@@ -119,7 +119,28 @@ describe("authenticatedFetch", () => {
     setTokenRefresher(null);
     finish("previous-session-token");
 
-    await expect(pending).resolves.toBeNull();
+    await expect(pending).resolves.toEqual({ status: "stale" });
+  });
+
+  it("lets a stale 401 pass rather than logging the new session out", async () => {
+    setToken("old-session");
+    let finish: (token: string | null) => void = () => {};
+    setTokenRefresher(() => new Promise<string | null>((r) => (finish = r)));
+    const reload = stubReload();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response(null, { status: 401 })),
+    );
+
+    const pending = authenticatedFetch("/workflows");
+    // The provider re-registers (a new login) while that 401 is being handled.
+    setTokenRefresher(async () => "new-session");
+    setToken("new-session");
+    finish("old-session-renewed");
+
+    expect((await pending).status).toBe(401);
+    expect(getToken()).toBe("new-session");
+    expect(reload).not.toHaveBeenCalled();
   });
 
   it("leaves an unauthenticated 401 alone", async () => {
