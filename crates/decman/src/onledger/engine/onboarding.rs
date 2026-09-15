@@ -1051,6 +1051,15 @@ async fn member_cosign_party(
     let config = ctx.ol.config();
     let sync_id = &ctx.sync_id;
 
+    // Write the cache here, not only in `Complete`. The proposer finishes
+    // the WorkflowProposal as soon as the party is effective, and a member
+    // that reads the outcome first completes its row through `reconcile`
+    // without ever running `Complete`. It would then hold no owner key for
+    // its peers, and the next kick on this party would fail on this node.
+    // The member has validated this membership by now and is about to sign
+    // it, so recording it early records what it endorsed.
+    persist_party_cache(ctx.db(), &plan, &ctx.participant_id).await?;
+
     if topology::read_accepted_p2p(config, sync_id, &plan.party)
         .await?
         .is_some()

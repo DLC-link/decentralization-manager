@@ -433,6 +433,29 @@ pub async fn count_dec_party_identity(db_path: &Path, dec_party_id: &str) -> any
     Ok(n)
 }
 
+/// How many `dec_party_participant` rows carry a key for a party.
+///
+/// This is the long-lived key material an on-ledger party keeps: every
+/// member's owner fingerprint, and its Daml key where one is known. It
+/// replaced the `dec_party_identity` bundle, which only parties created
+/// before the Canton-native coordination still hold.
+pub async fn count_dec_party_participant_keys(
+    db_path: &Path,
+    dec_party_id: &str,
+) -> anyhow::Result<i64> {
+    let pool = open(db_path).await?;
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM dec_party_participant \
+         WHERE dec_party_id = ?1 AND owner_key IS NOT NULL",
+    )
+    .bind(dec_party_id)
+    .fetch_one(&pool)
+    .await
+    .context("count_dec_party_participant_keys")?;
+    pool.close().await;
+    Ok(n)
+}
+
 /// Then-style probe over the persisted workflow_runs row. Returns
 ///  - `None`            when the row hasn't reached a terminal state yet,
 ///  - `Some(Ok(()))`    when it's `completed`,
