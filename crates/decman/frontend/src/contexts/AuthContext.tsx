@@ -101,6 +101,12 @@ function KeycloakAuthProvider({
             : {}),
         });
 
+        // Unmounted while Keycloak was initialising. The latch reopens on
+        // every effect pass, so it is still closed only after a real unmount,
+        // and this init must not register a refresher or a timer over
+        // whatever mounted after it.
+        if (!sessionLive.current) return;
+
         // Restore the original app route after Keycloak's URL cleanup.
         if (cleanHash) {
           window.history.replaceState(null, "", cleanHash);
@@ -151,6 +157,7 @@ function KeycloakAuthProvider({
                   scheduleRefresh();
                 })
                 .catch(() => {
+                  if (!sessionLive.current) return;
                   clearToken();
                   setTokenState(null);
                 });

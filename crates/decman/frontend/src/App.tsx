@@ -160,6 +160,10 @@ const App = () => {
   // discard everything scrolled and snap back to the first batch.
   const [actionsAccumulated, setActionsAccumulated] = useState(false);
   const [workflowRuns, setWorkflowRuns] = useState<WorkflowRun[]>([]);
+  // Request counters for the two feeds, so a slower earlier answer cannot
+  // overwrite a later one.
+  const invitationsSeq = useRef(0);
+  const workflowRunsSeq = useRef(0);
   const [workflowRunsLoaded, setWorkflowRunsLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -499,9 +503,13 @@ const App = () => {
   }, []);
 
   const refreshInvitations = useCallback(async () => {
+    // Newest request wins. Accepting an invitation refreshes the feed by hand
+    // while a poll is already in flight, and that older answer, landing after,
+    // would put the invitation back.
+    const seq = ++invitationsSeq.current;
     try {
       const res = await authenticatedFetch(`${API_BASE}/invitations`);
-      if (res.ok) {
+      if (res.ok && seq === invitationsSeq.current) {
         const data = await res.json();
         setPendingInvitations(data.invitations);
       }
@@ -522,9 +530,12 @@ const App = () => {
   }, [refreshInvitations]);
 
   const refreshWorkflowRuns = useCallback(async () => {
+    // Newest request wins, as above: cancel, dismiss and retry all refresh by
+    // hand alongside the poll.
+    const seq = ++workflowRunsSeq.current;
     try {
       const res = await authenticatedFetch(`${API_BASE}/workflows`);
-      if (res.ok) {
+      if (res.ok && seq === workflowRunsSeq.current) {
         const data = await res.json();
         setWorkflowRuns(data.runs ?? []);
       }
