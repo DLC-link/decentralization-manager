@@ -230,12 +230,16 @@ function Auth0AuthProvider({ children }: { children: ReactNode }) {
       return;
     }
 
+    // Per-run flag as well as the latch: this effect re-runs whenever Auth0
+    // hands back a new `getAccessTokenSilently`, and the latch alone cannot
+    // tell an earlier run's pending promise from the current run's.
+    let cancelled = false;
     sessionLive.current = true;
     setTokenRefresher(async () => {
-      if (!sessionLive.current) return null;
+      if (cancelled || !sessionLive.current) return null;
       try {
         const t = await getAccessTokenSilently({ cacheMode: "off" });
-        if (!sessionLive.current) return null;
+        if (cancelled || !sessionLive.current) return null;
         setToken(t);
         setTokenState(t);
         return t;
@@ -246,17 +250,22 @@ function Auth0AuthProvider({ children }: { children: ReactNode }) {
 
     getAccessTokenSilently()
       .then((t) => {
+        if (cancelled) return;
         setToken(t);
         setTokenState(t);
       })
       .catch((err) => {
+        if (cancelled) return;
         console.error("Auth0 token retrieval failed:", err);
         clearToken();
         setTokenState(null);
       })
-      .finally(() => setTokenLoading(false));
+      .finally(() => {
+        if (!cancelled) setTokenLoading(false);
+      });
 
     return () => {
+      cancelled = true;
       sessionLive.current = false;
       setTokenRefresher(null);
     };

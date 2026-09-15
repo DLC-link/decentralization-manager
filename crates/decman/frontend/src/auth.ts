@@ -59,7 +59,16 @@ export function setTokenRefresher(fn: TokenRefresher | null): void {
  * Renew the access token, sharing one refresh between concurrent callers:
  * every poller on the page hits its 401 in the same second.
  */
-export function refreshAccessToken(): Promise<TokenRenewal> {
+export function currentSession(): number {
+  return session;
+}
+
+export function refreshAccessToken(
+  forSession: number = session,
+): Promise<TokenRenewal> {
+  // The caller asked on behalf of a session that has since been replaced, so
+  // renewing now would hand the new user's token to the old user's request.
+  if (forSession !== session) return Promise.resolve({ status: "stale" });
   const renew = refresher;
   if (!renew) return Promise.resolve({ status: "failed" });
   if (!refreshInFlight) {

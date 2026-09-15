@@ -122,6 +122,29 @@ describe("authenticatedFetch", () => {
     await expect(pending).resolves.toEqual({ status: "stale" });
   });
 
+  it("does not retry an old session's request under the new session", async () => {
+    setToken("old-session");
+    setTokenRefresher(async () => "old-renewed");
+    const reload = stubReload();
+    let answer401: (r: Response) => void = () => {};
+    const fetchMock = vi
+      .fn()
+      .mockReturnValueOnce(new Promise<Response>((r) => (answer401 = r)));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const pending = authenticatedFetch("/workflows");
+    // A new login registers before the in-flight request answers.
+    const newRefresher = vi.fn(async () => "new-session");
+    setTokenRefresher(newRefresher);
+    answer401(new Response(null, { status: 401 }));
+
+    expect((await pending).status).toBe(401);
+    // No renewal under the new session, and no second attempt at the request.
+    expect(newRefresher).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(reload).not.toHaveBeenCalled();
+  });
+
   it("lets a stale 401 pass rather than logging the new session out", async () => {
     setToken("old-session");
     let finish: (token: string | null) => void = () => {};
