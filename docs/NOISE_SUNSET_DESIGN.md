@@ -195,6 +195,14 @@ the acceptor's `participantId`, its `namespaceFingerprint` and `signingPublicKey
 and add-party joiner), and its `damlKeyFingerprint` for the party (all kinds; feeds
 `dec_party_participant.signing_key`).
 
+`POST /invitations/{cid}/accept` records the operator's decision locally and opens the peer
+run row. The observer makes the ledger write on the next tick. Every member publishes its
+acceptance, whatever the kind: a coordinator counts acceptances before it acts, so a member
+that publishes none deadlocks both sides in silence. `engine::drive` therefore makes the write
+for every kind. A kind whose acceptance carries key material a member step generates opts out
+through `KindDriver::member_publishes_own_acceptance` and writes it at that step instead;
+onboarding, add-party and kick are the three that do.
+
 An acceptance is **counted** only if: `acceptance.proposal == proposalCid`,
 `acceptance.proposer == proposal.proposer`, `acceptor ∈ proposal.invitees`,
 `acceptance.participantId ∈ proposal.participants`, and the acceptor's node party is hosted

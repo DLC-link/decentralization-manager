@@ -1588,6 +1588,12 @@ impl KindDriver for AddParty {
         WorkflowKind::AddParty
     }
 
+    /// This kind's member attaches key material a member step generates,
+    /// so it exercises `Accept` itself rather than through [`super::drive`].
+    fn member_publishes_own_acceptance() -> bool {
+        true
+    }
+
     fn coordinator_steps() -> &'static [&'static str] {
         COORDINATOR_STEPS
     }

@@ -17,7 +17,7 @@
 use anyhow::{Result, bail};
 use common::{
     canton_id::CantonId,
-    types::{WorkflowKind, WorkflowProgress, WorkflowRun},
+    types::{WorkflowKind, WorkflowRun},
 };
 
 use crate::onledger::{
@@ -27,9 +27,8 @@ use crate::onledger::{
 };
 
 use super::{
-    COMPLETE_STEP, KindDriver, MemberVariant, OnLedger, PreflightRejected, ProposalExtras,
-    ProposerKeyMaterial, RunMeta, StartRequest, TickCtx, WAITING_FOR_ACCEPTANCES_STEP, accept_args,
-    advance_step, complete_run, fail_run,
+    COMPLETE_STEP, KindDriver, MemberVariant, OnLedger, PreflightRejected, ProposalExtras, RunMeta,
+    StartRequest, TickCtx, WAITING_FOR_ACCEPTANCES_STEP, advance_step, complete_run, fail_run,
 };
 
 pub struct Dars;
@@ -53,12 +52,6 @@ pub const MEMBER_STEPS: &[&str] = &[UPLOAD_DARS_STEP, COMPLETE_STEP];
 /// every invitee).
 pub fn all_invitees_accepted(invitees: &[CantonId], counted: &[Acceptance]) -> bool {
     acceptance_gate(invitees, counted) == AcceptanceGate::Ready
-}
-
-/// Whether `me` already accepted, so the tick does not exercise `Accept`
-/// twice.
-pub fn has_my_acceptance(acceptances: &[Acceptance], me: &CantonId) -> bool {
-    acceptances.iter().any(|a| a.record.acceptor == *me)
 }
 
 /// The proposal's participants as Canton ids. A participant that does not
@@ -103,27 +96,6 @@ pub fn acceptance_gate(invitees: &[CantonId], counted: &[Acceptance]) -> Accepta
 /// the next tick reconciles it.
 fn proposal_of<'a>(ctx: &'a TickCtx<'_>, meta: &RunMeta) -> Option<&'a ActiveProposal> {
     ctx.proposals.proposal(&meta.proposal_cid)
-}
-
-/// Design D5 step 5 before the one ledger write a member makes: the row is
-/// still in progress and the proposal is still active and unexpired, read
-/// fresh rather than from the tick snapshot.
-async fn recheck_before_accept(
-    ctx: &TickCtx<'_>,
-    run: &WorkflowRun,
-    meta: &RunMeta,
-) -> Result<bool> {
-    use crate::db::schema::SchemaRead;
-    let Some(fresh) = ctx.db().get_workflow_run(&run.instance_name).await? else {
-        return Ok(false);
-    };
-    if fresh.status != WorkflowProgress::InProgress {
-        return Ok(false);
-    }
-    let Some(proposal) = proposals::read_proposal(ctx.client, &meta.proposal_cid).await? else {
-        return Ok(false);
-    };
-    Ok(!ctx.is_expired(&proposal))
 }
 
 impl KindDriver for Dars {
@@ -252,26 +224,8 @@ impl KindDriver for Dars {
         let db = ctx.db();
         match run.current_step.as_str() {
             UPLOAD_DARS_STEP => {
-                let me = &ctx.identity.node_party;
-                if !has_my_acceptance(&ctx.proposals.acceptances_for(&proposal.contract_id), me) {
-                    if !recheck_before_accept(ctx, run, meta).await? {
-                        tracing::debug!(
-                            instance = %run.instance_name,
-                            "run or proposal changed under the tick; not accepting"
-                        );
-                        return Ok(());
-                    }
-                    // Dars carries no key material: every field is None.
-                    let args = accept_args(ctx.identity, &ProposerKeyMaterial::default(), None);
-                    let cid = proposals::accept(ctx.client, &meta.proposal_cid, &args).await?;
-                    tracing::info!(
-                        instance = %run.instance_name,
-                        acceptance = %cid,
-                        pins = proposal.record.dar_pins.len(),
-                        "DAR pins accepted; upload the files through POST /dars/upload"
-                    );
-                    return Ok(());
-                }
+                // `drive` published the acceptance, which is what lets
+                // `POST /dars/upload` take the pinned files.
                 let missing =
                     dars::unvetted_pins_locally(ctx.ol.config(), &proposal.record.dar_pins).await?;
                 if missing.is_empty() {
@@ -279,8 +233,9 @@ impl KindDriver for Dars {
                 }
                 tracing::debug!(
                     instance = %run.instance_name,
+                    pins = proposal.record.dar_pins.len(),
                     missing = ?missing,
-                    "waiting for the operator to upload the pinned DARs"
+                    "waiting for the operator to upload the pinned DARs through POST /dars/upload"
                 );
                 Ok(())
             }
@@ -374,14 +329,6 @@ mod tests {
         assert!(!all_invitees_accepted(&invitees, &stranger));
 
         assert!(all_invitees_accepted(&[], &[]));
-    }
-
-    #[test]
-    fn my_acceptance_is_found_by_acceptor() {
-        let list = vec![acceptance("node-b")];
-        assert!(has_my_acceptance(&list, &party("node-b")));
-        assert!(!has_my_acceptance(&list, &party("node-c")));
-        assert!(!has_my_acceptance(&[], &party("node-b")));
     }
 
     #[test]

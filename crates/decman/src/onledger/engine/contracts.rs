@@ -759,6 +759,12 @@ async fn sign_submissions(
         // them. Before the first round exists there is nothing to conclude.
         if has_pinned_round(meta) {
             complete_run(ctx.db(), run).await?;
+        } else {
+            tracing::debug!(
+                instance = %run.instance_name,
+                run_id = %proposal.record.run_id,
+                "no SubmissionRound names this node yet; waiting for the proposer"
+            );
         }
         return Ok(());
     }

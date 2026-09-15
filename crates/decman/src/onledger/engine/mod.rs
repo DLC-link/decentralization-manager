@@ -583,9 +583,85 @@ pub trait KindDriver {
         Ok(ProposalExtras::default())
     }
 
+    /// Whether the member driver exercises `WorkflowProposal_Accept` itself.
+    ///
+    /// A kind answers `true` only when the acceptance must carry key
+    /// material one of its member steps generates. The default is `false`,
+    /// so [`drive`] publishes the acceptance before the first member tick
+    /// and a kind that needs nothing extra cannot forget to. A coordinator
+    /// waits on counted acceptances, so forgetting deadlocks the run.
+    fn member_publishes_own_acceptance() -> bool {
+        false
+    }
+
     async fn tick_coordinator(ctx: &TickCtx<'_>, run: &WorkflowRun, meta: &RunMeta) -> Result<()>;
 
     async fn tick_member(ctx: &TickCtx<'_>, run: &WorkflowRun, meta: &RunMeta) -> Result<()>;
+}
+
+/// Whether `me` already accepted, so a tick does not exercise `Accept`
+/// twice.
+pub fn has_my_acceptance(acceptances: &[Acceptance], me: &CantonId) -> bool {
+    acceptances.iter().any(|a| a.record.acceptor == *me)
+}
+
+/// Design D5 step 5 before the one ledger write a member makes: the row is
+/// still in progress and the proposal is still active and unexpired, read
+/// fresh rather than from the tick snapshot.
+pub async fn recheck_before_accept(
+    ctx: &TickCtx<'_>,
+    run: &WorkflowRun,
+    meta: &RunMeta,
+) -> Result<bool> {
+    let Some(fresh) = ctx.db().get_workflow_run(&run.instance_name).await? else {
+        return Ok(false);
+    };
+    if fresh.status != WorkflowProgress::InProgress {
+        return Ok(false);
+    }
+    let Some(proposal) = proposals::read_proposal(ctx.client, &meta.proposal_cid).await? else {
+        return Ok(false);
+    };
+    Ok(!ctx.is_expired(&proposal))
+}
+
+/// `RunMeta.topology_hashes` key holding the cid of the acceptance this
+/// member published. A second acceptance from one acceptor fails the
+/// coordinator closed, and `submit_and_wait` can return before the create
+/// reaches the next ACS read, so the tick that writes it records the cid.
+const ACCEPTANCE_PIN: &str = "acceptance";
+
+/// Publish this node's `WorkflowAcceptance` for a kind that attaches no key
+/// material. Returns whether this tick wrote it, so the caller can let the
+/// kind driver read it on the next tick.
+async fn publish_member_acceptance(
+    ctx: &TickCtx<'_>,
+    run: &WorkflowRun,
+    meta: &RunMeta,
+) -> Result<bool> {
+    if meta.topology_hashes.contains_key(ACCEPTANCE_PIN) {
+        return Ok(false);
+    }
+    let me = &ctx.identity.node_party;
+    if has_my_acceptance(&ctx.proposals.acceptances_for(&meta.proposal_cid), me) {
+        return Ok(false);
+    }
+    if !recheck_before_accept(ctx, run, meta).await? {
+        tracing::debug!(
+            instance = %run.instance_name,
+            "run or proposal changed under the tick; not accepting"
+        );
+        return Ok(false);
+    }
+    let args = accept_args(ctx.identity, &ProposerKeyMaterial::default(), None);
+    let cid = proposals::accept(ctx.client, &meta.proposal_cid, &args).await?;
+    pin_topology_hash(ctx.db(), &run.instance_name, ACCEPTANCE_PIN, &cid).await?;
+    tracing::info!(
+        instance = %run.instance_name,
+        acceptance = %cid,
+        "invitation accepted on the ledger"
+    );
+    Ok(true)
 }
 
 /// What [`drive`] did with a row.
@@ -726,6 +802,15 @@ pub async fn drive(ctx: &TickCtx<'_>, run: &WorkflowRun) -> Result<Driven> {
     let Some(meta) = read_run_meta(run) else {
         return Ok(Driven::Skipped);
     };
+    // A stalled run logs nothing else: each step returns quietly while it
+    // waits. This line names the step the run sits in.
+    tracing::debug!(
+        instance = %run.instance_name,
+        kind = %run.kind.as_str(),
+        role = ?run.role,
+        step = %run.current_step,
+        "driving run"
+    );
     if !reconcile(ctx, run, &meta).await? {
         return Ok(Driven::Stopped);
     }
@@ -733,7 +818,17 @@ pub async fn drive(ctx: &TickCtx<'_>, run: &WorkflowRun) -> Result<Driven> {
         ($driver:ty) => {
             match run.role {
                 WorkflowRole::Coordinator => <$driver>::tick_coordinator(ctx, run, &meta).await?,
-                WorkflowRole::Peer => <$driver>::tick_member(ctx, run, &meta).await?,
+                WorkflowRole::Peer => {
+                    // The coordinator counts acceptances before it acts, so
+                    // the acceptance comes first and the driver reads it on
+                    // the next tick.
+                    if !<$driver>::member_publishes_own_acceptance()
+                        && publish_member_acceptance(ctx, run, &meta).await?
+                    {
+                        return Ok(Driven::Ticked);
+                    }
+                    <$driver>::tick_member(ctx, run, &meta).await?
+                }
             }
         };
     }
@@ -1532,6 +1627,47 @@ mod tests {
 
     fn participant(n: u8) -> CantonId {
         CantonId::parse(&format!("participant{n}::{NS}")).expect("id")
+    }
+
+    fn acceptance_of(acceptor: &str) -> Acceptance {
+        Acceptance {
+            contract_id: format!("00{acceptor}"),
+            offset: 0,
+            record: crate::onledger::daml::codec::WorkflowAcceptanceRecord {
+                proposal: "00proposal".into(),
+                proposer: party("node-a"),
+                acceptor: party(acceptor),
+                observers: Vec::new(),
+                run_id: "r".into(),
+                participant_id: participant(2).to_string(),
+                namespace_fingerprint: None,
+                signing_public_key_hex: None,
+                daml_key_fingerprint: None,
+                member_party: None,
+                accepted_at: 0,
+            },
+        }
+    }
+
+    // A member that never publishes its acceptance deadlocks the
+    // coordinator, which counts acceptances before it acts.
+    #[test]
+    fn my_acceptance_is_found_by_acceptor() {
+        let list = vec![acceptance_of("node-b")];
+        assert!(has_my_acceptance(&list, &party("node-b")));
+        assert!(!has_my_acceptance(&list, &party("node-c")));
+        assert!(!has_my_acceptance(&[], &party("node-b")));
+    }
+
+    #[test]
+    fn only_the_kinds_that_carry_key_material_accept_for_themselves() {
+        assert!(onboarding::Onboarding::member_publishes_own_acceptance());
+        assert!(add_party::AddParty::member_publishes_own_acceptance());
+        assert!(kick::Kick::member_publishes_own_acceptance());
+        // The rest rely on `drive`, so a new kind is safe by default.
+        assert!(!dars::Dars::member_publishes_own_acceptance());
+        assert!(!contracts::Contracts::member_publishes_own_acceptance());
+        assert!(!change_threshold::ChangeThreshold::member_publishes_own_acceptance());
     }
 
     fn meta() -> RunMeta {

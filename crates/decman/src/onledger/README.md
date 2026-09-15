@@ -674,11 +674,14 @@ pub trait KindDriver {
     fn member_steps(variant: Option<MemberVariant>) -> &'static [&'static str];
     async fn preflight(ol: &OnLedger, req: &StartRequest) -> Result<()>;            // default Ok; return PreflightRejected for 409
     async fn prepare(ol: &OnLedger, req: &StartRequest) -> Result<ProposalExtras>;  // default empty; key material, pins, package names
+    fn member_publishes_own_acceptance() -> bool;                                  // default false; true for onboarding, add-party, kick
     async fn tick_coordinator(ctx: &TickCtx<'_>, run: &WorkflowRun, meta: &RunMeta) -> Result<()>;
     async fn tick_member(ctx: &TickCtx<'_>, run: &WorkflowRun, meta: &RunMeta) -> Result<()>;
 }
 pub enum Driven { Skipped, Stopped, Ticked }
 pub async fn drive(ctx: &TickCtx<'_>, run: &WorkflowRun) -> Result<Driven>;     // reconcile (D10) then dispatch
+pub fn has_my_acceptance(acceptances: &[Acceptance], me: &CantonId) -> bool;
+pub async fn recheck_before_accept(ctx: &TickCtx<'_>, run: &WorkflowRun, meta: &RunMeta) -> Result<bool>;   // D5 step 5
 
 pub async fn start_run(ol: &OnLedger, req: StartRequest) -> Result<StartedRun>;
 pub struct AcceptedInvitation { instance_name: String, member_variant: Option<MemberVariant> }
