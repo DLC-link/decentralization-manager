@@ -29,71 +29,6 @@ use crate::common::{
 /// - invitations surfacing on BOTH the existing member (P2) and the new
 ///   member (P3), and both being acceptable;
 /// - the resulting topology: 3 participants, configured threshold.
-/// Move the party's ACS snapshot from the exporting host to the joiner, the
-/// way an operator does it: read the `AcsManifest` the exporter published,
-/// download the file from that same host, and upload it to the joining node.
-/// Nothing travels between the nodes themselves (design D9).
-///
-/// Every current host exports and publishes its own manifest, and two
-/// snapshots of one ACS are not byte-identical, so the download has to come
-/// from the host that published the manifest the import names.
-///
-/// Returns `false` while no manifest names P3 yet.
-async fn relay_acs_snapshot(f: &Fixture) -> anyhow::Result<bool> {
-    let party_id = f.party_id()?.to_string();
-    let target = f.p3.participant_id.clone();
-
-    let manifests: AcsManifestsResponse = f
-        .get_json(f.p3.http, &format!("/acs-manifests/{party_id}"))
-        .await
-        .context("GET /acs-manifests on P3")?;
-    let hosts = [(&f.p1, "P1"), (&f.p2, "P2")];
-    let Some((manifest, port, host_name)) = manifests
-        .manifests
-        .into_iter()
-        .filter(|m| m.target_participant == target)
-        .filter_map(|m| {
-            hosts
-                .iter()
-                .find(|(node, _)| node.participant_id == m.exporter_participant)
-                .map(|(node, name)| (m, node.http, *name))
-        })
-        .max_by_key(|(m, _, _)| m.activation_serial)
-    else {
-        return Ok(false);
-    };
-
-    let serial = manifest.activation_serial;
-    let exporter = &manifest.exporter_participant;
-    let bytes = f
-        .get_bytes(
-            port,
-            &format!("/acs-export/{party_id}/{target}?serial={serial}"),
-        )
-        .await
-        .with_context(|| format!("GET /acs-export on {host_name}"))?;
-    info!(
-        "operator carried {} bytes of ACS from {host_name} for {target} at serial {serial}",
-        bytes.len()
-    );
-
-    let imported: AcsImportResponse = f
-        .post_bytes(
-            f.p3.http,
-            &format!("/acs-import/{party_id}?serial={serial}&exporter={exporter}"),
-            bytes,
-        )
-        .await
-        .context("POST /acs-import on P3")?;
-    anyhow::ensure!(
-        imported.sha256_hex == manifest.sha256_hex,
-        "the imported bytes hash to {} but the manifest names {}",
-        imported.sha256_hex,
-        manifest.sha256_hex
-    );
-    Ok(true)
-}
-
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: add_party");
 
@@ -386,4 +321,69 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         )
         .run(f)
         .await
+}
+
+/// Move the party's ACS snapshot from the exporting host to the joiner, the
+/// way an operator does it: read the `AcsManifest` the exporter published,
+/// download the file from that same host, and upload it to the joining node.
+/// Nothing travels between the nodes themselves (design D9).
+///
+/// Every current host exports and publishes its own manifest, and two
+/// snapshots of one ACS are not byte-identical, so the download has to come
+/// from the host that published the manifest the import names.
+///
+/// Returns `false` while no manifest names P3 yet.
+async fn relay_acs_snapshot(f: &Fixture) -> anyhow::Result<bool> {
+    let party_id = f.party_id()?.to_string();
+    let target = f.p3.participant_id.clone();
+
+    let manifests: AcsManifestsResponse = f
+        .get_json(f.p3.http, &format!("/acs-manifests/{party_id}"))
+        .await
+        .context("GET /acs-manifests on P3")?;
+    let hosts = [(&f.p1, "P1"), (&f.p2, "P2")];
+    let Some((manifest, port, host_name)) = manifests
+        .manifests
+        .into_iter()
+        .filter(|m| m.target_participant == target)
+        .filter_map(|m| {
+            hosts
+                .iter()
+                .find(|(node, _)| node.participant_id == m.exporter_participant)
+                .map(|(node, name)| (m, node.http, *name))
+        })
+        .max_by_key(|(m, _, _)| m.activation_serial)
+    else {
+        return Ok(false);
+    };
+
+    let serial = manifest.activation_serial;
+    let exporter = &manifest.exporter_participant;
+    let bytes = f
+        .get_bytes(
+            port,
+            &format!("/acs-export/{party_id}/{target}?serial={serial}"),
+        )
+        .await
+        .with_context(|| format!("GET /acs-export on {host_name}"))?;
+    info!(
+        "operator carried {} bytes of ACS from {host_name} for {target} at serial {serial}",
+        bytes.len()
+    );
+
+    let imported: AcsImportResponse = f
+        .post_bytes(
+            f.p3.http,
+            &format!("/acs-import/{party_id}?serial={serial}&exporter={exporter}"),
+            bytes,
+        )
+        .await
+        .context("POST /acs-import on P3")?;
+    anyhow::ensure!(
+        imported.sha256_hex == manifest.sha256_hex,
+        "the imported bytes hash to {} but the manifest names {}",
+        imported.sha256_hex,
+        manifest.sha256_hex
+    );
+    Ok(true)
 }
