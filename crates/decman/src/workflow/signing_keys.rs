@@ -534,14 +534,27 @@ pub fn legacy_signing_keys_for_members(
         );
     }
 
-    let left_behind = legacy_keys.len() - keys.len();
+    // Count distinct keys, not entries. A legacy mapping is allowed to repeat a
+    // key, and `by_fingerprint` collapses those while `legacy_keys` does not,
+    // so the raw length would report keys left behind that do not exist. An
+    // operator reading this during a one-shot migration deserves a true count.
+    let distinct = by_fingerprint.len();
+    if legacy_keys.len() != distinct {
+        tracing::info!(
+            "The party's PartyToKeyMapping lists {entries} entries for {distinct} distinct \
+             key(s); the repeats are counted once",
+            entries = legacy_keys.len()
+        );
+    }
+
+    let left_behind = distinct.saturating_sub(keys.len());
     if left_behind > 0 {
         tracing::warn!(
-            "Moving {adopted} of the party's {total} legacy signing keys onto the \
+            "Moving {adopted} of the party's {distinct} legacy signing keys onto the \
              PartyToParticipant; the remaining {left_behind} are claimed by no current \
-             member and stop authorizing for the party",
-            adopted = keys.len(),
-            total = legacy_keys.len()
+             member. They stop authorizing while the inline keys are in force, which \
+             shadows the old mapping rather than emptying it",
+            adopted = keys.len()
         );
     }
 
@@ -771,6 +784,26 @@ mod tests {
         let adopted = legacy_signing_keys_for_members(&legacy, &uids(&["p1", "p2"]), &claims)?;
 
         assert_eq!(adopted.len(), legacy.len());
+        Ok(())
+    }
+
+    /// Canton lets a legacy mapping repeat a key. The adopted set must still
+    /// be one key per member, and the count of what is left behind has to go
+    /// by distinct keys or it reports keys that do not exist.
+    #[test]
+    fn handles_a_mapping_that_repeats_a_key() -> Result {
+        let legacy = vec![key(1), key(2), key(1), key(2)];
+        let claims = claims(&[("p1", 1), ("p2", 2)]);
+
+        let adopted = legacy_signing_keys_for_members(&legacy, &uids(&["p1", "p2"]), &claims)?;
+
+        assert_eq!(
+            adopted
+                .iter()
+                .map(utils::compute_fingerprint)
+                .collect::<Vec<_>>(),
+            vec![fingerprint(1), fingerprint(2)]
+        );
         Ok(())
     }
 }
