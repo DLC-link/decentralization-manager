@@ -780,15 +780,29 @@ pub enum SyncDecision {
     EmptySnapshot { exporter_participant: String },
     /// The import endpoint recorded completion.
     Imported,
+    /// This participant holds none of these packages, which the party's
+    /// contracts need. The import would fail after the disconnect, so the
+    /// run stops here instead (design D9).
+    MissingPackages(Vec<String>),
     /// Nothing to act on yet; the text is for the log.
     Waiting(String),
 }
 
-/// The pure decision behind [`empty_fast_path_or_wait`].
+/// The package ids a set of verified manifests names, deduplicated.
+pub fn manifest_package_ids(verified: &[&AcsManifestRecord]) -> BTreeSet<String> {
+    verified
+        .iter()
+        .flat_map(|m| m.package_ids.iter().cloned())
+        .collect()
+}
+
+/// The pure decision behind [`empty_fast_path_or_wait`]. `missing` holds the
+/// package ids the manifests name that this participant does not hold.
 pub fn decide_sync(
     verified: &[&AcsManifestRecord],
     rejected: &[String],
     imported: bool,
+    missing: &[String],
 ) -> SyncDecision {
     if imported {
         return SyncDecision::Imported;
@@ -797,6 +811,12 @@ pub fn decide_sync(
         return SyncDecision::EmptySnapshot {
             exporter_participant: m.exporter_participant.clone(),
         };
+    }
+    // Before the operator carries a file this node cannot import: the
+    // offline import re-validates every contract and would fail only after
+    // the disconnect window is open.
+    if !missing.is_empty() {
+        return SyncDecision::MissingPackages(missing.to_vec());
     }
     if verified.is_empty() {
         return SyncDecision::Waiting(if rejected.is_empty() {
@@ -893,7 +913,20 @@ pub async fn empty_fast_path_or_wait(
             Err(e) => rejected.push(format!("{}: {e}", m.contract_id)),
         }
     }
-    Ok(decide_sync(&verified, &rejected, false))
+    // The manifests name the packages the party's contracts need. Check
+    // them now, while the participant is still connected and nothing has
+    // been carried.
+    let required = manifest_package_ids(&verified);
+    let missing: Vec<String> = if required.is_empty() {
+        Vec::new()
+    } else {
+        let available = crate::workflow::party_replication::acs::local_package_ids(config).await?;
+        required
+            .into_iter()
+            .filter(|id| !available.contains(id))
+            .collect()
+    };
+    Ok(decide_sync(&verified, &rejected, false, &missing))
 }
 
 // ---------------------------------------------------------------------------
@@ -1756,25 +1789,65 @@ mod tests {
     fn sync_decision_prefers_completion_then_the_empty_fast_path() {
         let empty = manifest(0);
         let full = manifest(9);
-        assert_eq!(decide_sync(&[&full], &[], true), SyncDecision::Imported);
         assert_eq!(
-            decide_sync(&[&full, &empty], &[], false),
+            decide_sync(&[&full], &[], true, &[]),
+            SyncDecision::Imported
+        );
+        assert_eq!(
+            decide_sync(&[&full, &empty], &[], false, &[]),
             SyncDecision::EmptySnapshot {
                 exporter_participant: id("participant1").to_string()
             }
         );
         assert!(matches!(
-            decide_sync(&[&full], &[], false),
+            decide_sync(&[&full], &[], false, &[]),
             SyncDecision::Waiting(_)
         ));
-        match decide_sync(&[], &["m1: rule 3".into()], false) {
+        match decide_sync(&[], &["m1: rule 3".into()], false, &[]) {
             SyncDecision::Waiting(why) => assert!(why.contains("rule 3")),
             other => panic!("{other:?}"),
         }
-        match decide_sync(&[], &[], false) {
+        match decide_sync(&[], &[], false, &[]) {
             SyncDecision::Waiting(why) => assert!(why.contains("no AcsManifest")),
             other => panic!("{other:?}"),
         }
+    }
+
+    // The import re-validates every contract and would fail only after the
+    // disconnect window opens, so a package this node lacks has to stop the
+    // run while it is still connected and nothing has been carried.
+    #[test]
+    fn a_missing_package_stops_the_joiner_before_the_import() {
+        let full = manifest(1);
+        assert_eq!(
+            decide_sync(&[&full], &[], false, &["pkg-a".to_string()]),
+            SyncDecision::MissingPackages(vec!["pkg-a".to_string()])
+        );
+        // An empty snapshot needs no packages, so it still takes the fast path.
+        let mut empty = manifest(1);
+        empty.size_bytes = 0;
+        assert!(matches!(
+            decide_sync(&[&empty], &[], false, &["pkg-a".to_string()]),
+            SyncDecision::EmptySnapshot { .. }
+        ));
+        // A completed import is never undone by a late package check.
+        assert_eq!(
+            decide_sync(&[&full], &[], true, &["pkg-a".to_string()]),
+            SyncDecision::Imported
+        );
+    }
+
+    #[test]
+    fn manifest_package_ids_dedupe_across_manifests() {
+        let mut a = manifest(1);
+        a.package_ids = vec!["p1".into(), "p2".into()];
+        let mut b = manifest(1);
+        b.package_ids = vec!["p2".into(), "p3".into()];
+        let ids = manifest_package_ids(&[&a, &b]);
+        assert_eq!(
+            ids.into_iter().collect::<Vec<_>>(),
+            vec!["p1".to_string(), "p2".to_string(), "p3".to_string()]
+        );
     }
 
     #[test]

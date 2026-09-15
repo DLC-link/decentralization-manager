@@ -549,7 +549,7 @@ pub async fn collect_party_package_ids(
 
 /// New-member side: package ids currently known to this participant, via the
 /// admin `PackageService.ListPackages`. Backs the ACS-import package preflight.
-async fn local_package_ids(config: &NodeConfig) -> Result<HashSet<String>> {
+pub(crate) async fn local_package_ids(config: &NodeConfig) -> Result<HashSet<String>> {
     let mut client = PackageServiceClient::new(config.admin_channel().await?);
     let descriptions = client
         .list_packages(tonic::Request::new(ListPackagesRequest {

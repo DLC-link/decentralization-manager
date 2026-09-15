@@ -1537,6 +1537,19 @@ async fn joiner_sync_acs(ctx: &TickCtx<'_>, run: &WorkflowRun, facts: &Facts) ->
             tracing::info!(instance = %run.instance_name, "ACS import recorded");
             advance_step(ctx.db(), run, STEP_CLEAR_ONBOARDING).await
         }
+        SyncDecision::MissingPackages(missing) => {
+            fail_run(
+                ctx.db(),
+                run,
+                &format!(
+                    "this participant is missing {n} package(s) the party's contracts need — \
+                     vet the corresponding DAR(s) here before the import; the ACS will not \
+                     import without them. Missing package ids: {missing:?}",
+                    n = missing.len()
+                ),
+            )
+            .await
+        }
         SyncDecision::Waiting(why) => {
             tracing::debug!(instance = %run.instance_name, why, "SyncAcs waiting");
             Ok(())
