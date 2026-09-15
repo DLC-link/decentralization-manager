@@ -349,7 +349,7 @@ pub async fn start_server(
     // created, so the upload starts at once and retries until the participant
     // answers. `/node-health` reports its state.
     let dar_state = app_state.onledger.clone();
-    spawn_supervised(
+    spawn_once(
         "coordination DAR upload",
         "the coordination package may stay unvetted; upload it through POST /dars/upload",
         async move {
@@ -668,6 +668,20 @@ where
         match tokio::spawn(task).await {
             Ok(()) => tracing::error!(task = name, "{name} loop returned; {consequence}"),
             Err(e) => tracing::error!(task = name, error = %e, "{name} task died; {consequence}"),
+        }
+    });
+}
+
+/// Spawns a task that finishes once and then has nothing left to do. A clean
+/// return is the normal end, so only a panic reports at `error`. The task
+/// itself says whether the work succeeded.
+fn spawn_once<F>(name: &'static str, consequence: &'static str, task: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(async move {
+        if let Err(e) = tokio::spawn(task).await {
+            tracing::error!(task = name, error = %e, "{name} task died; {consequence}");
         }
     });
 }

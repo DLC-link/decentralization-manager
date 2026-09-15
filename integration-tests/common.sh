@@ -229,7 +229,11 @@ start_nodes() {
         # chaos phase's respawn accumulates rather than truncates.
         local log_file="$DEV_DIR/participant-$i/stderr.log"
         echo "Starting participant-$i (log: $log_file)..."
-        RUST_LOG="${RUST_LOG:-dec_party_manager=info}" \
+        # The node log level is separate from the runner's. The runner stays
+        # quiet so the scenario output reads cleanly; each node still records
+        # what it did, because that file is the only evidence a CI failure
+        # leaves behind. Override with DECPM_NODE_RUST_LOG.
+        RUST_LOG="${DECPM_NODE_RUST_LOG:-dec_party_manager=info,dec_party_manager::onledger=debug}" \
         DECPM_CANTON_ADMIN_HOST=127.0.0.1 \
         DECPM_CANTON_ADMIN_PORT="${canton_admin_ports[$idx]}" \
         DECPM_CANTON_LEDGER_HOST=127.0.0.1 \

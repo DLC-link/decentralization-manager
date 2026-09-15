@@ -38,8 +38,9 @@ Boots a Splice localnet (or connects to devnet), spawns 3 dec-party-manager
 instances, and runs the governance workflow e2e (cargo test --profile release-ci).
 
 Output is filtered by default so the Given-When-Then scenario trace stays
-readable. The dec-party-manager processes log only at WARN+ unless --verbose
-is passed.
+readable. Each dec-party-manager process writes its own file at INFO, with
+the on-ledger coordination module at DEBUG; --verbose adds that stream to the
+runner's output too. Set DECPM_NODE_RUST_LOG to change the node level alone.
 
 Options:
   -v, --verbose   Show INFO output from dec-party-manager processes,
@@ -55,6 +56,7 @@ Options:
   -h, --help      Show this help and exit.
 
 If RUST_LOG is already set in the environment, it overrides this preset.
+DECPM_NODE_RUST_LOG overrides the node level, whatever RUST_LOG holds.
 EOF
             exit 0
             ;;
