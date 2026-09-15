@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     canton_id::CantonId,
     types::{
-        AuditLogEntry, DecentralizedParty, PendingInvitation, Permission, WorkflowKind,
-        WorkflowProgress, WorkflowRun,
+        AuditLogEntry, DecentralizedParty, PendingInvitation, Permission, WorkflowProgress,
+        WorkflowRun,
     },
 };
 
@@ -262,43 +262,6 @@ pub struct OnboardingRequest {
     pub threshold: Option<i32>,
 }
 
-/// Why a directed edge was reported missing. The frontend renders different
-/// remediation hints depending on which kind it sees: `MeshHole` is a true
-/// peer↔peer config gap ("on `from`, add `to` to the network config"), while
-/// `UnreachableFromCoordinator` is a coordinator-side reachability problem
-/// (the peer is unknown, has no public key, didn't answer, or replied with
-/// a malformed payload — fix the coordinator's view of `to`, or `to` itself).
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub enum MissingEdgeKind {
-    UnreachableFromCoordinator,
-    MeshHole,
-}
-
-/// One directed missing edge in the peer mesh: `from` does not have `to`
-/// configured as a peer (`MeshHole`), or the coordinator could not query
-/// `to` at all (`UnreachableFromCoordinator`, `from` is the coordinator).
-#[derive(Clone, Debug, Serialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct MissingPeerEdge {
-    pub from: String,
-    pub to: String,
-    pub kind: MissingEdgeKind,
-}
-
-/// Returned when onboarding pre-flight detects that selected peers are not
-/// fully meshed. The workflow is not started.
-#[derive(Clone, Debug, Serialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct OnboardingMeshErrorResponse {
-    pub error: String,
-    pub missing_edges: Vec<MissingPeerEdge>,
-}
-
 /// Request to deploy contracts for a decentralized party
 #[derive(Clone, Debug, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -327,6 +290,11 @@ pub struct DarsRequest {
     /// Peer IDs to distribute to (required non-empty for /dars/distribute, ignored by /dars/upload)
     #[serde(default)]
     pub peer_ids: Vec<CantonId>,
+    /// `/dars/upload` only: the `runId` of the `WorkflowProposal(kind = Dars)`
+    /// whose pins the uploaded files must match (design D8). Absent for a
+    /// plain local upload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin_instance: Option<String>,
 }
 
 /// Response for workflow initiation (kick, onboarding, etc.)
@@ -589,8 +557,7 @@ pub struct TenantAddHostsOnboardResponse {
 /// The wallet is the transport: it reads block N here and hands block N to the
 /// joining host, which feeds it straight into its open `ImportPartyAcs` stream.
 /// Nothing lands on disk at either end, so the size of the party stops deciding
-/// whether the transfer is possible — the same property the add-party path gets
-/// from its node-to-node pipe.
+/// whether the transfer is possible.
 ///
 /// Forward-only. The export stream cannot rewind, so a broken transfer restarts
 /// from block 1 with a fresh export rather than resuming.
@@ -777,151 +744,6 @@ pub struct TenantPartyStateResponse {
     /// an operator learned which case they had by calling prepare and reading
     /// the 400.
     pub has_signing_key: bool,
-}
-
-/// Response for key status check
-#[derive(Serialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct KeyStatusResponse {
-    pub has_keys: bool,
-    pub public_key: Option<String>,
-}
-
-/// Payload sent inside an `InviteOnboarding` Noise message.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct OnboardingInvitePayload {
-    pub prefix: String,
-    pub participants: Vec<CantonId>,
-    /// Initial signing threshold the coordinator will use, so the invitation
-    /// and run cards can show it before the proposals are built. `None` from
-    /// an older coordinator that predates the field (the card then omits it).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub threshold: Option<i32>,
-    /// The coordinator's `workflow_runs` instance name for this run. Echoed
-    /// back in `DeclineInvitationPayload` so the coordinator can tell a
-    /// decline of THIS run apart from a stale invite of an earlier run.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workflow_instance: Option<String>,
-}
-
-/// Payload sent inside a `DeclineInvitation` Noise message — peer telling
-/// the coordinator that it has rejected an outstanding invitation so the
-/// coordinator can fail its matching in-progress run with a clear error.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct DeclineInvitationPayload {
-    pub kind: WorkflowKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    /// The coordinator run this decline targets (from the invite payload).
-    /// `None` when the invite predates this field — the coordinator then
-    /// falls back to kind + membership checks only.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workflow_instance: Option<String>,
-}
-
-/// Payload sent inside an `InviteDars` Noise message.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct DarsInvitePayload {
-    pub dar_filenames: Vec<String>,
-    /// SHA-256 of each DAR's content, hex encoded and index-aligned with
-    /// `dar_filenames`. A peer pins the accepted content with these, so a
-    /// coordinator cannot get a different DAR vetted under an accepted name.
-    /// Empty from a coordinator that predates the field; the peer then falls
-    /// back to checking filenames only.
-    #[serde(default)]
-    pub dar_hashes: Vec<String>,
-    /// The member set (selected peers) this distribution targets, so the peer
-    /// card can render the same participant list the coordinator shows.
-    #[serde(default)]
-    pub participants: Vec<CantonId>,
-    /// The coordinator's run instance name (see `OnboardingInvitePayload`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workflow_instance: Option<String>,
-}
-
-/// Payload sent inside an `InviteKick` Noise message — gives the peer enough
-/// context to show "kicking X from dec party Y, threshold a→b" before the kick
-/// proposals arrive later in the workflow.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct KickInvitePayload {
-    pub dec_party_id: CantonId,
-    pub kicked_participant: CantonId,
-    pub new_threshold: i32,
-    pub previous_threshold: i32,
-    /// The surviving member set the kick targets, so the peer card renders
-    /// the same participant list the coordinator shows.
-    #[serde(default)]
-    pub participants: Vec<CantonId>,
-    /// The coordinator's run instance name (see `OnboardingInvitePayload`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workflow_instance: Option<String>,
-}
-
-/// Payload sent inside an `InviteAddParty` Noise message — gives the peer
-/// enough context to show "adding X to dec party Y, threshold a→b" before
-/// the proposals arrive. Sent both to the existing members and to the new
-/// member itself (which recognises its own id in `new_participant`).
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct AddPartyInvitePayload {
-    pub dec_party_id: CantonId,
-    pub new_participant: CantonId,
-    pub new_threshold: i32,
-    pub previous_threshold: i32,
-    /// The full post-add member set, so the peer card renders the same
-    /// participant list the coordinator shows.
-    #[serde(default)]
-    pub participants: Vec<CantonId>,
-    /// The coordinator's run instance name (see `OnboardingInvitePayload`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workflow_instance: Option<String>,
-}
-
-/// Payload sent inside an `InviteChangeThreshold` Noise message — gives the
-/// peer enough context to show "changing dec party Y threshold a→b" before the
-/// proposals arrive.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct ChangeThresholdInvitePayload {
-    pub dec_party_id: CantonId,
-    pub new_threshold: i32,
-    pub previous_threshold: i32,
-    /// The party's member set, so the peer card renders the same participant
-    /// list the coordinator shows.
-    #[serde(default)]
-    pub participants: Vec<CantonId>,
-    /// The coordinator's run instance name (see `OnboardingInvitePayload`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workflow_instance: Option<String>,
-}
-
-/// Payload sent inside an `InviteContracts` Noise message — mirrors the rich
-/// Kick payload so the peer card can show the dec party, member set, and the
-/// package/contract names being deployed before the proposals arrive.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct ContractsInvitePayload {
-    pub dec_party_id: CantonId,
-    #[serde(default)]
-    pub participants: Vec<CantonId>,
-    /// Human-readable contract/package names (from `ContractDefinition.name`).
-    #[serde(default)]
-    pub package_names: Vec<String>,
-    /// The coordinator's run instance name (see `OnboardingInvitePayload`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workflow_instance: Option<String>,
 }
 
 /// Response for pending invitations endpoint

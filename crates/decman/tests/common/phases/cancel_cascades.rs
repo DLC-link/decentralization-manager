@@ -24,7 +24,7 @@ struct Ctx {
     /// Coordinator-side instance_name on P1 (`<prefix>-creation`).
     instance_name: String,
     /// Peer-side instance_name on P2 — synthesized by accept_invitation
-    /// as `peer-onboarding-<pubkey>-<epoch>`. Captured once the
+    /// as `peer-onboarding-{participant_short}-{runId}`. Captured once the
     /// inprogress row is observable so subsequent steps can refer to it
     /// after it flips to `cancelled`.
     p2_peer_instance: Option<String>,

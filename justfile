@@ -13,6 +13,20 @@ gen-types:
     DECMAN_SKIP_FRONTEND=1 cargo run -q -p decman --features typegen --bin gen-types
     echo "Generated crates/decman/frontend/src/types.generated.ts"
 
+# Build every Daml package in daml/multi-package.yaml.
+[group('daml')]
+daml-build:
+    cd daml && dpm build --all
+
+# Run the Daml Script tests, the same set CI runs. Each test package depends on
+# its subject's DAR, so build first.
+[group('daml')]
+daml-test: daml-build
+    cd daml/decman-coordination-test && dpm test
+    cd daml/governance-core-test && dpm test
+    cd daml/governance-token-custody-test && dpm test
+    cd daml/governance-utility-onboarding-test && dpm test
+
 # Forward Canton devnet participant 1..4 Ledger/Admin ports. Each node lives in
 # its own namespace (KUBE_NS_PREFIX=canton-node- by default -> canton-node-1..4).
 [group('canton')]

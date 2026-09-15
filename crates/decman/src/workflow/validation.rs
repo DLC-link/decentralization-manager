@@ -1,7 +1,6 @@
 //! Peer-side validation of coordinator payloads against the accepted invitation.
 //!
-//! A peer authenticates the coordinator over the Noise channel and its
-//! operator accepts one invitation per workflow run. Everything after that is
+//! A peer's operator accepts one invitation per workflow run. Everything after that is
 //! automatic, so without this module the peer signs whatever the coordinator
 //! sends: a topology transaction for any party, with any owner set and any
 //! threshold, or a DAR it never agreed to install.
@@ -36,12 +35,15 @@ use crate::{
     server::WorkflowKind,
     utils,
     workflow::{
-        onboarding::steps::proposals::create::{
-            compute_decentralized_namespace, decode_keys_payload,
-        },
+        signing_keys::decode_keys_payload,
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
     },
 };
+
+/// The decentralized namespace of an owner set (Canton `HashPurpose` 37).
+fn compute_decentralized_namespace(namespaces: &std::collections::HashSet<String>) -> String {
+    crate::onledger::topology::compute_namespace(namespaces.iter())
+}
 
 /// What an unrecorded local key bundle means for a check that needs it.
 ///

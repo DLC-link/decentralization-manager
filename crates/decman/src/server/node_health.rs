@@ -199,6 +199,10 @@ pub struct NodeHealthResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub participant: Option<ParticipantHealth>,
     pub synchronizers: Vec<SynchronizerHealth>,
+    /// State of the startup coordination-DAR upload (design D8). Filled by
+    /// the handler, not by the probe, so the cached snapshot carries `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordination_dar: Option<common::coordination::CoordinationDarStatus>,
 }
 
 static ADMIN_LATENCY: LazyLock<Gauge> = LazyLock::new(|| {
@@ -312,6 +316,7 @@ impl HealthCache {
             ledger_api: ledger_link,
             participant,
             synchronizers,
+            coordination_dar: None,
         };
         publish_metrics(&snapshot);
         inner.snapshot = Some((snapshot.clone(), Instant::now()));

@@ -22,6 +22,7 @@ import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
 import { useSnackbar } from "../contexts";
 import { TextHelp } from "./FieldHelp";
+import { peerSubtitle } from "../peers";
 import type { DarsStatusResponse, DarFile, Peer, NodeConfig } from "../types";
 
 interface DarsDialogProps {
@@ -308,7 +309,7 @@ export const DarsDialog = ({
               <Typography variant="body2" color="text.secondary">
                 {mode === "upload"
                   ? "Upload Daml Archive (DAR) files to this node only."
-                  : "Distribute Daml Archive (DAR) files to selected peers. This will coordinate with the chosen nodes via Noise protocol."}
+                  : "Distribute Daml Archive (DAR) files to selected peers. Each peer uploads and vets the pinned packages on its own participant."}
               </Typography>
 
               <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
@@ -411,7 +412,7 @@ export const DarsDialog = ({
                                   {peer.name || peer.participant_id}
                                 </Typography>
                                 <Typography variant="caption" color="text.secondary">
-                                  {peer.address}:{peer.port}
+                                  {peerSubtitle(peer)}
                                 </Typography>
                               </Box>
                             }

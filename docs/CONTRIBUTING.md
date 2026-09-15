@@ -44,8 +44,8 @@ process in [SECURITY.md](SECURITY.md).
 
 ### Repository layout
 
-- `crates/decman/` — Rust server crate (HTTP server, Noise P2P, Canton gRPC,
-  workflows); binary `dec-party-manager`.
+- `crates/decman/` — Rust server crate (HTTP server, Canton gRPC, on-ledger
+  coordination, workflows); binary `dec-party-manager`.
   - `crates/decman/src/` — server source.
   - `crates/decman/frontend/` — React + Vite UI (embedded into the binary at build time).
   - `crates/decman/migrations/` — SQLx database migrations.

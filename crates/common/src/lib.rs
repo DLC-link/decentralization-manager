@@ -9,6 +9,7 @@
 
 pub mod api;
 pub mod canton_id;
+pub mod coordination;
 pub mod error;
 pub mod fingerprint;
 pub mod types;

@@ -549,7 +549,7 @@ pub async fn collect_party_package_ids(
 
 /// New-member side: package ids currently known to this participant, via the
 /// admin `PackageService.ListPackages`. Backs the ACS-import package preflight.
-async fn local_package_ids(config: &NodeConfig) -> Result<HashSet<String>> {
+pub(crate) async fn local_package_ids(config: &NodeConfig) -> Result<HashSet<String>> {
     let mut client = PackageServiceClient::new(config.admin_channel().await?);
     let descriptions = client
         .list_packages(tonic::Request::new(ListPackagesRequest {
@@ -641,10 +641,10 @@ where
                 PipeBlock::Data { bytes, .. } => {
                     hasher.update(&bytes);
                     fed += bytes.len() as u64;
-                    // Re-chunk into the import stream: a transport block may be
+                    // Re-chunk into the import stream: a spool block may be
                     // larger than Canton's inbound gRPC message cap (4 MiB by
                     // default), which the block size deliberately can be, since
-                    // it is tuned against the Noise handler timeout instead.
+                    // it is tuned for file throughput instead.
                     for chunk in bytes.chunks(IMPORT_CHUNK_SIZE) {
                         // A closed receiver means the RPC already failed; that
                         // error is the informative one, so stop and let it

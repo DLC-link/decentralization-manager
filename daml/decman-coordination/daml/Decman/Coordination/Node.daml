@@ -1,0 +1,73 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | The self-signed registry entry of one decman node.
+module Decman.Coordination.Node where
+
+import DA.Time (addRelTime, seconds)
+
+-- | One node's registry entry. Readers key the entry by its signatory, so an
+-- entry can only describe the node that signed it. Observers are the peers
+-- whose participant has vetted this package; Canton rejects a create for any
+-- other informee.
+template DecmanNode
+  with
+    node : Party
+    participantId : Text
+      -- ^ A claim. Readers cross-check it against the topology store.
+    displayName : Text
+    version : Text
+    buildVersion : Text
+    coordinationVersion : Int
+      -- ^ A proposer refuses to start a run with a peer below its own version.
+    peers : [Party]
+    lastActiveAt : Time
+    heartbeatIntervalSecs : Int
+      -- ^ Peers derive staleness from this value, not from a liveness probe.
+    minHeartbeatIntervalSecs : Int
+      -- ^ Floor for DecmanNode_Heartbeat. Stops a misconfigured node from flooding the ledger.
+  where
+    signatory node
+    observer peers
+    ensure heartbeatIntervalSecs > 0
+      && minHeartbeatIntervalSecs >= 1
+      && minHeartbeatIntervalSecs <= heartbeatIntervalSecs
+      && coordinationVersion >= 1
+
+    -- | Re-create the entry with lastActiveAt = now.
+    choice DecmanNode_Heartbeat : ContractId DecmanNode
+      controller node
+      do
+        now <- getTime
+        assertMsg "heartbeat too soon"
+          (now >= addRelTime lastActiveAt (seconds minHeartbeatIntervalSecs))
+        create this with lastActiveAt = now
+
+    -- | Replace every mutable field at once. The publisher exercises this only
+    -- when the on-ledger fields differ from its desired state.
+    choice DecmanNode_Update : ContractId DecmanNode
+      with
+        newPeers : [Party]
+        newDisplayName : Text
+        newVersion : Text
+        newBuildVersion : Text
+        newCoordinationVersion : Int
+        newHeartbeatIntervalSecs : Int
+        newMinHeartbeatIntervalSecs : Int
+      controller node
+      do
+        now <- getTime
+        create this with
+          peers = newPeers
+          displayName = newDisplayName
+          version = newVersion
+          buildVersion = newBuildVersion
+          coordinationVersion = newCoordinationVersion
+          heartbeatIntervalSecs = newHeartbeatIntervalSecs
+          minHeartbeatIntervalSecs = newMinHeartbeatIntervalSecs
+          lastActiveAt = now
+
+    -- | Remove this node from the registry.
+    choice DecmanNode_Retire : ()
+      controller node
+      do pure ()

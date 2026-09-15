@@ -124,11 +124,11 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     // polls, so every observation reads false either way.
                     //
                     // 30s budget (150 × 200ms). Localnet refreshes in
-                    // milliseconds; devnet's `resolve_owner_keys_from_peers`
-                    // makes a Noise round trip per peer plus the Canton
-                    // `list_my_owner_keys` admin-gRPC calls (post-#158 fix
-                    // ≈3s/peer worst case on the kubectl tunnel). A run on
-                    // 9fd91be exhausted the original 6s budget here.
+                    // milliseconds; devnet's `resolve_owner_keys_from_topology`
+                    // makes a topology read per party plus the Canton
+                    // `list_my_owner_keys` admin-gRPC calls (≈3s/peer worst
+                    // case on the kubectl tunnel). A run on 9fd91be exhausted
+                    // the original 6s budget here.
                     for _ in 0..150 {
                         if db::dec_party_cache_updated_at(&db_path, &prefix)
                             .await?

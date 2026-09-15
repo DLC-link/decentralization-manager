@@ -63,6 +63,20 @@ import type {
   WorkflowRun,
 } from "../types";
 
+/**
+ * Short label for the node that started a run, when the peers table holds no
+ * name for it. The node party is the identity that signed the proposal, so it
+ * comes first; the participant id is the fallback a legacy row still carries.
+ */
+const coordinatorLabel = (
+  party?: string,
+  participant?: string,
+): string | null => {
+  const id = party || participant;
+  if (!id) return null;
+  return id.length > 20 ? `${id.slice(0, 12)}…${id.slice(-6)}` : id;
+};
+
 export interface PartyActions {
   partyId: string;
   /** Contract that holds the GovernanceRules — needed for confirm/execute. */
@@ -211,7 +225,11 @@ const InvitationCard = ({
 
   const fromLabel =
     invitation.coordinator_name ||
-    `${invitation.coordinator_pubkey.slice(0, 12)}…${invitation.coordinator_pubkey.slice(-6)}`;
+    coordinatorLabel(
+      invitation.coordinator_party,
+      invitation.coordinator_participant,
+    ) ||
+    "an unnamed node";
   // Render every detail the invite payload carried, regardless of workflow
   // type — mirrors WorkflowRunCard so the peer's invitation card is as rich
   // as the coordinator's run card.
@@ -1580,27 +1598,28 @@ const WorkflowRunCard = ({
 
   // Only the coordinator knows what the other peers did: a peer-side row never
   // gets a count and would show a permanent 0. While the coordinator waits, the
-  // peers that joined are the progress — nothing "completes" a step that
-  // carries no command — and from the next step on it is the peers that
-  // completed the current one.
+  // peers that accepted the proposal are the progress — nothing "completes" a
+  // step that carries no command — and from the next step on it is the peers
+  // that completed the current one.
   const showsPeerCount =
     isInProgress &&
     run.role === "Coordinator" &&
     (run.expected_peers?.length ?? 0) > 0;
-  const waitingForPeers = run.current_step === "WaitingForPeers";
+  const waitingForAcceptances = run.current_step === "WaitingForAcceptances";
   const peerCountLine = showsPeerCount
-    ? waitingForPeers
-      ? `${run.connected_peers?.length ?? 0} of ${run.expected_peers.length} peers joined`
+    ? waitingForAcceptances
+      ? `${run.connected_peers?.length ?? 0} of ${run.expected_peers.length} peers accepted`
       : `${run.completed_peers?.length ?? 0} of ${run.expected_peers.length} peers responded`
     : null;
 
+  const coordinator =
+    run.coordinator_name ||
+    coordinatorLabel(run.coordinator_party, run.coordinator_participant);
   const fromLine = run.role === "Coordinator"
     ? "started by you"
-    : run.coordinator_name
-      ? `from ${run.coordinator_name}`
-      : run.coordinator_pubkey
-        ? `from ${run.coordinator_pubkey.slice(0, 12)}…${run.coordinator_pubkey.slice(-6)}`
-        : null;
+    : coordinator
+      ? `from ${coordinator}`
+      : null;
 
   // Terminal runs collapse to a single dense row in the Completed section.
   if (compact) {

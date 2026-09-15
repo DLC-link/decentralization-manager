@@ -1,0 +1,22 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Shared data types for decman node coordination.
+-- Fingerprints and hashes are Canton hex strings. Public keys and signatures
+-- are lowercase hex. The Rust side validates the hex; Daml only carries it.
+module Decman.Coordination.Types where
+
+-- | The kinds of run a decman node coordinates.
+data WorkflowKind = Onboarding | AddParty | Kick | ChangeThreshold | Contracts | Dars
+  deriving (Eq, Show)
+
+-- | A DAR that each invitee uploads locally. No DAR bytes travel on the ledger,
+-- so the pin is what lets an operator verify the file they received.
+data DarPin = DarPin
+  with
+    filename : Text
+    sha256Hex : Text
+    mainPackageId : Text
+      -- ^ Pinned as the expected main package id on the local upload.
+    sizeBytes : Int
+  deriving (Eq, Show)

@@ -69,7 +69,7 @@ pub async fn inject_inprogress_coordinator_run(
     let result = sqlx::query(
         "INSERT INTO workflow_runs (
             instance_name, kind, role, status, current_step, step_index, step_total,
-            config_json, coordinator_pubkey, expected_peers_json, completed_peers_json,
+            config_json, coordinator_participant, expected_peers_json, completed_peers_json,
             dec_party_id, error, dismissed, created_at, updated_at
          ) VALUES (?1, ?2, 'Coordinator', 'inprogress', ?3, 2, 5,
                    '{}', NULL, '[]', '[]', NULL, NULL, 0,
@@ -142,8 +142,8 @@ pub async fn count_workflow_runs_inprogress(
 
 /// Resolve the peer-side instance_name for the current inprogress run
 /// of `kind`. Peers mint their own synthetic instance_name on accept
-/// (e.g. `peer-onboarding-<pubkey>-<epoch>`), so chaos phases can't
-/// guess it from the coordinator's prefix. The partial unique index
+/// (`peer-{kind}-{coordinator_participant_short}-{coordinator_runId}`, design
+/// section 12), so chaos phases can't guess it from the coordinator's prefix. The partial unique index
 /// `(kind, role) WHERE status='inprogress'` guarantees at most one match.
 pub async fn current_inprogress_peer_instance(
     db_path: &Path,
@@ -196,6 +196,29 @@ pub async fn workflow_run_status(
     .fetch_optional(&pool)
     .await
     .context("workflow_run_status")?;
+    pool.close().await;
+    Ok(s)
+}
+
+/// The `current_step` of a workflow run. `None` if there is no row.
+///
+/// A member's progress lives on the run row, not in `workflow_artifacts`:
+/// only the contracts engine writes artefacts now, so a phase that waits
+/// for a member to reach a step reads this.
+pub async fn workflow_run_step(
+    db_path: &Path,
+    instance_name: &str,
+    role: &str,
+) -> anyhow::Result<Option<String>> {
+    let pool = open(db_path).await?;
+    let s: Option<String> = sqlx::query_scalar(
+        "SELECT current_step FROM workflow_runs WHERE instance_name = ?1 AND role = ?2",
+    )
+    .bind(instance_name)
+    .bind(role)
+    .fetch_optional(&pool)
+    .await
+    .context("workflow_run_step")?;
     pool.close().await;
     Ok(s)
 }
@@ -398,14 +421,25 @@ pub async fn dec_party_cache_updated_at(
     Ok(v)
 }
 
-pub async fn count_dec_party_identity(db_path: &Path, dec_party_id: &str) -> anyhow::Result<i64> {
+/// How many `dec_party_participant` rows carry a key for a party.
+///
+/// This is the long-lived key material an on-ledger party keeps: every
+/// member's owner fingerprint, and its Daml key where one is known. It
+/// replaced the `dec_party_identity` bundle, which only parties created
+/// before the Canton-native coordination still hold.
+pub async fn count_dec_party_participant_keys(
+    db_path: &Path,
+    dec_party_id: &str,
+) -> anyhow::Result<i64> {
     let pool = open(db_path).await?;
-    let n: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM dec_party_identity WHERE dec_party_id = ?1")
-            .bind(dec_party_id)
-            .fetch_one(&pool)
-            .await
-            .context("count_dec_party_identity")?;
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM dec_party_participant \
+         WHERE dec_party_id = ?1 AND owner_key IS NOT NULL",
+    )
+    .bind(dec_party_id)
+    .fetch_one(&pool)
+    .await
+    .context("count_dec_party_participant_keys")?;
     pool.close().await;
     Ok(n)
 }

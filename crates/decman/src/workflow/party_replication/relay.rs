@@ -1,13 +1,12 @@
 //! Wallet-relayed ACS transfer: the pipe with a wallet in the middle.
 //!
-//! The add-party path runs [`super::pipe`] between two DecMan nodes over Noise:
-//! the target pulls a block, feeds it straight into its open `ImportPartyAcs`
-//! stream, and asks for the next. Nothing lands on disk and the size of the
-//! party stops mattering.
+//! [`super::pipe`] moves a snapshot one block at a time: the target pulls a
+//! block, feeds it straight into its open `ImportPartyAcs` stream, and asks for
+//! the next. Nothing lands on disk and the size of the party stops mattering.
 //!
-//! The tenant path wants the same property but has no node-to-node channel — a
-//! partner's host is generally not in this node's mesh, so the wallet is the
-//! transport. That inverts the direction on the importing side: the joiner
+//! The tenant path wants the same property but has no node-to-node channel, so
+//! the wallet is the transport. That inverts the direction on the importing
+//! side: the joiner
 //! cannot pull, because the thing holding the bytes is an HTTP client it has
 //! never heard of.
 //!

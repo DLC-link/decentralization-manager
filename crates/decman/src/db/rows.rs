@@ -1,25 +1,27 @@
-use std::str::FromStr;
+use std::{collections::BTreeMap, str::FromStr};
 
 use anyhow::Context;
 
 use crate::{
     canton_id::CantonId,
-    config::{Auth0M2MConfig, KeycloakConfig, PackageConfig, PartyCredentials, Peer},
+    config::{
+        Auth0M2MConfig, CredentialKind, KeycloakConfig, PackageConfig, PartyCredentials, Peer,
+    },
     db::crypto,
     error::Result,
     server::{
-        InvitationType, PendingInvitation, WorkflowKind, WorkflowProgress, WorkflowRole,
-        WorkflowRun,
+        InvitationType, MemberVariant, PendingInvitation, WorkflowKind, WorkflowProgress,
+        WorkflowRole, WorkflowRun,
     },
 };
 
+/// One `peers` row: the address book of design D2.
 #[derive(Debug, sqlx::FromRow)]
 pub struct PeerRow {
     pub participant_id: String,
     pub name: String,
-    pub address: String,
-    pub port: i64,
-    pub public_key: String,
+    /// The peer's node party. Nullable because an operator can add a peer
+    /// before that peer has a node identity; such a peer cannot be invited.
     pub party: Option<String>,
 }
 
@@ -28,27 +30,30 @@ impl PeerRow {
         Self {
             participant_id: peer.participant_id.to_string(),
             name: peer.name.clone(),
-            address: peer.address.clone(),
-            port: peer.port as i64,
-            public_key: peer.public_key.clone(),
-            party: peer.party.clone(),
+            party: peer.party.as_ref().map(CantonId::to_string),
         }
     }
 
     pub fn into_domain(self) -> Result<Peer> {
+        let party = self
+            .party
+            .as_deref()
+            .filter(|p| !p.is_empty())
+            .map(CantonId::parse)
+            .transpose()
+            .with_context(|| format!("peers row {}: invalid party", self.participant_id))?;
         Ok(Peer {
             participant_id: CantonId::parse(&self.participant_id)?,
             name: self.name,
-            address: self.address,
-            port: self.port as u16,
-            public_key: self.public_key,
-            party: self.party,
+            party,
         })
     }
 }
 
 #[derive(Debug, sqlx::FromRow)]
 pub struct PartyCredentialsRow {
+    /// `decparty` or `node`; see [`CredentialKind`].
+    pub kind: String,
     pub dec_party_id: String,
     pub member_party_id: String,
     pub user_id: String,
@@ -77,6 +82,7 @@ impl PartyCredentialsRow {
                 None => (None, None, None, None),
             };
         Ok(Self {
+            kind: creds.kind.as_str().to_string(),
             dec_party_id: creds.dec_party_id.to_string(),
             member_party_id: creds.member_party_id.to_string(),
             user_id: creds.user_id.clone(),
@@ -111,6 +117,8 @@ impl PartyCredentialsRow {
             _ => None,
         };
         Ok(PartyCredentials {
+            kind: CredentialKind::from_str(&self.kind)
+                .with_context(|| format!("party_credentials row {}", self.dec_party_id))?,
             dec_party_id: CantonId::parse(&self.dec_party_id)?,
             member_party_id: CantonId::parse(&self.member_party_id)?,
             user_id: self.user_id,
@@ -128,6 +136,95 @@ impl PartyCredentialsRow {
             },
             auth0,
             packages: PackageConfig::default(),
+        })
+    }
+}
+
+/// What this node decided about one `WorkflowProposal`.
+///
+/// The row is the idempotency guard of the observer: a proposal with a
+/// decision is never projected into `pending_invitations` again.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProposalDecision {
+    /// The operator accepted. The node co-signs matching topology proposals.
+    Accepted,
+    /// The operator declined. `WorkflowProposal_Decline` was exercised.
+    Declined,
+    /// The operator dismissed the card without answering.
+    Dismissed,
+}
+
+impl ProposalDecision {
+    /// The stored column value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::Declined => "declined",
+            Self::Dismissed => "dismissed",
+        }
+    }
+}
+
+impl std::fmt::Display for ProposalDecision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ProposalDecision {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "accepted" => Ok(Self::Accepted),
+            "declined" => Ok(Self::Declined),
+            "dismissed" => Ok(Self::Dismissed),
+            other => Err(anyhow::anyhow!("unknown proposal decision: {other}")),
+        }
+    }
+}
+
+/// One `proposal_decisions` row, decoded.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProposalDecisionEntry {
+    /// The `WorkflowProposal` contract id the decision is about.
+    pub proposal_cid: String,
+    pub decision: ProposalDecision,
+    /// Unix seconds.
+    pub decided_at: i64,
+    /// Topology transaction hashes (Canton hex) this node agreed to co-sign.
+    /// Empty until the observer pins them.
+    pub pinned_hashes: Vec<String>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct ProposalDecisionRow {
+    pub proposal_cid: String,
+    pub decision: String,
+    pub decided_at: i64,
+    pub pinned_hashes_json: Option<String>,
+}
+
+impl ProposalDecisionRow {
+    pub fn from_domain(entry: &ProposalDecisionEntry) -> Result<Self> {
+        Ok(Self {
+            proposal_cid: entry.proposal_cid.clone(),
+            decision: entry.decision.as_str().to_string(),
+            decided_at: entry.decided_at,
+            pinned_hashes_json: encode_list(&entry.pinned_hashes, "proposal pinned hashes")?,
+        })
+    }
+
+    pub fn into_domain(self) -> Result<ProposalDecisionEntry> {
+        let decision = ProposalDecision::from_str(&self.decision)
+            .with_context(|| format!("proposal_decisions row {}", self.proposal_cid))?;
+        let pinned_hashes =
+            decode_list(self.pinned_hashes_json, &self.proposal_cid, "pinned_hashes")?;
+        Ok(ProposalDecisionEntry {
+            proposal_cid: self.proposal_cid,
+            decision,
+            decided_at: self.decided_at,
+            pinned_hashes,
         })
     }
 }
@@ -155,7 +252,7 @@ pub struct DecPartyParticipantRow {
     pub owner_key: Option<String>,
     /// Fingerprint of the Daml signing key this participant contributes to
     /// the party's `party_signing_keys`. `None` until the participant
-    /// reports it over the OwnerKeys exchange.
+    /// reports it in a `WorkflowAcceptance` (design D6).
     pub signing_key: Option<String>,
 }
 
@@ -185,11 +282,17 @@ pub struct GovernanceAuditRow {
     pub created_at: i64,
 }
 
+/// One `pending_invitations` row: the local cache of an unaccepted
+/// `WorkflowProposal` that names this node (design D11). `id` is the
+/// proposal contract id.
 #[derive(Debug, sqlx::FromRow)]
 pub struct PendingInvitationRow {
     pub id: String,
     pub invitation_type: String,
-    pub coordinator_pubkey: String,
+    pub coordinator_participant: String,
+    pub coordinator_party: Option<String>,
+    pub proposal_cid: Option<String>,
+    pub expires_at: Option<i64>,
     pub received_at: i64,
     pub prefix: Option<String>,
     pub participants: Option<String>,
@@ -237,7 +340,10 @@ impl PendingInvitationRow {
         Ok(Self {
             id: inv.id.clone(),
             invitation_type: inv.invitation_type.to_string(),
-            coordinator_pubkey: inv.coordinator_pubkey.clone(),
+            coordinator_participant: inv.coordinator_participant.clone(),
+            coordinator_party: inv.coordinator_party.as_ref().map(CantonId::to_string),
+            proposal_cid: Some(inv.proposal_cid.clone()),
+            expires_at: inv.expires_at,
             received_at: inv.received_at,
             prefix: inv.prefix.clone(),
             participants: encode_list(&inv.participants, "pending invitation participants")?,
@@ -281,12 +387,23 @@ impl PendingInvitationRow {
             .map(|s| CantonId::parse(&s))
             .transpose()
             .with_context(|| format!("invalid dec_party_id for id {}", self.id))?;
+        let coordinator_party = self
+            .coordinator_party
+            .map(|s| CantonId::parse(&s))
+            .transpose()
+            .with_context(|| format!("invalid coordinator_party for id {}", self.id))?;
+        // The card id is the proposal contract id, so a row without the
+        // column filled still names its proposal.
+        let proposal_cid = self.proposal_cid.unwrap_or_else(|| self.id.clone());
         Ok(PendingInvitation {
             id: self.id,
             invitation_type,
-            coordinator_pubkey: self.coordinator_pubkey,
+            coordinator_participant: self.coordinator_participant,
+            coordinator_party,
+            proposal_cid,
             coordinator_name: None,
             received_at: self.received_at,
+            expires_at: self.expires_at,
             prefix: self.prefix,
             participants,
             dar_filenames,
@@ -319,6 +436,11 @@ pub struct ChainAuditCacheRow {
     pub details: String,
 }
 
+/// One `workflow_runs` row: the UI projection of a run (design D11). The
+/// on-ledger fields (`proposal_cid`, `coordinator_party`,
+/// `coordinator_participant`, `member_variant`, `topology_hashes_json`) are
+/// what the observer drives a run from; a row without a `proposal_cid`
+/// is a legacy row that predates the 2.0 upgrade and is only displayed.
 #[derive(Debug, sqlx::FromRow)]
 pub struct WorkflowRunRow {
     pub instance_name: String,
@@ -329,7 +451,11 @@ pub struct WorkflowRunRow {
     pub step_index: i64,
     pub step_total: i64,
     pub config_json: String,
-    pub coordinator_pubkey: Option<String>,
+    pub coordinator_participant: Option<String>,
+    pub coordinator_party: Option<String>,
+    pub proposal_cid: Option<String>,
+    pub topology_hashes_json: Option<String>,
+    pub member_variant: Option<String>,
     pub coordinator_instance: Option<String>,
     pub expected_peers_json: String,
     pub completed_peers_json: String,
@@ -378,7 +504,15 @@ impl WorkflowRunRow {
             step_index: r.step_index,
             step_total: r.step_total,
             config_json: r.config_json.clone(),
-            coordinator_pubkey: r.coordinator_pubkey.clone(),
+            coordinator_participant: r.coordinator_participant.clone(),
+            coordinator_party: r.coordinator_party.as_ref().map(CantonId::to_string),
+            proposal_cid: r.proposal_cid.clone(),
+            topology_hashes_json: if r.topology_hashes.is_empty() {
+                None
+            } else {
+                Some(serde_json::to_string(&r.topology_hashes).context("encode topology_hashes")?)
+            },
+            member_variant: r.member_variant.map(|v| v.as_str().to_string()),
             coordinator_instance: r.coordinator_instance.clone(),
             expected_peers_json: serde_json::to_string(&r.expected_peers)
                 .context("encode expected_peers")?,
@@ -415,6 +549,24 @@ impl WorkflowRunRow {
             .map(CantonId::parse)
             .transpose()
             .with_context(|| format!("decode dec_party_id on {}", self.instance_name))?;
+        let coordinator_party = self
+            .coordinator_party
+            .as_deref()
+            .map(CantonId::parse)
+            .transpose()
+            .with_context(|| format!("decode coordinator_party on {}", self.instance_name))?;
+        let topology_hashes: BTreeMap<String, String> = match self.topology_hashes_json.as_deref() {
+            Some(json) if !json.is_empty() => serde_json::from_str(json)
+                .with_context(|| format!("decode topology_hashes on {}", self.instance_name))?,
+            _ => BTreeMap::new(),
+        };
+        let member_variant = self
+            .member_variant
+            .as_deref()
+            .filter(|v| !v.is_empty())
+            .map(MemberVariant::from_str)
+            .transpose()
+            .with_context(|| format!("decode member_variant on {}", self.instance_name))?;
         Ok(WorkflowRun {
             instance_name: self.instance_name,
             kind,
@@ -424,7 +576,11 @@ impl WorkflowRunRow {
             step_index: self.step_index,
             step_total: self.step_total,
             config_json: self.config_json,
-            coordinator_pubkey: self.coordinator_pubkey,
+            coordinator_participant: self.coordinator_participant,
+            coordinator_party,
+            proposal_cid: self.proposal_cid,
+            member_variant,
+            topology_hashes,
             coordinator_instance: self.coordinator_instance,
             coordinator_name: None,
             expected_peers,
@@ -463,9 +619,12 @@ mod tests {
 
     fn base_pending_invitation_row() -> PendingInvitationRow {
         PendingInvitationRow {
-            id: "inv-1".to_string(),
+            id: "00inv-1".to_string(),
             invitation_type: "Onboarding".to_string(),
-            coordinator_pubkey: "deadbeef".to_string(),
+            coordinator_participant: "participant1::1220aa".to_string(),
+            coordinator_party: None,
+            proposal_cid: None,
+            expires_at: None,
             received_at: 0,
             prefix: None,
             participants: None,
@@ -517,10 +676,23 @@ mod tests {
 
         let inv = row.into_domain()?;
 
-        assert_eq!(inv.id, "inv-1");
+        assert_eq!(inv.id, "00inv-1");
         assert!(matches!(inv.invitation_type, InvitationType::Onboarding));
+        // A row without the column still names its proposal through `id`.
+        assert_eq!(inv.proposal_cid, "00inv-1");
+        assert!(inv.coordinator_party.is_none());
 
         Ok(())
+    }
+
+    #[test]
+    fn pending_invitation_bad_coordinator_party_errs() {
+        let row = PendingInvitationRow {
+            coordinator_party: Some("not-a-canton-id".to_string()),
+            ..base_pending_invitation_row()
+        };
+
+        assert_is_err(row.into_domain());
     }
 
     fn base_workflow_run_row() -> WorkflowRunRow {
@@ -533,7 +705,11 @@ mod tests {
             step_index: 0,
             step_total: 1,
             config_json: "{}".to_string(),
-            coordinator_pubkey: None,
+            coordinator_participant: None,
+            coordinator_party: None,
+            proposal_cid: None,
+            topology_hashes_json: None,
+            member_variant: None,
             coordinator_instance: None,
             expected_peers_json: "[]".to_string(),
             completed_peers_json: "[]".to_string(),
@@ -595,8 +771,52 @@ mod tests {
         assert!(matches!(run.kind, WorkflowKind::Onboarding));
         assert!(matches!(run.role, WorkflowRole::Coordinator));
         assert!(matches!(run.status, WorkflowProgress::Idle));
+        assert!(run.proposal_cid.is_none());
+        assert!(run.topology_hashes.is_empty());
+        assert!(run.member_variant.is_none());
 
         Ok(())
+    }
+
+    /// The on-ledger columns round-trip, and an empty hash map is stored as
+    /// NULL so a row the observer never touched stays byte-identical.
+    #[test]
+    fn workflow_run_onledger_columns_round_trip() -> Result {
+        let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
+        let mut run = base_workflow_run_row().into_domain()?;
+        run.coordinator_participant = Some(format!("participant1::{ns}"));
+        run.coordinator_party = Some(CantonId::parse(&format!("node-a::{ns}"))?);
+        run.proposal_cid = Some("00proposal".to_string());
+        run.member_variant = Some(MemberVariant::Joiner);
+        run.topology_hashes
+            .insert("dnd".to_string(), "1220ab".to_string());
+
+        let row = WorkflowRunRow::from_domain(&run)?;
+        assert_eq!(row.member_variant.as_deref(), Some("Joiner"));
+        assert_eq!(
+            row.topology_hashes_json.as_deref(),
+            Some(r#"{"dnd":"1220ab"}"#)
+        );
+        let back = row.into_domain()?;
+        assert_eq!(back.coordinator_party, run.coordinator_party);
+        assert_eq!(back.proposal_cid.as_deref(), Some("00proposal"));
+        assert_eq!(back.member_variant, Some(MemberVariant::Joiner));
+        assert_eq!(back.topology_hashes, run.topology_hashes);
+
+        let empty = WorkflowRunRow::from_domain(&base_workflow_run_row().into_domain()?)?;
+        assert!(empty.topology_hashes_json.is_none());
+        assert!(empty.member_variant.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn workflow_run_bad_member_variant_errs() {
+        let row = WorkflowRunRow {
+            member_variant: Some("Bystander".to_string()),
+            ..base_workflow_run_row()
+        };
+
+        assert_is_err(row.into_domain());
     }
 
     fn base_party_credentials_row() -> PartyCredentialsRow {
@@ -605,6 +825,7 @@ mod tests {
         // the other tests use as raw strings they never parse.
         let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
         PartyCredentialsRow {
+            kind: "decparty".to_string(),
             dec_party_id: format!("dec::{ns}"),
             member_party_id: format!("member::{ns}"),
             user_id: "user-1".to_string(),

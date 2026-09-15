@@ -1,20 +1,14 @@
 pub mod config;
-pub mod coordinator;
-pub mod peer;
 pub mod steps;
 
 pub use config::ChangeThresholdConfig;
-pub use steps::{create_proposals, export_state, sign_proposals, submit_change};
+pub use steps::export_state;
 
-use crate::{noise::MessageType, server::WorkflowKind, workflow::state::WorkflowStep};
+use crate::{server::WorkflowKind, workflow::state::WorkflowStep};
 
-/// Change-threshold workflow steps (re-issuing an existing dec party's
-/// namespace + P2P threshold without changing its membership).
-///
-/// Structurally identical to the kick workflow minus the removal: the
-/// coordinator exports the current namespace, builds new DNS + P2P proposals
-/// carrying the new threshold (same owners/participants), the members sign a
-/// quorum, and the coordinator submits.
+/// Change-threshold workflow steps of the 1.x transport. Kept for the run cards
+/// of rows that predate the 2.0 upgrade; the on-ledger engine has its own
+/// step lists (`crate::onledger::engine::change_threshold`).
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ChangeThresholdStep {
     /// Waiting for all peers to connect
@@ -32,16 +26,6 @@ pub enum ChangeThresholdStep {
 }
 
 impl WorkflowStep for ChangeThresholdStep {
-    fn to_command(&self) -> Option<MessageType> {
-        match self {
-            Self::SignProposals => Some(MessageType::SignChangeThreshold),
-            Self::Complete => Some(MessageType::Disconnect),
-            Self::WaitingForPeers | Self::ExportState | Self::CreateProposals | Self::Submit => {
-                None
-            }
-        }
-    }
-
     fn next(&self) -> Option<Self> {
         match self {
             Self::WaitingForPeers => Some(Self::ExportState),
@@ -133,7 +117,7 @@ mod tests {
     }
 
     #[test]
-    fn only_sign_step_requires_peers_and_carries_a_command() {
+    fn only_sign_step_requires_peers() {
         for step in [
             ChangeThresholdStep::WaitingForPeers,
             ChangeThresholdStep::ExportState,
@@ -148,15 +132,6 @@ mod tests {
                 "{step:?} peer requirement"
             );
         }
-        assert_eq!(
-            ChangeThresholdStep::SignProposals.to_command(),
-            Some(MessageType::SignChangeThreshold)
-        );
-        assert_eq!(
-            ChangeThresholdStep::Complete.to_command(),
-            Some(MessageType::Disconnect)
-        );
-        assert_eq!(ChangeThresholdStep::CreateProposals.to_command(), None);
     }
 
     #[test]

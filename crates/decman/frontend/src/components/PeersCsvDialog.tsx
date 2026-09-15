@@ -55,11 +55,7 @@ interface Row {
 }
 
 const samePeer = (a: Peer, b: Peer): boolean =>
-  a.name === b.name &&
-  a.address === b.address &&
-  a.port === b.port &&
-  a.public_key === b.public_key &&
-  (a.party ?? "") === (b.party ?? "");
+  a.name === b.name && (a.party ?? "") === (b.party ?? "");
 
 const kindChip: Record<
   RowKind,
@@ -89,9 +85,6 @@ const ellipsisSx = {
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
 } as const;
-
-const truncateKey = (key: string): string =>
-  key.length > 16 ? `${key.slice(0, 10)}…${key.slice(-4)}` : key;
 
 const exportFilename = (): string =>
   `decman-peers-${new Date().toISOString().slice(0, 10)}.csv`;
@@ -332,8 +325,7 @@ export const PeersCsvDialog = ({
                     />
                   </TableCell>
                   <TableCell sx={{ width: "22%" }}>Name</TableCell>
-                  <TableCell>Address</TableCell>
-                  <TableCell sx={{ width: 172 }}>Public Key</TableCell>
+                  <TableCell sx={{ width: 220 }}>Node Party</TableCell>
                   {isImport && (
                     <TableCell sx={{ width: 128 }}>Change</TableCell>
                   )}
@@ -369,27 +361,17 @@ export const PeersCsvDialog = ({
                           </Typography>
                         )}
                       </TableCell>
-                      {/* The port is the half worth reading, so the host
-                        * clips and the port stays pinned beside it. */}
-                      <TableCell title={`${row.peer.address}:${row.peer.port}`}>
-                        <Box sx={{ display: "flex", minWidth: 0 }}>
-                          <Box component="span" sx={ellipsisSx}>
-                            {row.peer.address}
-                          </Box>
-                          <Box component="span" sx={{ flexShrink: 0 }}>
-                            :{row.peer.port}
-                          </Box>
-                        </Box>
-                      </TableCell>
+                      {/* The node party is what a run invites, so it is the
+                        * one identifier worth reading on this row. */}
                       <TableCell
-                        title={row.peer.public_key}
+                        title={row.peer.party ?? ""}
                         sx={{
                           ...ellipsisSx,
                           fontFamily: "var(--font-mono)",
                           fontSize: "0.75rem",
                         }}
                       >
-                        {truncateKey(row.peer.public_key)}
+                        {row.peer.party ?? ""}
                       </TableCell>
                       {isImport && (
                         <TableCell>

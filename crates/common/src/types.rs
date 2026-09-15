@@ -5,14 +5,14 @@
 //! the `openapi` feature so dependency-light clients don't inherit them — see
 //! the `cfg_attr` pattern used throughout and in [`crate::canton_id`].
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
 use crate::canton_id::CantonId;
 
 /// Participant permission level
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 #[serde(rename_all = "lowercase")]
@@ -97,32 +97,24 @@ pub struct PackageInfo {
 
 /// Reason a peer was reported `reachable: false` in `PeerPackageResult`.
 ///
-/// Mirrors `NoiseError` variants at a coarser granularity that's stable on
-/// the wire — added so the UI / future tooling can distinguish failure
-/// modes without having to scan logs. Layered transport-side: TCP connect
-/// (timeout/failed), then post-connect request budget (`RequestTimeout`),
-/// then mid-stream IO/HTTP (`Transport`); then handshake/decode/status.
+/// The vetted packages of a peer come from the synchronizer topology store,
+/// so "reachable" means the topology read for that participant succeeded.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 #[serde(rename_all = "snake_case")]
 pub enum PeerErrorKind {
-    TcpConnectTimeout,
-    TcpConnectFailed,
-    RequestTimeout,
-    Transport,
-    HandshakeFailed,
-    BadStatus,
-    DecodeFailed,
-    InvalidPublicKey,
+    /// `ListVettedPackages` for the participant failed.
+    TopologyReadFailed,
+    /// The read succeeded but the participant has vetted no package.
+    NoVettedPackages,
     Other,
 }
 
-/// Result of querying packages from a single peer.
+/// Result of reading the vetted packages of a single peer.
 ///
 /// `error_kind` is `None` when `reachable: true`. Always `Some(_)` when
-/// `reachable: false`. (Decode failures on `reachable: true` responses are
-/// not yet surfaced — see Future work item 5 in the spec.)
+/// `reachable: false`.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
@@ -170,20 +162,27 @@ pub struct DecentralizedParty {
     pub local_metadata: Option<PartyMetadata>,
 }
 
-/// Connection status for a participant
+/// Health of a peer, read from its on-ledger registry entry (design D3).
+///
+/// The value describes the age of the peer's last heartbeat, not liveness:
+/// the UI labels it "last heartbeat N ago".
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 #[serde(rename_all = "PascalCase")]
 pub enum ConnectionStatus {
-    /// Current node (always reachable)
+    /// This node.
     CurrentNode,
-    /// Successfully connected via Noise protocol
-    Connected,
-    /// Failed to establish TCP connection (peer not reachable)
-    Unreachable,
-    /// Noise handshake/decryption failed (likely wrong public key configured)
-    HandshakeFailed,
+    /// A registry entry is visible and its last heartbeat is recent.
+    Active,
+    /// A registry entry is visible but its last heartbeat is older than the
+    /// stale factor times the peer's heartbeat interval.
+    Stale,
+    /// No registry entry signed by the peer's node party is visible, or this
+    /// node has no node identity yet.
+    Unknown,
+    /// The peer's participant has not vetted the coordination package.
+    Unvetted,
 }
 
 /// Status of a single participant
@@ -193,22 +192,24 @@ pub enum ConnectionStatus {
 pub struct ParticipantStatus {
     pub id: String,
     pub status: ConnectionStatus,
-    /// Round-trip latency of the health probe, in milliseconds. `None` when the
-    /// peer is the current node or was unreachable.
+    /// The peer's node party from the peers table, when the operator entered
+    /// one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub latency_ms: Option<u64>,
-    /// The workflow this peer is currently participating in, if any and if it
-    /// reported one (peers on older code report `None`).
+    pub node_party: Option<CantonId>,
+    /// Unix seconds of the peer's last heartbeat. `None` without a visible
+    /// registry entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workflow: Option<WorkflowInfo>,
+    pub last_seen_at: Option<i64>,
+    /// Seconds since `last_seen_at` when the snapshot was taken.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heartbeat_age_secs: Option<i64>,
     /// dec-party-manager semver: this node's own version for the current
-    /// node, or the version a peer reported in its health response. `None` for
-    /// unreachable peers and peers on older code that don't report one.
+    /// node, or the version the peer's registry entry carries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     /// Display build identity (image tag / short SHA / `<semver>-dev`) for this
-    /// node or the one a peer reported. `None` for unreachable peers and peers
-    /// on code that predates the field. This is what the peers table shows.
+    /// node or the one the peer's registry entry carries. This is what the
+    /// peers table shows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_version: Option<String>,
 }
@@ -353,11 +354,49 @@ impl std::str::FromStr for WorkflowRole {
     }
 }
 
-/// `current_step` of the first step of every workflow kind, where the
-/// coordinator waits for its invitees to join. Progress on this step is
-/// [`WorkflowRun::connected_peers`], not `completed_peers` — nothing completes
-/// a step that carries no command.
-pub const WAITING_FOR_PEERS_STEP: &str = "WaitingForPeers";
+/// `current_step` of the coordinator step that waits for invitees to accept
+/// the `WorkflowProposal`. Progress on this step is
+/// [`WorkflowRun::connected_peers`], not `completed_peers`.
+pub const WAITING_FOR_ACCEPTANCES_STEP: &str = "WaitingForAcceptances";
+
+/// Which member step list a peer row follows (design section 6).
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+#[serde(rename_all = "PascalCase")]
+pub enum MemberVariant {
+    /// The add-party participant being added.
+    Joiner,
+    /// Any other invitee.
+    Member,
+}
+
+impl MemberVariant {
+    /// The stored column value; matches the serde representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Joiner => "Joiner",
+            Self::Member => "Member",
+        }
+    }
+}
+
+impl std::fmt::Display for MemberVariant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for MemberVariant {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "Joiner" => Ok(Self::Joiner),
+            "Member" => Ok(Self::Member),
+            other => Err(anyhow::anyhow!("unknown member variant: {other}")),
+        }
+    }
+}
 
 /// Which end of an ACS transfer this node is on.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -418,14 +457,27 @@ pub struct WorkflowRun {
     /// JSON-encoded copy of the original *Config struct that started the
     /// workflow — the resume path round-trips it back through serde.
     pub config_json: String,
-    /// Hex pubkey of the coordinator. None for coordinator-side rows.
+    /// Participant id of the coordinator. Legacy rows from before the 2.0
+    /// upgrade may still carry a transport pubkey here when no peer matched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub coordinator_pubkey: Option<String>,
-    /// The coordinator's own run `instance_name` this peer-side row belongs to
-    /// (the invite's `workflow_instance`). Lets instance-scoped CancelInvite /
-    /// RetryWorkflow target exactly one of several concurrent runs from the
-    /// same coordinator, and gives peer resume its routing key. None for
-    /// coordinator-side rows and for rows that predate instance routing.
+    pub coordinator_participant: Option<String>,
+    /// Node party of the coordinator (the `WorkflowProposal` signatory).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordinator_party: Option<CantonId>,
+    /// The `WorkflowProposal` contract id this run follows. `None` on legacy
+    /// rows from before the 2.0 upgrade; the observer ignores those.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal_cid: Option<String>,
+    /// Which member step list a peer row follows. `None` on coordinator rows
+    /// and on kinds with one member step list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_variant: Option<MemberVariant>,
+    /// Topology transaction hashes this run pinned, by mapping (`dnd`, `p2p`,
+    /// `clear`), as Canton hex.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub topology_hashes: BTreeMap<String, String>,
+    /// The coordinator's own run `instance_name` (the proposal `runId`) this
+    /// peer-side row belongs to. None for coordinator-side rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coordinator_instance: Option<String>,
     /// Resolved coordinator name from the peers table (server-side join,
@@ -434,11 +486,10 @@ pub struct WorkflowRun {
     pub coordinator_name: Option<String>,
     pub expected_peers: Vec<CantonId>,
     pub completed_peers: Vec<CantonId>,
-    /// Peers that have joined this run — the set the `WaitingForPeers` gate
-    /// counts, and the only progress a run has to show before its first
-    /// peer-gated step. Live in-memory state merged in by the API layer from
-    /// the workflow registry (not a DB column), so it is empty for a run this
-    /// node does not currently coordinate.
+    /// Invitees that accepted the `WorkflowProposal`: the set the
+    /// `WaitingForAcceptances` step counts. Merged in by the API layer from
+    /// the observer's proposal snapshot (not a DB column), so it is empty for
+    /// a run this node does not coordinate.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connected_peers: Vec<CantonId>,
     /// How far this run's ACS transfer has got, when one is moving. Merged in
@@ -541,12 +592,23 @@ impl std::str::FromStr for InvitationType {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct PendingInvitation {
+    /// The `WorkflowProposal` contract id.
     pub id: String,
     pub invitation_type: InvitationType,
-    pub coordinator_pubkey: String,
+    /// Participant id the proposal claims for the coordinator.
+    pub coordinator_participant: String,
+    /// Node party that signed the proposal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordinator_party: Option<CantonId>,
+    /// The `WorkflowProposal` contract id, same as `id`.
+    #[serde(default)]
+    pub proposal_cid: String,
     #[serde(default)]
     pub coordinator_name: Option<String>,
     pub received_at: i64,
+    /// Unix seconds when the proposal expires (`expiresAt`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
     /// Onboarding-only: party ID prefix the coordinator chose.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefix: Option<String>,

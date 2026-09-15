@@ -29,14 +29,15 @@ export DECPM_TOPOLOGY_PROPAGATION_DELAY_SECS=3
 # the 48s/109s/219s spread this phase showed across runs.
 export DECPM_REWARD_AUTOMATION_INTERVAL_SECS=3
 
-# The peer's coordinator-poll cadence, which quantizes every multi-step
-# workflow: 100% of the suite's waits >=2s floored to an even second on the 2s
-# default, and "onboarding reaches completed" was exactly 22.0s (11 polls) in
-# five runs out of five. 500ms rather than something smaller because each poll
-# is a fresh Noise connection, and this runner is CPU-sensitive enough that
-# handshake pressure has stalled the mesh before. devnet keeps the 2s default —
-# there a coordinator step is a real Canton round trip.
-export DECPM_PEER_WAIT_POLL_DELAY_MS=500
+# Coordination cadence. Every multi-step workflow advances one step per
+# observer tick, so the suite's wall clock is a multiple of the poll interval.
+# The heartbeat values are the test settings design section 10 names: a peer
+# goes Stale within seconds rather than hours. Exported so the chaos phases'
+# respawned nodes (tests/common/processes.rs inherits this environment) get
+# the same cadence.
+export DECPM_OBSERVER_POLL_SECS=1
+export DECPM_HEARTBEAT_INTERVAL_SECS=5
+export DECPM_HEARTBEAT_MIN_INTERVAL_SECS=1
 
 # Localnet
 LOCALNET_VERSION="0.6.12"
@@ -55,13 +56,17 @@ P2_CANTON_ADMIN=2902
 P3_CANTON_LEDGER=4901
 P3_CANTON_ADMIN=4902
 
-# dec-party-manager HTTP and Noise ports
+# dec-party-manager HTTP ports. A node opens no other listener: it coordinates
+# only through Canton.
 P1_HTTP=8081
-P1_NOISE=9001
 P2_HTTP=8082
-P2_NOISE=9002
 P3_HTTP=8083
-P3_NOISE=9003
+
+# Canton JSON Ledger API ports (compose.yaml), used to allocate one node party
+# per node and grant `ledger-api-user` rights on it (design D1).
+P1_JSON_API=3975
+P2_JSON_API=2975
+P3_JSON_API=4975
 
 P1_METRICS=9464
 P2_METRICS=9465
@@ -90,7 +95,7 @@ cleanup() {
 
     # Kill dec-party-manager processes. The binary ignores SIGTERM today, so
     # plain `kill` without escalation leaks orphaned processes that hold the
-    # Noise/HTTP ports until the host reboots. Send SIGTERM first (give the
+    # HTTP port until the host reboots. Send SIGTERM first (give the
     # process a chance to shut down cleanly if it ever starts honoring it),
     # wait briefly, then SIGKILL anything still alive.
     # Guard the array expansions: macOS ships bash 3.2, which treats
@@ -251,11 +256,10 @@ stop_localnet() {
 
 stop_nodes() {
     # Same SIGTERM-ignoring problem as in `cleanup`: plain `kill` leaves the
-    # processes alive, holding their HTTP/Noise ports. When `configure_peers`
-    # then calls `start_nodes` to reload peer config, the new processes can't
-    # bind, the test silently runs against the old (peer-config-stale)
-    # instances, and Noise calls fail later with "Connection refused".
-    # Send SIGTERM, give a 2s grace, then SIGKILL anything still alive.
+    # processes alive, holding their HTTP port. A chaos phase that then
+    # respawns the node cannot bind, and the suite silently runs against the
+    # old process. Send SIGTERM, give a 2s grace, then SIGKILL anything still
+    # alive.
     for pid in "${PIDS[@]}"; do
         if kill -0 "$pid" 2>/dev/null; then
             kill "$pid" 2>/dev/null || true

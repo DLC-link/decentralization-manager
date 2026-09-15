@@ -1,15 +1,12 @@
 use super::rows::{
     ChainAuditCacheRow, DecPartyContractRow, DecPartyParticipantRow, DecPartyRow,
-    GovernanceAuditRow,
+    GovernanceAuditRow, ProposalDecision, ProposalDecisionEntry,
 };
 use crate::{
     canton_id::CantonId,
     config::{PartyCredentials, Peer},
     error::Result,
-    server::{
-        InvitationType, PendingInvitation, WorkflowKind, WorkflowProgress, WorkflowRole,
-        WorkflowRun,
-    },
+    server::{PendingInvitation, WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun},
 };
 
 /// Read operations on the database
@@ -26,9 +23,6 @@ pub trait SchemaRead {
 
     /// Get all party credentials
     async fn get_all_party_credentials(&self) -> Result<Vec<PartyCredentials>>;
-
-    /// Get a peer by its Noise public key
-    async fn get_peer_by_public_key(&self, public_key: &str) -> Result<Option<Peer>>;
 
     /// Get party credentials by decentralized party ID
     async fn get_party_credentials(
@@ -165,6 +159,15 @@ pub trait SchemaRead {
         dec_party_id: &CantonId,
         artifact_kind: &str,
     ) -> Result<Vec<(String, Vec<u8>)>>;
+
+    /// This node's decision about one `WorkflowProposal`, if it made one.
+    async fn get_proposal_decision(
+        &self,
+        proposal_cid: &str,
+    ) -> Result<Option<ProposalDecisionEntry>>;
+
+    /// Every recorded proposal decision, oldest first.
+    async fn get_all_proposal_decisions(&self) -> Result<Vec<ProposalDecisionEntry>>;
 }
 
 /// Write operations on the database
@@ -208,6 +211,35 @@ pub trait Commitable {
 
     /// Insert or replace party credentials
     async fn upsert_party_credentials(&mut self, creds: &PartyCredentials) -> Result;
+
+    /// Delete one party credentials row (no-op if absent). Used when the node
+    /// identity moves to a different node party, so only one `kind = 'node'`
+    /// row exists at a time.
+    async fn delete_party_credentials(&mut self, dec_party_id: &CantonId) -> Result;
+
+    /// Record a first decision about a proposal. Returns `false` and changes
+    /// nothing when a row already exists: the first decision wins, so a racing
+    /// accept and decline cannot both take effect.
+    async fn insert_proposal_decision(&mut self, entry: &ProposalDecisionEntry) -> Result<bool>;
+
+    /// Change the decision on an existing row. No-op if the row is absent.
+    async fn update_proposal_decision(
+        &mut self,
+        proposal_cid: &str,
+        decision: ProposalDecision,
+        decided_at: i64,
+    ) -> Result;
+
+    /// Replace the pinned topology hashes on an existing row. No-op if the row
+    /// is absent.
+    async fn set_proposal_pinned_hashes(
+        &mut self,
+        proposal_cid: &str,
+        pinned_hashes: &[String],
+    ) -> Result;
+
+    /// Forget a decision, e.g. once the proposal is archived and swept.
+    async fn delete_proposal_decision(&mut self, proposal_cid: &str) -> Result;
 
     /// Upsert a decentralized party
     async fn upsert_dec_party(&mut self, row: &DecPartyRow) -> Result;
@@ -268,20 +300,6 @@ pub trait Commitable {
 
     /// Delete a pending invitation by its id (no-op if absent)
     async fn delete_pending_invitation(&mut self, id: &str) -> Result;
-
-    /// Delete every pending invitation matching a coordinator's Noise pubkey
-    async fn delete_pending_invitations_by_coordinator(
-        &mut self,
-        coordinator_pubkey: &str,
-    ) -> Result;
-
-    /// Delete every pending invitation of one type from one coordinator —
-    /// used to replace a superseded invite when a fresh one arrives.
-    async fn delete_pending_invitations_by_type_and_coordinator(
-        &mut self,
-        invitation_type: InvitationType,
-        coordinator_pubkey: &str,
-    ) -> Result;
 
     /// Insert or replace a workflow run. Used on initial start, on every
     /// state-machine advance, and on resume.

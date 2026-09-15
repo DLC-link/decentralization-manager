@@ -11,10 +11,12 @@ jobs:
     uses: ./.github/workflows/ci.yml
     secrets: inherit
 
-  # Guard the peer-compatibility semver: the version peers gate on
-  # (MIN_PEER_VERSION) is decman's Cargo.toml version, so a release tag must
-  # match it. Runs in parallel with `ci` and gates `binary`, so a mismatched
-  # tag fails fast before the expensive compile.
+  # Guard the version a node publishes about itself: each node writes its
+  # Cargo.toml version into its `DecmanNode` registry entry, and operators read
+  # it to decide what a peer runs. A tag that disagrees with the crate would
+  # therefore ship a node that misreports itself. Runs in parallel with `ci`
+  # and gates `binary`, so a mismatched tag fails fast before the expensive
+  # compile.
   verify-tag:
     name: Verify tag matches crate version
     runs-on: ubuntu-latest

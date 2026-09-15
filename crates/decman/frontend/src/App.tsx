@@ -47,7 +47,7 @@ import type {
   NodeConfig,
   NetworkConfig,
   ParticipantStatus,
-  KeyStatusResponse,
+  NodeIdentityResponse,
   Peer,
   PendingInvitation,
   PartyAuthStatus,
@@ -113,14 +113,14 @@ const App = () => {
     ParticipantStatus[]
   >([]);
   // Our own round-trip latency to the backend (ms). The peers table fills the
-  // peer rows from Noise health probes but never the "you" row; this fills it.
+  // peer rows from the registry snapshot but never the "you" row; this fills it.
   //
   // `seq` advances on every measurement, so the node health card's sparkline
   // still records a sample when the latency reads the same twice in a row.
   const [selfLatency, setSelfLatency] = useState<{ ms?: number; seq: number }>({
     seq: 0,
   });
-  const [keyStatus, setKeyStatus] = useState<KeyStatusResponse | null>(null);
+  const [nodeIdentity, setNodeIdentity] = useState<NodeIdentityResponse | null>(null);
   const [authStatuses, setAuthStatuses] = useState<PartyAuthStatus[]>([]);
   const [packageCount, setPackageCount] = useState(0);
   const [onboardingDialogOpen, setOnboardingDialogOpen] = useState(false);
@@ -423,21 +423,21 @@ const App = () => {
   // Lazy-load config tab data when first opened
   useEffect(() => {
     if (activeTab !== 2) return;
-    if (networkConfig && keyStatus) return; // already loaded
+    if (networkConfig && nodeIdentity) return; // already loaded
     const fetchConfigData = async () => {
       try {
-        const [networkRes, keyStatusRes] = await Promise.all([
+        const [networkRes, identityRes] = await Promise.all([
           authenticatedFetch(`${API_BASE}/network-config`),
-          authenticatedFetch(`${API_BASE}/keys/status`),
+          authenticatedFetch(`${API_BASE}/node-identity`),
         ]);
         if (networkRes.ok) setNetworkConfig(await networkRes.json());
-        if (keyStatusRes.ok) setKeyStatus(await keyStatusRes.json());
+        if (identityRes.ok) setNodeIdentity(await identityRes.json());
       } catch {
         // Ignore — will show empty state
       }
     };
     fetchConfigData();
-  }, [activeTab, networkConfig, keyStatus]);
+  }, [activeTab, networkConfig, nodeIdentity]);
 
   // Poll participant statuses every 2 seconds, and on the same cadence measure
   // our own round-trip to the backend so the "you" row of the peers table shows
@@ -1177,7 +1177,7 @@ const App = () => {
                 <NetworkConfigAccordion
                   config={networkConfig}
                   nodeConfig={nodeConfig ?? undefined}
-                  keyStatus={keyStatus ?? undefined}
+                  nodeIdentity={nodeIdentity ?? undefined}
                   participantStatuses={participantStatuses}
                   selfLatencyMs={selfLatency.ms}
                   onSave={savePeers}

@@ -19,7 +19,6 @@ use crate::{
     canton_id::CantonId,
     db::schema::{Commitable, SchemaWrite},
     error::Result,
-    noise::MessageType,
     server::{WorkflowKind, WorkflowProgress},
     workflow::party_replication::pipe::{ExportSession, PipeBlock},
 };
@@ -29,7 +28,6 @@ use crate::{
 pub trait WorkflowStep:
     Copy + std::fmt::Debug + PartialEq + Eq + std::hash::Hash + Send + Sync
 {
-    fn to_command(&self) -> Option<MessageType>;
     fn next(&self) -> Option<Self>;
     fn requires_peers(&self) -> bool;
     fn is_waiting_for_peers(&self) -> bool;
@@ -66,8 +64,7 @@ pub struct WorkflowState<S> {
     expected_peers: HashSet<CantonId>,
     /// Peer quorum for both gates; `None` requires all expected peers.
     peer_threshold: Option<usize>,
-    /// Peers that have connected (transient — not persisted, recoverable
-    /// via Noise reconnect after a restart)
+    /// Peers that have joined (transient, not persisted)
     connected_peers: RwLock<HashSet<CantonId>>,
     /// Peers that have completed the current step
     completed_peers: RwLock<HashSet<CantonId>>,
@@ -184,9 +181,7 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
     ) -> Result<PipeBlock> {
         let mut guard = self.acs_export.lock().await;
 
-        // Authenticated at the Noise layer, but any peer in the allowlist can
-        // route to this run. Only the participant being replicated onto may
-        // read the export.
+        // Only the participant being replicated onto may read the export.
         if let Some((authorized, _)) = guard.as_ref()
             && authorized != caller
         {
@@ -366,11 +361,6 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
         self.maybe_advance().await;
     }
 
-    pub async fn current_command(&self) -> Option<MessageType> {
-        let step = self.current_step.read().await;
-        step.to_command()
-    }
-
     pub async fn peer_completed(&self, peer_id: CantonId) {
         if !self.expected_peers.contains(&peer_id) {
             tracing::warn!(
@@ -539,12 +529,6 @@ mod tests {
     }
 
     impl WorkflowStep for TestStep {
-        fn to_command(&self) -> Option<MessageType> {
-            match self {
-                TestStep::Sign => Some(MessageType::SignDns),
-                _ => None,
-            }
-        }
         fn next(&self) -> Option<Self> {
             match self {
                 TestStep::WaitPeers => Some(TestStep::Sign),

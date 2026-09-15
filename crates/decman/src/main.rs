@@ -108,9 +108,8 @@ async fn run() -> Result {
         dotenvy::from_path(&env_path).ok();
     }
 
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new("dec_party_manager=info,tokio_noise=error,hyper_noise=error")
-    });
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("dec_party_manager=info"));
 
     if json_logs_enabled(std::env::var("DECPM_LOG_FORMAT").ok().as_deref()) {
         tracing_subscriber::registry()
@@ -137,9 +136,6 @@ async fn run() -> Result {
 
     match &args.command {
         Commands::Serve {
-            listen_address,
-            noise_port,
-            public_address,
             canton_admin_host,
             canton_admin_port,
             canton_ledger_host,
@@ -165,13 +161,6 @@ async fn run() -> Result {
             auth0_audience,
             auth0_scope,
             jwt_role_claim: _,
-            timeout_handshake,
-            timeout_message,
-            timeout_retry_attempts,
-            timeout_retry_delay,
-            noise_retry_timeout_sec,
-            noise_retry_max_attempts,
-            noise_retry_backoff_ms,
             reward_automation_interval_secs,
             reward_expiry_read_interval_secs,
             reward_max_creates,
@@ -188,15 +177,6 @@ async fn run() -> Result {
             if let Some(key) = db_encryption_key {
                 dec_party_manager::db::crypto::init_key(key);
                 tracing::info!("Database encryption enabled");
-            }
-            if let Some(addr) = listen_address {
-                config.node.listen_address = addr.clone();
-            }
-            if let Some(p) = noise_port {
-                config.node.port = *p;
-            }
-            if let Some(addr) = public_address {
-                config.node.public_address = Some(addr.clone());
             }
             if let Some(host) = canton_admin_host {
                 config.canton.admin_api_host = host.clone();
@@ -282,27 +262,6 @@ async fn run() -> Result {
                     "DECPM_AUTH0_SCOPE is set but DECPM_AUTH0_DOMAIN/CLIENT_ID are not; no \
                      Auth0 config was created and the scope is ignored"
                 );
-            }
-            if let Some(v) = timeout_handshake {
-                config.timeouts.handshake_timeout_secs = *v;
-            }
-            if let Some(v) = timeout_message {
-                config.timeouts.message_timeout_secs = *v;
-            }
-            if let Some(v) = timeout_retry_attempts {
-                config.timeouts.connection_retry_attempts = *v;
-            }
-            if let Some(v) = timeout_retry_delay {
-                config.timeouts.connection_retry_delay_secs = *v;
-            }
-            if let Some(v) = noise_retry_timeout_sec {
-                config.noise_retry.per_attempt_timeout_secs = *v;
-            }
-            if let Some(v) = noise_retry_max_attempts {
-                config.noise_retry.max_attempts = *v;
-            }
-            if let Some(v) = noise_retry_backoff_ms {
-                config.noise_retry.backoff_ms = *v;
             }
             if let Some(v) = reward_automation_interval_secs {
                 config.reward_automation_interval_secs = *v;

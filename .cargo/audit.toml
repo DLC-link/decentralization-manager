@@ -32,17 +32,12 @@ ignore = [
   # the 0.3 line — 0.3.27 is the last release ever published, and the patch
   # landed only in 0.4.16 — so this cannot be resolved by updating.
   #
-  # Two paths pull it, neither removable from here:
-  #   * actix-http (actix-web 4), whose `http2` is a default feature;
-  #   * hyper 0.14, required by hyper-noise 0.0.3, which declares
-  #     `hyper = { features = ["full"] }` itself. Narrowing our own hyper
-  #     features changes nothing, because feature unification keeps h2 in the
-  #     graph regardless.
+  # One path pulls it: actix-http (actix-web 4), whose `http2` is a default
+  # feature. This repository cannot remove it.
   #
   # The h2 0.4 instance (AWS SDK / hyper 1.x) IS fixed, by the 0.4.16 bump in
   # the same change as this ignore.
   #
-  # Drop this ignore when hyper-noise moves off hyper 0.14, or actix-web
-  # ships an h2 0.4 release. Tracked in #351.
+  # Drop this ignore when actix-web ships an h2 0.4 release. Tracked in #351.
   "RUSTSEC-2026-0258",
 ]

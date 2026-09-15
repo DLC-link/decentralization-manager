@@ -17,17 +17,21 @@ log_phase() {
 # Readiness polling
 # ============================================================================
 
+# The DecMan API needs a bearer token on devnet (real JwtValidator) so the
+# probes below aren't rejected as "missing bearer token". On localnet the
+# binary is built with `--features test-mode` (MockValidator), which accepts
+# any token or none, so DECPM_IT_AUTH_TOKEN stays unset there. Each function
+# below builds its own `auth_args` array from it.
+
+# A node is ready when `/node-config` answers (bootstrap finished, participant
+# id resolved) and `/healthz` answers 200. A node opens no other listener — it
+# coordinates only through Canton.
 wait_for_server() {
     local port=$1
     local name=$2
-    local noise_port=$3
     local max_attempts=30
     local attempt=0
 
-    # Optional bearer token. Required on devnet (real JwtValidator) so the
-    # readiness probes below aren't rejected as "missing bearer token". On
-    # localnet the binary is built with `--features test-mode` (MockValidator)
-    # which accepts any/no token, so DECPM_IT_AUTH_TOKEN is left unset.
     local auth_args=()
     if [ -n "${DECPM_IT_AUTH_TOKEN:-}" ]; then
         auth_args=(-H "Authorization: Bearer ${DECPM_IT_AUTH_TOKEN}")
@@ -43,37 +47,83 @@ wait_for_server() {
         sleep 1
     done
 
-    # Wait for keys to be generated
     attempt=0
-    while true; do
-        local key
-        key=$(curl -s "${auth_args[@]+"${auth_args[@]}"}" "http://localhost:$port/keys/status" | jq -r '.public_key // empty')
-        if [ -n "$key" ] && [ "$key" != "null" ]; then
-            break
-        fi
+    while ! curl -sf "${auth_args[@]+"${auth_args[@]}"}" "http://localhost:$port/healthz" > /dev/null 2>&1; do
         attempt=$((attempt + 1))
         if [ $attempt -ge $max_attempts ]; then
-            echo "ERROR: $name keys not generated after $max_attempts attempts"
+            echo "ERROR: $name /healthz not answering after $max_attempts attempts"
             exit 1
         fi
         sleep 1
     done
 
-    # Wait for Noise listener
-    if [ -n "$noise_port" ]; then
-        attempt=0
-        echo "Waiting for $name Noise listener on port $noise_port..."
-        while ! (echo >/dev/tcp/localhost/"$noise_port") 2>/dev/null; do
-            attempt=$((attempt + 1))
-            if [ $attempt -ge $max_attempts ]; then
-                echo "ERROR: $name Noise listener not ready after $max_attempts attempts"
-                exit 1
-            fi
-            sleep 1
-        done
+    echo "$name is ready"
+}
+
+# The coordination package carries every contract nodes coordinate through, so
+# nothing works until each participant has vetted it. A startup task uploads
+# and vets the embedded DAR (design D8); this waits for the result.
+wait_for_coordination_dar() {
+    local port=$1
+    local name=$2
+    local max_attempts=${3:-120}
+    local attempt=0
+
+    local auth_args=()
+    if [ -n "${DECPM_IT_AUTH_TOKEN:-}" ]; then
+        auth_args=(-H "Authorization: Bearer ${DECPM_IT_AUTH_TOKEN}")
     fi
 
-    echo "$name is ready"
+    echo "Waiting for $name to vet decman-coordination-v1..."
+    while true; do
+        local seen
+        seen=$(curl -s "${auth_args[@]+"${auth_args[@]}"}" \
+            "http://localhost:$port/packages/vetted" \
+            | jq -r '[.[] | select(.package_name == "decman-coordination-v1")] | length' 2>/dev/null \
+            || echo 0)
+        if [ "${seen:-0}" -ge 1 ]; then
+            echo "$name has vetted decman-coordination-v1"
+            return 0
+        fi
+        attempt=$((attempt + 1))
+        if [ $attempt -ge $max_attempts ]; then
+            echo "ERROR: $name did not vet decman-coordination-v1 after $max_attempts attempts"
+            exit 1
+        fi
+        sleep 1
+    done
+}
+
+# Wait until this node sees a registry entry for every configured peer
+# (design D3). A node refuses to start a workflow before that.
+wait_for_registry() {
+    local port=$1
+    local name=$2
+    local expected=$3
+    local max_attempts=${4:-120}
+    local attempt=0
+
+    local auth_args=()
+    if [ -n "${DECPM_IT_AUTH_TOKEN:-}" ]; then
+        auth_args=(-H "Authorization: Bearer ${DECPM_IT_AUTH_TOKEN}")
+    fi
+
+    echo "Waiting for $name to see $expected peer registry entries..."
+    while true; do
+        local seen
+        seen=$(curl -s "${auth_args[@]+"${auth_args[@]}"}" "http://localhost:$port/registry" \
+            | jq -r '[.peers[] | select(.hosting_verified)] | length' 2>/dev/null || echo 0)
+        if [ "${seen:-0}" -ge "$expected" ]; then
+            echo "$name sees $seen peer registry entries"
+            return 0
+        fi
+        attempt=$((attempt + 1))
+        if [ $attempt -ge $max_attempts ]; then
+            echo "ERROR: $name saw $seen of $expected peer registry entries after $max_attempts attempts"
+            exit 1
+        fi
+        sleep 1
+    done
 }
 
 # ============================================================================
@@ -121,13 +171,13 @@ check_prerequisites() {
 # Port availability
 # ============================================================================
 
-# Checks that the dec-party-manager HTTP and Noise ports are free.
+# Checks that the dec-party-manager HTTP and metrics ports are free.
 # A leftover process (e.g. a DecMan started by a previous run that didn't clean up,
 # or a different worktree's DecMan still running) would silently steal one of these
 # ports and the e2e would time out 60s into the first invitation accept.
 # Failing fast here turns that into an instant, actionable error.
 check_decman_ports_free() {
-    local ports=("$P1_HTTP" "$P2_HTTP" "$P3_HTTP" "$P1_NOISE" "$P2_NOISE" "$P3_NOISE" "$P1_METRICS" "$P2_METRICS" "$P3_METRICS")
+    local ports=("$P1_HTTP" "$P2_HTTP" "$P3_HTTP" "$P1_METRICS" "$P2_METRICS" "$P3_METRICS")
     local busy=()
 
     for p in "${ports[@]}"; do
@@ -170,44 +220,40 @@ start_nodes() {
     local http_ports=($P1_HTTP $P2_HTTP $P3_HTTP)
     local canton_ledger_ports=($P1_CANTON_LEDGER $P2_CANTON_LEDGER $P3_CANTON_LEDGER)
     local canton_admin_ports=($P1_CANTON_ADMIN $P2_CANTON_ADMIN $P3_CANTON_ADMIN)
-    local noise_ports=($P1_NOISE $P2_NOISE $P3_NOISE)
     local metrics_ports=($P1_METRICS $P2_METRICS $P3_METRICS)
 
     for i in 1 2 3; do
         local idx=$((i - 1))
         # Per-participant stderr file: makes "what did P1 see" answerable
-        # without grepping a 3-way-interleaved unified log. Appended (>>) so
-        # configure_peers' restart cycle accumulates rather than truncates.
+        # without grepping a 3-way-interleaved unified log. Appended (>>) so a
+        # chaos phase's respawn accumulates rather than truncates.
         local log_file="$DEV_DIR/participant-$i/stderr.log"
         echo "Starting participant-$i (log: $log_file)..."
-        RUST_LOG="${RUST_LOG:-dec_party_manager=info,tokio_noise=error,hyper_noise=error}" \
+        # The node log level is separate from the runner's. The runner stays
+        # quiet so the scenario output reads cleanly; each node still records
+        # what it did, because that file is the only evidence a CI failure
+        # leaves behind. Override with DECPM_NODE_RUST_LOG.
+        RUST_LOG="${DECPM_NODE_RUST_LOG:-dec_party_manager=info,dec_party_manager::onledger=debug}" \
         DECPM_CANTON_ADMIN_HOST=127.0.0.1 \
         DECPM_CANTON_ADMIN_PORT="${canton_admin_ports[$idx]}" \
         DECPM_CANTON_LEDGER_HOST=127.0.0.1 \
         DECPM_CANTON_LEDGER_PORT="${canton_ledger_ports[$idx]}" \
         DECPM_CANTON_NETWORK=devnet \
         DECPM_METRICS_PORT="${metrics_ports[$idx]}" \
-        DECPM_NOISE_PORT="${noise_ports[$idx]}" \
         DECPM_PORT="${http_ports[$idx]}" \
         DECPM_REWARD_AUTOMATION_INTERVAL_SECS="${DECPM_REWARD_AUTOMATION_INTERVAL_SECS:-15}" \
+        DECPM_HEARTBEAT_INTERVAL_SECS="${DECPM_HEARTBEAT_INTERVAL_SECS:-5}" \
+        DECPM_HEARTBEAT_MIN_INTERVAL_SECS="${DECPM_HEARTBEAT_MIN_INTERVAL_SECS:-1}" \
+        DECPM_OBSERVER_POLL_SECS="${DECPM_OBSERVER_POLL_SECS:-1}" \
         "$BINARY" -d "$DEV_DIR/participant-$i" serve \
             >> "$log_file" 2>&1 &
         PIDS+=($!)
     done
 
     # Wait for all servers to be ready
-    wait_for_server $P1_HTTP "participant-1" $P1_NOISE
-    wait_for_server $P2_HTTP "participant-2" $P2_NOISE
-    wait_for_server $P3_HTTP "participant-3" $P3_NOISE
-
-    # Settle delay before returning. wait_for_server only checks "is the port
-    # bound", not "are all peers reachable from each other through the Noise
-    # mesh". Without this delay, configure_peers' restart cycle can leave the
-    # workflow client and the parties handler hammering each freshly-restarted
-    # peer for ~30-50s with Connection-refused / handshake-rejection log spam
-    # while the cross-node Noise sessions converge. 5s catches the common case;
-    # noisy networks will still produce some log lines but the storm is short.
-    sleep 5
+    wait_for_server $P1_HTTP "participant-1"
+    wait_for_server $P2_HTTP "participant-2"
+    wait_for_server $P3_HTTP "participant-3"
 }
 
 # ============================================================================
@@ -216,8 +262,8 @@ start_nodes() {
 #
 # Sends SIGTERM, waits 2s, then SIGKILL on anything still alive. Mirrors
 # env.sh's localnet definition (which still overrides this) so devnet's
-# bare-process path has a stop_nodes too without sourcing env.sh. Required
-# by configure_peers' restart cycle and devnet.env.sh's cleanup trap.
+# bare-process path has a stop_nodes too without sourcing env.sh. Required by
+# devnet.env.sh's cleanup trap.
 
 stop_nodes() {
     for pid in "${PIDS[@]+"${PIDS[@]}"}"; do
@@ -234,7 +280,7 @@ stop_nodes() {
     # Reap only the DecMan PIDs we just killed. A bare `wait` would block on
     # every active bg child of the script — on devnet that includes the
     # `_canton_forward_loop` subshells (while-true kubectl port-forwards),
-    # so `configure_peers`' restart cycle would hang forever.
+    # so the caller would hang forever.
     wait "${PIDS[@]+"${PIDS[@]}"}" 2>/dev/null || true
     PIDS=()
 }
@@ -244,33 +290,36 @@ stop_nodes() {
 # ============================================================================
 
 configure_peers() {
-    echo "Fetching public keys and participant IDs..."
-
-    # See wait_for_server for the rationale: devnet's real JwtValidator
-    # requires a bearer; localnet's test-mode MockValidator accepts no token.
     local auth_args=()
     if [ -n "${DECPM_IT_AUTH_TOKEN:-}" ]; then
         auth_args=(-H "Authorization: Bearer ${DECPM_IT_AUTH_TOKEN}")
     fi
 
-    P1_KEY=$(curl -s "${auth_args[@]+"${auth_args[@]}"}" "http://localhost:$P1_HTTP/keys/status" | jq -r '.public_key')
-    P2_KEY=$(curl -s "${auth_args[@]+"${auth_args[@]}"}" "http://localhost:$P2_HTTP/keys/status" | jq -r '.public_key')
-    P3_KEY=$(curl -s "${auth_args[@]+"${auth_args[@]}"}" "http://localhost:$P3_HTTP/keys/status" | jq -r '.public_key')
+    # Nothing coordinates before every participant has vetted the coordination
+    # package: Canton refuses a create whose observer's participant has not.
+    wait_for_coordination_dar "$P1_HTTP" "participant-1"
+    wait_for_coordination_dar "$P2_HTTP" "participant-2"
+    wait_for_coordination_dar "$P3_HTTP" "participant-3"
 
+    echo "Fetching participant IDs..."
     P1_PARTICIPANT_ID=$(curl -s "${auth_args[@]+"${auth_args[@]}"}" "http://localhost:$P1_HTTP/node-config" | jq -r '.node.participant_id')
     P2_PARTICIPANT_ID=$(curl -s "${auth_args[@]+"${auth_args[@]}"}" "http://localhost:$P2_HTTP/node-config" | jq -r '.node.participant_id')
     P3_PARTICIPANT_ID=$(curl -s "${auth_args[@]+"${auth_args[@]}"}" "http://localhost:$P3_HTTP/node-config" | jq -r '.node.participant_id')
 
-    echo "Participant 1: $P1_PARTICIPANT_ID (key: ${P1_KEY:0:16}...)"
-    echo "Participant 2: $P2_PARTICIPANT_ID (key: ${P2_KEY:0:16}...)"
-    echo "Participant 3: $P3_PARTICIPANT_ID (key: ${P3_KEY:0:16}...)"
+    setup_node_identities
 
+    echo "Participant 1: $P1_PARTICIPANT_ID (node party: $P1_NODE_PARTY)"
+    echo "Participant 2: $P2_PARTICIPANT_ID (node party: $P2_NODE_PARTY)"
+    echo "Participant 3: $P3_PARTICIPANT_ID (node party: $P3_NODE_PARTY)"
+
+    # Design D2: operators exchange `participant_id,node_party_id,name` and
+    # nothing else. A peer without a node party cannot be invited.
     local peers_json
     peers_json=$(cat <<EOF
 [
-  {"participant_id": "$P1_PARTICIPANT_ID", "name": "Participant 1", "address": "127.0.0.1", "port": $P1_NOISE, "public_key": "$P1_KEY", "party": null},
-  {"participant_id": "$P2_PARTICIPANT_ID", "name": "Participant 2", "address": "127.0.0.1", "port": $P2_NOISE, "public_key": "$P2_KEY", "party": null},
-  {"participant_id": "$P3_PARTICIPANT_ID", "name": "Participant 3", "address": "127.0.0.1", "port": $P3_NOISE, "public_key": "$P3_KEY", "party": null}
+  {"participant_id": "$P1_PARTICIPANT_ID", "name": "Participant 1", "party": "$P1_NODE_PARTY"},
+  {"participant_id": "$P2_PARTICIPANT_ID", "name": "Participant 2", "party": "$P2_NODE_PARTY"},
+  {"participant_id": "$P3_PARTICIPANT_ID", "name": "Participant 3", "party": "$P3_NODE_PARTY"}
 ]
 EOF
     )
@@ -283,12 +332,91 @@ EOF
 
     echo "Peers configured on all participants"
 
-    # Restart to reload peer config (peer_keys map is built at startup)
-    sleep 1
-    echo "Restarting nodes to reload peer configuration..."
-    stop_nodes
+    # Peers are read from the database per request, so no restart is needed.
+    # Each node republishes its registry entry with the new observers; wait
+    # until every node sees the other two before any workflow starts.
+    wait_for_registry "$P1_HTTP" "participant-1" 2
+    wait_for_registry "$P2_HTTP" "participant-2" 2
+    wait_for_registry "$P3_HTTP" "participant-3" 2
+}
 
-    sleep 2
-    start_nodes
-    echo "Nodes restarted with peer configuration"
+# ============================================================================
+# Node identity (design D1)
+# ============================================================================
+
+# Allocate one node party per node, grant `ledger-api-user` CanActAs/CanReadAs
+# on it, and PUT it as the node identity. Localnet only: it drives the Canton
+# JSON Ledger API as `ledger-api-user`, which devnet's real IdP does not allow.
+#
+# TODO(onledger-phases): devnet needs the same three steps through its own admin
+# path (allocate on the participant, grant through /auth/grant-rights, PUT with
+# the participant's Keycloak client), and exported P{1,2,3}_NODE_PARTY.
+setup_node_identities() {
+    if [ -z "${P1_JSON_API:-}" ]; then
+        local missing=()
+        for v in P1_NODE_PARTY P2_NODE_PARTY P3_NODE_PARTY; do
+            [ -z "${!v:-}" ] && missing+=("$v")
+        done
+        if [ "${#missing[@]}" -gt 0 ]; then
+            echo "ERROR: no JSON Ledger API ports and no ${missing[*]}; cannot set node identities"
+            exit 1
+        fi
+        echo "Using the node parties from the environment"
+        return 0
+    fi
+
+    P1_NODE_PARTY=$(setup_node_identity "$P1_JSON_API" "$P1_HTTP" "participant-1" "decman-node-1")
+    P2_NODE_PARTY=$(setup_node_identity "$P2_JSON_API" "$P2_HTTP" "participant-2" "decman-node-2")
+    P3_NODE_PARTY=$(setup_node_identity "$P3_JSON_API" "$P3_HTTP" "participant-3" "decman-node-3")
+    export P1_NODE_PARTY P2_NODE_PARTY P3_NODE_PARTY
+}
+
+# Allocate, grant, PUT — for one node. Echoes the allocated node party id.
+setup_node_identity() {
+    local json_port=$1
+    local http_port=$2
+    local name=$3
+    local hint=$4
+
+    local auth_args=()
+    if [ -n "${DECPM_IT_AUTH_TOKEN:-}" ]; then
+        auth_args=(-H "Authorization: Bearer ${DECPM_IT_AUTH_TOKEN}")
+    fi
+
+    local party
+    party=$(curl -s -X POST "http://localhost:$json_port/v2/parties" \
+        -H "Authorization: Bearer $MOCK_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "{\"party_id_hint\": \"$hint\", \"local_metadata\": {\"annotations\": {}}}" \
+        | jq -r '.partyDetails.party // empty')
+    if [ -z "$party" ]; then
+        echo "ERROR: failed to allocate the node party '$hint' on $name" >&2
+        exit 1
+    fi
+
+    # The node party submits every coordination command, so its Ledger API
+    # user needs both rights on it.
+    curl -s -X POST "http://localhost:$json_port/v2/users/ledger-api-user/rights" \
+        -H "Authorization: Bearer $MOCK_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "{\"userId\": \"ledger-api-user\",
+             \"rights\": [
+               {\"kind\": {\"CanActAs\":  {\"value\": {\"party\": \"$party\"}}}},
+               {\"kind\": {\"CanReadAs\": {\"value\": {\"party\": \"$party\"}}}}
+             ],
+             \"identityProviderId\": \"\"}" > /dev/null
+
+    local response
+    response=$(curl -s -w '\n%{http_code}' -X PUT "${auth_args[@]+"${auth_args[@]}"}" \
+        "http://localhost:$http_port/node-identity" \
+        -H "Content-Type: application/json" \
+        -d "{\"node_party_id\": \"$party\", \"user_id\": \"ledger-api-user\"}")
+    local code
+    code=$(printf '%s' "$response" | tail -1)
+    if [ "$code" != "200" ]; then
+        echo "ERROR: PUT /node-identity on $name returned $code: $(printf '%s' "$response" | sed '$d')" >&2
+        exit 1
+    fi
+
+    printf '%s' "$party"
 }

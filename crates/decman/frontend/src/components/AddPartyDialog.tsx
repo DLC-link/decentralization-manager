@@ -16,6 +16,7 @@ import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
 import { useSnackbar } from "../contexts";
 import { fieldHelpAdornment } from "./FieldHelp";
+import { peerSubtitle } from "../peers";
 import type { AddPartyRequest, Peer } from "../types";
 
 interface AddPartyDialogProps {
@@ -181,7 +182,7 @@ export const AddPartyDialog = ({
                     {peer.name || peer.participant_id}
                   </Typography>
                   <Typography variant="caption" color="text.secondary">
-                    {peer.address}:{peer.port}
+                    {peerSubtitle(peer)}
                   </Typography>
                 </Box>
               </MenuItem>

@@ -1,8 +1,12 @@
-//! G5: dec_party_identity survives onboarding completion + dismiss.
+//! G5: a party's key cache survives onboarding completion + dismiss.
 //!
-//! Run a fresh onboarding to completion. Snapshot dec_party_identity row
-//! count for the new dec_party. Dismiss the onboarding workflow_runs row.
-//! Re-read and assert the identity rows are preserved.
+//! Run a fresh onboarding to completion. Snapshot the `dec_party_participant`
+//! rows that carry a key for the new party. Dismiss the onboarding
+//! workflow_runs row. Re-read and assert the keys are preserved.
+//!
+//! Those rows are what a later kick reads to attribute an owner key to a
+//! participant, and they outlive the run that created them. Dismissing a run
+//! clears what the run owns and must not touch them.
 
 use std::time::Duration;
 
@@ -42,7 +46,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     let instance_name = format!("{prefix}-creation");
 
     Scenario::with_ctx(
-        format!("dec_party_identity preserved across dismiss ({prefix})"),
+        format!("party key cache preserved across dismiss ({prefix})"),
         Ctx {
             instance_name: instance_name.clone(),
             ..Default::default()
@@ -152,24 +156,27 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             }
         },
     )
-    .given("snapshot dec_party_identity rows pre-dismiss", |f, ctx| {
-        let db_path = f.db_path(1);
-        Box::pin(async move {
-            let dec_party_id = ctx
-                .dec_party_id
-                .as_deref()
-                .context("dec_party_id not set")?
-                .to_string();
-            let n = db::count_dec_party_identity(&db_path, &dec_party_id).await?;
-            anyhow::ensure!(
-                n >= 1,
-                "expected ≥1 identity rows for {dec_party_id}, got {n}"
-            );
-            ctx.identity_before = n;
-            info!("[G5] {n} dec_party_identity rows pre-dismiss");
-            Ok(())
-        })
-    })
+    .given(
+        "snapshot the party's keyed participant rows pre-dismiss",
+        |f, ctx| {
+            let db_path = f.db_path(1);
+            Box::pin(async move {
+                let dec_party_id = ctx
+                    .dec_party_id
+                    .as_deref()
+                    .context("dec_party_id not set")?
+                    .to_string();
+                let n = db::count_dec_party_participant_keys(&db_path, &dec_party_id).await?;
+                anyhow::ensure!(
+                    n >= 1,
+                    "expected 1 or more keyed participant rows for {dec_party_id}, got {n}"
+                );
+                ctx.identity_before = n;
+                info!("[G5] {n} keyed dec_party_participant rows pre-dismiss");
+                Ok(())
+            })
+        },
+    )
     .when("P1 dismisses the onboarding run", |f, ctx| {
         let instance = ctx.instance_name.clone();
         Box::pin(async move {
@@ -179,7 +186,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         })
     })
     .then(
-        "dec_party_identity row count unchanged",
+        "the party's key row count is unchanged",
         Duration::from_secs(15),
         |f, ctx| {
             let db_path = f.db_path(1);
@@ -187,17 +194,17 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Box::pin(async move {
                 let dec_party_id = ctx.dec_party_id.as_deref()?.to_string();
                 let after = diag.ok(
-                    "count dec_party_identity rows",
-                    db::count_dec_party_identity(&db_path, &dec_party_id).await,
+                    "count keyed dec_party_participant rows",
+                    db::count_dec_party_participant_keys(&db_path, &dec_party_id).await,
                 )?;
                 if after != ctx.identity_before {
                     return Some(Err(anyhow::anyhow!(
-                        "dec_party_identity rows changed across dismiss ({} → {})",
+                        "the party's key rows changed across dismiss ({} -> {})",
                         ctx.identity_before,
                         after
                     )));
                 }
-                info!("[G5] dec_party_identity preserved across dismiss ({after} rows)");
+                info!("[G5] party key cache preserved across dismiss ({after} rows)");
                 Some(Ok(()))
             })
         },

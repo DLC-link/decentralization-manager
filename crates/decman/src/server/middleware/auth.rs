@@ -93,8 +93,12 @@ where
             // request: only one bootstrap-shaped call is in flight at a time;
             // any concurrent attempt is rejected with 409. After the holder
             // writes credentials, subsequent calls fall through to normal auth.
+            //
+            // `PUT /node-identity` (design D1) shares the exemption, the
+            // predicate, and the mutex: the node identity is the first row a
+            // fresh node writes, before any decparty exists.
             if method == "PUT"
-                && path == "/party-config"
+                && is_bootstrap_path(&path)
                 && app_state.party_credentials.read().await.is_empty()
             {
                 let Ok(guard) = app_state.bootstrap_mu.clone().try_lock_owned() else {
@@ -106,7 +110,7 @@ where
                 // finished writing; if so, drop the lock and require auth.
                 if app_state.party_credentials.read().await.is_empty() {
                     tracing::info!(
-                        "PUT /party-config bootstrap: unauthenticated call allowed because \
+                        "PUT {path} bootstrap: unauthenticated call allowed because \
                          party_credentials is empty. Subsequent writes will require admin role."
                     );
                     let res = service.call(req).await?;
@@ -203,6 +207,11 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         return false;
     }
     a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// The two writes a fresh node may make before it holds any credential row.
+fn is_bootstrap_path(path: &str) -> bool {
+    matches!(path, "/party-config" | "/node-identity")
 }
 
 /// Extract the bearer token from the request.
@@ -379,11 +388,6 @@ mod tests {
         Data::new(AppState {
             db,
             config: NodeConfig::default(),
-            peer_status: Arc::new(RwLock::new(HashMap::new())),
-            last_seen: Arc::new(RwLock::new(HashMap::new())),
-            peer_job_sender: tokio::sync::mpsc::unbounded_channel().0,
-            workflows: crate::server::WorkflowRegistry::new(),
-            pending_invitations: Arc::new(RwLock::new(Vec::new())),
             auth: Arc::new(RwLock::new(None)),
             token_validator: validator,
             admin_role: Some("decman-admin".to_string()),
@@ -401,6 +405,7 @@ mod tests {
             discovery_completed: Arc::new(RwLock::new(HashMap::new())),
             http_client: reqwest::Client::new(),
             health_cache: crate::server::HealthCache::new(),
+            onledger: crate::onledger::OnLedger::placeholder(),
         })
     }
 

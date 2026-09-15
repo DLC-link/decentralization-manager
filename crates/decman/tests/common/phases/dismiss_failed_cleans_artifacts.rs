@@ -4,10 +4,13 @@
 //! onboarding invite, then fabricate the coordinator-side failure
 //! (coordinators no longer self-fail when peers go away — wait-states are
 //! human-paced): kill P1, flip its persisted row to `failed` while it's
-//! down, restart it. Confirm artifacts exist for the failed run; dismiss;
-//! confirm artifacts gone, the run row stays as dismissed=1, and a fresh
-//! onboarding of the same kind starts (proving the unique partial index is
-//! not blocked).
+//! down, restart it. Dismiss it, then confirm the artifacts of the run are
+//! gone, the row stays as dismissed=1, and a fresh onboarding of the same
+//! kind starts, which proves the unique partial index is not blocked.
+//!
+//! Onboarding writes no artifact rows: it keeps its progress on the run
+//! row, and only a contracts run uses `workflow_artifacts`. The cleanup
+//! assertion therefore covers the cascade, not a populated table.
 
 use std::time::Duration;
 
@@ -39,10 +42,13 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     post_accept_invitation(f, f.p2.http, &p2_inv).await?;
     post_accept_invitation(f, f.p3.http, &p3_inv).await?;
 
-    // Wait for ≥1 artifact row before forcing failure.
+    // Wait for the coordinator to leave its first step, so the run has real
+    // progress to dismiss. Onboarding keeps that progress on the run row:
+    // only a contracts run writes to workflow_artifacts now.
     let p1_db = f.db_path(1);
     chaos::poll_until(Duration::from_secs(60), || async {
-        Ok(db::count_artifacts(&p1_db, &instance).await? > 0)
+        let step = db::workflow_run_step(&p1_db, &instance, "Coordinator").await?;
+        Ok(step.is_some_and(|s| s != "GenerateKeys"))
     })
     .await?;
 
@@ -69,12 +75,8 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     processes::spawn_only(f, 1).await?;
     chaos::say("G4", "coordinator row Failed; P1 back up");
 
-    // Confirm artifacts still exist for the failed run.
+    // A failed run keeps whatever it owns until the operator dismisses it.
     let artifact_count_before = db::count_artifacts(&p1_db, &instance).await?;
-    anyhow::ensure!(
-        artifact_count_before >= 1,
-        "failed run should keep artifacts; got {artifact_count_before}"
-    );
     chaos::say(
         "G4",
         &format!("{artifact_count_before} artifact rows present pre-dismiss"),

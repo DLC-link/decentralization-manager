@@ -1,4 +1,6 @@
 packages:
+  - decman-coordination
+  - decman-coordination-test
   - governance-action-v1
   - governance-core
   - orphan-marker

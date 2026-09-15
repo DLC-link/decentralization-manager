@@ -1,16 +1,14 @@
 pub mod config;
-pub mod coordinator;
-pub mod peer;
 pub mod steps;
 
 pub use config::KickConfig;
-pub use steps::{
-    create_proposals, export_state, prune_cached_membership, sign_proposals, submit_kick,
-};
+pub use steps::{export_state, prune_cached_membership};
 
-use crate::{noise::MessageType, server::WorkflowKind, workflow::state::WorkflowStep};
+use crate::{server::WorkflowKind, workflow::state::WorkflowStep};
 
-/// Kick workflow steps (removing a member from decentralized party)
+/// Kick workflow steps of the 1.x transport. Kept for the run cards of rows that
+/// predate the 2.0 upgrade; the on-ledger engine has its own step lists
+/// (`crate::onledger::engine::kick`).
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum KickStep {
     /// Waiting for all peers to connect
@@ -28,17 +26,6 @@ pub enum KickStep {
 }
 
 impl WorkflowStep for KickStep {
-    fn to_command(&self) -> Option<MessageType> {
-        match self {
-            Self::SignProposals => Some(MessageType::SignKick),
-            Self::Complete => Some(MessageType::Disconnect),
-            Self::WaitingForPeers
-            | Self::ExportState
-            | Self::CreateProposals
-            | Self::SubmitKick => None,
-        }
-    }
-
     fn next(&self) -> Option<Self> {
         match self {
             Self::WaitingForPeers => Some(Self::ExportState),

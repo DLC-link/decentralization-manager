@@ -1,17 +1,12 @@
 pub mod config;
-pub mod coordinator;
-pub mod peer;
-pub mod steps;
 
 pub use config::OnboardingConfig;
-pub use steps::{
-    create_proposals, generate_keys, sign_dns_proposals, sign_p2p_proposals, submit_dns_proposals,
-    submit_final_proposals,
-};
 
-use crate::{noise::MessageType, server::WorkflowKind, workflow::state::WorkflowStep};
+use crate::{server::WorkflowKind, workflow::state::WorkflowStep};
 
-/// Onboarding workflow steps (decentralized party creation)
+/// Onboarding workflow steps of the 1.x transport. Kept for the run cards of
+/// rows that predate the 2.0 upgrade; the on-ledger engine has its own
+/// step lists (`crate::onledger::engine::onboarding`).
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum OnboardingStep {
     /// Waiting for all peers to connect
@@ -33,18 +28,6 @@ pub enum OnboardingStep {
 }
 
 impl WorkflowStep for OnboardingStep {
-    fn to_command(&self) -> Option<MessageType> {
-        match self {
-            Self::GenerateKeys => Some(MessageType::GenerateKeys),
-            Self::SignDns => Some(MessageType::SignDns),
-            Self::SignP2p => Some(MessageType::SignP2p),
-            Self::Complete => Some(MessageType::Disconnect),
-            Self::WaitingForPeers | Self::CreateProposals | Self::SubmitDns | Self::SubmitFinal => {
-                None
-            }
-        }
-    }
-
     fn next(&self) -> Option<Self> {
         match self {
             Self::WaitingForPeers => Some(Self::GenerateKeys),

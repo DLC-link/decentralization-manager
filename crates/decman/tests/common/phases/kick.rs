@@ -28,7 +28,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             })
         })
         .then(
-            "P3 owner_key resolved via Noise",
+            "P3 owner_key resolved from the acceptance cache",
             Duration::from_secs(60),
             |f, _| {
                 Box::pin(async move {

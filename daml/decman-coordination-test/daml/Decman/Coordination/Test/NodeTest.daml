@@ -1,0 +1,181 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Tests for the DecmanNode registry entry.
+module Decman.Coordination.Test.NodeTest where
+
+import DA.Time (addRelTime, seconds)
+import Daml.Script
+
+import Decman.Coordination.Node
+import Decman.Coordination.TestUtils
+
+import TestHarness
+
+-- ============================================================================
+-- Fixtures
+-- ============================================================================
+
+data NodeFixture = NodeFixture
+  with
+    parties : CoordinationTestParties
+    nodeCid : ContractId DecmanNode
+    createdAt : Time
+  deriving (Eq, Show)
+
+-- ============================================================================
+-- Given
+-- ============================================================================
+
+given_parties : Script CoordinationTestParties
+given_parties = do
+  _ <- startClock
+  allocateCoordinationTestParties
+
+given_registered_node : Script NodeFixture
+given_registered_node = do
+  createdAt <- startClock
+  parties <- allocateCoordinationTestParties
+  nodeCid <- createTestNode parties
+  pure NodeFixture with ..
+
+-- ============================================================================
+-- When
+-- ============================================================================
+
+when_heartbeat_at_floor : NodeFixture -> Script (ContractId DecmanNode)
+when_heartbeat_at_floor f = do
+  passTime (seconds testMinHeartbeatIntervalSecs)
+  submit f.parties.proposer $ exerciseCmd f.nodeCid DecmanNode_Heartbeat
+
+when_heartbeat_below_floor : NodeFixture -> Script ()
+when_heartbeat_below_floor f = do
+  passTime (seconds (testMinHeartbeatIntervalSecs - 1))
+  submitMustFail f.parties.proposer $ exerciseCmd f.nodeCid DecmanNode_Heartbeat
+
+when_node_updated : NodeFixture -> Script (ContractId DecmanNode)
+when_node_updated f = do
+  passTime (seconds 5)
+  submit f.parties.proposer $ exerciseCmd f.nodeCid DecmanNode_Update with
+    newPeers = [f.parties.invitee1]
+    newDisplayName = "renamed"
+    newVersion = "2.1.0"
+    newBuildVersion = "2.1.0-test"
+    newCoordinationVersion = 2
+    newHeartbeatIntervalSecs = 7200
+    newMinHeartbeatIntervalSecs = 120
+
+when_node_retired : NodeFixture -> Script ()
+when_node_retired f =
+  submit f.parties.proposer $ exerciseCmd f.nodeCid DecmanNode_Retire
+
+when_created_with_floor_above_interval : CoordinationTestParties -> Script ()
+when_created_with_floor_above_interval parties = do
+  now <- getTime
+  submitMustFail parties.proposer $ createCmd (testNode parties now) with
+    minHeartbeatIntervalSecs = testHeartbeatIntervalSecs + 1
+
+when_created_with_zero_floor : CoordinationTestParties -> Script ()
+when_created_with_zero_floor parties = do
+  now <- getTime
+  submitMustFail parties.proposer $ createCmd (testNode parties now) with
+    minHeartbeatIntervalSecs = 0
+
+when_created_with_coordination_version_zero : CoordinationTestParties -> Script ()
+when_created_with_coordination_version_zero parties = do
+  now <- getTime
+  submitMustFail parties.proposer $ createCmd (testNode parties now) with
+    coordinationVersion = 0
+
+-- ============================================================================
+-- Then
+-- ============================================================================
+
+then_last_active_at_moves_to_heartbeat_time : NodeFixture -> ContractId DecmanNode -> Script Failures
+then_last_active_at_moves_to_heartbeat_time f newCid = do
+  Some node <- queryContractId f.parties.proposer newCid
+  ownEntries <- query @DecmanNode f.parties.proposer
+  peerView <- query @DecmanNode f.parties.invitee1
+  pure $
+    shouldBe "lastActiveAt" (addRelTime f.createdAt (seconds testMinHeartbeatIntervalSecs)) node.lastActiveAt <>
+    shouldBe "one entry after the heartbeat" 1 (length ownEntries) <>
+    shouldBe "peer sees the new entry" [newCid] (map fst peerView)
+
+then_entry_unchanged : NodeFixture -> () -> Script Failures
+then_entry_unchanged f _ = do
+  Some node <- queryContractId f.parties.proposer f.nodeCid
+  pure $ shouldBe "lastActiveAt unchanged" f.createdAt node.lastActiveAt
+
+then_fields_replaced : NodeFixture -> ContractId DecmanNode -> Script Failures
+then_fields_replaced f newCid = do
+  Some node <- queryContractId f.parties.proposer newCid
+  droppedPeerView <- query @DecmanNode f.parties.invitee2
+  pure $
+    shouldBe "peers" [f.parties.invitee1] node.peers <>
+    shouldBe "displayName" "renamed" node.displayName <>
+    shouldBe "version" "2.1.0" node.version <>
+    shouldBe "buildVersion" "2.1.0-test" node.buildVersion <>
+    shouldBe "coordinationVersion" 2 node.coordinationVersion <>
+    shouldBe "heartbeatIntervalSecs" 7200 node.heartbeatIntervalSecs <>
+    shouldBe "minHeartbeatIntervalSecs" 120 node.minHeartbeatIntervalSecs <>
+    shouldBe "lastActiveAt" (addRelTime f.createdAt (seconds 5)) node.lastActiveAt <>
+    shouldBe "dropped peer sees no entry" 0 (length droppedPeerView)
+
+then_entry_gone : NodeFixture -> () -> Script Failures
+then_entry_gone f _ = do
+  ownEntries <- query @DecmanNode f.parties.proposer
+  peerView <- query @DecmanNode f.parties.invitee1
+  pure $
+    shouldBe "own entries" 0 (length ownEntries) <>
+    shouldBe "peer view" 0 (length peerView)
+
+then_no_entry_created : CoordinationTestParties -> () -> Script Failures
+then_no_entry_created parties _ = do
+  entries <- query @DecmanNode parties.proposer
+  pure $ shouldBe "entries" 0 (length entries)
+
+-- ============================================================================
+-- Tests
+-- ============================================================================
+
+test_when_heartbeat_at_floor_then_last_active_at_updated = script do
+  run Test with
+    given = given_registered_node
+    when = when_heartbeat_at_floor
+    then_ = then_last_active_at_moves_to_heartbeat_time
+
+test_when_heartbeat_below_floor_then_rejected = script do
+  run Test with
+    given = given_registered_node
+    when = when_heartbeat_below_floor
+    then_ = then_entry_unchanged
+
+test_when_node_updated_then_fields_replaced = script do
+  run Test with
+    given = given_registered_node
+    when = when_node_updated
+    then_ = then_fields_replaced
+
+test_when_node_retired_then_entry_gone = script do
+  run Test with
+    given = given_registered_node
+    when = when_node_retired
+    then_ = then_entry_gone
+
+test_when_floor_above_interval_then_create_rejected = script do
+  run Test with
+    given = given_parties
+    when = when_created_with_floor_above_interval
+    then_ = then_no_entry_created
+
+test_when_floor_below_one_then_create_rejected = script do
+  run Test with
+    given = given_parties
+    when = when_created_with_zero_floor
+    then_ = then_no_entry_created
+
+test_when_coordination_version_zero_then_create_rejected = script do
+  run Test with
+    given = given_parties
+    when = when_created_with_coordination_version_zero
+    then_ = then_no_entry_created

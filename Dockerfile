@@ -23,12 +23,13 @@ FROM gcr.io/distroless/cc-debian12:${BASE_TAG}
 COPY --chmod=0755 dec-party-manager /usr/local/bin/dec-party-manager
 
 # Stated explicitly rather than inherited from the base, so the runtime
-# identity is visible here. The binary needs no root either way: it binds 8080
-# and 9000, both above 1024, and writes only under its data directory.
+# identity is visible here. The binary needs no root either way: it binds
+# 8080 (and the metrics port), above 1024, and writes only under its data
+# directory.
 ARG RUNTIME_UID=0
 USER ${RUNTIME_UID}:${RUNTIME_UID}
 
-EXPOSE 8080 9000
+EXPOSE 8080
 
 # Build identity, stamped by CI (build.yml / release.yml). DECPM_BUILD_VERSION
 # is the pushed image tag (releases) or short commit SHA (per-commit images);

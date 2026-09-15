@@ -25,3 +25,8 @@ integration-tests/.e2e-pids
 
 # Other secrets
 config.toml
+
+# Coverage artefacts. code-coverage.sh runs the suite with the LLVM
+# instrumentation on, and each test process drops a .profraw beside it.
+*.profraw
+*.profdata

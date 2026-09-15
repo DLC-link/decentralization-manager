@@ -14,8 +14,8 @@
 //! and dismisses the leftover run so subsequent phases start clean.
 //!
 //! Stalling is achieved by deferring `accept_invitation` rather than by
-//! pausing peer processes — the start handler pre-flight peer-meshes over
-//! Noise, so peers must remain responsive.
+//! pausing peer processes — the start handler pre-flight requires every
+//! invitee to have a visible registry entry, so peers must stay up.
 
 use std::time::Duration;
 

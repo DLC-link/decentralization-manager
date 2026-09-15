@@ -94,11 +94,11 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     .runs
                     .iter()
                     .find(|w| w.kind == WorkflowKind::Onboarding && w.role == WorkflowRole::Peer)?;
-                let pubkey = row.coordinator_pubkey.as_deref().unwrap_or("");
+                let participant = row.coordinator_participant.as_deref().unwrap_or("");
                 let name = row.coordinator_name.as_deref().unwrap_or("");
-                if pubkey.is_empty() {
+                if participant.is_empty() {
                     return Some(Err(anyhow::anyhow!(
-                        "P2 Onboarding/Peer row has empty coordinator_pubkey"
+                        "P2 Onboarding/Peer row has empty coordinator_participant"
                     )));
                 }
                 if name != "Participant 1" {

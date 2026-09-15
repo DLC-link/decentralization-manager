@@ -104,8 +104,9 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     // Decentrally-hosted external-party onboarding, wallet-driven via the
     // /v0/tenant/* API: the key is generated + each transaction hash signed client-side
     // and the wallet calls /onboard on each host itself, hosting it across
-    // P1+P2+P3 at a 2-of-3 confirmation threshold. No Noise mesh is involved (the
-    // calls are plain HTTP to each host), so it can run anywhere in the suite.
+    // P1+P2+P3 at a 2-of-3 confirmation threshold. No decman coordination is
+    // involved (the calls are plain HTTP to each host), so it can run anywhere
+    // in the suite.
     phases::external_party_tenant::run(&mut f).await?;
     // Serial-N+1 against a party that already exists: onboards on P1+P2, then
     // adds P3. Same plain-HTTP path, so it sits here with its sibling.
@@ -172,11 +173,9 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     // dismisses the rows it creates. PIDs are tracked in `f.current_pids` so
     // restarts compose across phases.
     // ----------------------------------------------------------------------
-    // Peer-health flip (kill a peer, assert P1 reports it Unreachable, restart,
-    // assert Connected again). Runs first in the chaos block, where the mesh is
-    // known healthy; it respawns P2 before returning so later phases see all
-    // three nodes.
-    phases::peer_health_flip::run(&mut f).await?;
+    // TODO(onledger-phases): a staleness flip replaces the 1.x peer-health flip
+    // (kill a peer, wait past DECPM_PEER_STALE_FACTOR x the heartbeat interval,
+    // assert Stale, restart, assert Active again).
     phases::identity_survives_dismiss::run(&mut f).await?;
     phases::cancel_cascades::run(&mut f).await?;
     phases::start_handler_conflict_409::run(&mut f).await?;
@@ -185,33 +184,29 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     phases::retry_coordinator_broadcast::run(&mut f).await?; // G3
     phases::dismiss_failed_cleans_artifacts::run(&mut f).await?; // G4
     phases::generate_keys_idempotent::run(&mut f).await?; // G7
-    // G8 (peer 3-strikes abort) is intentionally NOT run. The
-    // `peer_3_strikes_abort` phase is an unimplemented stub: exercising it
-    // needs a raw-Noise-frame injection harness to feed a peer three
-    // undeserializable payloads, which doesn't exist yet. Previously it was
-    // called here and returned Ok(()) without asserting anything — a phase
-    // that always "passed", i.e. misleading coverage — so it's left out of the
-    // sequence until the harness lands. (Tracked by the TODO in that module.)
-    // G9: restart with two concurrent kinds in flight — under the registry
-    // model the recovery path must resume BOTH InProgress coordinator rows
-    // (the old single-slot model resumed only the newest). Its original
-    // disable reason (the shared per-kind dars_state singleton) no longer
-    // exists.
+    // G8 (peer 3-strikes abort) is gone with the 1.x transport: it counted
+    // undeserializable transport frames, and no decman node opens a connection to
+    // another decman node any more.
+    // G9: restart with two concurrent kinds in flight — the observer must
+    // pick BOTH InProgress coordinator rows up again (the old single-slot
+    // model resumed only the newest).
     phases::restart_with_concurrent_kinds::run(&mut f).await?; // G9
-    phases::retry_with_offline_peer::run(&mut f).await?; // P2
+    // P2 (retry with an offline peer) is gone with the 1.x transport: a
+    // retry re-reads the ledger, so a stopped peer delays the run instead of
+    // failing the send.
     // G12: cancelling one of two concurrent sibling runs must leave the
-    // other's invites and peer rows untouched (instance-scoped CancelInvite +
-    // per-instance cancel endpoint).
+    // other's invitations and peer rows untouched (the cancel archives one
+    // `WorkflowProposal`, not both).
     phases::concurrent_sibling_cancel::run(&mut f).await?; // G12
     // G13: a delivered invitation must survive a peer restart (persisted +
     // reloaded at boot) and still be acceptable afterwards.
     phases::invite_survives_peer_restart::run(&mut f).await?; // G13
     // G14: declining one of two sibling invites fails only that run — the
-    // peer-side mirror of G12 (decline routing + instance-stamped teardown).
+    // peer-side mirror of G12.
     phases::concurrent_sibling_decline::run(&mut f).await?; // G14
-    // G15: pending invitations from one coordinator are capped at 16, oldest
-    // evicted — the only bound on invite intake now that busy-gating is gone.
-    phases::invite_cap::run(&mut f).await?; // G15
+    // G15 (invite cap) is gone with the 1.x transport: invitations are now
+    // `WorkflowProposal` contracts a peer observes on the ledger, so there is
+    // no inbound queue to bound.
     // G11 runs LAST: it is the heaviest phase (six concurrent coordinator
     // runs, twelve peer runs) and the full-feature test of concurrent
     // multi-instance workflows — full-mesh cross-acceptance of simultaneous
@@ -251,7 +246,8 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
 ///
 /// Invoke via `integration-tests/run-external-party.sh`, which brings up the
 /// localnet + 3 dec-party-manager nodes and runs just this test. The phase talks
-/// to each host over plain HTTP (no Noise mesh), so all it needs is fixture setup
+/// to each host over plain HTTP (no decman coordination), so all it needs is
+/// fixture setup
 /// + `discover_network_parties`, no earlier phases.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires running localnet — invoke via integration-tests/run-external-party.sh"]

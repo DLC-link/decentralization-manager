@@ -1,0 +1,32 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | The on-ledger pin for an ACS snapshot that the operator moves by hand.
+module Decman.Coordination.Acs where
+
+-- | Pins one exported snapshot. The joiner verifies the file against sizeBytes
+-- and sha256Hex before it imports, and trusts the manifest only after it has
+-- checked the exporter's hosting against the topology store.
+template AcsManifest
+  with
+    exporter : Party
+    exporterParticipant : Text
+    observers : [Party]
+    decPartyId : Text
+    targetParticipant : Text
+    activationSerial : Int
+      -- ^ The P2P serial that marked the target participant Onboarding.
+    sizeBytes : Int
+      -- ^ Zero means the party had no active contracts. The joiner then clears the flag without an import.
+    sha256Hex : Text
+    packageIds : [Text]
+      -- ^ The joiner requires every id to be vetted locally before the import.
+    exportedAt : Time
+  where
+    signatory exporter
+    observer observers
+    ensure sizeBytes >= 0 && activationSerial >= 1
+
+    choice AcsManifest_Archive : ()
+      controller exporter
+      do pure ()

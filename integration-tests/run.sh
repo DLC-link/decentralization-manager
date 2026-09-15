@@ -38,15 +38,15 @@ Boots a Splice localnet (or connects to devnet), spawns 3 dec-party-manager
 instances, and runs the governance workflow e2e (cargo test --profile release-ci).
 
 Output is filtered by default so the Given-When-Then scenario trace stays
-readable. The dec-party-manager processes and Canton/Noise libraries log
-only at WARN+ unless --verbose is passed.
+readable. Each dec-party-manager process writes its own file at INFO, with
+the on-ledger coordination module at DEBUG; --verbose adds that stream to the
+runner's output too. Set DECPM_NODE_RUST_LOG to change the node level alone.
 
 Options:
   -v, --verbose   Show INFO output from dec-party-manager processes,
                   the cargo test runner, and the e2e crate. Useful when
                   diagnosing a stuck or failing run. Sets:
-                  RUST_LOG=dec_party_manager=info,tokio_noise=error,
-                          hyper_noise=error,governance_workflows=info
+                  RUST_LOG=dec_party_manager=info,governance_workflows=info
 
   --target <localnet|devnet>
                   Which target to test against (default: localnet).
@@ -56,6 +56,7 @@ Options:
   -h, --help      Show this help and exit.
 
 If RUST_LOG is already set in the environment, it overrides this preset.
+DECPM_NODE_RUST_LOG overrides the node level, whatever RUST_LOG holds.
 EOF
             exit 0
             ;;
@@ -97,15 +98,14 @@ trap cleanup EXIT
 check_prerequisites
 
 # Port-free check applies to both targets: PR #142 moved devnet to a
-# bare-process bringup (no longer docker-compose), so the same 6 ports
-# (8081-8083 HTTP + 9000-9002 Noise) are bound directly by DecMan on devnet
+# bare-process bringup (no longer docker-compose), so the same ports
+# (8081-8083 HTTP + the metrics ports) are bound directly by DecMan on devnet
 # too. An orphan DecMan from a previous run (especially from another worktree
 # of the same repo) would otherwise:
 #   - hold the port,
-#   - silently steal the bash bringup's `wait_for_server` TCP readiness probe
-#     (so the new DecMan's EADDRINUSE death is invisible),
-#   - and respond to subsequent traffic with its own (stale, possibly
-#     wrong-revision) Noise keys — producing peer-decrypt errors that look
+#   - silently steal the bash bringup's readiness probe (so the new DecMan's
+#     EADDRINUSE death is invisible),
+#   - and answer subsequent traffic from its own stale database, which reads
 #     like the new DecMan is misconfigured.
 # Fail fast here instead.
 check_decman_ports_free
@@ -118,20 +118,14 @@ check_decman_ports_free
 # process. An externally-set RUST_LOG always overrides this preset.
 if [ -z "${RUST_LOG:-}" ]; then
     if [ "$VERBOSE" = 1 ]; then
-        export RUST_LOG="dec_party_manager=info,tokio_noise=error,hyper_noise=error,governance_workflows=info"
+        export RUST_LOG="dec_party_manager=info,governance_workflows=info"
     else
         # Quiet default: only WARN+ from everything except the GWT scenario
         # DSL output and per-phase headers from the test crate. The test
         # crate's helpers (invitations, http) stay at WARN — readers see the
         # scenario structure without helper-internal chatter. Pass --verbose
         # to surface the helpers and the dec-party-manager INFO stream.
-        #
-        # `hyper_noise::server` is pinned to ERROR rather than WARN: it logs
-        # one warning per failed Noise handshake, and during the
-        # configure_peers restart window stale clients spam ~20 of these
-        # over ~50s while the mesh converges. They're not actionable for
-        # readers of a passing test; --verbose surfaces them.
-        export RUST_LOG="warn,hyper_noise::server=error,governance_workflows::common::scenario=info,governance_workflows::common::phases=info,governance_workflows::common::chaos=info"
+        export RUST_LOG="warn,governance_workflows::common::scenario=info,governance_workflows::common::phases=info,governance_workflows::common::chaos=info"
     fi
 fi
 
@@ -221,7 +215,6 @@ configure_peers
 log_phase "Running e2e: ${DECPM_E2E_TEST:-governance_workflows_e2e} (Rust)"
 
 export P1_HTTP P2_HTTP P3_HTTP
-export P1_NOISE P2_NOISE P3_NOISE
 export P1_METRICS P2_METRICS P3_METRICS
 export P1_PARTICIPANT_ID P2_PARTICIPANT_ID P3_PARTICIPANT_ID
 export DEV_DIR

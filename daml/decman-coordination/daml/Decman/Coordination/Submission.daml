@@ -1,0 +1,91 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Signature collection for one prepared interactive submission.
+module Decman.Coordination.Submission where
+
+-- | One prepared transaction for the decentralized party. Signers recompute the
+-- hash from the bytes before they sign; the proposer verifies each signature
+-- before it counts toward the party threshold.
+template SubmissionRound
+  with
+    proposer : Party
+    runId : Text
+    index : Int
+    signers : [Party]
+    decPartyId : Text
+    actAs : Text
+      -- ^ The party the prepared transaction acts as. Signers require it to equal decPartyId.
+    description : Text
+    preparedTransactionHex : Text
+    preparedHashHex : Text
+    hashingSchemeVersion : Int
+    preparationTime : Time
+    maxRecordTime : Time
+    deadline : Time
+      -- ^ Set below maxRecordTime so the proposer has time to execute after the last signature.
+  where
+    signatory proposer
+    observer signers
+    ensure deadline <= maxRecordTime
+
+    -- | Nonconsuming, so every signer signs the same round.
+    nonconsuming choice SubmissionRound_Sign : ContractId SubmissionSignature
+      with
+        signer : Party
+        participantId : Text
+        signedBy : Text
+        signatureHex : Text
+        format : Text
+        algorithm : Text
+      controller signer
+      do
+        assertMsg "not a signer" (signer `elem` signers)
+        now <- getTime
+        assertMsg "round expired" (now < deadline)
+        create SubmissionSignature with
+          round = self
+          proposer
+          signer
+          observers = signers
+          runId
+          index
+          participantId
+          signedBy
+          signatureHex
+          format
+          algorithm
+          signedAt = now
+
+    -- | Close the round after execution or expiry.
+    choice SubmissionRound_Close : ()
+      with
+        result : Text
+          -- ^ Recorded in the exercise event as the audit trail of the round.
+      controller proposer
+      do pure ()
+
+template SubmissionSignature
+  with
+    round : ContractId SubmissionRound
+    proposer : Party
+    signer : Party
+    observers : [Party]
+    runId : Text
+    index : Int
+    participantId : Text
+    signedBy : Text
+      -- ^ Fingerprint of the signing key. The proposer counts the signature only when this key is in the head party_signing_keys.
+    signatureHex : Text
+    format : Text
+      -- ^ Canton SignatureFormat name.
+    algorithm : Text
+      -- ^ Canton SigningAlgorithmSpec name.
+    signedAt : Time
+  where
+    signatory signer
+    observer proposer, observers
+
+    choice SubmissionSignature_Archive : ()
+      controller signer
+      do pure ()

@@ -6,17 +6,6 @@ pub use clap::Parser;
 
 use dec_party_manager::config::Network;
 
-fn parse_positive_usize(s: &str) -> std::result::Result<usize, String> {
-    let v: usize = s
-        .parse()
-        .map_err(|e: std::num::ParseIntError| e.to_string())?;
-    if v == 0 {
-        Err("must be >= 1".into())
-    } else {
-        Ok(v)
-    }
-}
-
 #[derive(Parser)]
 #[command(name = "dec-party-manager")]
 #[command(about = "Canton decentralized party onboarding workflow automation", long_about = None)]
@@ -54,19 +43,6 @@ pub enum Commands {
         /// Encryption key for secrets stored in the database
         #[arg(long, env = "DECPM_DB_ENCRYPTION_KEY")]
         db_encryption_key: Option<String>,
-
-        // Node settings
-        /// Address to listen on for Noise protocol connections
-        #[arg(long, env = "DECPM_LISTEN_ADDRESS")]
-        listen_address: Option<String>,
-
-        /// Port to listen on for Noise protocol connections
-        #[arg(long, env = "DECPM_NOISE_PORT")]
-        noise_port: Option<u16>,
-
-        /// Public address that peers use to connect to this node
-        #[arg(long, env = "DECPM_PUBLIC_ADDRESS")]
-        public_address: Option<String>,
 
         // Canton settings
         /// Canton Admin API host
@@ -224,46 +200,14 @@ pub enum Commands {
         #[arg(long, env = "DECPM_TENANT_API_KEYS")]
         tenant_api_keys: Option<String>,
 
-        // Timeouts
-        /// Noise handshake timeout in seconds
-        #[arg(long, env = "DECPM_TIMEOUT_HANDSHAKE")]
-        timeout_handshake: Option<u64>,
-
-        /// Noise message timeout in seconds
-        #[arg(long, env = "DECPM_TIMEOUT_MESSAGE")]
-        timeout_message: Option<u64>,
-
-        /// Connection retry attempts
-        #[arg(long, env = "DECPM_TIMEOUT_RETRY_ATTEMPTS")]
-        timeout_retry_attempts: Option<u32>,
-
-        /// Connection retry delay in seconds
-        #[arg(long, env = "DECPM_TIMEOUT_RETRY_DELAY")]
-        timeout_retry_delay: Option<u64>,
-
-        // Noise retry tuning (separate from the legacy Timeouts knobs above)
-        /// Per-attempt timeout for the bounded peer-Noise retry wrapper, in seconds
-        #[arg(long, env = "DECPM_NOISE_RETRY_TIMEOUT_SEC")]
-        noise_retry_timeout_sec: Option<u64>,
-
-        /// Total attempts (initial + retries) for the bounded peer-Noise retry wrapper.
-        /// Must be >= 1.
-        #[arg(long, env = "DECPM_NOISE_RETRY_MAX_ATTEMPTS", value_parser = parse_positive_usize)]
-        noise_retry_max_attempts: Option<usize>,
-
-        /// Backoff between attempts of the bounded peer-Noise retry wrapper, in milliseconds
-        #[arg(long, env = "DECPM_NOISE_RETRY_BACKOFF_MS")]
-        noise_retry_backoff_ms: Option<u64>,
-
         /// CIP-104 Mode A reward-automation loop tick interval, in seconds.
         /// Enablement is on-ledger (presence of a CouponReassignmentDelegation);
         /// this only controls cadence. Defaults to 300.
         #[arg(long, env = "DECPM_REWARD_AUTOMATION_INTERVAL_SECS")]
         reward_automation_interval_secs: Option<u64>,
         /// Ceiling on an ACS snapshot the wallet relays over the tenant API, in
-        /// bytes. The Noise chunked-transfer limit does not apply to that path,
-        /// which goes over HTTP. The snapshot is assembled in memory on both
-        /// ends, so this is a real memory commitment. Defaults to 512 MiB.
+        /// bytes. The snapshot is assembled in memory on both ends, so this is
+        /// a real memory commitment. Defaults to 512 MiB.
         /// How often to re-read the backlog purely to refresh the expiry gauge,
         /// in seconds, when no sweep is due. The gauge refreshes at whichever of
         /// this and the sweep interval is shorter. Defaults to 3600.

@@ -1,8 +1,9 @@
 mod auth;
 mod config;
+mod coordination;
 mod governance;
 mod invitations;
-mod keys;
+mod node_identity;
 mod parties;
 mod party_config;
 mod tenant;
@@ -26,13 +27,16 @@ pub(crate) use governance::{
 // Crate-internal governance helpers reused by the reward-automation module,
 // re-exported here so they are reachable through the private `governance`
 // submodule.
+pub(crate) use coordination::{
+    export_acs_snapshot, get_acs_manifests, get_unsolicited_proposals, import_acs_snapshot,
+};
 pub(crate) use governance::{get_party_credentials, packages};
 pub(crate) use invitations::{accept_invitation, decline_invitation, get_invitations};
-pub(crate) use keys::get_key_status;
+pub(crate) use node_identity::{get_node_identity, get_registry, save_node_identity};
 pub(crate) use parties::{
     Discovery, DiscoveryGate, MAX_CONCURRENT_DISCOVERIES, clear_acs_import_quarantine,
     compare_peer_packages, discover_and_cache, get_decentralized_parties, get_participants_status,
-    get_vetted_packages, resolve_owner_keys_from_peers,
+    get_vetted_packages, resolve_owner_keys_from_topology,
 };
 pub(crate) use party_config::{discover_member_party, get_party_config, save_party_config};
 pub(crate) use tenant::{

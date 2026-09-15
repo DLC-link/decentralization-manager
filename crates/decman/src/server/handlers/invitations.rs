@@ -1,176 +1,58 @@
-use std::{collections::HashMap, time::Duration};
+//! `GET /invitations`, `POST /invitations/accept`, `POST /invitations/decline`.
+//!
+//! A card is an active `WorkflowProposal` that names this node and that the
+//! operator has not decided on. The observer projects the cards every tick
+//! (`onledger::proposals::project_pending_invitations`); the handlers read
+//! that projection and hand decisions to the engine (design D6, D10).
 
-use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
-use sqlx::SqlitePool;
+use std::collections::HashMap;
+
+use actix_web::{HttpRequest, HttpResponse, Responder, get, http::StatusCode, post, web};
 
 use crate::{
-    config::Peer,
-    consts::{DECLINE_NOTIFY_BACKOFF_SECS, DECLINE_NOTIFY_MAX_ATTEMPTS},
-    db::schema::{Commitable, SchemaRead, SchemaWrite},
-    noise::client::NoiseClient,
+    db::schema::SchemaRead,
+    onledger,
     server::{
-        AppState, mark_failed_via_pool,
+        AppState,
         middleware::require_admin,
         types::{
-            DeclineInvitationPayload, ErrorResponse, InvitationActionRequest, MessageResponse,
-            PeerJob, PendingInvitation, PendingInvitationsResponse, WorkflowKind, WorkflowProgress,
-            WorkflowRole, WorkflowRun,
+            ErrorResponse, InvitationActionRequest, MessageResponse, PendingInvitation,
+            PendingInvitationsResponse,
         },
-    },
-    workflow::{
-        AddPartyStep, ChangeThresholdStep, ContractsStep, DarsStep, KickStep, OnboardingStep,
-        state::WorkflowStep,
     },
 };
 
-async fn delete_persisted_invitation(data: &web::Data<AppState>, id: &str) {
-    match data.db.begin_transaction().await {
-        Ok(mut tx) => {
-            if let Err(e) = tx.delete_pending_invitation(id).await {
-                tracing::warn!("Failed to delete persisted invitation {id}: {e}");
-            } else if let Err(e) = Commitable::commit(tx).await {
-                tracing::warn!("Failed to commit invitation deletion {id}: {e}");
-            }
-        }
-        Err(e) => tracing::warn!("Failed to begin tx to delete invitation {id}: {e}"),
+/// The HTTP status for an accept or decline error, from the words the engine
+/// uses: an unknown or vanished proposal is 404, a proposal already decided,
+/// expired, or not addressed to this node is 409, and a missing node identity
+/// is 409 as well because the operator has to configure one.
+fn decision_error_status(message: &str) -> StatusCode {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("not active") || lower.contains("not visible") {
+        StatusCode::NOT_FOUND
+    } else if lower.contains("already")
+        || lower.contains("expired")
+        || lower.contains("does not invite")
+        || lower.contains("created by this node")
+        || lower.contains("node identity")
+    {
+        StatusCode::CONFLICT
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
     }
 }
 
-/// Put a removed invitation back (memory + DB) after an accept failed
-/// part-way: removal happens FIRST (under the write lock, so a double accept
-/// 404s), which means a failure after that point would otherwise strand the
-/// run — the card is gone, the operator can't retry, and the coordinator's
-/// human-paced WaitingForPeers waits forever.
-async fn restore_invitation(data: &web::Data<AppState>, invitation: &PendingInvitation) {
-    match data.db.begin_transaction().await {
-        Ok(mut tx) => {
-            if let Err(e) = tx.upsert_pending_invitation(invitation).await {
-                tracing::warn!("Failed to re-persist restored invitation: {e}");
-            } else if let Err(e) = Commitable::commit(tx).await {
-                tracing::warn!("Failed to commit restored invitation: {e}");
-            }
-        }
-        Err(e) => tracing::warn!("Failed to begin tx to restore invitation: {e}"),
+fn decision_error(action: &str, e: &anyhow::Error) -> HttpResponse {
+    let message = format!("{e:#}");
+    let status = decision_error_status(&message);
+    if status == StatusCode::INTERNAL_SERVER_ERROR {
+        tracing::error!(error = %message, "invitation {action} failed");
+    } else {
+        tracing::info!(error = %message, "invitation {action} refused");
     }
-    let mut invitations = data.pending_invitations.write().await;
-    if !invitations.iter().any(|i| i.id == invitation.id) {
-        invitations.push(invitation.clone());
-    }
-}
-
-fn step_total_for(kind: WorkflowKind) -> i64 {
-    match kind {
-        WorkflowKind::Onboarding => OnboardingStep::step_total(),
-        WorkflowKind::Kick => KickStep::step_total(),
-        WorkflowKind::Contracts => ContractsStep::step_total(),
-        WorkflowKind::Dars => DarsStep::step_total(),
-        WorkflowKind::AddParty => AddPartyStep::step_total(),
-        WorkflowKind::ChangeThreshold => ChangeThresholdStep::step_total(),
-    }
-}
-
-/// Insert the peer-side `workflow_runs` row for a freshly-accepted invite.
-///
-/// The synthetic instance_name is keyed on the coordinator's run instance
-/// (`peer-<kind>-<coord_pubkey[..16]>-<workflow_instance>`): with concurrent
-/// workflows a node can accept several same-kind invites from the SAME
-/// coordinator back to back, and a timestamp suffix at seconds resolution
-/// would collide — the second accept's upsert (ON CONFLICT(instance_name) DO
-/// UPDATE) silently merging two distinct runs into one row, cross-wiring
-/// their artefacts and statuses. Keying on the coordinator run makes the row
-/// unique per run and stable across a re-sent invite of the same run (the
-/// re-accept resumes the same row instead of duplicating it). Invites from
-/// coordinators that predate instance routing carry no `workflow_instance`;
-/// they fall back to the old timestamp suffix.
-pub(crate) async fn insert_peer_run(
-    db: &SqlitePool,
-    invitation: &PendingInvitation,
-) -> Option<String> {
-    let kind: WorkflowKind = invitation.invitation_type.into();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let pubkey_short =
-        &invitation.coordinator_pubkey[..invitation.coordinator_pubkey.len().min(16)];
-    let run_suffix = match invitation.workflow_instance.as_deref() {
-        Some(coord_instance) if !coord_instance.is_empty() => coord_instance.to_string(),
-        _ => now.to_string(),
-    };
-    let instance_name = format!(
-        "peer-{}-{}-{}",
-        kind.as_str().to_lowercase(),
-        pubkey_short,
-        run_suffix
-    );
-    let run = WorkflowRun {
-        instance_name: instance_name.clone(),
-        kind,
-        role: WorkflowRole::Peer,
-        status: WorkflowProgress::InProgress,
-        // No per-step granularity on the peer side yet — coordinator drives
-        // the protocol; we just track "I'm participating".
-        current_step: "Active".to_string(),
-        step_index: 0,
-        step_total: step_total_for(kind),
-        // We don't have the coordinator's full config; we have what they sent
-        // in the invite payload. Persist that for forensic purposes / future
-        // resume.
-        config_json: serde_json::json!({
-            "prefix": invitation.prefix,
-            "participants": invitation.participants,
-            "dar_filenames": invitation.dar_filenames,
-            "dar_hashes": invitation.dar_hashes,
-            "participant_id": invitation.kicked_participant,
-            "new_participant_id": invitation.new_participant,
-            "new_threshold": invitation.new_threshold,
-            "previous_threshold": invitation.previous_threshold,
-            "package_names": invitation.package_names,
-        })
-        .to_string(),
-        coordinator_pubkey: Some(invitation.coordinator_pubkey.clone()),
-        // The coordinator run this peer row belongs to — keys instance-scoped
-        // CancelInvite/RetryWorkflow and peer-resume routing.
-        coordinator_instance: invitation.workflow_instance.clone(),
-        coordinator_name: None,
-        // The participants list is the authoritative peer set carried in the
-        // invite (all four kinds send one).
-        expected_peers: invitation.participants.clone(),
-        completed_peers: Vec::new(),
-        connected_peers: Vec::new(),
-        acs_progress: None,
-        // Kick + contracts invites carry the target dec party; others don't.
-        dec_party_id: invitation.dec_party_id.clone(),
-        prefix: None,
-        participants: Vec::new(),
-        previous_threshold: None,
-        new_threshold: None,
-        kicked_participant: None,
-        added_participant: None,
-        package_names: Vec::new(),
-        dar_filenames: Vec::new(),
-        error: None,
-        dismissed: false,
-        created_at: now,
-        updated_at: now,
-    };
-
-    let mut tx = match db.begin_transaction().await {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::warn!("peer run: begin_transaction failed: {e}");
-            return None;
-        }
-    };
-    if let Err(e) = tx.upsert_workflow_run(&run).await {
-        tracing::warn!("peer run: upsert failed: {e}");
-        return None;
-    }
-    if let Err(e) = Commitable::commit(tx).await {
-        tracing::warn!("peer run: commit failed: {e}");
-        return None;
-    }
-    Some(instance_name)
+    HttpResponse::build(status).json(ErrorResponse {
+        error: format!("Failed to {action} the invitation: {e}"),
+    })
 }
 
 /// Get all pending invitations
@@ -182,23 +64,23 @@ pub(crate) async fn insert_peer_run(
 )]
 #[get("/invitations")]
 pub async fn get_invitations(data: web::Data<AppState>) -> impl Responder {
-    let invitations = data.pending_invitations.read().await;
+    let invitations = data.onledger.pending_invitations().await;
 
     // Resolve coordinator names from a single DB query
-    let pubkey_to_name: HashMap<String, String> = data
+    let names: HashMap<String, String> = data
         .db
         .get_all_peers()
         .await
         .unwrap_or_default()
         .into_iter()
-        .map(|p| (p.public_key, p.name))
+        .map(|p| (p.participant_id.to_string(), p.name))
         .collect();
 
     let invitations_with_names: Vec<PendingInvitation> = invitations
-        .iter()
+        .into_iter()
         .map(|inv| PendingInvitation {
-            coordinator_name: pubkey_to_name.get(&inv.coordinator_pubkey).cloned(),
-            ..inv.clone()
+            coordinator_name: names.get(&inv.coordinator_participant).cloned(),
+            ..inv
         })
         .collect();
 
@@ -207,7 +89,8 @@ pub async fn get_invitations(data: web::Data<AppState>) -> impl Responder {
     })
 }
 
-/// Accept a pending invitation and trigger the workflow
+/// Accept a pending invitation: record the decision and create the peer run
+/// row. The observer accepts on the ledger and drives the run from there.
 #[utoipa::path(
     tag = "Invitations",
     request_body = InvitationActionRequest,
@@ -215,7 +98,8 @@ pub async fn get_invitations(data: web::Data<AppState>) -> impl Responder {
         (status = 200, description = "Invitation accepted", body = MessageResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
-        (status = 404, description = "Invitation not found", body = ErrorResponse)
+        (status = 404, description = "Invitation not found", body = ErrorResponse),
+        (status = 409, description = "Invitation already decided, expired, or no node identity", body = ErrorResponse)
     )
 )]
 #[post("/invitations/accept")]
@@ -227,99 +111,24 @@ pub async fn accept_invitation(
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
     }
-    let invitation = {
-        let mut invitations = data.pending_invitations.write().await;
-        let idx = invitations.iter().position(|i| i.id == body.id);
-        match idx {
-            Some(i) => invitations.remove(i),
-            None => {
-                return HttpResponse::NotFound().json(serde_json::json!({
-                    "error": "Invitation not found"
-                }));
-            }
+    match onledger::accept_invitation(&data.onledger, &body.id).await {
+        Ok(accepted) => {
+            tracing::info!(
+                proposal = %body.id,
+                instance = %accepted.instance_name,
+                variant = ?accepted.member_variant,
+                "invitation accepted"
+            );
+            HttpResponse::Ok().json(MessageResponse {
+                message: "Invitation accepted".to_string(),
+            })
         }
-    };
-
-    delete_persisted_invitation(&data, &invitation.id).await;
-
-    // Refuse a second accept for a run we're already driving: a resurrected
-    // card (e.g. an in-flight invite delivered after a scoped cancel, or a
-    // re-broadcast) would otherwise upsert the SAME peer row and enqueue a
-    // SECOND start_peer loop for it — two loops double-executing commands
-    // against one row. Legacy invites without an instance skip the check.
-    if let Some(coord_instance) = invitation
-        .workflow_instance
-        .as_deref()
-        .filter(|i| !i.is_empty())
-    {
-        let already_running = SchemaRead::get_in_progress_workflow_runs(&data.db)
-            .await
-            .unwrap_or_default()
-            .iter()
-            .any(|r| {
-                r.role == WorkflowRole::Peer
-                    && r.coordinator_instance.as_deref() == Some(coord_instance)
-                    && r.coordinator_pubkey.as_deref() == Some(&invitation.coordinator_pubkey)
-            });
-        if already_running {
-            return HttpResponse::Conflict().json(serde_json::json!({
-                "error": format!(
-                    "Already participating in workflow run {coord_instance} from this \
-                     coordinator"
-                )
-            }));
-        }
+        Err(e) => decision_error("accept", &e),
     }
-
-    // Persist a peer-side workflow_runs row so the operator's feed shows
-    // "I'm participating in <kind>" until completion.
-    let Some(peer_instance) = insert_peer_run(&data.db, &invitation).await else {
-        // Put the card back so the operator can retry the accept.
-        restore_invitation(&data, &invitation).await;
-        return HttpResponse::InternalServerError().json(serde_json::json!({
-            "error": "Failed to record accepted invitation; the invitation was kept"
-        }));
-    };
-
-    // Enqueue a peer job. Carrying the coordinator's run instance
-    // (`workflow_instance` from the invite) lets the peer route its commands
-    // back to the right concurrent run; the single queue lets this node accept
-    // many invites of any kind at once without racing over a shared slot.
-    let job = PeerJob {
-        kind: invitation.invitation_type.into(),
-        instance_name: peer_instance,
-        coordinator_instance: invitation.workflow_instance.clone().unwrap_or_default(),
-        coordinator_pubkey: invitation.coordinator_pubkey.clone(),
-    };
-    tracing::info!(
-        "Accepting {:?} invitation; enqueuing peer job {}",
-        invitation.invitation_type,
-        job.instance_name
-    );
-    let peer_instance_for_err = job.instance_name.clone();
-    if data.peer_job_sender.send(job).is_err() {
-        // The row was just persisted InProgress; without a listener nothing
-        // will ever drive it, so mark it Failed instead of leaving a stale
-        // in-progress card in the feed — and put the invitation back so the
-        // operator can retry once the listener recovers.
-        mark_failed_via_pool(
-            &data.db,
-            &peer_instance_for_err,
-            "Peer workflow listener unavailable",
-        )
-        .await;
-        restore_invitation(&data, &invitation).await;
-        return HttpResponse::InternalServerError().json(serde_json::json!({
-            "error": "Peer workflow listener unavailable; the invitation was kept"
-        }));
-    }
-
-    HttpResponse::Ok().json(serde_json::json!({
-        "message": "Invitation accepted"
-    }))
 }
 
-/// Decline a pending invitation
+/// Decline a pending invitation: record the decision and exercise
+/// `WorkflowProposal_Decline` so the coordinator's run fails at once.
 #[utoipa::path(
     tag = "Invitations",
     request_body = InvitationActionRequest,
@@ -327,7 +136,8 @@ pub async fn accept_invitation(
         (status = 200, description = "Invitation declined", body = MessageResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
-        (status = 404, description = "Invitation not found", body = ErrorResponse)
+        (status = 404, description = "Invitation not found", body = ErrorResponse),
+        (status = 409, description = "Invitation already accepted or no node identity", body = ErrorResponse)
     )
 )]
 #[post("/invitations/decline")]
@@ -339,120 +149,46 @@ pub async fn decline_invitation(
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
     }
-    let invitation = {
-        let mut invitations = data.pending_invitations.write().await;
-        let idx = invitations.iter().position(|i| i.id == body.id);
-        match idx {
-            Some(i) => invitations.remove(i),
-            None => {
-                return HttpResponse::NotFound().json(serde_json::json!({
-                    "error": "Invitation not found"
-                }));
-            }
+    match onledger::decline_invitation(&data.onledger, &body.id, "declined by the operator").await {
+        Ok(decline_cid) => {
+            tracing::info!(proposal = %body.id, decline = %decline_cid, "invitation declined");
+            HttpResponse::Ok().json(MessageResponse {
+                message: "Invitation declined".to_string(),
+            })
         }
-    };
-
-    delete_persisted_invitation(&data, &invitation.id).await;
-
-    // Best-effort: tell the coordinator we declined so they can fail their
-    // matching in-progress run immediately instead of waiting until timeout.
-    // If the Noise round-trip fails for any reason we still report success
-    // to the operator — the local invitation is gone and the coordinator's
-    // existing timeout/cancel paths cover the worst case.
-    notify_coordinator_of_decline(&data, &invitation).await;
-
-    tracing::info!("Declined invitation {}", invitation.id);
-    HttpResponse::Ok().json(serde_json::json!({
-        "message": "Invitation declined"
-    }))
+        Err(e) => decision_error("decline", &e),
+    }
 }
 
-/// Best-effort: open a Noise client to the coordinator and send a
-/// `DeclineInvitation` message. Logs (but does not propagate) failures —
-/// callers treat this as fire-and-forget.
-async fn notify_coordinator_of_decline(data: &web::Data<AppState>, invitation: &PendingInvitation) {
-    let coordinator = match find_coordinator_peer(data, &invitation.coordinator_pubkey).await {
-        Some(p) => p,
-        None => {
-            tracing::warn!(
-                "Cannot notify coordinator of decline: no peer record for pubkey {}",
-                invitation.coordinator_pubkey
-            );
-            return;
-        }
-    };
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let payload = DeclineInvitationPayload {
-        kind: invitation.invitation_type.into(),
-        reason: None,
-        // Echo the coordinator's run identity so it only fails the matching
-        // run — a stale card's decline must not kill a newer workflow.
-        workflow_instance: invitation.workflow_instance.clone(),
-    };
-    let payload_bytes = match serde_json::to_vec(&payload) {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!("Failed to encode DeclineInvitationPayload: {e}");
-            return;
-        }
-    };
-
-    // Route the decline to the coordinator's matching run so it fails only that
-    // run when multiple workflows are active.
-    let route_instance = invitation.workflow_instance.clone().unwrap_or_default();
-    let client = match NoiseClient::new(data.config.clone(), coordinator, route_instance).await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!("Failed to build NoiseClient for decline notification: {e}");
-            return;
-        }
-    };
-
-    // Bounded retries: this is the only signal that fails the coordinator's
-    // run — its WaitingForPeers is human-paced (no timeout), so a dropped
-    // notification leaves that run hanging until a manual cancel. The budget
-    // is the dedicated DECLINE_NOTIFY profile, NOT the fast-transport
-    // noise_retry one: a decline sent the moment the invite card appears
-    // races the coordinator's ~2s init window (invites are sent before the
-    // run registers its Noise handle), during which the listener answers 503
-    // — the retries must outlive that window (see consts.rs). Spawned: each
-    // attempt can block for the full Noise request timeout, and the decline
-    // HTTP response must not hang the operator's UI on an unreachable
-    // coordinator — the notification is explicitly best-effort.
-    tokio::spawn(async move {
-        let max_attempts = DECLINE_NOTIFY_MAX_ATTEMPTS.max(1);
-        for attempt in 1..=max_attempts {
-            match client.send_decline_invitation(payload_bytes.clone()).await {
-                Ok(()) => return,
-                Err(e) if attempt < max_attempts => {
-                    tracing::warn!(
-                        "Decline notification to coordinator failed \
-                         (attempt {attempt}/{max_attempts}), retrying: {e}"
-                    );
-                    tokio::time::sleep(Duration::from_secs(DECLINE_NOTIFY_BACKOFF_SECS)).await;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Best-effort decline notification to coordinator failed after \
-                         {max_attempts} attempts: {e}"
-                    );
-                }
-            }
-        }
-    });
-}
-
-/// Look up the `Peer` record that owns the given Noise public key. The
-/// invitation carries the coordinator's pubkey but `get_peer` is keyed by
-/// participant id, so iterate the peers table.
-async fn find_coordinator_peer(
-    data: &web::Data<AppState>,
-    coordinator_pubkey: &str,
-) -> Option<Peer> {
-    data.db
-        .get_all_peers()
-        .await
-        .ok()?
-        .into_iter()
-        .find(|p| p.public_key == coordinator_pubkey)
+    #[test]
+    fn decision_errors_map_to_the_operator_facing_status() {
+        assert_eq!(
+            decision_error_status("WorkflowProposal 00a is not active or not visible to this node"),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            decision_error_status("WorkflowProposal 00a was already declined"),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            decision_error_status("WorkflowProposal 00a has expired"),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            decision_error_status("WorkflowProposal 00a does not invite this node"),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            decision_error_status("node identity not configured"),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            decision_error_status("database is locked"),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
 }

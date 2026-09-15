@@ -1,9 +1,9 @@
 //! G7: GenerateKeys idempotent re-run on resume reuses existing vault keys.
 //!
-//! Drive an Onboarding to mid-flight on P2 (after the peer has persisted
-//! its `peer_public_keys` artifact), capture the artifact payload, kill
-//! and restart P2, drive to completion, and verify the dec_party_identity
-//! row was created (proving the keys persisted across the restart).
+//! Drive an Onboarding to mid-flight on P2 (past GenerateKeys, so the key
+//! exists and rides on P2's acceptance), kill and restart P2, drive to
+//! completion, and verify the party's keyed participant rows exist, which
+//! proves the keys persisted across the restart.
 
 use std::time::Duration;
 
@@ -35,9 +35,9 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     post_accept_invitation(f, f.p2.http, &p2_inv).await?;
     post_accept_invitation(f, f.p3.http, &p3_inv).await?;
 
-    // Wait for P2 to persist the peer_public_keys artifact for its
-    // synthesized peer instance (proves GenerateKeys completed once on
-    // P2 before we kill it).
+    // Wait for P2's peer run to leave GenerateKeys. That step generates the
+    // key and publishes it on the acceptance, so a run past it proves P2
+    // holds a key before we kill it.
     let p2_db = f.db_path(2);
     let p2_db_clone = p2_db.clone();
     chaos::poll_until(Duration::from_secs(60), || {
@@ -48,7 +48,8 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 Some(n) => n,
                 None => return Ok(false),
             };
-            Ok(db::count_artifacts(&p2_db, &peer_inst).await? > 0)
+            let step = db::workflow_run_step(&p2_db, &peer_inst, "Peer").await?;
+            Ok(step.is_some_and(|s| s != "GenerateKeys"))
         }
     })
     .await?;
@@ -78,12 +79,12 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         .map(|p| p.party_id.to_string())
         .ok_or_else(|| anyhow::anyhow!("dec_party_id not resolved for prefix {prefix}"))?;
 
-    // dec_party_identity must have rows for this party (keys persist
+    // The party's key rows must exist (they persist
     // long-term, even after the artifact-cleanup-on-completion fires).
-    let id_count = db::count_dec_party_identity(&p2_db, &dec_party_id).await?;
+    let id_count = db::count_dec_party_participant_keys(&p2_db, &dec_party_id).await?;
     anyhow::ensure!(
         id_count >= 1,
-        "expected ≥1 dec_party_identity rows for {dec_party_id}, got {id_count}"
+        "expected 1 or more keyed participant rows for {dec_party_id}, got {id_count}"
     );
 
     // Sanity: the namespace prefix in dec_party_id must equal $PARTY_PREFIX.

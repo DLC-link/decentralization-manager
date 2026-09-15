@@ -2612,6 +2612,7 @@ mod tests {
 
         let decparty = CantonId::parse(EVE)?;
         let registry = AuthRegistry::new(&[PartyCredentials {
+            kind: crate::config::CredentialKind::Decparty,
             dec_party_id: decparty.clone(),
             member_party_id: CantonId::parse(BOB)?,
             user_id: "user".to_string(),

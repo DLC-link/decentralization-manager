@@ -32,11 +32,11 @@ pub fn fresh_prefix(label: &str) -> String {
 /// Used by chaos phases that drive a fresh onboarding and don't care about
 /// the response shape beyond success.
 ///
-/// The handler runs a peer-mesh pre-flight that can transiently 422 right
-/// after a chaos phase has killed/restarted peers — the new Noise sessions
-/// take a few seconds to re-converge across all three nodes. We retry a
-/// handful of times before giving up, since this is a precondition rather
-/// than the actual property under test.
+/// The handler runs a readiness pre-flight that can transiently 409 right
+/// after a chaos phase has killed/restarted peers — a restarted node needs a
+/// few observer ticks to republish its registry entry. We retry a handful of
+/// times before giving up, since this is a precondition rather than the actual
+/// property under test.
 pub async fn post_onboarding(f: &Fixture, prefix: &str) -> anyhow::Result<()> {
     let req = json!({
         "party_id_prefix": prefix,
@@ -54,24 +54,14 @@ pub async fn post_onboarding(f: &Fixture, prefix: &str) -> anyhow::Result<()> {
                 .with_context(|| format!("deserialize POST /onboarding response: {body}"))?;
             return Ok(());
         }
-        // Two retryable 4xx classes:
-        //   422 = peer-mesh pre-flight not yet converged after a chaos
-        //         restart; Noise sessions need a few seconds to settle.
-        //   409 = previous chaos phase's workflow_runs row is still
-        //         "active" from the server's perspective. Cleanup is
-        //         async (Disconnect commands to peers must ACK before
-        //         the coordinator marks its run completed). On localnet
-        //         this is sub-second; on devnet the per-peer Noise round
-        //         trip plus Canton submission acknowledgments push it
-        //         into the seconds range.
+        // One retryable 4xx class, 409, with two causes the handler does not
+        // distinguish: a peer whose registry entry is not visible yet after a
+        // chaos restart (design D3 version gate), or a previous phase's
+        // workflow_runs row that the observer has not finished closing.
         // Everything else is treated as fatal.
         let s = status.as_u16();
-        if (s == 422 || s == 409) && attempt < max_attempts {
-            let reason = if s == 409 {
-                "409 previous workflow still cleaning up"
-            } else {
-                "422 peer-mesh pre-flight not yet converged"
-            };
+        if s == 409 && attempt < max_attempts {
+            let reason = "409 peers not ready, or the previous workflow is still closing";
             info!("post_onboarding attempt {attempt}/{max_attempts}: {reason}, retrying");
             sleep(Duration::from_secs(3)).await;
             continue;
@@ -147,23 +137,17 @@ pub fn say(label: &str, msg: &str) {
     info!("[{label}] {msg}");
 }
 
-/// Verify all three nodes' HTTP + Noise ports are reachable; if any are
-/// not, respawn that node via `processes::spawn_only`. Used at the start of
-/// chaos phases to repair any state left by an earlier phase (or by an
-/// in-process race between cancel/abort and a CancelInvite delivery that
-/// leaves a Noise listener in a bad state).
+/// Verify all three nodes' HTTP ports are reachable; if any are not, respawn
+/// that node via `processes::spawn_only`. Used at the start of chaos phases to
+/// repair any node an earlier phase left dead.
 pub async fn ensure_nodes_healthy(f: &mut Fixture) -> anyhow::Result<()> {
     use tokio::net::TcpStream;
-    let probes = [
-        (1u8, f.p1.http, f.p1.noise),
-        (2, f.p2.http, f.p2.noise),
-        (3, f.p3.http, f.p3.noise),
-    ];
-    for (idx, http_port, noise_port) in probes {
+    let probes = [(1u8, f.p1.http), (2, f.p2.http), (3, f.p3.http)];
+    for (idx, http_port) in probes {
         // Only repair nodes the fixture believes should be alive. A
         // `current_pids[idx] = None` slot means a chaos phase intentionally
         // killed this node and is expecting it to stay dead — respawning
-        // it here would defeat the test's own premise (e.g. G3/G4/P2 kill
+        // it here would defeat the test's own premise (e.g. G3/G4 kill
         // peers to force a coordinator failure within the bounded
         // wait). Crashes leave the slot as `Some(stale_pid)`, so the
         // self-heal path still kicks in for the case it's meant to cover.
@@ -171,15 +155,10 @@ pub async fn ensure_nodes_healthy(f: &mut Fixture) -> anyhow::Result<()> {
         if !has_pid {
             continue;
         }
-        let http_ok = TcpStream::connect(("127.0.0.1", http_port)).await.is_ok();
-        let noise_ok = TcpStream::connect(("127.0.0.1", noise_port)).await.is_ok();
-        if http_ok && noise_ok {
+        if TcpStream::connect(("127.0.0.1", http_port)).await.is_ok() {
             continue;
         }
-        tracing::warn!(
-            "ensure_nodes_healthy: P{idx} unreachable (http={http_ok}, noise={noise_ok}); \
-             respawning"
-        );
+        tracing::warn!("ensure_nodes_healthy: P{idx} HTTP port unreachable; respawning");
         crate::common::processes::restart_node(f, idx).await?;
     }
     Ok(())

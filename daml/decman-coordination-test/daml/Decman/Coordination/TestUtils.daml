@@ -1,0 +1,214 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Test utilities for decman-coordination tests.
+-- Every party is a node party. Daml Script does not model participants, so
+-- participant ids are plain text constants and hosting checks stay in Rust.
+module Decman.Coordination.TestUtils where
+
+import DA.Date (Month(..), date)
+import DA.Time (RelTime, addRelTime, days, hours, time)
+import Daml.Script
+
+import Decman.Coordination.Acs
+import Decman.Coordination.Node
+import Decman.Coordination.Submission
+import Decman.Coordination.Types
+import Decman.Coordination.Workflow
+
+-- | Standard test party allocation.
+data CoordinationTestParties = CoordinationTestParties
+  with
+    proposer : Party
+    invitee1 : Party
+    invitee2 : Party
+    outsider : Party
+  deriving (Show, Eq)
+
+-- | Allocate standard test parties.
+allocateCoordinationTestParties : Script CoordinationTestParties
+allocateCoordinationTestParties = do
+  proposer <- allocateParty "Proposer"
+  invitee1 <- allocateParty "Invitee1"
+  invitee2 <- allocateParty "Invitee2"
+  outsider <- allocateParty "Outsider"
+  pure CoordinationTestParties with ..
+
+-- | Fixed ledger time for every fixture. Tests move time relative to it.
+testStartTime : Time
+testStartTime = time (date 2026 Sep 14) 12 0 0
+
+-- | Set the ledger clock to testStartTime and return it.
+startClock : Script Time
+startClock = do
+  setTime testStartTime
+  pure testStartTime
+
+-- | Submission context for a party that can read a contract it does not hold.
+-- Stands in for explicit disclosure, so a negative test reaches the choice
+-- guard instead of failing on visibility. Qualified because the SubmissionRound
+-- field `actAs` shadows the Daml.Script function of the same name.
+disclosedContext actor reader = Daml.Script.actAs actor <> Daml.Script.readAs reader
+
+proposerParticipantId : Text
+proposerParticipantId = "PAR::proposer::1220aa"
+
+invitee1ParticipantId : Text
+invitee1ParticipantId = "PAR::invitee1::1220bb"
+
+invitee2ParticipantId : Text
+invitee2ParticipantId = "PAR::invitee2::1220cc"
+
+testFingerprint : Text
+testFingerprint = "1220deadbeef"
+
+testSigningPublicKeyHex : Text
+testSigningPublicKeyHex = "0a20deadbeef"
+
+testDecPartyId : Text
+testDecPartyId = "decparty::1220dd"
+
+testRunId : Text
+testRunId = "run-1"
+
+-- ============================================================================
+-- Registry
+-- ============================================================================
+
+testHeartbeatIntervalSecs : Int
+testHeartbeatIntervalSecs = 3600
+
+testMinHeartbeatIntervalSecs : Int
+testMinHeartbeatIntervalSecs = 60
+
+-- | The proposer's registry entry with both invitees as peers.
+testNode : CoordinationTestParties -> Time -> DecmanNode
+testNode parties now = DecmanNode with
+  node = parties.proposer
+  participantId = proposerParticipantId
+  displayName = "proposer-node"
+  version = "2.0.0"
+  buildVersion = "2.0.0-test"
+  coordinationVersion = 1
+  peers = [parties.invitee1, parties.invitee2]
+  lastActiveAt = now
+  heartbeatIntervalSecs = testHeartbeatIntervalSecs
+  minHeartbeatIntervalSecs = testMinHeartbeatIntervalSecs
+
+createTestNode : CoordinationTestParties -> Script (ContractId DecmanNode)
+createTestNode parties = do
+  now <- getTime
+  submit parties.proposer $ createCmd (testNode parties now)
+
+-- ============================================================================
+-- Workflow
+-- ============================================================================
+
+testProposalTtl : RelTime
+testProposalTtl = days 7
+
+-- | An onboarding proposal from the proposer to both invitees.
+testProposal : CoordinationTestParties -> Time -> WorkflowProposal
+testProposal parties now = WorkflowProposal with
+  proposer = parties.proposer
+  proposerParticipant = proposerParticipantId
+  proposerNamespaceFingerprint = Some testFingerprint
+  proposerSigningPublicKeyHex = Some testSigningPublicKeyHex
+  proposerDamlKeyFingerprint = Some testFingerprint
+  runId = testRunId
+  kind = Onboarding
+  invitees = [parties.invitee1, parties.invitee2]
+  participants = [proposerParticipantId, invitee1ParticipantId, invitee2ParticipantId]
+  decPartyId = None
+  prefix = Some "decparty"
+  threshold = Some 2
+  previousThreshold = None
+  dndBaseSerial = None
+  p2pBaseSerial = None
+  newParticipant = None
+  kickedParticipant = None
+  darPins = []
+  packageNames = []
+  description = "Onboard decparty"
+  createdAt = now
+  expiresAt = addRelTime now testProposalTtl
+
+createTestProposal : CoordinationTestParties -> Script (ContractId WorkflowProposal)
+createTestProposal parties = do
+  now <- getTime
+  submit parties.proposer $ createCmd (testProposal parties now)
+
+-- | The Accept command of one node. A command, not a submission, so a test can
+-- submit it as a success or as an expected failure.
+acceptCmd : Party -> Text -> ContractId WorkflowProposal -> Commands (ContractId WorkflowAcceptance)
+acceptCmd acceptor participantId proposalCid =
+  exerciseCmd proposalCid WorkflowProposal_Accept with
+    acceptor
+    participantId
+    namespaceFingerprint = Some testFingerprint
+    signingPublicKeyHex = Some testSigningPublicKeyHex
+    damlKeyFingerprint = Some testFingerprint
+    memberParty = None
+
+declineCmd : Party -> Text -> ContractId WorkflowProposal -> Commands (ContractId WorkflowDecline)
+declineCmd decliner reason proposalCid =
+  exerciseCmd proposalCid WorkflowProposal_Decline with
+    decliner
+    reason
+
+-- ============================================================================
+-- Submission
+-- ============================================================================
+
+testRoundDeadline : RelTime
+testRoundDeadline = hours 1
+
+-- | A round for both invitees, prepared at `now`.
+testRound : CoordinationTestParties -> Time -> SubmissionRound
+testRound parties now = SubmissionRound with
+  proposer = parties.proposer
+  runId = testRunId
+  index = 0
+  signers = [parties.invitee1, parties.invitee2]
+  decPartyId = testDecPartyId
+  actAs = testDecPartyId
+  description = "Create GovernanceRules"
+  preparedTransactionHex = "0a00"
+  preparedHashHex = "1220cafe"
+  hashingSchemeVersion = 2
+  preparationTime = now
+  maxRecordTime = addRelTime now (hours 20)
+  deadline = addRelTime now testRoundDeadline
+
+createTestRound : CoordinationTestParties -> Script (ContractId SubmissionRound)
+createTestRound parties = do
+  now <- getTime
+  submit parties.proposer $ createCmd (testRound parties now)
+
+signCmd : Party -> Text -> ContractId SubmissionRound -> Commands (ContractId SubmissionSignature)
+signCmd signer participantId roundCid =
+  exerciseCmd roundCid SubmissionRound_Sign with
+    signer
+    participantId
+    signedBy = testFingerprint
+    signatureHex = "abcd"
+    format = "SIGNATURE_FORMAT_CONCAT"
+    algorithm = "SIGNING_ALGORITHM_SPEC_ED25519"
+
+-- ============================================================================
+-- ACS
+-- ============================================================================
+
+-- | A manifest exported by invitee1 for a snapshot that invitee2 imports.
+testManifest : CoordinationTestParties -> Time -> AcsManifest
+testManifest parties now = AcsManifest with
+  exporter = parties.invitee1
+  exporterParticipant = invitee1ParticipantId
+  observers = [parties.proposer, parties.invitee2]
+  decPartyId = testDecPartyId
+  targetParticipant = invitee2ParticipantId
+  activationSerial = 3
+  sizeBytes = 4096
+  sha256Hex = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  packageIds = ["1220aaaa", "1220bbbb"]
+  exportedAt = now

@@ -8,11 +8,13 @@ use serde::Serialize;
 
 use sqlx::SqlitePool;
 
+use common::coordination::{CoordinationDarPhase, CoordinationDarStatus};
+
 use crate::{
     config::{NetworkConfig, NodeConfig, Peer},
     db::schema::{Commitable, SchemaRead, SchemaWrite},
     error::Result,
-    noise::parse_public_key,
+    onledger::dars,
     server::{
         AppState,
         middleware::require_admin,
@@ -48,7 +50,7 @@ pub async fn get_network_config(data: web::Data<AppState>) -> impl Responder {
     request_body = Vec<Peer>,
     responses(
         (status = 200, description = "Network config saved", body = SuccessResponse),
-        (status = 400, description = "A peer carries an unparseable Noise public key", body = ErrorResponse),
+        (status = 400, description = "A peer carries no node party", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
@@ -65,10 +67,13 @@ pub async fn save_network_config(
     }
     let peers = body.into_inner();
 
-    let bad_keys = peers_with_unparseable_keys(&peers);
-    if !bad_keys.is_empty() {
+    let without_party = peers_without_node_party(&peers);
+    if !without_party.is_empty() {
         return HttpResponse::BadRequest().json(ErrorResponse {
-            error: format!("Invalid Noise public key for: {}", bad_keys.join(", ")),
+            error: format!(
+                "These peers carry no node party, so no workflow can invite them: {}",
+                without_party.join(", ")
+            ),
         });
     }
 
@@ -81,6 +86,19 @@ pub async fn save_network_config(
     }
 
     tracing::info!("Saved network config with {} peers", peers.len());
+
+    // The registry entry names the peers as observers (design D3), so a
+    // changed peer list means a changed entry. Best effort and off the
+    // request path: the observer republishes on its next tick anyway.
+    let onledger = data.onledger.clone();
+    tokio::spawn(async move {
+        if onledger.identity().await.is_none() {
+            return;
+        }
+        if let Err(e) = onledger.publish_registry_entry().await {
+            tracing::warn!(error = %format!("{e:#}"), "registry entry not republished after a peers change");
+        }
+    });
     HttpResponse::Ok().json(SuccessResponse { success: true })
 }
 
@@ -95,9 +113,8 @@ pub struct NodeConfigResponse {
     #[serde(flatten)]
     config: NodeConfig,
     test_mode: bool,
-    /// Cargo package semver. This is the *compatibility* version peers gate on
-    /// (`MIN_PEER_VERSION`), not necessarily the release identity — see
-    /// `build_version`.
+    /// Cargo package semver, the version this node publishes in its registry
+    /// entry; not necessarily the release identity — see `build_version`.
     version: &'static str,
     /// Display build identity: the git tag on release images, the short commit
     /// SHA on per-commit images, or `<semver>-dev` outside CI. This is what the
@@ -126,7 +143,8 @@ pub async fn get_node_config(data: web::Data<AppState>) -> impl Responder {
     })
 }
 
-/// Per-hop health of this node and the participant it drives.
+/// Per-hop health of this node and the participant it drives, plus the state
+/// of the startup coordination-DAR upload (design D8).
 ///
 /// Answers from a shared snapshot that is at most `SNAPSHOT_TTL` old, so the
 /// Config tab's poll costs one pair of gRPC probes per TTL however many
@@ -141,16 +159,38 @@ pub async fn get_node_config(data: web::Data<AppState>) -> impl Responder {
 )]
 #[get("/node-health")]
 pub async fn get_node_health(data: web::Data<AppState>) -> impl Responder {
+    let mut health = data.health_cache.get(&data.config).await;
+    health.coordination_dar = Some(coordination_dar_status(&dars::startup_upload_state().await));
     HttpResponse::Ok()
         .insert_header(CacheControl(vec![CacheDirective::NoStore]))
-        .json(data.health_cache.get(&data.config).await)
+        .json(health)
+}
+
+/// The wire view of the startup task's state (pure).
+fn coordination_dar_status(state: &dars::StartupUploadState) -> CoordinationDarStatus {
+    let phase = match state.phase {
+        dars::StartupUploadPhase::Pending => CoordinationDarPhase::Pending,
+        dars::StartupUploadPhase::Disabled => CoordinationDarPhase::Disabled,
+        dars::StartupUploadPhase::Uploading => CoordinationDarPhase::Uploading,
+        dars::StartupUploadPhase::Ready => CoordinationDarPhase::Ready,
+    };
+    CoordinationDarStatus {
+        phase,
+        filename: state.filename.clone(),
+        main_package_id: state.main_package_id.clone(),
+        uploaded: state.uploaded,
+        vetted: state.vetted,
+        attempts: state.attempts,
+        last_error: state.last_error.clone(),
+        updated_at: state.updated_at,
+    }
 }
 
 /// Liveness probe. Returns `200 {"status":"ok"}` and does no I/O, so the
 /// frontend can ping it to measure its own round-trip latency to this node
-/// (filling the "you" row of the peers table, where peer latency comes from
-/// Noise health probes). Public — no auth — so the timing reflects transport
-/// plus handler overhead only, and so it doubles as a container liveness probe.
+/// (filling the "you" row of the peers table; peers show their heartbeat age
+/// instead). Public — no auth — so the timing reflects transport plus
+/// handler overhead only, and so it doubles as a container liveness probe.
 #[utoipa::path(
     tag = "Configuration",
     responses(
@@ -186,15 +226,15 @@ pub async fn metrics() -> impl Responder {
     }
 }
 
-/// Participant IDs whose Noise public key will not parse.
+/// Participant IDs of peers that carry no node party.
 ///
-/// A key that is hex and the right length can still be off the curve. It stores
-/// fine and is then skipped by every Noise path, so the peer silently never
-/// connects; the write is the last place to catch it.
-fn peers_with_unparseable_keys(peers: &[Peer]) -> Vec<String> {
+/// Such a row stores fine and is then skipped by every coordination path: the
+/// node cannot name the peer as an observer, so it never appears in a run. The
+/// write is the last place to catch it.
+fn peers_without_node_party(peers: &[Peer]) -> Vec<String> {
     peers
         .iter()
-        .filter(|p| parse_public_key(&p.public_key).is_err())
+        .filter(|p| p.party.as_ref().is_none_or(|q| q.to_string().is_empty()))
         .map(|p| p.participant_id.to_string())
         .collect()
 }
@@ -215,35 +255,25 @@ mod tests {
     use common::canton_id::CantonId;
     use utoipa::PartialSchema;
 
-    // Compressed generator point: valid hex, valid length, and on the curve.
-    const VALID_KEY: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
-
-    fn peer(prefix: &str, public_key: &str) -> Result<Peer> {
+    fn peer(prefix: &str, party: Option<&str>) -> Result<Peer> {
         Ok(Peer {
             participant_id: CantonId::parse(&format!("{prefix}::{ns}", ns = "a".repeat(68)))?,
             name: prefix.to_string(),
-            address: "peer.example.com".to_string(),
-            port: 9000,
-            public_key: public_key.to_string(),
-            party: None,
+            party: party
+                .map(|p| CantonId::parse(&format!("{p}::{ns}", ns = "b".repeat(68))))
+                .transpose()?,
         })
     }
 
-    // Length and hex alone do not make a public key: an all-zero 33-byte value
-    // passes both and is not a point on the curve. Storing it leaves a peer the
-    // Noise paths quietly skip, so the POST has to refuse it.
+    // A peer with no node party stores fine and is then skipped by every
+    // coordination path, so the POST has to refuse it.
     #[test]
-    fn unparseable_public_keys_are_named_by_participant_id() -> Result {
-        let peers = [
-            peer("good", VALID_KEY)?,
-            peer("offcurve", &format!("02{}", "0".repeat(64)))?,
-            peer("nothex", "02zz")?,
-            peer("empty", "")?,
-        ];
+    fn peers_without_a_node_party_are_named_by_participant_id() -> Result {
+        let peers = [peer("good", Some("node"))?, peer("bare", None)?];
 
-        let bad = peers_with_unparseable_keys(&peers);
+        let bad = peers_without_node_party(&peers);
 
-        assert_eq!(bad.len(), 3, "only the valid key should survive: {bad:?}");
+        assert_eq!(bad.len(), 1, "only the bare peer should be named: {bad:?}");
         assert!(bad.iter().all(|id| !id.starts_with("good::")));
         Ok(())
     }
@@ -261,6 +291,46 @@ mod tests {
                 json.contains(field),
                 "OpenAPI schema missing `{field}`: {json}"
             );
+        }
+    }
+
+    /// Every phase of the startup task has a wire value, and the fields the
+    /// UI shows copy across unchanged.
+    #[test]
+    fn coordination_dar_status_mirrors_the_task_state() {
+        let state = dars::StartupUploadState {
+            phase: dars::StartupUploadPhase::Uploading,
+            filename: "decman-coordination-v1-0.1.0.dar".into(),
+            main_package_id: "abc".into(),
+            uploaded: true,
+            vetted: false,
+            attempts: 3,
+            last_error: Some("not connected".into()),
+            updated_at: 42,
+        };
+        let view = coordination_dar_status(&state);
+        assert_eq!(view.phase, CoordinationDarPhase::Uploading);
+        assert!(view.uploaded);
+        assert!(!view.vetted);
+        assert_eq!(view.attempts, 3);
+        assert_eq!(view.last_error.as_deref(), Some("not connected"));
+        assert_eq!(view.updated_at, 42);
+        for (phase, expected) in [
+            (
+                dars::StartupUploadPhase::Pending,
+                CoordinationDarPhase::Pending,
+            ),
+            (
+                dars::StartupUploadPhase::Disabled,
+                CoordinationDarPhase::Disabled,
+            ),
+            (dars::StartupUploadPhase::Ready, CoordinationDarPhase::Ready),
+        ] {
+            let view = coordination_dar_status(&dars::StartupUploadState {
+                phase,
+                ..state.clone()
+            });
+            assert_eq!(view.phase, expected);
         }
     }
 
