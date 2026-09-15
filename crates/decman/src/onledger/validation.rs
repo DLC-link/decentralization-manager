@@ -809,7 +809,13 @@ pub fn check_kick_p2p(pending: &PendingProposal<PartyToParticipant>, exp: &Expec
         .as_ref()
         .map(|d| d.owners.iter().cloned().collect())
         .unwrap_or_default();
-    let dual_key_party = !head_owners.is_empty() && head_keys == head_owners;
+    // A member reads the head DND after the kick DND became effective, so the
+    // kicked owner is already gone from it while its key is still in the P2P.
+    // Both shapes therefore mean the same dual-usage party.
+    let mut owners_before_kick = head_owners.clone();
+    owners_before_kick.insert(kicked.owner_fingerprint.clone());
+    let dual_key_party =
+        !head_owners.is_empty() && (head_keys == head_owners || head_keys == owners_before_kick);
     if dual_key_party && **removed != kicked.owner_fingerprint {
         refuse!(
             "P2P removes key {removed} but the kicked member's key is {}",
@@ -1396,6 +1402,37 @@ mod tests {
         let p2p = build_kick_p2p(&head_p2p(), &participant(3), &fp(3), 2);
         let p = pending(p2p_of(&p2p).expect("p2p").clone(), 2, &[fp(1)]);
         check_kick_p2p(&p, &exp).expect("legacy ok");
+    }
+
+    /// A member validates the kick P2P after the kick DND became effective, so
+    /// the head owners already exclude the kicked member. The party is still
+    /// dual-usage, and the pin on the kicked member's key must still hold.
+    #[test]
+    fn kick_p2p_pins_the_kicked_key_after_the_dnd_landed() {
+        let mut exp = party_expectations(WorkflowKind::Kick, 2);
+        // The head DND is the one the kick already wrote.
+        let mut landed = head_dnd();
+        landed.owners.retain(|o| *o != fp(3));
+        landed.threshold = 2;
+        exp.head.dnd = Some(landed);
+        // A cold cache: no own Daml key, no survivor claims, no recorded key for
+        // the kicked member. Only the owner-set shape can catch a wrong removal.
+        exp.identity.daml_key_fingerprint = None;
+        exp.survivor_key_claims = Default::default();
+        exp.kicked = Some(KickedMember {
+            participant_id: participant(3).to_string(),
+            owner_fingerprint: fp(3),
+            signing_key_fingerprint: None,
+        });
+
+        let p2p = build_kick_p2p(&head_p2p(), &participant(3), &fp(1), 2);
+        let p = pending(p2p_of(&p2p).expect("p2p").clone(), 2, &[fp(1)]);
+        let err = check_kick_p2p(&p, &exp).expect_err("wrong key");
+        assert!(err.0.contains("the kicked member's key is"), "{err}");
+
+        let p2p = build_kick_p2p(&head_p2p(), &participant(3), &fp(3), 2);
+        let p = pending(p2p_of(&p2p).expect("p2p").clone(), 2, &[fp(1)]);
+        check_kick_p2p(&p, &exp).expect("the kicked member's own key");
     }
 
     #[test]

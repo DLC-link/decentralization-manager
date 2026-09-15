@@ -251,7 +251,8 @@ packages per participant from the topology store. No DAR bytes travel over any d
 The coordination DAR (`releases/v1/decman-coordination-v1-0.1.0.dar`) is embedded with
 `include_bytes!` and uploaded and vetted by a background task at startup with retry
 (`DECPM_AUTO_UPLOAD_COORDINATION_DAR`, default true; `expected_main_package_id` pinned;
-`synchronizer_id = utils::get_synchronizer_id(config)`); state appears in `/node-health`. This
+`synchronizer_id` = the logical synchronizer id, which is what `UploadDarRequest` parses);
+state appears in `/node-health`. This
 is a policy change from operator-accepted vetting and is documented as such.
 `POST /dars/upload` remains the manual fallback.
 
