@@ -3931,6 +3931,28 @@ mod tests {
         Ok(())
     }
 
+    /// The feed is polled every two seconds, so a run may put nothing
+    /// unbounded on the wire. A Dars config carries each DAR's bytes.
+    #[test]
+    fn dars_run_keeps_its_dar_bytes_off_the_feed() -> anyhow::Result<()> {
+        let payload = "A".repeat(4096);
+        let mut run = enrich_run(
+            &format!(r#"{{"dar_files":[{{"filename":"app.dar","data":"{payload}"}}]}}"#),
+            Vec::new(),
+        );
+        enrich_from_config_json(&mut run);
+
+        let feed = serde_json::to_string(&WorkflowRunsResponse { runs: vec![run] })?;
+        assert!(!feed.contains(&payload), "the feed carries the DAR bytes");
+        assert!(feed.contains("app.dar"), "the feed lost the DAR filename");
+
+        // The CLI and the IT harness read this response back, so the field has
+        // to default in rather than fail as missing.
+        let back: WorkflowRunsResponse = serde_json::from_str(&feed)?;
+        assert!(back.runs[0].config_json.is_empty());
+        Ok(())
+    }
+
     #[test]
     fn contracts_invite_payload_roundtrips_with_defaults() -> anyhow::Result<()> {
         let payload = ContractsInvitePayload {

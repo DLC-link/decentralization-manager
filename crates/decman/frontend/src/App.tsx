@@ -89,6 +89,22 @@ function buildHash(tab: number, partySlug?: string | null): string {
   return partySlug ? `#${section}/${partySlug}` : `#${section}`;
 }
 
+/**
+ * Wrap a refresh so a tick is skipped while the previous one is still running.
+ * Without it a response slower than the interval stacks requests until the
+ * browser's connection pool is full and nothing else on the page loads.
+ */
+function pollGuard(refresh: () => Promise<void>): () => void {
+  let inFlight = false;
+  return () => {
+    if (inFlight) return;
+    inFlight = true;
+    void refresh().finally(() => {
+      inFlight = false;
+    });
+  };
+}
+
 const App = () => {
   const muiTheme = useTheme();
   const isLargeScreen = useMediaQuery(muiTheme.breakpoints.up("lg"));
@@ -496,10 +512,12 @@ const App = () => {
     }
   }, []);
 
-  // Poll pending invitations every 2 seconds
+  // Poll pending invitations every 2 seconds, in-flight-guarded like the
+  // status probe above: a slow response must not stack concurrent requests.
   useEffect(() => {
-    refreshInvitations();
-    const interval = window.setInterval(refreshInvitations, 2000);
+    const poll = pollGuard(refreshInvitations);
+    poll();
+    const interval = window.setInterval(poll, 2000);
     return () => clearInterval(interval);
   }, [refreshInvitations]);
 
@@ -519,8 +537,9 @@ const App = () => {
 
   // Poll workflow_runs every 2 seconds, same cadence as invitations.
   useEffect(() => {
-    refreshWorkflowRuns();
-    const interval = window.setInterval(refreshWorkflowRuns, 2000);
+    const poll = pollGuard(refreshWorkflowRuns);
+    poll();
+    const interval = window.setInterval(poll, 2000);
     return () => clearInterval(interval);
   }, [refreshWorkflowRuns]);
 

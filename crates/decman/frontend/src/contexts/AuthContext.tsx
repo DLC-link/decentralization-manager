@@ -15,6 +15,7 @@ import {
   getIdToken,
   setIdToken,
   clearToken,
+  setTokenRefresher,
 } from "../auth";
 import { LoginPage } from "../components/LoginPage";
 import type { AuthConfig } from "../types";
@@ -103,6 +104,23 @@ function KeycloakAuthProvider({
           if (kc.idToken) setIdToken(kc.idToken);
           setTokenState(kc.token);
 
+          // Renew on demand too: the timer below is the happy path, but a
+          // throttled background tab or a sleeping laptop fires it late, and
+          // whatever request lands first must not lose the session over it.
+          setTokenRefresher(async () => {
+            try {
+              await kc.updateToken(30);
+            } catch {
+              return null;
+            }
+            if (!kc.token) return null;
+            setToken(kc.token);
+            if (kc.refreshToken) setRefreshToken(kc.refreshToken);
+            if (kc.idToken) setIdToken(kc.idToken);
+            setTokenState(kc.token);
+            return kc.token;
+          });
+
           function scheduleRefresh() {
             const exp = kc.tokenParsed?.exp;
             if (!exp) return;
@@ -145,7 +163,10 @@ function KeycloakAuthProvider({
     }
 
     init();
-    return () => clearTimeout(refreshTimer.current);
+    return () => {
+      clearTimeout(refreshTimer.current);
+      setTokenRefresher(null);
+    };
   }, [config]);
 
   const logout = useCallback(() => {
@@ -191,6 +212,17 @@ function Auth0AuthProvider({ children }: { children: ReactNode }) {
       return;
     }
 
+    setTokenRefresher(async () => {
+      try {
+        const t = await getAccessTokenSilently({ cacheMode: "off" });
+        setToken(t);
+        setTokenState(t);
+        return t;
+      } catch {
+        return null;
+      }
+    });
+
     getAccessTokenSilently()
       .then((t) => {
         setToken(t);
@@ -202,6 +234,8 @@ function Auth0AuthProvider({ children }: { children: ReactNode }) {
         setTokenState(null);
       })
       .finally(() => setTokenLoading(false));
+
+    return () => setTokenRefresher(null);
   }, [isAuthenticated, isLoading, getAccessTokenSilently]);
 
   const logout = useCallback(() => {
