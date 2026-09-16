@@ -54,12 +54,19 @@ function KeycloakAuthProvider({
   const sessionLive = useRef(true);
 
   useEffect(() => {
-    // Reopened before the guard below: StrictMode runs effect, cleanup, effect,
-    // and the second pass returns here early. Left closed, the `init()` still
-    // running from the first pass would register a refresher that can never
-    // renew, and every 401 in a dev build would reload the page.
+    // StrictMode runs effect, cleanup, effect. The latch reopens on the second
+    // pass so the `init()` still running from the first can finish, and every
+    // pass returns the same cleanup, including the guarded one: React keeps
+    // only the newest, so a pass that returned none would leave a real unmount
+    // with nothing to close the latch or unregister the refresher.
+    const endSession = () => {
+      clearTimeout(refreshTimer.current);
+      sessionLive.current = false;
+      setTokenRefresher(null);
+    };
+
     sessionLive.current = true;
-    if (initStarted.current) return;
+    if (initStarted.current) return endSession;
     initStarted.current = true;
 
     async function init() {
@@ -181,11 +188,7 @@ function KeycloakAuthProvider({
     }
 
     init();
-    return () => {
-      clearTimeout(refreshTimer.current);
-      sessionLive.current = false;
-      setTokenRefresher(null);
-    };
+    return endSession;
   }, [config]);
 
   const logout = useCallback(() => {
