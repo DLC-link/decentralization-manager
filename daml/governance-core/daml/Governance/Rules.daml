@@ -311,8 +311,6 @@ template GovernanceRules
         -- before counting threshold — only member votes count toward N.
         now <- getTime
         fetched <- mapA (\cid -> exercise cid GovernanceSelfConfirmation_Consume) confirmations
-        -- Consume already rejects an expired confirmation at this same ledger time,
-        -- so this filter never removes a row. Kept as defence in depth.
         let valid = filter (\c -> c.expiresAt > now) fetched
         let memberVotes = filter (\c -> c.confirmer `Set.member` members) valid
         require "All confirmations must match the action being executed"
@@ -416,8 +414,6 @@ template GovernanceRules
         -- Consume and validate confirmations
         now <- getTime
         fetched <- mapA (\cid -> exercise cid GovernanceConfirmation_Consume) confirmations
-        -- Consume already rejects an expired confirmation at this same ledger time,
-        -- so this filter never removes a row. Kept as defence in depth.
         let valid = filter (\c -> c.expiresAt > now) fetched
         require "All confirmations must reference the same proposal"
           (all (\c -> c.actionProposalCid == actionProposalCid) valid)
