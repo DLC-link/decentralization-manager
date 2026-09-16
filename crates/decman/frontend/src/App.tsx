@@ -89,6 +89,22 @@ function buildHash(tab: number, partySlug?: string | null): string {
   return partySlug ? `#${section}/${partySlug}` : `#${section}`;
 }
 
+/**
+ * Wrap a refresh so a tick is skipped while the previous one is still running.
+ * Without it a response slower than the interval stacks requests until the
+ * browser's connection pool is full and nothing else on the page loads.
+ */
+function pollGuard(refresh: () => Promise<void>): () => void {
+  let inFlight = false;
+  return () => {
+    if (inFlight) return;
+    inFlight = true;
+    void refresh().finally(() => {
+      inFlight = false;
+    });
+  };
+}
+
 const App = () => {
   const muiTheme = useTheme();
   const isLargeScreen = useMediaQuery(muiTheme.breakpoints.up("lg"));
@@ -144,6 +160,10 @@ const App = () => {
   // discard everything scrolled and snap back to the first batch.
   const [actionsAccumulated, setActionsAccumulated] = useState(false);
   const [workflowRuns, setWorkflowRuns] = useState<WorkflowRun[]>([]);
+  // Request counters for the two feeds, so a slower earlier answer cannot
+  // overwrite a later one.
+  const invitationsSeq = useRef(0);
+  const workflowRunsSeq = useRef(0);
   const [workflowRunsLoaded, setWorkflowRunsLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -483,12 +503,18 @@ const App = () => {
   }, []);
 
   const refreshInvitations = useCallback(async () => {
+    // Newest request wins. Accepting an invitation refreshes the feed by hand
+    // while a poll is already in flight, and that older answer, landing after,
+    // would put the invitation back.
+    const seq = ++invitationsSeq.current;
     try {
       const res = await authenticatedFetch(`${API_BASE}/invitations`);
-      if (res.ok) {
-        const data = await res.json();
-        setPendingInvitations(data.invitations);
-      }
+      if (!res.ok) return;
+      // Compared after the body, not before: reading it is another wait, and a
+      // manual refresh that finishes inside it would be overwritten here.
+      const data = await res.json();
+      if (seq !== invitationsSeq.current) return;
+      setPendingInvitations(data.invitations);
     } catch {
       // Ignore polling errors
     } finally {
@@ -496,20 +522,25 @@ const App = () => {
     }
   }, []);
 
-  // Poll pending invitations every 2 seconds
+  // Poll pending invitations every 2 seconds, in-flight-guarded like the
+  // status probe above: a slow response must not stack concurrent requests.
   useEffect(() => {
-    refreshInvitations();
-    const interval = window.setInterval(refreshInvitations, 2000);
+    const poll = pollGuard(refreshInvitations);
+    poll();
+    const interval = window.setInterval(poll, 2000);
     return () => clearInterval(interval);
   }, [refreshInvitations]);
 
   const refreshWorkflowRuns = useCallback(async () => {
+    // Newest request wins, as above: cancel, dismiss and retry all refresh by
+    // hand alongside the poll.
+    const seq = ++workflowRunsSeq.current;
     try {
       const res = await authenticatedFetch(`${API_BASE}/workflows`);
-      if (res.ok) {
-        const data = await res.json();
-        setWorkflowRuns(data.runs ?? []);
-      }
+      if (!res.ok) return;
+      const data = await res.json();
+      if (seq !== workflowRunsSeq.current) return;
+      setWorkflowRuns(data.runs ?? []);
     } catch {
       // Ignore polling errors
     } finally {
@@ -519,8 +550,9 @@ const App = () => {
 
   // Poll workflow_runs every 2 seconds, same cadence as invitations.
   useEffect(() => {
-    refreshWorkflowRuns();
-    const interval = window.setInterval(refreshWorkflowRuns, 2000);
+    const poll = pollGuard(refreshWorkflowRuns);
+    poll();
+    const interval = window.setInterval(poll, 2000);
     return () => clearInterval(interval);
   }, [refreshWorkflowRuns]);
 
