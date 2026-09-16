@@ -509,10 +509,12 @@ const App = () => {
     const seq = ++invitationsSeq.current;
     try {
       const res = await authenticatedFetch(`${API_BASE}/invitations`);
-      if (res.ok && seq === invitationsSeq.current) {
-        const data = await res.json();
-        setPendingInvitations(data.invitations);
-      }
+      if (!res.ok) return;
+      // Compared after the body, not before: reading it is another wait, and a
+      // manual refresh that finishes inside it would be overwritten here.
+      const data = await res.json();
+      if (seq !== invitationsSeq.current) return;
+      setPendingInvitations(data.invitations);
     } catch {
       // Ignore polling errors
     } finally {
@@ -535,10 +537,10 @@ const App = () => {
     const seq = ++workflowRunsSeq.current;
     try {
       const res = await authenticatedFetch(`${API_BASE}/workflows`);
-      if (res.ok && seq === workflowRunsSeq.current) {
-        const data = await res.json();
-        setWorkflowRuns(data.runs ?? []);
-      }
+      if (!res.ok) return;
+      const data = await res.json();
+      if (seq !== workflowRunsSeq.current) return;
+      setWorkflowRuns(data.runs ?? []);
     } catch {
       // Ignore polling errors
     } finally {
