@@ -34,7 +34,7 @@ pub use common::api::{
     PendingInvitationsResponse, ProposalSummary, ProposalsPageResponse, ProviderConfigurationInfo,
     ProviderConfigurationsResponse, ProviderServiceInfo, ProviderServicesResponse,
     RegistrarServiceInfo, RegistrarServiceRequestInfo, RegistrarServiceRequestsResponse,
-    RegistrarServicesResponse, ResponseSource, RightsStatus, SuccessResponse,
+    RegistrarServicesResponse, RequestDarPayload, ResponseSource, RightsStatus, SuccessResponse,
     TenantAcsBlockResponse, TenantAcsImportRequest, TenantAcsImportResponse,
     TenantAddHostsOnboardRequest, TenantAddHostsOnboardResponse, TenantAddHostsPrepareResponse,
     TenantAddHostsRequest, TenantOnboardRequest, TenantOnboardResponse, TenantPartyStateResponse,
