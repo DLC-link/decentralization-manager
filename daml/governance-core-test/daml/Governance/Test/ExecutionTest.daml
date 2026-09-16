@@ -137,7 +137,9 @@ testNonMemberCannotExecute = script do
       actionProposalCid = proposalIfaceCid
       confirmations = confirmationCids
 
--- | Expired confirmations are filtered out and don't count toward threshold.
+-- | An expired confirmation aborts execution rather than dropping out of the count.
+-- `GovernanceConfirmation_Consume` rejects it before `GovernanceRules_ExecuteConfirmedAction`
+-- reaches its `expiresAt` filter, so the whole execute fails.
 testExpiredConfirmationsDontCount = script do
   parties <- allocateTestParties
 
