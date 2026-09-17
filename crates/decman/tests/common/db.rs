@@ -182,6 +182,44 @@ pub async fn latest_peer_instance(db_path: &Path, kind: &str) -> anyhow::Result<
     Ok(v)
 }
 
+/// Most recent coordinator-side instance_name of `kind`, whatever its status.
+pub async fn latest_coordinator_instance(
+    db_path: &Path,
+    kind: &str,
+) -> anyhow::Result<Option<String>> {
+    let pool = open(db_path).await?;
+    let v: Option<String> = sqlx::query_scalar(
+        "SELECT instance_name FROM workflow_runs \
+         WHERE kind = ?1 AND role = 'Coordinator' \
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(kind)
+    .fetch_optional(&pool)
+    .await
+    .context("latest_coordinator_instance")?;
+    pool.close().await;
+    Ok(v)
+}
+
+/// The `current_step` a run stopped on.
+pub async fn workflow_run_step(
+    db_path: &Path,
+    instance_name: &str,
+    role: &str,
+) -> anyhow::Result<Option<String>> {
+    let pool = open(db_path).await?;
+    let s: Option<String> = sqlx::query_scalar(
+        "SELECT current_step FROM workflow_runs WHERE instance_name = ?1 AND role = ?2",
+    )
+    .bind(instance_name)
+    .bind(role)
+    .fetch_optional(&pool)
+    .await
+    .context("workflow_run_step")?;
+    pool.close().await;
+    Ok(s)
+}
+
 pub async fn workflow_run_status(
     db_path: &Path,
     instance_name: &str,
