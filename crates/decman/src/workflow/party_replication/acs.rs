@@ -4,7 +4,6 @@ use std::{
     time::Duration,
 };
 
-use anyhow::Context;
 use canton_proto_rs::com::{
     daml::ledger::api::v2::{
         CumulativeFilter, EventFormat, Filters, GetActiveContractsRequest, GetLedgerEndRequest,
@@ -26,7 +25,10 @@ use sqlx::SqlitePool;
 
 use crate::{
     config::NodeConfig,
-    consts::{topology_retry_delay_secs, topology_retry_max_attempts},
+    consts::{
+        ACS_BLOCK_FETCH_MAX_DELAY_SECS, acs_block_fetch_attempts, acs_import_attempts_in_window,
+        topology_retry_delay_secs, topology_retry_max_attempts,
+    },
     db::schema::{SchemaRead, SchemaWrite},
     error::Result,
     utils,
@@ -103,6 +105,40 @@ const PROGRESS_EVERY_BYTES: u64 = 256 * 1024 * 1024;
 /// How many blocks may sit in the import channel ahead of Canton. Bounds the
 /// target's memory to a couple of blocks.
 const IMPORT_READAHEAD: usize = 2;
+
+/// Pause before restarting a broken transfer, so a cancelled `ImportPartyAcs`
+/// has unwound on the participant before the next one opens. The restart
+/// budget itself is [`acs_import_attempts_in_window`]: the whole retry budget
+/// of the step, because the participant is reconnected exactly once, after the
+/// import succeeded or the last attempt failed, never between attempts. Every
+/// reconnect replays the ACS journal, and a participant that has been hosting
+/// the party without its ACS has rows in that journal that make the replay
+/// fatal. Re-feeding the same snapshot over a partial import is safe because
+/// Canton skips contracts that are already active.
+const IMPORT_RETRY_DELAY: Duration = Duration::from_secs(10);
+
+/// How many times block 1 is re-requested when a transfer restarts: the source
+/// discards its forward-only export on that request and re-opens it on its
+/// next step tick, so the first ask normally fails once.
+const RESTART_FIRST_BLOCK_ATTEMPTS: u32 = 5;
+
+/// How long a re-entered import waits before trusting an empty connection list.
+/// A participant that has just restarted reconnects on its own within seconds;
+/// importing into it while that happens is refused by Canton.
+const REENTRY_GRACE: Duration = Duration::from_secs(5);
+
+/// Where the blocks of a transfer come from, which decides what a failed pull
+/// may do about it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransferSource {
+    /// The coordinator's open export. A block can be asked for again, since the
+    /// source replays the one it served last, and asking for block 1 again
+    /// makes it re-open the export from the top.
+    Coordinator,
+    /// A wallet relaying blocks one way. Nothing can be asked for again, so the
+    /// first broken pull ends the attempt and the wallet decides about a retry.
+    Relay,
+}
 
 /// Source side: open an `ExportPartyAcs` stream for the target and wrap it in
 /// a [`ExportSession`] the transport can pull blocks from.
@@ -199,12 +235,17 @@ pub async fn open_export_session(
 /// but it makes the window crash-safe on its own side:
 ///
 /// - a durable marker is written before disconnecting, so a retry (after a
-///   DecMan or participant crash) knows the participant was left mid-window and
-///   recovers it — reconnecting and verifying health — before touching it again;
-/// - the participant is never left disconnected: reconnect runs even when the
-///   import fails, and success is reported only once the synchronizer is
-///   confirmed healthy again (not merely that `ReconnectSynchronizers` was
-///   accepted);
+///   DecMan or participant crash) knows the window was opened by this run; a
+///   participant found still disconnected is not reconnected, the import simply
+///   continues inside the window it is already in;
+/// - a transfer that breaks is restarted from block 1 inside the same
+///   disconnect window, up to [`acs_import_attempts_in_window`] times; the
+///   participant reconnects exactly once, after the import succeeded or the
+///   last attempt failed, never between attempts;
+/// - the participant is never left disconnected: that single reconnect runs
+///   even when the import fails, and success is reported only once the
+///   synchronizer is confirmed healthy again (not merely that
+///   `ReconnectSynchronizers` was accepted);
 /// - a participant that can't be brought back to a healthy connected state
 ///   yields an actionable error naming the likely orphan-row corruption instead
 ///   of a cryptic retry-abort.
@@ -213,6 +254,7 @@ pub async fn import_party_acs<F, Fut>(
     storage: &SqlitePool,
     target: &ReplicationTarget,
     required_package_ids: &[String],
+    source: TransferSource,
     mut next_block: F,
 ) -> Result
 where
@@ -233,16 +275,9 @@ where
         .is_some();
     if disconnect_window_opened {
         tracing::warn!(
-            "ACS import re-entered with the disconnect-window marker set — verifying \
-             the participant is reconnected and healthy before retrying"
+            "ACS import re-entered with the disconnect-window marker set — a participant \
+             found disconnected stays disconnected and the import continues in its window"
         );
-        reconnect_and_verify_healthy(config).await.map_err(|e| {
-            anyhow::anyhow!(
-                "participant is not healthy and connected on ACS-import re-entry — it \
-                 may be crash-looping on orphan ACS rows left by an unclean shutdown; \
-                 the participant needs manual repair before add-party can proceed: {e}"
-            )
-        })?;
     }
 
     // A previous attempt fed part of the ACS to Canton before failing. Canton
@@ -319,27 +354,48 @@ where
         .into_inner()
         .connected_synchronizers;
 
-    // Preflight: the participant must be healthy and connected before we open
-    // the disconnect window. If it's NOT (e.g. already disconnected from a prior
-    // interrupted attempt), try to bring it back rather than refusing outright —
-    // `ImportPartyAcs` needs it disconnected anyway, but we must first confirm it
-    // can reach a healthy connected state, and only THEN re-list the synchronizers
-    // to disconnect. Bail only if it genuinely can't be recovered.
-    if !synchronizer_healthy(&connected, config.synchronizer()) {
-        reconnect_and_verify_healthy(config).await.map_err(|e| {
-            anyhow::anyhow!(
-                "refusing to start ACS import: participant is not connected and healthy on \
-                 synchronizer '{}' and could not be recovered — restore its health before \
-                 retrying add-party so the disconnect/import window can't compound a bad \
-                 state: {e}",
-                config.synchronizer()
-            )
-        })?;
-        connected = connectivity
-            .list_connected_synchronizers(tonic::Request::new(ListConnectedSynchronizersRequest {}))
-            .await?
-            .into_inner()
-            .connected_synchronizers;
+    // Preflight. A participant left disconnected by an earlier attempt of this
+    // run is already where `ImportPartyAcs` needs it, so the import continues
+    // without touching the connection. One that is unhealthy for any other
+    // reason is given time to settle, never a `ReconnectSynchronizers`: that
+    // replays the ACS journal, and a participant in an unknown state is exactly
+    // the one whose replay may be fatal.
+    let alias = config.synchronizer();
+    if !synchronizer_healthy(&connected, alias) {
+        let mut still_in_window = disconnect_window_opened && !connected_to(&connected, alias);
+        if still_in_window {
+            tokio::time::sleep(REENTRY_GRACE).await;
+            connected = connectivity
+                .list_connected_synchronizers(tonic::Request::new(
+                    ListConnectedSynchronizersRequest {},
+                ))
+                .await?
+                .into_inner()
+                .connected_synchronizers;
+            still_in_window = !connected_to(&connected, alias);
+        }
+        if still_in_window {
+            tracing::warn!(
+                "participant is still disconnected from '{alias}' since the previous attempt — \
+                 continuing the import inside the open window"
+            );
+        } else {
+            verify_healthy(config).await.map_err(|e| {
+                anyhow::anyhow!(
+                    "refusing to start ACS import: participant is not connected and healthy \
+                     on synchronizer '{}' and did not settle on its own — it is not \
+                     reconnected from here; check it before retrying add-party: {e}",
+                    config.synchronizer()
+                )
+            })?;
+            connected = connectivity
+                .list_connected_synchronizers(tonic::Request::new(
+                    ListConnectedSynchronizersRequest {},
+                ))
+                .await?
+                .into_inner()
+                .connected_synchronizers;
+        }
     }
 
     // Open the crash-safety window BEFORE disconnecting so a crash between here
@@ -364,28 +420,61 @@ where
                 }))
                 .await?;
         }
-        run_import(
-            config,
-            storage,
-            target,
-            &synchronizer_id,
-            &party_id,
-            first,
-            &mut next_block,
-        )
-        .await
+        let attempts = match source {
+            TransferSource::Coordinator => acs_import_attempts_in_window(),
+            TransferSource::Relay => 1,
+        };
+        let mut first = first;
+        // Bytes that reached Canton over every attempt so far, not just the
+        // last one: the quarantine is about what may sit on the participant.
+        let mut any_fed = 0u64;
+        let mut attempt = 1;
+        loop {
+            let params = ImportParams {
+                synchronizer_id: &synchronizer_id,
+                party_id: &party_id,
+                source,
+            };
+            let (fed, cause) =
+                match run_import(config, storage, target, params, first, &mut next_block).await {
+                    Ok(()) => return Ok(()),
+                    Err(ImportError::Fatal { fed, cause }) => {
+                        return Err(
+                            give_up_transfer(storage, target, any_fed.max(fed), cause).await
+                        );
+                    }
+                    Err(ImportError::Transfer { fed, cause }) => (fed, cause),
+                };
+            any_fed = any_fed.max(fed);
+            if attempt >= attempts {
+                return Err(give_up_transfer(storage, target, any_fed, cause).await);
+            }
+            tracing::warn!(
+                "ACS transfer attempt {attempt}/{attempts} broke after {fed} bytes: {cause}; \
+                 restarting it from block 1 without reconnecting"
+            );
+            tokio::time::sleep(IMPORT_RETRY_DELAY).await;
+            first = match pull_first_block(&mut next_block).await {
+                Ok(block) => block,
+                Err(restart_err) => {
+                    return Err(give_up_transfer(storage, target, any_fed, cause)
+                        .await
+                        .context(format!("the transfer could not restart: {restart_err}")));
+                }
+            };
+            attempt += 1;
+        }
     }
     .await;
 
-    // ALWAYS reconnect and verify the connection is actually healthy — a
-    // participant left disconnected (or half-reconnected) is a worse failure
-    // mode than a failed import (which the peer step retries end-to-end).
+    // The one reconnect of the step, after the import succeeded or the last
+    // attempt failed. A participant left disconnected (or half-reconnected) is
+    // a worse failure mode than a failed import, so it runs on both outcomes.
     let reconnect_result = reconnect_and_verify_healthy(config).await;
 
     // Prioritise an unhealthy participant: that's the critical, operator-
-    // actionable failure and must not be masked by a (retryable) import error
-    // when both fail. A failed import with a HEALTHY participant is reported
-    // only after, so the peer step can retry it end-to-end.
+    // actionable failure and must not be masked by the import error when both
+    // fail. A failed import with a HEALTHY participant is reported after it.
     if let Err(reconnect_err) = reconnect_result {
         let import_note = match &import_result {
             Ok(()) => "the ACS import itself completed".to_string(),
@@ -419,7 +508,12 @@ async fn reconnect_and_verify_healthy(config: &NodeConfig) -> Result {
             ignore_failures: false,
         }))
         .await?;
+    verify_healthy(config).await
+}
 
+/// Poll `ListConnectedSynchronizers` until the configured synchronizer reports
+/// healthy, or give up after the topology retry budget. Never reconnects.
+async fn verify_healthy(config: &NodeConfig) -> Result {
     let alias = config.synchronizer();
     let max_attempts = topology_retry_max_attempts();
     let retry_delay = Duration::from_secs(topology_retry_delay_secs());
@@ -470,8 +564,8 @@ async fn reconnect_and_verify_healthy(config: &NodeConfig) -> Result {
         }
     }
     anyhow::bail!(
-        "synchronizer '{alias}' did not become healthy after reconnect within \
-         {max_attempts} attempts (last: {last_reason})"
+        "synchronizer '{alias}' did not become healthy within {max_attempts} attempts \
+         (last: {last_reason})"
     )
 }
 
@@ -565,17 +659,163 @@ async fn local_package_ids(config: &NodeConfig) -> Result<HashSet<String>> {
     Ok(descriptions.into_iter().map(|p| p.package_id).collect())
 }
 
+/// Why one `ImportPartyAcs` attempt did not complete. Both carry how many
+/// bytes reached Canton, because that is what decides the quarantine.
+enum ImportError {
+    /// Pulling blocks failed, or Canton answered with a transient status. Worth
+    /// another attempt inside the same disconnect window.
+    Transfer { fed: u64, cause: anyhow::Error },
+    /// Canton rejected the import, or what was fed does not match the export.
+    /// Feeding the same bytes again cannot change the answer.
+    Fatal { fed: u64, cause: anyhow::Error },
+}
+
+impl From<anyhow::Error> for ImportError {
+    fn from(cause: anyhow::Error) -> Self {
+        Self::Fatal { fed: 0, cause }
+    }
+}
+
+/// Sort Canton's answer to the whole stream: a status that says "not now" is
+/// retried inside the window, anything that judges the content is final.
+fn import_rpc_error(status: tonic::Status, fed: u64) -> ImportError {
+    use tonic::Code;
+    let cause = anyhow::Error::from(status).context("ImportPartyAcs did not complete");
+    match cause
+        .downcast_ref::<tonic::Status>()
+        .map(tonic::Status::code)
+    {
+        Some(Code::Unavailable | Code::DeadlineExceeded | Code::Aborted | Code::Unknown) => {
+            ImportError::Transfer { fed, cause }
+        }
+        _ => ImportError::Fatal { fed, cause },
+    }
+}
+
+/// True iff `alias` appears in the connected list at all, healthy or not.
+fn connected_to(connected: &[list_connected_synchronizers_response::Result], alias: &str) -> bool {
+    connected.iter().any(|s| s.synchronizer_alias == alias)
+}
+
+/// Record that a partial ACS may sit on the participant and build the error
+/// that ends the step. Nothing is recorded when no byte reached Canton.
+async fn give_up_transfer(
+    storage: &SqlitePool,
+    target: &ReplicationTarget,
+    fed: u64,
+    cause: anyhow::Error,
+) -> anyhow::Error {
+    if fed == 0 {
+        return cause;
+    }
+    // Cancelling means Canton was never told the snapshot was complete, but it
+    // persists contracts batch by batch as they arrive, so it may hold part of
+    // the ACS and there is no way to ask. Record that against the participant
+    // so any later run refuses, not just a retry of this one.
+    let reason = format!(
+        "an ACS transfer failed after {fed} bytes had already reached Canton; the \
+         import was cancelled rather than closed, so Canton was not told the \
+         snapshot was complete, but this participant may hold part of the ACS"
+    );
+    if let Err(e) = storage
+        .quarantine_acs_import(
+            &target.party_id,
+            &target.target_participant_id,
+            &reason,
+            fed,
+        )
+        .await
+    {
+        return cause.context(format!(
+            "{reason}; recording the quarantine also failed: {e}"
+        ));
+    }
+    cause.context(format!(
+        "{reason}. It needs repair (RepairCommitmentsUsingAcs) or a restore before \
+         this party is used, and replication is now refused for this participant \
+         until the quarantine is lifted"
+    ))
+}
+
+/// Block 1 of a restarted transfer. The source discards its forward-only
+/// export when block 1 is asked for again and re-opens it on its next step
+/// tick, so the first request is expected to fail once.
+async fn pull_first_block<F, Fut>(next_block: &mut F) -> Result<PipeBlock>
+where
+    F: FnMut(u64) -> Fut,
+    Fut: Future<Output = Result<PipeBlock>>,
+{
+    let mut last = None;
+    for attempt in 1..=RESTART_FIRST_BLOCK_ATTEMPTS {
+        match next_block(1).await {
+            Ok(block) => return Ok(block),
+            Err(e) => {
+                tracing::info!(
+                    "block 1 not available yet (attempt {attempt}/{RESTART_FIRST_BLOCK_ATTEMPTS}): {e}"
+                );
+                last = Some(e);
+            }
+        }
+        if attempt < RESTART_FIRST_BLOCK_ATTEMPTS {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    }
+    Err(last.unwrap_or_else(|| anyhow::anyhow!("block 1 was never requested")))
+}
+
+/// Block `seq`, re-requested with backoff while the source keeps failing to
+/// answer. Safe because the source replays the block it served last.
+async fn fetch_block<F, Fut>(
+    next_block: &mut F,
+    seq: u64,
+    source: TransferSource,
+) -> Result<PipeBlock>
+where
+    F: FnMut(u64) -> Fut,
+    Fut: Future<Output = Result<PipeBlock>>,
+{
+    let attempts = match source {
+        TransferSource::Coordinator => acs_block_fetch_attempts(),
+        TransferSource::Relay => 1,
+    };
+    let max_delay = Duration::from_secs(ACS_BLOCK_FETCH_MAX_DELAY_SECS);
+    let mut delay = Duration::from_secs(2);
+    let mut last = None;
+    for attempt in 1..=attempts {
+        match next_block(seq).await {
+            Ok(block) => return Ok(block),
+            Err(e) => {
+                tracing::warn!("ACS block {seq} failed (attempt {attempt}/{attempts}): {e}");
+                last = Some(e);
+            }
+        }
+        if attempt < attempts {
+            tokio::time::sleep(delay).await;
+            delay = (delay * 2).min(max_delay);
+        }
+    }
+    Err(last.unwrap_or_else(|| anyhow::anyhow!("block {seq} was never requested")))
+}
+
+/// What one `ImportPartyAcs` attempt is for: the party, the synchronizer its
+/// contracts sit on, and where the blocks come from.
+#[derive(Clone, Copy)]
+struct ImportParams<'a> {
+    synchronizer_id: &'a str,
+    party_id: &'a str,
+    source: TransferSource,
+}
+
 /// The streamed `ImportPartyAcs` call, isolated so the caller can pair it
-/// with the disconnect/reconnect bracket.
+/// with the disconnect/reconnect bracket and restart it on a broken transfer.
 async fn run_import<F, Fut>(
     config: &NodeConfig,
     storage: &SqlitePool,
     target: &ReplicationTarget,
-    synchronizer_id: &str,
-    party_id: &str,
+    params: ImportParams<'_>,
     first: PipeBlock,
     next_block: &mut F,
-) -> Result
+) -> Result<(), ImportError>
 where
     F: FnMut(u64) -> Fut,
     Fut: Future<Output = Result<PipeBlock>>,
@@ -596,6 +836,11 @@ where
             .map(|_| ())
     });
 
+    let ImportParams {
+        synchronizer_id,
+        party_id,
+        source,
+    } = params;
     let synchronizer_id = synchronizer_id.to_string();
     let party_id = party_id.to_string();
     let build = |bytes: Vec<u8>| ImportPartyAcsRequest {
@@ -689,7 +934,7 @@ where
                 }
             }
             seq += 1;
-            block = next_block(seq).await?;
+            block = fetch_block(next_block, seq, source).await?;
         }
     }
     .await;
@@ -703,56 +948,40 @@ where
         Ok(trailer) => {
             tx.close_channel();
             drop(tx);
-            let rpc_result = rpc.await.context("the ACS import task did not finish")?;
-            rpc_result?;
+            let rpc_result = rpc.await.map_err(|e| ImportError::Fatal {
+                fed,
+                cause: anyhow::Error::from(e).context("the ACS import task did not finish"),
+            })?;
+            rpc_result.map_err(|status| import_rpc_error(status, fed))?;
             trailer
         }
-        Err(fetch_err) => {
+        Err(cause) => {
             rpc.abort();
             let _ = rpc.await;
             drop(tx);
-
-            if fed == 0 {
-                return Err(fetch_err);
-            }
-            // Cancelling means Canton was never told the snapshot was complete,
-            // but it may still have committed what it had already processed,
-            // and there is no way to ask. Record that against the participant so
-            // any later run refuses, not just a retry of this one.
-            let reason = format!(
-                "an ACS transfer failed after {fed} bytes had already reached Canton; the \
-                 import was cancelled rather than closed, so Canton was not told the \
-                 snapshot was complete, but this participant may hold part of the ACS"
-            );
-            storage
-                .quarantine_acs_import(
-                    &target.party_id,
-                    &target.target_participant_id,
-                    &reason,
-                    fed,
-                )
-                .await?;
-            return Err(fetch_err.context(format!(
-                "{reason}. It needs repair (RepairCommitmentsUsingAcs) or a restore before \
-                 this party is used, and replication is now refused for this participant \
-                 until the quarantine is lifted"
-            )));
+            return Err(ImportError::Transfer { fed, cause });
         }
     };
 
     let Some(trailer) = trailer else {
-        anyhow::bail!("the ACS import stream closed before the export finished");
+        return Err(ImportError::Fatal {
+            fed,
+            cause: anyhow::anyhow!("the ACS import stream closed before the export finished"),
+        });
     };
     let digest = hex::encode(hasher.finalize());
     if fed != trailer.total_len || digest != trailer.sha256 {
-        anyhow::bail!(
-            "the imported ACS does not match the source: fed {fed} bytes (sha256 \
-             {digest}), source exported {expected} bytes (sha256 {expected_digest}). \
-             The participant now holds an ACS that may be incomplete and needs \
-             repair before the party is used",
-            expected = trailer.total_len,
-            expected_digest = trailer.sha256
-        );
+        return Err(ImportError::Fatal {
+            fed,
+            cause: anyhow::anyhow!(
+                "the imported ACS does not match the source: fed {fed} bytes (sha256 \
+                 {digest}), source exported {expected} bytes (sha256 {expected_digest}). \
+                 The participant now holds an ACS that may be incomplete and needs \
+                 repair before the party is used",
+                expected = trailer.total_len,
+                expected_digest = trailer.sha256
+            ),
+        });
     }
 
     tracing::info!("Imported {fed} bytes, digest verified");

@@ -31,6 +31,47 @@ pub fn topology_retry_delay_secs() -> u64 {
         .unwrap_or(TOPOLOGY_RETRY_DELAY_SECS)
 }
 
+/// How many times a broken ACS transfer is restarted from block 1 inside one
+/// disconnect window. Default; read via [`acs_import_attempts_in_window`].
+///
+/// Deliberately small: `ExportPartyAcs` cannot resume, so every restart
+/// re-streams the whole snapshot — on a terabyte-scale party that is hours to
+/// days, all of it with the participant disconnected. Resilience against
+/// blips belongs in the per-block re-asks ([`acs_block_fetch_attempts`]),
+/// which lose nothing; a full restart is the last resort.
+pub const ACS_IMPORT_ATTEMPTS_IN_WINDOW: usize = 2;
+
+/// How many times one ACS block is re-asked, with doubling backoff capped at
+/// [`ACS_BLOCK_FETCH_MAX_DELAY_SECS`], before the transfer counts as broken.
+/// Default; read via [`acs_block_fetch_attempts`]. The source replays the
+/// block it served last, so a re-ask is always safe and costs nothing but
+/// time: 12 attempts is roughly nine minutes of patience, enough for a
+/// load-balancer blip or a coordinator pod coming back.
+pub const ACS_BLOCK_FETCH_ATTEMPTS: u32 = 12;
+
+/// Upper bound on the backoff between two re-asks of the same ACS block.
+pub const ACS_BLOCK_FETCH_MAX_DELAY_SECS: u64 = 60;
+
+/// Whole-transfer restarts inside the disconnect window, configurable via
+/// `DECPM_ACS_IMPORT_ATTEMPTS`. Defaults to [`ACS_IMPORT_ATTEMPTS_IN_WINDOW`].
+pub fn acs_import_attempts_in_window() -> usize {
+    std::env::var("DECPM_ACS_IMPORT_ATTEMPTS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|n| *n >= 1)
+        .unwrap_or(ACS_IMPORT_ATTEMPTS_IN_WINDOW)
+}
+
+/// Re-asks of one ACS block, configurable via `DECPM_ACS_BLOCK_FETCH_ATTEMPTS`.
+/// Defaults to [`ACS_BLOCK_FETCH_ATTEMPTS`].
+pub fn acs_block_fetch_attempts() -> u32 {
+    std::env::var("DECPM_ACS_BLOCK_FETCH_ATTEMPTS")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .filter(|n| *n >= 1)
+        .unwrap_or(ACS_BLOCK_FETCH_ATTEMPTS)
+}
+
 /// Maximum number of consecutive failures before a peer-side workflow step
 /// aborts the whole workflow.
 ///

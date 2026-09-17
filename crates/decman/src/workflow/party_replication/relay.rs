@@ -43,7 +43,7 @@ use crate::{
     config::NodeConfig,
     error::Result,
     workflow::party_replication::{
-        ReplicationTarget, import_party_acs,
+        ReplicationTarget, TransferSource, import_party_acs,
         pipe::{ExportSession, PipeBlock},
     },
 };
@@ -406,25 +406,32 @@ fn spawn_import(
 ) -> tokio::task::JoinHandle<Result<()>> {
     tokio::spawn(async move {
         let rx = Arc::new(Mutex::new(rx));
-        import_party_acs(&config, &db, &target, &required_package_ids, move |seq| {
-            let rx = rx.clone();
-            async move {
-                let Some(block) = rx.lock().await.recv().await else {
-                    anyhow::bail!(
-                        "the wallet stopped relaying before block {seq}; the transfer must \
+        import_party_acs(
+            &config,
+            &db,
+            &target,
+            &required_package_ids,
+            TransferSource::Relay,
+            move |seq| {
+                let rx = rx.clone();
+                async move {
+                    let Some(block) = rx.lock().await.recv().await else {
+                        anyhow::bail!(
+                            "the wallet stopped relaying before block {seq}; the transfer must \
                          restart from block 1"
+                        );
+                    };
+                    let got = match &block {
+                        PipeBlock::Data { seq, .. } | PipeBlock::End { seq, .. } => *seq,
+                    };
+                    anyhow::ensure!(
+                        got == seq,
+                        "the wallet relayed block {got} where block {seq} was expected"
                     );
-                };
-                let got = match &block {
-                    PipeBlock::Data { seq, .. } | PipeBlock::End { seq, .. } => *seq,
-                };
-                anyhow::ensure!(
-                    got == seq,
-                    "the wallet relayed block {got} where block {seq} was expected"
-                );
-                Ok(block)
-            }
-        })
+                    Ok(block)
+                }
+            },
+        )
         .await
     })
 }

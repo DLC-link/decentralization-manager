@@ -1133,6 +1133,7 @@ pub async fn start_peer(
                     &db,
                     &add_party_config.replication_target(&instance_name),
                     &required_package_ids,
+                    party_replication::TransferSource::Coordinator,
                     |seq| {
                         let client = &client;
                         async move { client.request_next_acs_block(seq).await.map_err(Into::into) }
@@ -1140,16 +1141,12 @@ pub async fn start_peer(
                 )
                 .await;
 
+                // The import owns its retries and runs them inside one disconnect
+                // window. Retrying the step here would reconnect the participant
+                // between attempts, which replays the ACS journal — so a failure
+                // that reaches this point ends the peer.
                 if let Err(e) = step_result {
-                    tracing::error!("Step execution failed: {e}");
-                    consecutive_step_failures += 1;
-                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                        anyhow::bail!(
-                            "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
-                        );
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-                    continue;
+                    anyhow::bail!("Aborting peer: the ACS import failed: {e}");
                 }
                 consecutive_step_failures = 0;
                 if let Err(e) = client.send_status(b"ImportAcs completed".to_vec()).await {
