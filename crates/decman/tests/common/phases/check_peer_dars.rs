@@ -276,9 +276,12 @@ mod tests {
         match classify_compare_peers(&v, "A", "B") {
             Some(Err(e)) => {
                 let chain = format!("{e:#}");
-                assert!(chain.contains("decode failure"), "got: {chain}");
+                assert!(
+                    chain.contains("reachable and empty must not occur together"),
+                    "got: {chain}"
+                );
             }
-            other => panic!("expected terminal decode-failure error, got {other:?}"),
+            other => panic!("expected a terminal error, got {other:?}"),
         }
     }
 
