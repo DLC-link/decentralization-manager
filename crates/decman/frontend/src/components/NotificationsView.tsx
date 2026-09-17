@@ -27,6 +27,7 @@ import {
   Typography,
 } from "@mui/material";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
+import DownloadIcon from "@mui/icons-material/Download";
 import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
 import { copyToClipboard } from "../clipboard";
@@ -176,7 +177,37 @@ const InvitationCard = ({
   onSelectParty: (partyId: string) => void;
 }) => {
   const [busy, setBusy] = useState(false);
+  const [readingDar, setReadingDar] = useState<number | null>(null);
   const { showSnackbar } = useSnackbar();
+
+  // Pulled from the coordinator on demand, not carried by the invite: the
+  // operator can read the DAR before deciding, and an invite that nobody
+  // opens costs nothing.
+  const readDar = async (index: number, filename: string) => {
+    setReadingDar(index);
+    try {
+      const res = await authenticatedFetch(
+        `${API_BASE}/invitations/${encodeURIComponent(invitation.id)}/dars/${index}`,
+      );
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `Could not read ${filename}`);
+      }
+      const url = URL.createObjectURL(await res.blob());
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      showSnackbar(
+        err instanceof Error ? err.message : `Could not read ${filename}`,
+        "error",
+      );
+    } finally {
+      setReadingDar(null);
+    }
+  };
 
   const respond = async (path: "accept" | "decline") => {
     setBusy(true);
@@ -520,6 +551,22 @@ const InvitationCard = ({
                       sx={{ display: "flex", alignItems: "baseline", gap: 1 }}
                     >
                       <Chip size="small" variant="outlined" label={filename} />
+                      <Tooltip title={`Download ${filename} to read it before accepting`}>
+                        <span>
+                          <IconButton
+                            size="small"
+                            disabled={readingDar !== null}
+                            onClick={() => readDar(index, filename)}
+                            aria-label={`Download ${filename}`}
+                          >
+                            {readingDar === index ? (
+                              <CircularProgress size={14} />
+                            ) : (
+                              <DownloadIcon fontSize="inherit" />
+                            )}
+                          </IconButton>
+                        </span>
+                      </Tooltip>
                       <Typography
                         variant="caption"
                         color={hash ? "text.secondary" : "warning.main"}
