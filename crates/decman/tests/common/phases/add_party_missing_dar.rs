@@ -7,10 +7,13 @@
 //! party, then re-add P3 — whose participant never received `orphan-marker`. The
 //! party's exported ACS now contains contracts P3 cannot validate.
 //!
-//! With the DAR-preflight fix, P3's AddParty peer must FAIL fast — before the
-//! disconnect/import window — with an actionable missing-package error. This
-//! phase asserts exactly that (peer run `failed`, error names the package),
-//! which pins both the reproduction and the fix.
+//! With the preflight fix, the COORDINATOR must fail the run at `ExportState`,
+//! before it creates or submits any proposal, with an actionable
+//! missing-package error. This phase asserts exactly that (coordinator run
+//! `failed`, stopped on `ExportState`, error names the packages), which pins
+//! both the reproduction and the fix: stopping at `ExportState` is what proves
+//! the party was never hosted on P3, so its ACS journal cannot collect
+//! activation-less archives.
 
 use std::{path::Path, time::Duration};
 
@@ -260,43 +263,49 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 .context("accept AddParty on P3")
         })
     })
-    // 5. The fix must catch it: P3's AddParty peer FAILS fast with a
-    //    missing-package error (i.e. the preflight fired before any disconnect).
+    // 5. The fix must catch it: the coordinator FAILS at ExportState with a
+    //    missing-package error, before any proposal is created or submitted.
     .then(
-        "P3's AddParty peer fails at the DAR preflight (missing orphan-marker)",
+        "the coordinator fails at ExportState with the missing packages",
         Duration::from_secs(300),
         |f, _| {
             Box::pin(async move {
-                let p3_db = f.db_path(3);
-                let instance = match db::current_inprogress_peer_instance(&p3_db, "AddParty").await
-                {
-                    Ok(Some(i)) => i,
-                    _ => db::latest_peer_instance(&p3_db, "AddParty")
-                        .await
-                        .ok()
-                        .flatten()?,
-                };
-                match db::workflow_run_status(&p3_db, &instance, "Peer").await {
+                let p1_db = f.db_path(1);
+                let instance = db::latest_coordinator_instance(&p1_db, "AddParty")
+                    .await
+                    .ok()
+                    .flatten()?;
+                match db::workflow_run_status(&p1_db, &instance, "Coordinator").await {
                     Ok(Some(s)) if s.eq_ignore_ascii_case("failed") => {
-                        let err = db::workflow_run_error(&p3_db, &instance, "Peer")
+                        let err = db::workflow_run_error(&p1_db, &instance, "Coordinator")
                             .await
                             .ok()
                             .flatten()
                             .unwrap_or_default();
-                        // Require the preflight's structured tail ("Missing package
-                        // ids: [...]"), which is emitted only by our preflight and
-                        // implies the concrete missing-package list — not a generic
-                        // package word a raw mid-import Canton failure might also
-                        // carry. This strictly proves the preflight fired BEFORE the
-                        // disconnect/import window rather than the import dying inside it.
-                        if err.to_lowercase().contains("missing package ids") {
-                            Some(Ok(()))
-                        } else {
-                            Some(Err(anyhow::anyhow!(
-                                "P3 peer failed but NOT via the DAR preflight (expected a \
-                                 'Missing package ids: [...]' error): {err}"
-                            )))
+                        let step = db::workflow_run_step(&p1_db, &instance, "Coordinator")
+                            .await
+                            .ok()
+                            .flatten()
+                            .unwrap_or_default();
+                        // The structured tail ("Missing package ids: [...]") is
+                        // emitted only by the preflight, so a generic Canton
+                        // package error cannot satisfy this.
+                        if !err.to_lowercase().contains("missing package ids") {
+                            return Some(Err(anyhow::anyhow!(
+                                "coordinator failed but NOT via the package preflight \
+                                 (expected a 'Missing package ids: [...]' error): {err}"
+                            )));
                         }
+                        // ExportState precedes CreateProposals and SubmitProposals,
+                        // so stopping here is the proof that no topology was written.
+                        if step != "ExportState" {
+                            return Some(Err(anyhow::anyhow!(
+                                "coordinator failed with the right error but on step \
+                                 {step}, not ExportState — a proposal may already have \
+                                 been submitted"
+                            )));
+                        }
+                        Some(Ok(()))
                     }
                     _ => None,
                 }
