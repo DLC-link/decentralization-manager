@@ -112,16 +112,16 @@ const IMPORT_READAHEAD: usize = 2;
 /// has rows in that journal that make the replay fatal. Re-feeding the same
 /// snapshot over a partial import is safe because Canton skips contracts that
 /// are already active.
-const IMPORT_ATTEMPTS_IN_WINDOW: usize = 6;
+const IMPORT_ATTEMPTS_IN_WINDOW: usize = 10;
 
 /// Pause before restarting a broken transfer, so a cancelled `ImportPartyAcs`
 /// has unwound on the participant before the next one opens.
-const IMPORT_RETRY_DELAY: Duration = Duration::from_secs(5);
+const IMPORT_RETRY_DELAY: Duration = Duration::from_secs(10);
 
 /// How many times one block is re-requested before the transfer counts as
 /// broken. The source replays the block it served last, so asking for the same
 /// sequence again is always safe.
-const BLOCK_FETCH_ATTEMPTS: u32 = 4;
+const BLOCK_FETCH_ATTEMPTS: u32 = 6;
 
 /// How many times block 1 is re-requested when a transfer restarts: the source
 /// discards its forward-only export on that request and re-opens it on its
