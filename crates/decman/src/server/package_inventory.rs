@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -13,6 +13,8 @@ use canton_proto_rs::com::digitalasset::canton::{
     },
 };
 use prost_types::Timestamp;
+
+use common::canton_id::CantonId;
 
 use crate::{config::NodeConfig, utils, workflow::topology};
 
@@ -146,6 +148,36 @@ pub(crate) async fn fetch_package_id_to_name(
 /// `ListVettedPackages`, but it needs a bearer token and tokens here are
 /// per-party — a participant-level endpoint has no party to borrow one from.
 pub(crate) async fn fetch_vetted_packages(config: &NodeConfig) -> Result<Vec<VettedPackageInfo>> {
+    let ids = fetch_vetted_package_ids(config, config.participant_id()).await?;
+    let descriptions = fetch_package_descriptions(config).await?;
+
+    Ok(ids
+        .into_iter()
+        .map(|package_id| {
+            let (name, version) = descriptions.get(&package_id).cloned().unwrap_or_default();
+            VettedPackageInfo {
+                package_id,
+                package_name: name,
+                package_version: version,
+            }
+        })
+        .collect())
+}
+
+/// The package ids `participant_id` has vetted right now, in topology order
+/// and deduplicated.
+///
+/// The synchronizer replicates every participant's `VettedPackages` mapping to
+/// every member, so this reads a PEER's vetting from the local participant's
+/// own topology store. No peer is contacted.
+///
+/// # Errors
+/// Returns an error when the synchronizer id cannot be resolved or the
+/// topology read fails.
+pub(crate) async fn fetch_vetted_package_ids(
+    config: &NodeConfig,
+    participant_id: &CantonId,
+) -> Result<Vec<String>> {
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
     let channel = config
         .admin_channel()
@@ -154,45 +186,37 @@ pub(crate) async fn fetch_vetted_packages(config: &NodeConfig) -> Result<Vec<Vet
     let mut client = TopologyManagerReadServiceClient::new(channel)
         .max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
 
+    let wanted = participant_id.to_string();
     let response = client
         .list_vetted_packages(tonic::Request::new(ListVettedPackagesRequest {
             base_query: Some(BaseQuery {
                 operation: TopologyChangeOp::AddReplace as i32,
                 ..topology::head_state_query(&synchronizer_id)
             }),
-            filter_participant: config.participant_id().to_string(),
+            filter_participant: wanted.clone(),
         }))
         .await
-        .context("Failed to list vetted packages")?
+        .with_context(|| format!("Failed to list vetted packages of {wanted}"))?
         .into_inner();
 
-    let descriptions = fetch_package_descriptions(config).await?;
     let now = now_timestamp();
-
-    let mut seen = std::collections::HashSet::new();
-    let mut vetted = Vec::new();
+    let mut seen = HashSet::new();
+    let mut ids = Vec::new();
     for result in response.results {
         let Some(item) = result.item else { continue };
+        // Canton treats `filter_participant` as a prefix match, so one
+        // participant's id can select another's mapping. Confirm the uid.
+        if item.participant_uid != wanted {
+            continue;
+        }
         for package in item.packages {
-            if !package_valid_at(&package, &now) {
-                continue;
+            if package_valid_at(&package, &now) && seen.insert(package.package_id.clone()) {
+                ids.push(package.package_id);
             }
-            if !seen.insert(package.package_id.clone()) {
-                continue;
-            }
-            let (name, version) = descriptions
-                .get(&package.package_id)
-                .cloned()
-                .unwrap_or_default();
-            vetted.push(VettedPackageInfo {
-                package_id: package.package_id,
-                package_name: name,
-                package_version: version,
-            });
         }
     }
 
-    Ok(vetted)
+    Ok(ids)
 }
 
 /// The current wall-clock time as a proto timestamp, for validity checks.

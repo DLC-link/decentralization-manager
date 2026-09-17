@@ -29,7 +29,7 @@ use sqlx::SqlitePool;
 use crate::{
     auth::WorkflowAuth,
     canton_id::CantonId,
-    config::{NetworkConfig, NodeConfig, PartyCredentials, default_package_config},
+    config::{NetworkConfig, NodeConfig, PartyCredentials, Peer, default_package_config},
     db::{
         rows::{DecPartyContractRow, DecPartyParticipantRow, DecPartyRow},
         schema::{Commitable, SchemaRead, SchemaWrite},
@@ -37,12 +37,12 @@ use crate::{
     error::Result,
     noise::{
         Message, MessageType, NoiseError, NoiseKeypair, parse_public_key, send_noise_message,
-        send_noise_message_with_chunked_response, send_noise_message_with_retry,
+        send_noise_message_with_retry,
     },
     server::{
         AppState,
         health::classify_health_reply,
-        package_inventory::fetch_vetted_packages,
+        package_inventory::{fetch_vetted_package_ids, fetch_vetted_packages},
         queries::{
             contract_templates_all, fetch_package_versions, get_contracts, get_party_metadata,
             rules_templates, sort_contracts,
@@ -2055,7 +2055,7 @@ async fn check_participants_status(
     Ok(ParticipantsStatusResponse { statuses })
 }
 
-/// Compare locally uploaded packages with peer nodes via Noise protocol
+/// Compare this node's packages with each peer's, read from the synchronizer
 #[utoipa::path(
     tag = "Packages",
     responses(
@@ -2076,17 +2076,14 @@ pub async fn compare_peer_packages(data: web::Data<AppState>) -> impl Responder 
     }
 }
 
-/// Pure mapping from `NoiseError` to the wire-stable `PeerErrorKind`.
-///
-/// What an operator should check, for a peer request that failed.
+/// What an operator should check, for a Noise request to a peer that failed.
 ///
 /// The raw error names a symptom — `snow error: input error`,
 /// `Message too short: got 0` — and an operator reading it has no way to get
 /// from there to an action. Each arm below names the thing to go and look at.
 ///
-/// Exhaustive for the same reason as [`peer_error_kind_from_noise_err`]: a new
-/// `NoiseError` variant must be given a hint rather than silently inheriting a
-/// vague one.
+/// The match is exhaustive (no wildcard), so a new `NoiseError` variant must
+/// be given a hint rather than silently inheriting a vague one.
 fn peer_failure_hint(err: &NoiseError) -> &'static str {
     match err {
         NoiseError::TcpConnectionTimeout(_) | NoiseError::TcpConnectionFailed(_) => {
@@ -2125,29 +2122,6 @@ fn peer_failure_hint(err: &NoiseError) -> &'static str {
     }
 }
 
-/// Exhaustive match (no wildcard) — adding a new `NoiseError` variant will
-/// fail to compile here until it's explicitly classified.
-fn peer_error_kind_from_noise_err(err: &NoiseError) -> PeerErrorKind {
-    match err {
-        NoiseError::TcpConnectionTimeout(_) => PeerErrorKind::TcpConnectTimeout,
-        NoiseError::TcpConnectionFailed(_) => PeerErrorKind::TcpConnectFailed,
-        NoiseError::RequestTimeout => PeerErrorKind::RequestTimeout,
-        NoiseError::Io(_) | NoiseError::Hyper(_) => PeerErrorKind::Transport,
-        NoiseError::Noise(_) | NoiseError::HandshakeFailed | NoiseError::DecryptionError => {
-            PeerErrorKind::HandshakeFailed
-        }
-        NoiseError::BadStatusCode(..) => PeerErrorKind::BadStatus,
-        NoiseError::InvalidMessage | NoiseError::JsonSerialization(_) => {
-            PeerErrorKind::DecodeFailed
-        }
-        NoiseError::Http(_)
-        | NoiseError::InvalidUri(_)
-        | NoiseError::UriParsingError(_)
-        | NoiseError::UnknownPeer(_)
-        | NoiseError::Anyhow(_) => PeerErrorKind::Other,
-    }
-}
-
 async fn fetch_peer_packages(
     config: &NodeConfig,
     db: &SqlitePool,
@@ -2171,92 +2145,91 @@ async fn fetch_peer_packages(
         })
         .collect();
 
-    let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
-    let keypair = Arc::new(NoiseKeypair::from_file(&config.key_file_path()).await?);
-    let current_participant_id = config.participant_id();
-
-    let invite_message = Message::new_empty(MessageType::ListPackages);
-    let noise_retry_cfg = config.noise_retry.clone();
-
-    let peer_futures: Vec<_> = network_config
-        .peers
+    let local_index: HashMap<&str, &PackageInfo> = local_packages
         .iter()
-        .filter(|p| p.participant_id != *current_participant_id && !p.public_key.is_empty())
-        .map(|peer| {
-            let keypair = Arc::clone(&keypair);
-            let peer = peer.clone();
-            let msg = invite_message.clone();
-            let noise_retry_cfg = noise_retry_cfg.clone();
-            async move {
-                let peer_pub_key = match parse_public_key(&peer.public_key) {
-                    Ok(pk) => pk,
-                    Err(_) => {
-                        return PeerPackageResult {
-                            participant_id: peer.participant_id.to_string(),
-                            name: peer.name.clone(),
-                            reachable: false,
-                            error_kind: Some(PeerErrorKind::InvalidPublicKey),
-                            packages: vec![],
-                        };
-                    }
-                };
-
-                let psk = keypair.derive_psk(&peer_pub_key);
-                let identity = current_participant_id.to_string();
-
-                match send_noise_message_with_chunked_response(
-                    &peer.address,
-                    peer.port,
-                    &psk,
-                    identity.as_bytes(),
-                    &msg,
-                    &noise_retry_cfg,
-                )
-                .await
-                {
-                    Ok(response) => {
-                        if let Ok(response_msg) = Message::from_bytes(&response)
-                            && response_msg.msg_type == MessageType::Data
-                            && let Ok(packages) =
-                                serde_json::from_slice::<Vec<PackageInfo>>(&response_msg.payload)
-                        {
-                            return PeerPackageResult {
-                                participant_id: peer.participant_id.to_string(),
-                                name: peer.name.clone(),
-                                reachable: true,
-                                error_kind: None,
-                                packages,
-                            };
-                        }
-                        // 200 OK but unexpected message shape — `error_kind` stays
-                        // None per the documented invariant; widening this case is
-                        // tracked as Future work item 5 in the spec.
-                        PeerPackageResult {
-                            participant_id: peer.participant_id.to_string(),
-                            name: peer.name.clone(),
-                            reachable: true,
-                            error_kind: None,
-                            packages: vec![],
-                        }
-                    }
-                    Err(e) => PeerPackageResult {
-                        participant_id: peer.participant_id.to_string(),
-                        name: peer.name.clone(),
-                        reachable: false,
-                        error_kind: Some(peer_error_kind_from_noise_err(&e)),
-                        packages: vec![],
-                    },
-                }
-            }
-        })
+        .map(|p| (p.package_id.as_str(), p))
         .collect();
 
-    let peers = futures::future::join_all(peer_futures).await;
+    let current_participant_id = config.participant_id();
+    let peers = db.get_all_peers().await?;
+
+    let mut results = Vec::with_capacity(peers.len());
+    for peer in peers
+        .iter()
+        .filter(|p| p.participant_id != *current_participant_id)
+    {
+        let read = fetch_vetted_package_ids(config, &peer.participant_id).await;
+        results.push(peer_package_result(peer, read, &local_index));
+    }
 
     Ok(PeerPackageComparison {
         local_packages,
-        peers,
+        peers: results,
     })
+}
+
+/// One comparison row, from this node's topology read of `peer`.
+///
+/// `reachable` keeps its wire meaning — "this node has that peer's package
+/// list" — but nothing is reached any more. A peer whose read succeeds and
+/// names nothing is reported as `NoVettedPackages`: an empty vetting set means
+/// the peer cannot run any Daml, which an operator must act on, so it is not
+/// reported as a healthy peer holding zero packages.
+fn peer_package_result(
+    peer: &Peer,
+    read: Result<Vec<String>>,
+    local_index: &HashMap<&str, &PackageInfo>,
+) -> PeerPackageResult {
+    let participant_id = peer.participant_id.to_string();
+    let name = peer.name.clone();
+    match read {
+        Ok(ids) if ids.is_empty() => PeerPackageResult {
+            participant_id,
+            name,
+            reachable: false,
+            error_kind: Some(PeerErrorKind::NoVettedPackages),
+            packages: vec![],
+        },
+        Ok(ids) => {
+            // A package this node does not hold has no description to join, so
+            // it shows with its id and empty name/version.
+            let mut packages: Vec<PackageInfo> = ids
+                .into_iter()
+                .map(|id| match local_index.get(id.as_str()) {
+                    Some(local) => (*local).clone(),
+                    None => PackageInfo {
+                        package_id: id,
+                        name: String::new(),
+                        version: String::new(),
+                    },
+                })
+                .collect();
+            packages.sort_by(|a, b| {
+                (&a.name, &a.version, &a.package_id).cmp(&(&b.name, &b.version, &b.package_id))
+            });
+            PeerPackageResult {
+                participant_id,
+                name,
+                reachable: true,
+                error_kind: None,
+                packages,
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                peer = %participant_id,
+                error = %format!("{e:#}"),
+                "vetted-package read failed"
+            );
+            PeerPackageResult {
+                participant_id,
+                name,
+                reachable: false,
+                error_kind: Some(PeerErrorKind::TopologyReadFailed),
+                packages: vec![],
+            }
+        }
+    }
 }
 
 /// Query the local participant's vault for namespace key fingerprints.
@@ -2274,6 +2247,88 @@ mod tests {
 
     use super::*;
     use crate::{config::Network, db::MIGRATOR};
+
+    fn test_peer(name: &str) -> Peer {
+        Peer {
+            participant_id: CantonId::parse(
+                "participant::12200ad4539c269a7b13af6806fb2ee326e7c0d7233fa6144004c416502a2c73fb0b",
+            )
+            .expect("valid id"),
+            name: name.to_string(),
+            address: "unused".to_string(),
+            port: 0,
+            public_key: String::new(),
+            party: None,
+        }
+    }
+
+    #[test]
+    fn a_peers_vetted_ids_join_the_local_names() {
+        let local = PackageInfo {
+            package_id: "pkg-a".to_string(),
+            name: "governance-core".to_string(),
+            version: "1.0.0".to_string(),
+        };
+        let index: HashMap<&str, &PackageInfo> = [("pkg-a", &local)].into_iter().collect();
+
+        let got = peer_package_result(
+            &test_peer("p2"),
+            Ok(vec!["pkg-a".to_string(), "pkg-unknown".to_string()]),
+            &index,
+        );
+
+        assert!(got.reachable);
+        assert_eq!(got.error_kind, None);
+        // A package this node holds carries its name; one it does not hold
+        // still appears, by id, so the operator sees the difference.
+        assert_eq!(got.packages.len(), 2);
+        let named: Vec<&str> = got.packages.iter().map(|p| p.name.as_str()).collect();
+        assert!(named.contains(&"governance-core"), "{named:?}");
+        let ids: Vec<&str> = got.packages.iter().map(|p| p.package_id.as_str()).collect();
+        assert!(ids.contains(&"pkg-unknown"), "{ids:?}");
+    }
+
+    #[test]
+    fn a_peer_that_has_vetted_nothing_is_not_reported_healthy() {
+        // An empty vetting set means the peer can run no Daml at all. That is
+        // an operator problem, not a peer holding zero packages.
+        let index: HashMap<&str, &PackageInfo> = HashMap::new();
+        let got = peer_package_result(&test_peer("p2"), Ok(vec![]), &index);
+
+        assert!(!got.reachable);
+        assert_eq!(got.error_kind, Some(PeerErrorKind::NoVettedPackages));
+        assert!(got.packages.is_empty());
+    }
+
+    #[test]
+    fn a_failed_topology_read_names_itself() {
+        let index: HashMap<&str, &PackageInfo> = HashMap::new();
+        let got = peer_package_result(
+            &test_peer("p2"),
+            Err(anyhow::anyhow!("synchronizer unreachable")),
+            &index,
+        );
+
+        assert!(!got.reachable);
+        assert_eq!(got.error_kind, Some(PeerErrorKind::TopologyReadFailed));
+        assert!(got.packages.is_empty());
+    }
+
+    #[test]
+    fn peer_packages_sort_stably() {
+        // The UI renders this list directly, so two reads of an unchanged
+        // peer must not reorder it. Topology order is not stable.
+        let index: HashMap<&str, &PackageInfo> = HashMap::new();
+        let ids = vec![
+            "pkg-c".to_string(),
+            "pkg-a".to_string(),
+            "pkg-b".to_string(),
+        ];
+        let got = peer_package_result(&test_peer("p2"), Ok(ids), &index);
+
+        let order: Vec<&str> = got.packages.iter().map(|p| p.package_id.as_str()).collect();
+        assert_eq!(order, vec!["pkg-a", "pkg-b", "pkg-c"]);
+    }
 
     /// Discovery is the same query on every network, because it reads the
     /// decentralized-namespace mappings rather than every party. MainNet used
@@ -2620,56 +2675,6 @@ mod tests {
             contracts: Vec::new(),
             local_metadata: None,
         })
-    }
-
-    #[test]
-    fn peer_error_kind_mapping_known_variants() {
-        // Construct one easily-instantiable example of each PeerErrorKind
-        // category and assert the mapping. Hard-to-construct NoiseError
-        // variants (Hyper, Noise, JsonSerialization, Http, InvalidUri) are
-        // not exercised here — the helper's exhaustive match is what
-        // guarantees they're classified. This test catches accidental
-        // arm-swap regressions in the easy variants.
-        let pairs: Vec<(NoiseError, PeerErrorKind)> = vec![
-            (
-                NoiseError::TcpConnectionTimeout("x".into()),
-                PeerErrorKind::TcpConnectTimeout,
-            ),
-            (NoiseError::RequestTimeout, PeerErrorKind::RequestTimeout),
-            (
-                NoiseError::TcpConnectionFailed("x".into()),
-                PeerErrorKind::TcpConnectFailed,
-            ),
-            (
-                NoiseError::Io(std::io::Error::other("x")),
-                PeerErrorKind::Transport,
-            ),
-            (NoiseError::HandshakeFailed, PeerErrorKind::HandshakeFailed),
-            (NoiseError::DecryptionError, PeerErrorKind::HandshakeFailed),
-            (
-                NoiseError::BadStatusCode(StatusCode::INTERNAL_SERVER_ERROR, None),
-                PeerErrorKind::BadStatus,
-            ),
-            (NoiseError::InvalidMessage, PeerErrorKind::DecodeFailed),
-            (
-                NoiseError::UriParsingError("x".into()),
-                PeerErrorKind::Other,
-            ),
-            (NoiseError::UnknownPeer("x".into()), PeerErrorKind::Other),
-        ];
-        for (err, expected) in &pairs {
-            let got = peer_error_kind_from_noise_err(err);
-            assert_eq!(got, *expected, "for variant {err:?}");
-        }
-    }
-
-    #[test]
-    fn anyhow_variant_falls_through_to_other() {
-        let err = NoiseError::Anyhow(anyhow::anyhow!("anything"));
-        assert!(matches!(
-            peer_error_kind_from_noise_err(&err),
-            PeerErrorKind::Other
-        ));
     }
 
     #[test]
