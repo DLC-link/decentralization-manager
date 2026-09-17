@@ -2675,10 +2675,7 @@ async fn dar_for_invited_peer(
         bail!("run {} does not distribute DARs", request.workflow_instance);
     }
     if !run.expected_peers.iter().any(|p| p.to_string() == sender) {
-        bail!(
-            "{sender} was not invited to {}",
-            request.workflow_instance
-        );
+        bail!("{sender} was not invited to {}", request.workflow_instance);
     }
 
     let config: workflow::DarsConfig = serde_json::from_str(&run.config_json)
@@ -2837,8 +2834,11 @@ mod tests {
         const DAR: &[u8] = b"not really a DAR, but bytes are bytes";
 
         fn pid(prefix: &str, tag: u8) -> anyhow::Result<CantonId> {
-            CantonId::parse(&format!("{prefix}::1220{}", format!("{tag:02x}").repeat(32)))
-                .map_err(|e| anyhow::anyhow!("bad test id {prefix}: {e}"))
+            CantonId::parse(&format!(
+                "{prefix}::1220{}",
+                format!("{tag:02x}").repeat(32)
+            ))
+            .map_err(|e| anyhow::anyhow!("bad test id {prefix}: {e}"))
         }
 
         fn dars_run(instance: &str, invited: Vec<CantonId>) -> anyhow::Result<WorkflowRun> {
@@ -2889,13 +2889,12 @@ mod tests {
             Ok(())
         }
 
-        fn ask(instance: &str, index: usize, filename: &str) -> Vec<u8> {
-            serde_json::to_vec(&RequestDarPayload {
+        fn ask(instance: &str, index: usize, filename: &str) -> anyhow::Result<Vec<u8>> {
+            Ok(serde_json::to_vec(&RequestDarPayload {
                 workflow_instance: instance.to_string(),
                 index,
                 filename: filename.to_string(),
-            })
-            .expect("payload encodes")
+            })?)
         }
 
         #[sqlx::test(migrator = "MIGRATOR")]
@@ -2906,7 +2905,7 @@ mod tests {
             let served = dar_for_invited_peer(
                 &pool,
                 Some(&invited.to_string()),
-                &ask("dars-1", 0, "app.dar"),
+                &ask("dars-1", 0, "app.dar")?,
             )
             .await?;
 
@@ -2922,15 +2921,16 @@ mod tests {
             let stranger = pid("validator-9", 0xbb)?;
             save(&pool, &dars_run("dars-1", vec![invited])?).await?;
 
-            let refused = dar_for_invited_peer(
+            match dar_for_invited_peer(
                 &pool,
                 Some(&stranger.to_string()),
-                &ask("dars-1", 0, "app.dar"),
+                &ask("dars-1", 0, "app.dar")?,
             )
-            .await;
-
-            let message = refused.expect_err("a stranger must not read it").to_string();
-            assert!(message.contains("was not invited"), "{message}");
+            .await
+            {
+                Ok(_) => panic!("a stranger must not read the DAR"),
+                Err(e) => assert!(e.to_string().contains("was not invited"), "{e}"),
+            }
             Ok(())
         }
 
@@ -2939,7 +2939,7 @@ mod tests {
             let invited = pid("validator-1", 0xaa)?;
             save(&pool, &dars_run("dars-1", vec![invited])?).await?;
 
-            let refused = dar_for_invited_peer(&pool, None, &ask("dars-1", 0, "app.dar")).await;
+            let refused = dar_for_invited_peer(&pool, None, &ask("dars-1", 0, "app.dar")?).await;
 
             assert!(refused.is_err(), "an unidentified caller must not read it");
             Ok(())
@@ -2954,15 +2954,16 @@ mod tests {
             let invited = pid("validator-1", 0xaa)?;
             save(&pool, &dars_run("dars-1", vec![invited.clone()])?).await?;
 
-            let refused = dar_for_invited_peer(
+            match dar_for_invited_peer(
                 &pool,
                 Some(&invited.to_string()),
-                &ask("dars-1", 0, "something-else.dar"),
+                &ask("dars-1", 0, "something-else.dar")?,
             )
-            .await;
-
-            let message = refused.expect_err("the name must match").to_string();
-            assert!(message.contains("something-else.dar"), "{message}");
+            .await
+            {
+                Ok(_) => panic!("a name that does not match the index must be refused"),
+                Err(e) => assert!(e.to_string().contains("something-else.dar"), "{e}"),
+            }
             Ok(())
         }
 
@@ -2974,7 +2975,7 @@ mod tests {
             let refused = dar_for_invited_peer(
                 &pool,
                 Some(&invited.to_string()),
-                &ask("dars-1", 7, "app.dar"),
+                &ask("dars-1", 7, "app.dar")?,
             )
             .await;
 
