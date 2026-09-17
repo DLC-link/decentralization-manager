@@ -1133,6 +1133,7 @@ pub async fn start_peer(
                     &db,
                     &add_party_config.replication_target(&instance_name),
                     &required_package_ids,
+                    party_replication::TransferSource::Coordinator,
                     |seq| {
                         let client = &client;
                         async move { client.request_next_acs_block(seq).await.map_err(Into::into) }
