@@ -2181,6 +2181,75 @@ mod tests {
     /// One cached chain-audit row. `contract_id` is part of the primary key, so
     /// it is what lets several rows share an offset — the case the paging query
     /// has to keep together.
+    async fn insert_chain_audit_row_with_details(
+        pool: &SqlitePool,
+        contract_id: &str,
+        details: &str,
+    ) -> Result {
+        sqlx::query(
+            r"
+            INSERT INTO chain_audit_cache (
+                party_id, offset, timestamp, event_type, contract_id,
+                template_id, package_id, governance_type, action_summary,
+                choice, acting_parties, update_id, details
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ",
+        )
+        .bind("party-a")
+        .bind(1_i64)
+        .bind(1_i64)
+        .bind("propose")
+        .bind(contract_id)
+        .bind("Governance:Action")
+        .bind("pkg-1")
+        .bind("core_domain")
+        .bind("propose_add_member")
+        .bind(None::<String>)
+        .bind("[]")
+        .bind("update-1")
+        .bind(details)
+        .execute(pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// The purge in `000020_purge_chain_audit_unsupported_maps` must delete
+    /// every row that still carries the dropped-map marker, and leave the rest
+    /// alone. `LIKE` treats `_` as a single-character wildcard, so the pattern
+    /// needs its `ESCAPE` clause to avoid deleting a row whose details merely
+    /// resemble the marker. The test runs the migration file itself.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_purge_deletes_only_rows_holding_the_map_marker(pool: SqlitePool) -> Result {
+        insert_chain_audit_row_with_details(&pool, "marker", r#"{"_unsupported":"map"}"#).await?;
+        insert_chain_audit_row_with_details(
+            &pool,
+            "nested",
+            r#"{"members":{"map":{"_unsupported":"map"}}}"#,
+        )
+        .await?;
+        insert_chain_audit_row_with_details(&pool, "lookalike", r#"{"Xunsupported":"map"}"#)
+            .await?;
+        insert_chain_audit_row_with_details(&pool, "plain", r#"{"threshold":2}"#).await?;
+
+        sqlx::raw_sql(include_str!(
+            "../../migrations/000020_purge_chain_audit_unsupported_maps.up.sql"
+        ))
+        .execute(&pool)
+        .await?;
+
+        let survivors: Vec<String> =
+            sqlx::query_scalar("SELECT contract_id FROM chain_audit_cache ORDER BY contract_id")
+                .fetch_all(&pool)
+                .await?;
+        assert_eq!(
+            survivors,
+            vec!["lookalike".to_string(), "plain".to_string()]
+        );
+
+        Ok(())
+    }
+
     async fn insert_chain_audit_row(
         pool: &SqlitePool,
         party_id: &str,
