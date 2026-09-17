@@ -1581,15 +1581,20 @@ pub async fn expire_confirmation(
     responses(
         (status = 200, description = "Confirmation cancelled", body = MessageResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 404, description = "No credentials configured for party", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     )
 )]
 #[post("/governance/cancel")]
 pub async fn cancel_confirmation(
+    http_req: HttpRequest,
     data: web::Data<AppState>,
     body: web::Json<CancelConfirmationRequest>,
 ) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
     let party_id = &body.party_id;
 
     let (token, member_party_id) = match get_party_credentials(&data, party_id).await {
@@ -3159,6 +3164,62 @@ mod action_metrics_tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(count(step, ActionOutcome::Error), error_before);
         assert_eq!(count(step, ActionOutcome::Ok), ok_before);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod cancel_confirmation_gate_tests {
+    use actix_web::{
+        App,
+        http::StatusCode,
+        test::{self, TestRequest},
+    };
+    use serde_json::json;
+
+    use super::*;
+    use crate::server::middleware::AuthMiddleware;
+
+    fn cancel_request() -> TestRequest {
+        TestRequest::post()
+            .uri("/governance/cancel")
+            .set_json(json!({
+                "party_id": format!("dec-party::{}", "0".repeat(68)),
+                "confirmation_cid": "00confirmation",
+            }))
+    }
+
+    /// The gate fires before the handler reads the member's stored credentials.
+    #[actix_web::test]
+    async fn a_request_without_a_principal_is_unauthorized() -> anyhow::Result<()> {
+        let data = AppState::for_test(None).await?;
+        let app = test::init_service(App::new().app_data(data).service(cancel_confirmation)).await;
+
+        let resp = test::call_service(&app, cancel_request().to_request()).await;
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    /// A valid token without the admin role must not revoke a member's live
+    /// confirmation as that member.
+    #[actix_web::test]
+    async fn a_non_admin_cannot_cancel_a_confirmation() -> anyhow::Result<()> {
+        let data = AppState::for_test_as_non_admin().await?;
+        let app = test::init_service(
+            App::new()
+                .app_data(data)
+                .wrap(AuthMiddleware)
+                .service(cancel_confirmation),
+        )
+        .await;
+
+        let req = cancel_request()
+            .insert_header(("Authorization", "Bearer spa.user.token"))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
         Ok(())
     }
 }

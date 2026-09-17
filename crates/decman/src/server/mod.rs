@@ -227,8 +227,30 @@ impl AppState {
         auth: Option<crate::auth::WorkflowAuth>,
         db: SqlitePool,
     ) -> (actix_web::web::Data<Self>, mpsc::UnboundedReceiver<PeerJob>) {
+        let (state, peer_jobs) = Self::test_state(auth, db);
+        (actix_web::web::Data::new(state), peer_jobs)
+    }
+
+    /// An `AppState` whose admin gate is on while every accepted token carries
+    /// only a non-admin role, for tests that prove a handler turns such a
+    /// caller away.
+    pub(crate) async fn for_test_as_non_admin() -> anyhow::Result<actix_web::web::Data<Self>> {
+        let (state, _) = Self::test_state(None, SqlitePool::connect("sqlite::memory:").await?);
+        Ok(actix_web::web::Data::new(Self {
+            token_validator: crate::auth::TokenValidator::Mock(Arc::new(
+                crate::auth::MockValidator::new("viewer".to_string()),
+            )),
+            admin_role: Some("decman-admin".to_string()),
+            ..state
+        }))
+    }
+
+    fn test_state(
+        auth: Option<crate::auth::WorkflowAuth>,
+        db: SqlitePool,
+    ) -> (Self, mpsc::UnboundedReceiver<PeerJob>) {
         let (peer_job_sender, peer_jobs) = mpsc::unbounded_channel();
-        let state = actix_web::web::Data::new(Self {
+        let state = Self {
             db,
             config: NodeConfig::default(),
             peer_status: Arc::new(RwLock::new(HashMap::new())),
@@ -256,7 +278,7 @@ impl AppState {
             http_client: reqwest::Client::new(),
             health_cache: HealthCache::new(),
             external_parties: Default::default(),
-        });
+        };
         (state, peer_jobs)
     }
 }
