@@ -3,8 +3,8 @@ use std::{collections::HashMap, future::Future};
 use anyhow::{Context, Result};
 use canton_proto_rs::com::daml::ledger::api::v2::{
     CumulativeFilter, GenMap, GetLatestPrunedOffsetsRequest, GetLedgerEndRequest, Identifier,
-    Record, Transaction, TransactionFormat, TransactionShape, UpdateFormat, Value, event::Event,
-    value,
+    Record, TextMap, Transaction, TransactionFormat, TransactionShape, UpdateFormat, Value,
+    event::Event, value,
 };
 use decman_lib::catalog::lifecycle::{GovernanceLifecycleEvent, classify_choice as lifecycle_of};
 use serde_json::{Value as JsonValue, json};
@@ -216,12 +216,13 @@ fn classify_created(tid: &Identifier, is_child_of_exercise: bool) -> (String, St
 /// - A set becomes a JSON array of its keys. Daml has no set type of its own.
 ///   `DA.Set` is a record wrapping a `GenMap a Unit`, so a map whose values
 ///   are all `Unit` is a set, whatever its keys are. The values carry nothing,
-///   and an array of members is what an auditor reads.
+///   and an array of members is what an auditor reads. A `TextMap Unit`
+///   follows the same rule, because the shape decides rather than the Daml
+///   type that produced it.
 /// - Any other map whose keys are all `Text` or `Party` becomes a JSON object.
 /// - Every remaining map becomes an array of explicit `key`/`value` pairs.
 ///
-/// An empty map stays an object, because nothing marks it as a set. A
-/// `TextMap` always becomes an object, because `DA.Set` never compiles to one.
+/// An empty map stays an object, because nothing marks it as a set.
 ///
 /// Four smaller differences predate that choice and remain: `Unit` becomes
 /// `null` rather than `{}`, a variant is tagged `_variant` rather than `tag`,
@@ -255,12 +256,7 @@ fn value_to_json(v: &Value) -> JsonValue {
             json!({ "_variant": var.constructor, "value": inner })
         }
         Some(value::Sum::Enum(e)) => JsonValue::String(e.constructor.clone()),
-        Some(value::Sum::TextMap(m)) => JsonValue::Object(
-            m.entries
-                .iter()
-                .map(|e| (e.key.clone(), optional_value_to_json(&e.value)))
-                .collect(),
-        ),
+        Some(value::Sum::TextMap(m)) => text_map_to_json(m),
         Some(value::Sum::GenMap(m)) => gen_map_to_json(m),
         None => JsonValue::Null,
     }
@@ -274,15 +270,37 @@ fn gen_map_key(key: &Option<Value>) -> Option<String> {
     }
 }
 
-/// Whether every entry carries `Unit`, which makes the map a `DA.Set`.
+/// Whether a map value is `Unit`, which carries nothing.
+fn is_unit(value: Option<&Value>) -> bool {
+    matches!(
+        value.and_then(|v| v.sum.as_ref()),
+        Some(value::Sum::Unit(()))
+    )
+}
+
+/// A `TextMap` as an array of its keys when it is a set, and as a JSON object
+/// otherwise. See [`value_to_json`] for why.
+fn text_map_to_json(m: &TextMap) -> JsonValue {
+    if !m.entries.is_empty() && m.entries.iter().all(|e| is_unit(e.value.as_ref())) {
+        return JsonValue::Array(
+            m.entries
+                .iter()
+                .map(|e| JsonValue::String(e.key.clone()))
+                .collect(),
+        );
+    }
+
+    JsonValue::Object(
+        m.entries
+            .iter()
+            .map(|e| (e.key.clone(), optional_value_to_json(&e.value)))
+            .collect(),
+    )
+}
+
+/// Whether every entry carries `Unit`, which makes the map a set.
 fn is_set(m: &GenMap) -> bool {
-    !m.entries.is_empty()
-        && m.entries.iter().all(|e| {
-            matches!(
-                e.value.as_ref().and_then(|v| v.sum.as_ref()),
-                Some(value::Sum::Unit(()))
-            )
-        })
+    !m.entries.is_empty() && m.entries.iter().all(|e| is_unit(e.value.as_ref()))
 }
 
 /// A `GenMap` as an array of keys when it is a set, as a JSON object when
@@ -1231,6 +1249,18 @@ mod tests {
     fn an_empty_gen_map_becomes_an_empty_object() {
         // Nothing marks an empty map as a set, so it keeps the object form.
         assert_eq!(value_to_json(&gen_map_of(&[])), json!({}));
+    }
+
+    #[test]
+    fn a_text_map_of_units_becomes_an_array_of_its_keys() {
+        let set = text_map_of(&[("alpha", unit()), ("beta", unit())]);
+        assert_eq!(value_to_json(&set), json!(["alpha", "beta"]));
+    }
+
+    #[test]
+    fn a_text_map_with_one_real_value_stays_an_object() {
+        let map = text_map_of(&[("alpha", unit()), ("beta", text("two"))]);
+        assert_eq!(value_to_json(&map), json!({ "alpha": null, "beta": "two" }));
     }
 
     #[test]
