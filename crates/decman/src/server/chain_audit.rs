@@ -207,13 +207,21 @@ fn classify_created(tid: &Identifier, is_child_of_exercise: bool) -> (String, St
 /// that the JSON Ledger API uses, documented at
 /// <https://docs.daml.com/json-api/lf-value-specification.html>.
 ///
-/// Maps are the deliberate difference. The canonical encoding renders a
+/// Maps are the deliberate difference. The canonical encoding renders every
 /// `GenMap` as a list of `[key, value]` pairs, because a GenMap key is any
-/// Daml value while a JSON object key must be a string. Governance maps key
-/// on `Party`, and `Set Party` arrives as a record wrapping a
-/// `GenMap Party Unit`. The pair form splits each party from its value across
-/// two lines in both viewers. So this function emits an object whenever every
-/// key is a `Text` or a `Party`, and explicit `key`/`value` pairs otherwise.
+/// Daml value while a JSON object key must be a string. That form splits each
+/// key from its value across two lines in both viewers, so this function
+/// renders a `GenMap` three ways instead:
+///
+/// - A set becomes a JSON array of its keys. Daml has no set type of its own.
+///   `DA.Set` is a record wrapping a `GenMap a Unit`, so a map whose values
+///   are all `Unit` is a set, whatever its keys are. The values carry nothing,
+///   and an array of members is what an auditor reads.
+/// - Any other map whose keys are all `Text` or `Party` becomes a JSON object.
+/// - Every remaining map becomes an array of explicit `key`/`value` pairs.
+///
+/// An empty map stays an object, because nothing marks it as a set. A
+/// `TextMap` always becomes an object, because `DA.Set` never compiles to one.
 ///
 /// Four smaller differences predate that choice and remain: `Unit` becomes
 /// `null` rather than `{}`, a variant is tagged `_variant` rather than `tag`,
@@ -266,9 +274,30 @@ fn gen_map_key(key: &Option<Value>) -> Option<String> {
     }
 }
 
-/// A `GenMap` as a JSON object when every key is string-like, and as explicit
-/// `key`/`value` pairs otherwise. See [`value_to_json`] for why.
+/// Whether every entry carries `Unit`, which makes the map a `DA.Set`.
+fn is_set(m: &GenMap) -> bool {
+    !m.entries.is_empty()
+        && m.entries.iter().all(|e| {
+            matches!(
+                e.value.as_ref().and_then(|v| v.sum.as_ref()),
+                Some(value::Sum::Unit(()))
+            )
+        })
+}
+
+/// A `GenMap` as an array of keys when it is a set, as a JSON object when
+/// every key is string-like, and as explicit `key`/`value` pairs otherwise.
+/// See [`value_to_json`] for why.
 fn gen_map_to_json(m: &GenMap) -> JsonValue {
+    if is_set(m) {
+        return JsonValue::Array(
+            m.entries
+                .iter()
+                .map(|e| optional_value_to_json(&e.key))
+                .collect(),
+        );
+    }
+
     let keys: Option<Vec<String>> = m.entries.iter().map(|e| gen_map_key(&e.key)).collect();
     match keys {
         Some(keys) => JsonValue::Object(
@@ -1200,7 +1229,37 @@ mod tests {
 
     #[test]
     fn an_empty_gen_map_becomes_an_empty_object() {
+        // Nothing marks an empty map as a set, so it keeps the object form.
         assert_eq!(value_to_json(&gen_map_of(&[])), json!({}));
+    }
+
+    #[test]
+    fn a_gen_map_of_units_becomes_an_array_of_its_keys() {
+        let set = gen_map_of(&[
+            (party("alice::1220aa"), unit()),
+            (party("bob::1220bb"), unit()),
+        ]);
+        assert_eq!(value_to_json(&set), json!(["alice::1220aa", "bob::1220bb"]));
+    }
+
+    /// A `Set` need not key on `Party`. The values decide, not the keys.
+    #[test]
+    fn a_set_of_non_party_keys_still_becomes_an_array() {
+        let set = gen_map_of(&[(int(1), unit()), (int(2), unit())]);
+        assert_eq!(value_to_json(&set), json!([1, 2]));
+    }
+
+    /// One non-`Unit` value is enough to make it a map rather than a set.
+    #[test]
+    fn a_gen_map_with_one_real_value_stays_an_object() {
+        let map = gen_map_of(&[
+            (party("alice::1220aa"), unit()),
+            (party("bob::1220bb"), int(1)),
+        ]);
+        assert_eq!(
+            value_to_json(&map),
+            json!({ "alice::1220aa": null, "bob::1220bb": 1 })
+        );
     }
 
     /// The case issue #460 reports. `members : Set Party` reaches the ledger
@@ -1220,7 +1279,7 @@ mod tests {
         };
         assert_eq!(
             record_to_json_inner(&members),
-            json!({ "map": { "alice::1220aa": null, "bob::1220bb": null } })
+            json!({ "map": ["alice::1220aa", "bob::1220bb"] })
         );
     }
 
