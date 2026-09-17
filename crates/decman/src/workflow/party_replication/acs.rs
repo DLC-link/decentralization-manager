@@ -25,7 +25,10 @@ use sqlx::SqlitePool;
 
 use crate::{
     config::NodeConfig,
-    consts::{topology_retry_delay_secs, topology_retry_max_attempts},
+    consts::{
+        ACS_BLOCK_FETCH_MAX_DELAY_SECS, acs_block_fetch_attempts, acs_import_attempts_in_window,
+        topology_retry_delay_secs, topology_retry_max_attempts,
+    },
     db::schema::{SchemaRead, SchemaWrite},
     error::Result,
     utils,
@@ -103,24 +106,16 @@ const PROGRESS_EVERY_BYTES: u64 = 256 * 1024 * 1024;
 /// target's memory to a couple of blocks.
 const IMPORT_READAHEAD: usize = 2;
 
-/// How many times a broken transfer is restarted from block 1 inside one
-/// disconnect window. This is the whole retry budget for the step: the
-/// participant is reconnected exactly once, after the import succeeded or the
-/// last attempt failed, never between attempts. Every reconnect replays the ACS
-/// journal, and a participant that has been hosting the party without its ACS
-/// has rows in that journal that make the replay fatal. Re-feeding the same
-/// snapshot over a partial import is safe because Canton skips contracts that
-/// are already active.
-const IMPORT_ATTEMPTS_IN_WINDOW: usize = 10;
-
 /// Pause before restarting a broken transfer, so a cancelled `ImportPartyAcs`
-/// has unwound on the participant before the next one opens.
+/// has unwound on the participant before the next one opens. The restart
+/// budget itself is [`acs_import_attempts_in_window`]: the whole retry budget
+/// of the step, because the participant is reconnected exactly once, after the
+/// import succeeded or the last attempt failed, never between attempts. Every
+/// reconnect replays the ACS journal, and a participant that has been hosting
+/// the party without its ACS has rows in that journal that make the replay
+/// fatal. Re-feeding the same snapshot over a partial import is safe because
+/// Canton skips contracts that are already active.
 const IMPORT_RETRY_DELAY: Duration = Duration::from_secs(10);
-
-/// How many times one block is re-requested before the transfer counts as
-/// broken. The source replays the block it served last, so asking for the same
-/// sequence again is always safe.
-const BLOCK_FETCH_ATTEMPTS: u32 = 6;
 
 /// How many times block 1 is re-requested when a transfer restarts: the source
 /// discards its forward-only export on that request and re-opens it on its
@@ -244,7 +239,7 @@ pub async fn open_export_session(
 ///   participant found still disconnected is not reconnected, the import simply
 ///   continues inside the window it is already in;
 /// - a transfer that breaks is restarted from block 1 inside the same
-///   disconnect window, up to [`IMPORT_ATTEMPTS_IN_WINDOW`] times; the
+///   disconnect window, up to [`acs_import_attempts_in_window`] times; the
 ///   participant reconnects exactly once, after the import succeeded or the
 ///   last attempt failed, never between attempts;
 /// - the participant is never left disconnected: that single reconnect runs
@@ -426,7 +421,7 @@ where
                 .await?;
         }
         let attempts = match source {
-            TransferSource::Coordinator => IMPORT_ATTEMPTS_IN_WINDOW,
+            TransferSource::Coordinator => acs_import_attempts_in_window(),
             TransferSource::Relay => 1,
         };
         let mut first = first;
@@ -780,9 +775,10 @@ where
     Fut: Future<Output = Result<PipeBlock>>,
 {
     let attempts = match source {
-        TransferSource::Coordinator => BLOCK_FETCH_ATTEMPTS,
+        TransferSource::Coordinator => acs_block_fetch_attempts(),
         TransferSource::Relay => 1,
     };
+    let max_delay = Duration::from_secs(ACS_BLOCK_FETCH_MAX_DELAY_SECS);
     let mut delay = Duration::from_secs(2);
     let mut last = None;
     for attempt in 1..=attempts {
@@ -795,7 +791,7 @@ where
         }
         if attempt < attempts {
             tokio::time::sleep(delay).await;
-            delay *= 2;
+            delay = (delay * 2).min(max_delay);
         }
     }
     Err(last.unwrap_or_else(|| anyhow::anyhow!("block {seq} was never requested")))
