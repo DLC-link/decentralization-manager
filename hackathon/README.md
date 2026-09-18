@@ -6,7 +6,7 @@ know each other. There is no login, no identity provider, and no Rust toolchain.
 The DecMan nodes run the published release image as is.
 
 ```bash
-./hackathon/up.sh      # start (first run downloads about 760MB, then pulls images)
+./hackathon/up.sh      # start (first run downloads a 760MB bundle, then pulls several GB of images)
 ./hackathon/seed.sh    # create a demo party and deploy the governance core
 ./hackathon/demo.sh    # run one propose, confirm and execute, then print the evidence
 ./hackathon/down.sh    # stop, keep the data
