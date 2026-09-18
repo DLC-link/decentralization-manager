@@ -4,7 +4,6 @@ use std::{
     time::Duration,
 };
 
-use anyhow::Context;
 use canton_proto_rs::com::{
     daml::ledger::api::v2::{
         CumulativeFilter, EventFormat, Filters, GetActiveContractsRequest, GetLedgerEndRequest,
@@ -321,6 +320,11 @@ where
         && trailer.total_len == 0
     {
         tracing::info!("ACS snapshot is empty — nothing to import");
+        // A window opened before the authorization is closed all the same: the
+        // participant is off the synchronizer and on manual connection.
+        if opened_before_authorization {
+            close_import_window(config, true).await?;
+        }
         return Ok(());
     }
 
@@ -483,27 +487,18 @@ where
     // The one reconnect of the step, after the import succeeded or the last
     // attempt failed. A participant left disconnected (or half-reconnected) is
     // a worse failure mode than a failed import, so it runs on both outcomes.
-    // A window opened before the authorization put the synchronizer on manual
-    // connection; that has to come off first, or the reconnect skips it.
-    if opened_before_authorization {
-        set_manual_connect(config, false)
-            .await
-            .context("could not hand the synchronizer back to automatic connection")?;
-    }
-    let reconnect_result = reconnect_and_verify_healthy(config).await;
-
     // Prioritise an unhealthy participant: that's the critical, operator-
     // actionable failure and must not be masked by the import error when both
     // fail. A failed import with a HEALTHY participant is reported after it.
-    if let Err(reconnect_err) = reconnect_result {
+    if let Err(close_err) = close_import_window(config, opened_before_authorization).await {
         let import_note = match &import_result {
             Ok(()) => "the ACS import itself completed".to_string(),
-            Err(e) => format!("the ACS import also failed: {e}"),
+            Err(e) => format!("the ACS import also failed: {e:#}"),
         };
         anyhow::bail!(
             "ACS import did not leave the participant healthy and connected — it may \
              be crash-looping on orphan ACS rows from an unclean shutdown and may need \
-             manual repair ({import_note}): {reconnect_err}"
+             manual repair ({import_note}): {close_err:#}"
         );
     }
     import_result?;
@@ -511,6 +506,41 @@ where
     tracing::info!("ACS snapshot imported successfully");
 
     Ok(())
+}
+
+/// Close the window: reconnect, confirm the synchronizer is healthy, and hand
+/// it back to automatic connection when the window had put it on manual.
+///
+/// Every part runs whatever the others did. Manual connection has to come off
+/// before the reconnect, or the reconnect skips the synchronizer; if that
+/// fails, the reconnect is attempted anyway and the reset is retried once the
+/// participant is connected. A participant left on manual connection stays
+/// disconnected after its next restart, so that outcome is an error even when
+/// it is connected now.
+async fn close_import_window(config: &NodeConfig, manual_connection: bool) -> Result {
+    let mut manual_err = if manual_connection {
+        set_manual_connect(config, false).await.err()
+    } else {
+        None
+    };
+    let reconnect = reconnect_and_verify_healthy(config).await;
+    if manual_err.is_some() && reconnect.is_ok() {
+        manual_err = set_manual_connect(config, false).await.err();
+    }
+    match (reconnect, manual_err) {
+        (Ok(()), None) => Ok(()),
+        (Ok(()), Some(e)) => Err(e.context(format!(
+            "the participant is connected but its synchronizer '{alias}' stays on manual \
+             connection, so its next restart leaves it disconnected; set manual_connect to \
+             false on it",
+            alias = config.synchronizer()
+        ))),
+        (Err(reconnect_err), None) => Err(reconnect_err),
+        (Err(reconnect_err), Some(manual_err)) => Err(reconnect_err.context(format!(
+            "and the synchronizer could not be taken off manual connection either: \
+             {manual_err:#}"
+        ))),
+    }
 }
 
 /// Open the disconnect window before the party is authorized onto this
