@@ -152,13 +152,16 @@ Shortcut for this step and the two before it:
 ## 5. Deploy the governance core (2 minutes)
 
 On **P1**, open the party, press **Deploy Contracts**, and in the dialog press
-**Deploy Governance Core**. This creates one `GovernanceRules` contract, signed
-by the decentralized party itself, so the peers must co-sign again: accept the
+**Deploy Governance Core**. Check the form: the member set lists the three
+member parties and the threshold is 2. **Proposal Timeout** defaults to 24
+hours; pick 30 min, which is what `seed.sh` deploys. Press **Deploy
+Contracts**. This creates one `GovernanceRules` contract, signed by the
+decentralized party itself, so the peers must co-sign again: accept the
 Contracts invitation on **P2** and **P3**.
 
 The contract carries the governance member set, the confirmation threshold (2),
-and how long a proposal stays open (30 minutes). The party's **Contracts**
-section then shows it. That contract ID is what every later action refers to.
+and how long a proposal stays open. The party's **Contracts** section then
+shows it. That contract ID is what every later action refers to.
 
 ## 6. Run one governance action (5 minutes)
 
@@ -237,8 +240,15 @@ first and then repeat it by hand.
 - [../docs/USE_CASES.md](../docs/USE_CASES.md) — what people build on this.
 - [../docs/CUSTOM_DAML_TEMPLATES.md](../docs/CUSTOM_DAML_TEMPLATES.md) — put your
   own Daml templates under governance, which is most likely what you want for a
-  hackathon project.
+  hackathon project. The released DARs are built with Daml SDK 3.4.11
+  (`dpm build`). Start from the same SDK for a package that implements
+  `GovernableAction`.
 - [../docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md) — how the workflows and the
   Noise peer protocol fit together.
+- [External Party Onboarding](../docs/ARCHITECTURE.md#external-party-onboarding-tenant-api)
+  and [../crates/decman-wallet/README.md](../crates/decman-wallet/README.md) — a
+  co-validated party: one key the owner holds, hosted on all three nodes. The
+  wallet drives it over `/v0/tenant/*`. Insecure mode skips the tenant API key
+  check, so in this sandbox those endpoints answer without a key.
 - [README.md](README.md#what-localnet-is-not) — what LocalNet fakes, so you do
   not build on a shortcut.
