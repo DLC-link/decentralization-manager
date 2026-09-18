@@ -62,41 +62,61 @@ pub async fn submit_proposals(
     )
     .await?;
 
-    let new_namespace_bytes = storage
-        .read_artifact(
-            instance_name,
-            artifact_kinds::ADD_PARTY_NEW_NAMESPACE_DEF,
-            None,
+    let confirm_p2p = || {
+        wait_for_participant(
+            config,
+            &synchronizer_id,
+            &add_party_config.decentralized_party_id,
+            &add_party_config.new_participant_id,
         )
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("ADD_PARTY_NEW_NAMESPACE_DEF artifact missing"))?;
-    let new_namespace_def: DecentralizedNamespaceDefinition =
-        utils::read_first_message_from_bytes(&new_namespace_bytes)?;
+    };
 
-    topology::submit_dns_then_p2p(
-        config,
-        &synchronizer_id,
-        "add-party",
-        dns_transaction,
-        p2p_transaction,
-        || {
-            wait_for_owners(
-                config,
-                &synchronizer_id,
-                &new_namespace_def.decentralized_namespace,
-                &new_namespace_def.owners,
+    // A former host being hosted again leaves the namespace as it is; the DNS
+    // the peers signed is the one already in force and is not resubmitted.
+    let rehost = storage
+        .read_artifact(instance_name, artifact_kinds::ADD_PARTY_REHOST, None)
+        .await?
+        .is_some();
+    if rehost {
+        tracing::info!("Namespace unchanged for a re-hosted member; submitting the P2P only");
+        topology::submit_p2p(
+            config,
+            &synchronizer_id,
+            "add-party",
+            p2p_transaction,
+            confirm_p2p,
+        )
+        .await?;
+    } else {
+        let new_namespace_bytes = storage
+            .read_artifact(
+                instance_name,
+                artifact_kinds::ADD_PARTY_NEW_NAMESPACE_DEF,
+                None,
             )
-        },
-        || {
-            wait_for_participant(
-                config,
-                &synchronizer_id,
-                &add_party_config.decentralized_party_id,
-                &add_party_config.new_participant_id,
-            )
-        },
-    )
-    .await?;
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("ADD_PARTY_NEW_NAMESPACE_DEF artifact missing"))?;
+        let new_namespace_def: DecentralizedNamespaceDefinition =
+            utils::read_first_message_from_bytes(&new_namespace_bytes)?;
+
+        topology::submit_dns_then_p2p(
+            config,
+            &synchronizer_id,
+            "add-party",
+            dns_transaction,
+            p2p_transaction,
+            || {
+                wait_for_owners(
+                    config,
+                    &synchronizer_id,
+                    &new_namespace_def.decentralized_namespace,
+                    &new_namespace_def.owners,
+                )
+            },
+            confirm_p2p,
+        )
+        .await?;
+    }
 
     tracing::info!("Add-party proposals submitted and confirmed successfully");
     Ok(())

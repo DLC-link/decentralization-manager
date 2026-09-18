@@ -84,6 +84,10 @@ pub mod artifact_kinds {
     /// Post-add `DecentralizedNamespaceDefinition` protobuf — used by submit
     /// to wait for the new owner set to land in the topology.
     pub const ADD_PARTY_NEW_NAMESPACE_DEF: &str = "add_party_new_namespace_def";
+    /// Present when the member being added already owns the party's namespace:
+    /// a former host being hosted again. The namespace is left as it is and
+    /// only the `PartyToParticipant` is submitted.
+    pub const ADD_PARTY_REHOST: &str = "add_party_rehost";
     /// Unsigned DNS add proposal (`SignedTopologyTransaction`) produced by
     /// the coordinator in CreateProposals. Length-prefixed proto.
     pub const ADD_PARTY_DNS_PROPOSAL: &str = "add_party_dns_proposal";

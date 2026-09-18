@@ -17,12 +17,19 @@ use crate::{
         add_party::AddPartyConfig,
         onboarding::steps::proposals::create::decode_keys_payload,
         signing_keys::adopt_legacy_signing_keys,
-        storage::{WorkflowStorage, artifact_kinds},
+        storage::{WorkflowStorage, artifact_kinds, identity_kinds},
         topology,
     },
 };
 
 /// Coordinator step: build and propose the updated topology for the add.
+///
+/// A member whose namespace already owns the party is a former host being
+/// hosted again: the namespace and the party's signing keys are left as they
+/// are, only the `PartyToParticipant` grows, and `ADD_PARTY_REHOST` tells the
+/// submit step to leave the namespace alone. The peers still sign a DNS
+/// transaction in that case, the one already in force, so their signing round
+/// is the same as for any add.
 ///
 /// Creates:
 /// - new `DecentralizedNamespaceDefinition`: same namespace hash, existing
@@ -80,30 +87,45 @@ pub async fn create_proposals(
          Daml key fingerprint: {new_daml_fingerprint}"
     );
 
-    if current_namespace_def
-        .owners
-        .contains(&new_namespace_fingerprint)
-    {
-        anyhow::bail!(
-            "Namespace fingerprint {new_namespace_fingerprint} is already a DNS owner — \
-             the new member appears to reuse an existing member's namespace key"
-        );
-    }
-
-    let new_threshold = add_party_config.new_threshold;
-    let mut new_owners = current_namespace_def.owners.clone();
-    new_owners.push(new_namespace_fingerprint.clone());
-    new_owners.sort();
-
-    let new_namespace_def = DecentralizedNamespaceDefinition {
-        decentralized_namespace: current_namespace_def.decentralized_namespace.clone(),
-        threshold: new_threshold,
-        owners: new_owners,
-    };
-
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
     let party_id = &add_party_config.decentralized_party_id;
     let current_p2p = topology::fetch_p2p_mapping(config, &synchronizer_id, party_id).await?;
+
+    let rehost = is_former_host(
+        storage,
+        party_id,
+        &new_member_id,
+        &current_namespace_def,
+        &new_namespace_fingerprint,
+    )
+    .await?;
+
+    let new_threshold = add_party_config.new_threshold;
+    let new_namespace_def = if rehost {
+        if new_threshold != current_namespace_def.threshold {
+            anyhow::bail!(
+                "Re-hosting {new_member_id} leaves the namespace as it is, so its threshold \
+                 stays {current}; got new_threshold {new_threshold}. Change it afterwards with \
+                 change-threshold",
+                current = current_namespace_def.threshold
+            );
+        }
+        tracing::info!(
+            "{new_member_id} already owns namespace {ns}; hosting it again without touching \
+             the namespace",
+            ns = current_namespace_def.decentralized_namespace
+        );
+        current_namespace_def.clone()
+    } else {
+        let mut new_owners = current_namespace_def.owners.clone();
+        new_owners.push(new_namespace_fingerprint.clone());
+        new_owners.sort();
+        DecentralizedNamespaceDefinition {
+            decentralized_namespace: current_namespace_def.decentralized_namespace.clone(),
+            threshold: new_threshold,
+            owners: new_owners,
+        }
+    };
 
     tracing::info!(
         "Current P2P mapping has {count} participant(s)",
@@ -167,19 +189,29 @@ pub async fn create_proposals(
         }),
     };
 
-    tracing::info!("Creating DNS add-party proposal...");
-    let dns_response = topology::authorize_with_topology_retry(
-        config,
-        proposal_request(
+    let dns_transaction = if rehost {
+        topology::fetch_signed_namespace_definition(
+            config,
             &synchronizer_id,
-            topology_mapping::Mapping::DecentralizedNamespaceDefinition(new_namespace_def.clone()),
-        ),
-        "add-party DNS",
-    )
-    .await?;
-    let dns_transaction = dns_response
+            &new_namespace_def.decentralized_namespace,
+        )
+        .await?
+    } else {
+        tracing::info!("Creating DNS add-party proposal...");
+        topology::authorize_with_topology_retry(
+            config,
+            proposal_request(
+                &synchronizer_id,
+                topology_mapping::Mapping::DecentralizedNamespaceDefinition(
+                    new_namespace_def.clone(),
+                ),
+            ),
+            "add-party DNS",
+        )
+        .await?
         .transaction
-        .ok_or_else(|| anyhow::anyhow!("No DNS transaction returned"))?;
+        .ok_or_else(|| anyhow::anyhow!("No DNS transaction returned"))?
+    };
 
     tracing::info!("Creating P2P add-party proposal...");
     let p2p_response = topology::authorize_with_topology_retry(
@@ -219,9 +251,50 @@ pub async fn create_proposals(
             &utils::encode_length_prefixed_message(&new_namespace_def),
         )
         .await?;
+    if rehost {
+        storage
+            .write_artifact(instance_name, artifact_kinds::ADD_PARTY_REHOST, None, b"1")
+            .await?;
+    }
 
     tracing::info!("Add-party proposals created and saved successfully");
     Ok(())
+}
+
+/// Whether the member being added already owns the party's namespace because
+/// it hosted the party before and only its hosting entry was removed.
+///
+/// Confirmed against this node's identity record for that participant: a
+/// namespace key this node cannot attribute to it is refused, since two
+/// participants sharing one namespace key would let either act for the other.
+async fn is_former_host(
+    storage: &SqlitePool,
+    party_id: &crate::canton_id::CantonId,
+    new_member_id: &str,
+    namespace_def: &DecentralizedNamespaceDefinition,
+    namespace_fingerprint: &str,
+) -> Result<bool> {
+    if !namespace_def
+        .owners
+        .iter()
+        .any(|o| o == namespace_fingerprint)
+    {
+        return Ok(false);
+    }
+    let recorded = storage
+        .read_identity(party_id, identity_kinds::PEER_PUBLIC_KEYS, new_member_id)
+        .await?
+        .map(|payload| decode_keys_payload(&payload))
+        .transpose()?
+        .and_then(|keys| keys.first().map(utils::compute_fingerprint));
+    if recorded.as_deref() == Some(namespace_fingerprint) {
+        return Ok(true);
+    }
+    anyhow::bail!(
+        "Namespace fingerprint {namespace_fingerprint} is already a DNS owner and this node \
+         has no record of it belonging to {new_member_id} — the new member appears to reuse \
+         an existing member's namespace key"
+    )
 }
 
 /// Build an `AuthorizeRequest` proposing `mapping` against the synchronizer
@@ -248,5 +321,88 @@ pub(crate) fn proposal_request(
         signed_by: vec![],
         store: Some(topology::synchronizer_store_id(synchronizer_id)),
         wait_to_become_effective: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use canton_proto_rs::com::digitalasset::canton::crypto::v30::{
+        SigningKeyUsage, SigningPublicKey,
+    };
+    use sqlx::SqlitePool;
+
+    use super::*;
+    use crate::{
+        canton_id::CantonId, db::MIGRATOR,
+        workflow::onboarding::steps::generate_keys::encode_keys_payload,
+    };
+
+    fn key(seed: u8, usage: SigningKeyUsage) -> SigningPublicKey {
+        SigningPublicKey {
+            public_key: vec![seed; 32],
+            usage: vec![usage as i32],
+            ..Default::default()
+        }
+    }
+
+    fn party() -> CantonId {
+        CantonId::parse(&format!("party::{}", "1220".to_owned() + &"ab".repeat(32)))
+            .expect("valid party id")
+    }
+
+    fn namespace_def(owners: &[String]) -> DecentralizedNamespaceDefinition {
+        DecentralizedNamespaceDefinition {
+            decentralized_namespace: "ns".to_string(),
+            threshold: 1,
+            owners: owners.to_vec(),
+        }
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_namespace_that_is_not_an_owner_is_a_plain_add(pool: SqlitePool) -> Result {
+        let fingerprint = utils::compute_fingerprint(&key(1, SigningKeyUsage::Namespace));
+        let def = namespace_def(&["other".to_string()]);
+        assert!(!is_former_host(&pool, &party(), "p3::1220aa", &def, &fingerprint).await?);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_owner_this_node_recorded_for_the_member_is_a_rehost(pool: SqlitePool) -> Result {
+        let namespace = key(1, SigningKeyUsage::Namespace);
+        let fingerprint = utils::compute_fingerprint(&namespace);
+        let party = party();
+        pool.write_identity(
+            &party,
+            identity_kinds::PEER_PUBLIC_KEYS,
+            "p3::1220aa",
+            &encode_keys_payload(&namespace, &key(2, SigningKeyUsage::Protocol)),
+        )
+        .await?;
+        let def = namespace_def(&[fingerprint.clone(), "other".to_string()]);
+        assert!(is_former_host(&pool, &party, "p3::1220aa", &def, &fingerprint).await?);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_owner_without_a_matching_record_is_refused(pool: SqlitePool) -> Result {
+        let fingerprint = utils::compute_fingerprint(&key(1, SigningKeyUsage::Namespace));
+        let party = party();
+        // Recorded for a different participant: the key belongs to someone else.
+        pool.write_identity(
+            &party,
+            identity_kinds::PEER_PUBLIC_KEYS,
+            "p2::1220bb",
+            &encode_keys_payload(
+                &key(1, SigningKeyUsage::Namespace),
+                &key(2, SigningKeyUsage::Protocol),
+            ),
+        )
+        .await?;
+        let def = namespace_def(std::slice::from_ref(&fingerprint));
+        let err = is_former_host(&pool, &party, "p3::1220aa", &def, &fingerprint)
+            .await
+            .expect_err("an owner key this node cannot attribute to the member must be refused");
+        assert!(format!("{err}").contains("already a DNS owner"), "{err}");
+        Ok(())
     }
 }
