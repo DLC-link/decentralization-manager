@@ -1,2 +1,0 @@
--- Irreversible data cleanup: purged cache rows are re-derived from the
--- ledger on the next chain audit refresh.
