@@ -2,8 +2,9 @@ use std::{collections::HashMap, future::Future};
 
 use anyhow::{Context, Result};
 use canton_proto_rs::com::daml::ledger::api::v2::{
-    CumulativeFilter, GetLatestPrunedOffsetsRequest, GetLedgerEndRequest, Identifier, Record,
-    Transaction, TransactionFormat, TransactionShape, UpdateFormat, Value, event::Event, value,
+    CumulativeFilter, GenMap, GetLatestPrunedOffsetsRequest, GetLedgerEndRequest, Identifier,
+    Record, TextMap, Transaction, TransactionFormat, TransactionShape, UpdateFormat, Value,
+    event::Event, value,
 };
 use decman_lib::catalog::lifecycle::{GovernanceLifecycleEvent, classify_choice as lifecycle_of};
 use serde_json::{Value as JsonValue, json};
@@ -200,6 +201,36 @@ fn classify_created(tid: &Identifier, is_child_of_exercise: bool) -> (String, St
     }
 }
 
+/// Convert a ledger-API `Value` to the JSON the audit trail displays.
+///
+/// This is a display encoding. It is not the canonical Daml-LF JSON encoding
+/// that the JSON Ledger API uses, documented at
+/// <https://docs.daml.com/json-api/lf-value-specification.html>.
+///
+/// Maps are the deliberate difference. The canonical encoding renders every
+/// `GenMap` as a list of `[key, value]` pairs, because a GenMap key is any
+/// Daml value while a JSON object key must be a string. That form splits each
+/// key from its value across two lines in both viewers, so this function
+/// renders a `GenMap` three ways instead:
+///
+/// - A set becomes a JSON array of its keys. Daml has no set type of its own.
+///   `DA.Set` is a record wrapping a `GenMap a Unit`, so a map whose values
+///   are all `Unit` is a set, whatever its keys are. The values carry nothing,
+///   and an array of members is what an auditor reads. A `TextMap Unit`
+///   follows the same rule, because the shape decides rather than the Daml
+///   type that produced it.
+/// - Any other map whose keys are all `Text` or `Party` becomes a JSON object.
+/// - Every remaining map becomes an array of explicit `key`/`value` pairs.
+///
+/// An empty map stays an object, because nothing marks it as a set.
+///
+/// [`record_to_json_inner`] drops the record wrapper that `DA.Set` puts around
+/// its map, so a set renders as a bare array rather than a one-key object.
+///
+/// Four smaller differences predate that choice and remain: `Unit` becomes
+/// `null` rather than `{}`, a variant is tagged `_variant` rather than `tag`,
+/// `Date` and `Timestamp` stay raw proto integers, and a nested `Optional`
+/// loses the distinction between `None` and `Some None`.
 fn value_to_json(v: &Value) -> JsonValue {
     match &v.sum {
         Some(value::Sum::Unit(())) => JsonValue::Null,
@@ -228,14 +259,128 @@ fn value_to_json(v: &Value) -> JsonValue {
             json!({ "_variant": var.constructor, "value": inner })
         }
         Some(value::Sum::Enum(e)) => JsonValue::String(e.constructor.clone()),
-        Some(value::Sum::TextMap(_)) | Some(value::Sum::GenMap(_)) => {
-            json!({ "_unsupported": "map" })
-        }
+        Some(value::Sum::TextMap(m)) => text_map_to_json(m),
+        Some(value::Sum::GenMap(m)) => gen_map_to_json(m),
         None => JsonValue::Null,
     }
 }
 
+/// The JSON object key for a Daml map key, when that key is string-like.
+fn gen_map_key(key: &Option<Value>) -> Option<String> {
+    match key.as_ref().and_then(|v| v.sum.as_ref()) {
+        Some(value::Sum::Text(s) | value::Sum::Party(s)) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+/// Whether a map value is `Unit`, which carries nothing.
+fn is_unit(value: Option<&Value>) -> bool {
+    matches!(
+        value.and_then(|v| v.sum.as_ref()),
+        Some(value::Sum::Unit(()))
+    )
+}
+
+/// A `TextMap` as an array of its keys when it is a set, and as a JSON object
+/// otherwise. See [`value_to_json`] for why.
+fn text_map_to_json(m: &TextMap) -> JsonValue {
+    if !m.entries.is_empty() && m.entries.iter().all(|e| is_unit(e.value.as_ref())) {
+        return JsonValue::Array(
+            m.entries
+                .iter()
+                .map(|e| JsonValue::String(e.key.clone()))
+                .collect(),
+        );
+    }
+
+    JsonValue::Object(
+        m.entries
+            .iter()
+            .map(|e| (e.key.clone(), optional_value_to_json(&e.value)))
+            .collect(),
+    )
+}
+
+/// Whether every entry carries `Unit`, which makes the map a set.
+fn is_set(m: &GenMap) -> bool {
+    !m.entries.is_empty() && m.entries.iter().all(|e| is_unit(e.value.as_ref()))
+}
+
+/// A `GenMap` as an array of keys when it is a set, as a JSON object when
+/// every key is string-like, and as explicit `key`/`value` pairs otherwise.
+/// See [`value_to_json`] for why.
+fn gen_map_to_json(m: &GenMap) -> JsonValue {
+    if is_set(m) {
+        return JsonValue::Array(
+            m.entries
+                .iter()
+                .map(|e| optional_value_to_json(&e.key))
+                .collect(),
+        );
+    }
+
+    let keys: Option<Vec<String>> = m.entries.iter().map(|e| gen_map_key(&e.key)).collect();
+    match keys {
+        Some(keys) => JsonValue::Object(
+            keys.into_iter()
+                .zip(m.entries.iter())
+                .map(|(key, e)| (key, optional_value_to_json(&e.value)))
+                .collect(),
+        ),
+        None => JsonValue::Array(
+            m.entries
+                .iter()
+                .map(|e| {
+                    json!({
+                        "key": optional_value_to_json(&e.key),
+                        "value": optional_value_to_json(&e.value),
+                    })
+                })
+                .collect(),
+        ),
+    }
+}
+
+/// The map inside a `DA.Set`, when this record is the wrapper around one.
+///
+/// Daml has no set type. `DA.Set` is a record whose only field is named `map`
+/// and holds a `GenMap a Unit`. Keeping that wrapper would make an auditor
+/// open two nodes to read one list.
+///
+/// The audit read asks for verbose events, so `record_id` is present and names
+/// the type exactly. Under [`AuditScope::All`] the trail also renders
+/// third-party templates, and one of those may declare its own field called
+/// `map`; the identifier check keeps that field's label. The label alone
+/// remains the fallback for a producer that omits `record_id`.
+fn set_wrapper_map(r: &Record) -> Option<&Value> {
+    let [field] = r.fields.as_slice() else {
+        return None;
+    };
+    if field.label != "map" {
+        return None;
+    }
+    if let Some(id) = &r.record_id
+        && !(id.module_name == "DA.Set.Types" && id.entity_name == "Set")
+    {
+        return None;
+    }
+    let value = field.value.as_ref()?;
+    matches!(&value.sum, Some(value::Sum::GenMap(_))).then_some(value)
+}
+
 fn record_to_json_inner(r: &Record) -> JsonValue {
+    if let Some(inner) = set_wrapper_map(r) {
+        // The wrapper is itself the proof that this map is a set, so an empty
+        // one renders as an empty array. A bare map has no such proof and
+        // keeps the object form, which is why `is_set` cannot decide this.
+        if let Some(value::Sum::GenMap(m)) = &inner.sum
+            && m.entries.is_empty()
+        {
+            return JsonValue::Array(Vec::new());
+        }
+        return value_to_json(inner);
+    }
+
     let mut obj = serde_json::Map::new();
     for (idx, f) in r.fields.iter().enumerate() {
         let key = if f.label.is_empty() {
@@ -800,8 +945,8 @@ mod tests {
     use std::collections::VecDeque;
 
     use canton_proto_rs::com::daml::ledger::api::v2::{
-        CreatedEvent, Enum, Event as EventEnvelope, ExercisedEvent, Optional, RecordField, TextMap,
-        Variant,
+        CreatedEvent, Enum, Event as EventEnvelope, ExercisedEvent, GenMap, Optional, RecordField,
+        TextMap, Variant, gen_map, text_map,
     };
 
     use super::*;
@@ -939,6 +1084,52 @@ mod tests {
         }
     }
 
+    fn party(p: &str) -> Value {
+        Value {
+            sum: Some(value::Sum::Party(p.to_string())),
+        }
+    }
+
+    fn int(i: i64) -> Value {
+        Value {
+            sum: Some(value::Sum::Int64(i)),
+        }
+    }
+
+    fn unit() -> Value {
+        Value {
+            sum: Some(value::Sum::Unit(())),
+        }
+    }
+
+    fn text_map_of(entries: &[(&str, Value)]) -> Value {
+        Value {
+            sum: Some(value::Sum::TextMap(TextMap {
+                entries: entries
+                    .iter()
+                    .map(|(k, v)| text_map::Entry {
+                        key: (*k).to_string(),
+                        value: Some(v.clone()),
+                    })
+                    .collect(),
+            })),
+        }
+    }
+
+    fn gen_map_of(entries: &[(Value, Value)]) -> Value {
+        Value {
+            sum: Some(value::Sum::GenMap(GenMap {
+                entries: entries
+                    .iter()
+                    .map(|(k, v)| gen_map::Entry {
+                        key: Some(k.clone()),
+                        value: Some(v.clone()),
+                    })
+                    .collect(),
+            })),
+        }
+    }
+
     #[test]
     fn test_classify_choice_maps_every_protocol_name() {
         assert_eq!(
@@ -1015,13 +1206,13 @@ mod tests {
             json!({ "_variant": "AV_Text", "value": "x" })
         );
 
-        // An empty TextMap → unsupported-map marker.
+        // An empty TextMap → an empty JSON object.
         let empty_map = Value {
             sum: Some(value::Sum::TextMap(TextMap {
                 entries: Vec::new(),
             })),
         };
-        assert_eq!(value_to_json(&empty_map), json!({ "_unsupported": "map" }));
+        assert_eq!(value_to_json(&empty_map), json!({}));
 
         // Numeric is emitted as a JSON STRING to preserve financial precision.
         let numeric = Value {
@@ -1055,6 +1246,209 @@ mod tests {
             })),
         };
         assert_eq!(value_to_json(&red), json!("Red"));
+    }
+
+    #[test]
+    fn text_map_becomes_a_json_object() {
+        let map = text_map_of(&[("alpha", text("one")), ("beta", text("two"))]);
+        assert_eq!(
+            value_to_json(&map),
+            json!({ "alpha": "one", "beta": "two" })
+        );
+    }
+
+    #[test]
+    fn gen_map_with_party_keys_becomes_a_json_object() {
+        let map = gen_map_of(&[
+            (party("alice::1220aa"), int(2)),
+            (party("bob::1220bb"), int(1)),
+        ]);
+        assert_eq!(
+            value_to_json(&map),
+            json!({ "alice::1220aa": 2, "bob::1220bb": 1 })
+        );
+    }
+
+    #[test]
+    fn gen_map_with_text_keys_becomes_a_json_object() {
+        let map = gen_map_of(&[(text("k"), text("v"))]);
+        assert_eq!(value_to_json(&map), json!({ "k": "v" }));
+    }
+
+    #[test]
+    fn gen_map_with_non_text_keys_becomes_an_array_of_pairs() {
+        let map = gen_map_of(&[(int(1), text("one")), (int(2), text("two"))]);
+        assert_eq!(
+            value_to_json(&map),
+            json!([
+                { "key": 1, "value": "one" },
+                { "key": 2, "value": "two" },
+            ])
+        );
+    }
+
+    #[test]
+    fn an_empty_gen_map_becomes_an_empty_object() {
+        // Nothing marks an empty map as a set, so it keeps the object form.
+        assert_eq!(value_to_json(&gen_map_of(&[])), json!({}));
+    }
+
+    #[test]
+    fn a_text_map_of_units_becomes_an_array_of_its_keys() {
+        let set = text_map_of(&[("alpha", unit()), ("beta", unit())]);
+        assert_eq!(value_to_json(&set), json!(["alpha", "beta"]));
+    }
+
+    #[test]
+    fn a_text_map_with_one_real_value_stays_an_object() {
+        let map = text_map_of(&[("alpha", unit()), ("beta", text("two"))]);
+        assert_eq!(value_to_json(&map), json!({ "alpha": null, "beta": "two" }));
+    }
+
+    #[test]
+    fn a_gen_map_of_units_becomes_an_array_of_its_keys() {
+        let set = gen_map_of(&[
+            (party("alice::1220aa"), unit()),
+            (party("bob::1220bb"), unit()),
+        ]);
+        assert_eq!(value_to_json(&set), json!(["alice::1220aa", "bob::1220bb"]));
+    }
+
+    /// A `Set` need not key on `Party`. The values decide, not the keys.
+    #[test]
+    fn a_set_of_non_party_keys_still_becomes_an_array() {
+        let set = gen_map_of(&[(int(1), unit()), (int(2), unit())]);
+        assert_eq!(value_to_json(&set), json!([1, 2]));
+    }
+
+    /// One non-`Unit` value is enough to make it a map rather than a set.
+    #[test]
+    fn a_gen_map_with_one_real_value_stays_an_object() {
+        let map = gen_map_of(&[
+            (party("alice::1220aa"), unit()),
+            (party("bob::1220bb"), int(1)),
+        ]);
+        assert_eq!(
+            value_to_json(&map),
+            json!({ "alice::1220aa": null, "bob::1220bb": 1 })
+        );
+    }
+
+    /// The case issue #460 reports. `members : Set Party` reaches the ledger
+    /// API as a record wrapping a `GenMap Party Unit`, so the audit trail must
+    /// show the parties through that wrapper.
+    #[test]
+    fn a_set_of_parties_shows_its_members() {
+        let members = Record {
+            record_id: Some(set_id()),
+            fields: vec![RecordField {
+                label: "map".to_string(),
+                value: Some(gen_map_of(&[
+                    (party("alice::1220aa"), unit()),
+                    (party("bob::1220bb"), unit()),
+                ])),
+            }],
+        };
+        assert_eq!(
+            record_to_json_inner(&members),
+            json!(["alice::1220aa", "bob::1220bb"])
+        );
+    }
+
+    /// `DA.Set.Types:Set`, the record id a verbose read puts on a set wrapper.
+    fn set_id() -> Identifier {
+        Identifier {
+            package_id: "#daml-stdlib".to_string(),
+            module_name: "DA.Set.Types".to_string(),
+            entity_name: "Set".to_string(),
+        }
+    }
+
+    /// The wrapper proves the map is a set, so an empty one is an empty array.
+    /// Without that, the same field would be an array when populated and an
+    /// object when empty.
+    #[test]
+    fn an_empty_set_wrapper_becomes_an_empty_array() {
+        let empty = Record {
+            record_id: Some(set_id()),
+            fields: vec![RecordField {
+                label: "map".to_string(),
+                value: Some(gen_map_of(&[])),
+            }],
+        };
+        assert_eq!(record_to_json_inner(&empty), json!([]));
+    }
+
+    /// Under `AuditScope::All` the trail renders third-party templates. One of
+    /// them may declare its own field named `map`, and its label must survive.
+    #[test]
+    fn a_foreign_record_with_a_map_field_keeps_its_label() {
+        let foreign = Record {
+            record_id: Some(Identifier {
+                package_id: "#some-app".to_string(),
+                module_name: "App.Index".to_string(),
+                entity_name: "Index".to_string(),
+            }),
+            fields: vec![RecordField {
+                label: "map".to_string(),
+                value: Some(text_map_of(&[("k", text("v"))])),
+            }],
+        };
+        assert_eq!(
+            record_to_json_inner(&foreign),
+            json!({ "map": { "k": "v" } })
+        );
+    }
+
+    /// A producer that omits `record_id` still gets the wrapper dropped, so the
+    /// label remains the fallback signal.
+    #[test]
+    fn a_set_wrapper_without_a_record_id_still_unwraps() {
+        let members = Record {
+            record_id: None,
+            fields: vec![RecordField {
+                label: "map".to_string(),
+                value: Some(gen_map_of(&[(party("alice::1220aa"), unit())])),
+            }],
+        };
+        assert_eq!(record_to_json_inner(&members), json!(["alice::1220aa"]));
+    }
+
+    /// The wrapper is dropped only when `map` is the record's one field. A
+    /// record carrying more than that is an ordinary record.
+    #[test]
+    fn a_record_with_more_than_a_map_field_keeps_its_labels() {
+        let record = Record {
+            record_id: None,
+            fields: vec![
+                RecordField {
+                    label: "map".to_string(),
+                    value: Some(gen_map_of(&[(party("alice::1220aa"), unit())])),
+                },
+                RecordField {
+                    label: "threshold".to_string(),
+                    value: Some(int(2)),
+                },
+            ],
+        };
+        assert_eq!(
+            record_to_json_inner(&record),
+            json!({ "map": ["alice::1220aa"], "threshold": 2 })
+        );
+    }
+
+    /// A single field named `map` that holds something other than a map is not
+    /// a set wrapper.
+    #[test]
+    fn a_single_map_field_holding_no_map_keeps_its_label() {
+        let record = Record {
+            record_id: None,
+            fields: vec![RecordField {
+                label: "map".to_string(),
+                value: Some(text("not a map")),
+            }],
+        };
+        assert_eq!(record_to_json_inner(&record), json!({ "map": "not a map" }));
     }
 
     #[test]
