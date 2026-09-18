@@ -86,6 +86,29 @@ pub fn archive_command(
     })
 }
 
+/// Build the `/v2/state/active-contracts` body for every active contract
+/// visible to `party`, whatever its template, as of `offset`.
+pub fn active_contracts_request_all(party: &str, offset: i64) -> Value {
+    json!({
+        "eventFormat": {
+            "filtersByParty": {
+                party: {
+                    "cumulative": [{
+                        "identifierFilter": {
+                            "WildcardFilter": {
+                                "value": { "includeCreatedEventBlob": false }
+                            }
+                        }
+                    }]
+                }
+            },
+            "verbose": false
+        },
+        "verbose": false,
+        "activeAtOffset": offset,
+    })
+}
+
 /// `(contract_id, round)` of every active `RewardCouponV2` in an ACS response.
 /// `round` is `-1` when the payload carries none.
 pub fn parse_coupon_ids(acs_response: &Value) -> Vec<(String, i64)> {
@@ -200,6 +223,24 @@ impl Fixture {
         r.get("offset")
             .and_then(|o| o.as_i64())
             .context("ledger-end response missing integer offset")
+    }
+
+    /// Contract ids of every active contract visible to `party`, whatever the
+    /// template, as of the current ledger end.
+    pub async fn active_contract_ids(&self, port: u16, party: &str) -> anyhow::Result<Vec<String>> {
+        let offset = self.ledger_end(port).await?;
+        let body = active_contracts_request_all(party, offset);
+        let (status, text) = self
+            .post_expect_status(port, "/v2/state/active-contracts", &body)
+            .await
+            .context("POST /v2/state/active-contracts")?;
+        if !status.is_success() {
+            anyhow::bail!("POST /v2/state/active-contracts returned {status}: {text}");
+        }
+        Ok(parse_coupon_ids(&normalize_acs_body(&text)?)
+            .into_iter()
+            .map(|(cid, _)| cid)
+            .collect())
     }
 
     /// `(contract_id, round)` of the active `RewardCouponV2` coupons visible to

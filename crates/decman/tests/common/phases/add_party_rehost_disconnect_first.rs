@@ -10,8 +10,12 @@
 //! target reconnects.
 //!
 //! Setup: P3 hosts the party (the add_party phase put it back). P3 removes its
-//! own hosting entry, which a participant may do alone, and stays a namespace
-//! owner: the shape MainNet is in. Contracts the party observes are created
+//! own hosting entry, which a participant may do alone once it forces past
+//! Canton's active-contracts guard, and stays a namespace owner: the shape
+//! MainNet is in. P3 then leaves the synchronizer, purges its copy of the
+//! party's contracts and reconnects, the way the recovery procedure does;
+//! contracts left behind would stay active on P3 forever, since it no longer
+//! sees the party's archives. Contracts the party observes are then created
 //! while P3 is out, so P3 holds none of them.
 //!
 //! P3 is then added back. From the moment P3 accepts the invitation until the
@@ -39,12 +43,14 @@ use std::{
 use anyhow::Context;
 use canton_proto_rs::com::digitalasset::canton::{
     admin::participant::v30::{
-        ListConnectedSynchronizersRequest, ListRegisteredSynchronizersRequest,
+        DisconnectSynchronizerRequest, ListConnectedSynchronizersRequest,
+        ListRegisteredSynchronizersRequest, PurgeContractsRequest, ReconnectSynchronizerRequest,
+        participant_repair_service_client::ParticipantRepairServiceClient,
         synchronizer_connectivity_service_client::SynchronizerConnectivityServiceClient,
     },
     protocol::v30::{TopologyMapping, enums::TopologyChangeOp, topology_mapping},
     topology::admin::v30::{
-        AuthorizeRequest, ListDecentralizedNamespaceDefinitionRequest,
+        AuthorizeRequest, ForceFlag, ListDecentralizedNamespaceDefinitionRequest,
         ListPartyToParticipantRequest, authorize_request,
         list_party_to_participant_response::result::Item as P2pItem,
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
@@ -175,7 +181,9 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         },
                     )),
                     must_fully_authorize: true,
-                    force_changes: vec![],
+                    // Canton refuses to let a participant drop a party it holds
+                    // active contracts for unless told the operator means it.
+                    force_changes: vec![ForceFlag::DisablePartyWithActiveContracts as i32],
                     signed_by: vec![],
                     store: Some(synchronizer_store_id(&synchronizer_id)),
                     wait_to_become_effective: None,
@@ -212,6 +220,79 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     Ok(false) => Some(Ok(())),
                     Ok(true) => None,
                     Err(e) => Some(Err(e)),
+                }
+            })
+        },
+    )
+    .when(
+        "P3 leaves the synchronizer, purges its copy of the party's contracts, reconnects",
+        |f, _| {
+            Box::pin(async move {
+                let p3 = admin_config(f, 3)?;
+                let party = f.party_id()?.to_string();
+                let held = f.active_contract_ids(P3_JSON_API, &party).await?;
+                let alias = p3.synchronizer().to_string();
+                let mut connectivity =
+                    SynchronizerConnectivityServiceClient::new(p3.admin_channel().await?);
+                connectivity
+                    .disconnect_synchronizer(tonic::Request::new(DisconnectSynchronizerRequest {
+                        synchronizer_alias: alias.clone(),
+                    }))
+                    .await
+                    .context("disconnect P3")?;
+                if !held.is_empty() {
+                    let mut repair = ParticipantRepairServiceClient::new(p3.admin_channel().await?);
+                    let mut last = None;
+                    for _ in 0..5 {
+                        match repair
+                            .purge_contracts(tonic::Request::new(PurgeContractsRequest {
+                                synchronizer_alias: alias.clone(),
+                                contract_ids: held.clone(),
+                                ignore_already_purged: true,
+                            }))
+                            .await
+                        {
+                            Ok(_) => {
+                                last = None;
+                                break;
+                            }
+                            Err(e) => {
+                                last = Some(e);
+                                tokio::time::sleep(Duration::from_secs(2)).await;
+                            }
+                        }
+                    }
+                    if let Some(e) = last {
+                        anyhow::bail!("purge of {} contract(s) on P3 failed: {e}", held.len());
+                    }
+                }
+                connectivity
+                    .reconnect_synchronizer(tonic::Request::new(ReconnectSynchronizerRequest {
+                        synchronizer_alias: alias,
+                        retry: true,
+                    }))
+                    .await
+                    .context("reconnect P3")?;
+                info!(
+                    "P3 purged {} contract(s) of the party and reconnected",
+                    held.len()
+                );
+                Ok(())
+            })
+        },
+    )
+    .then(
+        "P3's participant is connected and healthy after the purge",
+        Duration::from_secs(90),
+        |f, _| {
+            Box::pin(async move {
+                let p3 = match admin_config(f, 3) {
+                    Ok(c) => c,
+                    Err(e) => return Some(Err(e)),
+                };
+                match connection_state(&p3).await {
+                    Ok((true, _)) => Some(Ok(())),
+                    _ => None,
                 }
             })
         },
