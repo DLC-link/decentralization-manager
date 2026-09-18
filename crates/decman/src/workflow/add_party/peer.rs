@@ -1,11 +1,16 @@
 use canton_proto_rs::com::digitalasset::canton::{
-    protocol::v30::SignedTopologyTransaction,
-    topology::admin::v30::topology_manager_write_service_client::TopologyManagerWriteServiceClient,
+    protocol::v30::party_to_participant::HostingParticipant,
+    topology::admin::v30::{
+        ListPartyToParticipantRequest, list_party_to_participant_response::result::Item as P2pItem,
+        topology_manager_read_service_client::TopologyManagerReadServiceClient,
+    },
 };
 use sqlx::SqlitePool;
 
 use crate::{
+    canton_id::CantonId,
     config::NodeConfig,
+    consts::{topology_retry_delay_secs, topology_retry_max_attempts},
     error::Result,
     noise::client::NoiseClient,
     utils,
@@ -15,29 +20,62 @@ use crate::{
     },
 };
 
-/// Put the coordinator's P2P proposal into this node's own synchronizer store.
+/// Wait until this node's own synchronizer store holds the P2P proposal that
+/// hosts it with the onboarding marker.
 ///
-/// `ImportPartyAcs` checks the target's own store for a mapping, effective or
-/// proposed, that hosts it with the onboarding marker, and refuses the import
-/// otherwise. The new member disconnects before the mapping is authorized, so
-/// its store never sees it become effective; Canton's procedure has the target
-/// propose the mapping itself before it disconnects, and this is that step.
-/// Adding a transaction the store already holds changes nothing.
+/// `ImportPartyAcs` checks the target's own store for such a mapping, effective
+/// or proposed, and refuses the import otherwise. A synchronizer store is fed
+/// only by sequenced transactions, so the coordinator's proposal reaches it a
+/// moment after `Authorize` returned on the coordinator. The new member
+/// disconnects before the mapping is authorized and will not see it take
+/// effect, so the proposal has to be in its store before it disconnects.
 ///
 /// # Errors
-/// Returns an error if the payload is not a signed topology transaction or
-/// Canton refuses it.
-pub async fn keep_hosting_proposal(config: &NodeConfig, p2p_payload: &[u8]) -> Result {
-    let proposal: SignedTopologyTransaction = utils::read_first_message_from_bytes(p2p_payload)?;
+/// Returns an error if the proposal has not arrived within the topology retry
+/// budget.
+pub async fn wait_for_hosting_proposal(config: &NodeConfig, party_id: &CantonId) -> Result {
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
-    TopologyManagerWriteServiceClient::new(config.admin_channel().await?)
-        .add_transactions(tonic::Request::new(topology::add_transactions_request(
-            &synchronizer_id,
-            proposal,
-        )))
-        .await?;
-    tracing::info!("Hosting proposal recorded in this node's own topology store");
-    Ok(())
+    let self_id = config.participant_id().to_string();
+    let max_attempts = topology_retry_max_attempts();
+    let retry_delay = std::time::Duration::from_secs(topology_retry_delay_secs());
+    let hosts_self =
+        |p: &HostingParticipant| p.participant_uid == self_id && p.onboarding.is_some();
+
+    for attempt in 1..=max_attempts {
+        let mut client = TopologyManagerReadServiceClient::new(config.admin_channel().await?);
+        for proposals in [true, false] {
+            let mut base_query = topology::head_state_query(&synchronizer_id);
+            base_query.proposals = proposals;
+            let response = client
+                .list_party_to_participant(tonic::Request::new(ListPartyToParticipantRequest {
+                    base_query: Some(base_query),
+                    filter_party: party_id.to_string(),
+                    filter_participant: String::new(),
+                }))
+                .await?
+                .into_inner();
+            let found = response.results.into_iter().any(|r| {
+                let Some(P2pItem::V30(mapping)) = r.item else {
+                    return false;
+                };
+                mapping.party == party_id.to_string() && mapping.participants.iter().any(hosts_self)
+            });
+            if found {
+                tracing::info!(
+                    "This node's store holds the mapping hosting it with the onboarding marker \
+                     (proposal: {proposals}) after {attempt} attempt(s)"
+                );
+                return Ok(());
+            }
+        }
+        if attempt < max_attempts {
+            tokio::time::sleep(retry_delay).await;
+        }
+    }
+    anyhow::bail!(
+        "the P2P proposal hosting {self_id} for {party_id} did not reach this node's store \
+         within {max_attempts} attempts"
+    )
 }
 
 /// Status string a non-addressed peer replies with when a new-member-only

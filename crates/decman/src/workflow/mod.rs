@@ -1045,11 +1045,15 @@ pub async fn start_peer(
                 // let the coordinator authorize the mapping. From the moment the
                 // mapping is effective it receives the party's traffic, and it
                 // must not journal any of it until the ACS import has landed.
-                // Its own store keeps the proposal first: disconnected, it will
-                // not see the mapping take effect, and the import checks for it.
+                // Its own store has to hold the proposal first: disconnected, it
+                // will not see the mapping take effect, and the import checks for it.
                 if is_new_member(&node_config, &add_party_config)
                     && let Err(e) = async {
-                        add_party::peer::keep_hosting_proposal(&node_config, &items[2]).await?;
+                        add_party::peer::wait_for_hosting_proposal(
+                            &node_config,
+                            &add_party_config.decentralized_party_id,
+                        )
+                        .await?;
                         party_replication::open_import_window(
                             &node_config,
                             &db,
