@@ -1041,6 +1041,38 @@ pub async fn start_peer(
                     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     continue;
                 }
+                // The new member leaves the synchronizer before its signature can
+                // let the coordinator authorize the mapping. From the moment the
+                // mapping is effective it receives the party's traffic, and it
+                // must not journal any of it until the ACS import has landed.
+                // Its own store has to hold the proposal first: disconnected, it
+                // will not see the mapping take effect, and the import checks for it.
+                if is_new_member(&node_config, &add_party_config)
+                    && let Err(e) = async {
+                        add_party::peer::wait_for_hosting_proposal(
+                            &node_config,
+                            &add_party_config.decentralized_party_id,
+                        )
+                        .await?;
+                        party_replication::open_import_window(
+                            &node_config,
+                            &db,
+                            &add_party_config.replication_target(&instance_name),
+                        )
+                        .await
+                    }
+                    .await
+                {
+                    tracing::error!("Failed to open the ACS import window: {e:#}");
+                    consecutive_step_failures += 1;
+                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                        anyhow::bail!(
+                            "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
+                        );
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    continue;
+                }
                 consecutive_step_failures = 0;
                 if let Err(e) = add_party::peer::send_add_party_signatures_to_coordinator(
                     &client,
@@ -1146,7 +1178,7 @@ pub async fn start_peer(
                 // between attempts, which replays the ACS journal — so a failure
                 // that reaches this point ends the peer.
                 if let Err(e) = step_result {
-                    anyhow::bail!("Aborting peer: the ACS import failed: {e}");
+                    anyhow::bail!("Aborting peer: the ACS import failed: {e:#}");
                 }
                 consecutive_step_failures = 0;
                 if let Err(e) = client.send_status(b"ImportAcs completed".to_vec()).await {

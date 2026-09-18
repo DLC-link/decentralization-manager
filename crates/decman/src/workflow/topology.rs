@@ -19,7 +19,7 @@ use canton_proto_rs::com::digitalasset::canton::{
         SignedTopologyTransaction, TopologyTransaction, enums, topology_mapping,
     },
     topology::admin::v30::{
-        AddTransactionsRequest, AuthorizeRequest, AuthorizeResponse, BaseQuery,
+        AddTransactionsRequest, AuthorizeRequest, AuthorizeResponse, BaseQuery, ListAllRequest,
         ListDecentralizedNamespaceDefinitionRequest, ListPartyToKeyMappingRequest,
         ListPartyToParticipantRequest, SignTransactionsRequest, SignTransactionsResponse, StoreId,
         Synchronizer, base_query,
@@ -452,6 +452,49 @@ pub async fn check_added_signing_keys_signed(
     Ok(())
 }
 
+/// The signed transaction currently in force for the decentralized namespace,
+/// as the synchronizer store holds it.
+///
+/// Re-hosting a former member changes nothing about the namespace, but the
+/// peers' signing round takes a DNS transaction alongside the P2P one. Handing
+/// them the transaction already in force keeps that round unchanged; their
+/// signatures on it are never submitted.
+///
+/// # Errors
+/// Returns an error if the store holds no such transaction.
+pub async fn fetch_signed_namespace_definition(
+    config: &NodeConfig,
+    synchronizer_id: &str,
+    namespace_hex: &str,
+) -> Result<SignedTopologyTransaction> {
+    let mut topology_read_client =
+        TopologyManagerReadServiceClient::new(config.admin_channel().await?);
+    // `ListAll` is the variant Canton 3.5 serves; its successor is 3.6-only.
+    #[allow(deprecated)]
+    let response = topology_read_client
+        .list_all(tonic::Request::new(ListAllRequest {
+            base_query: Some(head_state_query(synchronizer_id)),
+            exclude_mappings: vec![],
+            filter_namespace: namespace_hex.to_string(),
+        }))
+        .await?
+        .into_inner();
+    for item in response.result.map(|r| r.items).unwrap_or_default() {
+        let signed: SignedTopologyTransaction = utils::decode_versioned(&item.transaction)?;
+        let transaction: TopologyTransaction = utils::decode_versioned(&signed.transaction)?;
+        if let Some(topology_mapping::Mapping::DecentralizedNamespaceDefinition(def)) =
+            transaction.mapping.and_then(|m| m.mapping)
+            && def.decentralized_namespace == namespace_hex
+        {
+            return Ok(signed);
+        }
+    }
+    anyhow::bail!(
+        "No DecentralizedNamespaceDefinition transaction for {namespace_hex} in the \
+         synchronizer head state"
+    )
+}
+
 /// Fetch the current `DecentralizedNamespaceDefinition` from the synchronizer
 /// head state. Errors if the namespace is not present.
 pub async fn fetch_namespace_definition(
@@ -694,6 +737,25 @@ where
         .await?;
     confirm_dns().await?;
     tracing::info!("DNS {label} confirmed in topology");
+
+    submit_p2p(config, synchronizer_id, label, p2p_transaction, confirm_p2p).await
+}
+
+/// Submit the aggregated P2P mapping alone, await its confirmation, and finish
+/// with the shared topology-propagation delay. The second half of
+/// [`submit_dns_then_p2p`], for a change that leaves the namespace as it is.
+pub async fn submit_p2p<P2pFut>(
+    config: &NodeConfig,
+    synchronizer_id: &str,
+    label: &str,
+    p2p_transaction: SignedTopologyTransaction,
+    confirm_p2p: impl FnOnce() -> P2pFut,
+) -> Result
+where
+    P2pFut: Future<Output = Result>,
+{
+    let mut topology_write_client =
+        TopologyManagerWriteServiceClient::new(config.admin_channel().await?);
 
     tracing::info!("Submitting P2P {label} proposal...");
     topology_write_client

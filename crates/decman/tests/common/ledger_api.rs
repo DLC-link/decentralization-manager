@@ -62,6 +62,73 @@ pub fn reward_coupon_create_command(coupons: &[SeedCoupon], command_id: &str) ->
     })
 }
 
+/// Build the `/v2/commands/submit-and-wait` body archiving one contract of
+/// `template_id`, submitted as `ledger-api-user` acting as its signatory `actor`.
+pub fn archive_command(
+    template_id: &str,
+    contract_id: &str,
+    actor: &str,
+    command_id: &str,
+) -> Value {
+    json!({
+        "commands": [{
+            "ExerciseCommand": {
+                "templateId": template_id,
+                "contractId": contract_id,
+                "choice": "Archive",
+                "choiceArgument": {},
+            }
+        }],
+        "commandId": command_id,
+        "userId": "ledger-api-user",
+        "actAs": [actor],
+        "readAs": [actor],
+    })
+}
+
+/// Build the `/v2/state/active-contracts` body for every active contract
+/// visible to `party`, whatever its template, as of `offset`.
+pub fn active_contracts_request_all(party: &str, offset: i64) -> Value {
+    json!({
+        "eventFormat": {
+            "filtersByParty": {
+                party: {
+                    "cumulative": [{
+                        "identifierFilter": {
+                            "WildcardFilter": {
+                                "value": { "includeCreatedEventBlob": false }
+                            }
+                        }
+                    }]
+                }
+            },
+            "verbose": false
+        },
+        "verbose": false,
+        "activeAtOffset": offset,
+    })
+}
+
+/// `(contract_id, round)` of every active `RewardCouponV2` in an ACS response.
+/// `round` is `-1` when the payload carries none.
+pub fn parse_coupon_ids(acs_response: &Value) -> Vec<(String, i64)> {
+    acs_response
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let created = entry.pointer("/contractEntry/JsActiveContract/createdEvent")?;
+            let contract_id = created.get("contractId")?.as_str()?.to_string();
+            let round = created
+                .pointer("/createArgument/round/number")
+                .and_then(|n| n.as_str())
+                .and_then(|n| n.parse::<i64>().ok())
+                .unwrap_or(-1);
+            Some((contract_id, round))
+        })
+        .collect()
+}
+
 /// Build the `/v2/state/active-contracts` body: active `RewardCouponV2`
 /// contracts visible to `party`, as of `offset`.
 pub fn active_contracts_request(party: &str, template_id: &str, offset: i64) -> Value {
@@ -156,6 +223,43 @@ impl Fixture {
         r.get("offset")
             .and_then(|o| o.as_i64())
             .context("ledger-end response missing integer offset")
+    }
+
+    /// Contract ids of every active contract visible to `party`, whatever the
+    /// template, as of the current ledger end.
+    pub async fn active_contract_ids(&self, port: u16, party: &str) -> anyhow::Result<Vec<String>> {
+        let offset = self.ledger_end(port).await?;
+        let body = active_contracts_request_all(party, offset);
+        let (status, text) = self
+            .post_expect_status(port, "/v2/state/active-contracts", &body)
+            .await
+            .context("POST /v2/state/active-contracts")?;
+        if !status.is_success() {
+            anyhow::bail!("POST /v2/state/active-contracts returned {status}: {text}");
+        }
+        Ok(parse_coupon_ids(&normalize_acs_body(&text)?)
+            .into_iter()
+            .map(|(cid, _)| cid)
+            .collect())
+    }
+
+    /// `(contract_id, round)` of the active `RewardCouponV2` coupons visible to
+    /// `party` as of the current ledger end.
+    pub async fn active_coupon_ids(
+        &self,
+        port: u16,
+        party: &str,
+    ) -> anyhow::Result<Vec<(String, i64)>> {
+        let offset = self.ledger_end(port).await?;
+        let body = active_contracts_request(party, REWARD_COUPON_V2_TEMPLATE, offset);
+        let (status, text) = self
+            .post_expect_status(port, "/v2/state/active-contracts", &body)
+            .await
+            .context("POST /v2/state/active-contracts")?;
+        if !status.is_success() {
+            anyhow::bail!("POST /v2/state/active-contracts returned {status}: {text}");
+        }
+        Ok(parse_coupon_ids(&normalize_acs_body(&text)?))
     }
 
     /// Read the decoded active `RewardCouponV2` coupons visible to `party` as of

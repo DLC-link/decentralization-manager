@@ -161,6 +161,11 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     // threshold signatures, topology growth, ACS sync, onboarding-flag
     // clearing) + the already-member and same-party 409 guards.
     phases::add_party::run(&mut f).await?;
+    // Host P3 again after it un-hosts itself, with the party transacting the
+    // whole time: the target must leave the synchronizer before the mapping
+    // that hosts it is authorized (the 2026-09-16 MainNet incident, fixed).
+    // Leaves the party as add_party left it: P1 + P2 + P3, threshold 2.
+    phases::add_party_rehost_disconnect_first::run(&mut f).await?;
     // Threshold change on the restored 3-member party: down to 1 and back to
     // 2, so later phases still find the party at threshold 2.
     phases::change_threshold::run(&mut f).await?;

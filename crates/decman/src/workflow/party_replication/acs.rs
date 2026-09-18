@@ -9,13 +9,17 @@ use canton_proto_rs::com::{
         CumulativeFilter, EventFormat, Filters, GetActiveContractsRequest, GetLedgerEndRequest,
         WildcardFilter, cumulative_filter, get_active_contracts_response::ContractEntry,
     },
-    digitalasset::canton::admin::participant::v30::{
-        ContractImportMode, DisconnectSynchronizerRequest, ExportPartyAcsRequest,
-        ImportPartyAcsRequest, ListConnectedSynchronizersRequest, ListPackagesRequest,
-        ReconnectSynchronizersRequest, list_connected_synchronizers_response,
-        package_service_client::PackageServiceClient,
-        party_management_service_client::PartyManagementServiceClient,
-        synchronizer_connectivity_service_client::SynchronizerConnectivityServiceClient,
+    digitalasset::canton::admin::{
+        participant::v30::{
+            ContractImportMode, DisconnectSynchronizerRequest, ExportPartyAcsRequest,
+            ImportPartyAcsRequest, ListConnectedSynchronizersRequest, ListPackagesRequest,
+            ListRegisteredSynchronizersRequest, ModifySynchronizerRequest,
+            ReconnectSynchronizersRequest, list_connected_synchronizers_response,
+            package_service_client::PackageServiceClient,
+            party_management_service_client::PartyManagementServiceClient,
+            synchronizer_connectivity_service_client::SynchronizerConnectivityServiceClient,
+        },
+        sequencer::v30::SequencerConnectionValidation,
     },
 };
 use common::types::{AcsTransferDirection, AcsTransferProgress};
@@ -121,6 +125,12 @@ const IMPORT_RETRY_DELAY: Duration = Duration::from_secs(10);
 /// discards its forward-only export on that request and re-opens it on its
 /// next step tick, so the first ask normally fails once.
 const RESTART_FIRST_BLOCK_ATTEMPTS: u32 = 5;
+
+/// Payload of the in-flight marker when the window was opened before the party
+/// was authorized onto this participant, which is the order Canton documents.
+/// The single reconnect at the end of the import reads it to hand the
+/// synchronizer back to automatic connection.
+const DISCONNECT_FIRST_MARKER: &[u8] = b"disconnect-first";
 
 /// How long a re-entered import waits before trusting an empty connection list.
 /// A participant that has just restarted reconnects on its own within seconds;
@@ -269,10 +279,11 @@ where
     // when the participant is already connected and healthy.
     // Through the target, not the pool: a tenant replication has no workflow
     // run, so its artefacts live in a table without the run foreign key.
-    let disconnect_window_opened = target
+    let window_marker = target
         .read_artifact(storage, target.artifacts.import_inflight, None)
-        .await?
-        .is_some();
+        .await?;
+    let disconnect_window_opened = window_marker.is_some();
+    let opened_before_authorization = window_marker.as_deref() == Some(DISCONNECT_FIRST_MARKER);
     if disconnect_window_opened {
         tracing::warn!(
             "ACS import re-entered with the disconnect-window marker set — a participant \
@@ -309,6 +320,11 @@ where
         && trailer.total_len == 0
     {
         tracing::info!("ACS snapshot is empty — nothing to import");
+        // A window opened before the authorization is closed all the same: the
+        // participant is off the synchronizer and on manual connection.
+        if opened_before_authorization {
+            close_import_window(config, true).await?;
+        }
         return Ok(());
     }
 
@@ -399,9 +415,10 @@ where
     }
 
     // Open the crash-safety window BEFORE disconnecting so a crash between here
-    // and a verified reconnect is detected on the next attempt.
+    // and a verified reconnect is detected on the next attempt. A window the
+    // new member opened before the authorization keeps its own marker.
     target
-        .write_artifact(storage, target.artifacts.import_inflight, None, b"1")
+        .write_artifact_if_absent(storage, target.artifacts.import_inflight, None, b"1")
         .await?;
 
     tracing::info!(
@@ -470,26 +487,144 @@ where
     // The one reconnect of the step, after the import succeeded or the last
     // attempt failed. A participant left disconnected (or half-reconnected) is
     // a worse failure mode than a failed import, so it runs on both outcomes.
-    let reconnect_result = reconnect_and_verify_healthy(config).await;
-
     // Prioritise an unhealthy participant: that's the critical, operator-
     // actionable failure and must not be masked by the import error when both
     // fail. A failed import with a HEALTHY participant is reported after it.
-    if let Err(reconnect_err) = reconnect_result {
+    if let Err(close_err) = close_import_window(config, opened_before_authorization).await {
         let import_note = match &import_result {
             Ok(()) => "the ACS import itself completed".to_string(),
-            Err(e) => format!("the ACS import also failed: {e}"),
+            Err(e) => format!("the ACS import also failed: {e:#}"),
         };
         anyhow::bail!(
             "ACS import did not leave the participant healthy and connected — it may \
              be crash-looping on orphan ACS rows from an unclean shutdown and may need \
-             manual repair ({import_note}): {reconnect_err}"
+             manual repair ({import_note}): {close_err:#}"
         );
     }
     import_result?;
 
     tracing::info!("ACS snapshot imported successfully");
 
+    Ok(())
+}
+
+/// Close the window: reconnect, confirm the synchronizer is healthy, and hand
+/// it back to automatic connection when the window had put it on manual.
+///
+/// Every part runs whatever the others did. Manual connection has to come off
+/// before the reconnect, or the reconnect skips the synchronizer; if that
+/// fails, the reconnect is attempted anyway and the reset is retried once the
+/// participant is connected. A participant left on manual connection stays
+/// disconnected after its next restart, so that outcome is an error even when
+/// it is connected now.
+async fn close_import_window(config: &NodeConfig, manual_connection: bool) -> Result {
+    let mut manual_err = if manual_connection {
+        set_manual_connect(config, false).await.err()
+    } else {
+        None
+    };
+    let reconnect = reconnect_and_verify_healthy(config).await;
+    if manual_err.is_some() && reconnect.is_ok() {
+        manual_err = set_manual_connect(config, false).await.err();
+    }
+    match (reconnect, manual_err) {
+        (Ok(()), None) => Ok(()),
+        (Ok(()), Some(e)) => Err(e.context(format!(
+            "the participant is connected but its synchronizer '{alias}' stays on manual \
+             connection, so its next restart leaves it disconnected; set manual_connect to \
+             false on it",
+            alias = config.synchronizer()
+        ))),
+        (Err(reconnect_err), None) => Err(reconnect_err),
+        (Err(reconnect_err), Some(manual_err)) => Err(reconnect_err.context(format!(
+            "and the synchronizer could not be taken off manual connection either: \
+             {manual_err:#}"
+        ))),
+    }
+}
+
+/// Open the disconnect window before the party is authorized onto this
+/// participant: put the synchronizer on manual connection so a restart cannot
+/// reconnect into the window, record the marker, and disconnect.
+///
+/// Canton's offline party replication keeps the target off the synchronizer
+/// from before the onboarding mapping becomes effective until the ACS import
+/// has landed. A participant that is connected in between receives the party's
+/// traffic and journals every archive of a contract it never activated, and the
+/// next replay of that journal is fatal. Idempotent: a window that is already
+/// open is left as it is.
+///
+/// # Errors
+/// Returns an error if the synchronizer is not registered, or if Canton
+/// refuses the configuration change or a disconnect.
+pub async fn open_import_window(
+    config: &NodeConfig,
+    storage: &SqlitePool,
+    target: &ReplicationTarget,
+) -> Result {
+    set_manual_connect(config, true).await?;
+    target
+        .write_artifact(
+            storage,
+            target.artifacts.import_inflight,
+            None,
+            DISCONNECT_FIRST_MARKER,
+        )
+        .await?;
+
+    let mut connectivity =
+        SynchronizerConnectivityServiceClient::new(config.admin_channel().await?);
+    let connected = connectivity
+        .list_connected_synchronizers(tonic::Request::new(ListConnectedSynchronizersRequest {}))
+        .await?
+        .into_inner()
+        .connected_synchronizers;
+    for s in &connected {
+        connectivity
+            .disconnect_synchronizer(tonic::Request::new(DisconnectSynchronizerRequest {
+                synchronizer_alias: s.synchronizer_alias.clone(),
+            }))
+            .await?;
+    }
+    tracing::info!(
+        "ACS import window open: {count} synchronizer(s) disconnected, manual connection on",
+        count = connected.len()
+    );
+    Ok(())
+}
+
+/// Set `manual_connect` on the registered configuration of this node's
+/// synchronizer. The sequencer connections are left untouched, so Canton is
+/// told not to validate them.
+async fn set_manual_connect(config: &NodeConfig, manual: bool) -> Result {
+    let alias = config.synchronizer();
+    let mut connectivity =
+        SynchronizerConnectivityServiceClient::new(config.admin_channel().await?);
+    let mut connection = connectivity
+        .list_registered_synchronizers(tonic::Request::new(ListRegisteredSynchronizersRequest {
+            all_statuses: false,
+        }))
+        .await?
+        .into_inner()
+        .results
+        .into_iter()
+        .filter_map(|r| r.config)
+        .find(|c| c.synchronizer_alias == alias)
+        .ok_or_else(|| {
+            anyhow::anyhow!("synchronizer '{alias}' is not registered on this participant")
+        })?;
+    if connection.manual_connect == manual {
+        return Ok(());
+    }
+    connection.manual_connect = manual;
+    connectivity
+        .modify_synchronizer(tonic::Request::new(ModifySynchronizerRequest {
+            physical_synchronizer_id: None,
+            new_config: Some(connection),
+            sequencer_connection_validation: SequencerConnectionValidation::Disabled as i32,
+        }))
+        .await?;
+    tracing::info!("synchronizer '{alias}' manual connection set to {manual}");
     Ok(())
 }
 
@@ -713,8 +848,8 @@ async fn give_up_transfer(
     // the ACS and there is no way to ask. Record that against the participant
     // so any later run refuses, not just a retry of this one.
     let reason = format!(
-        "an ACS transfer failed after {fed} bytes had already reached Canton; the \
-         import was cancelled rather than closed, so Canton was not told the \
+        "an ACS transfer failed after {fed} bytes had already reached Canton ({cause:#}); \
+         the import was cancelled rather than closed, so Canton was not told the \
          snapshot was complete, but this participant may hold part of the ACS"
     );
     if let Err(e) = storage
