@@ -224,6 +224,9 @@ fn classify_created(tid: &Identifier, is_child_of_exercise: bool) -> (String, St
 ///
 /// An empty map stays an object, because nothing marks it as a set.
 ///
+/// [`record_to_json_inner`] drops the record wrapper that `DA.Set` puts around
+/// its map, so a set renders as a bare array rather than a one-key object.
+///
 /// Four smaller differences predate that choice and remain: `Unit` becomes
 /// `null` rather than `{}`, a variant is tagged `_variant` rather than `tag`,
 /// `Date` and `Timestamp` stay raw proto integers, and a nested `Optional`
@@ -338,7 +341,32 @@ fn gen_map_to_json(m: &GenMap) -> JsonValue {
     }
 }
 
+/// The map inside a `DA.Set`, when this record is the wrapper around one.
+///
+/// Daml has no set type. `DA.Set` is a record whose only field is named `map`
+/// and holds a `GenMap a Unit`. No Daml type in this repo declares a field
+/// named `map`, so that shape identifies the wrapper. Keeping it would make an
+/// auditor open two nodes to read one list.
+fn set_wrapper_map(r: &Record) -> Option<&Value> {
+    let [field] = r.fields.as_slice() else {
+        return None;
+    };
+    if field.label != "map" {
+        return None;
+    }
+    let value = field.value.as_ref()?;
+    matches!(
+        &value.sum,
+        Some(value::Sum::GenMap(_) | value::Sum::TextMap(_))
+    )
+    .then_some(value)
+}
+
 fn record_to_json_inner(r: &Record) -> JsonValue {
+    if let Some(inner) = set_wrapper_map(r) {
+        return value_to_json(inner);
+    }
+
     let mut obj = serde_json::Map::new();
     for (idx, f) in r.fields.iter().enumerate() {
         let key = if f.label.is_empty() {
@@ -1309,8 +1337,45 @@ mod tests {
         };
         assert_eq!(
             record_to_json_inner(&members),
-            json!({ "map": ["alice::1220aa", "bob::1220bb"] })
+            json!(["alice::1220aa", "bob::1220bb"])
         );
+    }
+
+    /// The wrapper is dropped only when `map` is the record's one field. A
+    /// record carrying more than that is an ordinary record.
+    #[test]
+    fn a_record_with_more_than_a_map_field_keeps_its_labels() {
+        let record = Record {
+            record_id: None,
+            fields: vec![
+                RecordField {
+                    label: "map".to_string(),
+                    value: Some(gen_map_of(&[(party("alice::1220aa"), unit())])),
+                },
+                RecordField {
+                    label: "threshold".to_string(),
+                    value: Some(int(2)),
+                },
+            ],
+        };
+        assert_eq!(
+            record_to_json_inner(&record),
+            json!({ "map": ["alice::1220aa"], "threshold": 2 })
+        );
+    }
+
+    /// A single field named `map` that holds something other than a map is not
+    /// a set wrapper.
+    #[test]
+    fn a_single_map_field_holding_no_map_keeps_its_label() {
+        let record = Record {
+            record_id: None,
+            fields: vec![RecordField {
+                label: "map".to_string(),
+                value: Some(text("not a map")),
+            }],
+        };
+        assert_eq!(record_to_json_inner(&record), json!({ "map": "not a map" }));
     }
 
     #[test]
