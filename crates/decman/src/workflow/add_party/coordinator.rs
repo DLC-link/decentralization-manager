@@ -79,8 +79,6 @@ async fn run_workflow(
     db: SqlitePool,
 ) -> Result {
     let instance_name = add_party_config.instance_name.clone();
-    let ledger_token =
-        resolve_ledger_token(&workflow_auth, &add_party_config.decentralized_party_id).await;
     let config_payload =
         serde_json::to_vec(&add_party_config).context("Failed to serialize add-party config")?;
 
@@ -150,6 +148,9 @@ async fn run_workflow(
                 tracing::info!("Coordinator executing: Export state");
                 save_new_member_keys(&workflow_state, &db, &instance_name, &add_party_config)
                     .await?;
+                let ledger_token =
+                    resolve_ledger_token(&workflow_auth, &add_party_config.decentralized_party_id)
+                        .await;
                 export_state(
                     &node_config,
                     &db,
@@ -205,6 +206,9 @@ async fn run_workflow(
                 // ACS — its preflight fails fast (before disconnecting) if any
                 // are missing, instead of the import dying mid-window.
                 let party_id = add_party_config.decentralized_party_id.to_string();
+                let ledger_token =
+                    resolve_ledger_token(&workflow_auth, &add_party_config.decentralized_party_id)
+                        .await;
                 let package_ids =
                     collect_party_package_ids(&node_config, &party_id, ledger_token.as_deref())
                         .await?;

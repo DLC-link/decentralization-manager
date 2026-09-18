@@ -12,13 +12,23 @@ use crate::{
 };
 
 /// Resolve a ledger-API token for `party` from the node's auth registry.
-/// Best-effort: the token only feeds the begin-offset capture's primary
-/// tier; without one the capture degrades to the admin-API tiers.
+///
+/// Call this at the point of use, never once per run: the token carries a
+/// short expiry, and a coordinator can sit in `WaitingForPeers` for hours
+/// before the first ledger call. The offset capture degrades to the
+/// admin-API tiers without one, but the package preflight cannot, so every
+/// path that yields `None` says so.
 pub(crate) async fn resolve_ledger_token(
     auth: &Option<WorkflowAuth>,
     party: &CantonId,
 ) -> Option<String> {
-    let auth = auth.as_ref()?;
+    let Some(auth) = auth.as_ref() else {
+        tracing::warn!(
+            "No auth registry configured, so {party} has no ledger token; \
+             ledger calls will go out unauthenticated"
+        );
+        return None;
+    };
     match auth.get_credentials(party).await {
         Ok(creds) => Some(creds.token),
         Err(e) => {
