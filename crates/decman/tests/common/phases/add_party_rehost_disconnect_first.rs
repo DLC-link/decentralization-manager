@@ -100,6 +100,12 @@ const SAMPLE_INTERVAL: Duration = Duration::from_millis(200);
 /// count as a reproduction of the incident's precondition.
 const MIN_ARCHIVES_IN_WINDOW: usize = 3;
 
+/// How far ahead the seeded coupons expire. Below the reward automation's
+/// expiry margin (120 s by default), so its sweeps never assign them and the
+/// archiver stays the only thing that changes them; the later split phase then
+/// sees exactly the coupons it seeded itself.
+const SEEDED_EXPIRY: chrono::Duration = chrono::Duration::seconds(60);
+
 #[derive(Default)]
 struct Ctx {
     invites: InvitationIds,
@@ -303,7 +309,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Box::pin(async move {
                 let decparty = f.party_id()?.to_string();
                 let dso = f.p1_member_party()?.to_string();
-                let expires_at = (Utc::now() + chrono::Duration::hours(36))
+                let expires_at = (Utc::now() + SEEDED_EXPIRY)
                     .format("%Y-%m-%dT%H:%M:%SZ")
                     .to_string();
                 let seeds: Vec<SeedCoupon> = (0..SEEDED_CONTRACTS)
@@ -595,6 +601,36 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             })
         },
     )
+    .when("the seeded contracts still active are archived", |f, _| {
+        Box::pin(async move {
+            let decparty = f.party_id()?.to_string();
+            let dso = f.p1_member_party()?.to_string();
+            for round in 0..3 {
+                let left: Vec<String> = f
+                    .active_coupon_ids(P1_JSON_API, &decparty)
+                    .await?
+                    .into_iter()
+                    .filter(|(_, r)| *r >= ROUND_BASE)
+                    .map(|(cid, _)| cid)
+                    .collect();
+                if left.is_empty() {
+                    return Ok(());
+                }
+                for (i, cid) in left.iter().enumerate() {
+                    let body = archive_command(
+                        REWARD_COUPON_V2_TEMPLATE,
+                        cid,
+                        &dso,
+                        &format!("rehost-cleanup-{round}-{i}-{}", f.run_id),
+                    );
+                    if let Err(e) = f.submit_create(P1_JSON_API, &body).await {
+                        tracing::warn!("cleanup: archive {cid}: {e:#}");
+                    }
+                }
+            }
+            anyhow::bail!("seeded coupons still active after three cleanup rounds")
+        })
+    })
     .then(
         "P3's participant is connected, healthy, on automatic connection",
         Duration::from_secs(30),
