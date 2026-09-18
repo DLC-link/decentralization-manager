@@ -2178,11 +2178,12 @@ mod tests {
     // Chain audit cache
     // ====================================================================
 
-    /// One cached chain-audit row. `contract_id` is part of the primary key, so
-    /// it is what lets several rows share an offset — the case the paging query
-    /// has to keep together.
+    /// One cached chain-audit row with caller-chosen `details`, for the purge
+    /// test. Every row shares one offset, so a party's rows form a single
+    /// offset group.
     async fn insert_chain_audit_row_with_details(
         pool: &SqlitePool,
+        party_id: &str,
         contract_id: &str,
         details: &str,
     ) -> Result {
@@ -2195,7 +2196,7 @@ mod tests {
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ",
         )
-        .bind("party-a")
+        .bind(party_id)
         .bind(1_i64)
         .bind(1_i64)
         .bind("propose")
@@ -2215,41 +2216,80 @@ mod tests {
     }
 
     /// The purge in `000020_purge_chain_audit_unsupported_maps` must delete
-    /// every row that still carries the dropped-map marker, and leave the rest
+    /// every party that still holds the dropped-map marker, and leave the rest
     /// alone. `LIKE` treats `_` as a single-character wildcard, so the pattern
-    /// needs its `ESCAPE` clause to avoid deleting a row whose details merely
+    /// needs its `ESCAPE` clause to avoid deleting a party whose details merely
     /// resemble the marker. The test runs the migration file itself.
     #[sqlx::test(migrator = "MIGRATOR")]
-    async fn test_purge_deletes_only_rows_holding_the_map_marker(pool: SqlitePool) -> Result {
-        insert_chain_audit_row_with_details(&pool, "marker", r#"{"_unsupported":"map"}"#).await?;
+    async fn test_purge_deletes_only_parties_holding_the_map_marker(pool: SqlitePool) -> Result {
+        insert_chain_audit_row_with_details(&pool, "p-marker", "c", r#"{"_unsupported":"map"}"#)
+            .await?;
         insert_chain_audit_row_with_details(
             &pool,
-            "nested",
+            "p-nested",
+            "c",
             r#"{"members":{"map":{"_unsupported":"map"}}}"#,
         )
         .await?;
-        insert_chain_audit_row_with_details(&pool, "lookalike", r#"{"Xunsupported":"map"}"#)
+        insert_chain_audit_row_with_details(&pool, "p-lookalike", "c", r#"{"Xunsupported":"map"}"#)
             .await?;
-        insert_chain_audit_row_with_details(&pool, "plain", r#"{"threshold":2}"#).await?;
+        insert_chain_audit_row_with_details(&pool, "p-plain", "c", r#"{"threshold":2}"#).await?;
 
-        sqlx::raw_sql(include_str!(
-            "../../migrations/000020_purge_chain_audit_unsupported_maps.up.sql"
-        ))
-        .execute(&pool)
-        .await?;
+        run_map_purge(&pool).await?;
 
         let survivors: Vec<String> =
-            sqlx::query_scalar("SELECT contract_id FROM chain_audit_cache ORDER BY contract_id")
+            sqlx::query_scalar("SELECT party_id FROM chain_audit_cache ORDER BY party_id")
                 .fetch_all(&pool)
                 .await?;
         assert_eq!(
             survivors,
-            vec!["lookalike".to_string(), "plain".to_string()]
+            vec!["p-lookalike".to_string(), "p-plain".to_string()]
         );
 
         Ok(())
     }
 
+    /// A marked row takes its clean neighbours with it. `get_chain_audit_cache`
+    /// answers a page from whatever rows it finds and reaches the ledger only
+    /// when it finds none, so leaving the neighbours behind would keep that
+    /// page cached and hide the deleted entry for good.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_purge_clears_the_whole_party_not_just_the_marked_row(pool: SqlitePool) -> Result {
+        insert_chain_audit_row_with_details(
+            &pool,
+            "party-a",
+            "marked",
+            r#"{"_unsupported":"map"}"#,
+        )
+        .await?;
+        insert_chain_audit_row_with_details(&pool, "party-a", "clean", r#"{"threshold":2}"#)
+            .await?;
+
+        run_map_purge(&pool).await?;
+
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM chain_audit_cache WHERE party_id = 'party-a'")
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(remaining, 0);
+
+        Ok(())
+    }
+
+    /// Run migration 000020's own SQL, so the tests exercise the shipped file.
+    async fn run_map_purge(pool: &SqlitePool) -> Result {
+        sqlx::raw_sql(include_str!(
+            "../../migrations/000020_purge_chain_audit_unsupported_maps.up.sql"
+        ))
+        .execute(pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// One cached chain-audit row. `contract_id` is part of the primary key, so
+    /// it is what lets several rows share an offset — the case the paging query
+    /// has to keep together.
     async fn insert_chain_audit_row(
         pool: &SqlitePool,
         party_id: &str,
