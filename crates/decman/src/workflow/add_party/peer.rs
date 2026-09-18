@@ -1,11 +1,44 @@
+use canton_proto_rs::com::digitalasset::canton::{
+    protocol::v30::SignedTopologyTransaction,
+    topology::admin::v30::topology_manager_write_service_client::TopologyManagerWriteServiceClient,
+};
 use sqlx::SqlitePool;
 
 use crate::{
     config::NodeConfig,
     error::Result,
     noise::client::NoiseClient,
-    workflow::storage::{WorkflowStorage, artifact_kinds},
+    utils,
+    workflow::{
+        storage::{WorkflowStorage, artifact_kinds},
+        topology,
+    },
 };
+
+/// Put the coordinator's P2P proposal into this node's own synchronizer store.
+///
+/// `ImportPartyAcs` checks the target's own store for a mapping, effective or
+/// proposed, that hosts it with the onboarding marker, and refuses the import
+/// otherwise. The new member disconnects before the mapping is authorized, so
+/// its store never sees it become effective; Canton's procedure has the target
+/// propose the mapping itself before it disconnects, and this is that step.
+/// Adding a transaction the store already holds changes nothing.
+///
+/// # Errors
+/// Returns an error if the payload is not a signed topology transaction or
+/// Canton refuses it.
+pub async fn keep_hosting_proposal(config: &NodeConfig, p2p_payload: &[u8]) -> Result {
+    let proposal: SignedTopologyTransaction = utils::read_first_message_from_bytes(p2p_payload)?;
+    let synchronizer_id = utils::get_synchronizer_id(config).await?;
+    TopologyManagerWriteServiceClient::new(config.admin_channel().await?)
+        .add_transactions(tonic::Request::new(topology::add_transactions_request(
+            &synchronizer_id,
+            proposal,
+        )))
+        .await?;
+    tracing::info!("Hosting proposal recorded in this node's own topology store");
+    Ok(())
+}
 
 /// Status string a non-addressed peer replies with when a new-member-only
 /// command (GenerateAddPartyKeys / ImportAcs / ClearOnboardingFlag) isn't for

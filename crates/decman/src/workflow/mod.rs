@@ -1045,15 +1045,21 @@ pub async fn start_peer(
                 // let the coordinator authorize the mapping. From the moment the
                 // mapping is effective it receives the party's traffic, and it
                 // must not journal any of it until the ACS import has landed.
+                // Its own store keeps the proposal first: disconnected, it will
+                // not see the mapping take effect, and the import checks for it.
                 if is_new_member(&node_config, &add_party_config)
-                    && let Err(e) = party_replication::open_import_window(
-                        &node_config,
-                        &db,
-                        &add_party_config.replication_target(&instance_name),
-                    )
+                    && let Err(e) = async {
+                        add_party::peer::keep_hosting_proposal(&node_config, &items[2]).await?;
+                        party_replication::open_import_window(
+                            &node_config,
+                            &db,
+                            &add_party_config.replication_target(&instance_name),
+                        )
+                        .await
+                    }
                     .await
                 {
-                    tracing::error!("Failed to open the ACS import window: {e}");
+                    tracing::error!("Failed to open the ACS import window: {e:#}");
                     consecutive_step_failures += 1;
                     if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
                         anyhow::bail!(
@@ -1168,7 +1174,7 @@ pub async fn start_peer(
                 // between attempts, which replays the ACS journal — so a failure
                 // that reaches this point ends the peer.
                 if let Err(e) = step_result {
-                    anyhow::bail!("Aborting peer: the ACS import failed: {e}");
+                    anyhow::bail!("Aborting peer: the ACS import failed: {e:#}");
                 }
                 consecutive_step_failures = 0;
                 if let Err(e) = client.send_status(b"ImportAcs completed".to_vec()).await {

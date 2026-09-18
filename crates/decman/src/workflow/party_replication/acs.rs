@@ -411,9 +411,10 @@ where
     }
 
     // Open the crash-safety window BEFORE disconnecting so a crash between here
-    // and a verified reconnect is detected on the next attempt.
+    // and a verified reconnect is detected on the next attempt. A window the
+    // new member opened before the authorization keeps its own marker.
     target
-        .write_artifact(storage, target.artifacts.import_inflight, None, b"1")
+        .write_artifact_if_absent(storage, target.artifacts.import_inflight, None, b"1")
         .await?;
 
     tracing::info!(
@@ -817,8 +818,8 @@ async fn give_up_transfer(
     // the ACS and there is no way to ask. Record that against the participant
     // so any later run refuses, not just a retry of this one.
     let reason = format!(
-        "an ACS transfer failed after {fed} bytes had already reached Canton; the \
-         import was cancelled rather than closed, so Canton was not told the \
+        "an ACS transfer failed after {fed} bytes had already reached Canton ({cause:#}); \
+         the import was cancelled rather than closed, so Canton was not told the \
          snapshot was complete, but this participant may hold part of the ACS"
     );
     if let Err(e) = storage
