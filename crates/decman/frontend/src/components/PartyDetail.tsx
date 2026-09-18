@@ -706,7 +706,7 @@ export const PartyDetail = ({
       )}
 
       {/* Holdings */}
-      {authStatus?.rights?.dec_party_act_as && (
+      {(authStatus?.rights?.dec_party_act_as || authStatus?.rights?.dec_party_read_as) && (
         <CollapsibleSection
           title="Holdings"
           expanded={holdingsExpanded}
@@ -745,7 +745,7 @@ export const PartyDetail = ({
       )}
 
       {/* Audit Trail */}
-      {authStatus?.rights?.dec_party_act_as && (
+      {(authStatus?.rights?.dec_party_act_as || authStatus?.rights?.dec_party_read_as) && (
         <CollapsibleSection
           title="Audit Trail"
           expanded={governanceExpanded}
