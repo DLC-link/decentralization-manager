@@ -97,11 +97,14 @@ pub struct PackageInfo {
 
 /// Reason a peer was reported `reachable: false` in `PeerPackageResult`.
 ///
-/// Mirrors `NoiseError` variants at a coarser granularity that's stable on
-/// the wire — added so the UI / future tooling can distinguish failure
-/// modes without having to scan logs. Layered transport-side: TCP connect
-/// (timeout/failed), then post-connect request budget (`RequestTimeout`),
-/// then mid-stream IO/HTTP (`Transport`); then handshake/decode/status.
+/// Why this node has no package list for a peer, at a granularity that's
+/// stable on the wire — so the UI can distinguish failure modes without
+/// having to scan logs.
+///
+/// `TopologyReadFailed` and `NoVettedPackages` are the only two the package
+/// comparison emits: it reads the synchronizer's topology store and contacts
+/// no peer. The variants above them describe a failed Noise request, and the
+/// remaining Noise callers keep them until those paths move too.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
@@ -116,13 +119,18 @@ pub enum PeerErrorKind {
     DecodeFailed,
     InvalidPublicKey,
     Other,
+    /// This node's topology read for the peer failed.
+    TopologyReadFailed,
+    /// The read succeeded and the peer has vetted no package.
+    NoVettedPackages,
 }
 
-/// Result of querying packages from a single peer.
+/// One peer's packages, as this node reads them.
 ///
-/// `error_kind` is `None` when `reachable: true`. Always `Some(_)` when
-/// `reachable: false`. (Decode failures on `reachable: true` responses are
-/// not yet surfaced — see Future work item 5 in the spec.)
+/// `error_kind` is `None` when `reachable: true`, and always `Some(_)` when
+/// `reachable: false`. `reachable` predates the synchronizer read and now
+/// means "this node has that peer's package list", not that anything was
+/// contacted.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
