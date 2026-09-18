@@ -344,9 +344,14 @@ fn gen_map_to_json(m: &GenMap) -> JsonValue {
 /// The map inside a `DA.Set`, when this record is the wrapper around one.
 ///
 /// Daml has no set type. `DA.Set` is a record whose only field is named `map`
-/// and holds a `GenMap a Unit`. No Daml type in this repo declares a field
-/// named `map`, so that shape identifies the wrapper. Keeping it would make an
-/// auditor open two nodes to read one list.
+/// and holds a `GenMap a Unit`. Keeping that wrapper would make an auditor
+/// open two nodes to read one list.
+///
+/// The audit read asks for verbose events, so `record_id` is present and names
+/// the type exactly. Under [`AuditScope::All`] the trail also renders
+/// third-party templates, and one of those may declare its own field called
+/// `map`; the identifier check keeps that field's label. The label alone
+/// remains the fallback for a producer that omits `record_id`.
 fn set_wrapper_map(r: &Record) -> Option<&Value> {
     let [field] = r.fields.as_slice() else {
         return None;
@@ -354,16 +359,25 @@ fn set_wrapper_map(r: &Record) -> Option<&Value> {
     if field.label != "map" {
         return None;
     }
+    if let Some(id) = &r.record_id
+        && !(id.module_name == "DA.Set.Types" && id.entity_name == "Set")
+    {
+        return None;
+    }
     let value = field.value.as_ref()?;
-    matches!(
-        &value.sum,
-        Some(value::Sum::GenMap(_) | value::Sum::TextMap(_))
-    )
-    .then_some(value)
+    matches!(&value.sum, Some(value::Sum::GenMap(_))).then_some(value)
 }
 
 fn record_to_json_inner(r: &Record) -> JsonValue {
     if let Some(inner) = set_wrapper_map(r) {
+        // The wrapper is itself the proof that this map is a set, so an empty
+        // one renders as an empty array. A bare map has no such proof and
+        // keeps the object form, which is why `is_set` cannot decide this.
+        if let Some(value::Sum::GenMap(m)) = &inner.sum
+            && m.entries.is_empty()
+        {
+            return JsonValue::Array(Vec::new());
+        }
         return value_to_json(inner);
     }
 
@@ -1326,7 +1340,7 @@ mod tests {
     #[test]
     fn a_set_of_parties_shows_its_members() {
         let members = Record {
-            record_id: None,
+            record_id: Some(set_id()),
             fields: vec![RecordField {
                 label: "map".to_string(),
                 value: Some(gen_map_of(&[
@@ -1339,6 +1353,65 @@ mod tests {
             record_to_json_inner(&members),
             json!(["alice::1220aa", "bob::1220bb"])
         );
+    }
+
+    /// `DA.Set.Types:Set`, the record id a verbose read puts on a set wrapper.
+    fn set_id() -> Identifier {
+        Identifier {
+            package_id: "#daml-stdlib".to_string(),
+            module_name: "DA.Set.Types".to_string(),
+            entity_name: "Set".to_string(),
+        }
+    }
+
+    /// The wrapper proves the map is a set, so an empty one is an empty array.
+    /// Without that, the same field would be an array when populated and an
+    /// object when empty.
+    #[test]
+    fn an_empty_set_wrapper_becomes_an_empty_array() {
+        let empty = Record {
+            record_id: Some(set_id()),
+            fields: vec![RecordField {
+                label: "map".to_string(),
+                value: Some(gen_map_of(&[])),
+            }],
+        };
+        assert_eq!(record_to_json_inner(&empty), json!([]));
+    }
+
+    /// Under `AuditScope::All` the trail renders third-party templates. One of
+    /// them may declare its own field named `map`, and its label must survive.
+    #[test]
+    fn a_foreign_record_with_a_map_field_keeps_its_label() {
+        let foreign = Record {
+            record_id: Some(Identifier {
+                package_id: "#some-app".to_string(),
+                module_name: "App.Index".to_string(),
+                entity_name: "Index".to_string(),
+            }),
+            fields: vec![RecordField {
+                label: "map".to_string(),
+                value: Some(text_map_of(&[("k", text("v"))])),
+            }],
+        };
+        assert_eq!(
+            record_to_json_inner(&foreign),
+            json!({ "map": { "k": "v" } })
+        );
+    }
+
+    /// A producer that omits `record_id` still gets the wrapper dropped, so the
+    /// label remains the fallback signal.
+    #[test]
+    fn a_set_wrapper_without_a_record_id_still_unwraps() {
+        let members = Record {
+            record_id: None,
+            fields: vec![RecordField {
+                label: "map".to_string(),
+                value: Some(gen_map_of(&[(party("alice::1220aa"), unit())])),
+            }],
+        };
+        assert_eq!(record_to_json_inner(&members), json!(["alice::1220aa"]));
     }
 
     /// The wrapper is dropped only when `map` is the record's one field. A
