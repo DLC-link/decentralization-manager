@@ -51,9 +51,9 @@ use canton_proto_rs::com::digitalasset::canton::{
         topology_mapping,
     },
     topology::admin::v30::{
-        AddTransactionsRequest, GenerateTransactionsRequest, ListPartyToParticipantRequest,
-        SignTransactionsRequest, generate_transactions_request,
-        list_party_to_participant_response::result::Item as P2pItem,
+        AddTransactionsRequest, AuthorizeRequest, GenerateTransactionsRequest,
+        ListPartyToParticipantRequest, SignTransactionsRequest, authorize_request,
+        generate_transactions_request, list_party_to_participant_response::result::Item as P2pItem,
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
         topology_manager_write_service_client::TopologyManagerWriteServiceClient,
     },
@@ -371,39 +371,15 @@ pub async fn prepare_add_hosts(
     let mapping = add_hosts_mapping(&current.mapping, new_hosts, permission)
         .map_err(AddHostsError::Invalid)?;
 
-    // Capture the replication offsets HERE, before the topology is submitted.
-    // `ExportPartyAcs` and `ClearPartyOnboardingFlag` both search forward from
-    // an offset that must predate the party's activation on the joiner, so a
-    // capture taken any later would look for it in a window that no longer
-    // contains it. Every host captures both keys: prepare is called on all of
-    // them and none knows yet which role it will play. The capture is
-    // once-only, so a retry keeps the original value.
-    for host in new_hosts {
-        let target =
-            replication_target(party_id, host, base_serial).map_err(AddHostsError::Invalid)?;
-        capture_offset_once(
-            config,
-            storage,
-            &target,
-            target.artifacts.export_offset,
-            None,
-            ledger_token,
-            "tenant add-hosts export",
-        )
-        .await
-        .map_err(AddHostsError::Canton)?;
-        capture_offset_once(
-            config,
-            storage,
-            &target,
-            target.artifacts.pre_activation_offset,
-            Some(&config.participant_id().to_string()),
-            ledger_token,
-            "tenant add-hosts pre-activation",
-        )
-        .await
-        .map_err(AddHostsError::Canton)?;
-    }
+    capture_replication_offsets(
+        config,
+        storage,
+        party_id,
+        new_hosts,
+        base_serial,
+        ledger_token,
+    )
+    .await?;
     let next_serial = current.serial.checked_add(1).ok_or_else(|| {
         AddHostsError::Invalid(anyhow::anyhow!(
             "{party_id} is at serial {s}, which cannot be advanced",
@@ -464,6 +440,204 @@ pub async fn prepare_add_hosts(
         transaction_hashes,
         topology_transactions,
     })
+}
+
+/// Which half of Canton's "party namespace + the new participant namespace" this
+/// node can sign, or `None` when it can sign neither.
+///
+/// A node that holds neither would spend its key on a signature Canton has no
+/// use for, and the caller would read the resulting proposal as progress.
+///
+/// The party's namespace is the fingerprint half of its id. A node owns it when
+/// the party is local to that node, or was before it adopted a signing key —
+/// adopting one adds a `party_signing_keys` entry and never moves the namespace.
+fn authorizing_role(
+    config: &NodeConfig,
+    party_id: &str,
+    new_hosts: &[CantonId],
+) -> Option<AuthorizingRole> {
+    let party_namespace = party_id.rsplit_once("::").map(|(_, ns)| ns)?;
+    if party_namespace == config.participant_id().namespace.to_hex() {
+        return Some(AuthorizingRole::NamespaceOwner);
+    }
+    if new_hosts.contains(config.participant_id()) {
+        return Some(AuthorizingRole::JoiningHost);
+    }
+    None
+}
+
+/// The half of the authorization a node contributes, for logging.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AuthorizingRole {
+    NamespaceOwner,
+    JoiningHost,
+}
+
+impl AuthorizingRole {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NamespaceOwner => "namespace-owner",
+            Self::JoiningHost => "joining-host",
+        }
+    }
+}
+
+/// Capture the replication offsets for every joining host, before the topology
+/// is submitted.
+///
+/// `ExportPartyAcs` and `ClearPartyOnboardingFlag` both search forward from an
+/// offset that must predate the party's activation on the joiner, so a capture
+/// taken any later would look for it in a window that no longer contains it.
+/// Every node captures both keys, because whichever entry point a caller uses is
+/// called on all of them and none knows yet which role it will play. The capture
+/// is once-only, so a retry keeps the original value and calling this from both
+/// entry points costs nothing.
+///
+/// # Errors
+/// [`AddHostsError::Invalid`] for a host that is not a valid replication target,
+/// [`AddHostsError::Canton`] if the offset read fails.
+async fn capture_replication_offsets(
+    config: &NodeConfig,
+    storage: &SqlitePool,
+    party_id: &str,
+    new_hosts: &[CantonId],
+    base_serial: u32,
+    ledger_token: Option<&str>,
+) -> std::result::Result<(), AddHostsError> {
+    for host in new_hosts {
+        let target =
+            replication_target(party_id, host, base_serial).map_err(AddHostsError::Invalid)?;
+        capture_offset_once(
+            config,
+            storage,
+            &target,
+            target.artifacts.export_offset,
+            None,
+            ledger_token,
+            "tenant add-hosts export",
+        )
+        .await
+        .map_err(AddHostsError::Canton)?;
+        capture_offset_once(
+            config,
+            storage,
+            &target,
+            target.artifacts.pre_activation_offset,
+            Some(&config.participant_id().to_string()),
+            ledger_token,
+            "tenant add-hosts pre-activation",
+        )
+        .await
+        .map_err(AddHostsError::Canton)?;
+    }
+    Ok(())
+}
+
+/// Authorize the add-hosts change with this node's own key, for a party whose
+/// namespace nobody can sign for from outside Canton.
+///
+/// The wallet-signed path cannot serve such a party. `validate_add_hosts_topology`
+/// requires `signed_by` to be the party's namespace, and for a party that is (or
+/// once was) local that namespace is a participant's root key: it lives in
+/// Canton's vault, and no admin RPC signs a hash with a vault key. Converting the
+/// party does not move the namespace either — the adopted key is a
+/// `party_signing_keys` entry with no `NamespaceDelegation` behind it, so it
+/// signs transactions and authorizes no topology at all.
+///
+/// A vault key signs only through `Authorize`, so that is what this uses. Canton
+/// wants "party namespace + the new participant namespace" for an add, which no
+/// single node holds: the source node contributes the first half and each joining
+/// node the second. `must_fully_authorize` is therefore false — the write stays a
+/// proposal until the last node calls this, and Canton assembles it.
+///
+/// Every node builds the mapping itself from its own head-state read, exactly as
+/// [`prepare_add_hosts`] does, so a caller cannot hand one node a different
+/// change from another.
+///
+/// # Errors
+/// [`AddHostsError`] variants, so a caller can answer a stale pin, a bundle this
+/// node may not authorize, and a Canton failure differently.
+pub async fn authorize_add_hosts(
+    config: &NodeConfig,
+    storage: &SqlitePool,
+    party_id: &str,
+    new_hosts: &[CantonId],
+    permission: HostPermission,
+    base_serial: u32,
+    ledger_token: Option<&str>,
+) -> std::result::Result<u32, AddHostsError> {
+    let Some(current) = read_party_to_participant(config, party_id)
+        .await
+        .map_err(AddHostsError::Canton)?
+    else {
+        return Err(AddHostsError::UnknownParty {
+            party: party_id.to_string(),
+        });
+    };
+    if base_serial != current.serial {
+        return Err(AddHostsError::StaleSerial {
+            party: party_id.to_string(),
+            pinned: base_serial,
+            found: current.serial,
+        });
+    }
+
+    let Some(role) = authorizing_role(config, party_id, new_hosts) else {
+        return Err(AddHostsError::Invalid(anyhow::anyhow!(
+            "this node neither owns {party_id}'s namespace nor is joining it, so it holds no \
+             key Canton needs for the add"
+        )));
+    };
+
+    let mapping = add_hosts_mapping(&current.mapping, new_hosts, permission)
+        .map_err(AddHostsError::Invalid)?;
+    capture_replication_offsets(
+        config,
+        storage,
+        party_id,
+        new_hosts,
+        base_serial,
+        ledger_token,
+    )
+    .await?;
+    let synchronizer_id = utils::get_synchronizer_id(config)
+        .await
+        .map_err(AddHostsError::Canton)?;
+    let next_serial = current.serial.saturating_add(1);
+
+    topology::authorize_with_topology_retry(
+        config,
+        AuthorizeRequest {
+            r#type: Some(authorize_request::Type::Proposal(
+                authorize_request::Proposal {
+                    change: TopologyChangeOp::AddReplace as i32,
+                    serial: next_serial,
+                    mapping: Some(authorize_request::proposal::Mapping::V30(TopologyMapping {
+                        mapping: Some(topology_mapping::Mapping::PartyToParticipant(mapping)),
+                    })),
+                },
+            )),
+            // Neither node holds both halves, so demanding full authorization
+            // would fail on whichever one calls first.
+            must_fully_authorize: false,
+            force_changes: vec![],
+            signed_by: vec![],
+            store: Some(topology::synchronizer_store_id(&synchronizer_id)),
+            wait_to_become_effective: None,
+        },
+        "external-party add-hosts authorize",
+    )
+    .await
+    .map_err(AddHostsError::Canton)?;
+
+    tracing::info!(
+        party_id = %party_id,
+        base_serial = current.serial,
+        role = role.as_str(),
+        "external-party: add-hosts authorized with this node's own key"
+    );
+
+    Ok(current.serial)
 }
 
 /// The party-signed add-hosts bundle a wallet submits to each new host.
@@ -1494,6 +1668,51 @@ mod tests {
     /// concatenated Ed25519, which is always 64 bytes. Base64 accepts any
     /// length, so a truncated or empty one used to pass validation and fail
     /// inside a Canton RPC, surfacing as a 500 for plainly malformed input.
+    /// The node whose root key IS the party's namespace signs the "party
+    /// namespace" half. This is the case the wallet-signed path cannot serve:
+    /// that key lives in Canton's vault and no RPC signs a hash with it.
+    #[test]
+    fn the_namespace_owner_authorizes_as_owner() {
+        let config = test_config(1);
+        let party = format!("alice::{ns}", ns = participant(1).namespace.to_hex());
+        assert_eq!(
+            authorizing_role(&config, &party, &[participant(2)]),
+            Some(AuthorizingRole::NamespaceOwner)
+        );
+    }
+
+    /// A joining node signs the "new participant" half, whoever owns the
+    /// namespace. Both calls are needed, which is why neither may be skipped.
+    #[test]
+    fn a_joining_node_authorizes_as_joiner() {
+        let config = test_config(2);
+        let party = format!("alice::{ns}", ns = participant(1).namespace.to_hex());
+        assert_eq!(
+            authorizing_role(&config, &party, &[participant(2)]),
+            Some(AuthorizingRole::JoiningHost)
+        );
+    }
+
+    /// A node holding neither half would spend its key on a signature Canton has
+    /// no use for, and the caller would read the proposal it leaves behind as
+    /// progress.
+    #[test]
+    fn a_bystander_node_cannot_authorize() {
+        let config = test_config(3);
+        let party = format!("alice::{ns}", ns = participant(1).namespace.to_hex());
+        assert_eq!(authorizing_role(&config, &party, &[participant(2)]), None);
+    }
+
+    /// An id with no namespace half is not a party id, and treating its missing
+    /// namespace as a match would let any node authorize anything.
+    #[test]
+    fn a_party_id_without_a_namespace_cannot_authorize() {
+        assert_eq!(
+            authorizing_role(&test_config(1), "alice", &[participant(2)]),
+            None
+        );
+    }
+
     /// A signature attributed to anything but the party's own namespace cannot
     /// authorize its topology. Caught here so it reads as the caller's mistake
     /// rather than as this host being unhealthy.

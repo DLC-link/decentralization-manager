@@ -16,7 +16,7 @@ after `::`.
 | The namespace is | The party is | Path |
 |---|---|---|
 | Its own key, held by a wallet | External | [Add hosts](#adding-hosts-to-an-external-party) |
-| A participant's root key | Local | [Convert first](#converting-a-local-party), then add hosts |
+| A participant's root key | Local | Add hosts with [`authorize`](#when-the-namespace-is-a-participants-key); [convert](#converting-a-local-party) too if the party must sign for itself |
 | A `DecentralizedNamespaceDefinition` | A decparty | Use the add-party workflow, not this |
 
 To tell a local party from an external one, compare the party's namespace with
@@ -73,6 +73,26 @@ the comparison fails for a reason that is not an attack.
 Then `/v0/tenant/add-hosts/onboard` on **each joining host only**. Canton needs
 the party namespace plus each new participant; existing hosts are neither and
 have nothing to add.
+
+#### When the namespace is a participant's key
+
+A party that is, or once was, local takes a different call. Its namespace is a
+participant's root key, that key lives in Canton's vault, and no admin RPC signs
+a hash with a vault key — so no wallet signature can ever satisfy `onboard`.
+**Converting the party does not change this.** The adopted key is a
+`party_signing_keys` entry with no `NamespaceDelegation` behind it: it signs the
+party's transactions and authorizes none of its topology.
+
+Use `/v0/tenant/add-hosts/authorize` instead, with the same request body as
+`prepare`. Call it on the node owning the party's namespace **and** on each
+joining node. A vault key signs only through `Authorize`, and Canton wants both
+halves for an add, so the change stays a proposal until the last call lands.
+Order does not matter and a repeat is harmless. There is no hash to compare
+here, because there is nothing for anyone outside Canton to sign: each node
+builds the mapping from its own head-state read.
+
+A node that owns neither half is refused rather than made to spend its key on a
+signature Canton has no use for.
 
 ### Phase 2 — state
 
@@ -137,6 +157,14 @@ Canton refuses Submission once a party signs its own transactions. **The
 partner's application must switch to interactive submission at this point.**
 Coordinate the cutover: between the conversion landing and their application
 being updated, the party cannot transact.
+
+Converting is **not** a prerequisite for adding hosts, and it does not change how
+hosts are added: both before and after, the party's topology is authorized by the
+source participant's namespace key through
+[`add-hosts/authorize`](#when-the-namespace-is-a-participants-key). Convert when
+the party must sign for itself — which co-validation requires, because Canton
+forbids a Submission host above threshold 1. Skip it for failover-only hosting at
+threshold 1, where the partner's application is left untouched.
 
 Afterwards the party is external in every respect except one: its namespace is
 still the source participant's key, so **that node can unilaterally change the

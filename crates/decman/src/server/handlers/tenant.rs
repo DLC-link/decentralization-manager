@@ -38,7 +38,7 @@ use crate::{
     },
     workflow::external_party::{
         add_hosts::{
-            AddHostsError, ExternalPartyAddHostsPayload, prepare_add_hosts,
+            AddHostsError, ExternalPartyAddHostsPayload, authorize_add_hosts, prepare_add_hosts,
             read_party_to_participant, replication_target, submit_add_hosts,
         },
         keys::fingerprint_from_public_key,
@@ -377,6 +377,84 @@ pub async fn tenant_add_hosts_prepare(
         }),
         Err(e) => add_hosts_error_response("prepare", e),
     }
+}
+
+/// Authorize the add-hosts change with THIS node's own namespace key.
+///
+/// The counterpart to `add-hosts/onboard` for a party nobody can sign for from
+/// outside Canton: one that is, or once was, local. Its namespace is a
+/// participant's root key, that key lives in Canton's vault, and adopting a
+/// signing key does not move the namespace — so no wallet signature can ever
+/// satisfy `onboard`.
+///
+/// The caller invokes this on the node owning the party's namespace AND on each
+/// joining node. Canton wants both halves for an add and neither node holds
+/// both, so the change stays a proposal until the last call lands. Order does
+/// not matter, and a repeat is harmless.
+#[utoipa::path(
+    tag = "Tenant",
+    request_body = TenantAddHostsRequest,
+    responses(
+        (status = 202, description = "Authorized on this node", body = TenantAddHostsOnboardResponse),
+        (status = 400, description = "Bad host set, or a change this node holds no key for", body = ErrorResponse),
+        (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 404, description = "No authorized PartyToParticipant for this party", body = ErrorResponse),
+        (status = 409, description = "The pinned base serial has moved on this node", body = ErrorResponse),
+        (status = 500, description = "A Canton call failed on this node", body = ErrorResponse)
+    )
+)]
+#[post("/v0/tenant/add-hosts/authorize")]
+pub async fn tenant_add_hosts_authorize(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    body: web::Json<TenantAddHostsRequest>,
+) -> impl Responder {
+    if let Err(resp) = require_tenant_api_key(&http_req, &data) {
+        return resp;
+    }
+    if body.new_hosts.is_empty() {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: "new_hosts must name at least one participant to add".to_string(),
+        });
+    }
+
+    // No ledger token, for the same reason prepare passes none: this node holds
+    // no credential for the party, so the offset capture takes its admin-API
+    // tiers.
+    let base_serial = match authorize_add_hosts(
+        &data.config,
+        &data.db,
+        &body.party_id,
+        &body.new_hosts,
+        body.permission,
+        body.base_serial,
+        None,
+    )
+    .await
+    {
+        Ok(serial) => serial,
+        Err(e) => return add_hosts_error_response("authorize", e),
+    };
+
+    // The serial advances only once the last node has authorized; until then
+    // this node's read still returns the base serial.
+    let (status, serial) = match read_party_to_participant(&data.config, &body.party_id).await {
+        Ok(Some(current)) if current.serial > base_serial => {
+            (WorkflowProgress::Completed, current.serial)
+        }
+        Ok(Some(current)) => (WorkflowProgress::InProgress, current.serial),
+        Ok(None) => (WorkflowProgress::InProgress, base_serial),
+        Err(e) => {
+            tracing::warn!("tenant add-hosts authorize: post-submit status read failed: {e:#}");
+            (WorkflowProgress::InProgress, base_serial)
+        }
+    };
+
+    HttpResponse::Accepted().json(TenantAddHostsOnboardResponse {
+        status,
+        party_id: body.party_id.clone(),
+        serial,
+    })
 }
 
 /// Submit the wallet-signed add-hosts topology on THIS host. The wallet calls
