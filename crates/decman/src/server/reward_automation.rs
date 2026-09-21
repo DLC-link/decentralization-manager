@@ -1060,8 +1060,8 @@ fn canton_error_id(e: &anyhow::Error) -> Option<String> {
         .then(|| id.to_string())
 }
 
-/// Whether the sweep failed only because a package it reads by name is absent
-/// from this participant.
+/// Whether a read failed only because a package it names is absent from this
+/// participant.
 ///
 /// Both reads name their package by alias, so the ledger rejects the request
 /// before it reads a contract. A node in that state fails identically on every
@@ -1271,6 +1271,13 @@ async fn read_enablement(
         };
         match delegated_decparties(&data.config, &pkgs, data.test_mode, &member, &token).await {
             Ok(set) => return Some(set),
+            Err(e) if package_absent(&e) => {
+                tracing::trace!(
+                    %member,
+                    error = %e,
+                    "reward automation is off: this participant holds no rewards DAR"
+                );
+            }
             Err(e) => {
                 // Another decparty's token may still work, so try the rest.
                 tracing::warn!(%member, error = %e, "reading the delegated decparties failed");
