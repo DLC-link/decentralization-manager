@@ -442,6 +442,26 @@ pub async fn prepare_add_hosts(
     })
 }
 
+/// Does this mapping already host every one of `new_hosts` at `permission`?
+///
+/// The "already authorized" half of the retry check. The onboarding marker is
+/// deliberately not compared: it is cleared once the joiner's ACS import lands,
+/// so a retry arriving after that would otherwise read as a stale pin.
+fn hosts_present(
+    mapping: &PartyToParticipant,
+    new_hosts: &[CantonId],
+    permission: HostPermission,
+) -> bool {
+    let wanted = canton_permission(permission);
+    new_hosts.iter().all(|host| {
+        let uid = host.to_string();
+        mapping
+            .participants
+            .iter()
+            .any(|p| p.participant_uid == uid && p.permission == wanted)
+    })
+}
+
 /// Which half of Canton's "party namespace + the new participant namespace" this
 /// node can sign, or `None` when it can sign neither.
 ///
@@ -575,6 +595,25 @@ pub async fn authorize_add_hosts(
         });
     };
     if base_serial != current.serial {
+        // The second node's call is what makes the change live, so by the time a
+        // driver retries either call the serial may already have advanced. A
+        // retry whose first attempt landed must not read as a conflict, or a
+        // driver that lost the response could never learn it succeeded.
+        //
+        // Only when head state is exactly one past the pin AND already hosts
+        // what this call asked for. Anything else is a genuine stale pin: some
+        // other write could have moved the party, and calling that success would
+        // report a change that is not live.
+        if current.serial == base_serial.saturating_add(1)
+            && hosts_present(&current.mapping, new_hosts, permission)
+        {
+            tracing::info!(
+                party_id = %party_id,
+                serial = current.serial,
+                "add-hosts already authorized; treating the retry as success"
+            );
+            return Ok(base_serial);
+        }
         return Err(AddHostsError::StaleSerial {
             party: party_id.to_string(),
             pinned: base_serial,
@@ -603,7 +642,12 @@ pub async fn authorize_add_hosts(
     let synchronizer_id = utils::get_synchronizer_id(config)
         .await
         .map_err(AddHostsError::Canton)?;
-    let next_serial = current.serial.saturating_add(1);
+    let next_serial = current.serial.checked_add(1).ok_or_else(|| {
+        AddHostsError::Invalid(anyhow::anyhow!(
+            "{party_id} is at serial {s}, which cannot be advanced",
+            s = current.serial
+        ))
+    })?;
 
     topology::authorize_with_topology_retry(
         config,
@@ -1668,6 +1712,75 @@ mod tests {
     /// concatenated Ed25519, which is always 64 bytes. Base64 accepts any
     /// length, so a truncated or empty one used to pass validation and fail
     /// inside a Canton RPC, surfacing as a 500 for plainly malformed input.
+    /// A driver's retry after the second node completed the add must read as
+    /// success, not as a conflict, or a lost response leaves it unable to learn
+    /// the change is live.
+    #[test]
+    fn a_landed_add_is_recognized_on_retry() {
+        let mut mapping = current().mapping;
+        mapping.participants.push(HostingParticipant {
+            participant_uid: participant(3).to_string(),
+            permission: ParticipantPermission::Confirmation as i32,
+            onboarding: Some(hosting_participant::Onboarding {}),
+        });
+        assert!(hosts_present(
+            &mapping,
+            &[participant(3)],
+            HostPermission::Confirmation
+        ));
+    }
+
+    /// The marker is gone once the joiner's ACS import lands, and a retry after
+    /// that is still the same landed add.
+    #[test]
+    fn a_cleared_marker_still_counts_as_present() {
+        let mut mapping = current().mapping;
+        mapping.participants.push(HostingParticipant {
+            participant_uid: participant(3).to_string(),
+            permission: ParticipantPermission::Confirmation as i32,
+            onboarding: None,
+        });
+        assert!(hosts_present(
+            &mapping,
+            &[participant(3)],
+            HostPermission::Confirmation
+        ));
+    }
+
+    /// A host sitting at another permission is not the change this call asked
+    /// for, so the pin is genuinely stale.
+    #[test]
+    fn a_host_at_another_permission_is_not_present() {
+        let mut mapping = current().mapping;
+        mapping.participants.push(HostingParticipant {
+            participant_uid: participant(3).to_string(),
+            permission: ParticipantPermission::Submission as i32,
+            onboarding: None,
+        });
+        assert!(!hosts_present(
+            &mapping,
+            &[participant(3)],
+            HostPermission::Confirmation
+        ));
+    }
+
+    /// Every named host has to be there. A partially applied set means some
+    /// other write moved the party.
+    #[test]
+    fn a_missing_host_is_not_present() {
+        let mut mapping = current().mapping;
+        mapping.participants.push(HostingParticipant {
+            participant_uid: participant(3).to_string(),
+            permission: ParticipantPermission::Confirmation as i32,
+            onboarding: None,
+        });
+        assert!(!hosts_present(
+            &mapping,
+            &[participant(3), participant(4)],
+            HostPermission::Confirmation
+        ));
+    }
+
     /// The node whose root key IS the party's namespace signs the "party
     /// namespace" half. This is the case the wallet-signed path cannot serve:
     /// that key lives in Canton's vault and no RPC signs a hash with it.
