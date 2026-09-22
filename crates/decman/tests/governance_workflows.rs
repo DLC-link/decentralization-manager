@@ -117,6 +117,10 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     // Spike: does Canton let an existing local party adopt a wallet key? The
     // answer decides whether Plan B1 exists at all.
     phases::local_party_adopt_key::run(&mut f).await?;
+    // The two above, joined: convert a local party, add a second host to it,
+    // replicate, and transact from both. P2 joins rather than P3, because
+    // add_party_missing_dar needs P3 to stay without orphan-marker.
+    phases::local_party_decentralization::run(&mut f).await?;
     phases::create_dec_party::run(&mut f).await?;
     phases::distribute_dars::run(&mut f).await?;
     phases::check_peer_dars::run(&mut f).await?;
@@ -268,6 +272,7 @@ async fn external_party_e2e() -> anyhow::Result<()> {
     phases::external_party_tenant::run(&mut f).await?;
     phases::external_party_add_hosts::run(&mut f).await?;
     phases::local_party_adopt_endpoints::run(&mut f).await?;
+    phases::local_party_decentralization::run(&mut f).await?;
     Ok(())
 }
 

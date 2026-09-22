@@ -1352,6 +1352,7 @@ pub async fn start_server(
             .service(handlers::tenant_prepare)
             .service(handlers::tenant_onboard)
             .service(handlers::tenant_add_hosts_prepare)
+            .service(handlers::tenant_add_hosts_authorize)
             .service(handlers::tenant_add_hosts_onboard)
             .service(handlers::tenant_acs_snapshot)
             .service(handlers::tenant_acs_import)
