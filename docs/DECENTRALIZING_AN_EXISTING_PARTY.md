@@ -148,7 +148,11 @@ When the party's namespace is a participant's key, use
 `authorize`: `onboard` submits the caller's signature untouched and no node
 co-signs, so nothing outside Canton can authorize it. Canton wants the party
 namespace alone for a threshold change, so this is one call on the node owning
-that namespace, and the change is live when it returns. Any other node refuses.
+that namespace, and no second signature is awaited. Any other node refuses.
+
+The call supplies the authorization; it does not wait for the change to take
+effect. The response reports `InProgress` until this node sees the new serial, so
+poll `/state` before pinning anything to it.
 
 Raising the threshold above 1 is what makes the party **co-validated** rather
 than merely redundant. Below that each host still acts alone.

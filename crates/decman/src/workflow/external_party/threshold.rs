@@ -126,8 +126,10 @@ fn threshold_mapping(
 ///
 /// A vault key signs only through `Authorize`. Canton wants the party namespace
 /// alone for a threshold change, so unlike an add this needs exactly one node
-/// and one call: `must_fully_authorize` holds, and the change is live when this
-/// returns rather than waiting on anyone else.
+/// and one call: `must_fully_authorize` holds, and no second signature is
+/// awaited. The call supplies the whole authorization; it does not wait for the
+/// change to become effective, so a caller that needs the new serial polls for
+/// it.
 ///
 /// # Errors
 /// [`AddHostsError`] variants, so a caller answers a stale pin, a threshold this
@@ -146,6 +148,17 @@ pub async fn authorize_threshold(
             party: party_id.to_string(),
         });
     };
+    // Before the serial is even looked at. A node that owns nothing here must
+    // answer the same way whether or not the change has landed: once P1's write
+    // is live, a bystander reading head state would otherwise match the
+    // retry-as-success case and be told it authorized something.
+    if !owns_party_namespace(config, party_id) {
+        return Err(AddHostsError::Invalid(anyhow::anyhow!(
+            "this node does not own {party_id}'s namespace, so it holds no key that can \
+             authorize the party's topology"
+        )));
+    }
+
     if base_serial != current.serial {
         // A retry whose first attempt landed must not read as a conflict, or a
         // caller that lost the response could never learn it succeeded. Only
@@ -166,13 +179,6 @@ pub async fn authorize_threshold(
             pinned: base_serial,
             found: current.serial,
         });
-    }
-
-    if !owns_party_namespace(config, party_id) {
-        return Err(AddHostsError::Invalid(anyhow::anyhow!(
-            "this node does not own {party_id}'s namespace, so it holds no key that can \
-             authorize the party's topology"
-        )));
     }
 
     let mapping =

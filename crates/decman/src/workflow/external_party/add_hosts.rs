@@ -606,6 +606,17 @@ pub async fn authorize_add_hosts(
             party: party_id.to_string(),
         });
     };
+    // Before the serial is even looked at. A node that holds neither half must
+    // answer the same way whether or not the add has landed: once it is live, a
+    // bystander reading head state would otherwise match the retry-as-success
+    // case below and be told it authorized something.
+    let Some(role) = authorizing_role(config, party_id, new_hosts) else {
+        return Err(AddHostsError::Invalid(anyhow::anyhow!(
+            "this node neither owns {party_id}'s namespace nor is joining it, so it holds no \
+             key Canton needs for the add"
+        )));
+    };
+
     if base_serial != current.serial {
         // The second node's call is what makes the change live, so by the time a
         // driver retries either call the serial may already have advanced. A
@@ -632,13 +643,6 @@ pub async fn authorize_add_hosts(
             found: current.serial,
         });
     }
-
-    let Some(role) = authorizing_role(config, party_id, new_hosts) else {
-        return Err(AddHostsError::Invalid(anyhow::anyhow!(
-            "this node neither owns {party_id}'s namespace nor is joining it, so it holds no \
-             key Canton needs for the add"
-        )));
-    };
 
     let mapping = add_hosts_mapping(&current.mapping, new_hosts, permission)
         .map_err(AddHostsError::Invalid)?;
