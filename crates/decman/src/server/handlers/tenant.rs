@@ -47,7 +47,9 @@ use crate::{
             ExternalPartyAllocatePayload, HostOnboardingStatus, allocate_party,
             host_onboarding_status, prepare_topology,
         },
-        threshold::{ExternalPartyThresholdPayload, prepare_threshold, submit_threshold},
+        threshold::{
+            ExternalPartyThresholdPayload, authorize_threshold, prepare_threshold, submit_threshold,
+        },
     },
     workflow::party_replication::{
         ClearOutcome, collect_party_package_ids, open_export_session,
@@ -946,6 +948,71 @@ pub async fn tenant_threshold_prepare(
         }),
         Err(e) => add_hosts_error_response("threshold prepare", e),
     }
+}
+
+/// Authorize a threshold change with THIS node's own namespace key.
+///
+/// The counterpart to `threshold/onboard` for a party nobody can sign for from
+/// outside Canton: one that is, or once was, local. `onboard` submits the
+/// caller's signature untouched and no node co-signs, so it can never serve a
+/// party whose namespace key sits in Canton's vault.
+///
+/// Canton wants the party namespace alone for a threshold change, so this takes
+/// one call on the node owning that namespace and the change is live when it
+/// returns. A repeat is harmless.
+#[utoipa::path(
+    tag = "Tenant",
+    request_body = TenantThresholdRequest,
+    responses(
+        (status = 202, description = "Authorized on this node", body = TenantAddHostsOnboardResponse),
+        (status = 400, description = "A threshold this party cannot field, or a party this node holds no key for", body = ErrorResponse),
+        (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 404, description = "No authorized PartyToParticipant for this party", body = ErrorResponse),
+        (status = 409, description = "The pinned base serial has moved on this node", body = ErrorResponse),
+        (status = 500, description = "A Canton call failed on this node", body = ErrorResponse)
+    )
+)]
+#[post("/v0/tenant/threshold/authorize")]
+pub async fn tenant_threshold_authorize(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    body: web::Json<TenantThresholdRequest>,
+) -> impl Responder {
+    if let Err(resp) = require_tenant_api_key(&http_req, &data) {
+        return resp;
+    }
+
+    let base_serial = match authorize_threshold(
+        &data.config,
+        &body.party_id,
+        body.new_threshold,
+        body.base_serial,
+    )
+    .await
+    {
+        Ok(serial) => serial,
+        Err(e) => return add_hosts_error_response("threshold authorize", e),
+    };
+
+    // One signature is all Canton wants here, so the change should be live
+    // already; the read only reports what this node now sees.
+    let (status, serial) = match read_party_to_participant(&data.config, &body.party_id).await {
+        Ok(Some(current)) if current.serial > base_serial => {
+            (WorkflowProgress::Completed, current.serial)
+        }
+        Ok(Some(current)) => (WorkflowProgress::InProgress, current.serial),
+        Ok(None) => (WorkflowProgress::InProgress, base_serial),
+        Err(e) => {
+            tracing::warn!("tenant threshold authorize: post-submit status read failed: {e:#}");
+            (WorkflowProgress::InProgress, base_serial)
+        }
+    };
+
+    HttpResponse::Accepted().json(TenantAddHostsOnboardResponse {
+        status,
+        party_id: body.party_id.clone(),
+        serial,
+    })
 }
 
 /// Submit the wallet-signed threshold change on THIS host. A threshold change

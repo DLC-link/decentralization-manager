@@ -802,6 +802,116 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             }
         })
         .run(f)
+        .await?;
+
+    // ------------------------------------------------------------------
+    // 6 — co-validation proper: both hosts must confirm. Only now, because a
+    //     marked host cannot confirm and so cannot count toward the threshold.
+    // ------------------------------------------------------------------
+    Scenario::with_ctx(format!("{hint} raises its threshold to 2 of 2"), ())
+        .when("the namespace owner authorizes the raise alone", {
+            let party_id = party_id.clone();
+            move |f, _| {
+                let party_id = party_id.clone();
+                Box::pin(async move {
+                    let state: Value = f
+                        .get_json(f.p1.http, &format!("/v0/tenant/{party_id}/state"))
+                        .await?;
+                    let base_serial = state
+                        .get("serial")
+                        .and_then(Value::as_u64)
+                        .context("party state missing serial")?;
+                    anyhow::ensure!(
+                        state.get("onboarding_hosts").and_then(Value::as_u64) == Some(0),
+                        "the raise needs every marker cleared: {state}"
+                    );
+
+                    let request = json!({
+                        "party_id": party_id,
+                        "new_threshold": 2,
+                        "base_serial": base_serial,
+                    });
+
+                    // One call, one node. Canton wants the party namespace alone
+                    // for a threshold change, and P1's key is that namespace, so
+                    // the change is authorized outright rather than left as a
+                    // proposal for P2 to complete.
+                    let _: Value = f
+                        .post_json(f.p1.http, "/v0/tenant/threshold/authorize", &request)
+                        .await
+                        .context("threshold/authorize on P1")?;
+
+                    // P2 holds neither the namespace nor any other key Canton
+                    // wants here, so it must refuse rather than spend its key.
+                    let refused: anyhow::Result<Value> = f
+                        .post_json(f.p2.http, "/v0/tenant/threshold/authorize", &request)
+                        .await;
+                    let Err(e) = refused else {
+                        anyhow::bail!("a node that does not own the namespace must refuse");
+                    };
+                    let reason = format!("{e:#}");
+                    anyhow::ensure!(
+                        reason.contains("namespace"),
+                        "the refusal must name the namespace, got: {reason}"
+                    );
+                    Ok(())
+                })
+            }
+        })
+        .then(
+            "both nodes report threshold 2 of 2",
+            Duration::from_secs(180),
+            {
+                let party_id = party_id.clone();
+                move |f, _| {
+                    let party_id = party_id.clone();
+                    Box::pin(async move {
+                        for host in [f.p1.http, f.p2.http] {
+                            let state: Value = f
+                                .probe_get_json(host, &format!("/v0/tenant/{party_id}/state"))
+                                .await?;
+                            if state.get("threshold").and_then(Value::as_u64) != Some(2)
+                                || state.get("host_count").and_then(Value::as_u64) != Some(2)
+                            {
+                                return None;
+                            }
+                        }
+                        info!("converted party co-validated at 2 of 2");
+                        Some(Ok(()))
+                    })
+                }
+            },
+        )
+        // Co-validation is only real if the party still transacts under it, and
+        // at 2 of 2 that means both nodes confirming the same transaction.
+        .when("the party still transacts with both hosts confirming", {
+            let party_id = party_id.clone();
+            let config = p1_config.clone();
+            move |f, _| {
+                let party_id = party_id.clone();
+                let config = config.clone();
+                let wallet = ExternalKeyPair::from_seed(seed);
+                Box::pin(async move {
+                    let token = f.refresher.token().await?;
+                    let created = create_marker_as_converted(
+                        &config,
+                        &token,
+                        &party_id,
+                        &wallet,
+                        SEEDED_MARKERS + 2,
+                    )
+                    .await
+                    .context("the co-validated party submitting at threshold 2")?;
+                    anyhow::ensure!(
+                        created == 1,
+                        "the co-validated submission created {created} contract(s), not 1"
+                    );
+                    info!("co-validated party transacted at 2 of 2");
+                    Ok(())
+                })
+            }
+        })
+        .run(f)
         .await
 }
 

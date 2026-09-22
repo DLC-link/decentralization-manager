@@ -476,14 +476,26 @@ fn authorizing_role(
     party_id: &str,
     new_hosts: &[CantonId],
 ) -> Option<AuthorizingRole> {
-    let party_namespace = party_id.rsplit_once("::").map(|(_, ns)| ns)?;
-    if party_namespace == config.participant_id().namespace.to_hex() {
+    if owns_party_namespace(config, party_id) {
         return Some(AuthorizingRole::NamespaceOwner);
     }
     if new_hosts.contains(config.participant_id()) {
         return Some(AuthorizingRole::JoiningHost);
     }
     None
+}
+
+/// Is this party's namespace this node's own participant namespace?
+///
+/// True for a party that is local to this node, and for one that was before it
+/// adopted a signing key — adopting one adds a `party_signing_keys` entry and
+/// never moves the namespace, which the party id embeds. Such a namespace key
+/// lives in Canton's vault, so this node is the only place its signature can
+/// come from, and it can only come through `Authorize`.
+pub fn owns_party_namespace(config: &NodeConfig, party_id: &str) -> bool {
+    party_id
+        .rsplit_once("::")
+        .is_some_and(|(_, ns)| ns == config.participant_id().namespace.to_hex())
 }
 
 /// The half of the authorization a node contributes, for logging.
@@ -594,6 +606,17 @@ pub async fn authorize_add_hosts(
             party: party_id.to_string(),
         });
     };
+    // Before the serial is even looked at. A node that holds neither half must
+    // answer the same way whether or not the add has landed: once it is live, a
+    // bystander reading head state would otherwise match the retry-as-success
+    // case below and be told it authorized something.
+    let Some(role) = authorizing_role(config, party_id, new_hosts) else {
+        return Err(AddHostsError::Invalid(anyhow::anyhow!(
+            "this node neither owns {party_id}'s namespace nor is joining it, so it holds no \
+             key Canton needs for the add"
+        )));
+    };
+
     if base_serial != current.serial {
         // The second node's call is what makes the change live, so by the time a
         // driver retries either call the serial may already have advanced. A
@@ -620,13 +643,6 @@ pub async fn authorize_add_hosts(
             found: current.serial,
         });
     }
-
-    let Some(role) = authorizing_role(config, party_id, new_hosts) else {
-        return Err(AddHostsError::Invalid(anyhow::anyhow!(
-            "this node neither owns {party_id}'s namespace nor is joining it, so it holds no \
-             key Canton needs for the add"
-        )));
-    };
 
     let mapping = add_hosts_mapping(&current.mapping, new_hosts, permission)
         .map_err(AddHostsError::Invalid)?;
