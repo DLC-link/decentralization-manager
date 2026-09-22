@@ -280,6 +280,13 @@ export const PartyDetail = ({
 
   const isOwner = Boolean(party.my_owner_key);
 
+  // `authStatus.rights` describes the party credential this node is configured
+  // with, not the person using the browser. `canAct` gates the one control that
+  // submits a command; `canRead` gates the sections that only read, so a node
+  // configured read-only still shows them.
+  const canAct = Boolean(authStatus?.rights?.dec_party_act_as);
+  const canRead = canAct || Boolean(authStatus?.rights?.dec_party_read_as);
+
   // Stable identity: the audit trail reports through this from an effect, so a
   // fresh callback each render would re-run it on every parent render.
   const onAuditTrailCountChange = useCallback(
@@ -363,7 +370,7 @@ export const PartyDetail = ({
         key: "gov",
         icon: <EditIcon fontSize="small" />,
         label: "Governance Actions",
-        disabled: !authStatus?.rights?.dec_party_act_as,
+        disabled: !canAct,
         onClick: () => {
           setGovDialogView("actions");
           setEditGovContractId(rulesContract.contract_id);
@@ -706,7 +713,7 @@ export const PartyDetail = ({
       )}
 
       {/* Holdings */}
-      {authStatus?.rights?.dec_party_act_as && (
+      {canRead && (
         <CollapsibleSection
           title="Holdings"
           expanded={holdingsExpanded}
@@ -745,7 +752,7 @@ export const PartyDetail = ({
       )}
 
       {/* Audit Trail */}
-      {authStatus?.rights?.dec_party_act_as && (
+      {canRead && (
         <CollapsibleSection
           title="Audit Trail"
           expanded={governanceExpanded}
