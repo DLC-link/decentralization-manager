@@ -903,7 +903,13 @@ fn transaction_entries(
 }
 
 /// Save chain audit entries to the cache table.
-/// Uses INSERT OR IGNORE to skip duplicates based on (party_id, offset, contract_id, event_type).
+///
+/// Writes with `INSERT OR REPLACE` on the primary key
+/// `(party_id, offset, contract_id, event_type)`, so a re-read of the same
+/// event overwrites the row it cached before. The alternative, `INSERT OR
+/// IGNORE`, keeps the first row forever: a build that rendered an event
+/// differently would keep serving its old `details` even after a refresh
+/// re-read the ledger, and nothing in the UI could clear it.
 pub async fn save_chain_audit_cache(
     pool: &SqlitePool,
     party_id: &CantonId,
@@ -916,7 +922,7 @@ pub async fn save_chain_audit_cache(
 
         if let Err(e) = sqlx::query(
             r"
-            INSERT OR IGNORE INTO chain_audit_cache (
+            INSERT OR REPLACE INTO chain_audit_cache (
                 party_id, offset, timestamp, event_type, contract_id,
                 template_id, package_id, governance_type, action_summary,
                 choice, acting_parties, update_id, details
@@ -971,6 +977,35 @@ mod tests {
             update_id: String::new(),
             details: JsonValue::Null,
         }
+    }
+
+    /// A re-save must overwrite an existing row, so a cache written by an older
+    /// build stops serving its stale `details` once a refresh re-reads the
+    /// ledger. `INSERT OR IGNORE` dropped that second write, and the stale row
+    /// outlived the fix that corrected it.
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn saving_an_entry_twice_overwrites_the_cached_row(pool: sqlx::SqlitePool) {
+        let party_id = CantonId::parse(&format!(
+            "party-a::{}",
+            "1220aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ))
+        .expect("a valid party id");
+
+        let mut entry = entry_with_event_type("propose");
+        entry.details = json!({ "_unsupported": "map" });
+        save_chain_audit_cache(&pool, &party_id, std::slice::from_ref(&entry)).await;
+
+        entry.details = json!({ "members": ["alice::1220aa"] });
+        save_chain_audit_cache(&pool, &party_id, std::slice::from_ref(&entry)).await;
+
+        let stored: String =
+            sqlx::query_scalar("SELECT details FROM chain_audit_cache WHERE party_id = ?")
+                .bind(party_id.to_string())
+                .fetch_one(&pool)
+                .await
+                .expect("the row is cached");
+
+        assert_eq!(stored, json!({ "members": ["alice::1220aa"] }).to_string());
     }
 
     /// Entries at the given offsets, newest-first, as `trim_to_offset_groups`
