@@ -476,14 +476,26 @@ fn authorizing_role(
     party_id: &str,
     new_hosts: &[CantonId],
 ) -> Option<AuthorizingRole> {
-    let party_namespace = party_id.rsplit_once("::").map(|(_, ns)| ns)?;
-    if party_namespace == config.participant_id().namespace.to_hex() {
+    if owns_party_namespace(config, party_id) {
         return Some(AuthorizingRole::NamespaceOwner);
     }
     if new_hosts.contains(config.participant_id()) {
         return Some(AuthorizingRole::JoiningHost);
     }
     None
+}
+
+/// Is this party's namespace this node's own participant namespace?
+///
+/// True for a party that is local to this node, and for one that was before it
+/// adopted a signing key — adopting one adds a `party_signing_keys` entry and
+/// never moves the namespace, which the party id embeds. Such a namespace key
+/// lives in Canton's vault, so this node is the only place its signature can
+/// come from, and it can only come through `Authorize`.
+pub fn owns_party_namespace(config: &NodeConfig, party_id: &str) -> bool {
+    party_id
+        .rsplit_once("::")
+        .is_some_and(|(_, ns)| ns == config.participant_id().namespace.to_hex())
 }
 
 /// The half of the authorization a node contributes, for logging.

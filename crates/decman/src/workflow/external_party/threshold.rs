@@ -20,7 +20,8 @@ use canton_proto_rs::com::digitalasset::canton::{
         topology_mapping,
     },
     topology::admin::v30::{
-        AddTransactionsRequest, GenerateTransactionsRequest, generate_transactions_request,
+        AddTransactionsRequest, AuthorizeRequest, GenerateTransactionsRequest, authorize_request,
+        generate_transactions_request,
         topology_manager_write_service_client::TopologyManagerWriteServiceClient,
     },
     version::v1::{UntypedVersionedMessage, untyped_versioned_message},
@@ -33,7 +34,7 @@ use crate::{
     utils,
     workflow::{
         external_party::add_hosts::{
-            AddHostsError, CurrentPartyTopology, read_party_to_participant,
+            AddHostsError, CurrentPartyTopology, owns_party_namespace, read_party_to_participant,
         },
         topology,
     },
@@ -109,6 +110,116 @@ fn threshold_mapping(
         participants: current.participants.clone(),
         party_signing_keys: current.party_signing_keys.clone(),
     })
+}
+
+/// Raise or lower the threshold with this node's own key, for a party whose
+/// namespace nobody can sign for from outside Canton.
+///
+/// [`submit_threshold`] cannot serve such a party. It submits the caller's
+/// signature untouched and no node co-signs, because for a party born external
+/// the namespace is the wallet's key and a node asked to sign would fail with
+/// `TOPOLOGY_NO_APPROPRIATE_SIGNING_KEY_IN_STORE`. A party that is, or once was,
+/// local has a participant's root key for a namespace instead: it lives in
+/// Canton's vault, nothing outside Canton can sign with it, and converting the
+/// party does not move it — the adopted key authorizes transactions, not
+/// topology.
+///
+/// A vault key signs only through `Authorize`. Canton wants the party namespace
+/// alone for a threshold change, so unlike an add this needs exactly one node
+/// and one call: `must_fully_authorize` holds, and the change is live when this
+/// returns rather than waiting on anyone else.
+///
+/// # Errors
+/// [`AddHostsError`] variants, so a caller answers a stale pin, a threshold this
+/// party cannot field, and a Canton failure differently.
+pub async fn authorize_threshold(
+    config: &NodeConfig,
+    party_id: &str,
+    new_threshold: u32,
+    base_serial: u32,
+) -> std::result::Result<u32, AddHostsError> {
+    let Some(current) = read_party_to_participant(config, party_id)
+        .await
+        .map_err(AddHostsError::Canton)?
+    else {
+        return Err(AddHostsError::UnknownParty {
+            party: party_id.to_string(),
+        });
+    };
+    if base_serial != current.serial {
+        // A retry whose first attempt landed must not read as a conflict, or a
+        // caller that lost the response could never learn it succeeded. Only
+        // when head state is exactly one past the pin AND already carries this
+        // threshold; anything else is a genuine stale pin.
+        if current.serial == base_serial.saturating_add(1)
+            && current.mapping.threshold == new_threshold
+        {
+            tracing::info!(
+                party_id = %party_id,
+                threshold = new_threshold,
+                "threshold already authorized; treating the retry as success"
+            );
+            return Ok(base_serial);
+        }
+        return Err(AddHostsError::StaleSerial {
+            party: party_id.to_string(),
+            pinned: base_serial,
+            found: current.serial,
+        });
+    }
+
+    if !owns_party_namespace(config, party_id) {
+        return Err(AddHostsError::Invalid(anyhow::anyhow!(
+            "this node does not own {party_id}'s namespace, so it holds no key that can \
+             authorize the party's topology"
+        )));
+    }
+
+    let mapping =
+        threshold_mapping(&current.mapping, new_threshold).map_err(AddHostsError::Invalid)?;
+    let synchronizer_id = utils::get_synchronizer_id(config)
+        .await
+        .map_err(AddHostsError::Canton)?;
+    let next_serial = current.serial.checked_add(1).ok_or_else(|| {
+        AddHostsError::Invalid(anyhow::anyhow!(
+            "{party_id} is at serial {s}, which cannot be advanced",
+            s = current.serial
+        ))
+    })?;
+
+    topology::authorize_with_topology_retry(
+        config,
+        AuthorizeRequest {
+            r#type: Some(authorize_request::Type::Proposal(
+                authorize_request::Proposal {
+                    change: TopologyChangeOp::AddReplace as i32,
+                    serial: next_serial,
+                    mapping: Some(authorize_request::proposal::Mapping::V30(TopologyMapping {
+                        mapping: Some(topology_mapping::Mapping::PartyToParticipant(mapping)),
+                    })),
+                },
+            )),
+            // This node holds the only signature Canton wants, so the change is
+            // authorized outright rather than left as a proposal.
+            must_fully_authorize: true,
+            force_changes: vec![],
+            signed_by: vec![],
+            store: Some(topology::synchronizer_store_id(&synchronizer_id)),
+            wait_to_become_effective: None,
+        },
+        "external-party threshold authorize",
+    )
+    .await
+    .map_err(AddHostsError::Canton)?;
+
+    tracing::info!(
+        party_id = %party_id,
+        base_serial = current.serial,
+        threshold = new_threshold,
+        "external-party: threshold authorized with this node's own key"
+    );
+
+    Ok(current.serial)
 }
 
 /// Ask Canton to build the threshold change and the hash the party must sign.

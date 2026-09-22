@@ -143,6 +143,16 @@ confirms nothing.
 marked host cannot confirm, so a threshold raised to count one is a threshold
 the party cannot meet.
 
+When the party's namespace is a participant's key, use
+`/v0/tenant/threshold/authorize` instead, for the reason the host add uses
+`authorize`: `onboard` submits the caller's signature untouched and no node
+co-signs, so nothing outside Canton can authorize it. Canton wants the party
+namespace alone for a threshold change, so this is one call on the node owning
+that namespace, and the change is live when it returns. Any other node refuses.
+
+Raising the threshold above 1 is what makes the party **co-validated** rather
+than merely redundant. Below that each host still acts alone.
+
 ## Converting a local party
 
 `/v0/tenant/local-party/adopt-key/{prepare,onboard}` on the party's own node.
