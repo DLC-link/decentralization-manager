@@ -347,11 +347,11 @@ fn gen_map_to_json(m: &GenMap) -> JsonValue {
 /// and holds a `GenMap a Unit`. Keeping that wrapper would make an auditor
 /// open two nodes to read one list.
 ///
-/// The audit read asks for verbose events, so `record_id` is present and names
-/// the type exactly. Under [`AuditScope::All`] the trail also renders
-/// third-party templates, and one of those may declare its own field called
-/// `map`; the identifier check keeps that field's label. The label alone
-/// remains the fallback for a producer that omits `record_id`.
+/// The record id decides this, not the field label. The audit read asks for
+/// verbose events, so `record_id` is always present and names the type exactly.
+/// Under [`AuditScope::All`] the trail also renders third-party templates, and
+/// one of those may declare its own single field called `map`. A record that
+/// does not name itself `DA.Set.Types:Set` keeps its label.
 fn set_wrapper_map(r: &Record) -> Option<&Value> {
     let [field] = r.fields.as_slice() else {
         return None;
@@ -359,8 +359,10 @@ fn set_wrapper_map(r: &Record) -> Option<&Value> {
     if field.label != "map" {
         return None;
     }
-    if let Some(id) = &r.record_id
-        && !(id.module_name == "DA.Set.Types" && id.entity_name == "Set")
+    if !r
+        .record_id
+        .as_ref()
+        .is_some_and(|id| id.module_name == "DA.Set.Types" && id.entity_name == "Set")
     {
         return None;
     }
@@ -1381,6 +1383,10 @@ mod tests {
 
     /// Under `AuditScope::All` the trail renders third-party templates. One of
     /// them may declare its own field named `map`, and its label must survive.
+    ///
+    /// The field holds a `GenMap` of units, so the record id is the only thing
+    /// that can reject this record. A `TextMap` here would pass whether or not
+    /// [`set_wrapper_map`] checks the id.
     #[test]
     fn a_foreign_record_with_a_map_field_keeps_its_label() {
         let foreign = Record {
@@ -1391,19 +1397,20 @@ mod tests {
             }),
             fields: vec![RecordField {
                 label: "map".to_string(),
-                value: Some(text_map_of(&[("k", text("v"))])),
+                value: Some(gen_map_of(&[(party("alice::1220aa"), unit())])),
             }],
         };
         assert_eq!(
             record_to_json_inner(&foreign),
-            json!({ "map": { "k": "v" } })
+            json!({ "map": ["alice::1220aa"] })
         );
     }
 
-    /// A producer that omits `record_id` still gets the wrapper dropped, so the
-    /// label remains the fallback signal.
+    /// The label alone does not identify a set. A verbose read always carries
+    /// `record_id`, so a record without one is not a `DA.Set` and keeps its
+    /// label.
     #[test]
-    fn a_set_wrapper_without_a_record_id_still_unwraps() {
+    fn a_map_field_without_a_record_id_keeps_its_label() {
         let members = Record {
             record_id: None,
             fields: vec![RecordField {
@@ -1411,7 +1418,10 @@ mod tests {
                 value: Some(gen_map_of(&[(party("alice::1220aa"), unit())])),
             }],
         };
-        assert_eq!(record_to_json_inner(&members), json!(["alice::1220aa"]));
+        assert_eq!(
+            record_to_json_inner(&members),
+            json!({ "map": ["alice::1220aa"] })
+        );
     }
 
     /// The wrapper is dropped only when `map` is the record's one field. A
