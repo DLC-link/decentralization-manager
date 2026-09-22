@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -8,11 +8,14 @@ use canton_proto_rs::com::digitalasset::canton::{
     admin::participant::v30::{ListPackagesRequest, package_service_client::PackageServiceClient},
     protocol::v30::{enums::TopologyChangeOp, vetted_packages::VettedPackage},
     topology::admin::v30::{
-        BaseQuery, ListVettedPackagesRequest,
+        BaseQuery, ListVettedPackagesRequest, list_vetted_packages_response,
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
     },
 };
 use prost_types::Timestamp;
+use tonic::transport::Channel;
+
+use common::canton_id::CantonId;
 
 use crate::{config::NodeConfig, utils, workflow::topology};
 
@@ -146,53 +149,123 @@ pub(crate) async fn fetch_package_id_to_name(
 /// `ListVettedPackages`, but it needs a bearer token and tokens here are
 /// per-party — a participant-level endpoint has no party to borrow one from.
 pub(crate) async fn fetch_vetted_packages(config: &NodeConfig) -> Result<Vec<VettedPackageInfo>> {
-    let synchronizer_id = utils::get_synchronizer_id(config).await?;
-    let channel = config
-        .admin_channel()
-        .await
-        .context("Failed to connect to participant Admin API")?;
-    let mut client = TopologyManagerReadServiceClient::new(channel)
-        .max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
-
-    let response = client
-        .list_vetted_packages(tonic::Request::new(ListVettedPackagesRequest {
-            base_query: Some(BaseQuery {
-                operation: TopologyChangeOp::AddReplace as i32,
-                ..topology::head_state_query(&synchronizer_id)
-            }),
-            filter_participant: config.participant_id().to_string(),
-        }))
-        .await
-        .context("Failed to list vetted packages")?
-        .into_inner();
-
+    let ids = fetch_vetted_package_ids(config, config.participant_id()).await?;
     let descriptions = fetch_package_descriptions(config).await?;
-    let now = now_timestamp();
 
-    let mut seen = std::collections::HashSet::new();
-    let mut vetted = Vec::new();
-    for result in response.results {
-        let Some(item) = result.item else { continue };
-        for package in item.packages {
-            if !package_valid_at(&package, &now) {
-                continue;
-            }
-            if !seen.insert(package.package_id.clone()) {
-                continue;
-            }
-            let (name, version) = descriptions
-                .get(&package.package_id)
-                .cloned()
-                .unwrap_or_default();
-            vetted.push(VettedPackageInfo {
-                package_id: package.package_id,
+    Ok(ids
+        .into_iter()
+        .map(|package_id| {
+            let (name, version) = descriptions.get(&package_id).cloned().unwrap_or_default();
+            VettedPackageInfo {
+                package_id,
                 package_name: name,
                 package_version: version,
-            });
-        }
+            }
+        })
+        .collect())
+}
+
+/// The package ids `participant_id` has vetted right now, in topology order
+/// and deduplicated.
+///
+/// The synchronizer replicates every participant's `VettedPackages` mapping to
+/// every member, so this reads a PEER's vetting from the local participant's
+/// own topology store. No peer is contacted.
+///
+/// # Errors
+/// Returns an error when the synchronizer id cannot be resolved or the
+/// topology read fails.
+pub(crate) async fn fetch_vetted_package_ids(
+    config: &NodeConfig,
+    participant_id: &CantonId,
+) -> Result<Vec<String>> {
+    TopologyReader::connect(config)
+        .await?
+        .vetted_package_ids(participant_id)
+        .await
+}
+
+/// One connected topology reader, reused across several reads.
+///
+/// Reading a whole peer set through [`fetch_vetted_package_ids`] would resolve
+/// the synchronizer id and open an admin channel once per peer. This holds both
+/// so a caller pays that cost once.
+pub(crate) struct TopologyReader {
+    client: TopologyManagerReadServiceClient<Channel>,
+    synchronizer_id: String,
+}
+
+impl TopologyReader {
+    /// Resolve the synchronizer and connect to the participant's Admin API.
+    ///
+    /// # Errors
+    /// Returns an error when the synchronizer id cannot be resolved or the
+    /// channel cannot be opened.
+    pub(crate) async fn connect(config: &NodeConfig) -> Result<Self> {
+        let synchronizer_id = utils::get_synchronizer_id(config).await?;
+        let channel = config
+            .admin_channel()
+            .await
+            .context("Failed to connect to participant Admin API")?;
+        Ok(Self {
+            client: TopologyManagerReadServiceClient::new(channel)
+                .max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE),
+            synchronizer_id,
+        })
     }
 
-    Ok(vetted)
+    /// The package ids `participant_id` has vetted right now.
+    ///
+    /// # Errors
+    /// Returns an error when the topology read fails.
+    pub(crate) async fn vetted_package_ids(
+        &mut self,
+        participant_id: &CantonId,
+    ) -> Result<Vec<String>> {
+        let wanted = participant_id.to_string();
+        let response = self
+            .client
+            .list_vetted_packages(tonic::Request::new(ListVettedPackagesRequest {
+                base_query: Some(BaseQuery {
+                    operation: TopologyChangeOp::AddReplace as i32,
+                    ..topology::head_state_query(&self.synchronizer_id)
+                }),
+                filter_participant: wanted.clone(),
+            }))
+            .await
+            .with_context(|| format!("Failed to list vetted packages of {wanted}"))?
+            .into_inner();
+
+        Ok(vetted_ids_of(response.results, &wanted, &now_timestamp()))
+    }
+}
+
+/// The valid, deduplicated package ids that `wanted` itself has vetted.
+///
+/// Canton splits `filter_participant` on `::` and matches each half as a LIKE
+/// prefix, so a request for `participant::1220ab` also returns
+/// `participant-2::1220abcd`. Every result whose `participant_uid` is not
+/// exactly `wanted` is dropped here. Without that check a node would read a
+/// neighbour's vetting as its peer's.
+fn vetted_ids_of(
+    results: Vec<list_vetted_packages_response::Result>,
+    wanted: &str,
+    now: &Timestamp,
+) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut ids = Vec::new();
+    for result in results {
+        let Some(item) = result.item else { continue };
+        if item.participant_uid != wanted {
+            continue;
+        }
+        for package in item.packages {
+            if package_valid_at(&package, now) && seen.insert(package.package_id.clone()) {
+                ids.push(package.package_id);
+            }
+        }
+    }
+    ids
 }
 
 /// The current wall-clock time as a proto timestamp, for validity checks.
@@ -248,6 +321,151 @@ async fn fetch_package_descriptions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A namespace long enough to look like a real Canton fingerprint, so the
+    /// two uids below differ only in the part before `::`.
+    const NS: &str = "1220cf0b33c716d8ea7a711353612aab36bf2c91674f69057e383328b35b52896ca2";
+
+    fn vetted_result(
+        participant_uid: &str,
+        package_ids: &[&str],
+    ) -> list_vetted_packages_response::Result {
+        list_vetted_packages_response::Result {
+            context: None,
+            item: Some(
+                canton_proto_rs::com::digitalasset::canton::protocol::v30::VettedPackages {
+                    participant_uid: participant_uid.to_string(),
+                    packages: package_ids
+                        .iter()
+                        .map(|id| VettedPackage {
+                            package_id: (*id).to_string(),
+                            valid_from_inclusive: None,
+                            valid_until_exclusive: None,
+                        })
+                        .collect(),
+                    ..Default::default()
+                },
+            ),
+        }
+    }
+
+    #[test]
+    fn a_prefix_colliding_participant_contributes_nothing() {
+        // Canton splits `filter_participant` on `::` and matches each half as a
+        // LIKE prefix, so asking for `participant` also returns `participant-2`.
+        // Counting the neighbour's packages would report a peer as vetting
+        // software it has never seen.
+        let wanted = format!("participant::{NS}");
+        let collider = format!("participant-2::{NS}");
+        let now = Timestamp {
+            seconds: 100,
+            nanos: 0,
+        };
+
+        let ids = vetted_ids_of(
+            vec![
+                vetted_result(&collider, &["pkg-theirs"]),
+                vetted_result(&wanted, &["pkg-mine"]),
+            ],
+            &wanted,
+            &now,
+        );
+
+        assert_eq!(ids, vec!["pkg-mine".to_string()]);
+    }
+
+    #[test]
+    fn only_the_exact_uid_survives_when_it_is_absent() {
+        // The requested participant has vetted nothing, but a prefix collider
+        // has. The answer must be empty, not the collider's list.
+        let wanted = format!("participant::{NS}");
+        let collider = format!("participant-2::{NS}");
+        let now = Timestamp {
+            seconds: 100,
+            nanos: 0,
+        };
+
+        let ids = vetted_ids_of(
+            vec![vetted_result(&collider, &["pkg-theirs"])],
+            &wanted,
+            &now,
+        );
+
+        assert!(ids.is_empty(), "{ids:?}");
+    }
+
+    #[test]
+    fn vetted_ids_drop_invalid_windows_and_duplicates() {
+        let wanted = format!("participant::{NS}");
+        let now = Timestamp {
+            seconds: 100,
+            nanos: 0,
+        };
+        let ts = |seconds| Timestamp { seconds, nanos: 0 };
+
+        let results = vec![list_vetted_packages_response::Result {
+            context: None,
+            item: Some(
+                canton_proto_rs::com::digitalasset::canton::protocol::v30::VettedPackages {
+                    participant_uid: wanted.clone(),
+                    packages: vec![
+                        VettedPackage {
+                            package_id: "pkg-a".to_string(),
+                            valid_from_inclusive: None,
+                            valid_until_exclusive: None,
+                        },
+                        // duplicate of pkg-a
+                        VettedPackage {
+                            package_id: "pkg-a".to_string(),
+                            valid_from_inclusive: None,
+                            valid_until_exclusive: None,
+                        },
+                        // scheduled for the future, e.g. a Splice upgrade vetting
+                        VettedPackage {
+                            package_id: "pkg-future".to_string(),
+                            valid_from_inclusive: Some(ts(101)),
+                            valid_until_exclusive: None,
+                        },
+                        // already expired
+                        VettedPackage {
+                            package_id: "pkg-expired".to_string(),
+                            valid_from_inclusive: None,
+                            valid_until_exclusive: Some(ts(100)),
+                        },
+                    ],
+                    ..Default::default()
+                },
+            ),
+        }];
+
+        assert_eq!(
+            vetted_ids_of(results, &wanted, &now),
+            vec!["pkg-a".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_result_without_an_item_is_skipped() {
+        let wanted = format!("participant::{NS}");
+        let now = Timestamp {
+            seconds: 100,
+            nanos: 0,
+        };
+
+        let ids = vetted_ids_of(
+            vec![
+                list_vetted_packages_response::Result {
+                    context: None,
+                    item: None,
+                },
+                vetted_result(&wanted, &["pkg-a"]),
+            ],
+            &wanted,
+            &now,
+        );
+
+        assert_eq!(ids, vec!["pkg-a".to_string()]);
+    }
 
     #[test]
     fn test_package_name_prefix() {

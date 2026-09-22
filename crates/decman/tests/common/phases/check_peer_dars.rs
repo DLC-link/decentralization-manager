@@ -133,8 +133,8 @@ fn classify_compare_peers(
         let packages = peer.get("packages")?.as_array()?;
 
         if !reachable {
-            // Not yet reachable — the Noise mesh is still converging; keep
-            // polling until the deadline (mirrors probe_participants_status).
+            // The peer's vetting has not reached this node's topology store
+            // yet; keep polling until the deadline.
             return None;
         }
         if let Some(ek) = error_kind
@@ -144,15 +144,14 @@ fn classify_compare_peers(
                 "peer {id} reachable but error_kind set: {ek:?}"
             )));
         }
-        // Distinguish "still propagating" from "responded with empty list":
-        // if the peer reports reachable + zero packages while local has
-        // some, that's the silent decode-failure path (Future work item 5
-        // in the spec). Surface it as a terminal error so the failure
-        // message is actionable instead of a deadline timeout.
+        // The handler reports an empty vetting set as `NoVettedPackages` with
+        // `reachable: false`, so this pair cannot occur. Keep it as a terminal
+        // error: if it ever does, the message names the invariant that broke
+        // instead of leaving a deadline timeout to explain.
         if packages.is_empty() && local_count > 0 {
             return Some(Err(anyhow::anyhow!(
                 "peer {id} reachable but reported zero packages while local has {local_count} \
-                 — likely decode failure (see spec Future work item 5)"
+                 — reachable and empty must not occur together"
             )));
         }
         // (We deliberately do NOT assert packages.len() == local_count: in
@@ -277,9 +276,12 @@ mod tests {
         match classify_compare_peers(&v, "A", "B") {
             Some(Err(e)) => {
                 let chain = format!("{e:#}");
-                assert!(chain.contains("decode failure"), "got: {chain}");
+                assert!(
+                    chain.contains("reachable and empty must not occur together"),
+                    "got: {chain}"
+                );
             }
-            other => panic!("expected terminal decode-failure error, got {other:?}"),
+            other => panic!("expected a terminal error, got {other:?}"),
         }
     }
 

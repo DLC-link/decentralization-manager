@@ -152,11 +152,14 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         "scoped cancel verified: sibling invite + peer row survived",
     );
 
-    // Regression guard for the GetChunk routing fix: P1 now has EXACTLY ONE
-    // live run (sibling A) — the window where the old sole-active fallback
-    // misrouted an empty-routing-key chunked ListPackages INTO the workflow's
-    // chunk server. A cross-node package comparison from P2 fans ListPackages
-    // to P1; its chunked fetch must hit P1's chunk cache and succeed.
+    // P1 now has EXACTLY ONE live run (sibling A). The comparison must still
+    // report P1's packages while that run holds the node.
+    //
+    // This began as a regression guard for a Noise chunk-routing bug: a
+    // chunked ListPackages with an empty routing key was misrouted into the
+    // live workflow's chunk server. The comparison reads the synchronizer's
+    // topology store now and sends P1 nothing, so that path is gone. The
+    // assertion stays because a live run must not hide a peer's packages.
     let v: serde_json::Value = f
         .get_json(f.p2.http, "/packages/compare-peers")
         .await

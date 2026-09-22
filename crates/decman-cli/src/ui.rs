@@ -1072,6 +1072,8 @@ fn peer_error_label(kind: PeerErrorKind) -> &'static str {
         PeerErrorKind::DecodeFailed => "decode_failed",
         PeerErrorKind::InvalidPublicKey => "invalid_public_key",
         PeerErrorKind::Other => "other",
+        PeerErrorKind::TopologyReadFailed => "topology_read_failed",
+        PeerErrorKind::NoVettedPackages => "no_vetted_packages",
     }
 }
 
