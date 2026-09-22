@@ -219,7 +219,8 @@ fn classify_created(tid: &Identifier, is_child_of_exercise: bool) -> (String, St
 ///   and an array of members is what an auditor reads. A `TextMap Unit`
 ///   follows the same rule, because the shape decides rather than the Daml
 ///   type that produced it.
-/// - Any other map whose keys are all `Text` or `Party` becomes a JSON object.
+/// - Any other map whose keys are all `Text`, `Party` or `ContractId` becomes
+///   a JSON object. Each of those reaches the ledger API as a string already.
 /// - Every remaining map becomes an array of explicit `key`/`value` pairs.
 ///
 /// An empty map stays an object, because nothing marks it as a set.
@@ -268,7 +269,9 @@ fn value_to_json(v: &Value) -> JsonValue {
 /// The JSON object key for a Daml map key, when that key is string-like.
 fn gen_map_key(key: &Option<Value>) -> Option<String> {
     match key.as_ref().and_then(|v| v.sum.as_ref()) {
-        Some(value::Sum::Text(s) | value::Sum::Party(s)) => Some(s.clone()),
+        Some(value::Sum::Text(s) | value::Sum::Party(s) | value::Sum::ContractId(s)) => {
+            Some(s.clone())
+        }
         _ => None,
     }
 }
@@ -1104,6 +1107,12 @@ mod tests {
         }
     }
 
+    fn contract_id(c: &str) -> Value {
+        Value {
+            sum: Some(value::Sum::ContractId(c.to_string())),
+        }
+    }
+
     fn text_map_of(entries: &[(&str, Value)]) -> Value {
         Value {
             sum: Some(value::Sum::TextMap(TextMap {
@@ -1275,6 +1284,12 @@ mod tests {
     fn gen_map_with_text_keys_becomes_a_json_object() {
         let map = gen_map_of(&[(text("k"), text("v"))]);
         assert_eq!(value_to_json(&map), json!({ "k": "v" }));
+    }
+
+    #[test]
+    fn gen_map_with_contract_id_keys_becomes_a_json_object() {
+        let map = gen_map_of(&[(contract_id("00abcd"), int(7))]);
+        assert_eq!(value_to_json(&map), json!({ "00abcd": 7 }));
     }
 
     #[test]
