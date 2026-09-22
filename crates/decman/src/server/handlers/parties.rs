@@ -42,7 +42,7 @@ use crate::{
     server::{
         AppState,
         health::classify_health_reply,
-        package_inventory::{fetch_vetted_package_ids, fetch_vetted_packages},
+        package_inventory::{TopologyReader, fetch_vetted_packages},
         queries::{
             contract_templates_all, fetch_package_versions, get_contracts, get_party_metadata,
             rules_templates, sort_contracts,
@@ -2122,6 +2122,18 @@ fn peer_failure_hint(err: &NoiseError) -> &'static str {
     }
 }
 
+/// The local package list, and each peer's, for the comparison table.
+///
+/// The two sides do not measure the same thing. `local_packages` comes from
+/// this participant's `PackageService`, so it is what this node has UPLOADED.
+/// Each peer's list comes from the topology store, so it is what that peer has
+/// VETTED. A package uploaded here but not yet vetted here therefore renders as
+/// a mismatch against every peer, because no peer can have vetted it either.
+///
+/// Reading the local side through `fetch_vetted_packages` would remove that
+/// asymmetry, at the cost of dropping uploaded-but-unvetted packages from the
+/// operator's table entirely. That is a UI decision, so it is left out of the
+/// change that moved the peer side onto the topology store.
 async fn fetch_peer_packages(
     config: &NodeConfig,
     db: &SqlitePool,
@@ -2153,12 +2165,17 @@ async fn fetch_peer_packages(
     let current_participant_id = config.participant_id();
     let peers = db.get_all_peers().await?;
 
+    // One reader for the whole set: the synchronizer id and the admin channel
+    // are resolved once, not once per peer. The reads stay sequential on
+    // purpose — this endpoint is an operator's button click over a handful of
+    // peers, and each read is local.
+    let mut reader = TopologyReader::connect(config).await?;
     let mut results = Vec::with_capacity(peers.len());
     for peer in peers
         .iter()
         .filter(|p| p.participant_id != *current_participant_id)
     {
-        let read = fetch_vetted_package_ids(config, &peer.participant_id).await;
+        let read = reader.vetted_package_ids(&peer.participant_id).await;
         results.push(peer_package_result(peer, read, &local_index));
     }
 
@@ -2248,22 +2265,21 @@ mod tests {
     use super::*;
     use crate::{config::Network, db::MIGRATOR};
 
-    fn test_peer(name: &str) -> Peer {
-        Peer {
+    fn test_peer(name: &str) -> anyhow::Result<Peer> {
+        Ok(Peer {
             participant_id: CantonId::parse(
                 "participant::12200ad4539c269a7b13af6806fb2ee326e7c0d7233fa6144004c416502a2c73fb0b",
-            )
-            .expect("valid id"),
+            )?,
             name: name.to_string(),
             address: "unused".to_string(),
             port: 0,
             public_key: String::new(),
             party: None,
-        }
+        })
     }
 
     #[test]
-    fn a_peers_vetted_ids_join_the_local_names() {
+    fn a_peers_vetted_ids_join_the_local_names() -> anyhow::Result<()> {
         let local = PackageInfo {
             package_id: "pkg-a".to_string(),
             name: "governance-core".to_string(),
@@ -2272,7 +2288,7 @@ mod tests {
         let index: HashMap<&str, &PackageInfo> = [("pkg-a", &local)].into_iter().collect();
 
         let got = peer_package_result(
-            &test_peer("p2"),
+            &test_peer("p2")?,
             Ok(vec!["pkg-a".to_string(), "pkg-unknown".to_string()]),
             &index,
         );
@@ -2286,25 +2302,27 @@ mod tests {
         assert!(named.contains(&"governance-core"), "{named:?}");
         let ids: Vec<&str> = got.packages.iter().map(|p| p.package_id.as_str()).collect();
         assert!(ids.contains(&"pkg-unknown"), "{ids:?}");
+        Ok(())
     }
 
     #[test]
-    fn a_peer_that_has_vetted_nothing_is_not_reported_healthy() {
+    fn a_peer_that_has_vetted_nothing_is_not_reported_healthy() -> anyhow::Result<()> {
         // An empty vetting set means the peer can run no Daml at all. That is
         // an operator problem, not a peer holding zero packages.
         let index: HashMap<&str, &PackageInfo> = HashMap::new();
-        let got = peer_package_result(&test_peer("p2"), Ok(vec![]), &index);
+        let got = peer_package_result(&test_peer("p2")?, Ok(vec![]), &index);
 
         assert!(!got.reachable);
         assert_eq!(got.error_kind, Some(PeerErrorKind::NoVettedPackages));
         assert!(got.packages.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn a_failed_topology_read_names_itself() {
+    fn a_failed_topology_read_names_itself() -> anyhow::Result<()> {
         let index: HashMap<&str, &PackageInfo> = HashMap::new();
         let got = peer_package_result(
-            &test_peer("p2"),
+            &test_peer("p2")?,
             Err(anyhow::anyhow!("synchronizer unreachable")),
             &index,
         );
@@ -2312,10 +2330,11 @@ mod tests {
         assert!(!got.reachable);
         assert_eq!(got.error_kind, Some(PeerErrorKind::TopologyReadFailed));
         assert!(got.packages.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn peer_packages_sort_stably() {
+    fn peer_packages_sort_stably() -> anyhow::Result<()> {
         // The UI renders this list directly, so two reads of an unchanged
         // peer must not reorder it. Topology order is not stable.
         let index: HashMap<&str, &PackageInfo> = HashMap::new();
@@ -2324,10 +2343,11 @@ mod tests {
             "pkg-a".to_string(),
             "pkg-b".to_string(),
         ];
-        let got = peer_package_result(&test_peer("p2"), Ok(ids), &index);
+        let got = peer_package_result(&test_peer("p2")?, Ok(ids), &index);
 
         let order: Vec<&str> = got.packages.iter().map(|p| p.package_id.as_str()).collect();
         assert_eq!(order, vec!["pkg-a", "pkg-b", "pkg-c"]);
+        Ok(())
     }
 
     /// Discovery is the same query on every network, because it reads the

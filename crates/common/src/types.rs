@@ -101,10 +101,11 @@ pub struct PackageInfo {
 /// stable on the wire — so the UI can distinguish failure modes without
 /// having to scan logs.
 ///
-/// `TopologyReadFailed` and `NoVettedPackages` are the only two the package
-/// comparison emits: it reads the synchronizer's topology store and contacts
-/// no peer. The variants above them describe a failed Noise request, and the
-/// remaining Noise callers keep them until those paths move too.
+/// `TopologyReadFailed` and `NoVettedPackages` are the only two anything
+/// emits: the package comparison reads the synchronizer's topology store and
+/// contacts no peer. The variants above them describe a failed Noise request
+/// and now have no producer — they stay only so an existing client keeps
+/// deserializing this enum. Remove them when the transport goes.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
