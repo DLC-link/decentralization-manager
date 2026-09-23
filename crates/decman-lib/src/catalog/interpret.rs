@@ -500,11 +500,27 @@ pub fn dedupe_newest_per_party<T>(
 pub fn live_count<T>(items: &[T], expires_at: impl Fn(&T) -> i64, now_seconds: i64) -> usize {
     items
         .iter()
-        .filter(|item| {
-            let expires = expires_at(item);
-            expires == 0 || expires > now_seconds
-        })
+        .filter(|item| is_live(expires_at(item), now_seconds))
         .count()
+}
+
+/// Contract ids of the confirmations [`live_count`] counts. An Execute must
+/// submit only these: consuming an expired confirmation aborts it on-ledger.
+pub fn live_contract_ids<T>(
+    items: &[T],
+    expires_at: impl Fn(&T) -> i64,
+    contract_id: impl Fn(&T) -> &str,
+    now_seconds: i64,
+) -> Vec<String> {
+    items
+        .iter()
+        .filter(|item| is_live(expires_at(item), now_seconds))
+        .map(|item| contract_id(item).to_string())
+        .collect()
+}
+
+fn is_live(expires_at: i64, now_seconds: i64) -> bool {
+    expires_at == 0 || expires_at > now_seconds
 }
 
 /// Label used for a proposal synthesized from a bare `GovernableAction` when
@@ -521,6 +537,7 @@ pub struct DomainAction {
     pub description: Option<String>,
     pub confirmations: Vec<ParsedDomainConfirmation>,
     pub confirmation_count: usize,
+    pub executable_confirmation_cids: Vec<String>,
     pub can_execute: bool,
     pub orphaned: bool,
     pub transfer_details: Option<TransferProposalDetails>,
@@ -583,12 +600,19 @@ pub fn assemble_domain_actions(
             };
             let confirmation_count =
                 live_count(&unique_confirmations, |c| c.expires_at, now_seconds);
+            let executable_confirmation_cids = live_contract_ids(
+                &unique_confirmations,
+                |c| c.expires_at,
+                |c| &c.contract_id,
+                now_seconds,
+            );
             DomainAction {
                 proposal_cid,
                 action_label,
                 description,
                 confirmations: unique_confirmations,
                 confirmation_count,
+                executable_confirmation_cids,
                 // Orphans can't be executed regardless of threshold.
                 can_execute: !orphaned && confirmation_count >= threshold,
                 orphaned,
@@ -612,6 +636,7 @@ pub fn assemble_domain_actions(
                 description: info.description,
                 confirmations: Vec::new(),
                 confirmation_count: 0,
+                executable_confirmation_cids: Vec::new(),
                 can_execute: false,
                 orphaned: false,
                 transfer_details: info.transfer,
@@ -1311,6 +1336,38 @@ mod tests {
             1,
             "expires_at > now counts as live"
         );
+    }
+
+    #[test]
+    fn executable_confirmation_cids_skip_expired_confirmations() {
+        let now = 1_700_000_000;
+        let mut infos = HashMap::new();
+        infos.insert(
+            "proposal-1".to_string(),
+            proposal_info_fixture(Some("Action")),
+        );
+        let confs = vec![
+            domain_confirmation("expired", "proposal-1", ALICE, 100, now - 1),
+            domain_confirmation("live", "proposal-1", BOB, 100, now + 60),
+            domain_confirmation("no-expiry", "proposal-1", GOV, 100, 0),
+        ];
+
+        let actions = assemble_domain_actions(
+            confirmations_map("proposal-1", "Action", confs),
+            infos,
+            true,
+            true,
+            2,
+            now,
+        );
+
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].confirmations.len(), 3);
+        let mut cids = actions[0].executable_confirmation_cids.clone();
+        cids.sort();
+        assert_eq!(cids, vec!["live".to_string(), "no-expiry".to_string()]);
+        assert_eq!(actions[0].confirmation_count, cids.len());
+        assert!(actions[0].can_execute);
     }
 
     #[test]

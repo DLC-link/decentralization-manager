@@ -616,6 +616,12 @@ pub async fn get_governance_confirmations(
             );
             let confirmation_count =
                 interpret::live_count(&unique_confirmations, |c| c.expires_at, now_seconds);
+            let executable_confirmation_cids = interpret::live_contract_ids(
+                &unique_confirmations,
+                |c| c.expires_at,
+                |c| &c.contract_id,
+                now_seconds,
+            );
             let last_confirmation_at = unique_confirmations
                 .iter()
                 .map(|c| c.created_at)
@@ -629,6 +635,7 @@ pub async fn get_governance_confirmations(
                     .map(confirmation_dto)
                     .collect(),
                 confirmation_count,
+                executable_confirmation_cids,
                 can_execute: confirmation_count >= threshold,
                 last_confirmation_at,
             }
@@ -654,6 +661,7 @@ pub async fn get_governance_confirmations(
             .map(domain_confirmation_dto)
             .collect(),
         confirmation_count: action.confirmation_count,
+        executable_confirmation_cids: action.executable_confirmation_cids,
         can_execute: action.can_execute,
         orphaned: action.orphaned,
         transfer_details: action.transfer_details,
