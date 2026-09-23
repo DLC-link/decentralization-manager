@@ -4,12 +4,13 @@ use canton_proto_rs::com::daml::ledger::api::v2::admin::{
     GrantUserRightsRequest, ListUserRightsRequest, Right,
     right::{CanActAs, CanReadAs, Kind},
 };
-use keycloak::login::{ClientCredentialsParams, client_credentials, token_url};
+use keycloak::login::token_url;
+use serde::Deserialize;
 
 use crate::{
     auth::WorkflowAuth,
     canton_id::CantonId,
-    config::{Auth0M2MConfig, NodeConfig, PartyCredentials},
+    config::{NodeConfig, PartyCredentials},
     error::Result,
     server::{
         AppState,
@@ -450,46 +451,71 @@ impl AdminTokenSource {
     }
 }
 
+/// Why an admin token mint failed.
+#[derive(Debug, thiserror::Error)]
+enum AdminMintError {
+    /// The IdP answered 400, 401 or 403: the supplied client id or secret is wrong.
+    #[error("{0}")]
+    Rejected(String),
+    /// The IdP was unreachable, failed, or sent a response we cannot parse.
+    #[error("{0}")]
+    Upstream(String),
+}
+
+#[derive(Deserialize)]
+struct AdminTokenResponse {
+    access_token: String,
+}
+
 /// Mint an admin access token from `source` using the operator-supplied client
 /// credentials.
 ///
 /// # Errors
 ///
-/// Propagates the IdP's rejection or transport failure.
+/// Returns [`AdminMintError::Rejected`] when the IdP refuses the credentials and
+/// [`AdminMintError::Upstream`] for transport failures, other error statuses and
+/// unparseable responses.
 async fn mint_admin_token(
     http: &reqwest::Client,
     source: &AdminTokenSource,
-    client_id: String,
-    client_secret: String,
-) -> Result<String> {
-    match source {
-        AdminTokenSource::Auth0 { domain, audience } => {
-            let response = crate::auth::auth0_client_credentials(
-                http,
-                &Auth0M2MConfig {
-                    domain: domain.clone(),
-                    audience: audience.clone(),
-                    client_id,
-                    client_secret,
-                },
-            )
-            .await?;
-            Ok(response.access_token)
-        }
-        AdminTokenSource::Keycloak { .. } => {
-            // The keycloak crate builds its own client (it is on a different
-            // reqwest major than this crate, so `http` cannot be shared with
-            // it) and reports failures as a plain String.
-            let response = client_credentials(ClientCredentialsParams {
-                url: source.token_endpoint(),
-                client_id,
-                client_secret,
-            })
-            .await
-            .map_err(|e| anyhow::anyhow!("Keycloak client_credentials failed: {e}"))?;
-            Ok(response.access_token)
-        }
+    client_id: &str,
+    client_secret: &str,
+) -> std::result::Result<String, AdminMintError> {
+    let request = http.post(source.token_endpoint());
+    let request = match source {
+        AdminTokenSource::Auth0 { audience, .. } => request.json(&serde_json::json!({
+            "grant_type": "client_credentials",
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "audience": audience,
+        })),
+        AdminTokenSource::Keycloak { .. } => request.form(&[
+            ("grant_type", "client_credentials"),
+            ("client_id", client_id),
+            ("client_secret", client_secret),
+        ]),
+    };
+
+    let response = request
+        .send()
+        .await
+        .map_err(|e| AdminMintError::Upstream(format!("Token request failed: {e}")))?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        let message = format!("Token endpoint returned {status}: {body}");
+        return Err(if matches!(status.as_u16(), 400 | 401 | 403) {
+            AdminMintError::Rejected(message)
+        } else {
+            AdminMintError::Upstream(message)
+        });
     }
+
+    response
+        .json::<AdminTokenResponse>()
+        .await
+        .map(|token| token.access_token)
+        .map_err(|e| AdminMintError::Upstream(format!("Token response parse failed: {e}")))
 }
 
 /// Grant actAs + readAs rights on the member party and the dec party to the
@@ -500,9 +526,12 @@ async fn mint_admin_token(
     responses(
         (status = 200, description = "Rights granted; current rights returned", body = GrantRightsResponse),
         (status = 400, description = "Bad request", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid session token", body = ErrorResponse),
+        (status = 403, description = "Caller is not an admin", body = ErrorResponse),
         (status = 404, description = "Party not configured", body = ErrorResponse),
         (status = 422, description = "Admin credentials rejected by the IdP", body = ErrorResponse),
-        (status = 500, description = "Grant failed", body = ErrorResponse)
+        (status = 500, description = "Grant failed", body = ErrorResponse),
+        (status = 502, description = "IdP unreachable or failed", body = ErrorResponse)
     )
 )]
 #[post("/auth/grant-rights")]
@@ -590,20 +619,27 @@ pub async fn grant_rights(
     let admin_token = match mint_admin_token(
         &data.http_client,
         &admin_source,
-        admin_client_id,
-        admin_client_secret,
+        &admin_client_id,
+        &admin_client_secret,
     )
     .await
     {
         Ok(token) => token,
         Err(e) => {
-            // Full chain to logs (the IdP client's Display can include request
-            // URL / response body — keep it server-side); generic message in
-            // the response so we don't surface reflected secrets.
-            tracing::warn!("Failed to mint admin token for grant-rights: {e:#}");
-            return HttpResponse::UnprocessableEntity().json(ErrorResponse {
-                error: format!("Admin {idp} auth failed", idp = admin_source.idp()),
-            });
+            // The error carries the IdP response body, so keep it in the logs
+            // and return a generic message that cannot reflect secrets.
+            tracing::warn!("Failed to mint admin token for grant-rights: {e}");
+            let idp = admin_source.idp();
+            return match e {
+                AdminMintError::Rejected(_) => {
+                    HttpResponse::UnprocessableEntity().json(ErrorResponse {
+                        error: format!("Admin {idp} auth failed"),
+                    })
+                }
+                AdminMintError::Upstream(_) => HttpResponse::BadGateway().json(ErrorResponse {
+                    error: format!("Admin {idp} token endpoint failed"),
+                }),
+            };
         }
     };
 
@@ -1019,11 +1055,11 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
-    /// #421: a rejected admin client id or secret is a problem with the
-    /// request body, not with the caller's session. A 401 here made the UI
-    /// treat it as an expired session and log the operator out.
-    #[actix_web::test]
-    async fn grant_rights_rejects_bad_admin_credentials_without_401() -> anyhow::Result<()> {
+    /// Call grant-rights on a Keycloak party whose token endpoint issues the
+    /// party token, then answers the admin mint with `admin_mint`.
+    async fn grant_rights_with_admin_mint(
+        admin_mint: ResponseTemplate,
+    ) -> anyhow::Result<(StatusCode, Value)> {
         let keycloak = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path_regex(r".*/token$"))
@@ -1042,9 +1078,7 @@ mod tests {
         keycloak.reset().await;
         Mock::given(method("POST"))
             .and(path_regex(r".*/token$"))
-            .respond_with(
-                ResponseTemplate::new(401).set_body_json(json!({"error": "unauthorized_client"})),
-            )
+            .respond_with(admin_mint)
             .mount(&keycloak)
             .await;
 
@@ -1068,10 +1102,43 @@ mod tests {
             }))
             .to_request();
         let resp = test::call_service(&app, req).await;
-
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let status = resp.status();
         let body: Value = test::read_body_json(resp).await;
+        Ok((status, body))
+    }
+
+    /// #421: a rejected admin client id or secret is a problem with the
+    /// request body, not with the caller's session. A 401 here made the UI
+    /// treat it as an expired session and log the operator out.
+    #[actix_web::test]
+    async fn grant_rights_rejects_bad_admin_credentials_without_401() -> anyhow::Result<()> {
+        let (status, body) = grant_rights_with_admin_mint(
+            ResponseTemplate::new(401).set_body_json(json!({"error": "unauthorized_client"})),
+        )
+        .await?;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(body["error"], "Admin Keycloak auth failed");
+        Ok(())
+    }
+
+    #[actix_web::test]
+    async fn grant_rights_reports_idp_server_error_as_bad_gateway() -> anyhow::Result<()> {
+        let (status, body) = grant_rights_with_admin_mint(ResponseTemplate::new(503)).await?;
+
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(body["error"], "Admin Keycloak token endpoint failed");
+        Ok(())
+    }
+
+    #[actix_web::test]
+    async fn grant_rights_reports_malformed_token_response_as_bad_gateway() -> anyhow::Result<()> {
+        let (status, body) =
+            grant_rights_with_admin_mint(ResponseTemplate::new(200).set_body_string("not json"))
+                .await?;
+
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(body["error"], "Admin Keycloak token endpoint failed");
         Ok(())
     }
 
