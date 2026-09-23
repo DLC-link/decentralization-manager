@@ -19,8 +19,9 @@
 //! while P3 is out, so P3 holds none of them.
 //!
 //! P3 is then added back. From the moment P3 accepts the invitation until the
-//! run completes, two watchers run alongside: the seeded contracts are archived
-//! one at a time (traffic on the party inside the window), and P3's
+//! run completes, two watchers run alongside: all but the last few seeded
+//! contracts are archived one at a time (traffic on the party inside the
+//! window), and P3's
 //! synchronizer connection plus the party's hosting mapping are sampled every
 //! 200 ms.
 //!
@@ -80,12 +81,17 @@ use crate::common::{
         reward_coupon_create_command,
     },
     phases::deploy_gov_core::grant_rights,
+    probe::Class,
     scenario::Scenario,
 };
 
 /// Contracts created while P3 is out. Archived one by one during the run, so
 /// several land inside the disconnect window at localnet speed.
 const SEEDED_CONTRACTS: usize = 40;
+
+/// Seeded contracts the archiver leaves alone, so P1's set is never empty and
+/// the comparison with P3 has something to match. The cleanup archives them.
+const KEPT_CONTRACTS: usize = 5;
 
 /// Rounds from here up mark this phase's coupons apart from earlier phases'.
 const ROUND_BASE: i64 = 100_000;
@@ -406,7 +412,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 f.client.clone(),
                 Arc::clone(&f.refresher),
                 f.p1_member_party()?.to_string(),
-                ctx.seeded.clone(),
+                ctx.seeded[..ctx.seeded.len().saturating_sub(KEPT_CONTRACTS)].to_vec(),
                 Arc::clone(&watch),
                 Arc::clone(&stop),
             ));
@@ -580,9 +586,6 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 };
                 let on_p1 = ids(f.active_coupon_ids(P1_JSON_API, &decparty).await.ok()?);
                 let on_p3 = ids(f.active_coupon_ids(P3_JSON_API, &decparty).await.ok()?);
-                if on_p1.is_empty() || on_p1 != on_p3 {
-                    return None;
-                }
                 let archived: HashSet<String> = ctx
                     .watch
                     .as_ref()?
@@ -597,7 +600,26 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         "archived contract {ghost} is active on P3: the import resurrected it"
                     )));
                 }
-                Some(Ok(()))
+                let kept = ctx.seeded.len().saturating_sub(KEPT_CONTRACTS);
+                let mut missing: Vec<&String> = ctx.seeded[kept..]
+                    .iter()
+                    .chain(on_p1.iter())
+                    .filter(|cid| !on_p3.contains(*cid))
+                    .collect::<HashSet<_>>()
+                    .into_iter()
+                    .collect();
+                let mut extra: Vec<&String> = on_p3.difference(&on_p1).collect();
+                if missing.is_empty() && extra.is_empty() {
+                    return Some(Ok(()));
+                }
+                missing.sort();
+                extra.sort();
+                f.probe_diag.record(
+                    "P3 contract set",
+                    Class::Transient,
+                    format!("P3 lacks {missing:?}; P3 has {extra:?} that P1 does not"),
+                );
+                None
             })
         },
     )
