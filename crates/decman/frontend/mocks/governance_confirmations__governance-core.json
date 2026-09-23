@@ -51,6 +51,12 @@
           "expires_at": 1782214323
         }
       ],
+      "executable_confirmation_cids": [
+        "002921bb0a8c3f39eeeeb70d6a4b86f119cd375170eafe64f03c3fb7b0651581f8",
+        "00e1dc8e2f92856c7ae274f2bcb42ca93e2448adca244a36957c9dc3384367b5a7",
+        "00ad62b37495b07085816d251c6169b7e8e900e6bd82fc46e76ee538aaa9e84c91",
+        "009a6d3896b3a3ce780ca4c46eebd820c12196baa6854b1e8bc847c5a4c531fe06"
+      ],
       "confirmation_count": 4,
       "can_execute": true,
       "last_confirmation_at": 1782126123
@@ -74,6 +80,10 @@
           "created_at": 1782124323,
           "expires_at": 1782214323
         }
+      ],
+      "executable_confirmation_cids": [
+        "0200b8f4c1a37d29e506cb8e3f71d42a69f18bc5d93e07a426fb1d8e35c9a2f400",
+        "0201b8f4c1a37d29e506cb8e3f71d42a69f18bc5d93e07a426fb1d8e35c9a2f401"
       ],
       "confirmation_count": 2,
       "can_execute": true
