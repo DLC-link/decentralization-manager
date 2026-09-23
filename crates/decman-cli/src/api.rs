@@ -308,6 +308,8 @@ pub struct GovAction {
     #[serde(default)]
     pub confirmations: Vec<GovConfirmation>,
     #[serde(default)]
+    pub executable_confirmation_cids: Option<Vec<String>>,
+    #[serde(default)]
     pub confirmation_count: i64,
     #[serde(default)]
     pub can_execute: bool,
@@ -324,6 +326,8 @@ pub struct DomainGovAction {
     pub description: Option<String>,
     #[serde(default)]
     pub confirmations: Vec<GovConfirmation>,
+    #[serde(default)]
+    pub executable_confirmation_cids: Option<Vec<String>>,
     #[serde(default)]
     pub confirmation_count: i64,
     #[serde(default)]

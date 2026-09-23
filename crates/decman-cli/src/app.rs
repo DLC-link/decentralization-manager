@@ -1064,12 +1064,18 @@ fn perform_gov_op(
     }
 }
 
-/// The contract ids of a set of confirmations, for the execute call.
-fn confirmation_cids(confirmations: &[GovConfirmation]) -> Vec<String> {
-    confirmations
-        .iter()
-        .map(|confirmation| confirmation.contract_id.clone())
-        .collect()
+/// The confirmation ids for the execute call: the server's live subset, or
+/// every confirmation when an older server does not send that subset.
+fn confirmation_cids(
+    executable: Option<&[String]>,
+    confirmations: &[GovConfirmation],
+) -> Vec<String> {
+    executable.map(<[String]>::to_vec).unwrap_or_else(|| {
+        confirmations
+            .iter()
+            .map(|confirmation| confirmation.contract_id.clone())
+            .collect()
+    })
 }
 
 /// Validate the add-peer form into a [`PeerEntry`], or return the index of the
@@ -2921,7 +2927,10 @@ impl App {
                     action.can_execute,
                     GovOp::Execute {
                         action: action.action.clone(),
-                        confirmation_cids: confirmation_cids(&action.confirmations),
+                        confirmation_cids: confirmation_cids(
+                            action.executable_confirmation_cids.as_deref(),
+                            &action.confirmations,
+                        ),
                         governance_type: view.governance_type.clone(),
                         proposal_cid: None,
                     },
@@ -2930,7 +2939,10 @@ impl App {
                     domain.can_execute,
                     GovOp::Execute {
                         action: placeholder_action(),
-                        confirmation_cids: confirmation_cids(&domain.confirmations),
+                        confirmation_cids: confirmation_cids(
+                            domain.executable_confirmation_cids.as_deref(),
+                            &domain.confirmations,
+                        ),
                         governance_type: "core_domain".to_owned(),
                         proposal_cid: Some(domain.proposal_cid.clone()),
                     },
