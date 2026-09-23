@@ -421,8 +421,8 @@ impl PeerExpectations {
             storage,
             instance_name,
             dec_party_id,
-            &namespace_def,
-            &mapping,
+            (decode_proposal_serial(dns_payload)?, &namespace_def),
+            (decode_proposal_serial(p2p_payload)?, &mapping),
         )
         .await?;
 
@@ -445,17 +445,21 @@ impl PeerExpectations {
     /// Only the new member holds the new member's keys, so only it can pin the
     /// added owner and key to them; every other peer checks that at most one
     /// was added.
+    ///
+    /// A proposal at the head serial that equals the head mapping is already
+    /// effective (a threshold-1 namespace applies it on `Authorize`), so
+    /// signing it changes nothing and it skips the delta.
     async fn check_on_chain_delta(
         &self,
         config: &NodeConfig,
         storage: &SqlitePool,
         instance_name: &str,
         dec_party_id: &CantonId,
-        namespace_def: &DecentralizedNamespaceDefinition,
-        mapping: &PartyToParticipant,
+        (dns_serial, namespace_def): (u32, &DecentralizedNamespaceDefinition),
+        (p2p_serial, mapping): (u32, &PartyToParticipant),
     ) -> Result {
         let synchronizer_id = utils::get_synchronizer_id(config).await?;
-        let current_def = topology::fetch_namespace_definition(
+        let (head_dns_serial, current_def) = topology::fetch_namespace_definition_at_head(
             config,
             &synchronizer_id,
             &dec_party_id.namespace.to_hex(),
@@ -464,11 +468,27 @@ impl PeerExpectations {
         .map_err(|e| {
             anyhow::anyhow!("cannot read the current owner set of {dec_party_id}: {e:#}")
         })?;
-        let current_p2p = topology::fetch_p2p_mapping(config, &synchronizer_id, dec_party_id)
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!("cannot read the current signing keys of {dec_party_id}: {e:#}")
-            })?;
+        let (head_p2p_serial, current_p2p) =
+            topology::fetch_p2p_mapping_at_head(config, &synchronizer_id, dec_party_id)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("cannot read the current signing keys of {dec_party_id}: {e:#}")
+                })?;
+        let new_member = self.new_member_fingerprints(storage, instance_name).await?;
+
+        check_dns_against_head(
+            self.kind,
+            (dns_serial, namespace_def),
+            (head_dns_serial, &current_def),
+            new_member.as_ref().map(|(namespace, _)| namespace.as_str()),
+        )?;
+        if already_applied(
+            "P2P",
+            (p2p_serial, mapping),
+            (head_p2p_serial, &current_p2p),
+        )? {
+            return Ok(());
+        }
 
         // A party onboarded before Canton 3.4 keeps its keys in a legacy
         // PartyToKeyMapping that still holds departed members' keys, so the
@@ -493,16 +513,7 @@ impl PeerExpectations {
             .party_signing_keys
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("P2P proposal carries no party signing keys"))?;
-        let new_member = self.new_member_fingerprints(storage, instance_name).await?;
 
-        check_set_delta(
-            "DNS owner",
-            self.kind,
-            &current_def.owners.into_iter().collect(),
-            &namespace_def.owners,
-            new_member.as_ref().map(|(namespace, _)| namespace.as_str()),
-            false,
-        )?;
         check_set_delta(
             "party signing key",
             self.kind,
@@ -1102,6 +1113,45 @@ fn namespace_fingerprint(keys: &[SigningPublicKey]) -> Option<String> {
 /// `new_member` pins the added entry when this node knows it. `legacy_source`
 /// marks a current set that may hold departed members' keys, so a proposal
 /// may drop any of them but still add none beyond the new member's.
+/// Whether a proposal is the head transaction itself. The same serial with a
+/// different mapping is refused: Canton would reject it, and the peer cannot
+/// tell what the coordinator meant by it.
+fn already_applied<T: PartialEq>(
+    what: &str,
+    (proposal_serial, proposal): (u32, &T),
+    (head_serial, head): (u32, &T),
+) -> Result<bool> {
+    if proposal_serial != head_serial {
+        return Ok(false);
+    }
+    if proposal != head {
+        anyhow::bail!(
+            "{what} proposal reuses the on-chain serial {head_serial} but differs from the \
+             on-chain mapping"
+        );
+    }
+    Ok(true)
+}
+
+fn check_dns_against_head(
+    kind: WorkflowKind,
+    proposal: (u32, &DecentralizedNamespaceDefinition),
+    head: (u32, &DecentralizedNamespaceDefinition),
+    new_member: Option<&str>,
+) -> Result {
+    if already_applied("DNS", proposal, head)? {
+        return Ok(());
+    }
+    check_set_delta(
+        "DNS owner",
+        kind,
+        &head.1.owners.iter().cloned().collect(),
+        &proposal.1.owners,
+        new_member,
+        false,
+    )
+}
+
 fn check_set_delta(
     what: &str,
     kind: WorkflowKind,
@@ -1154,6 +1204,17 @@ fn check_set_delta(
 /// mapping down, so the operation is pinned here, before anything else looks
 /// at the mapping.
 fn decode_topology_mapping(payload: &[u8]) -> Result<topology_mapping::Mapping> {
+    decode_add_replace(payload)?
+        .mapping
+        .and_then(|mapping| mapping.mapping)
+        .ok_or_else(|| anyhow::anyhow!("topology transaction carries no mapping"))
+}
+
+fn decode_proposal_serial(payload: &[u8]) -> Result<u32> {
+    Ok(decode_add_replace(payload)?.serial)
+}
+
+fn decode_add_replace(payload: &[u8]) -> Result<TopologyTransaction> {
     let signed: SignedTopologyTransaction = utils::read_first_message_from_bytes(payload)?;
     let transaction = utils::decode_versioned::<TopologyTransaction>(&signed.transaction)?;
 
@@ -1166,10 +1227,7 @@ fn decode_topology_mapping(payload: &[u8]) -> Result<topology_mapping::Mapping> 
         );
     }
 
-    transaction
-        .mapping
-        .and_then(|mapping| mapping.mapping)
-        .ok_or_else(|| anyhow::anyhow!("topology transaction carries no mapping"))
+    Ok(transaction)
 }
 
 fn decode_namespace_definition(payload: &[u8]) -> Result<DecentralizedNamespaceDefinition> {
@@ -2187,6 +2245,72 @@ mod tests {
         );
         assert!(
             error.contains("adds DNS owner"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    fn namespace(owners_list: &[&str]) -> DecentralizedNamespaceDefinition {
+        DecentralizedNamespaceDefinition {
+            decentralized_namespace: "dns".to_string(),
+            threshold: 1,
+            owners: owners(owners_list),
+        }
+    }
+
+    #[test]
+    fn accepts_a_kick_already_applied_at_the_proposal_serial() -> Result {
+        let kicked = namespace(&["a", "b"]);
+        check_dns_against_head(WorkflowKind::Kick, (2, &kicked), (2, &kicked), None)?;
+
+        let (a, b) = (canton_id("p1", 1)?, canton_id("p2", 2)?);
+        let mapping = p2p("party", &[a, b], 1);
+        assert!(already_applied("P2P", (2, &mapping), (2, &mapping))?);
+        Ok(())
+    }
+
+    #[test]
+    fn refuses_a_different_mapping_at_the_head_serial() -> Result {
+        let error = match check_dns_against_head(
+            WorkflowKind::Kick,
+            (2, &namespace(&["a", "x"])),
+            (2, &namespace(&["a", "b"])),
+            None,
+        ) {
+            Ok(()) => anyhow::bail!("expected a refusal"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("reuses the on-chain serial 2"),
+            "unexpected error: {error}"
+        );
+
+        let (a, b, c) = (
+            canton_id("p1", 1)?,
+            canton_id("p2", 2)?,
+            canton_id("p3", 3)?,
+        );
+        assert!(
+            already_applied(
+                "P2P",
+                (2, &p2p("party", &[a.clone(), c], 1)),
+                (2, &p2p("party", &[a, b], 1)),
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn refuses_a_kick_whose_head_matches_at_another_serial() -> Result {
+        let kicked = namespace(&["a", "b"]);
+        let error =
+            match check_dns_against_head(WorkflowKind::Kick, (3, &kicked), (2, &kicked), None) {
+                Ok(()) => anyhow::bail!("expected a refusal"),
+                Err(error) => error.to_string(),
+            };
+        assert!(
+            error.contains("must remove exactly 1"),
             "unexpected error: {error}"
         );
         Ok(())

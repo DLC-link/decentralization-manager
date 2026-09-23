@@ -218,7 +218,11 @@ everything that follows (`workflow::validation::PeerExpectations`).
   key to its own, and refuses the proposal if its own key bundle is missing.
   A party whose keys still sit in a legacy `PartyToKeyMapping` may drop
   departed members' keys, and may gain only the new member's key on
-  add-party. A topology read that fails refuses the proposal.
+  add-party. A topology read that fails refuses the proposal. A proposal at
+  the head serial that equals the head mapping is already in effect (a
+  threshold-1 namespace applies it when the coordinator proposes it), so the
+  peer signs it without the delta check. The same serial with any other
+  mapping is refused.
 - Prepared ledger submissions are re-hashed locally from the transaction that
   accompanies them (`canton_hash`), so a signature can only ever authorize the
   transaction the peer can inspect, and that transaction must act as the
@@ -231,7 +235,7 @@ everything that follows (`workflow::validation::PeerExpectations`).
 Any mismatch fails the step. Repeated mismatches abort the peer run.
 
 **What this does not cover.** The checks bound what a coordinator can obtain a
-signature for; they do not make the coordinator trustworthy. Three gaps remain,
+signature for; they do not make the coordinator trustworthy. Four gaps remain,
 and they are load-bearing enough to state rather than imply:
 
 - **During onboarding a peer cannot verify the other members' namespaces or
@@ -247,6 +251,14 @@ and they are load-bearing enough to state rather than imply:
   attesting the coordinator's aggregated bundle. The same holds for the one
   owner and key an add-party adds, as seen by the existing members: only the
   new member can tie them to itself, and its signature is required.
+- **A kick does not tie the removed owner and key to the kicked member.** A
+  peer only knows its own owner and key, so it checks that exactly one entry of
+  each goes and that its own stay. A coordinator can remove the entries of
+  another member that does not sign this round and leave the kicked member's in
+  place; the P2P proposal still drops the kicked participant, so the counts
+  match. Only the member whose entries vanish can catch it. Closing this needs
+  every surviving member to sign a kick, or an attested key bundle for the
+  kicked member.
 - **The contracts workflow constrains who a transaction acts as, not what it
   does.** The peer recomputes the hash and pins `act_as` to the accepted dec
   party, so it can only ever authorize the transaction it can read — but the
