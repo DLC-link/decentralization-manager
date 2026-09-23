@@ -501,6 +501,7 @@ async fn mint_admin_token(
         (status = 200, description = "Rights granted; current rights returned", body = GrantRightsResponse),
         (status = 400, description = "Bad request", body = ErrorResponse),
         (status = 404, description = "Party not configured", body = ErrorResponse),
+        (status = 422, description = "Admin credentials rejected by the IdP", body = ErrorResponse),
         (status = 500, description = "Grant failed", body = ErrorResponse)
     )
 )]
@@ -600,7 +601,7 @@ pub async fn grant_rights(
             // URL / response body — keep it server-side); generic message in
             // the response so we don't surface reflected secrets.
             tracing::warn!("Failed to mint admin token for grant-rights: {e:#}");
-            return HttpResponse::Unauthorized().json(ErrorResponse {
+            return HttpResponse::UnprocessableEntity().json(ErrorResponse {
                 error: format!("Admin {idp} auth failed", idp = admin_source.idp()),
             });
         }
@@ -743,10 +744,14 @@ mod tests {
     use serde_json::{Value, json};
     use sqlx::SqlitePool;
     use tokio::sync::{Mutex, RwLock};
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path_regex},
+    };
 
     use super::{AdminTokenSource, grant_rights};
     use crate::{
-        auth::{MockAuthRegistry, MockValidator, TokenValidator, WorkflowAuth},
+        auth::{AuthRegistry, MockAuthRegistry, MockValidator, TokenValidator, WorkflowAuth},
         canton_id::CantonId,
         config::{
             Auth0Config, Auth0M2MConfig, KeycloakConfig, NodeConfig, PackageConfig,
@@ -1012,6 +1017,62 @@ mod tests {
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// #421: a rejected admin client id or secret is a problem with the
+    /// request body, not with the caller's session. A 401 here made the UI
+    /// treat it as an expired session and log the operator out.
+    #[actix_web::test]
+    async fn grant_rights_rejects_bad_admin_credentials_without_401() -> anyhow::Result<()> {
+        let keycloak = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r".*/token$"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"access_token": "party-token", "expires_in": 300})),
+            )
+            .mount(&keycloak)
+            .await;
+
+        let mut party = keycloak_party();
+        party.keycloak.url = keycloak.uri();
+        party.keycloak.client_secret = Some("party-secret".to_string());
+        let registry = AuthRegistry::new(std::slice::from_ref(&party)).await?;
+
+        keycloak.reset().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r".*/token$"))
+            .respond_with(
+                ResponseTemplate::new(401).set_body_json(json!({"error": "unauthorized_client"})),
+            )
+            .mount(&keycloak)
+            .await;
+
+        let state = build_state_with(NodeConfig::default(), None, false).await;
+        *state.auth.write().await = Some(WorkflowAuth::Keycloak(Arc::new(registry)));
+        state.party_credentials.write().await.push(party);
+        let app = test::init_service(
+            App::new()
+                .app_data(state)
+                .wrap(AuthMiddleware)
+                .service(grant_rights),
+        )
+        .await;
+        let req = TestRequest::post()
+            .uri("/auth/grant-rights")
+            .insert_header((AUTHORIZATION, "Bearer any-token"))
+            .set_json(json!({
+                "dec_party_id": VALID_CANTON_ID,
+                "admin_client_id": "validator-admin",
+                "admin_client_secret": "wrong-secret",
+            }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body: Value = test::read_body_json(resp).await;
+        assert_eq!(body["error"], "Admin Keycloak auth failed");
+        Ok(())
     }
 
     fn auth0_config(scope: Option<&str>) -> NodeConfig {
