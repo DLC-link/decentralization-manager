@@ -44,6 +44,7 @@ import { SURFACE2, cardTableSx, sectionCardSx, zebraRow } from "../styles";
 import { ADMIN_ACCESS, API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
 import { formatMicroseconds } from "../governanceFormat";
+import { getGovernanceMembership } from "../governanceMembership";
 import type {
   DecentralizedParty,
   GovernanceState,
@@ -286,6 +287,10 @@ export const PartyDetail = ({
   // configured read-only still shows them.
   const canAct = Boolean(authStatus?.rights?.dec_party_act_as);
   const canRead = canAct || Boolean(authStatus?.rights?.dec_party_read_as);
+  const membership = getGovernanceMembership(
+    authStatus?.member_party_id,
+    governanceState,
+  );
 
   // Stable identity: the audit trail reports through this from an effect, so a
   // fresh callback each render would re-run it on every parent render.
@@ -497,7 +502,7 @@ export const PartyDetail = ({
         helpText="Credentials this node uses to act on the party's behalf via the Canton ledger API."
         badge={
           <Box sx={{ display: "flex", alignItems: "center", ml: 1 }}>
-            {getAuthStatusIcon(authStatus)}
+            {getAuthStatusIcon(authStatus, membership)}
           </Box>
         }
       >
@@ -505,6 +510,7 @@ export const PartyDetail = ({
           <AuthSection
             partyId={party.party_id}
             authStatus={authStatus}
+            membership={membership}
             onRefresh={onAuthRefresh}
             onConfigure={() => setConfigDialogOpen(true)}
           />

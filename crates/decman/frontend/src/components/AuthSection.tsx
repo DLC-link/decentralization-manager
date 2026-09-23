@@ -11,6 +11,7 @@ import {
 import CancelIcon from "@mui/icons-material/Cancel";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import ErrorIcon from "@mui/icons-material/Error";
+import HelpOutlineIcon from "@mui/icons-material/HelpOutlineOutlined";
 import ScienceIcon from "@mui/icons-material/Science";
 import WarningIcon from "@mui/icons-material/Warning";
 import RefreshIcon from "@mui/icons-material/Refresh";
@@ -20,11 +21,13 @@ import { CopyableText } from "./CopyableText";
 import { GrantRightsDialog } from "./GrantRightsDialog";
 import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
+import type { GovernanceMembership } from "../governanceMembership";
 import type { PartyAuthStatus, RightsStatus, AuthTestResponse } from "../types";
 
 interface AuthSectionProps {
   partyId: string;
   authStatus?: PartyAuthStatus;
+  membership: GovernanceMembership;
   onRefresh?: () => void;
   onConfigure?: () => void;
 }
@@ -39,7 +42,10 @@ const isRightsValid = (rights: RightsStatus | undefined): boolean => {
   );
 };
 
-export const getAuthStatusIcon = (authStatus: PartyAuthStatus | undefined) => {
+export const getAuthStatusIcon = (
+  authStatus: PartyAuthStatus | undefined,
+  membership: GovernanceMembership,
+) => {
   if (!authStatus) {
     return (
       <Tooltip title="Not authenticated">
@@ -49,6 +55,20 @@ export const getAuthStatusIcon = (authStatus: PartyAuthStatus | undefined) => {
   }
   switch (authStatus.status.status) {
     case "authenticated":
+      if (membership === "not_member") {
+        return (
+          <Tooltip title="Authenticated, but the member party is not a governance member">
+            <WarningIcon color="warning" fontSize="small" />
+          </Tooltip>
+        );
+      }
+      if (membership === "unknown") {
+        return (
+          <Tooltip title="Authenticated, governance membership unknown">
+            <HelpOutlineIcon color="disabled" fontSize="small" />
+          </Tooltip>
+        );
+      }
       return (
         <Tooltip title="Authenticated">
           <CheckCircleIcon color="success" fontSize="small" />
@@ -78,6 +98,7 @@ export const getAuthStatusIcon = (authStatus: PartyAuthStatus | undefined) => {
 export const AuthSection = ({
   partyId,
   authStatus,
+  membership,
   onRefresh,
   onConfigure,
 }: AuthSectionProps) => {
@@ -142,6 +163,43 @@ export const AuthSection = ({
           truncate={{ start: 16, end: 8 }}
           variant="body2"
         />
+      </Box>
+
+      <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 1 }}>
+        <Typography variant="body2" color="text.secondary">
+          <strong>Governance:</strong>
+        </Typography>
+        {membership === "member" && (
+          <Chip
+            label="Member"
+            size="small"
+            color="success"
+            variant="outlined"
+            icon={<CheckCircleIcon />}
+            data-testid="governance-membership"
+          />
+        )}
+        {membership === "not_member" && (
+          <Chip
+            label="Not a member"
+            size="small"
+            color="warning"
+            variant="outlined"
+            icon={<WarningIcon />}
+            data-testid="governance-membership"
+          />
+        )}
+        {membership === "unknown" && (
+          <Tooltip title="Governance state did not load, or the party has no rules contract">
+            <Chip
+              label="Unknown"
+              size="small"
+              variant="outlined"
+              icon={<HelpOutlineIcon />}
+              data-testid="governance-membership"
+            />
+          </Tooltip>
+        )}
       </Box>
 
       <Typography variant="body2" color="text.secondary" sx={{ mb: 0.5 }}>
@@ -226,6 +284,12 @@ export const AuthSection = ({
       {authStatus.status.status === "failed" && (
         <Alert severity="error" sx={{ mt: 1 }}>
           {authStatus.status.error}
+        </Alert>
+      )}
+      {membership === "not_member" && (
+        <Alert severity="warning" sx={{ mt: 1 }}>
+          The member party is not in the governance member set. This node
+          cannot confirm governance actions.
         </Alert>
       )}
       {authStatus.rights && !isRightsValid(authStatus.rights) && (
