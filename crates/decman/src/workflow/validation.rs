@@ -520,8 +520,8 @@ impl PeerExpectations {
         )
     }
 
-    /// The new member's `(namespace, daml)` fingerprints, when this node holds
-    /// its key bundle for the run. Only the new member itself does.
+    /// The new member's `(namespace, daml)` fingerprints, when this node is
+    /// the new member. Only it holds its key bundle for the run, and it must.
     async fn new_member_fingerprints(
         &self,
         storage: &SqlitePool,
@@ -530,16 +530,22 @@ impl PeerExpectations {
         let Some(new_member) = &self.new_participant else {
             return Ok(None);
         };
-        let Some(payload) = storage
+        if new_member != &self.self_id {
+            return Ok(None);
+        }
+        let payload = storage
             .read_artifact(
                 instance_name,
                 artifact_kinds::PEER_PUBLIC_KEYS,
                 Some(&new_member.to_string()),
             )
             .await?
-        else {
-            return Ok(None);
-        };
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "this node is the new member but its public keys are not on the \
+                     {instance_name} run, so the added owner and key cannot be pinned to it"
+                )
+            })?;
         match decode_keys_payload(&payload)?.as_slice() {
             [namespace, daml] => Ok(Some((
                 utils::compute_fingerprint(namespace),
@@ -2125,8 +2131,41 @@ mod tests {
         )
     }
 
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn the_new_member_refuses_without_its_own_key_bundle(pool: SqlitePool) -> Result {
+        let (a, new_member) = (canton_id("p1", 1)?, canton_id("p2", 2)?);
+        let mut expectations = expectations(vec![a], new_member.clone());
+        expectations.kind = WorkflowKind::AddParty;
+        expectations.new_participant = Some(new_member);
+
+        let error = match expectations.new_member_fingerprints(&pool, "run").await {
+            Ok(found) => anyhow::bail!("expected a refusal, got {found:?}"),
+            Err(error) => format!("{error:#}"),
+        };
+        assert!(
+            error.contains("this node is the new member"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn an_existing_member_has_no_new_member_bundle_to_pin(pool: SqlitePool) -> Result {
+        let (a, new_member) = (canton_id("p1", 1)?, canton_id("p2", 2)?);
+        let mut expectations = expectations(vec![a.clone()], a);
+        expectations.kind = WorkflowKind::AddParty;
+        expectations.new_participant = Some(new_member);
+
+        assert_eq!(
+            expectations.new_member_fingerprints(&pool, "run").await?,
+            None
+        );
+        Ok(())
+    }
+
     /// A legacy PartyToKeyMapping still holds departed members' keys, so the
-    /// proposal may drop several of them, but never bring in a new one.
+    /// proposal may drop several of them. Only add-party may bring in a new
+    /// one, the new member's.
     #[test]
     fn a_legacy_source_allows_dropping_but_not_adding() -> Result {
         check_set_delta(

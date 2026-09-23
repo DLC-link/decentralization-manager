@@ -215,9 +215,10 @@ everything that follows (`workflow::validation::PeerExpectations`).
   keeps the owners and signing keys as they are, kick removes exactly one of
   each, and add-party adds at most one of each (none to the owners when a
   former host is hosted again). The new member also pins the added owner and
-  key to its own. A party whose keys still sit in a legacy
-  `PartyToKeyMapping` may drop departed members' keys but gain none. A
-  topology read that fails refuses the proposal.
+  key to its own, and refuses the proposal if its own key bundle is missing.
+  A party whose keys still sit in a legacy `PartyToKeyMapping` may drop
+  departed members' keys, and may gain only the new member's key on
+  add-party. A topology read that fails refuses the proposal.
 - Prepared ledger submissions are re-hashed locally from the transaction that
   accompanies them (`canton_hash`), so a signature can only ever authorize the
   transaction the peer can inspect, and that transaction must act as the
