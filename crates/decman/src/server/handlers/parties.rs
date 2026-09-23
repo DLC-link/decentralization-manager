@@ -1280,19 +1280,11 @@ async fn discover_hosted_party_ids(
 
     let response = bounded_read(
         "list_parties",
-        aggregation_client.list_parties(tonic::Request::new(ListPartiesRequest {
-            as_of: None,
-            limit: MAX_HOSTED_PARTIES,
+        aggregation_client.list_parties(tonic::Request::new(build_list_parties_request(
             synchronizer_ids,
-            // A bare prefix, with no `::`, narrows by party identifier on both
-            // sides of Canton's filtering: `identifier LIKE 'prefix%'` in the
-            // store query and `identifier.startsWith` in the post-filter. That
-            // is what keeps this bounded on a participant hosting a very large
-            // number of parties, where the result limit below would otherwise
-            // truncate before reaching any decentralized party.
-            filter_party: prefix_filter.unwrap_or_default().to_string(),
-            filter_participant: participant_id.to_string(),
-        })),
+            prefix_filter,
+            participant_id,
+        ))),
     )
     .await?
     .into_inner();
@@ -1318,6 +1310,27 @@ async fn discover_hosted_party_ids(
         response.results.into_iter().map(|result| result.party),
         owned_namespaces,
     ))
+}
+
+/// Build the `ListParties` request that discovers this participant's parties.
+fn build_list_parties_request(
+    synchronizer_ids: Vec<String>,
+    prefix_filter: Option<&str>,
+    participant_id: &str,
+) -> ListPartiesRequest {
+    ListPartiesRequest {
+        as_of: None,
+        limit: MAX_HOSTED_PARTIES,
+        synchronizer_ids,
+        // A bare prefix, with no `::`, narrows by party identifier on both
+        // sides of Canton's filtering: `identifier LIKE 'prefix%'` in the
+        // store query and `identifier.startsWith` in the post-filter. That
+        // is what keeps this bounded on a participant hosting a very large
+        // number of parties, where the result limit would otherwise truncate
+        // before reaching any decentralized party.
+        filter_party: prefix_filter.unwrap_or_default().to_string(),
+        filter_participant: participant_id.to_string(),
+    }
 }
 
 /// The logical synchronizer ID inside a physical one.
@@ -2555,6 +2568,53 @@ mod tests {
         );
 
         assert!(paired.is_empty());
+    }
+
+    /// Canton's `ListParties` matches a bare identifier by prefix on a DB
+    /// store, so a partial prefix goes to it as is.
+    #[test]
+    fn list_parties_request_sends_a_partial_prefix_unchanged() {
+        let request = build_list_parties_request(
+            vec!["sync::1220abcd".to_string()],
+            Some("cb"),
+            "participant::abc123",
+        );
+
+        assert_eq!(request.filter_party, "cb");
+        assert_eq!(request.filter_participant, "participant::abc123");
+        assert_eq!(request.synchronizer_ids, vec!["sync::1220abcd".to_string()]);
+        assert_eq!(request.limit, MAX_HOSTED_PARTIES);
+
+        let unfiltered = build_list_parties_request(Vec::new(), None, "participant::abc123");
+        assert_eq!(unfiltered.filter_party, "");
+    }
+
+    #[test]
+    fn a_partial_prefix_keeps_the_parties_it_starts() {
+        let namespace = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
+        let mine = "1220aaaa";
+        let definition = DecentralizedNamespaceDefinition {
+            decentralized_namespace: namespace.to_string(),
+            threshold: 1,
+            owners: vec![mine.to_string()],
+        };
+        let parties_by_namespace = HashMap::from([(
+            namespace.to_string(),
+            vec![
+                a_mapping(&format!("cbtc::{namespace}")),
+                a_mapping(&format!("other::{namespace}")),
+            ],
+        )]);
+
+        let paired = pair_namespaces_with_parties(
+            vec![definition],
+            &parties_by_namespace,
+            &HashSet::from([mine.to_string()]),
+            Some("cb"),
+        );
+
+        let found: Vec<_> = paired.iter().map(|(_, _, p2p)| p2p.party.clone()).collect();
+        assert_eq!(found, vec![format!("cbtc::{namespace}")]);
     }
 
     fn a_mapping(party: &str) -> PartyToParticipant {
