@@ -41,6 +41,7 @@ use crate::{
         },
         signing_keys::{own_namespace_key, vault_holds},
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
+        topology,
     },
 };
 
@@ -415,12 +416,140 @@ impl PeerExpectations {
             WhenUnrecorded::Skip,
         )
         .await?;
+        self.check_on_chain_delta(
+            config,
+            storage,
+            instance_name,
+            dec_party_id,
+            &namespace_def,
+            &mapping,
+        )
+        .await?;
 
         tracing::info!(
             "{kind:?} proposals match the accepted invitation for {dec_party_id}",
             kind = self.kind
         );
         Ok(())
+    }
+
+    /// Hold both proposals to the party's on-chain state (#420, #422).
+    ///
+    /// Each signer only sees its own namespace and its own Daml key, so an
+    /// owner or key belonging to a member that does not sign this round could
+    /// otherwise be swapped for one the coordinator controls. Reading the
+    /// current definition and mapping pins everything else to what is already
+    /// on-chain plus the one change the run is for. A read that fails refuses
+    /// the proposal: a peer that cannot check it must not sign it.
+    ///
+    /// Only the new member holds the new member's keys, so only it can pin the
+    /// added owner and key to them; every other peer checks that at most one
+    /// was added.
+    async fn check_on_chain_delta(
+        &self,
+        config: &NodeConfig,
+        storage: &SqlitePool,
+        instance_name: &str,
+        dec_party_id: &CantonId,
+        namespace_def: &DecentralizedNamespaceDefinition,
+        mapping: &PartyToParticipant,
+    ) -> Result {
+        let synchronizer_id = utils::get_synchronizer_id(config).await?;
+        let current_def = topology::fetch_namespace_definition(
+            config,
+            &synchronizer_id,
+            &dec_party_id.namespace.to_hex(),
+        )
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!("cannot read the current owner set of {dec_party_id}: {e:#}")
+        })?;
+        let current_p2p = topology::fetch_p2p_mapping(config, &synchronizer_id, dec_party_id)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("cannot read the current signing keys of {dec_party_id}: {e:#}")
+            })?;
+
+        // A party onboarded before Canton 3.4 keeps its keys in a legacy
+        // PartyToKeyMapping that still holds departed members' keys, so the
+        // proposal adopts a subset of it rather than the whole set.
+        let (current_keys, legacy) = match current_p2p.party_signing_keys {
+            Some(keys) if !keys.keys.is_empty() => (keys.keys, false),
+            _ => {
+                let legacy_keys =
+                    topology::fetch_party_to_key_mapping(config, &synchronizer_id, dec_party_id)
+                        .await?
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "{dec_party_id} carries neither inline signing keys nor a \
+                                 PartyToKeyMapping, so the proposed keys cannot be checked"
+                            )
+                        })?;
+                (legacy_keys.signing_keys, true)
+            }
+        };
+
+        let proposed_keys = mapping
+            .party_signing_keys
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("P2P proposal carries no party signing keys"))?;
+        let new_member = self.new_member_fingerprints(storage, instance_name).await?;
+
+        check_set_delta(
+            "DNS owner",
+            self.kind,
+            &current_def.owners.into_iter().collect(),
+            &namespace_def.owners,
+            new_member.as_ref().map(|(namespace, _)| namespace.as_str()),
+            false,
+        )?;
+        check_set_delta(
+            "party signing key",
+            self.kind,
+            &current_keys
+                .iter()
+                .map(utils::compute_fingerprint)
+                .collect(),
+            &proposed_keys
+                .keys
+                .iter()
+                .map(utils::compute_fingerprint)
+                .collect::<Vec<_>>(),
+            new_member.as_ref().map(|(_, daml)| daml.as_str()),
+            legacy,
+        )
+    }
+
+    /// The new member's `(namespace, daml)` fingerprints, when this node holds
+    /// its key bundle for the run. Only the new member itself does.
+    async fn new_member_fingerprints(
+        &self,
+        storage: &SqlitePool,
+        instance_name: &str,
+    ) -> Result<Option<(String, String)>> {
+        let Some(new_member) = &self.new_participant else {
+            return Ok(None);
+        };
+        let Some(payload) = storage
+            .read_artifact(
+                instance_name,
+                artifact_kinds::PEER_PUBLIC_KEYS,
+                Some(&new_member.to_string()),
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        match decode_keys_payload(&payload)?.as_slice() {
+            [namespace, daml] => Ok(Some((
+                utils::compute_fingerprint(namespace),
+                utils::compute_fingerprint(daml),
+            ))),
+            keys => anyhow::bail!(
+                "expected 2 public keys for new member {new_member}, found {count}",
+                count = keys.len()
+            ),
+        }
     }
 
     /// Validate the add-party onboarding-flag clearing proposal: same party,
@@ -958,6 +1087,57 @@ fn namespace_fingerprint(keys: &[SigningPublicKey]) -> Option<String> {
         return None;
     }
     Some(utils::compute_fingerprint(key))
+}
+
+/// The proposed set must be the current on-chain set changed only as the run
+/// allows: unchanged for change-threshold, one entry removed for kick, and at
+/// most one added for add-party (none when a former host is hosted again).
+///
+/// `new_member` pins the added entry when this node knows it. `legacy_source`
+/// marks a current set that may hold departed members' keys, so a proposal
+/// may drop any of them but still add none beyond the new member's.
+fn check_set_delta(
+    what: &str,
+    kind: WorkflowKind,
+    current: &BTreeSet<String>,
+    proposed: &[String],
+    new_member: Option<&str>,
+    legacy_source: bool,
+) -> Result {
+    let proposed_set: BTreeSet<String> = proposed.iter().cloned().collect();
+    if proposed_set.len() != proposed.len() {
+        anyhow::bail!("proposal repeats a {what}");
+    }
+    let added: Vec<&String> = proposed_set.difference(current).collect();
+    let removed: Vec<&String> = current.difference(&proposed_set).collect();
+
+    let (max_added, removals) = match kind {
+        WorkflowKind::ChangeThreshold => (0, 0),
+        WorkflowKind::Kick => (0, 1),
+        WorkflowKind::AddParty => (1, 0),
+        other => anyhow::bail!("no on-chain {what} delta is defined for a {other:?} run"),
+    };
+    if added.len() > max_added {
+        anyhow::bail!(
+            "{kind:?} proposal adds {what}(s) {added:?} that are not on-chain; it may add at \
+             most {max_added}"
+        );
+    }
+    if !legacy_source && removed.len() != removals {
+        anyhow::bail!(
+            "{kind:?} proposal removes {what}(s) {removed:?} from the on-chain set; it must \
+             remove exactly {removals}"
+        );
+    }
+    if let Some(new_member) = new_member {
+        if let Some(stranger) = added.iter().find(|added| added.as_str() != new_member) {
+            anyhow::bail!("proposal adds {what} {stranger}, not the new member's {new_member}");
+        }
+        if !proposed_set.contains(new_member) {
+            anyhow::bail!("proposal does not carry the new member's {what} {new_member}");
+        }
+    }
+    Ok(())
 }
 
 /// Unwrap a coordinator-supplied `varint(len)||SignedTopologyTransaction`
@@ -1769,5 +1949,228 @@ mod tests {
             namespace_fingerprint(&[namespace.clone(), daml]),
             Some(utils::compute_fingerprint(&namespace))
         );
+    }
+
+    fn owners(items: &[&str]) -> Vec<String> {
+        items.iter().map(|item| (*item).to_string()).collect()
+    }
+
+    fn delta_error(
+        kind: WorkflowKind,
+        current: &[&str],
+        proposed: &[&str],
+        new_member: Option<&str>,
+        legacy_source: bool,
+    ) -> String {
+        check_set_delta(
+            "DNS owner",
+            kind,
+            &owners(current).into_iter().collect(),
+            &owners(proposed),
+            new_member,
+            legacy_source,
+        )
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_default()
+    }
+
+    #[test]
+    fn change_threshold_keeps_the_on_chain_set() -> Result {
+        check_set_delta(
+            "DNS owner",
+            WorkflowKind::ChangeThreshold,
+            &owners(&["a", "b", "c"]).into_iter().collect(),
+            &owners(&["c", "a", "b"]),
+            None,
+            false,
+        )
+    }
+
+    /// The #420 attack: the count and the signer's own entry stay, but a
+    /// non-signing member's entry is swapped for one the coordinator holds.
+    #[test]
+    fn change_threshold_rejects_a_swapped_entry() {
+        let error = delta_error(
+            WorkflowKind::ChangeThreshold,
+            &["a", "b", "c"],
+            &["a", "b", "x"],
+            None,
+            false,
+        );
+        assert!(
+            error.contains("adds DNS owner"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn kick_removes_exactly_one_entry() -> Result {
+        check_set_delta(
+            "DNS owner",
+            WorkflowKind::Kick,
+            &owners(&["a", "b", "c"]).into_iter().collect(),
+            &owners(&["a", "b"]),
+            None,
+            false,
+        )
+    }
+
+    #[test]
+    fn kick_rejects_a_swap_or_a_second_removal() {
+        let swap = delta_error(
+            WorkflowKind::Kick,
+            &["a", "b", "c"],
+            &["a", "x"],
+            None,
+            false,
+        );
+        assert!(swap.contains("adds DNS owner"), "unexpected error: {swap}");
+        let two = delta_error(WorkflowKind::Kick, &["a", "b", "c"], &["a"], None, false);
+        assert!(
+            two.contains("must remove exactly 1"),
+            "unexpected error: {two}"
+        );
+        let none = delta_error(WorkflowKind::Kick, &["a", "b"], &["a", "b"], None, false);
+        assert!(
+            none.contains("must remove exactly 1"),
+            "unexpected error: {none}"
+        );
+    }
+
+    #[test]
+    fn add_party_adds_at_most_one_entry() -> Result {
+        let current: BTreeSet<String> = owners(&["a", "b"]).into_iter().collect();
+        check_set_delta(
+            "DNS owner",
+            WorkflowKind::AddParty,
+            &current,
+            &owners(&["a", "b", "n"]),
+            None,
+            false,
+        )?;
+        // A former host hosted again leaves the namespace as it is.
+        check_set_delta(
+            "DNS owner",
+            WorkflowKind::AddParty,
+            &current,
+            &owners(&["a", "b"]),
+            None,
+            false,
+        )
+    }
+
+    #[test]
+    fn add_party_rejects_a_second_addition_or_a_removal() {
+        let two = delta_error(
+            WorkflowKind::AddParty,
+            &["a", "b"],
+            &["a", "b", "n", "x"],
+            None,
+            false,
+        );
+        assert!(two.contains("at most 1"), "unexpected error: {two}");
+        let swap = delta_error(
+            WorkflowKind::AddParty,
+            &["a", "b"],
+            &["a", "n", "x"],
+            None,
+            false,
+        );
+        assert!(swap.contains("at most 1"), "unexpected error: {swap}");
+        let dropped = delta_error(
+            WorkflowKind::AddParty,
+            &["a", "b"],
+            &["a", "n"],
+            None,
+            false,
+        );
+        assert!(
+            dropped.contains("must remove exactly 0"),
+            "unexpected error: {dropped}"
+        );
+    }
+
+    #[test]
+    fn add_party_pins_the_addition_to_the_new_member_when_known() -> Result {
+        let error = delta_error(
+            WorkflowKind::AddParty,
+            &["a", "b"],
+            &["a", "b", "x"],
+            Some("n"),
+            false,
+        );
+        assert!(
+            error.contains("not the new member's n"),
+            "unexpected error: {error}"
+        );
+        let missing = delta_error(
+            WorkflowKind::AddParty,
+            &["a", "b"],
+            &["a", "b"],
+            Some("n"),
+            false,
+        );
+        assert!(
+            missing.contains("does not carry the new member's"),
+            "unexpected error: {missing}"
+        );
+        check_set_delta(
+            "DNS owner",
+            WorkflowKind::AddParty,
+            &owners(&["a", "b"]).into_iter().collect(),
+            &owners(&["a", "b", "n"]),
+            Some("n"),
+            false,
+        )
+    }
+
+    /// A legacy PartyToKeyMapping still holds departed members' keys, so the
+    /// proposal may drop several of them, but never bring in a new one.
+    #[test]
+    fn a_legacy_source_allows_dropping_but_not_adding() -> Result {
+        check_set_delta(
+            "party signing key",
+            WorkflowKind::ChangeThreshold,
+            &owners(&["a", "b", "c", "old1", "old2"])
+                .into_iter()
+                .collect(),
+            &owners(&["a", "b", "c"]),
+            None,
+            true,
+        )?;
+        let error = delta_error(
+            WorkflowKind::Kick,
+            &["a", "b", "c", "old1"],
+            &["a", "x"],
+            None,
+            true,
+        );
+        assert!(
+            error.contains("adds DNS owner"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_a_repeated_entry() {
+        let error = delta_error(
+            WorkflowKind::AddParty,
+            &["a", "b"],
+            &["a", "b", "b"],
+            None,
+            false,
+        );
+        assert!(
+            error.contains("repeats a DNS owner"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_delta_for_a_kind_without_one() {
+        let error = delta_error(WorkflowKind::Onboarding, &[], &["a"], None, false);
+        assert!(error.contains("no on-chain"), "unexpected error: {error}");
     }
 }

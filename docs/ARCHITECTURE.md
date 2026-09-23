@@ -209,6 +209,15 @@ everything that follows (`workflow::validation::PeerExpectations`).
   party does not exist yet — the peer instead checks that the decentralized
   namespace really is the hash of the proposed owner set, and that the P2P
   proposal is for the namespace it signed in the DNS step.
+- For kick / add-party / change-threshold, the peer reads the party's current
+  namespace definition and `PartyToParticipant` from the synchronizer and
+  requires each proposal to be exactly the expected change: change-threshold
+  keeps the owners and signing keys as they are, kick removes exactly one of
+  each, and add-party adds at most one of each (none to the owners when a
+  former host is hosted again). The new member also pins the added owner and
+  key to its own. A party whose keys still sit in a legacy
+  `PartyToKeyMapping` may drop departed members' keys but gain none. A
+  topology read that fails refuses the proposal.
 - Prepared ledger submissions are re-hashed locally from the transaction that
   accompanies them (`canton_hash`), so a signature can only ever authorize the
   transaction the peer can inspect, and that transaction must act as the
@@ -224,16 +233,19 @@ Any mismatch fails the step. Repeated mismatches abort the peer run.
 signature for; they do not make the coordinator trustworthy. Three gaps remain,
 and they are load-bearing enough to state rather than imply:
 
-- **A peer cannot verify the other members' namespaces or signing keys.** It
-  only ever sends its own key bundle to the coordinator and never sees the
-  others', so it can confirm that it was not excluded but not that the rest of
-  the owner set and key set belong to the members named in the invitation. A
-  DNS proposal needs `threshold` signatures rather than all of them, so a
-  namespace or key belonging to a member that does not sign this round can be
-  substituted without any signer noticing. Closable for kick / add-party /
-  change-threshold by comparing against the current on-chain state
-  (DLC-link/decentralization-manager#420, #422); not closable for onboarding
-  without a protocol change, because no on-chain state exists yet.
+- **During onboarding a peer cannot verify the other members' namespaces or
+  signing keys.** It only ever sends its own key bundle to the coordinator and
+  never sees the others', so it can confirm that it was not excluded but not
+  that the rest of the owner set and key set belong to the members named in the
+  invitation. A DNS proposal needs `threshold` signatures rather than all of
+  them, so a namespace or key belonging to a member that does not sign can be
+  substituted without any signer noticing. Kick / add-party / change-threshold
+  close this against the on-chain state (above). Onboarding cannot: the party
+  does not exist yet, so there is nothing to compare against. Closing it needs
+  a protocol change, such as peers exchanging key bundles or each contributor
+  attesting the coordinator's aggregated bundle. The same holds for the one
+  owner and key an add-party adds, as seen by the existing members: only the
+  new member can tie them to itself, and its signature is required.
 - **The contracts workflow constrains who a transaction acts as, not what it
   does.** The peer recomputes the hash and pins `act_as` to the accepted dec
   party, so it can only ever authorize the transaction it can read — but the
