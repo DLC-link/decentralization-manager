@@ -244,8 +244,14 @@ export const PartyDetail = ({
   const [holdingsCount, setHoldingsCount] = useState(0);
   const [holdingsLoading, setHoldingsLoading] = useState(false);
   const [holdingsRefreshNonce, setHoldingsRefreshNonce] = useState(0);
-  const [governanceState, setGovernanceState] =
-    useState<GovernanceState | null>(null);
+  const [loadedGovernance, setLoadedGovernance] = useState<{
+    partyId: string;
+    state: GovernanceState | null;
+  } | null>(null);
+  const governanceState =
+    loadedGovernance?.partyId === party.party_id
+      ? loadedGovernance.state
+      : null;
   const [editGovContractId, setEditGovContractId] = useState<string | null>(
     null,
   );
@@ -332,7 +338,11 @@ export const PartyDetail = ({
         );
         if (!res.ok) return;
         const data: GovernanceStateResponse = await res.json();
-        if (!cancelled) setGovernanceState(data.state ?? null);
+        if (!cancelled)
+          setLoadedGovernance({
+            partyId: party.party_id,
+            state: data.state ?? null,
+          });
       } catch {
         /* leave columns blank on failure */
       }

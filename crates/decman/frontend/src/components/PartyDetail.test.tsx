@@ -1,9 +1,15 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
+import { authenticatedFetch } from "../api";
 import { SnackbarProvider } from "../contexts";
 import { PartyDetail } from "./PartyDetail";
-import type { DecentralizedParty, PartyAuthStatus, RightsStatus } from "../types";
+import type {
+  DecentralizedParty,
+  GovernanceStateResponse,
+  PartyAuthStatus,
+  RightsStatus,
+} from "../types";
 
 // `PartyDetail` and its two gated children each fetch on mount. The gate under
 // test runs before any of that, so one stub that never resolves keeps the
@@ -39,18 +45,19 @@ const authStatus = (over?: Partial<RightsStatus>): PartyAuthStatus => ({
   rights: over === undefined ? undefined : rights(over),
 });
 
-const renderDetail = (status: PartyAuthStatus) =>
-  render(
-    <SnackbarProvider>
-      <PartyDetail
-        party={party}
-        onBack={() => {}}
-        onRefresh={() => {}}
-        onNavigateToNotifications={() => {}}
-        authStatus={status}
-      />
-    </SnackbarProvider>,
-  );
+const detail = (status: PartyAuthStatus, forParty = party) => (
+  <SnackbarProvider>
+    <PartyDetail
+      party={forParty}
+      onBack={() => {}}
+      onRefresh={() => {}}
+      onNavigateToNotifications={() => {}}
+      authStatus={status}
+    />
+  </SnackbarProvider>
+);
+
+const renderDetail = (status: PartyAuthStatus) => render(detail(status));
 
 /**
  * Both sections only read. Gating them on `actAs` hid the audit trail from a
@@ -84,5 +91,38 @@ describe("PartyDetail read-only sections", () => {
 
     expect(screen.queryByText("Holdings")).toBeNull();
     expect(screen.queryByText("Audit Trail")).toBeNull();
+  });
+});
+
+describe("PartyDetail governance membership", () => {
+  it("drops the previous party's membership when the party changes", async () => {
+    const status = authStatus();
+    const loaded: GovernanceStateResponse = {
+      state: {
+        contract_id: "00rules",
+        governance_party: party.party_id,
+        members: [status.member_party_id],
+        threshold: 1,
+        out_of_date: false,
+      },
+    };
+    vi.mocked(authenticatedFetch).mockImplementation((url) =>
+      String(url).includes(encodeURIComponent(party.party_id))
+        ? Promise.resolve(new Response(JSON.stringify(loaded)))
+        : new Promise(() => {}),
+    );
+
+    const { rerender } = render(detail(status));
+    await waitFor(() =>
+      expect(screen.getByLabelText("Authenticated")).toBeTruthy(),
+    );
+
+    const other: DecentralizedParty = { ...party, party_id: `beta::${ns}` };
+    rerender(detail({ ...status, dec_party_id: other.party_id }, other));
+
+    expect(screen.queryByLabelText("Authenticated")).toBeNull();
+    expect(
+      screen.getByLabelText("Authenticated, governance membership unknown"),
+    ).toBeTruthy();
   });
 });
