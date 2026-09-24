@@ -21,8 +21,8 @@ use std::collections::BTreeSet;
 use canton_proto_rs::com::digitalasset::canton::{
     crypto::v30::{SigningKeyUsage, SigningPublicKey},
     protocol::v30::{
-        DecentralizedNamespaceDefinition, PartyToParticipant, SignedTopologyTransaction,
-        TopologyTransaction, enums, topology_mapping,
+        DecentralizedNamespaceDefinition, PartyToKeyMapping, PartyToParticipant,
+        SignedTopologyTransaction, TopologyTransaction, enums, topology_mapping,
     },
 };
 use sha2::{Digest, Sha256};
@@ -456,80 +456,25 @@ impl PeerExpectations {
         storage: &SqlitePool,
         instance_name: &str,
         dec_party_id: &CantonId,
-        (dns_serial, namespace_def): (u32, &DecentralizedNamespaceDefinition),
-        (p2p_serial, mapping): (u32, &PartyToParticipant),
+        dns: (u32, &DecentralizedNamespaceDefinition),
+        p2p: (u32, &PartyToParticipant),
     ) -> Result {
-        let synchronizer_id = utils::get_synchronizer_id(config).await?;
-        let (head_dns_serial, current_def) = topology::fetch_namespace_definition_at_head(
+        let head = SynchronizerHead {
             config,
-            &synchronizer_id,
-            &dec_party_id.namespace.to_hex(),
+            synchronizer_id: utils::get_synchronizer_id(config).await?,
+        };
+        let new_member = self.new_member_fingerprints(storage, instance_name).await?;
+        check_against_head(
+            &head,
+            self.kind,
+            dec_party_id,
+            dns,
+            p2p,
+            new_member
+                .as_ref()
+                .map(|(namespace, daml)| (namespace.as_str(), daml.as_str())),
         )
         .await
-        .map_err(|e| {
-            anyhow::anyhow!("cannot read the current owner set of {dec_party_id}: {e:#}")
-        })?;
-        let (head_p2p_serial, current_p2p) =
-            topology::fetch_p2p_mapping_at_head(config, &synchronizer_id, dec_party_id)
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!("cannot read the current signing keys of {dec_party_id}: {e:#}")
-                })?;
-        let new_member = self.new_member_fingerprints(storage, instance_name).await?;
-
-        check_dns_against_head(
-            self.kind,
-            (dns_serial, namespace_def),
-            (head_dns_serial, &current_def),
-            new_member.as_ref().map(|(namespace, _)| namespace.as_str()),
-        )?;
-        if already_applied(
-            "P2P",
-            (p2p_serial, mapping),
-            (head_p2p_serial, &current_p2p),
-        )? {
-            return Ok(());
-        }
-
-        // A party onboarded before Canton 3.4 keeps its keys in a legacy
-        // PartyToKeyMapping that still holds departed members' keys, so the
-        // proposal adopts a subset of it rather than the whole set.
-        let (current_keys, legacy) = match current_p2p.party_signing_keys {
-            Some(keys) if !keys.keys.is_empty() => (keys.keys, false),
-            _ => {
-                let legacy_keys =
-                    topology::fetch_party_to_key_mapping(config, &synchronizer_id, dec_party_id)
-                        .await?
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "{dec_party_id} carries neither inline signing keys nor a \
-                                 PartyToKeyMapping, so the proposed keys cannot be checked"
-                            )
-                        })?;
-                (legacy_keys.signing_keys, true)
-            }
-        };
-
-        let proposed_keys = mapping
-            .party_signing_keys
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("P2P proposal carries no party signing keys"))?;
-
-        check_set_delta(
-            "party signing key",
-            self.kind,
-            &current_keys
-                .iter()
-                .map(utils::compute_fingerprint)
-                .collect(),
-            &proposed_keys
-                .keys
-                .iter()
-                .map(utils::compute_fingerprint)
-                .collect::<Vec<_>>(),
-            new_member.as_ref().map(|(_, daml)| daml.as_str()),
-            legacy,
-        )
     }
 
     /// The new member's `(namespace, daml)` fingerprints, when this node is
@@ -1105,6 +1050,114 @@ fn namespace_fingerprint(keys: &[SigningPublicKey]) -> Option<String> {
         return None;
     }
     Some(utils::compute_fingerprint(key))
+}
+
+/// The party's head topology state as this node reads it.
+trait TopologyHead {
+    async fn namespace_definition(
+        &self,
+        namespace: &str,
+    ) -> Result<(u32, DecentralizedNamespaceDefinition)>;
+    async fn p2p_mapping(&self, party: &CantonId) -> Result<(u32, PartyToParticipant)>;
+    async fn party_to_key_mapping(&self, party: &CantonId) -> Result<Option<PartyToKeyMapping>>;
+}
+
+struct SynchronizerHead<'a> {
+    config: &'a NodeConfig,
+    synchronizer_id: String,
+}
+
+impl TopologyHead for SynchronizerHead<'_> {
+    async fn namespace_definition(
+        &self,
+        namespace: &str,
+    ) -> Result<(u32, DecentralizedNamespaceDefinition)> {
+        topology::fetch_namespace_definition_at_head(self.config, &self.synchronizer_id, namespace)
+            .await
+    }
+
+    async fn p2p_mapping(&self, party: &CantonId) -> Result<(u32, PartyToParticipant)> {
+        topology::fetch_p2p_mapping_at_head(self.config, &self.synchronizer_id, party).await
+    }
+
+    async fn party_to_key_mapping(&self, party: &CantonId) -> Result<Option<PartyToKeyMapping>> {
+        topology::fetch_party_to_key_mapping(self.config, &self.synchronizer_id, party).await
+    }
+}
+
+/// `new_member` is this node's `(namespace, daml)` fingerprints when it is the
+/// new member.
+async fn check_against_head(
+    head: &impl TopologyHead,
+    kind: WorkflowKind,
+    dec_party_id: &CantonId,
+    (dns_serial, namespace_def): (u32, &DecentralizedNamespaceDefinition),
+    (p2p_serial, mapping): (u32, &PartyToParticipant),
+    new_member: Option<(&str, &str)>,
+) -> Result {
+    let (head_dns_serial, current_def) = head
+        .namespace_definition(&dec_party_id.namespace.to_hex())
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!("cannot read the current owner set of {dec_party_id}: {e:#}")
+        })?;
+    let (head_p2p_serial, current_p2p) = head.p2p_mapping(dec_party_id).await.map_err(|e| {
+        anyhow::anyhow!("cannot read the current signing keys of {dec_party_id}: {e:#}")
+    })?;
+
+    check_dns_against_head(
+        kind,
+        (dns_serial, namespace_def),
+        (head_dns_serial, &current_def),
+        new_member.map(|(namespace, _)| namespace),
+    )?;
+    if already_applied(
+        "P2P",
+        (p2p_serial, mapping),
+        (head_p2p_serial, &current_p2p),
+    )? {
+        return Ok(());
+    }
+
+    // A party onboarded before Canton 3.4 keeps its keys in a legacy
+    // PartyToKeyMapping that still holds departed members' keys, so the
+    // proposal adopts a subset of it rather than the whole set.
+    let (current_keys, legacy) = match current_p2p.party_signing_keys {
+        Some(keys) if !keys.keys.is_empty() => (keys.keys, false),
+        _ => {
+            let legacy_keys = head
+                .party_to_key_mapping(dec_party_id)
+                .await?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "{dec_party_id} carries neither inline signing keys nor a \
+                         PartyToKeyMapping, so the proposed keys cannot be checked"
+                    )
+                })?;
+            (legacy_keys.signing_keys, true)
+        }
+    };
+
+    let proposed_keys = mapping
+        .party_signing_keys
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("P2P proposal carries no party signing keys"))?;
+
+    check_set_delta(
+        "party signing key",
+        kind,
+        &current_keys
+            .iter()
+            .map(utils::compute_fingerprint)
+            .collect(),
+        &proposed_keys
+            .keys
+            .iter()
+            .map(utils::compute_fingerprint)
+            .collect::<Vec<_>>(),
+        new_member.map(|(_, daml)| daml),
+        legacy,
+    )
 }
 
 /// The proposed set must be the current on-chain set changed only as the run
@@ -2384,6 +2437,156 @@ mod tests {
                 error.contains("P2P proposal is at serial"),
                 "unexpected error: {error}"
             );
+        }
+        Ok(())
+    }
+
+    struct StubHead {
+        dns: Option<(u32, DecentralizedNamespaceDefinition)>,
+        p2p: Option<(u32, PartyToParticipant)>,
+        legacy_keys: Option<Vec<SigningPublicKey>>,
+    }
+
+    impl TopologyHead for StubHead {
+        async fn namespace_definition(
+            &self,
+            _namespace: &str,
+        ) -> Result<(u32, DecentralizedNamespaceDefinition)> {
+            self.dns
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("topology read unavailable"))
+        }
+
+        async fn p2p_mapping(&self, _party: &CantonId) -> Result<(u32, PartyToParticipant)> {
+            self.p2p
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("topology read unavailable"))
+        }
+
+        async fn party_to_key_mapping(
+            &self,
+            _party: &CantonId,
+        ) -> Result<Option<PartyToKeyMapping>> {
+            Ok(self
+                .legacy_keys
+                .clone()
+                .map(|signing_keys| PartyToKeyMapping {
+                    signing_keys,
+                    ..Default::default()
+                }))
+        }
+    }
+
+    fn keyed_p2p(keys: Option<SigningKeysWithThreshold>) -> Result<PartyToParticipant> {
+        let hosts = [
+            canton_id("p1", 1)?,
+            canton_id("p2", 2)?,
+            canton_id("p3", 3)?,
+        ];
+        Ok(PartyToParticipant {
+            party_signing_keys: keys,
+            ..p2p("party", &hosts, 2)
+        })
+    }
+
+    /// A change-threshold run on a three-member party whose on-chain keys are
+    /// `head_keys` (inline) or, when those are absent, `legacy_keys`.
+    async fn change_threshold_against(
+        head_keys: Option<SigningKeysWithThreshold>,
+        legacy_keys: Option<Vec<SigningPublicKey>>,
+    ) -> Result {
+        let def = namespace(&["a", "b", "c"]);
+        let head = StubHead {
+            dns: Some((2, def.clone())),
+            p2p: Some((5, keyed_p2p(head_keys)?)),
+            legacy_keys,
+        };
+        check_against_head(
+            &head,
+            WorkflowKind::ChangeThreshold,
+            &canton_id("party", 9)?,
+            (3, &def),
+            (6, &keyed_p2p(Some(signing_keys(3, 2)))?),
+            None,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_legacy_party_checks_the_keys_against_its_party_to_key_mapping() -> Result {
+        let departed = signing_keys(4, 2).keys;
+        change_threshold_against(None, Some(departed.clone())).await?;
+
+        let error = match change_threshold_against(
+            Some(SigningKeysWithThreshold {
+                keys: departed,
+                threshold: 2,
+            }),
+            None,
+        )
+        .await
+        {
+            Ok(()) => anyhow::bail!("an inline key set must not take the legacy rule"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("must remove exactly 0"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_party_with_no_key_source_is_refused() -> Result {
+        let error = match change_threshold_against(None, None).await {
+            Ok(()) => anyhow::bail!("expected a refusal"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("neither inline signing keys nor a PartyToKeyMapping"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_failed_topology_read_refuses_the_proposal() -> Result {
+        let def = namespace(&["a", "b", "c"]);
+        let proposal = keyed_p2p(Some(signing_keys(3, 2)))?;
+        let party = canton_id("party", 9)?;
+        let heads = [
+            (
+                StubHead {
+                    dns: None,
+                    p2p: Some((5, proposal.clone())),
+                    legacy_keys: None,
+                },
+                "cannot read the current owner set",
+            ),
+            (
+                StubHead {
+                    dns: Some((2, def.clone())),
+                    p2p: None,
+                    legacy_keys: None,
+                },
+                "cannot read the current signing keys",
+            ),
+        ];
+        for (head, expected) in heads {
+            let error = match check_against_head(
+                &head,
+                WorkflowKind::ChangeThreshold,
+                &party,
+                (3, &def),
+                (6, &proposal),
+                None,
+            )
+            .await
+            {
+                Ok(()) => anyhow::bail!("expected a refusal"),
+                Err(error) => error.to_string(),
+            };
+            assert!(error.contains(expected), "unexpected error: {error}");
         }
         Ok(())
     }
