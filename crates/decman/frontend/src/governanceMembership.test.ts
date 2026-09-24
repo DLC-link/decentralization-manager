@@ -27,8 +27,8 @@ describe("getGovernanceMembership", () => {
     );
   });
 
-  it("reports not a member for an empty member set", () => {
-    expect(getGovernanceMembership(`m1::${nsA}`, state([]))).toBe("not_member");
+  it("reports unknown for an empty member set", () => {
+    expect(getGovernanceMembership(`m1::${nsA}`, state([]))).toBe("unknown");
   });
 
   it("does not match the same prefix under another namespace", () => {
