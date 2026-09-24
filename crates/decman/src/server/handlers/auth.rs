@@ -450,11 +450,30 @@ impl AdminTokenSource {
 #[derive(Debug, thiserror::Error)]
 enum AdminMintError {
     /// The IdP answered 400, 401 or 403: the supplied client id or secret is wrong.
-    #[error("{0}")]
-    Rejected(String),
+    #[error("{message}")]
+    Rejected { status: u16, message: String },
     /// The IdP was unreachable, failed, or sent a response we cannot parse.
-    #[error("{0}")]
-    Upstream(String),
+    #[error("{message}")]
+    Upstream {
+        status: Option<u16>,
+        message: String,
+    },
+}
+
+impl AdminMintError {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Rejected { .. } => "rejected",
+            Self::Upstream { .. } => "upstream",
+        }
+    }
+
+    fn status(&self) -> Option<u16> {
+        match self {
+            Self::Rejected { status, .. } => Some(*status),
+            Self::Upstream { status, .. } => *status,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -488,10 +507,10 @@ async fn mint_admin_token(
         ]),
     };
 
-    let response = request
-        .send()
-        .await
-        .map_err(|e| AdminMintError::Upstream(format!("Token request failed: {e}")))?;
+    let response = request.send().await.map_err(|e| AdminMintError::Upstream {
+        status: None,
+        message: format!("Token request failed: {e}"),
+    })?;
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
@@ -499,10 +518,14 @@ async fn mint_admin_token(
             "Token endpoint returned {status}: {body}",
             body = truncate_for_log(&body),
         );
-        return Err(if matches!(status.as_u16(), 400 | 401 | 403) {
-            AdminMintError::Rejected(message)
+        let status = status.as_u16();
+        return Err(if matches!(status, 400 | 401 | 403) {
+            AdminMintError::Rejected { status, message }
         } else {
-            AdminMintError::Upstream(message)
+            AdminMintError::Upstream {
+                status: Some(status),
+                message,
+            }
         });
     }
 
@@ -510,7 +533,10 @@ async fn mint_admin_token(
         .json::<AdminTokenResponse>()
         .await
         .map(|token| token.access_token)
-        .map_err(|e| AdminMintError::Upstream(format!("Token response parse failed: {e}")))
+        .map_err(|e| AdminMintError::Upstream {
+            status: Some(status.as_u16()),
+            message: format!("Token response parse failed: {e}"),
+        })
 }
 
 /// Grant actAs + readAs rights on the member party and the dec party to the
@@ -623,15 +649,21 @@ pub async fn grant_rights(
         Err(e) => {
             // The error carries the IdP response body, so keep it in the logs
             // and return a generic message that cannot reflect secrets.
-            tracing::warn!("Failed to mint admin token for grant-rights: {e}");
             let idp = admin_source.idp();
+            tracing::warn!(
+                kind = e.kind(),
+                idp,
+                status = e.status(),
+                party = %dec_party_id,
+                "Failed to mint admin token for grant-rights: {e}"
+            );
             return match e {
-                AdminMintError::Rejected(_) => {
+                AdminMintError::Rejected { .. } => {
                     HttpResponse::UnprocessableEntity().json(ErrorResponse {
                         error: format!("Admin {idp} auth failed"),
                     })
                 }
-                AdminMintError::Upstream(_) => HttpResponse::BadGateway().json(ErrorResponse {
+                AdminMintError::Upstream { .. } => HttpResponse::BadGateway().json(ErrorResponse {
                     error: format!("Admin {idp} token endpoint failed"),
                 }),
             };
