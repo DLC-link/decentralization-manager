@@ -7,6 +7,7 @@ import {
   CircularProgress,
   Alert,
   Tooltip,
+  type ChipProps,
 } from "@mui/material";
 import CancelIcon from "@mui/icons-material/Cancel";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
@@ -31,6 +32,26 @@ interface AuthSectionProps {
   onRefresh?: () => void;
   onConfigure?: () => void;
 }
+
+const membershipChip: Record<
+  GovernanceMembership,
+  {
+    label: string;
+    color: ChipProps["color"];
+    icon: ChipProps["icon"];
+    tooltip?: string;
+  }
+> = {
+  member: { label: "Member", color: "success", icon: <CheckCircleIcon /> },
+  not_member: { label: "Not a member", color: "warning", icon: <WarningIcon /> },
+  unknown: {
+    label: "Unknown",
+    color: "default",
+    icon: <HelpOutlineIcon />,
+    tooltip:
+      "Governance state did not load, or the party has no rules contract",
+  },
+};
 
 const isRightsValid = (rights: RightsStatus | undefined): boolean => {
   if (!rights) return false;
@@ -105,6 +126,7 @@ export const AuthSection = ({
   const [testing, setTesting] = useState(false);
   const [testError, setTestError] = useState<string | null>(null);
   const [grantDialogOpen, setGrantDialogOpen] = useState(false);
+  const chip = membershipChip[membership];
 
   if (!authStatus) {
     return (
@@ -169,37 +191,16 @@ export const AuthSection = ({
         <Typography variant="body2" color="text.secondary">
           <strong>Governance:</strong>
         </Typography>
-        {membership === "member" && (
+        <Tooltip title={chip.tooltip ?? ""}>
           <Chip
-            label="Member"
+            label={chip.label}
             size="small"
-            color="success"
+            color={chip.color}
             variant="outlined"
-            icon={<CheckCircleIcon />}
+            icon={chip.icon}
             data-testid="governance-membership"
           />
-        )}
-        {membership === "not_member" && (
-          <Chip
-            label="Not a member"
-            size="small"
-            color="warning"
-            variant="outlined"
-            icon={<WarningIcon />}
-            data-testid="governance-membership"
-          />
-        )}
-        {membership === "unknown" && (
-          <Tooltip title="Governance state did not load, or the party has no rules contract">
-            <Chip
-              label="Unknown"
-              size="small"
-              variant="outlined"
-              icon={<HelpOutlineIcon />}
-              data-testid="governance-membership"
-            />
-          </Tooltip>
-        )}
+        </Tooltip>
       </Box>
 
       <Typography variant="body2" color="text.secondary" sx={{ mb: 0.5 }}>
