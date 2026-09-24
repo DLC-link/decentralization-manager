@@ -1,5 +1,5 @@
-import { render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { act, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { authenticatedFetch } from "../api";
 import { SnackbarProvider } from "../contexts";
@@ -95,6 +95,54 @@ describe("PartyDetail read-only sections", () => {
 });
 
 describe("PartyDetail governance membership", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("shows membership that a later poll returns", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const status = authStatus();
+    const withMembers = (members: string[]): GovernanceStateResponse => ({
+      state: {
+        contract_id: "00rules",
+        governance_party: party.party_id,
+        members,
+        threshold: 1,
+        out_of_date: false,
+      },
+    });
+    const responses = [
+      withMembers([`other::${ns}`]),
+      withMembers([`other::${ns}`, status.member_party_id]),
+    ];
+    let calls = 0;
+    vi.mocked(authenticatedFetch).mockImplementation((url) => {
+      if (!String(url).includes("/governance/state"))
+        return new Promise(() => {});
+      const body = responses[Math.min(calls, responses.length - 1)];
+      calls += 1;
+      return Promise.resolve(new Response(JSON.stringify(body)));
+    });
+
+    render(detail(status));
+    await waitFor(() =>
+      expect(
+        screen.getByLabelText(
+          "Authenticated, but the member party is not a governance member",
+        ),
+      ).toBeTruthy(),
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+
+    await waitFor(() =>
+      expect(screen.getByLabelText("Authenticated")).toBeTruthy(),
+    );
+    expect(calls).toBe(2);
+  });
+
   it("drops the previous party's membership when the party changes", async () => {
     const status = authStatus();
     const loaded: GovernanceStateResponse = {

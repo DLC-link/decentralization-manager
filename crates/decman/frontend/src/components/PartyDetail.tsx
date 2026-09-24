@@ -58,6 +58,8 @@ import type {
  * measures. A pill wedged between the action buttons is what these used to be —
  * too small to read at a glance, which is the whole point of a summary.
  */
+const GOVERNANCE_STATE_POLL_MS = 10_000;
+
 const StatCard = ({
   label,
   value,
@@ -325,13 +327,12 @@ export const PartyDetail = ({
     }
   }, [party.contracts, updateScrollShadows]);
 
-  // Fetch governance state (threshold + action_confirmation_timeout) so the
-  // contracts table can show these values on the row of the active rules
-  // contract. Cancellation guards against a stale response landing after the
-  // user has switched to a different party.
+  // Poll governance state for the rules contract row in the contracts table and
+  // the membership chip in the auth section. The party id on each result keeps
+  // a late response for a previous party from showing.
   useEffect(() => {
     let cancelled = false;
-    (async () => {
+    const load = async () => {
       try {
         const res = await authenticatedFetch(
           `${API_BASE}/governance/state?party_id=${encodeURIComponent(party.party_id)}`,
@@ -344,11 +345,14 @@ export const PartyDetail = ({
             state: data.state ?? null,
           });
       } catch {
-        /* leave columns blank on failure */
+        /* keep the last loaded state */
       }
-    })();
+    };
+    void load();
+    const interval = setInterval(() => void load(), GOVERNANCE_STATE_POLL_MS);
     return () => {
       cancelled = true;
+      clearInterval(interval);
     };
   }, [party.party_id]);
 
