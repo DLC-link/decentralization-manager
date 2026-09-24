@@ -271,6 +271,36 @@ pub struct Auth0TokenResponse {
     pub expires_in: u64,
 }
 
+/// Longest IdP response body kept in a log line.
+const MAX_LOGGED_BODY_BYTES: usize = 512;
+
+/// Cut an IdP response body to [`MAX_LOGGED_BODY_BYTES`] on a char boundary.
+pub(crate) fn truncate_for_log(body: &str) -> &str {
+    &body[..body.floor_char_boundary(MAX_LOGGED_BODY_BYTES)]
+}
+
+/// Auth0's `client_credentials` token endpoint for `domain`.
+pub(crate) fn auth0_token_url(domain: &str) -> String {
+    format!(
+        "https://{domain}/oauth/token",
+        domain = domain.trim_end_matches('/')
+    )
+}
+
+/// Auth0's `client_credentials` JSON request body.
+pub(crate) fn auth0_token_body(
+    client_id: &str,
+    client_secret: &str,
+    audience: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "grant_type": "client_credentials",
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "audience": audience,
+    })
+}
+
 /// Mint an access token via Auth0's client_credentials flow.
 ///
 /// # Errors
@@ -281,21 +311,13 @@ pub(crate) async fn auth0_client_credentials(
     http: &reqwest::Client,
     config: &Auth0M2MConfig,
 ) -> Result<Auth0TokenResponse> {
-    let token_url = format!(
-        "https://{}/oauth/token",
-        config.domain.trim_end_matches('/')
-    );
-
-    let body = serde_json::json!({
-        "grant_type": "client_credentials",
-        "client_id": config.client_id,
-        "client_secret": config.client_secret,
-        "audience": config.audience,
-    });
-
     let response = http
-        .post(&token_url)
-        .json(&body)
+        .post(auth0_token_url(&config.domain))
+        .json(&auth0_token_body(
+            &config.client_id,
+            &config.client_secret,
+            &config.audience,
+        ))
         .send()
         .await
         .map_err(|e| AuthError::M2MAuthFailed(format!("Auth0 request failed: {e}")))?;
@@ -304,7 +326,8 @@ pub(crate) async fn auth0_client_credentials(
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
         return Err(AuthError::M2MAuthFailed(format!(
-            "Auth0 token endpoint returned {status}: {body}"
+            "Auth0 token endpoint returned {status}: {body}",
+            body = truncate_for_log(&body),
         )));
     }
 
@@ -466,7 +489,10 @@ mod tests {
         matchers::{method, path_regex},
     };
 
-    use super::{AuthRegistry, CantonId, KeycloakConfig, PartyCredentials};
+    use super::{
+        AuthRegistry, CantonId, KeycloakConfig, MAX_LOGGED_BODY_BYTES, PartyCredentials,
+        truncate_for_log,
+    };
 
     /// A writer the test reads back once the subscriber has written to it.
     #[derive(Clone, Default)]
@@ -624,5 +650,20 @@ mod tests {
             "an empty party list logged an error: {logs}"
         );
         Ok(())
+    }
+
+    #[test]
+    fn truncate_for_log_keeps_short_bodies() {
+        assert_eq!(truncate_for_log("invalid_client"), "invalid_client");
+    }
+
+    #[test]
+    fn truncate_for_log_cuts_on_a_char_boundary() {
+        let body = format!("{pad}é tail", pad = "a".repeat(MAX_LOGGED_BODY_BYTES - 1));
+
+        let logged = truncate_for_log(&body);
+
+        assert_eq!(logged.len(), MAX_LOGGED_BODY_BYTES - 1);
+        assert!(logged.chars().all(|c| c == 'a'));
     }
 }

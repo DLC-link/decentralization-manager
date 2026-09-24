@@ -8,7 +8,7 @@ use keycloak::login::token_url;
 use serde::Deserialize;
 
 use crate::{
-    auth::WorkflowAuth,
+    auth::{WorkflowAuth, auth0_token_body, auth0_token_url, truncate_for_log},
     canton_id::CantonId,
     config::{NodeConfig, PartyCredentials},
     error::Result,
@@ -431,12 +431,7 @@ impl AdminTokenSource {
     /// The absolute `client_credentials` token endpoint for this source.
     fn token_endpoint(&self) -> String {
         match self {
-            Self::Auth0 { domain, .. } => {
-                format!(
-                    "https://{domain}/oauth/token",
-                    domain = domain.trim_end_matches('/')
-                )
-            }
+            Self::Auth0 { domain, .. } => auth0_token_url(domain),
             Self::Keycloak { url, realm } => token_url(url, realm),
         }
     }
@@ -483,12 +478,9 @@ async fn mint_admin_token(
 ) -> std::result::Result<String, AdminMintError> {
     let request = http.post(source.token_endpoint());
     let request = match source {
-        AdminTokenSource::Auth0 { audience, .. } => request.json(&serde_json::json!({
-            "grant_type": "client_credentials",
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "audience": audience,
-        })),
+        AdminTokenSource::Auth0 { audience, .. } => {
+            request.json(&auth0_token_body(client_id, client_secret, audience))
+        }
         AdminTokenSource::Keycloak { .. } => request.form(&[
             ("grant_type", "client_credentials"),
             ("client_id", client_id),
@@ -503,7 +495,10 @@ async fn mint_admin_token(
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        let message = format!("Token endpoint returned {status}: {body}");
+        let message = format!(
+            "Token endpoint returned {status}: {body}",
+            body = truncate_for_log(&body),
+        );
         return Err(if matches!(status.as_u16(), 400 | 401 | 403) {
             AdminMintError::Rejected(message)
         } else {
