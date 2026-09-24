@@ -5,7 +5,7 @@
 //! into the response types served by the HTTP handlers.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     future::Future,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -522,10 +522,12 @@ where
 /// in one request is what left the approvals feed spinning (#424). The
 /// confirmations behind the batch come from a short-lived per-party cache, so
 /// scrolling does not re-read them.
+#[allow(clippy::too_many_arguments)]
 pub async fn get_governance_confirmations(
     config: &NodeConfig,
     party_id: &CantonId,
     threshold: usize,
+    members: Option<&HashSet<CantonId>>,
     token: Option<String>,
     packages: &PackageConfig,
     limit: usize,
@@ -603,37 +605,7 @@ pub async fn get_governance_confirmations(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
-    // Convert to GovernanceAction list, deduplicating confirmations by confirming_party
-    let actions: Vec<GovernanceAction> = confirmations_by_hash
-        .into_iter()
-        .map(|(action_hash, (action, confirmations))| {
-            // Newest-first per member, then Daml's `expiresAt > now` filter so
-            // the UI doesn't offer an Execute that chain will reject.
-            let unique_confirmations = interpret::dedupe_newest_per_party(
-                confirmations,
-                |c| &c.confirming_party,
-                |c| c.created_at,
-            );
-            let confirmation_count =
-                interpret::live_count(&unique_confirmations, |c| c.expires_at, now_seconds);
-            let last_confirmation_at = unique_confirmations
-                .iter()
-                .map(|c| c.created_at)
-                .max()
-                .unwrap_or(0);
-            GovernanceAction {
-                action_hash,
-                action,
-                confirmations: unique_confirmations
-                    .into_iter()
-                    .map(confirmation_dto)
-                    .collect(),
-                confirmation_count,
-                can_execute: confirmation_count >= threshold,
-                last_confirmation_at,
-            }
-        })
-        .collect();
+    let actions = assemble_self_actions(confirmations_by_hash, threshold, members, now_seconds);
 
     let domain_actions: Vec<DomainGovernanceAction> = interpret::assemble_domain_actions(
         domain_confirmations,
@@ -641,6 +613,7 @@ pub async fn get_governance_confirmations(
         proposal_infos_complete,
         domain_confirmations_complete,
         threshold,
+        members,
         now_seconds,
     )
     .into_iter()
@@ -654,6 +627,7 @@ pub async fn get_governance_confirmations(
             .map(domain_confirmation_dto)
             .collect(),
         confirmation_count: action.confirmation_count,
+        executable_confirmation_cids: action.executable_confirmation_cids,
         can_execute: action.can_execute,
         orphaned: action.orphaned,
         transfer_details: action.transfer_details,
@@ -665,6 +639,61 @@ pub async fn get_governance_confirmations(
     .collect();
 
     Ok((actions, domain_actions, next_cursor))
+}
+
+/// Group self-action confirmations into cards. Only executable confirmations
+/// from members count toward `threshold`. The Execute also submits live
+/// non-member confirmations: `ExecuteGovernanceAction` tolerates them and
+/// consuming them clears additional-proposer markers.
+fn assemble_self_actions(
+    confirmations_by_hash: HashMap<String, (ActionType, Vec<ParsedConfirmation>)>,
+    threshold: usize,
+    members: Option<&HashSet<CantonId>>,
+    now_seconds: i64,
+) -> Vec<GovernanceAction> {
+    confirmations_by_hash
+        .into_iter()
+        .map(|(action_hash, (action, confirmations))| {
+            let unique_confirmations = interpret::dedupe_newest_per_party(
+                confirmations,
+                |c| &c.confirming_party,
+                |c| c.created_at,
+            );
+            let confirmation_count = unique_confirmations
+                .iter()
+                .filter(|c| {
+                    interpret::counts_toward_threshold(
+                        &c.confirming_party,
+                        c.expires_at,
+                        members,
+                        now_seconds,
+                    )
+                })
+                .count();
+            let executable_confirmation_cids = unique_confirmations
+                .iter()
+                .filter(|c| interpret::is_executable(c.expires_at, now_seconds))
+                .map(|c| c.contract_id.clone())
+                .collect();
+            let last_confirmation_at = unique_confirmations
+                .iter()
+                .map(|c| c.created_at)
+                .max()
+                .unwrap_or(0);
+            GovernanceAction {
+                action_hash,
+                action,
+                confirmations: unique_confirmations
+                    .into_iter()
+                    .map(confirmation_dto)
+                    .collect(),
+                confirmation_count,
+                executable_confirmation_cids,
+                can_execute: confirmation_count >= threshold,
+                last_confirmation_at,
+            }
+        })
+        .collect()
 }
 
 /// Map a parsed confirmation onto the wire DTO.
@@ -3298,6 +3327,51 @@ mod tests {
         ];
 
         assert!(walk_parties("wanted::1220bb", pages).await?.is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn self_actions_count_only_executable_member_confirmations() -> Result {
+        let now = 1_700_000_000;
+        let alice: CantonId =
+            "alice::1220aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .parse()?;
+        let bob: CantonId =
+            "bob::1220bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".parse()?;
+        let proposer: CantonId =
+            "carol::1220cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                .parse()?;
+        let members: HashSet<CantonId> = [alice.clone(), bob.clone()].into_iter().collect();
+        let action = ActionType::GovernanceSetThreshold { new_threshold: 2 };
+        let confirmation = |contract_id: &str, party: &CantonId, expires_at| ParsedConfirmation {
+            contract_id: contract_id.to_string(),
+            action: action.clone(),
+            confirming_party: party.clone(),
+            created_at: 100,
+            expires_at,
+        };
+        let confirmations = vec![
+            confirmation("member", &alice, now + 3600),
+            confirmation(
+                "near-expiry",
+                &bob,
+                now + interpret::EXECUTE_EXPIRY_MARGIN_SECONDS,
+            ),
+            confirmation("proposer", &proposer, now + 3600),
+        ];
+        let mut by_hash = HashMap::new();
+        by_hash.insert("hash".to_string(), (action.clone(), confirmations));
+
+        let actions = assemble_self_actions(by_hash, 2, Some(&members), now);
+
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].confirmations.len(), 3);
+        assert_eq!(actions[0].confirmation_count, 1);
+        assert!(!actions[0].can_execute);
+        let mut cids = actions[0].executable_confirmation_cids.clone();
+        cids.sort();
+        assert_eq!(cids, vec!["member".to_string(), "proposer".to_string()]);
 
         Ok(())
     }

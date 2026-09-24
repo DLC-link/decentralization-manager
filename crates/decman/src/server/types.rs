@@ -564,6 +564,8 @@ pub struct DomainGovernanceAction {
     pub confirmations: Vec<DomainConfirmation>,
     /// Number of unique confirmers
     pub confirmation_count: usize,
+    /// Contract ids of the confirmations Execute submits
+    pub executable_confirmation_cids: Vec<String>,
     /// Whether threshold is met for execution
     pub can_execute: bool,
     /// `true` when the underlying proposal contract was not found in this
@@ -694,6 +696,8 @@ pub struct GovernanceAction {
     pub confirmations: Vec<GovernanceConfirmation>,
     /// Number of confirmations
     pub confirmation_count: usize,
+    /// Contract ids of the confirmations Execute submits
+    pub executable_confirmation_cids: Vec<String>,
     /// Whether threshold is met for execution
     pub can_execute: bool,
     /// Unix seconds of the most recent confirmation (used for sorting in UI).
@@ -1252,6 +1256,7 @@ mod tests {
                     expires_at: 0,
                 }],
                 confirmation_count: 1,
+                executable_confirmation_cids: Vec::new(),
                 can_execute: false,
                 last_confirmation_at: 0,
             }],
@@ -1261,6 +1266,7 @@ mod tests {
                 description: None,
                 confirmations: Vec::new(),
                 confirmation_count: 0,
+                executable_confirmation_cids: Vec::new(),
                 can_execute: false,
                 orphaned: false,
                 transfer_details: None,
@@ -1321,6 +1327,7 @@ mod tests {
                     expires_at: 0,
                 }],
                 confirmation_count: 1,
+                executable_confirmation_cids: Vec::new(),
                 can_execute: false,
                 last_confirmation_at: 0,
             }],
@@ -1335,6 +1342,7 @@ mod tests {
                     expires_at: 0,
                 }],
                 confirmation_count: 1,
+                executable_confirmation_cids: Vec::new(),
                 can_execute: false,
                 orphaned: false,
                 transfer_details: None,

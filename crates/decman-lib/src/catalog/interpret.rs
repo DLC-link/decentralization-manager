@@ -500,11 +500,40 @@ pub fn dedupe_newest_per_party<T>(
 pub fn live_count<T>(items: &[T], expires_at: impl Fn(&T) -> i64, now_seconds: i64) -> usize {
     items
         .iter()
-        .filter(|item| {
-            let expires = expires_at(item);
-            expires == 0 || expires > now_seconds
-        })
+        .filter(|item| is_live(expires_at(item), now_seconds))
         .count()
+}
+
+fn is_live(expires_at: i64, now_seconds: i64) -> bool {
+    expires_at == 0 || expires_at > now_seconds
+}
+
+/// How long before its `expiresAt` a confirmation stops being offered to
+/// Execute, so it cannot lapse between page load and the click.
+pub const EXECUTE_EXPIRY_MARGIN_SECONDS: i64 = 30;
+
+/// Whether an Execute submitted from a view built at `now_seconds` can still
+/// consume a confirmation that expires at `expires_at`. Consuming an expired
+/// confirmation aborts the whole Execute on-ledger.
+pub fn is_executable(expires_at: i64, now_seconds: i64) -> bool {
+    is_live(
+        expires_at,
+        now_seconds.saturating_add(EXECUTE_EXPIRY_MARGIN_SECONDS),
+    )
+}
+
+/// Whether a confirmation counts toward the Execute threshold: executable and
+/// confirmed by a member of the rules contract the Execute runs against.
+/// `members` is `None` when that contract could not be read, and then no
+/// member check applies.
+pub fn counts_toward_threshold(
+    confirmer: &CantonId,
+    expires_at: i64,
+    members: Option<&HashSet<CantonId>>,
+    now_seconds: i64,
+) -> bool {
+    is_executable(expires_at, now_seconds)
+        && members.is_none_or(|members| members.contains(confirmer))
 }
 
 /// Label used for a proposal synthesized from a bare `GovernableAction` when
@@ -521,6 +550,7 @@ pub struct DomainAction {
     pub description: Option<String>,
     pub confirmations: Vec<ParsedDomainConfirmation>,
     pub confirmation_count: usize,
+    pub executable_confirmation_cids: Vec<String>,
     pub can_execute: bool,
     pub orphaned: bool,
     pub transfer_details: Option<TransferProposalDetails>,
@@ -554,6 +584,7 @@ pub fn assemble_domain_actions(
     proposal_infos_complete: bool,
     domain_confirmations_complete: bool,
     threshold: usize,
+    members: Option<&HashSet<CantonId>>,
     now_seconds: i64,
 ) -> Vec<DomainAction> {
     let mut domain_actions: Vec<DomainAction> = domain_confirmations
@@ -581,14 +612,21 @@ pub fn assemble_domain_actions(
                 ),
                 None => (None, None, None, None, None, None, proposal_infos_complete),
             };
-            let confirmation_count =
-                live_count(&unique_confirmations, |c| c.expires_at, now_seconds);
+            let executable_confirmation_cids: Vec<String> = unique_confirmations
+                .iter()
+                .filter(|c| {
+                    counts_toward_threshold(&c.confirming_party, c.expires_at, members, now_seconds)
+                })
+                .map(|c| c.contract_id.clone())
+                .collect();
+            let confirmation_count = executable_confirmation_cids.len();
             DomainAction {
                 proposal_cid,
                 action_label,
                 description,
                 confirmations: unique_confirmations,
                 confirmation_count,
+                executable_confirmation_cids,
                 // Orphans can't be executed regardless of threshold.
                 can_execute: !orphaned && confirmation_count >= threshold,
                 orphaned,
@@ -612,6 +650,7 @@ pub fn assemble_domain_actions(
                 description: info.description,
                 confirmations: Vec::new(),
                 confirmation_count: 0,
+                executable_confirmation_cids: Vec::new(),
                 can_execute: false,
                 orphaned: false,
                 transfer_details: info.transfer,
@@ -1313,6 +1352,93 @@ mod tests {
         );
     }
 
+    fn single_proposal_actions(
+        confirmations: Vec<ParsedDomainConfirmation>,
+        threshold: usize,
+        members: Option<&HashSet<CantonId>>,
+        now: i64,
+    ) -> Vec<DomainAction> {
+        let mut infos = HashMap::new();
+        infos.insert(
+            "proposal-1".to_string(),
+            proposal_info_fixture(Some("Action")),
+        );
+        assemble_domain_actions(
+            confirmations_map("proposal-1", "Action", confirmations),
+            infos,
+            true,
+            true,
+            threshold,
+            members,
+            now,
+        )
+    }
+
+    #[test]
+    fn executable_confirmation_cids_skip_expired_confirmations() {
+        let now = 1_700_000_000;
+        let confs = vec![
+            domain_confirmation("expired", "proposal-1", ALICE, 100, now - 1),
+            domain_confirmation("live-bob", "proposal-1", BOB, 100, now + 3600),
+            domain_confirmation("live-gov", "proposal-1", GOV, 100, now + 3600),
+        ];
+
+        let actions = single_proposal_actions(confs, 2, None, now);
+
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].confirmations.len(), 3);
+        let mut cids = actions[0].executable_confirmation_cids.clone();
+        cids.sort();
+        assert_eq!(cids, vec!["live-bob".to_string(), "live-gov".to_string()]);
+        assert_eq!(actions[0].confirmation_count, 2);
+        assert!(actions[0].can_execute);
+    }
+
+    #[test]
+    fn executable_confirmation_cids_skip_non_members() {
+        let now = 1_700_000_000;
+        let members: HashSet<CantonId> = [cid(ALICE), cid(BOB)].into_iter().collect();
+        let confs = vec![
+            domain_confirmation("member", "proposal-1", ALICE, 100, now + 3600),
+            domain_confirmation("removed", "proposal-1", GOV, 100, now + 3600),
+        ];
+
+        let actions = single_proposal_actions(confs, 2, Some(&members), now);
+
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].confirmations.len(), 2);
+        assert_eq!(
+            actions[0].executable_confirmation_cids,
+            vec!["member".to_string()]
+        );
+        assert_eq!(actions[0].confirmation_count, 1);
+        assert!(!actions[0].can_execute);
+    }
+
+    #[test]
+    fn executable_confirmation_cids_skip_confirmations_inside_the_margin() {
+        let now = 1_700_000_000;
+        let edge = now + EXECUTE_EXPIRY_MARGIN_SECONDS;
+        assert!(!is_executable(edge, now));
+        assert!(is_executable(edge + 1, now));
+        assert!(is_executable(0, now));
+
+        let confs = vec![
+            domain_confirmation("near-expiry", "proposal-1", ALICE, 100, edge),
+            domain_confirmation("safe", "proposal-1", BOB, 100, edge + 1),
+        ];
+
+        let actions = single_proposal_actions(confs, 2, None, now);
+
+        assert_eq!(actions.len(), 1);
+        assert_eq!(
+            actions[0].executable_confirmation_cids,
+            vec!["safe".to_string()]
+        );
+        assert_eq!(actions[0].confirmation_count, 1);
+        assert!(!actions[0].can_execute);
+    }
+
     #[test]
     fn threshold_boundaries() {
         let now = 1_700_000_000;
@@ -1333,6 +1459,7 @@ mod tests {
             true,
             true,
             2,
+            None,
             now,
         );
         assert_eq!(actions.len(), 1);
@@ -1352,6 +1479,7 @@ mod tests {
             true,
             true,
             0,
+            None,
             now,
         );
         assert_eq!(actions.len(), 1);
@@ -1373,6 +1501,7 @@ mod tests {
             true,
             true,
             2,
+            None,
             now,
         );
         assert_eq!(actions.len(), 1);
@@ -1399,6 +1528,7 @@ mod tests {
             true,
             true,
             1,
+            None,
             1_700_000_000,
         );
 
@@ -1424,6 +1554,7 @@ mod tests {
             false,
             true,
             1,
+            None,
             1_700_000_000,
         );
 
@@ -1443,16 +1574,19 @@ mod tests {
         };
 
         // proposal_infos_complete alone is not enough.
-        let actions = assemble_domain_actions(HashMap::new(), fixture_infos(), true, false, 1, 0);
+        let actions =
+            assemble_domain_actions(HashMap::new(), fixture_infos(), true, false, 1, None, 0);
         assert!(actions.is_empty());
 
         // domain_confirmations_complete alone is not enough.
-        let actions = assemble_domain_actions(HashMap::new(), fixture_infos(), false, true, 1, 0);
+        let actions =
+            assemble_domain_actions(HashMap::new(), fixture_infos(), false, true, 1, None, 0);
         assert!(actions.is_empty());
 
         // Both complete -> the unconfirmed proposal is synthesized as a
         // zero-confirmation card.
-        let actions = assemble_domain_actions(HashMap::new(), fixture_infos(), true, true, 1, 0);
+        let actions =
+            assemble_domain_actions(HashMap::new(), fixture_infos(), true, true, 1, None, 0);
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].proposal_cid, "unconfirmed-cid");
         assert_eq!(actions[0].confirmation_count, 0);
@@ -1477,7 +1611,7 @@ mod tests {
 
         let mut infos = HashMap::new();
         infos.insert(proposal_cid, info);
-        let actions = assemble_domain_actions(HashMap::new(), infos, true, true, 2, 0);
+        let actions = assemble_domain_actions(HashMap::new(), infos, true, true, 2, None, 0);
 
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].action_label, "PauseTrading");
@@ -1494,7 +1628,7 @@ mod tests {
             proposal_info_fixture(Some("SetupCcPreapproval")),
         );
 
-        let actions = assemble_domain_actions(HashMap::new(), infos, true, true, 2, 0);
+        let actions = assemble_domain_actions(HashMap::new(), infos, true, true, 2, None, 0);
 
         assert_eq!(actions.len(), 1);
         let action = &actions[0];
@@ -1513,7 +1647,7 @@ mod tests {
         let mut infos = HashMap::new();
         infos.insert("cid-no-label".to_string(), proposal_info_fixture(None));
 
-        let actions = assemble_domain_actions(HashMap::new(), infos, true, true, 1, 0);
+        let actions = assemble_domain_actions(HashMap::new(), infos, true, true, 1, None, 0);
 
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].action_label, "Proposal");
