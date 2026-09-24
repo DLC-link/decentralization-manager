@@ -444,7 +444,9 @@ impl PeerExpectations {
     ///
     /// Only the new member holds the new member's keys, so only it can pin the
     /// added owner and key to them; every other peer checks that at most one
-    /// was added.
+    /// was added. Its refusal blocks the P2P, which Canton makes an added host
+    /// sign, but not the DNS: an added owner is authorized by its own key and
+    /// the existing owners' quorum, not by the new participant.
     ///
     /// A proposal at the head serial that equals the head mapping is already
     /// effective (a threshold-1 namespace applies it on `Authorize`), so
