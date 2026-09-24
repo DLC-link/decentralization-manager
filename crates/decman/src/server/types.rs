@@ -564,8 +564,7 @@ pub struct DomainGovernanceAction {
     pub confirmations: Vec<DomainConfirmation>,
     /// Number of unique confirmers
     pub confirmation_count: usize,
-    /// Contract ids of the live confirmations, the set Execute submits
-    #[serde(default)]
+    /// Contract ids of the confirmations Execute submits
     pub executable_confirmation_cids: Vec<String>,
     /// Whether threshold is met for execution
     pub can_execute: bool,
@@ -697,8 +696,7 @@ pub struct GovernanceAction {
     pub confirmations: Vec<GovernanceConfirmation>,
     /// Number of confirmations
     pub confirmation_count: usize,
-    /// Contract ids of the live confirmations, the set Execute submits
-    #[serde(default)]
+    /// Contract ids of the confirmations Execute submits
     pub executable_confirmation_cids: Vec<String>,
     /// Whether threshold is met for execution
     pub can_execute: bool,
