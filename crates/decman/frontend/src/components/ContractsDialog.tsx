@@ -136,6 +136,17 @@ const createEmptyContract = (): ContractDefinition => ({
   fields: [],
 });
 
+const commitPartyInput = (
+  input: HTMLInputElement | HTMLTextAreaElement,
+  parties: string[],
+  onCommit: (parties: string[]) => void,
+) => {
+  const party = input.value.trim();
+  if (!party) return;
+  if (!parties.includes(party)) onCommit([...parties, party]);
+  input.value = "";
+};
+
 // Governance Core contract definitions
 const getGovernanceCoreContracts = (
   participantCount: number = 3,
@@ -321,19 +332,23 @@ const FieldEditor = ({
           >
             <TextField
               size="small"
-              placeholder="Paste party ID, press Enter"
+              placeholder="Paste party ID, press Enter or click away"
               fullWidth
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
-                  const input = e.target as HTMLInputElement;
-                  const value = input.value.trim();
-                  if (value && !field.parties.includes(value)) {
-                    onChange({ ...field, parties: [...field.parties, value] });
-                    input.value = "";
-                  }
+                  commitPartyInput(
+                    e.currentTarget as HTMLInputElement,
+                    field.parties,
+                    (parties) => onChange({ ...field, parties }),
+                  );
                   e.preventDefault();
                 }
               }}
+              onBlur={(e) =>
+                commitPartyInput(e.target, field.parties, (parties) =>
+                  onChange({ ...field, parties }),
+                )
+              }
               slotProps={{
                 input: {
                   endAdornment: fieldHelpAdornment(
@@ -567,7 +582,7 @@ const FieldEditor = ({
               >
                 <TextField
                   size="small"
-                  placeholder="Paste party ID, press Enter (leave empty for no extra proposers)"
+                  placeholder="Paste party ID, press Enter or click away (leave empty for no extra proposers)"
                   fullWidth
                   slotProps={{
                     input: {
@@ -579,21 +594,27 @@ const FieldEditor = ({
                   }}
                   onKeyDown={(e) => {
                     if (e.key === "Enter") {
-                      const input = e.target as HTMLInputElement;
-                      const value = input.value.trim();
                       const inner = field.inner as { parties: string[] };
-                      if (value && !inner.parties.includes(value)) {
-                        onChange({
-                          ...field,
-                          inner: {
-                            type: "party_set",
-                            parties: [...inner.parties, value],
-                          },
-                        });
-                        input.value = "";
-                      }
+                      commitPartyInput(
+                        e.currentTarget as HTMLInputElement,
+                        inner.parties,
+                        (parties) =>
+                          onChange({
+                            ...field,
+                            inner: { type: "party_set", parties },
+                          }),
+                      );
                       e.preventDefault();
                     }
+                  }}
+                  onBlur={(e) => {
+                    const inner = field.inner as { parties: string[] };
+                    commitPartyInput(e.target, inner.parties, (parties) =>
+                      onChange({
+                        ...field,
+                        inner: { type: "party_set", parties },
+                      }),
+                    );
                   }}
                 />
                 {(field.inner as { parties: string[] }).parties.length > 0 && (
@@ -1636,23 +1657,27 @@ export const ContractsDialog = ({
                   >
                     <TextField
                       size="small"
-                      placeholder="Paste party ID, press Enter"
+                      placeholder="Paste party ID, press Enter or click away"
                       fullWidth
                       onKeyDown={(e) => {
                         if (e.key === "Enter") {
-                          const input = e.target as HTMLInputElement;
-                          const value = input.value.trim();
-                          if (
-                            value &&
-                            participantParties.length < participantIds.length
-                          ) {
-                            setParticipantParties([
-                              ...participantParties,
-                              value,
-                            ]);
-                            input.value = "";
+                          if (participantParties.length < participantIds.length) {
+                            commitPartyInput(
+                              e.currentTarget as HTMLInputElement,
+                              participantParties,
+                              setParticipantParties,
+                            );
                           }
                           e.preventDefault();
+                        }
+                      }}
+                      onBlur={(e) => {
+                        if (participantParties.length < participantIds.length) {
+                          commitPartyInput(
+                            e.target,
+                            participantParties,
+                            setParticipantParties,
+                          );
                         }
                       }}
                       disabled={
