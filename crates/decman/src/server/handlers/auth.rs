@@ -1,15 +1,17 @@
-use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
+use actix_web::{HttpRequest, HttpResponse, Responder, get, http::header::RETRY_AFTER, post, web};
 use base64::Engine;
 use canton_proto_rs::com::daml::ledger::api::v2::admin::{
     GrantUserRightsRequest, ListUserRightsRequest, Right,
     right::{CanActAs, CanReadAs, Kind},
 };
-use keycloak::login::{ClientCredentialsParams, client_credentials, token_url};
+use keycloak::login::token_url;
+use reqwest::StatusCode;
+use serde::Deserialize;
 
 use crate::{
-    auth::WorkflowAuth,
+    auth::{WorkflowAuth, auth0_token_body, auth0_token_url, truncate_for_log},
     canton_id::CantonId,
-    config::{Auth0M2MConfig, NodeConfig, PartyCredentials},
+    config::{NodeConfig, PartyCredentials},
     error::Result,
     server::{
         AppState,
@@ -430,12 +432,7 @@ impl AdminTokenSource {
     /// The absolute `client_credentials` token endpoint for this source.
     fn token_endpoint(&self) -> String {
         match self {
-            Self::Auth0 { domain, .. } => {
-                format!(
-                    "https://{domain}/oauth/token",
-                    domain = domain.trim_end_matches('/')
-                )
-            }
+            Self::Auth0 { domain, .. } => auth0_token_url(domain),
             Self::Keycloak { url, realm } => token_url(url, realm),
         }
     }
@@ -450,46 +447,116 @@ impl AdminTokenSource {
     }
 }
 
-/// Mint an admin access token from `source` using the operator-supplied client
-/// credentials.
+/// Why an admin token mint failed.
+#[derive(Debug, thiserror::Error)]
+enum AdminMintError {
+    /// The IdP answered 400, 401 or 403: the supplied client id or secret is wrong.
+    #[error("{message}")]
+    Rejected { status: u16, message: String },
+    /// The IdP answered 429. `retry_after` is its `Retry-After` header, if any.
+    #[error("{message}")]
+    RateLimited {
+        retry_after: Option<String>,
+        message: String,
+    },
+    /// The IdP was unreachable, failed, or sent a response we cannot parse.
+    #[error("{message}")]
+    Upstream {
+        status: Option<u16>,
+        message: String,
+    },
+}
+
+impl AdminMintError {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Rejected { .. } => "rejected",
+            Self::RateLimited { .. } | Self::Upstream { .. } => "upstream",
+        }
+    }
+
+    fn status(&self) -> Option<u16> {
+        match self {
+            Self::Rejected { status, .. } => Some(*status),
+            Self::RateLimited { .. } => Some(StatusCode::TOO_MANY_REQUESTS.as_u16()),
+            Self::Upstream { status, .. } => *status,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct AdminTokenResponse {
+    access_token: String,
+}
+
+/// Mint an admin access token at `token_url` in the request shape of `source`,
+/// using the operator-supplied client credentials.
 ///
 /// # Errors
 ///
-/// Propagates the IdP's rejection or transport failure.
+/// Returns [`AdminMintError::Rejected`] when the IdP refuses the credentials and
+/// [`AdminMintError::Upstream`] for transport failures, other error statuses and
+/// unparseable responses.
 async fn mint_admin_token(
     http: &reqwest::Client,
+    token_url: &str,
     source: &AdminTokenSource,
-    client_id: String,
-    client_secret: String,
-) -> Result<String> {
-    match source {
-        AdminTokenSource::Auth0 { domain, audience } => {
-            let response = crate::auth::auth0_client_credentials(
-                http,
-                &Auth0M2MConfig {
-                    domain: domain.clone(),
-                    audience: audience.clone(),
-                    client_id,
-                    client_secret,
-                },
-            )
-            .await?;
-            Ok(response.access_token)
+    client_id: &str,
+    client_secret: &str,
+) -> std::result::Result<String, AdminMintError> {
+    let request = http.post(token_url);
+    let request = match source {
+        AdminTokenSource::Auth0 { audience, .. } => {
+            request.json(&auth0_token_body(client_id, client_secret, audience))
         }
-        AdminTokenSource::Keycloak { .. } => {
-            // The keycloak crate builds its own client (it is on a different
-            // reqwest major than this crate, so `http` cannot be shared with
-            // it) and reports failures as a plain String.
-            let response = client_credentials(ClientCredentialsParams {
-                url: source.token_endpoint(),
-                client_id,
-                client_secret,
-            })
-            .await
-            .map_err(|e| anyhow::anyhow!("Keycloak client_credentials failed: {e}"))?;
-            Ok(response.access_token)
+        AdminTokenSource::Keycloak { .. } => request.form(&[
+            ("grant_type", "client_credentials"),
+            ("client_id", client_id),
+            ("client_secret", client_secret),
+        ]),
+    };
+
+    let response = request.send().await.map_err(|e| AdminMintError::Upstream {
+        status: None,
+        message: format!("Token request failed: {e}"),
+    })?;
+    let status = response.status();
+    if !status.is_success() {
+        let retry_after = response
+            .headers()
+            .get(RETRY_AFTER.as_str())
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let body = response.text().await.unwrap_or_default();
+        let message = format!(
+            "Token endpoint returned {status}: {body}",
+            body = truncate_for_log(&body),
+        );
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            return Err(AdminMintError::RateLimited {
+                retry_after,
+                message,
+            });
         }
+        let status = status.as_u16();
+        return Err(if matches!(status, 400 | 401 | 403) {
+            AdminMintError::Rejected { status, message }
+        } else {
+            AdminMintError::Upstream {
+                status: Some(status),
+                message,
+            }
+        });
     }
+
+    response
+        .json::<AdminTokenResponse>()
+        .await
+        .map(|token| token.access_token)
+        .map_err(|e| AdminMintError::Upstream {
+            status: Some(status.as_u16()),
+            message: format!("Token response parse failed: {e}"),
+        })
 }
 
 /// Grant actAs + readAs rights on the member party and the dec party to the
@@ -500,8 +567,14 @@ async fn mint_admin_token(
     responses(
         (status = 200, description = "Rights granted; current rights returned", body = GrantRightsResponse),
         (status = 400, description = "Bad request", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid session token", body = ErrorResponse),
+        (status = 403, description = "Caller is not an admin", body = ErrorResponse),
         (status = 404, description = "Party not configured", body = ErrorResponse),
-        (status = 500, description = "Grant failed", body = ErrorResponse)
+        (status = 422, description = "Admin credentials rejected by the IdP", body = ErrorResponse),
+        (status = 500, description = "Grant failed", body = ErrorResponse),
+        (status = 502, description = "IdP unreachable or failed", body = ErrorResponse),
+        (status = 503, description = "IdP rate-limited the admin token mint; retry after the \
+            `Retry-After` header when present", body = ErrorResponse)
     )
 )]
 #[post("/auth/grant-rights")]
@@ -588,21 +661,44 @@ pub async fn grant_rights(
 
     let admin_token = match mint_admin_token(
         &data.http_client,
+        &admin_source.token_endpoint(),
         &admin_source,
-        admin_client_id,
-        admin_client_secret,
+        &admin_client_id,
+        &admin_client_secret,
     )
     .await
     {
         Ok(token) => token,
         Err(e) => {
-            // Full chain to logs (the IdP client's Display can include request
-            // URL / response body — keep it server-side); generic message in
-            // the response so we don't surface reflected secrets.
-            tracing::warn!("Failed to mint admin token for grant-rights: {e:#}");
-            return HttpResponse::Unauthorized().json(ErrorResponse {
-                error: format!("Admin {idp} auth failed", idp = admin_source.idp()),
-            });
+            // The error carries the IdP response body, so keep it in the logs
+            // and return a generic message that cannot reflect secrets.
+            let idp = admin_source.idp();
+            tracing::warn!(
+                kind = e.kind(),
+                idp,
+                status = e.status(),
+                party = %dec_party_id,
+                "Failed to mint admin token for grant-rights: {e}"
+            );
+            return match e {
+                AdminMintError::Rejected { .. } => {
+                    HttpResponse::UnprocessableEntity().json(ErrorResponse {
+                        error: format!("Admin {idp} auth failed"),
+                    })
+                }
+                AdminMintError::RateLimited { retry_after, .. } => {
+                    let mut response = HttpResponse::ServiceUnavailable();
+                    if let Some(retry_after) = retry_after {
+                        response.insert_header((RETRY_AFTER, retry_after));
+                    }
+                    response.json(ErrorResponse {
+                        error: format!("Admin {idp} token endpoint is rate-limiting requests"),
+                    })
+                }
+                AdminMintError::Upstream { .. } => HttpResponse::BadGateway().json(ErrorResponse {
+                    error: format!("Admin {idp} token endpoint failed"),
+                }),
+            };
         }
     };
 
@@ -736,17 +832,24 @@ mod tests {
 
     use actix_web::{
         App,
-        http::{StatusCode, header::AUTHORIZATION},
+        http::{
+            StatusCode,
+            header::{AUTHORIZATION, HeaderMap, RETRY_AFTER},
+        },
         test::{self, TestRequest},
         web::Data,
     };
     use serde_json::{Value, json};
     use sqlx::SqlitePool;
     use tokio::sync::{Mutex, RwLock};
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{body_json, body_string, header, method, path, path_regex},
+    };
 
-    use super::{AdminTokenSource, grant_rights};
+    use super::{AdminMintError, AdminTokenSource, grant_rights, mint_admin_token};
     use crate::{
-        auth::{MockAuthRegistry, MockValidator, TokenValidator, WorkflowAuth},
+        auth::{AuthRegistry, MockAuthRegistry, MockValidator, TokenValidator, WorkflowAuth},
         canton_id::CantonId,
         config::{
             Auth0Config, Auth0M2MConfig, KeycloakConfig, NodeConfig, PackageConfig,
@@ -992,6 +1095,108 @@ mod tests {
         );
     }
 
+    const KEYCLOAK_TOKEN_PATH: &str = "/realms/decman/protocol/openid-connect/token";
+
+    /// The Keycloak mint must stay a form-encoded `client_credentials` request;
+    /// the mock only answers the exact form, so any drift fails the mint.
+    #[tokio::test]
+    async fn keycloak_admin_mint_sends_the_client_credentials_form() -> anyhow::Result<()> {
+        let idp = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(KEYCLOAK_TOKEN_PATH))
+            .and(header("content-type", "application/x-www-form-urlencoded"))
+            .and(body_string(
+                "grant_type=client_credentials&client_id=validator-admin&client_secret=admin-secret",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"access_token": "admin-token", "expires_in": 300})),
+            )
+            .expect(1)
+            .mount(&idp)
+            .await;
+        let mut party = keycloak_party();
+        party.keycloak.url = idp.uri();
+        let source = AdminTokenSource::from_party(&party).map_err(anyhow::Error::msg)?;
+
+        let token = mint_admin_token(
+            &reqwest::Client::new(),
+            &source.token_endpoint(),
+            &source,
+            "validator-admin",
+            "admin-secret",
+        )
+        .await?;
+
+        assert_eq!(token, "admin-token");
+        Ok(())
+    }
+
+    /// Auth0 takes JSON, not a form, and refuses a request without `audience`.
+    #[tokio::test]
+    async fn auth0_admin_mint_sends_the_client_credentials_json() -> anyhow::Result<()> {
+        let idp = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/oauth/token"))
+            .and(header("content-type", "application/json"))
+            .and(body_json(json!({
+                "grant_type": "client_credentials",
+                "client_id": "validator-admin",
+                "client_secret": "admin-secret",
+                "audience": LEDGER_AUDIENCE,
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"access_token": "admin-token", "expires_in": 300})),
+            )
+            .expect(1)
+            .mount(&idp)
+            .await;
+        let source = AdminTokenSource::from_party(&auth0_party()).map_err(anyhow::Error::msg)?;
+
+        let token = mint_admin_token(
+            &reqwest::Client::new(),
+            &format!("{base}/oauth/token", base = idp.uri()),
+            &source,
+            "validator-admin",
+            "admin-secret",
+        )
+        .await?;
+
+        assert_eq!(token, "admin-token");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn admin_mint_keeps_the_idp_retry_after() -> anyhow::Result<()> {
+        let idp = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(KEYCLOAK_TOKEN_PATH))
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "30"))
+            .mount(&idp)
+            .await;
+        let mut party = keycloak_party();
+        party.keycloak.url = idp.uri();
+        let source = AdminTokenSource::from_party(&party).map_err(anyhow::Error::msg)?;
+
+        let result = mint_admin_token(
+            &reqwest::Client::new(),
+            &source.token_endpoint(),
+            &source,
+            "validator-admin",
+            "admin-secret",
+        )
+        .await;
+
+        match result {
+            Err(AdminMintError::RateLimited { retry_after, .. }) => {
+                assert_eq!(retry_after.as_deref(), Some("30"));
+            }
+            other => panic!("expected a rate-limit error, got {other:?}"),
+        }
+        Ok(())
+    }
+
     /// `require_admin` rejects requests that arrive without a `Principal`
     /// attached. We skip the `AuthMiddleware` wrap here so no principal is
     /// injected — that's the production path when a request slips past auth
@@ -1012,6 +1217,123 @@ mod tests {
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Call grant-rights on a Keycloak party whose token endpoint issues the
+    /// party token, then answers the admin mint with `admin_mint`.
+    async fn grant_rights_with_admin_mint(
+        admin_mint: ResponseTemplate,
+    ) -> anyhow::Result<(StatusCode, HeaderMap, Value)> {
+        let keycloak = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r".*/token$"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"access_token": "party-token", "expires_in": 300})),
+            )
+            .mount(&keycloak)
+            .await;
+
+        let mut party = keycloak_party();
+        party.keycloak.url = keycloak.uri();
+        party.keycloak.client_secret = Some("party-secret".to_string());
+        let registry = AuthRegistry::new(std::slice::from_ref(&party)).await?;
+
+        keycloak.reset().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r".*/token$"))
+            .respond_with(admin_mint)
+            .mount(&keycloak)
+            .await;
+
+        let state = build_state_with(NodeConfig::default(), None, false).await;
+        *state.auth.write().await = Some(WorkflowAuth::Keycloak(Arc::new(registry)));
+        state.party_credentials.write().await.push(party);
+        let app = test::init_service(
+            App::new()
+                .app_data(state)
+                .wrap(AuthMiddleware)
+                .service(grant_rights),
+        )
+        .await;
+        let req = TestRequest::post()
+            .uri("/auth/grant-rights")
+            .insert_header((AUTHORIZATION, "Bearer any-token"))
+            .set_json(json!({
+                "dec_party_id": VALID_CANTON_ID,
+                "admin_client_id": "validator-admin",
+                "admin_client_secret": "wrong-secret",
+            }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let body: Value = test::read_body_json(resp).await;
+        Ok((status, headers, body))
+    }
+
+    /// #421: a rejected admin client id or secret is a problem with the
+    /// request body, not with the caller's session. A 401 here made the UI
+    /// treat it as an expired session and log the operator out.
+    #[actix_web::test]
+    async fn grant_rights_rejects_bad_admin_credentials_without_401() -> anyhow::Result<()> {
+        let (status, _, body) = grant_rights_with_admin_mint(
+            ResponseTemplate::new(401).set_body_json(json!({"error": "unauthorized_client"})),
+        )
+        .await?;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["error"], "Admin Keycloak auth failed");
+        Ok(())
+    }
+
+    #[actix_web::test]
+    async fn grant_rights_reports_idp_server_error_as_bad_gateway() -> anyhow::Result<()> {
+        let (status, _, body) = grant_rights_with_admin_mint(ResponseTemplate::new(503)).await?;
+
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(body["error"], "Admin Keycloak token endpoint failed");
+        Ok(())
+    }
+
+    #[actix_web::test]
+    async fn grant_rights_reports_malformed_token_response_as_bad_gateway() -> anyhow::Result<()> {
+        let (status, _, body) =
+            grant_rights_with_admin_mint(ResponseTemplate::new(200).set_body_string("not json"))
+                .await?;
+
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(body["error"], "Admin Keycloak token endpoint failed");
+        Ok(())
+    }
+
+    /// Retry-After is only a hint; the caller has to see it to back off.
+    #[actix_web::test]
+    async fn grant_rights_reports_idp_rate_limit_as_unavailable() -> anyhow::Result<()> {
+        let (status, headers, body) = grant_rights_with_admin_mint(
+            ResponseTemplate::new(429).insert_header("Retry-After", "30"),
+        )
+        .await?;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            headers.get(RETRY_AFTER).map(|v| v.as_bytes()),
+            Some(b"30".as_slice())
+        );
+        assert_eq!(
+            body["error"],
+            "Admin Keycloak token endpoint is rate-limiting requests"
+        );
+        Ok(())
+    }
+
+    #[actix_web::test]
+    async fn grant_rights_rate_limit_without_retry_after_sends_none() -> anyhow::Result<()> {
+        let (status, headers, _) = grant_rights_with_admin_mint(ResponseTemplate::new(429)).await?;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(headers.get(RETRY_AFTER).is_none());
+        Ok(())
     }
 
     fn auth0_config(scope: Option<&str>) -> NodeConfig {
