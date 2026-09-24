@@ -435,7 +435,12 @@ async fn bounded_read<T>(
 /// Query parameters for decentralized parties endpoint
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
 pub struct PartiesQuery {
-    /// Filter parties by prefix (e.g., "cbtc-network")
+    /// Filter parties by prefix (e.g., "cbtc-network").
+    ///
+    /// Parties this node already knows locally (credentials, workflow runs,
+    /// cache) that match the prefix suppress discovery. A node that knows
+    /// `cbtc::A` and also hosts an unknown `cbtc-v2::B` answers `cb` with A
+    /// only. The unfiltered list behaves the same way.
     #[serde(default)]
     pub prefix: Option<String>,
     /// Force a synchronous Canton fetch, bypassing the cache. Used right after
