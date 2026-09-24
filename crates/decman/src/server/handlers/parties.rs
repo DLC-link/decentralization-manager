@@ -2537,13 +2537,22 @@ mod tests {
         // The prefix narrows within the namespace, and picks the party by name
         // rather than by whichever mapping arrived last.
         let filtered = pair_namespaces_with_parties(
-            vec![definition],
+            vec![definition.clone()],
             &parties_by_namespace,
             &fingerprints,
             Some("beta"),
         );
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].2.party, format!("beta::{namespace}"));
+
+        let partial = pair_namespaces_with_parties(
+            vec![definition],
+            &parties_by_namespace,
+            &fingerprints,
+            Some("b"),
+        );
+        assert_eq!(partial.len(), 1);
+        assert_eq!(partial[0].2.party, format!("beta::{namespace}"));
     }
 
     /// A namespace this node owns no key in is somebody else's party.
@@ -2571,7 +2580,8 @@ mod tests {
     }
 
     /// Canton's `ListParties` matches a bare identifier by prefix on a DB
-    /// store, so a partial prefix goes to it as is.
+    /// store, so a partial prefix goes to it as is. This pins the request
+    /// only; the `create_dec_party` integration phase pins Canton's behavior.
     #[test]
     fn list_parties_request_sends_a_partial_prefix_unchanged() {
         let request = build_list_parties_request(
@@ -2587,34 +2597,6 @@ mod tests {
 
         let unfiltered = build_list_parties_request(Vec::new(), None, "participant::abc123");
         assert_eq!(unfiltered.filter_party, "");
-    }
-
-    #[test]
-    fn a_partial_prefix_keeps_the_parties_it_starts() {
-        let namespace = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
-        let mine = "1220aaaa";
-        let definition = DecentralizedNamespaceDefinition {
-            decentralized_namespace: namespace.to_string(),
-            threshold: 1,
-            owners: vec![mine.to_string()],
-        };
-        let parties_by_namespace = HashMap::from([(
-            namespace.to_string(),
-            vec![
-                a_mapping(&format!("cbtc::{namespace}")),
-                a_mapping(&format!("other::{namespace}")),
-            ],
-        )]);
-
-        let paired = pair_namespaces_with_parties(
-            vec![definition],
-            &parties_by_namespace,
-            &HashSet::from([mine.to_string()]),
-            Some("cb"),
-        );
-
-        let found: Vec<_> = paired.iter().map(|(_, _, p2p)| p2p.party.clone()).collect();
-        assert_eq!(found, vec![format!("cbtc::{namespace}")]);
     }
 
     fn a_mapping(party: &str) -> PartyToParticipant {
