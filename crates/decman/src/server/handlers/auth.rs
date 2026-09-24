@@ -1,10 +1,11 @@
-use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
+use actix_web::{HttpRequest, HttpResponse, Responder, get, http::header::RETRY_AFTER, post, web};
 use base64::Engine;
 use canton_proto_rs::com::daml::ledger::api::v2::admin::{
     GrantUserRightsRequest, ListUserRightsRequest, Right,
     right::{CanActAs, CanReadAs, Kind},
 };
 use keycloak::login::token_url;
+use reqwest::StatusCode;
 use serde::Deserialize;
 
 use crate::{
@@ -452,6 +453,12 @@ enum AdminMintError {
     /// The IdP answered 400, 401 or 403: the supplied client id or secret is wrong.
     #[error("{message}")]
     Rejected { status: u16, message: String },
+    /// The IdP answered 429. `retry_after` is its `Retry-After` header, if any.
+    #[error("{message}")]
+    RateLimited {
+        retry_after: Option<String>,
+        message: String,
+    },
     /// The IdP was unreachable, failed, or sent a response we cannot parse.
     #[error("{message}")]
     Upstream {
@@ -464,13 +471,14 @@ impl AdminMintError {
     fn kind(&self) -> &'static str {
         match self {
             Self::Rejected { .. } => "rejected",
-            Self::Upstream { .. } => "upstream",
+            Self::RateLimited { .. } | Self::Upstream { .. } => "upstream",
         }
     }
 
     fn status(&self) -> Option<u16> {
         match self {
             Self::Rejected { status, .. } => Some(*status),
+            Self::RateLimited { .. } => Some(StatusCode::TOO_MANY_REQUESTS.as_u16()),
             Self::Upstream { status, .. } => *status,
         }
     }
@@ -513,11 +521,22 @@ async fn mint_admin_token(
     })?;
     let status = response.status();
     if !status.is_success() {
+        let retry_after = response
+            .headers()
+            .get(RETRY_AFTER.as_str())
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
         let body = response.text().await.unwrap_or_default();
         let message = format!(
             "Token endpoint returned {status}: {body}",
             body = truncate_for_log(&body),
         );
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            return Err(AdminMintError::RateLimited {
+                retry_after,
+                message,
+            });
+        }
         let status = status.as_u16();
         return Err(if matches!(status, 400 | 401 | 403) {
             AdminMintError::Rejected { status, message }
@@ -552,7 +571,9 @@ async fn mint_admin_token(
         (status = 404, description = "Party not configured", body = ErrorResponse),
         (status = 422, description = "Admin credentials rejected by the IdP", body = ErrorResponse),
         (status = 500, description = "Grant failed", body = ErrorResponse),
-        (status = 502, description = "IdP unreachable or failed", body = ErrorResponse)
+        (status = 502, description = "IdP unreachable or failed", body = ErrorResponse),
+        (status = 503, description = "IdP rate-limited the admin token mint; retry after the \
+            `Retry-After` header when present", body = ErrorResponse)
     )
 )]
 #[post("/auth/grant-rights")]
@@ -661,6 +682,15 @@ pub async fn grant_rights(
                 AdminMintError::Rejected { .. } => {
                     HttpResponse::UnprocessableEntity().json(ErrorResponse {
                         error: format!("Admin {idp} auth failed"),
+                    })
+                }
+                AdminMintError::RateLimited { retry_after, .. } => {
+                    let mut response = HttpResponse::ServiceUnavailable();
+                    if let Some(retry_after) = retry_after {
+                        response.insert_header((RETRY_AFTER, retry_after));
+                    }
+                    response.json(ErrorResponse {
+                        error: format!("Admin {idp} token endpoint is rate-limiting requests"),
                     })
                 }
                 AdminMintError::Upstream { .. } => HttpResponse::BadGateway().json(ErrorResponse {
@@ -800,7 +830,10 @@ mod tests {
 
     use actix_web::{
         App,
-        http::{StatusCode, header::AUTHORIZATION},
+        http::{
+            StatusCode,
+            header::{AUTHORIZATION, HeaderMap, RETRY_AFTER},
+        },
         test::{self, TestRequest},
         web::Data,
     };
@@ -1086,7 +1119,7 @@ mod tests {
     /// party token, then answers the admin mint with `admin_mint`.
     async fn grant_rights_with_admin_mint(
         admin_mint: ResponseTemplate,
-    ) -> anyhow::Result<(StatusCode, Value)> {
+    ) -> anyhow::Result<(StatusCode, HeaderMap, Value)> {
         let keycloak = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path_regex(r".*/token$"))
@@ -1130,8 +1163,9 @@ mod tests {
             .to_request();
         let resp = test::call_service(&app, req).await;
         let status = resp.status();
+        let headers = resp.headers().clone();
         let body: Value = test::read_body_json(resp).await;
-        Ok((status, body))
+        Ok((status, headers, body))
     }
 
     /// #421: a rejected admin client id or secret is a problem with the
@@ -1139,7 +1173,7 @@ mod tests {
     /// treat it as an expired session and log the operator out.
     #[actix_web::test]
     async fn grant_rights_rejects_bad_admin_credentials_without_401() -> anyhow::Result<()> {
-        let (status, body) = grant_rights_with_admin_mint(
+        let (status, _, body) = grant_rights_with_admin_mint(
             ResponseTemplate::new(401).set_body_json(json!({"error": "unauthorized_client"})),
         )
         .await?;
@@ -1151,7 +1185,7 @@ mod tests {
 
     #[actix_web::test]
     async fn grant_rights_reports_idp_server_error_as_bad_gateway() -> anyhow::Result<()> {
-        let (status, body) = grant_rights_with_admin_mint(ResponseTemplate::new(503)).await?;
+        let (status, _, body) = grant_rights_with_admin_mint(ResponseTemplate::new(503)).await?;
 
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         assert_eq!(body["error"], "Admin Keycloak token endpoint failed");
@@ -1160,12 +1194,41 @@ mod tests {
 
     #[actix_web::test]
     async fn grant_rights_reports_malformed_token_response_as_bad_gateway() -> anyhow::Result<()> {
-        let (status, body) =
+        let (status, _, body) =
             grant_rights_with_admin_mint(ResponseTemplate::new(200).set_body_string("not json"))
                 .await?;
 
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         assert_eq!(body["error"], "Admin Keycloak token endpoint failed");
+        Ok(())
+    }
+
+    /// Retry-After is only a hint; the caller has to see it to back off.
+    #[actix_web::test]
+    async fn grant_rights_reports_idp_rate_limit_as_unavailable() -> anyhow::Result<()> {
+        let (status, headers, body) = grant_rights_with_admin_mint(
+            ResponseTemplate::new(429).insert_header("Retry-After", "30"),
+        )
+        .await?;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            headers.get(RETRY_AFTER).map(|v| v.as_bytes()),
+            Some(b"30".as_slice())
+        );
+        assert_eq!(
+            body["error"],
+            "Admin Keycloak token endpoint is rate-limiting requests"
+        );
+        Ok(())
+    }
+
+    #[actix_web::test]
+    async fn grant_rights_rate_limit_without_retry_after_sends_none() -> anyhow::Result<()> {
+        let (status, headers, _) = grant_rights_with_admin_mint(ResponseTemplate::new(429)).await?;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(headers.get(RETRY_AFTER).is_none());
         Ok(())
     }
 
