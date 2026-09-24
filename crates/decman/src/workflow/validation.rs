@@ -1160,13 +1160,6 @@ async fn check_against_head(
     )
 }
 
-/// The proposed set must be the current on-chain set changed only as the run
-/// allows: unchanged for change-threshold, one entry removed for kick, and at
-/// most one added for add-party (none when a former host is hosted again).
-///
-/// `new_member` pins the added entry when this node knows it. `legacy_source`
-/// marks a current set that may hold departed members' keys, so a proposal
-/// may drop any of them but still add none beyond the new member's.
 /// Whether a proposal is the head transaction itself. The same serial with a
 /// different mapping is refused: Canton would reject it, and the peer cannot
 /// tell what the coordinator meant by it.
@@ -1217,6 +1210,13 @@ fn check_dns_against_head(
     )
 }
 
+/// The proposed set must be the current on-chain set changed only as the run
+/// allows: unchanged for change-threshold, one entry removed for kick, and at
+/// most one added for add-party (none when a former host is hosted again).
+///
+/// `new_member` pins the added entry when this node knows it. `legacy_source`
+/// marks a current set that may hold departed members' keys, so a proposal
+/// may drop any of them but still add none beyond the new member's.
 fn check_set_delta(
     what: &str,
     kind: WorkflowKind,
@@ -2301,15 +2301,19 @@ mod tests {
             None,
             true,
         )?;
-        let error = delta_error(
+        let error = match check_set_delta(
+            "party signing key",
             WorkflowKind::Kick,
-            &["a", "b", "c", "old1"],
-            &["a", "x"],
+            &owners(&["a", "b", "c", "old1"]).into_iter().collect(),
+            &owners(&["a", "x"]),
             None,
             true,
-        );
+        ) {
+            Ok(()) => anyhow::bail!("expected a refusal"),
+            Err(error) => error.to_string(),
+        };
         assert!(
-            error.contains("adds DNS owner"),
+            error.contains("adds party signing key"),
             "unexpected error: {error}"
         );
         Ok(())
