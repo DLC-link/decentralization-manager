@@ -209,6 +209,22 @@ everything that follows (`workflow::validation::PeerExpectations`).
   party does not exist yet — the peer instead checks that the decentralized
   namespace really is the hash of the proposed owner set, and that the P2P
   proposal is for the namespace it signed in the DNS step.
+- For kick / add-party / change-threshold, the peer reads the party's current
+  namespace definition and `PartyToParticipant` from the synchronizer and
+  requires each proposal to be exactly the expected change: change-threshold
+  keeps the owners and signing keys as they are, kick removes exactly one of
+  each, and add-party adds at most one of each (none to the owners when a
+  former host is hosted again). The new member also pins the added owner and
+  key to its own, and refuses the proposal if its own key bundle is missing.
+  A party whose keys still sit in a legacy `PartyToKeyMapping` may drop
+  departed members' keys, and may gain only the new member's key on
+  add-party. A topology read that fails refuses the proposal. A proposal at
+  the head serial that equals the head mapping is already in effect (a
+  threshold-1 namespace applies it when the coordinator proposes it), so the
+  peer signs it without the delta check. The same serial with any other
+  mapping is refused, and so is every serial but the head serial + 1: Canton
+  checks the serial only on submission, so a signature on a later serial could
+  be held back and submitted against a state the peer never checked.
 - Prepared ledger submissions are re-hashed locally from the transaction that
   accompanies them (`canton_hash`), so a signature can only ever authorize the
   transaction the peer can inspect, and that transaction must act as the
@@ -221,19 +237,41 @@ everything that follows (`workflow::validation::PeerExpectations`).
 Any mismatch fails the step. Repeated mismatches abort the peer run.
 
 **What this does not cover.** The checks bound what a coordinator can obtain a
-signature for; they do not make the coordinator trustworthy. Three gaps remain,
+signature for; they do not make the coordinator trustworthy. Six gaps remain,
 and they are load-bearing enough to state rather than imply:
 
-- **A peer cannot verify the other members' namespaces or signing keys.** It
-  only ever sends its own key bundle to the coordinator and never sees the
-  others', so it can confirm that it was not excluded but not that the rest of
-  the owner set and key set belong to the members named in the invitation. A
-  DNS proposal needs `threshold` signatures rather than all of them, so a
-  namespace or key belonging to a member that does not sign this round can be
-  substituted without any signer noticing. Closable for kick / add-party /
-  change-threshold by comparing against the current on-chain state
-  (DLC-link/decentralization-manager#420, #422); not closable for onboarding
-  without a protocol change, because no on-chain state exists yet.
+- **During onboarding a peer cannot verify the other members' namespaces or
+  signing keys.** It only ever sends its own key bundle to the coordinator and
+  never sees the others', so it can confirm that it was not excluded but not
+  that the rest of the owner set and key set belong to the members named in the
+  invitation. A DNS proposal needs `threshold` signatures rather than all of
+  them, so a namespace or key belonging to a member that does not sign can be
+  substituted without any signer noticing. Kick / add-party / change-threshold
+  close this against the on-chain state (above). Onboarding cannot: the party
+  does not exist yet, so there is nothing to compare against. Closing it needs
+  a protocol change, such as peers exchanging key bundles or each contributor
+  attesting the coordinator's aggregated bundle.
+- **An add-party DNS does not tie the added owner to the new member.** Only the
+  new member knows its own namespace, and Canton authorizes an added owner with
+  that owner's key plus the existing owners' quorum, not with the new
+  participant. A coordinator can add an owner it holds in place of the new
+  member's: the existing members see one added owner and sign, and the new
+  member's refusal blocks only the P2P, where an added host must sign. Closing
+  this needs an attestation of the added owner from the new member's
+  participant namespace key.
+- **A kick does not tie the removed owner and key to the kicked member.** A
+  peer only knows its own owner and key, so it checks that exactly one entry of
+  each goes and that its own stay. A coordinator can remove the entries of
+  another member that does not sign this round and leave the kicked member's in
+  place; the P2P proposal still drops the kicked participant, so the counts
+  match. Only the member whose entries vanish can catch it. Closing this needs
+  every surviving member to sign a kick, or an attested key bundle for the
+  kicked member.
+- **A legacy `PartyToKeyMapping` does not bound how many keys a proposal
+  drops.** It still holds departed members' keys, so the removal count is not
+  checked, and a change-threshold can drop one member's key and keep a
+  departed member's key at the same count. Canton then requires the departed
+  key to sign, so this needs the holder of that key to collude.
 - **The contracts workflow constrains who a transaction acts as, not what it
   does.** The peer recomputes the hash and pins `act_as` to the accepted dec
   party, so it can only ever authorize the transaction it can read — but the

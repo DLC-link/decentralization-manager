@@ -296,6 +296,21 @@ pub async fn fetch_p2p_mapping(
     synchronizer_id: &str,
     party_id: &CantonId,
 ) -> Result<PartyToParticipant> {
+    fetch_p2p_mapping_at_head(config, synchronizer_id, party_id)
+        .await
+        .map(|(_, mapping)| mapping)
+}
+
+/// [`fetch_p2p_mapping`] together with the serial of the head transaction.
+///
+/// # Errors
+///
+/// Errors if the party has no mapping or the serial is out of range.
+pub async fn fetch_p2p_mapping_at_head(
+    config: &NodeConfig,
+    synchronizer_id: &str,
+    party_id: &CantonId,
+) -> Result<(u32, PartyToParticipant)> {
     let mut topology_read_client =
         TopologyManagerReadServiceClient::new(config.admin_channel().await?);
 
@@ -322,11 +337,11 @@ pub async fn fetch_p2p_mapping(
             return None;
         }
         let P2pItem::V30(mapping) = r.item?;
-        (mapping.party == party_id.to_string()).then_some(mapping)
+        (mapping.party == party_id.to_string()).then_some((context.serial, mapping))
     });
 
     match mapping {
-        Some(mapping) => Ok(mapping),
+        Some((serial, mapping)) => Ok((u32::try_from(serial)?, mapping)),
         // Saying "no mapping" for a malformed response sends the reader after
         // the wrong problem entirely.
         None if without_context > 0 => anyhow::bail!(
@@ -493,6 +508,51 @@ pub async fn fetch_signed_namespace_definition(
         "No DecentralizedNamespaceDefinition transaction for {namespace_hex} in the \
          synchronizer head state"
     )
+}
+
+/// Fetch the current `DecentralizedNamespaceDefinition` from the synchronizer
+/// head state together with the serial of its transaction.
+///
+/// # Errors
+///
+/// Errors if the namespace is not present as an add-or-replace, or the serial
+/// is out of range.
+pub async fn fetch_namespace_definition_at_head(
+    config: &NodeConfig,
+    synchronizer_id: &str,
+    namespace_hex: &str,
+) -> Result<(u32, DecentralizedNamespaceDefinition)> {
+    let mut topology_read_client =
+        TopologyManagerReadServiceClient::new(config.admin_channel().await?);
+
+    let request = tonic::Request::new(ListDecentralizedNamespaceDefinitionRequest {
+        base_query: Some(head_state_query(synchronizer_id)),
+        filter_namespace: namespace_hex.to_string(),
+    });
+
+    let response = topology_read_client
+        .list_decentralized_namespace_definition(request)
+        .await?
+        .into_inner();
+
+    let (serial, definition) = response
+        .results
+        .into_iter()
+        .find_map(|r| {
+            let context = r.context?;
+            if context.operation != enums::TopologyChangeOp::AddReplace as i32 {
+                return None;
+            }
+            let definition = r.item?;
+            (definition.decentralized_namespace == namespace_hex)
+                .then_some((context.serial, definition))
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Namespace {namespace_hex} has no add-or-replace definition in the head state"
+            )
+        })?;
+    Ok((u32::try_from(serial)?, definition))
 }
 
 /// Fetch the current `DecentralizedNamespaceDefinition` from the synchronizer

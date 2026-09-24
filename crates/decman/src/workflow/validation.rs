@@ -21,8 +21,8 @@ use std::collections::BTreeSet;
 use canton_proto_rs::com::digitalasset::canton::{
     crypto::v30::{SigningKeyUsage, SigningPublicKey},
     protocol::v30::{
-        DecentralizedNamespaceDefinition, PartyToParticipant, SignedTopologyTransaction,
-        TopologyTransaction, enums, topology_mapping,
+        DecentralizedNamespaceDefinition, PartyToKeyMapping, PartyToParticipant,
+        SignedTopologyTransaction, TopologyTransaction, enums, topology_mapping,
     },
 };
 use sha2::{Digest, Sha256};
@@ -41,6 +41,7 @@ use crate::{
         },
         signing_keys::{own_namespace_key, vault_holds},
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
+        topology,
     },
 };
 
@@ -415,12 +416,105 @@ impl PeerExpectations {
             WhenUnrecorded::Skip,
         )
         .await?;
+        self.check_on_chain_delta(
+            config,
+            storage,
+            instance_name,
+            dec_party_id,
+            (decode_proposal_serial(dns_payload)?, &namespace_def),
+            (decode_proposal_serial(p2p_payload)?, &mapping),
+        )
+        .await?;
 
         tracing::info!(
             "{kind:?} proposals match the accepted invitation for {dec_party_id}",
             kind = self.kind
         );
         Ok(())
+    }
+
+    /// Hold both proposals to the party's on-chain state (#420, #422).
+    ///
+    /// Each signer only sees its own namespace and its own Daml key, so an
+    /// owner or key belonging to a member that does not sign this round could
+    /// otherwise be swapped for one the coordinator controls. Reading the
+    /// current definition and mapping pins everything else to what is already
+    /// on-chain plus the one change the run is for. A read that fails refuses
+    /// the proposal: a peer that cannot check it must not sign it.
+    ///
+    /// Only the new member holds the new member's keys, so only it can pin the
+    /// added owner and key to them; every other peer checks that at most one
+    /// was added. Its refusal blocks the P2P, which Canton makes an added host
+    /// sign, but not the DNS: an added owner is authorized by its own key and
+    /// the existing owners' quorum, not by the new participant.
+    ///
+    /// A proposal at the head serial that equals the head mapping is already
+    /// effective (a threshold-1 namespace applies it on `Authorize`), so
+    /// signing it changes nothing and it skips the delta. Any other proposal
+    /// must sit at the next serial.
+    async fn check_on_chain_delta(
+        &self,
+        config: &NodeConfig,
+        storage: &SqlitePool,
+        instance_name: &str,
+        dec_party_id: &CantonId,
+        dns: (u32, &DecentralizedNamespaceDefinition),
+        p2p: (u32, &PartyToParticipant),
+    ) -> Result {
+        let head = SynchronizerHead {
+            config,
+            synchronizer_id: utils::get_synchronizer_id(config).await?,
+        };
+        let new_member = self.new_member_fingerprints(storage, instance_name).await?;
+        check_against_head(
+            &head,
+            self.kind,
+            dec_party_id,
+            dns,
+            p2p,
+            new_member
+                .as_ref()
+                .map(|(namespace, daml)| (namespace.as_str(), daml.as_str())),
+        )
+        .await
+    }
+
+    /// The new member's `(namespace, daml)` fingerprints, when this node is
+    /// the new member. Only it holds its key bundle for the run, and it must.
+    async fn new_member_fingerprints(
+        &self,
+        storage: &SqlitePool,
+        instance_name: &str,
+    ) -> Result<Option<(String, String)>> {
+        let Some(new_member) = &self.new_participant else {
+            return Ok(None);
+        };
+        if new_member != &self.self_id {
+            return Ok(None);
+        }
+        let payload = storage
+            .read_artifact(
+                instance_name,
+                artifact_kinds::PEER_PUBLIC_KEYS,
+                Some(&new_member.to_string()),
+            )
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "this node is the new member but its public keys are not on the \
+                     {instance_name} run, so the added owner and key cannot be pinned to it"
+                )
+            })?;
+        match decode_keys_payload(&payload)?.as_slice() {
+            [namespace, daml] => Ok(Some((
+                utils::compute_fingerprint(namespace),
+                utils::compute_fingerprint(daml),
+            ))),
+            keys => anyhow::bail!(
+                "expected 2 public keys for new member {new_member}, found {count}",
+                count = keys.len()
+            ),
+        }
     }
 
     /// Validate the add-party onboarding-flag clearing proposal: same party,
@@ -960,6 +1054,215 @@ fn namespace_fingerprint(keys: &[SigningPublicKey]) -> Option<String> {
     Some(utils::compute_fingerprint(key))
 }
 
+/// The party's head topology state as this node reads it.
+trait TopologyHead {
+    async fn namespace_definition(
+        &self,
+        namespace: &str,
+    ) -> Result<(u32, DecentralizedNamespaceDefinition)>;
+    async fn p2p_mapping(&self, party: &CantonId) -> Result<(u32, PartyToParticipant)>;
+    async fn party_to_key_mapping(&self, party: &CantonId) -> Result<Option<PartyToKeyMapping>>;
+}
+
+struct SynchronizerHead<'a> {
+    config: &'a NodeConfig,
+    synchronizer_id: String,
+}
+
+impl TopologyHead for SynchronizerHead<'_> {
+    async fn namespace_definition(
+        &self,
+        namespace: &str,
+    ) -> Result<(u32, DecentralizedNamespaceDefinition)> {
+        topology::fetch_namespace_definition_at_head(self.config, &self.synchronizer_id, namespace)
+            .await
+    }
+
+    async fn p2p_mapping(&self, party: &CantonId) -> Result<(u32, PartyToParticipant)> {
+        topology::fetch_p2p_mapping_at_head(self.config, &self.synchronizer_id, party).await
+    }
+
+    async fn party_to_key_mapping(&self, party: &CantonId) -> Result<Option<PartyToKeyMapping>> {
+        topology::fetch_party_to_key_mapping(self.config, &self.synchronizer_id, party).await
+    }
+}
+
+/// `new_member` is this node's `(namespace, daml)` fingerprints when it is the
+/// new member.
+async fn check_against_head(
+    head: &impl TopologyHead,
+    kind: WorkflowKind,
+    dec_party_id: &CantonId,
+    (dns_serial, namespace_def): (u32, &DecentralizedNamespaceDefinition),
+    (p2p_serial, mapping): (u32, &PartyToParticipant),
+    new_member: Option<(&str, &str)>,
+) -> Result {
+    let (head_dns_serial, current_def) = head
+        .namespace_definition(&dec_party_id.namespace.to_hex())
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!("cannot read the current owner set of {dec_party_id}: {e:#}")
+        })?;
+    let (head_p2p_serial, current_p2p) = head.p2p_mapping(dec_party_id).await.map_err(|e| {
+        anyhow::anyhow!("cannot read the current signing keys of {dec_party_id}: {e:#}")
+    })?;
+
+    check_dns_against_head(
+        kind,
+        (dns_serial, namespace_def),
+        (head_dns_serial, &current_def),
+        new_member.map(|(namespace, _)| namespace),
+    )?;
+    if already_applied(
+        "P2P",
+        (p2p_serial, mapping),
+        (head_p2p_serial, &current_p2p),
+    )? {
+        return Ok(());
+    }
+
+    // A party onboarded before Canton 3.4 keeps its keys in a legacy
+    // PartyToKeyMapping that still holds departed members' keys, so the
+    // proposal adopts a subset of it rather than the whole set.
+    let (current_keys, legacy) = match current_p2p.party_signing_keys {
+        Some(keys) if !keys.keys.is_empty() => (keys.keys, false),
+        _ => {
+            let legacy_keys = head
+                .party_to_key_mapping(dec_party_id)
+                .await?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "{dec_party_id} carries neither inline signing keys nor a \
+                         PartyToKeyMapping, so the proposed keys cannot be checked"
+                    )
+                })?;
+            (legacy_keys.signing_keys, true)
+        }
+    };
+
+    let proposed_keys = mapping
+        .party_signing_keys
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("P2P proposal carries no party signing keys"))?;
+
+    check_set_delta(
+        "party signing key",
+        kind,
+        &current_keys
+            .iter()
+            .map(utils::compute_fingerprint)
+            .collect(),
+        &proposed_keys
+            .keys
+            .iter()
+            .map(utils::compute_fingerprint)
+            .collect::<Vec<_>>(),
+        new_member.map(|(_, daml)| daml),
+        legacy,
+    )
+}
+
+/// Whether a proposal is the head transaction itself. The same serial with a
+/// different mapping is refused: Canton would reject it, and the peer cannot
+/// tell what the coordinator meant by it.
+///
+/// Any other proposal must sit at the next serial. Canton checks the serial
+/// only on submission, and the coordinator holds the signatures until then,
+/// so a signature on a later serial could be submitted against a state this
+/// peer never checked.
+fn already_applied<T: PartialEq>(
+    what: &str,
+    (proposal_serial, proposal): (u32, &T),
+    (head_serial, head): (u32, &T),
+) -> Result<bool> {
+    if proposal_serial == head_serial {
+        if proposal != head {
+            anyhow::bail!(
+                "{what} proposal reuses the on-chain serial {head_serial} but differs from the \
+                 on-chain mapping"
+            );
+        }
+        return Ok(true);
+    }
+    if head_serial.checked_add(1) != Some(proposal_serial) {
+        anyhow::bail!(
+            "{what} proposal is at serial {proposal_serial} but the on-chain serial is \
+             {head_serial}; only the next serial can be signed"
+        );
+    }
+    Ok(false)
+}
+
+fn check_dns_against_head(
+    kind: WorkflowKind,
+    proposal: (u32, &DecentralizedNamespaceDefinition),
+    head: (u32, &DecentralizedNamespaceDefinition),
+    new_member: Option<&str>,
+) -> Result {
+    if already_applied("DNS", proposal, head)? {
+        return Ok(());
+    }
+    check_set_delta(
+        "DNS owner",
+        kind,
+        &head.1.owners.iter().cloned().collect(),
+        &proposal.1.owners,
+        new_member,
+        false,
+    )
+}
+
+/// The proposed set must be the current on-chain set changed only as the run
+/// allows: unchanged for change-threshold, one entry removed for kick, and at
+/// most one added for add-party (none when a former host is hosted again).
+///
+/// `new_member` pins the added entry when this node knows it. `legacy_source`
+/// marks a current set that may hold departed members' keys, so a proposal
+/// may drop any of them but still add none beyond the new member's.
+fn check_set_delta(
+    what: &str,
+    kind: WorkflowKind,
+    current: &BTreeSet<String>,
+    proposed: &[String],
+    new_member: Option<&str>,
+    legacy_source: bool,
+) -> Result {
+    let proposed_set: BTreeSet<String> = proposed.iter().cloned().collect();
+    if proposed_set.len() != proposed.len() {
+        anyhow::bail!("proposal repeats a {what}");
+    }
+    let added: Vec<&String> = proposed_set.difference(current).collect();
+    let removed: Vec<&String> = current.difference(&proposed_set).collect();
+
+    let (max_added, removals) = match kind {
+        WorkflowKind::ChangeThreshold => (0, 0),
+        WorkflowKind::Kick => (0, 1),
+        WorkflowKind::AddParty => (1, 0),
+        other => anyhow::bail!("no on-chain {what} delta is defined for a {other:?} run"),
+    };
+    if added.len() > max_added {
+        anyhow::bail!(
+            "{kind:?} proposal adds {what}(s) {added:?} that are not on-chain; it may add at \
+             most {max_added}"
+        );
+    }
+    if !legacy_source && removed.len() != removals {
+        anyhow::bail!(
+            "{kind:?} proposal removes {what}(s) {removed:?} from the on-chain set; it must \
+             remove exactly {removals}"
+        );
+    }
+    if let Some(new_member) = new_member {
+        if let Some(stranger) = added.iter().find(|added| added.as_str() != new_member) {
+            anyhow::bail!("proposal adds {what} {stranger}, not the new member's {new_member}");
+        }
+        if !proposed_set.contains(new_member) {
+            anyhow::bail!("proposal does not carry the new member's {what} {new_member}");
+        }
+    }
+    Ok(())
+}
+
 /// Unwrap a coordinator-supplied `varint(len)||SignedTopologyTransaction`
 /// blob down to the topology mapping it carries.
 ///
@@ -968,6 +1271,17 @@ fn namespace_fingerprint(keys: &[SigningPublicKey]) -> Option<String> {
 /// mapping down, so the operation is pinned here, before anything else looks
 /// at the mapping.
 fn decode_topology_mapping(payload: &[u8]) -> Result<topology_mapping::Mapping> {
+    decode_add_replace(payload)?
+        .mapping
+        .and_then(|mapping| mapping.mapping)
+        .ok_or_else(|| anyhow::anyhow!("topology transaction carries no mapping"))
+}
+
+fn decode_proposal_serial(payload: &[u8]) -> Result<u32> {
+    Ok(decode_add_replace(payload)?.serial)
+}
+
+fn decode_add_replace(payload: &[u8]) -> Result<TopologyTransaction> {
     let signed: SignedTopologyTransaction = utils::read_first_message_from_bytes(payload)?;
     let transaction = utils::decode_versioned::<TopologyTransaction>(&signed.transaction)?;
 
@@ -980,10 +1294,7 @@ fn decode_topology_mapping(payload: &[u8]) -> Result<topology_mapping::Mapping> 
         );
     }
 
-    transaction
-        .mapping
-        .and_then(|mapping| mapping.mapping)
-        .ok_or_else(|| anyhow::anyhow!("topology transaction carries no mapping"))
+    Ok(transaction)
 }
 
 fn decode_namespace_definition(payload: &[u8]) -> Result<DecentralizedNamespaceDefinition> {
@@ -1769,5 +2080,541 @@ mod tests {
             namespace_fingerprint(&[namespace.clone(), daml]),
             Some(utils::compute_fingerprint(&namespace))
         );
+    }
+
+    fn owners(items: &[&str]) -> Vec<String> {
+        items.iter().map(|item| (*item).to_string()).collect()
+    }
+
+    fn delta_error(
+        kind: WorkflowKind,
+        current: &[&str],
+        proposed: &[&str],
+        new_member: Option<&str>,
+        legacy_source: bool,
+    ) -> String {
+        check_set_delta(
+            "DNS owner",
+            kind,
+            &owners(current).into_iter().collect(),
+            &owners(proposed),
+            new_member,
+            legacy_source,
+        )
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_default()
+    }
+
+    #[test]
+    fn change_threshold_keeps_the_on_chain_set() -> Result {
+        check_set_delta(
+            "DNS owner",
+            WorkflowKind::ChangeThreshold,
+            &owners(&["a", "b", "c"]).into_iter().collect(),
+            &owners(&["c", "a", "b"]),
+            None,
+            false,
+        )
+    }
+
+    /// The #420 attack: the count and the signer's own entry stay, but a
+    /// non-signing member's entry is swapped for one the coordinator holds.
+    #[test]
+    fn change_threshold_rejects_a_swapped_entry() {
+        let error = delta_error(
+            WorkflowKind::ChangeThreshold,
+            &["a", "b", "c"],
+            &["a", "b", "x"],
+            None,
+            false,
+        );
+        assert!(
+            error.contains("adds DNS owner"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn kick_removes_exactly_one_entry() -> Result {
+        check_set_delta(
+            "DNS owner",
+            WorkflowKind::Kick,
+            &owners(&["a", "b", "c"]).into_iter().collect(),
+            &owners(&["a", "b"]),
+            None,
+            false,
+        )
+    }
+
+    #[test]
+    fn kick_rejects_a_swap_or_a_second_removal() {
+        let swap = delta_error(
+            WorkflowKind::Kick,
+            &["a", "b", "c"],
+            &["a", "x"],
+            None,
+            false,
+        );
+        assert!(swap.contains("adds DNS owner"), "unexpected error: {swap}");
+        let two = delta_error(WorkflowKind::Kick, &["a", "b", "c"], &["a"], None, false);
+        assert!(
+            two.contains("must remove exactly 1"),
+            "unexpected error: {two}"
+        );
+        let none = delta_error(WorkflowKind::Kick, &["a", "b"], &["a", "b"], None, false);
+        assert!(
+            none.contains("must remove exactly 1"),
+            "unexpected error: {none}"
+        );
+    }
+
+    #[test]
+    fn add_party_adds_at_most_one_entry() -> Result {
+        let current: BTreeSet<String> = owners(&["a", "b"]).into_iter().collect();
+        check_set_delta(
+            "DNS owner",
+            WorkflowKind::AddParty,
+            &current,
+            &owners(&["a", "b", "n"]),
+            None,
+            false,
+        )?;
+        // A former host hosted again leaves the namespace as it is.
+        check_set_delta(
+            "DNS owner",
+            WorkflowKind::AddParty,
+            &current,
+            &owners(&["a", "b"]),
+            None,
+            false,
+        )
+    }
+
+    #[test]
+    fn add_party_rejects_a_second_addition_or_a_removal() {
+        let two = delta_error(
+            WorkflowKind::AddParty,
+            &["a", "b"],
+            &["a", "b", "n", "x"],
+            None,
+            false,
+        );
+        assert!(two.contains("at most 1"), "unexpected error: {two}");
+        let swap = delta_error(
+            WorkflowKind::AddParty,
+            &["a", "b"],
+            &["a", "n", "x"],
+            None,
+            false,
+        );
+        assert!(swap.contains("at most 1"), "unexpected error: {swap}");
+        let dropped = delta_error(
+            WorkflowKind::AddParty,
+            &["a", "b"],
+            &["a", "n"],
+            None,
+            false,
+        );
+        assert!(
+            dropped.contains("must remove exactly 0"),
+            "unexpected error: {dropped}"
+        );
+    }
+
+    #[test]
+    fn add_party_pins_the_addition_to_the_new_member_when_known() -> Result {
+        let error = delta_error(
+            WorkflowKind::AddParty,
+            &["a", "b"],
+            &["a", "b", "x"],
+            Some("n"),
+            false,
+        );
+        assert!(
+            error.contains("not the new member's n"),
+            "unexpected error: {error}"
+        );
+        let missing = delta_error(
+            WorkflowKind::AddParty,
+            &["a", "b"],
+            &["a", "b"],
+            Some("n"),
+            false,
+        );
+        assert!(
+            missing.contains("does not carry the new member's"),
+            "unexpected error: {missing}"
+        );
+        check_set_delta(
+            "DNS owner",
+            WorkflowKind::AddParty,
+            &owners(&["a", "b"]).into_iter().collect(),
+            &owners(&["a", "b", "n"]),
+            Some("n"),
+            false,
+        )
+    }
+
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn the_new_member_refuses_without_its_own_key_bundle(pool: SqlitePool) -> Result {
+        let (a, new_member) = (canton_id("p1", 1)?, canton_id("p2", 2)?);
+        let mut expectations = expectations(vec![a], new_member.clone());
+        expectations.kind = WorkflowKind::AddParty;
+        expectations.new_participant = Some(new_member);
+
+        let error = match expectations.new_member_fingerprints(&pool, "run").await {
+            Ok(found) => anyhow::bail!("expected a refusal, got {found:?}"),
+            Err(error) => format!("{error:#}"),
+        };
+        assert!(
+            error.contains("this node is the new member"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn an_existing_member_has_no_new_member_bundle_to_pin(pool: SqlitePool) -> Result {
+        let (a, new_member) = (canton_id("p1", 1)?, canton_id("p2", 2)?);
+        let mut expectations = expectations(vec![a.clone()], a);
+        expectations.kind = WorkflowKind::AddParty;
+        expectations.new_participant = Some(new_member);
+
+        assert_eq!(
+            expectations.new_member_fingerprints(&pool, "run").await?,
+            None
+        );
+        Ok(())
+    }
+
+    /// A legacy PartyToKeyMapping still holds departed members' keys, so the
+    /// proposal may drop several of them. Only add-party may bring in a new
+    /// one, the new member's.
+    #[test]
+    fn a_legacy_source_allows_dropping_but_not_adding() -> Result {
+        check_set_delta(
+            "party signing key",
+            WorkflowKind::ChangeThreshold,
+            &owners(&["a", "b", "c", "old1", "old2"])
+                .into_iter()
+                .collect(),
+            &owners(&["a", "b", "c"]),
+            None,
+            true,
+        )?;
+        let error = match check_set_delta(
+            "party signing key",
+            WorkflowKind::Kick,
+            &owners(&["a", "b", "c", "old1"]).into_iter().collect(),
+            &owners(&["a", "x"]),
+            None,
+            true,
+        ) {
+            Ok(()) => anyhow::bail!("expected a refusal"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("adds party signing key"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    fn namespace(owners_list: &[&str]) -> DecentralizedNamespaceDefinition {
+        DecentralizedNamespaceDefinition {
+            decentralized_namespace: "dns".to_string(),
+            threshold: 1,
+            owners: owners(owners_list),
+        }
+    }
+
+    #[test]
+    fn accepts_a_kick_already_applied_at_the_proposal_serial() -> Result {
+        let kicked = namespace(&["a", "b"]);
+        check_dns_against_head(WorkflowKind::Kick, (2, &kicked), (2, &kicked), None)?;
+
+        let (a, b) = (canton_id("p1", 1)?, canton_id("p2", 2)?);
+        let mapping = p2p("party", &[a, b], 1);
+        assert!(already_applied("P2P", (2, &mapping), (2, &mapping))?);
+        Ok(())
+    }
+
+    #[test]
+    fn refuses_a_different_mapping_at_the_head_serial() -> Result {
+        let error = match check_dns_against_head(
+            WorkflowKind::Kick,
+            (2, &namespace(&["a", "x"])),
+            (2, &namespace(&["a", "b"])),
+            None,
+        ) {
+            Ok(()) => anyhow::bail!("expected a refusal"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("reuses the on-chain serial 2"),
+            "unexpected error: {error}"
+        );
+
+        let (a, b, c) = (
+            canton_id("p1", 1)?,
+            canton_id("p2", 2)?,
+            canton_id("p3", 3)?,
+        );
+        assert!(
+            already_applied(
+                "P2P",
+                (2, &p2p("party", &[a.clone(), c], 1)),
+                (2, &p2p("party", &[a, b], 1)),
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn refuses_a_kick_whose_head_matches_at_another_serial() -> Result {
+        let kicked = namespace(&["a", "b"]);
+        let error =
+            match check_dns_against_head(WorkflowKind::Kick, (3, &kicked), (2, &kicked), None) {
+                Ok(()) => anyhow::bail!("expected a refusal"),
+                Err(error) => error.to_string(),
+            };
+        assert!(
+            error.contains("must remove exactly 1"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    fn dns_error(
+        kind: WorkflowKind,
+        proposal: (u32, &DecentralizedNamespaceDefinition),
+        head: (u32, &DecentralizedNamespaceDefinition),
+    ) -> Result<String> {
+        match check_dns_against_head(kind, proposal, head, None) {
+            Ok(()) => anyhow::bail!("expected a refusal"),
+            Err(error) => Ok(error.to_string()),
+        }
+    }
+
+    #[test]
+    fn refuses_a_change_threshold_beyond_the_next_serial() -> Result {
+        let def = namespace(&["a", "b", "c"]);
+        let error = dns_error(WorkflowKind::ChangeThreshold, (4, &def), (2, &def))?;
+        assert!(
+            error.contains("only the next serial can be signed"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn accepts_a_change_threshold_at_the_next_serial() -> Result {
+        let def = namespace(&["a", "b", "c"]);
+        check_dns_against_head(WorkflowKind::ChangeThreshold, (3, &def), (2, &def), None)
+    }
+
+    /// The same valid kick delta at head + 1 passes, so the refusal at head + 2
+    /// comes from the serial check and not from the kick's removal rule.
+    #[test]
+    fn the_serial_check_refuses_a_valid_kick_delta_at_a_later_serial() -> Result {
+        let (head, kicked) = (namespace(&["a", "b", "c"]), namespace(&["a", "b"]));
+        check_dns_against_head(WorkflowKind::Kick, (3, &kicked), (2, &head), None)?;
+        let error = dns_error(WorkflowKind::Kick, (4, &kicked), (2, &head))?;
+        assert!(
+            error.contains("only the next serial can be signed"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn refuses_a_p2p_proposal_beyond_the_next_serial() -> Result {
+        let (a, b) = (canton_id("p1", 1)?, canton_id("p2", 2)?);
+        let mapping = p2p("party", &[a, b], 1);
+        assert!(!already_applied("P2P", (3, &mapping), (2, &mapping))?);
+        for serial in [1, 4] {
+            let error = match already_applied("P2P", (serial, &mapping), (2, &mapping)) {
+                Ok(applied) => anyhow::bail!("expected a refusal, got {applied}"),
+                Err(error) => error.to_string(),
+            };
+            assert!(
+                error.contains("P2P proposal is at serial"),
+                "unexpected error: {error}"
+            );
+        }
+        Ok(())
+    }
+
+    struct StubHead {
+        dns: Option<(u32, DecentralizedNamespaceDefinition)>,
+        p2p: Option<(u32, PartyToParticipant)>,
+        legacy_keys: Option<Vec<SigningPublicKey>>,
+    }
+
+    impl TopologyHead for StubHead {
+        async fn namespace_definition(
+            &self,
+            _namespace: &str,
+        ) -> Result<(u32, DecentralizedNamespaceDefinition)> {
+            self.dns
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("topology read unavailable"))
+        }
+
+        async fn p2p_mapping(&self, _party: &CantonId) -> Result<(u32, PartyToParticipant)> {
+            self.p2p
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("topology read unavailable"))
+        }
+
+        async fn party_to_key_mapping(
+            &self,
+            _party: &CantonId,
+        ) -> Result<Option<PartyToKeyMapping>> {
+            Ok(self
+                .legacy_keys
+                .clone()
+                .map(|signing_keys| PartyToKeyMapping {
+                    signing_keys,
+                    ..Default::default()
+                }))
+        }
+    }
+
+    fn keyed_p2p(keys: Option<SigningKeysWithThreshold>) -> Result<PartyToParticipant> {
+        let hosts = [
+            canton_id("p1", 1)?,
+            canton_id("p2", 2)?,
+            canton_id("p3", 3)?,
+        ];
+        Ok(PartyToParticipant {
+            party_signing_keys: keys,
+            ..p2p("party", &hosts, 2)
+        })
+    }
+
+    /// A change-threshold run on a three-member party whose on-chain keys are
+    /// `head_keys` (inline) or, when those are absent, `legacy_keys`.
+    async fn change_threshold_against(
+        head_keys: Option<SigningKeysWithThreshold>,
+        legacy_keys: Option<Vec<SigningPublicKey>>,
+    ) -> Result {
+        let def = namespace(&["a", "b", "c"]);
+        let head = StubHead {
+            dns: Some((2, def.clone())),
+            p2p: Some((5, keyed_p2p(head_keys)?)),
+            legacy_keys,
+        };
+        check_against_head(
+            &head,
+            WorkflowKind::ChangeThreshold,
+            &canton_id("party", 9)?,
+            (3, &def),
+            (6, &keyed_p2p(Some(signing_keys(3, 2)))?),
+            None,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_legacy_party_checks_the_keys_against_its_party_to_key_mapping() -> Result {
+        let departed = signing_keys(4, 2).keys;
+        change_threshold_against(None, Some(departed.clone())).await?;
+
+        let error = match change_threshold_against(
+            Some(SigningKeysWithThreshold {
+                keys: departed,
+                threshold: 2,
+            }),
+            None,
+        )
+        .await
+        {
+            Ok(()) => anyhow::bail!("an inline key set must not take the legacy rule"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("must remove exactly 0"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_party_with_no_key_source_is_refused() -> Result {
+        let error = match change_threshold_against(None, None).await {
+            Ok(()) => anyhow::bail!("expected a refusal"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("neither inline signing keys nor a PartyToKeyMapping"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_failed_topology_read_refuses_the_proposal() -> Result {
+        let def = namespace(&["a", "b", "c"]);
+        let proposal = keyed_p2p(Some(signing_keys(3, 2)))?;
+        let party = canton_id("party", 9)?;
+        let heads = [
+            (
+                StubHead {
+                    dns: None,
+                    p2p: Some((5, proposal.clone())),
+                    legacy_keys: None,
+                },
+                "cannot read the current owner set",
+            ),
+            (
+                StubHead {
+                    dns: Some((2, def.clone())),
+                    p2p: None,
+                    legacy_keys: None,
+                },
+                "cannot read the current signing keys",
+            ),
+        ];
+        for (head, expected) in heads {
+            let error = match check_against_head(
+                &head,
+                WorkflowKind::ChangeThreshold,
+                &party,
+                (3, &def),
+                (6, &proposal),
+                None,
+            )
+            .await
+            {
+                Ok(()) => anyhow::bail!("expected a refusal"),
+                Err(error) => error.to_string(),
+            };
+            assert!(error.contains(expected), "unexpected error: {error}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_a_repeated_entry() {
+        let error = delta_error(
+            WorkflowKind::AddParty,
+            &["a", "b"],
+            &["a", "b", "b"],
+            None,
+            false,
+        );
+        assert!(
+            error.contains("repeats a DNS owner"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_delta_for_a_kind_without_one() {
+        let error = delta_error(WorkflowKind::Onboarding, &[], &["a"], None, false);
+        assert!(error.contains("no on-chain"), "unexpected error: {error}");
     }
 }
