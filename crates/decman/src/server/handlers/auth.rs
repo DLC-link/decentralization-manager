@@ -489,8 +489,8 @@ struct AdminTokenResponse {
     access_token: String,
 }
 
-/// Mint an admin access token from `source` using the operator-supplied client
-/// credentials.
+/// Mint an admin access token at `token_url` in the request shape of `source`,
+/// using the operator-supplied client credentials.
 ///
 /// # Errors
 ///
@@ -499,11 +499,12 @@ struct AdminTokenResponse {
 /// unparseable responses.
 async fn mint_admin_token(
     http: &reqwest::Client,
+    token_url: &str,
     source: &AdminTokenSource,
     client_id: &str,
     client_secret: &str,
 ) -> std::result::Result<String, AdminMintError> {
-    let request = http.post(source.token_endpoint());
+    let request = http.post(token_url);
     let request = match source {
         AdminTokenSource::Auth0 { audience, .. } => {
             request.json(&auth0_token_body(client_id, client_secret, audience))
@@ -660,6 +661,7 @@ pub async fn grant_rights(
 
     let admin_token = match mint_admin_token(
         &data.http_client,
+        &admin_source.token_endpoint(),
         &admin_source,
         &admin_client_id,
         &admin_client_secret,
@@ -842,10 +844,10 @@ mod tests {
     use tokio::sync::{Mutex, RwLock};
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
-        matchers::{method, path_regex},
+        matchers::{body_json, body_string, header, method, path, path_regex},
     };
 
-    use super::{AdminTokenSource, grant_rights};
+    use super::{AdminMintError, AdminTokenSource, grant_rights, mint_admin_token};
     use crate::{
         auth::{AuthRegistry, MockAuthRegistry, MockValidator, TokenValidator, WorkflowAuth},
         canton_id::CantonId,
@@ -1091,6 +1093,108 @@ mod tests {
             message.contains("audience missing"),
             "unhelpful error: {message}"
         );
+    }
+
+    const KEYCLOAK_TOKEN_PATH: &str = "/realms/decman/protocol/openid-connect/token";
+
+    /// The Keycloak mint must stay a form-encoded `client_credentials` request;
+    /// the mock only answers the exact form, so any drift fails the mint.
+    #[tokio::test]
+    async fn keycloak_admin_mint_sends_the_client_credentials_form() -> anyhow::Result<()> {
+        let idp = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(KEYCLOAK_TOKEN_PATH))
+            .and(header("content-type", "application/x-www-form-urlencoded"))
+            .and(body_string(
+                "grant_type=client_credentials&client_id=validator-admin&client_secret=admin-secret",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"access_token": "admin-token", "expires_in": 300})),
+            )
+            .expect(1)
+            .mount(&idp)
+            .await;
+        let mut party = keycloak_party();
+        party.keycloak.url = idp.uri();
+        let source = AdminTokenSource::from_party(&party).map_err(anyhow::Error::msg)?;
+
+        let token = mint_admin_token(
+            &reqwest::Client::new(),
+            &source.token_endpoint(),
+            &source,
+            "validator-admin",
+            "admin-secret",
+        )
+        .await?;
+
+        assert_eq!(token, "admin-token");
+        Ok(())
+    }
+
+    /// Auth0 takes JSON, not a form, and refuses a request without `audience`.
+    #[tokio::test]
+    async fn auth0_admin_mint_sends_the_client_credentials_json() -> anyhow::Result<()> {
+        let idp = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/oauth/token"))
+            .and(header("content-type", "application/json"))
+            .and(body_json(json!({
+                "grant_type": "client_credentials",
+                "client_id": "validator-admin",
+                "client_secret": "admin-secret",
+                "audience": LEDGER_AUDIENCE,
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"access_token": "admin-token", "expires_in": 300})),
+            )
+            .expect(1)
+            .mount(&idp)
+            .await;
+        let source = AdminTokenSource::from_party(&auth0_party()).map_err(anyhow::Error::msg)?;
+
+        let token = mint_admin_token(
+            &reqwest::Client::new(),
+            &format!("{base}/oauth/token", base = idp.uri()),
+            &source,
+            "validator-admin",
+            "admin-secret",
+        )
+        .await?;
+
+        assert_eq!(token, "admin-token");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn admin_mint_keeps_the_idp_retry_after() -> anyhow::Result<()> {
+        let idp = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(KEYCLOAK_TOKEN_PATH))
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "30"))
+            .mount(&idp)
+            .await;
+        let mut party = keycloak_party();
+        party.keycloak.url = idp.uri();
+        let source = AdminTokenSource::from_party(&party).map_err(anyhow::Error::msg)?;
+
+        let result = mint_admin_token(
+            &reqwest::Client::new(),
+            &source.token_endpoint(),
+            &source,
+            "validator-admin",
+            "admin-secret",
+        )
+        .await;
+
+        match result {
+            Err(AdminMintError::RateLimited { retry_after, .. }) => {
+                assert_eq!(retry_after.as_deref(), Some("30"));
+            }
+            other => panic!("expected a rate-limit error, got {other:?}"),
+        }
+        Ok(())
     }
 
     /// `require_admin` rejects requests that arrive without a `Principal`
