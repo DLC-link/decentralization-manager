@@ -3523,6 +3523,33 @@ mod tests {
         }
     }
 
+    fn gov_confirmation(contract_id: &str) -> GovConfirmation {
+        GovConfirmation {
+            contract_id: contract_id.to_owned(),
+            confirming_party: String::new(),
+            expires_at: 0,
+        }
+    }
+
+    #[test]
+    fn confirmation_cids_use_the_server_executable_set() {
+        let confirmations = [gov_confirmation("expired"), gov_confirmation("live")];
+        let executable = ["live".to_owned()];
+
+        let cids = confirmation_cids(Some(&executable), &confirmations);
+
+        assert_eq!(cids, vec!["live".to_owned()]);
+    }
+
+    #[test]
+    fn confirmation_cids_fall_back_to_every_confirmation() {
+        let confirmations = [gov_confirmation("a"), gov_confirmation("b")];
+
+        let cids = confirmation_cids(None, &confirmations);
+
+        assert_eq!(cids, vec!["a".to_owned(), "b".to_owned()]);
+    }
+
     #[test]
     fn filter_parties_matches_name_case_insensitively() {
         let parties = [
