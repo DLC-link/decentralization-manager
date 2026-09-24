@@ -44,6 +44,7 @@ import { SURFACE2, cardTableSx, sectionCardSx, zebraRow } from "../styles";
 import { ADMIN_ACCESS, API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
 import { formatMicroseconds } from "../governanceFormat";
+import { getGovernanceMembership } from "../governanceMembership";
 import type {
   DecentralizedParty,
   GovernanceState,
@@ -57,6 +58,8 @@ import type {
  * measures. A pill wedged between the action buttons is what these used to be —
  * too small to read at a glance, which is the whole point of a summary.
  */
+const GOVERNANCE_STATE_POLL_MS = 10_000;
+
 const StatCard = ({
   label,
   value,
@@ -243,8 +246,14 @@ export const PartyDetail = ({
   const [holdingsCount, setHoldingsCount] = useState(0);
   const [holdingsLoading, setHoldingsLoading] = useState(false);
   const [holdingsRefreshNonce, setHoldingsRefreshNonce] = useState(0);
-  const [governanceState, setGovernanceState] =
-    useState<GovernanceState | null>(null);
+  const [loadedGovernance, setLoadedGovernance] = useState<{
+    partyId: string;
+    state: GovernanceState | null;
+  } | null>(null);
+  const governanceState =
+    loadedGovernance?.partyId === party.party_id
+      ? loadedGovernance.state
+      : null;
   const [editGovContractId, setEditGovContractId] = useState<string | null>(
     null,
   );
@@ -286,6 +295,10 @@ export const PartyDetail = ({
   // configured read-only still shows them.
   const canAct = Boolean(authStatus?.rights?.dec_party_act_as);
   const canRead = canAct || Boolean(authStatus?.rights?.dec_party_read_as);
+  const membership = getGovernanceMembership(
+    authStatus?.member_party_id,
+    governanceState,
+  );
 
   // Stable identity: the audit trail reports through this from an effect, so a
   // fresh callback each render would re-run it on every parent render.
@@ -314,26 +327,32 @@ export const PartyDetail = ({
     }
   }, [party.contracts, updateScrollShadows]);
 
-  // Fetch governance state (threshold + action_confirmation_timeout) so the
-  // contracts table can show these values on the row of the active rules
-  // contract. Cancellation guards against a stale response landing after the
-  // user has switched to a different party.
+  // Poll governance state for the rules contract row in the contracts table and
+  // the membership chip in the auth section. The party id on each result keeps
+  // a late response for a previous party from showing.
   useEffect(() => {
     let cancelled = false;
-    (async () => {
+    const load = async () => {
       try {
         const res = await authenticatedFetch(
           `${API_BASE}/governance/state?party_id=${encodeURIComponent(party.party_id)}`,
         );
         if (!res.ok) return;
         const data: GovernanceStateResponse = await res.json();
-        if (!cancelled) setGovernanceState(data.state ?? null);
+        if (!cancelled)
+          setLoadedGovernance({
+            partyId: party.party_id,
+            state: data.state ?? null,
+          });
       } catch {
-        /* leave columns blank on failure */
+        /* keep the last loaded state */
       }
-    })();
+    };
+    void load();
+    const interval = setInterval(() => void load(), GOVERNANCE_STATE_POLL_MS);
     return () => {
       cancelled = true;
+      clearInterval(interval);
     };
   }, [party.party_id]);
 
@@ -497,7 +516,7 @@ export const PartyDetail = ({
         helpText="Credentials this node uses to act on the party's behalf via the Canton ledger API."
         badge={
           <Box sx={{ display: "flex", alignItems: "center", ml: 1 }}>
-            {getAuthStatusIcon(authStatus)}
+            {getAuthStatusIcon(authStatus, membership)}
           </Box>
         }
       >
@@ -505,6 +524,7 @@ export const PartyDetail = ({
           <AuthSection
             partyId={party.party_id}
             authStatus={authStatus}
+            membership={membership}
             onRefresh={onAuthRefresh}
             onConfigure={() => setConfigDialogOpen(true)}
           />
