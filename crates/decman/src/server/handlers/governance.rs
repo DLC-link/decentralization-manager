@@ -102,20 +102,26 @@ pub async fn get_governance(
     // threshold, which is a separate value used for signing
     // PartyToParticipant updates. Falling back to the DNS threshold for
     // historical compatibility only when the gov state isn't reachable.
-    let (rules_contract_id, gov_state_threshold, gov_core_out_of_date, gov_core_package_ref) =
-        match query_governance_state(&data.config, party_id, token.clone(), &packages).await {
-            Ok(Some(state)) => (
-                Some(state.contract_id),
-                Some(state.threshold as usize),
-                state.out_of_date,
-                state.package_ref,
-            ),
-            Ok(None) => (None, None, false, None),
-            Err(e) => {
-                tracing::warn!("Failed to fetch active rules contract: {e}");
-                (None, None, false, None)
-            }
-        };
+    let (
+        rules_contract_id,
+        gov_state_threshold,
+        gov_state_members,
+        gov_core_out_of_date,
+        gov_core_package_ref,
+    ) = match query_governance_state(&data.config, party_id, token.clone(), &packages).await {
+        Ok(Some(state)) => (
+            Some(state.contract_id),
+            Some(state.threshold as usize),
+            Some(state.members.into_iter().collect::<HashSet<_>>()),
+            state.out_of_date,
+            state.package_ref,
+        ),
+        Ok(None) => (None, None, None, false, None),
+        Err(e) => {
+            tracing::warn!("Failed to fetch active rules contract: {e}");
+            (None, None, None, false, None)
+        }
+    };
     let threshold = match gov_state_threshold {
         Some(t) => t,
         None => get_party_threshold(&data, party_id).await.unwrap_or(2),
@@ -131,6 +137,7 @@ pub async fn get_governance(
         &data.config,
         party_id,
         threshold,
+        gov_state_members.as_ref(),
         token,
         &packages,
         batch,
