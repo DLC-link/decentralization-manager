@@ -448,7 +448,8 @@ impl PeerExpectations {
     ///
     /// A proposal at the head serial that equals the head mapping is already
     /// effective (a threshold-1 namespace applies it on `Authorize`), so
-    /// signing it changes nothing and it skips the delta.
+    /// signing it changes nothing and it skips the delta. Any other proposal
+    /// must sit at the next serial.
     async fn check_on_chain_delta(
         &self,
         config: &NodeConfig,
@@ -1116,21 +1117,32 @@ fn namespace_fingerprint(keys: &[SigningPublicKey]) -> Option<String> {
 /// Whether a proposal is the head transaction itself. The same serial with a
 /// different mapping is refused: Canton would reject it, and the peer cannot
 /// tell what the coordinator meant by it.
+///
+/// Any other proposal must sit at the next serial. Canton checks the serial
+/// only on submission, and the coordinator holds the signatures until then,
+/// so a signature on a later serial could be submitted against a state this
+/// peer never checked.
 fn already_applied<T: PartialEq>(
     what: &str,
     (proposal_serial, proposal): (u32, &T),
     (head_serial, head): (u32, &T),
 ) -> Result<bool> {
-    if proposal_serial != head_serial {
-        return Ok(false);
+    if proposal_serial == head_serial {
+        if proposal != head {
+            anyhow::bail!(
+                "{what} proposal reuses the on-chain serial {head_serial} but differs from the \
+                 on-chain mapping"
+            );
+        }
+        return Ok(true);
     }
-    if proposal != head {
+    if head_serial.checked_add(1) != Some(proposal_serial) {
         anyhow::bail!(
-            "{what} proposal reuses the on-chain serial {head_serial} but differs from the \
-             on-chain mapping"
+            "{what} proposal is at serial {proposal_serial} but the on-chain serial is \
+             {head_serial}; only the next serial can be signed"
         );
     }
-    Ok(true)
+    Ok(false)
 }
 
 fn check_dns_against_head(
@@ -2313,6 +2325,66 @@ mod tests {
             error.contains("must remove exactly 1"),
             "unexpected error: {error}"
         );
+        Ok(())
+    }
+
+    fn dns_error(
+        kind: WorkflowKind,
+        proposal: (u32, &DecentralizedNamespaceDefinition),
+        head: (u32, &DecentralizedNamespaceDefinition),
+    ) -> Result<String> {
+        match check_dns_against_head(kind, proposal, head, None) {
+            Ok(()) => anyhow::bail!("expected a refusal"),
+            Err(error) => Ok(error.to_string()),
+        }
+    }
+
+    #[test]
+    fn refuses_a_change_threshold_beyond_the_next_serial() -> Result {
+        let def = namespace(&["a", "b", "c"]);
+        let error = dns_error(WorkflowKind::ChangeThreshold, (4, &def), (2, &def))?;
+        assert!(
+            error.contains("only the next serial can be signed"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn accepts_a_change_threshold_at_the_next_serial() -> Result {
+        let def = namespace(&["a", "b", "c"]);
+        check_dns_against_head(WorkflowKind::ChangeThreshold, (3, &def), (2, &def), None)
+    }
+
+    /// The same valid kick delta at head + 1 passes, so the refusal at head + 2
+    /// comes from the serial check and not from the kick's removal rule.
+    #[test]
+    fn the_serial_check_refuses_a_valid_kick_delta_at_a_later_serial() -> Result {
+        let (head, kicked) = (namespace(&["a", "b", "c"]), namespace(&["a", "b"]));
+        check_dns_against_head(WorkflowKind::Kick, (3, &kicked), (2, &head), None)?;
+        let error = dns_error(WorkflowKind::Kick, (4, &kicked), (2, &head))?;
+        assert!(
+            error.contains("only the next serial can be signed"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn refuses_a_p2p_proposal_beyond_the_next_serial() -> Result {
+        let (a, b) = (canton_id("p1", 1)?, canton_id("p2", 2)?);
+        let mapping = p2p("party", &[a, b], 1);
+        assert!(!already_applied("P2P", (3, &mapping), (2, &mapping))?);
+        for serial in [1, 4] {
+            let error = match already_applied("P2P", (serial, &mapping), (2, &mapping)) {
+                Ok(applied) => anyhow::bail!("expected a refusal, got {applied}"),
+                Err(error) => error.to_string(),
+            };
+            assert!(
+                error.contains("P2P proposal is at serial"),
+                "unexpected error: {error}"
+            );
+        }
         Ok(())
     }
 
