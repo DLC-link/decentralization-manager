@@ -1,5 +1,10 @@
 import { API_BASE } from "./constants";
-import type { DecentralizedParty, PackageInfo, PeerPackageResult } from "./types";
+import type {
+  DecentralizedParty,
+  ExpectedPackageVersion,
+  PackageInfo,
+  PeerPackageResult,
+} from "./types";
 
 export interface ParticipantOption {
   id: string;
@@ -169,4 +174,21 @@ export function rowDiffers(pkg: PackageInfo, peers: PeerIndex[]): boolean {
 /// package list, and this package is not in it at this version.
 export function canDistribute(status: CellStatus): boolean {
   return status === "other_version" || status === "missing";
+}
+
+/// Expected version by package name, from the expected-versions endpoint.
+export function expectedIndex(
+  expected: ExpectedPackageVersion[],
+): Map<string, string> {
+  return new Map(expected.map((e) => [e.package_name, e.version]));
+}
+
+/// Expected versions that no package on this node matches. Rows show only
+/// packages this node holds, so these would otherwise never appear.
+export function expectedNotHeld(
+  expected: ExpectedPackageVersion[],
+  local: PackageInfo[],
+): ExpectedPackageVersion[] {
+  const held = new Set(local.map((p) => `${p.name}:${p.version}`));
+  return expected.filter((e) => !held.has(`${e.package_name}:${e.version}`));
 }

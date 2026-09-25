@@ -54,10 +54,13 @@ import {
   type CellStatus,
   type ParticipantOption,
   canDistribute,
+  expectedIndex,
+  expectedNotHeld,
 } from "../packageCompare";
 import type {
   DecentralizedParty,
   DistributePackageRequest,
+  ExpectedVersionsResponse,
   PackageInfo,
   VettedPackageInfo,
   PeerPackageComparison,
@@ -142,6 +145,8 @@ export const PackagesPanel = ({
     peer: PeerPackageResult;
   } | null>(null);
   const [distributing, setDistributing] = useState(false);
+  const [expected, setExpected] = useState<ExpectedVersionsResponse | null>(null);
+  const [expectedError, setExpectedError] = useState<string | null>(null);
   const { showSnackbar } = useSnackbar();
   const [peers, setPeers] = useState<Peer[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
@@ -169,9 +174,27 @@ export const PackagesPanel = ({
     return [...byId.values()];
   }, [peers, party, selfParticipantId]);
 
+  // Read with every comparison, so the expected versions are as fresh as the
+  // vetting they sit beside.
+  const loadExpected = useCallback(async () => {
+    try {
+      const res = await authenticatedFetch(`${API_BASE}/packages/expected-versions`);
+      if (res.ok) {
+        setExpected(await res.json());
+        setExpectedError(null);
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setExpectedError(data.error || `HTTP ${res.status}`);
+      }
+    } catch (e) {
+      setExpectedError(e instanceof Error ? e.message : "request failed");
+    }
+  }, []);
+
   const runComparison = useCallback(async (participants: string[]) => {
     const seq = ++compareSeq.current;
     setComparing(true);
+    void loadExpected();
     try {
       const res = await authenticatedFetch(compareUrl(participants));
       if (res.ok && seq === compareSeq.current) {
@@ -183,7 +206,7 @@ export const PackagesPanel = ({
     } finally {
       if (seq === compareSeq.current) setComparing(false);
     }
-  }, []);
+  }, [loadExpected]);
 
   // Opening the page for a party selects its hosts and compares them at once:
   // that comparison is what the Check DARs action asked for.
@@ -249,6 +272,19 @@ export const PackagesPanel = ({
       matchesPackageFilter(p, groups, terms),
     );
   }, [comparison, groups, terms]);
+
+  const expectedByName = useMemo(
+    () => expectedIndex(expected?.packages ?? []),
+    [expected],
+  );
+
+  // Only for the packages the filter selects, like the rows.
+  const expectedMissingHere = useMemo(() => {
+    if (!comparison) return [];
+    return expectedNotHeld(expected?.packages ?? [], comparison.local_packages).filter((e) =>
+      matchesPackageFilter({ name: e.package_name, package_id: "" }, groups, terms),
+    );
+  }, [comparison, expected, groups, terms]);
 
   const summary = useMemo(
     () => (selectedPackages ? summarize(selectedPackages, peerIndexes) : null),
@@ -488,6 +524,18 @@ export const PackagesPanel = ({
           Comparing with every configured peer. Select participants to narrow the comparison.
         </Alert>
       )}
+      {comparison && expectedMissingHere.length > 0 && (
+        <Alert severity="warning" sx={{ mx: "24px", mb: 2, flexShrink: 0 }} data-testid="expected-not-held">
+          {`This node does not hold the expected version of ${expectedMissingHere
+            .map((e) => `${e.package_name} ${e.version}`)
+            .join(", ")}.`}
+        </Alert>
+      )}
+      {comparison && expectedError && (
+        <Alert severity="info" sx={{ mx: "24px", mb: 2, flexShrink: 0 }}>
+          {`Expected versions are unavailable: ${expectedError}. Observed versions are still compared.`}
+        </Alert>
+      )}
       {summary && (
         <Box sx={{ mx: "24px", mb: 2, flexShrink: 0 }} data-testid="comparison-summary">
           {summary.differing === 0 && summary.missing === 0 ? (
@@ -573,7 +621,7 @@ export const PackagesPanel = ({
                   // column shrinking as peers are added.
                   minWidth:
                     PACKAGE_MIN_WIDTH +
-                    VERSION_COL_WIDTH +
+                    2 * VERSION_COL_WIDTH +
                     peerIndexes.length * PEER_COL_WIDTH,
                 }}
               >
@@ -584,6 +632,7 @@ export const PackagesPanel = ({
                   * takes whatever the stated columns leave. */}
                 <colgroup>
                   <col />
+                  <col style={{ width: VERSION_COL_WIDTH }} />
                   <col style={{ width: VERSION_COL_WIDTH }} />
                   {peerIndexes.map(({ peer }) => (
                     <col key={peer.participant_id} style={{ width: PEER_COL_WIDTH }} />
@@ -596,6 +645,18 @@ export const PackagesPanel = ({
                     </TableCell>
                     <TableCell sx={{ py: 1, fontWeight: "bold" }}>
                       Version
+                    </TableCell>
+                    <TableCell sx={{ py: 1, fontWeight: "bold" }}>
+                      <Tooltip
+                        title={
+                          expected
+                            ? `From the ${expected.source}, read ${new Date(expected.fetched_at * 1000).toLocaleString()}. Only Splice packages have an expected version.`
+                            : "Only Splice packages have an expected version"
+                        }
+                        arrow
+                      >
+                        <span>Expected</span>
+                      </Tooltip>
                     </TableCell>
                     {peerIndexes.map(({ peer }) => (
                       <TableCell
@@ -661,6 +722,39 @@ export const PackagesPanel = ({
                         </TableCell>
                         <TableCell sx={{ py: 1 }}>
                           {pkg.version || "-"}
+                        </TableCell>
+                        <TableCell
+                          sx={{ py: 1 }}
+                          data-testid="expected-version"
+                          data-pkg={pkg.name}
+                        >
+                          {(() => {
+                            const want = expectedByName.get(pkg.name);
+                            if (!want) {
+                              return (
+                                <Tooltip
+                                  title="No trusted source gives an expected version for this package"
+                                  arrow
+                                >
+                                  <Typography variant="caption" color="text.disabled">
+                                    —
+                                  </Typography>
+                                </Tooltip>
+                              );
+                            }
+                            return (
+                              <Typography
+                                variant="body2"
+                                component="span"
+                                sx={{
+                                  color: want === pkg.version ? "success.main" : "text.secondary",
+                                  fontWeight: want === pkg.version ? 600 : 400,
+                                }}
+                              >
+                                {want}
+                              </Typography>
+                            );
+                          })()}
                         </TableCell>
                         {peerIndexes.map((index) => {
                           const { peer, unnamed } = index;

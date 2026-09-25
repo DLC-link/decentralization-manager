@@ -614,6 +614,29 @@ pub(crate) struct AmuletRulesContract {
     pub created_event_blob: String,
 }
 
+/// The DSO scan API's `/dso` response, as JSON.
+///
+/// # Errors
+/// Returns an error when the API cannot be reached, answers with an error
+/// status, or does not answer with JSON.
+pub(crate) async fn fetch_dso_info(
+    http_client: &reqwest::Client,
+    config: &NodeConfig,
+) -> anyhow::Result<serde_json::Value> {
+    let url = config.canton.network.dso_url();
+    let res = http_client
+        .get(url)
+        .send()
+        .await
+        .context("Failed to reach DSO API")?;
+    if !res.status().is_success() {
+        let status = res.status();
+        let body = res.text().await.unwrap_or_default();
+        anyhow::bail!("DSO API returned {status}: {body}");
+    }
+    res.json().await.context("Failed to parse DSO response")
+}
+
 /// Fetch the DSO party id and the current `AmuletRules` contract from the DSO
 /// scan API.
 pub(crate) async fn fetch_amulet_rules(
@@ -630,18 +653,7 @@ pub(crate) async fn fetch_amulet_rules(
             })
     }
 
-    let url = config.canton.network.dso_url();
-    let res = http_client
-        .get(url)
-        .send()
-        .await
-        .context("Failed to reach DSO API")?;
-    if !res.status().is_success() {
-        let status = res.status();
-        let body = res.text().await.unwrap_or_default();
-        anyhow::bail!("DSO API returned {status}: {body}");
-    }
-    let json: serde_json::Value = res.json().await.context("Failed to parse DSO response")?;
+    let json = fetch_dso_info(http_client, config).await?;
     let dso = text_at(&json, "/dso_party_id")?
         .parse::<CantonId>()
         .map_err(|e| anyhow::anyhow!("Invalid DSO party ID: {e}"))?;
