@@ -13,6 +13,9 @@ import {
   TextField,
   Tooltip,
   InputAdornment,
+  Autocomplete,
+  Chip,
+  Alert,
 } from "@mui/material";
 import SearchIcon from "@mui/icons-material/Search";
 import CloudUploadIcon from "@mui/icons-material/CloudUpload";
@@ -26,10 +29,18 @@ import { usePagination } from "../usePagination";
 import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
 import { finderTableSx, zebraRow } from "../styles";
+import {
+  compareUrl,
+  participantLabel,
+  partyParticipants,
+  type ParticipantOption,
+} from "../packageCompare";
 import type {
+  DecentralizedParty,
   VettedPackageInfo,
   PeerPackageComparison,
   PeerPackageResult,
+  Peer,
 } from "../types";
 
 /// Why this node has no package list for a peer, in the operator's terms.
@@ -60,6 +71,11 @@ interface PackagesPanelProps {
   /// Bumped by the parent after a DAR upload/distribute completes, to trigger
   /// a fresh fetch of the vetted-packages list without a manual refresh.
   refreshNonce?: number;
+  selfParticipantId?: string;
+  /// Set when the page was opened from a party's Check DARs action. The
+  /// participant selection starts as that party's hosts, less this node.
+  party?: DecentralizedParty | null;
+  onClearParty?: () => void;
 }
 
 // Comparison-table columns. Every one is stated, because a fixed-layout table
@@ -75,6 +91,9 @@ export const PackagesPanel = ({
   onUploadDars,
   onDistributeDars,
   refreshNonce,
+  selfParticipantId,
+  party,
+  onClearParty,
 }: PackagesPanelProps) => {
   const [packages, setPackages] = useState<VettedPackageInfo[]>([]);
   const [loadingPackages, setLoadingPackages] = useState(true);
@@ -94,7 +113,65 @@ export const PackagesPanel = ({
   );
   const [comparing, setComparing] = useState(false);
   const [search, setSearch] = useState("");
+  const [peers, setPeers] = useState<Peer[]>([]);
+  const [selected, setSelected] = useState<string[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
+  // Answers can arrive out of order when the selection changes quickly. Only
+  // the latest request may set the table.
+  const compareSeq = useRef(0);
+
+  useEffect(() => {
+    authenticatedFetch(`${API_BASE}/network-config`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { peers?: Peer[] } | null) => setPeers(data?.peers ?? []))
+      .catch(() => {});
+  }, []);
+
+  const participantOptions = useMemo(() => {
+    const byId = new Map<string, ParticipantOption>();
+    for (const p of peers) {
+      if (p.participant_id === selfParticipantId) continue;
+      byId.set(p.participant_id, { id: p.participant_id, name: p.name });
+    }
+    for (const id of party ? partyParticipants(party, selfParticipantId) : []) {
+      if (!byId.has(id)) byId.set(id, { id, name: "" });
+    }
+    return [...byId.values()];
+  }, [peers, party, selfParticipantId]);
+
+  const runComparison = useCallback(async (participants: string[]) => {
+    const seq = ++compareSeq.current;
+    setComparing(true);
+    try {
+      const res = await authenticatedFetch(compareUrl(participants));
+      if (res.ok && seq === compareSeq.current) {
+        const data: PeerPackageComparison = await res.json();
+        setComparison(data);
+      }
+    } catch (e) {
+      console.error("Failed to compare peer packages:", e);
+    } finally {
+      if (seq === compareSeq.current) setComparing(false);
+    }
+  }, []);
+
+  // Opening the page for a party selects its hosts and compares them at once:
+  // that comparison is what the Check DARs action asked for.
+  // Keyed on the host list, not the party object: the parties poll hands over
+  // a new object each tick, and that must not reset the operator's selection.
+  const partyHosts = party ? partyParticipants(party, selfParticipantId).join(",") : null;
+  useEffect(() => {
+    if (partyHosts === null) return;
+    const hosts = partyHosts ? partyHosts.split(",") : [];
+    setSelected(hosts);
+    void runComparison(hosts);
+  }, [partyHosts, runComparison]);
+
+  const handleSelectionChange = (ids: string[]) => {
+    setSelected(ids);
+    // A comparison on screen must describe the selection above it.
+    if (comparison) void runComparison(ids);
+  };
 
   const sorted = useMemo(
     () =>
@@ -158,20 +235,7 @@ export const PackagesPanel = ({
     }
   }, [sorted, comparison, updateScrollShadows]);
 
-  const handleComparePeers = async () => {
-    setComparing(true);
-    try {
-      const res = await authenticatedFetch(`${API_BASE}/packages/compare-peers`);
-      if (res.ok) {
-        const data: PeerPackageComparison = await res.json();
-        setComparison(data);
-      }
-    } catch (e) {
-      console.error("Failed to compare peer packages:", e);
-    } finally {
-      setComparing(false);
-    }
-  };
+  const handleComparePeers = () => runComparison(selected);
 
   // Build comparison lookup: for each peer, map "name:version" → true
   const peerLookups = useMemo(() => {
@@ -278,6 +342,51 @@ export const PackagesPanel = ({
           )}
         </Box>
       </Box>
+
+      <Box sx={{ display: "flex", alignItems: "center", gap: 2, mb: 2, flexShrink: 0, px: "24px", flexWrap: "wrap" }}>
+        <Autocomplete
+          multiple
+          size="small"
+          options={participantOptions}
+          value={participantOptions.filter((o) => selected.includes(o.id))}
+          onChange={(_, value) => handleSelectionChange(value.map((o) => o.id))}
+          getOptionLabel={participantLabel}
+          isOptionEqualToValue={(a, b) => a.id === b.id}
+          filterSelectedOptions
+          renderOption={(props, option) => {
+            const { key, ...rest } = props;
+            return (
+              <li key={key} {...rest}>
+                <Tooltip title={option.id} placement="right" arrow>
+                  <span>{participantLabel(option)}</span>
+                </Tooltip>
+              </li>
+            );
+          }}
+          renderInput={(params) => (
+            <TextField
+              {...params}
+              label="Participants"
+              placeholder={selected.length === 0 ? "All peers" : undefined}
+            />
+          )}
+          sx={{ minWidth: 360, flex: 1, maxWidth: 720 }}
+          data-testid="participant-filter"
+        />
+        {party && (
+          <Chip
+            label={`Party: ${party.party_id.split("::")[0]}`}
+            onDelete={onClearParty}
+            size="small"
+            data-testid="party-scope-chip"
+          />
+        )}
+      </Box>
+      {comparison && selected.length === 0 && (
+        <Alert severity="info" sx={{ mx: "24px", mb: 2, flexShrink: 0 }}>
+          Comparing with every configured peer. Select participants to narrow the comparison.
+        </Alert>
+      )}
 
         <Box sx={{ position: "relative", flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
           <Box
