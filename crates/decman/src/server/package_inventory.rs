@@ -4,8 +4,12 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use canton_proto_rs::com::digitalasset::canton::{
-    admin::participant::v30::{ListPackagesRequest, package_service_client::PackageServiceClient},
+    admin::participant::v30::{
+        DarDescription, GetDarRequest, GetPackageReferencesRequest, ListPackagesRequest,
+        package_service_client::PackageServiceClient,
+    },
     protocol::v30::{enums::TopologyChangeOp, vetted_packages::VettedPackage},
     topology::admin::v30::{
         BaseQuery, ListVettedPackagesRequest, list_vetted_packages_response,
@@ -17,7 +21,11 @@ use tonic::transport::Channel;
 
 use common::canton_id::CantonId;
 
-use crate::{config::NodeConfig, utils, workflow::topology};
+use crate::{
+    config::NodeConfig,
+    utils,
+    workflow::{contracts::DarFile, topology},
+};
 
 use super::{queries::compare_versions, types::VettedPackageInfo};
 
@@ -185,6 +193,67 @@ pub(crate) async fn fetch_vetted_package_ids(
         .await
 }
 
+/// The DAR on this participant that holds `package_id`, ready to distribute.
+///
+/// A package id can be a DAR's main package or one of its dependencies, so
+/// the DAR is found through the package's references. `Ok(None)` means no DAR
+/// on this participant holds the package: its vetting can outlive the DAR.
+///
+/// # Errors
+/// Returns an error when the Admin API cannot be reached or a read fails.
+pub(crate) async fn fetch_dar_for_package(
+    config: &NodeConfig,
+    package_id: &str,
+) -> Result<Option<DarFile>> {
+    let mut client = PackageServiceClient::new(
+        config
+            .admin_channel()
+            .await
+            .context("Failed to connect to participant Admin API")?,
+    )
+    .max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
+    let references = client
+        .get_package_references(tonic::Request::new(GetPackageReferencesRequest {
+            package_id: package_id.to_string(),
+        }))
+        .await
+        .with_context(|| format!("Failed to read the DARs that hold package {package_id}"))?
+        .into_inner();
+    let Some(dar) = pick_dar(package_id, &references.dars) else {
+        return Ok(None);
+    };
+    let main = dar.main.clone();
+    let response = client
+        .get_dar(tonic::Request::new(GetDarRequest {
+            main_package_id: main.clone(),
+        }))
+        .await
+        .with_context(|| format!("Failed to read DAR {main}"))?
+        .into_inner();
+    Ok(Some(DarFile {
+        filename: dar_filename(dar),
+        data: STANDARD.encode(response.payload),
+    }))
+}
+
+/// The DAR to send for `package_id`: the one it is the main package of, if
+/// any, else the first that depends on it. The main-package DAR is the one an
+/// operator uploaded to get this package.
+fn pick_dar<'a>(package_id: &str, dars: &'a [DarDescription]) -> Option<&'a DarDescription> {
+    dars.iter()
+        .find(|d| d.main == package_id)
+        .or_else(|| dars.first())
+}
+
+/// A file name for a DAR, as an upload would have named it.
+fn dar_filename(dar: &DarDescription) -> String {
+    match (dar.name.is_empty(), dar.version.is_empty()) {
+        (false, false) => format!("{}-{}.dar", dar.name, dar.version),
+        (false, true) => format!("{}.dar", dar.name),
+        _ => format!("{}.dar", dar.main),
+    }
+}
+
 /// One connected topology reader, reused across several reads.
 ///
 /// Reading a whole peer set through [`fetch_vetted_package_ids`] would resolve
@@ -321,6 +390,51 @@ async fn fetch_package_descriptions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dar(main: &str, name: &str, version: &str) -> DarDescription {
+        DarDescription {
+            main: main.to_string(),
+            name: name.to_string(),
+            version: version.to_string(),
+            description: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_dar_a_package_is_the_main_package_of_is_sent() {
+        let dars = vec![dar("app", "app", "1.0.0"), dar("lib", "lib", "0.2.0")];
+
+        let picked = pick_dar("lib", &dars).map(|d| d.main.as_str());
+
+        assert_eq!(picked, Some("lib"));
+    }
+
+    #[test]
+    fn a_dependency_is_sent_inside_a_dar_that_holds_it() {
+        let dars = vec![dar("app", "app", "1.0.0")];
+
+        let picked = pick_dar("lib", &dars).map(|d| d.main.as_str());
+
+        assert_eq!(picked, Some("app"));
+    }
+
+    #[test]
+    fn no_dar_holds_a_package_whose_dar_was_removed() {
+        assert!(pick_dar("lib", &[]).is_none());
+    }
+
+    #[test]
+    fn a_dar_file_is_named_like_an_upload() {
+        assert_eq!(
+            dar_filename(&dar("m", "utility-registry", "0.4.0")),
+            "utility-registry-0.4.0.dar"
+        );
+        assert_eq!(
+            dar_filename(&dar("m", "utility-registry", "")),
+            "utility-registry.dar"
+        );
+        assert_eq!(dar_filename(&dar("m", "", "")), "m.dar");
+    }
 
     /// A namespace long enough to look like a real Canton fingerprint, so the
     /// two uids below differ only in the part before `::`.

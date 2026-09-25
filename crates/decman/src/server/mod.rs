@@ -1371,6 +1371,7 @@ pub async fn start_server(
             .service(handlers::cancel_contracts)
             .service(handlers::upload_dars_local)
             .service(handlers::start_dars)
+            .service(handlers::start_dars_for_package)
             .service(handlers::get_dars_status)
             .service(handlers::cancel_dars)
             .service(handlers::list_workflows)

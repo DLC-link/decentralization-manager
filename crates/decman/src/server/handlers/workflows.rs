@@ -25,14 +25,15 @@ use crate::{
         AppState,
         health::classify_health_reply,
         middleware::require_admin,
+        package_inventory::fetch_dar_for_package,
         respawn_coordinator,
         types::{
             AcsTransferProgress, AddPartyInvitePayload, AddPartyRequest,
             ChangeThresholdInvitePayload, ChangeThresholdRequest, ContractsInvitePayload,
-            ContractsRequest, DarsInvitePayload, DarsRequest, ErrorResponse,
-            ExternalPartiesResponse, ExternalPartyHost, ExternalPartyInfo, KickInvitePayload,
-            KickRequest, KickResponse, KickStatus, MessageResponse, MissingEdgeKind,
-            MissingPeerEdge, OnboardingInvitePayload, OnboardingMeshErrorResponse,
+            ContractsRequest, DarsInvitePayload, DarsRequest, DistributePackageRequest,
+            ErrorResponse, ExternalPartiesResponse, ExternalPartyHost, ExternalPartyInfo,
+            KickInvitePayload, KickRequest, KickResponse, KickStatus, MessageResponse,
+            MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload, OnboardingMeshErrorResponse,
             OnboardingRequest, OnboardingResponse, OnboardingStatus, SuccessResponse,
             WorkflowGuard, WorkflowInstance, WorkflowKind, WorkflowProgress, WorkflowResponse,
             WorkflowRole, WorkflowRun, WorkflowRunsResponse, WorkflowStatusResponse,
@@ -42,7 +43,7 @@ use crate::{
     utils,
     workflow::{
         self, AddPartyStep, ChangeThresholdStep, ContractsStep, DarsStep, KickStep, OnboardingStep,
-        state::WorkflowStep, storage::WorkflowStorage,
+        contracts::DarFile, state::WorkflowStep, storage::WorkflowStorage,
     },
 };
 
@@ -2533,7 +2534,71 @@ pub async fn start_dars(
             error: "peer_ids must contain at least one peer".to_string(),
         });
     }
+    let body = body.into_inner();
+    launch_dars(&data, body.dar_files, body.peer_ids).await
+}
 
+/// Distribute the DAR on this node that holds a package
+///
+/// The DAR is read from this participant, so the operator does not upload it
+/// again. It then runs the same workflow as `/dars/distribute`: each peer
+/// accepts or rejects the invitation as before.
+#[utoipa::path(
+    tag = "Workflows",
+    request_body = DistributePackageRequest,
+    responses(
+        (status = 202, description = "DARs distribution workflow started", body = WorkflowResponse),
+        (status = 400, description = "Bad request (e.g. empty peer_ids)", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
+        (status = 404, description = "No DAR on this node holds the package", body = ErrorResponse),
+        (status = 409, description = "Workflow already in progress", body = ErrorResponse),
+        (status = 500, description = "The DAR could not be read", body = ErrorResponse)
+    )
+)]
+#[post("/dars/distribute-package")]
+pub async fn start_dars_for_package(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    body: web::Json<DistributePackageRequest>,
+) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
+    if body.peer_ids.is_empty() {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: "peer_ids must contain at least one peer".to_string(),
+        });
+    }
+    let dar = match fetch_dar_for_package(&data.config, &body.package_id).await {
+        Ok(Some(dar)) => dar,
+        Ok(None) => {
+            return HttpResponse::NotFound().json(ErrorResponse {
+                error: format!("No DAR on this node holds package {}", body.package_id),
+            });
+        }
+        Err(e) => {
+            tracing::error!(
+                "Failed to read the DAR for package {}: {e:#}",
+                body.package_id
+            );
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to read the DAR: {e}"),
+            });
+        }
+    };
+    let body = body.into_inner();
+    launch_dars(&data, vec![dar], body.peer_ids).await
+}
+
+/// Start a DARs distribution run: register it, invite the peers and run the
+/// coordinator. The caller has checked the admin role and that `peer_ids` is
+/// not empty.
+async fn launch_dars(
+    data: &web::Data<AppState>,
+    dar_files: Vec<DarFile>,
+    peer_ids: Vec<CantonId>,
+) -> HttpResponse {
     // Create DARs config from request
     let timestamp = now_secs();
     let instance_name = format!("dars-distribute-{timestamp}");
@@ -2544,14 +2609,14 @@ pub async fn start_dars(
     );
     let dars_state = &instance.http;
     let dars_config = workflow::DarsConfig {
-        dar_files: body.dar_files.clone(),
+        dar_files,
         instance_name: instance_name.clone(),
-        peer_ids: body.peer_ids.clone(),
+        peer_ids: peer_ids.clone(),
     };
 
     // Refuse to invite any peer that can't speak the concurrent-workflows wire
     // format — NO invites are sent if even one invitee fails the version gate.
-    let incompatible = preflight_incompatible_peers(&data.config, &data.db, &body.peer_ids).await;
+    let incompatible = preflight_incompatible_peers(&data.config, &data.db, &peer_ids).await;
     if !incompatible.is_empty() {
         return HttpResponse::Conflict().json(ErrorResponse {
             error: format_incompatible_peers(&incompatible),
@@ -2561,11 +2626,11 @@ pub async fn start_dars(
     // Register + persist atomically w.r.t. duplicates (registry insert dedups
     // before the upsert; a persist failure unregisters so nothing leaks).
     if let Err(resp) = register_and_persist(
-        &data,
+        data,
         &instance,
         DarsStep::WaitingForPeers,
         &dars_config,
-        &body.peer_ids,
+        &peer_ids,
         None,
     )
     .await
@@ -2579,7 +2644,6 @@ pub async fn start_dars(
     let instance_for_coord = instance.clone();
     let workflows = data.workflows.clone();
     let last_seen = data.last_seen.clone();
-    let peer_ids = body.peer_ids.clone();
     *dars_state.invited_peers.write().await = peer_ids.clone();
     let instance_for_task = instance_name.clone();
 

@@ -164,3 +164,9 @@ export function rowDiffers(pkg: PackageInfo, peers: PeerIndex[]): boolean {
     return status === "other_version" || status === "missing";
   });
 }
+
+/// Whether a cell offers the Distribute DAR action: the participant has a
+/// package list, and this package is not in it at this version.
+export function canDistribute(status: CellStatus): boolean {
+  return status === "other_version" || status === "missing";
+}
