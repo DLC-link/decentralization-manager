@@ -23,8 +23,11 @@ use canton_proto_rs::com::digitalasset::canton::{
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
     },
 };
+use chrono::Utc;
 use serde::Deserialize;
 use sqlx::SqlitePool;
+
+use super::token_standard::fetch_dso_info;
 
 use crate::{
     auth::WorkflowAuth,
@@ -42,16 +45,17 @@ use crate::{
     server::{
         AppState,
         health::classify_health_reply,
-        package_inventory::{TopologyReader, fetch_vetted_packages},
+        package_inventory::{TopologyReader, expected_splice_versions, fetch_vetted_packages},
         queries::{
             contract_templates_all, fetch_package_versions, get_contracts, get_party_metadata,
             rules_templates, sort_contracts,
         },
         types::{
             ConnectionStatus, ContractInfo, DecentralizedPartiesResponse, DecentralizedParty,
-            ErrorResponse, PackageInfo, ParticipantInfo, ParticipantStatus,
-            ParticipantsStatusResponse, PeerErrorKind, PeerPackageComparison, PeerPackageResult,
-            Permission, ResponseSource, VettedPackageInfo, permission_from_proto,
+            ErrorResponse, ExpectedVersionsResponse, PackageInfo, ParticipantInfo,
+            ParticipantStatus, ParticipantsStatusResponse, PeerErrorKind, PeerPackageComparison,
+            PeerPackageResult, Permission, ResponseSource, VettedPackageInfo,
+            permission_from_proto,
         },
     },
     utils,
@@ -1924,6 +1928,40 @@ pub async fn get_vetted_packages(data: web::Data<AppState>) -> impl Responder {
             tracing::error!("Failed to list vetted packages: {e:#}");
             HttpResponse::InternalServerError().json(ErrorResponse {
                 error: format!("Failed to list vetted packages: {e}"),
+            })
+        }
+    }
+}
+
+/// Expected versions for the package families that have a trusted source
+///
+/// Only Splice packages have one: the DSO's AmuletRules pins the version of
+/// each Splice package the network runs. Every other package has no expected
+/// version, and the caller compares observed versions only.
+#[utoipa::path(
+    tag = "Packages",
+    responses(
+        (status = 200, description = "Expected package versions", body = ExpectedVersionsResponse),
+        (status = 502, description = "The DSO API could not be read", body = ErrorResponse)
+    )
+)]
+#[get("/packages/expected-versions")]
+pub async fn get_expected_versions(data: web::Data<AppState>) -> impl Responder {
+    let now = Utc::now();
+    let packages = match fetch_dso_info(&data.http_client, &data.config).await {
+        Ok(dso) => expected_splice_versions(&dso, now),
+        Err(e) => Err(e),
+    };
+    match packages {
+        Ok(packages) => HttpResponse::Ok().json(ExpectedVersionsResponse {
+            source: "DSO AmuletRules".to_string(),
+            fetched_at: now.timestamp(),
+            packages,
+        }),
+        Err(e) => {
+            tracing::warn!("Failed to read expected package versions: {e:#}");
+            HttpResponse::BadGateway().json(ErrorResponse {
+                error: format!("Failed to read expected package versions: {e}"),
             })
         }
     }

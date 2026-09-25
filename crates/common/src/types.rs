@@ -85,6 +85,28 @@ pub struct VettedPackageInfo {
     pub package_version: String,
 }
 
+/// A package version that a trusted source says the network runs
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct ExpectedPackageVersion {
+    pub package_name: String,
+    pub version: String,
+}
+
+/// Expected package versions, for the package families that have a trusted
+/// source. A package missing from `packages` has no expected version.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct ExpectedVersionsResponse {
+    /// Where the versions come from, e.g. the DSO's AmuletRules
+    pub source: String,
+    /// When this node read the source, in seconds since the epoch
+    pub fetched_at: i64,
+    pub packages: Vec<ExpectedPackageVersion>,
+}
+
 /// Package info for peer comparison
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
