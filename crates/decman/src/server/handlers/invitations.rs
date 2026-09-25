@@ -7,14 +7,17 @@ use crate::{
     config::Peer,
     consts::{DECLINE_NOTIFY_BACKOFF_SECS, DECLINE_NOTIFY_MAX_ATTEMPTS},
     db::schema::{Commitable, SchemaRead, SchemaWrite},
-    noise::client::NoiseClient,
+    noise::{
+        Message, MessageType, NoiseKeypair, client::NoiseClient, parse_public_key,
+        send_noise_message_with_chunked_response,
+    },
     server::{
         AppState, mark_failed_via_pool,
         middleware::require_admin,
         types::{
             DeclineInvitationPayload, ErrorResponse, InvitationActionRequest, MessageResponse,
-            PeerJob, PendingInvitation, PendingInvitationsResponse, WorkflowKind, WorkflowProgress,
-            WorkflowRole, WorkflowRun,
+            PeerJob, PendingInvitation, PendingInvitationsResponse, RequestDarPayload,
+            WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun,
         },
     },
     workflow::{
@@ -455,4 +458,157 @@ async fn find_coordinator_peer(
         .ok()?
         .into_iter()
         .find(|p| p.public_key == coordinator_pubkey)
+}
+
+/// Fetch one DAR of a pending DARs invitation from the coordinator so the
+/// operator can read it before accepting. The bytes are not stored: they are
+/// pulled over Noise on demand, checked against the hash the invite pinned,
+/// and handed straight to the caller.
+#[utoipa::path(
+    tag = "Invitations",
+    params(
+        ("id" = String, Path, description = "Pending invitation id"),
+        ("index" = usize, Path, description = "Index into the invitation's dar_filenames"),
+    ),
+    responses(
+        (status = 200, description = "The DAR", content_type = "application/octet-stream"),
+        (status = 404, description = "No such invitation or DAR", body = ErrorResponse),
+        (status = 502, description = "The coordinator did not serve it", body = ErrorResponse),
+    )
+)]
+#[get("/invitations/{id}/dars/{index}")]
+pub async fn get_invitation_dar(
+    data: web::Data<AppState>,
+    path: web::Path<(String, usize)>,
+    http_req: HttpRequest,
+) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
+    let (id, index) = path.into_inner();
+
+    let invitation = {
+        let invitations = data.pending_invitations.read().await;
+        match invitations.iter().find(|i| i.id == id) {
+            Some(i) => i.clone(),
+            None => {
+                return HttpResponse::NotFound().json(ErrorResponse {
+                    error: format!("No pending invitation {id}"),
+                });
+            }
+        }
+    };
+
+    let Some(filename) = invitation.dar_filenames.get(index).cloned() else {
+        return HttpResponse::NotFound().json(ErrorResponse {
+            error: format!("Invitation {id} offers no DAR at index {index}"),
+        });
+    };
+    let Some(workflow_instance) = invitation.workflow_instance.clone() else {
+        return HttpResponse::NotFound().json(ErrorResponse {
+            error: "This invitation predates run-scoped DAR reads".to_string(),
+        });
+    };
+
+    let Some(coordinator) = find_coordinator_peer(&data, &invitation.coordinator_pubkey).await
+    else {
+        return HttpResponse::BadGateway().json(ErrorResponse {
+            error: "No peer record for the coordinator that sent this invitation".to_string(),
+        });
+    };
+
+    let dar = match fetch_dar_from_coordinator(
+        &data,
+        &coordinator,
+        &RequestDarPayload {
+            workflow_instance,
+            index,
+            filename: filename.clone(),
+        },
+    )
+    .await
+    {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            tracing::warn!("Could not read {filename} from the coordinator: {e:#}");
+            return HttpResponse::BadGateway().json(ErrorResponse {
+                error: format!("Could not read {filename} from the coordinator: {e:#}"),
+            });
+        }
+    };
+
+    // The invite pinned the content. Serving bytes that do not match it would
+    // show the operator one DAR and vet another, which is the whole point of
+    // reading it first. Older coordinators send no hashes; then there is
+    // nothing to check against.
+    if let Some(expected) = invitation.dar_hashes.get(index) {
+        let actual = crate::workflow::validation::hash_dar(&dar);
+        if &actual != expected {
+            tracing::warn!(
+                "Coordinator served a {filename} that is not the one it invited us to \
+                 ({actual}, invited {expected})"
+            );
+            return HttpResponse::BadGateway().json(ErrorResponse {
+                error: format!(
+                    "{filename} does not match the hash this invitation pinned. \
+                     Do not accept it."
+                ),
+            });
+        }
+    }
+
+    HttpResponse::Ok()
+        .content_type("application/octet-stream")
+        .insert_header((
+            "Content-Disposition",
+            format!("attachment; filename=\"{}\"", sanitize_filename(&filename)),
+        ))
+        .body(dar)
+}
+
+/// Quotes and path separators out: this name comes off the wire and goes into
+/// a `Content-Disposition` header and the browser's save dialog.
+fn sanitize_filename(name: &str) -> String {
+    name.chars()
+        .map(|c| match c {
+            '"' | '\\' | '/' | '\r' | '\n' => '_',
+            c => c,
+        })
+        .collect()
+}
+
+/// Ask the coordinator for one DAR over Noise, reassembling a chunked answer.
+async fn fetch_dar_from_coordinator(
+    data: &web::Data<AppState>,
+    coordinator: &Peer,
+    request: &RequestDarPayload,
+) -> anyhow::Result<Vec<u8>> {
+    let peer_pub_key = parse_public_key(&coordinator.public_key)
+        .map_err(|e| anyhow::anyhow!("the coordinator's public key does not parse: {e}"))?;
+    let keypair = NoiseKeypair::from_file(&data.config.key_file_path()).await?;
+    let psk = keypair.derive_psk(&peer_pub_key);
+    let identity = data.config.participant_id().to_string();
+
+    let message = Message::new(MessageType::RequestDar, serde_json::to_vec(request)?);
+    let response = send_noise_message_with_chunked_response(
+        &coordinator.address,
+        coordinator.port,
+        &psk,
+        identity.as_bytes(),
+        &message,
+        &data.config.noise_retry,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let response = Message::from_bytes(&response)
+        .map_err(|_| anyhow::anyhow!("the coordinator's answer does not parse"))?;
+    match response.msg_type {
+        MessageType::Data => Ok(response.payload),
+        MessageType::Error => Err(anyhow::anyhow!(
+            "{}",
+            String::from_utf8_lossy(&response.payload)
+        )),
+        other => Err(anyhow::anyhow!("unexpected answer {other:?}")),
+    }
 }
