@@ -2055,17 +2055,41 @@ async fn check_participants_status(
     Ok(ParticipantsStatusResponse { statuses })
 }
 
+/// Query parameters for the peer package comparison
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct ComparePeersQuery {
+    /// Comma-separated participant ids to compare against. Omitted means every
+    /// configured peer. A participant need not be a configured peer: its
+    /// vetting is read from the synchronizer, which holds every participant's.
+    #[serde(default)]
+    pub participants: Option<String>,
+}
+
 /// Compare this node's packages with each peer's, read from the synchronizer
 #[utoipa::path(
     tag = "Packages",
+    params(ComparePeersQuery),
     responses(
         (status = 200, description = "Peer package comparison", body = PeerPackageComparison),
+        (status = 400, description = "A participant id does not parse", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     )
 )]
 #[get("/packages/compare-peers")]
-pub async fn compare_peer_packages(data: web::Data<AppState>) -> impl Responder {
-    match fetch_peer_packages(&data.config, &data.db).await {
+pub async fn compare_peer_packages(
+    data: web::Data<AppState>,
+    query: web::Query<ComparePeersQuery>,
+) -> impl Responder {
+    let selection = match query.participants.as_deref().map(parse_participant_list) {
+        None => None,
+        Some(Ok(ids)) => Some(ids),
+        Some(Err(e)) => {
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                error: format!("Invalid participants: {e}"),
+            });
+        }
+    };
+    match fetch_peer_packages(&data.config, &data.db, selection).await {
         Ok(comparison) => HttpResponse::Ok().json(comparison),
         Err(e) => {
             tracing::error!("Failed to compare peer packages: {e}");
@@ -2134,9 +2158,54 @@ fn peer_failure_hint(err: &NoiseError) -> &'static str {
 /// asymmetry, at the cost of dropping uploaded-but-unvetted packages from the
 /// operator's table entirely. That is a UI decision, so it is left out of the
 /// change that moved the peer side onto the topology store.
+/// The distinct participant ids in a comma-separated list, in list order.
+fn parse_participant_list(raw: &str) -> Result<Vec<CantonId>> {
+    let mut seen = HashSet::new();
+    let mut ids = Vec::new();
+    for part in raw.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let id = CantonId::parse(part)?;
+        if seen.insert(id.to_string()) {
+            ids.push(id);
+        }
+    }
+    Ok(ids)
+}
+
+/// Who to compare against: the `selection` when given, else every configured
+/// peer. This node is left out, as its own list is the reference. A selected
+/// participant that is not a configured peer has no name to show.
+fn comparison_targets(
+    peers: &[Peer],
+    selection: Option<Vec<CantonId>>,
+    current: &CantonId,
+) -> Vec<(CantonId, String)> {
+    let targets: Vec<(CantonId, String)> = match selection {
+        None => peers
+            .iter()
+            .map(|p| (p.participant_id.clone(), p.name.clone()))
+            .collect(),
+        Some(ids) => ids
+            .into_iter()
+            .map(|id| {
+                let name = peers
+                    .iter()
+                    .find(|p| p.participant_id == id)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_default();
+                (id, name)
+            })
+            .collect(),
+    };
+    targets
+        .into_iter()
+        .filter(|(id, _)| id != current)
+        .collect()
+}
+
 async fn fetch_peer_packages(
     config: &NodeConfig,
     db: &SqlitePool,
+    selection: Option<Vec<CantonId>>,
 ) -> Result<PeerPackageComparison> {
     let mut client = PackageServiceClient::new(config.admin_channel().await?);
     let local_response = client
@@ -2162,21 +2231,23 @@ async fn fetch_peer_packages(
         .map(|p| (p.package_id.as_str(), p))
         .collect();
 
-    let current_participant_id = config.participant_id();
     let peers = db.get_all_peers().await?;
+    let targets = comparison_targets(&peers, selection, config.participant_id());
 
     // One reader for the whole set: the synchronizer id and the admin channel
     // are resolved once, not once per peer. The reads stay sequential on
     // purpose — this endpoint is an operator's button click over a handful of
     // peers, and each read is local.
     let mut reader = TopologyReader::connect(config).await?;
-    let mut results = Vec::with_capacity(peers.len());
-    for peer in peers
-        .iter()
-        .filter(|p| p.participant_id != *current_participant_id)
-    {
-        let read = reader.vetted_package_ids(&peer.participant_id).await;
-        results.push(peer_package_result(peer, read, &local_index));
+    let mut results = Vec::with_capacity(targets.len());
+    for (participant_id, name) in targets {
+        let read = reader.vetted_package_ids(&participant_id).await;
+        results.push(peer_package_result(
+            &participant_id,
+            name,
+            read,
+            &local_index,
+        ));
     }
 
     Ok(PeerPackageComparison {
@@ -2185,7 +2256,7 @@ async fn fetch_peer_packages(
     })
 }
 
-/// One comparison row, from this node's topology read of `peer`.
+/// One comparison row, from this node's topology read of `participant_id`.
 ///
 /// `reachable` keeps its wire meaning — "this node has that peer's package
 /// list" — but nothing is reached any more. A peer whose read succeeds and
@@ -2193,12 +2264,12 @@ async fn fetch_peer_packages(
 /// the peer cannot run any Daml, which an operator must act on, so it is not
 /// reported as a healthy peer holding zero packages.
 fn peer_package_result(
-    peer: &Peer,
+    participant_id: &CantonId,
+    name: String,
     read: Result<Vec<String>>,
     local_index: &HashMap<&str, &PackageInfo>,
 ) -> PeerPackageResult {
-    let participant_id = peer.participant_id.to_string();
-    let name = peer.name.clone();
+    let participant_id = participant_id.to_string();
     match read {
         Ok(ids) if ids.is_empty() => PeerPackageResult {
             participant_id,
@@ -2288,7 +2359,8 @@ mod tests {
         let index: HashMap<&str, &PackageInfo> = [("pkg-a", &local)].into_iter().collect();
 
         let got = peer_package_result(
-            &test_peer("p2")?,
+            &test_peer("p2")?.participant_id,
+            "p2".to_string(),
             Ok(vec!["pkg-a".to_string(), "pkg-unknown".to_string()]),
             &index,
         );
@@ -2310,7 +2382,12 @@ mod tests {
         // An empty vetting set means the peer can run no Daml at all. That is
         // an operator problem, not a peer holding zero packages.
         let index: HashMap<&str, &PackageInfo> = HashMap::new();
-        let got = peer_package_result(&test_peer("p2")?, Ok(vec![]), &index);
+        let got = peer_package_result(
+            &test_peer("p2")?.participant_id,
+            "p2".to_string(),
+            Ok(vec![]),
+            &index,
+        );
 
         assert!(!got.reachable);
         assert_eq!(got.error_kind, Some(PeerErrorKind::NoVettedPackages));
@@ -2322,7 +2399,8 @@ mod tests {
     fn a_failed_topology_read_names_itself() -> anyhow::Result<()> {
         let index: HashMap<&str, &PackageInfo> = HashMap::new();
         let got = peer_package_result(
-            &test_peer("p2")?,
+            &test_peer("p2")?.participant_id,
+            "p2".to_string(),
             Err(anyhow::anyhow!("synchronizer unreachable")),
             &index,
         );
@@ -2330,6 +2408,61 @@ mod tests {
         assert!(!got.reachable);
         assert_eq!(got.error_kind, Some(PeerErrorKind::TopologyReadFailed));
         assert!(got.packages.is_empty());
+        Ok(())
+    }
+
+    const OTHER_PARTICIPANT: &str =
+        "participant-9::12200ad4539c269a7b13af6806fb2ee326e7c0d7233fa6144004c416502a2c73fb0b";
+    const SELF_PARTICIPANT: &str =
+        "self::12200ad4539c269a7b13af6806fb2ee326e7c0d7233fa6144004c416502a2c73fb0b";
+
+    #[test]
+    fn a_participant_list_parses_trims_and_dedups() -> anyhow::Result<()> {
+        let peer = test_peer("p2")?.participant_id.to_string();
+        let raw = format!(" {peer}, {OTHER_PARTICIPANT},,{peer} ");
+
+        let ids = parse_participant_list(&raw)?;
+
+        let got: Vec<String> = ids.iter().map(ToString::to_string).collect();
+        assert_eq!(got, vec![peer, OTHER_PARTICIPANT.to_string()]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_malformed_participant_is_rejected() {
+        assert!(parse_participant_list("not-a-participant").is_err());
+    }
+
+    #[test]
+    fn no_selection_compares_every_peer_but_this_node() -> anyhow::Result<()> {
+        let peer = test_peer("p2")?;
+        let mut self_row = test_peer("me")?;
+        self_row.participant_id = CantonId::parse(SELF_PARTICIPANT)?;
+        let current = self_row.participant_id.clone();
+
+        let targets = comparison_targets(&[peer.clone(), self_row], None, &current);
+
+        assert_eq!(targets, vec![(peer.participant_id, "p2".to_string())]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_selection_names_known_peers_and_keeps_unknown_participants() -> anyhow::Result<()> {
+        // A party can be hosted on a participant this node has no peer row
+        // for. Its vetting is still on the synchronizer, so it stays in the
+        // comparison, without a name.
+        let peer = test_peer("p2")?;
+        let other = CantonId::parse(OTHER_PARTICIPANT)?;
+        let current = CantonId::parse(SELF_PARTICIPANT)?;
+        let peer_id = peer.participant_id.clone();
+        let selection = vec![other.clone(), current.clone(), peer_id.clone()];
+
+        let targets = comparison_targets(&[peer], Some(selection), &current);
+
+        assert_eq!(
+            targets,
+            vec![(other, String::new()), (peer_id, "p2".to_string())]
+        );
         Ok(())
     }
 
@@ -2343,7 +2476,12 @@ mod tests {
             "pkg-a".to_string(),
             "pkg-b".to_string(),
         ];
-        let got = peer_package_result(&test_peer("p2")?, Ok(ids), &index);
+        let got = peer_package_result(
+            &test_peer("p2")?.participant_id,
+            "p2".to_string(),
+            Ok(ids),
+            &index,
+        );
 
         let order: Vec<&str> = got.packages.iter().map(|p| p.package_id.as_str()).collect();
         assert_eq!(order, vec!["pkg-a", "pkg-b", "pkg-c"]);

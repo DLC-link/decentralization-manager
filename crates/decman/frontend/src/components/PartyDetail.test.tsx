@@ -86,3 +86,25 @@ describe("PartyDetail read-only sections", () => {
     expect(screen.queryByText("Audit Trail")).toBeNull();
   });
 });
+
+describe("PartyDetail Check DARs", () => {
+  it("opens the package comparison for this party", () => {
+    const onCheckDars = vi.fn();
+    render(
+      <SnackbarProvider>
+        <PartyDetail
+          party={party}
+          onBack={() => {}}
+          onRefresh={() => {}}
+          onNavigateToNotifications={() => {}}
+          authStatus={authStatus({})}
+          onCheckDars={onCheckDars}
+        />
+      </SnackbarProvider>,
+    );
+
+    screen.getByRole("button", { name: "Check DARs" }).click();
+
+    expect(onCheckDars).toHaveBeenCalledTimes(1);
+  });
+});
