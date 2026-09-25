@@ -16,7 +16,9 @@ use canton_proto_rs::com::digitalasset::canton::{
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
     },
 };
+use chrono::{DateTime, Utc};
 use prost_types::Timestamp;
+use serde_json::Value;
 use tonic::transport::Channel;
 
 use common::canton_id::CantonId;
@@ -27,7 +29,10 @@ use crate::{
     workflow::{contracts::DarFile, topology},
 };
 
-use super::{queries::compare_versions, types::VettedPackageInfo};
+use super::{
+    queries::compare_versions,
+    types::{ExpectedPackageVersion, VettedPackageInfo},
+};
 
 /// Derive the stable package-name prefix from a package reference by
 /// stripping the leading `#` and any trailing version segments, e.g.
@@ -191,6 +196,79 @@ pub(crate) async fn fetch_vetted_package_ids(
         .await?
         .vetted_package_ids(participant_id)
         .await
+}
+
+/// The Splice package that each field of AmuletRules' `packageConfig` pins.
+const SPLICE_PACKAGE_CONFIG: [(&str, &str); 6] = [
+    ("amulet", "splice-amulet"),
+    ("amuletNameService", "splice-amulet-name-service"),
+    ("dsoGovernance", "splice-dso-governance"),
+    ("validatorLifecycle", "splice-validator-lifecycle"),
+    ("wallet", "splice-wallet"),
+    ("walletPayments", "splice-wallet-payments"),
+];
+
+/// The Splice package versions the DSO has in effect at `now`, from the
+/// DSO API's `/dso` response.
+///
+/// AmuletRules holds a config schedule: an initial value and future values,
+/// each with the time it takes effect. The one in effect is the latest future
+/// value whose time has passed, else the initial value.
+///
+/// # Errors
+/// Returns an error when the response has no config schedule or a scheduled
+/// time does not parse.
+pub(crate) fn expected_splice_versions(
+    dso: &Value,
+    now: DateTime<Utc>,
+) -> Result<Vec<ExpectedPackageVersion>> {
+    let schedule = dso
+        .pointer("/amulet_rules/contract/payload/configSchedule")
+        .context("DSO API response has no AmuletRules config schedule")?;
+    let mut config = schedule
+        .get("initialValue")
+        .context("AmuletRules config schedule has no initial value")?;
+    let mut effective_since: Option<DateTime<Utc>> = None;
+    for entry in schedule
+        .get("futureValues")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let (time, value) = match entry {
+            Value::Array(pair) if pair.len() == 2 => (&pair[0], &pair[1]),
+            Value::Object(tuple) => match (tuple.get("_1"), tuple.get("_2")) {
+                (Some(time), Some(value)) => (time, value),
+                _ => continue,
+            },
+            _ => continue,
+        };
+        let time = time
+            .as_str()
+            .context("AmuletRules scheduled time is not a string")?;
+        let time = DateTime::parse_from_rfc3339(time)
+            .with_context(|| format!("AmuletRules scheduled time {time} does not parse"))?
+            .with_timezone(&Utc);
+        if time <= now && effective_since.is_none_or(|since| time > since) {
+            config = value;
+            effective_since = Some(time);
+        }
+    }
+    let package_config = config
+        .get("packageConfig")
+        .context("AmuletRules config has no packageConfig")?;
+    Ok(SPLICE_PACKAGE_CONFIG
+        .iter()
+        .filter_map(|(field, package_name)| {
+            package_config
+                .get(*field)
+                .and_then(Value::as_str)
+                .map(|version| ExpectedPackageVersion {
+                    package_name: (*package_name).to_string(),
+                    version: version.to_string(),
+                })
+        })
+        .collect())
 }
 
 /// The DAR on this participant that holds `package_id`, ready to distribute.
@@ -398,6 +476,86 @@ mod tests {
             version: version.to_string(),
             description: String::new(),
         }
+    }
+
+    fn dso_with_schedule(future_values: Value) -> Value {
+        serde_json::json!({
+            "amulet_rules": { "contract": { "payload": { "configSchedule": {
+                "initialValue": { "packageConfig": {
+                    "amulet": "0.1.22",
+                    "amuletNameService": "0.1.23",
+                    "dsoGovernance": "0.1.28",
+                    "validatorLifecycle": "0.1.9",
+                    "wallet": "0.1.23",
+                    "walletPayments": "0.1.22"
+                } },
+                "futureValues": future_values
+            } } } }
+        })
+    }
+
+    fn at(time: &str) -> anyhow::Result<DateTime<Utc>> {
+        Ok(DateTime::parse_from_rfc3339(time)?.with_timezone(&Utc))
+    }
+
+    fn version_of(versions: &[ExpectedPackageVersion], name: &str) -> Option<String> {
+        versions
+            .iter()
+            .find(|v| v.package_name == name)
+            .map(|v| v.version.clone())
+    }
+
+    #[test]
+    fn the_initial_config_names_every_splice_package() -> anyhow::Result<()> {
+        let dso = dso_with_schedule(serde_json::json!([]));
+
+        let got = expected_splice_versions(&dso, at("2026-09-25T00:00:00Z")?)?;
+
+        assert_eq!(got.len(), 6);
+        assert_eq!(version_of(&got, "splice-amulet").as_deref(), Some("0.1.22"));
+        assert_eq!(
+            version_of(&got, "splice-amulet-name-service").as_deref(),
+            Some("0.1.23")
+        );
+        assert_eq!(
+            version_of(&got, "splice-wallet-payments").as_deref(),
+            Some("0.1.22")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_future_value_takes_effect_only_once_its_time_passes() -> anyhow::Result<()> {
+        // Both tuple encodings appear in the wild: the JSON API writes a
+        // `(Time, AmuletConfig)` as `{_1, _2}`, and some encoders as a pair.
+        let dso = dso_with_schedule(serde_json::json!([
+            { "_1": "2026-09-01T00:00:00Z", "_2": { "packageConfig": { "amulet": "0.1.23" } } },
+            ["2026-10-01T00:00:00Z", { "packageConfig": { "amulet": "0.1.24" } }]
+        ]));
+
+        let before = expected_splice_versions(&dso, at("2026-08-31T00:00:00Z")?)?;
+        let between = expected_splice_versions(&dso, at("2026-09-25T00:00:00Z")?)?;
+        let after = expected_splice_versions(&dso, at("2026-10-02T00:00:00Z")?)?;
+
+        assert_eq!(
+            version_of(&before, "splice-amulet").as_deref(),
+            Some("0.1.22")
+        );
+        assert_eq!(
+            version_of(&between, "splice-amulet").as_deref(),
+            Some("0.1.23")
+        );
+        assert_eq!(
+            version_of(&after, "splice-amulet").as_deref(),
+            Some("0.1.24")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_response_without_amulet_rules_is_an_error() {
+        let result = expected_splice_versions(&serde_json::json!({}), Utc::now());
+        assert!(result.is_err());
     }
 
     #[test]

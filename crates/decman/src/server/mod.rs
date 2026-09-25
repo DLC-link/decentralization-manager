@@ -1338,6 +1338,7 @@ pub async fn start_server(
             .service(handlers::get_node_health)
             .service(handlers::compare_peer_packages)
             .service(handlers::get_vetted_packages)
+            .service(handlers::get_expected_versions)
             .service(handlers::clear_acs_import_quarantine)
             .service(handlers::start_kick)
             .service(handlers::get_kick_status)
