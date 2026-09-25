@@ -329,6 +329,18 @@ pub struct DarsRequest {
     pub peer_ids: Vec<CantonId>,
 }
 
+/// Request to distribute a DAR this node already holds, named by one of its
+/// packages
+#[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct DistributePackageRequest {
+    /// A package id in the DAR to distribute
+    pub package_id: String,
+    /// Peer IDs to distribute to (required non-empty)
+    pub peer_ids: Vec<CantonId>,
+}
+
 /// Response for workflow initiation (kick, onboarding, etc.)
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

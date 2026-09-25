@@ -18,6 +18,11 @@ import {
   Alert,
   FormControlLabel,
   Switch,
+  IconButton,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
 } from "@mui/material";
 import SearchIcon from "@mui/icons-material/Search";
 import CloudUploadIcon from "@mui/icons-material/CloudUpload";
@@ -27,10 +32,12 @@ import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import ErrorIcon from "@mui/icons-material/Error";
 import SyncProblemIcon from "@mui/icons-material/SyncProblem";
 import HelpOutlineIcon from "@mui/icons-material/HelpOutlineOutlined";
+import SendIcon from "@mui/icons-material/Send";
 import { CopyableText } from "./CopyableText";
 import { PaginationControls } from "./Pagination";
 import { usePagination } from "../usePagination";
-import { API_BASE } from "../constants";
+import { ADMIN_ACCESS, API_BASE } from "../constants";
+import { useSnackbar } from "../contexts";
 import { authenticatedFetch } from "../api";
 import { finderTableSx, zebraRow } from "../styles";
 import {
@@ -46,9 +53,12 @@ import {
   summarize,
   type CellStatus,
   type ParticipantOption,
+  canDistribute,
 } from "../packageCompare";
 import type {
   DecentralizedParty,
+  DistributePackageRequest,
+  PackageInfo,
   VettedPackageInfo,
   PeerPackageComparison,
   PeerPackageResult,
@@ -127,6 +137,12 @@ export const PackagesPanel = ({
   const [search, setSearch] = useState("");
   const [groupKeys, setGroupKeys] = useState<string[]>([]);
   const [differencesOnly, setDifferencesOnly] = useState(false);
+  const [distributeTarget, setDistributeTarget] = useState<{
+    pkg: PackageInfo;
+    peer: PeerPackageResult;
+  } | null>(null);
+  const [distributing, setDistributing] = useState(false);
+  const { showSnackbar } = useSnackbar();
   const [peers, setPeers] = useState<Peer[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -288,6 +304,44 @@ export const PackagesPanel = ({
       case "unknown":
       case "unreachable":
         return even ? "transparent" : "action.hover";
+    }
+  };
+
+  const configuredPeerIds = useMemo(
+    () => new Set(peers.map((p) => p.participant_id)),
+    [peers],
+  );
+
+  const handleDistribute = async () => {
+    if (!distributeTarget) return;
+    const { pkg, peer } = distributeTarget;
+    setDistributing(true);
+    try {
+      const body: DistributePackageRequest = {
+        package_id: pkg.package_id,
+        peer_ids: [peer.participant_id],
+      };
+      const res = await authenticatedFetch(`${API_BASE}/dars/distribute-package`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (res.ok) {
+        showSnackbar(
+          `Distribution of ${pkg.name} started — follow progress in the feed`,
+        );
+        setDistributeTarget(null);
+      } else {
+        const data = await res.json().catch(() => ({}));
+        showSnackbar(data.error || "Failed to start the distribution", "error");
+      }
+    } catch (e) {
+      showSnackbar(
+        e instanceof Error ? e.message : "Failed to start the distribution",
+        "error",
+      );
+    } finally {
+      setDistributing(false);
     }
   };
 
@@ -665,6 +719,29 @@ export const PackagesPanel = ({
                                   />
                                 </Tooltip>
                               )}
+                              {canDistribute(status) && ADMIN_ACCESS && (
+                                <Tooltip
+                                  title={
+                                    configuredPeerIds.has(peer.participant_id)
+                                      ? `Distribute ${pkg.name} ${pkg.version} to ${participantLabel({ id: peer.participant_id, name: peer.name })}`
+                                      : "Not a configured peer: DARs can only be distributed to configured peers"
+                                  }
+                                  arrow
+                                >
+                                  <span>
+                                    <IconButton
+                                      size="small"
+                                      aria-label={`Distribute ${pkg.name} to ${participantLabel({ id: peer.participant_id, name: peer.name })}`}
+                                      disabled={!configuredPeerIds.has(peer.participant_id)}
+                                      onClick={() => setDistributeTarget({ pkg, peer })}
+                                      sx={{ ml: 0.5, p: 0.25 }}
+                                      data-testid="distribute-dar"
+                                    >
+                                      <SendIcon sx={{ fontSize: 14 }} />
+                                    </IconButton>
+                                  </span>
+                                </Tooltip>
+                              )}
                               {status === "unknown" && (
                                 <Tooltip
                                   title="This node has no name for this package, so only its id can be compared, and the id does not match"
@@ -750,6 +827,34 @@ export const PackagesPanel = ({
           onChange={paging.setPage}
           sx={{ px: 3 }}
         />
+      <Dialog
+        open={distributeTarget !== null}
+        onClose={() => !distributing && setDistributeTarget(null)}
+        maxWidth="xs"
+        fullWidth
+      >
+        <DialogTitle>Distribute DAR</DialogTitle>
+        <DialogContent>
+          {distributeTarget && (
+            <Typography variant="body2">
+              {`Send the DAR that holds ${distributeTarget.pkg.name} ${distributeTarget.pkg.version} to ${participantLabel({ id: distributeTarget.peer.participant_id, name: distributeTarget.peer.name })}? The operator of that node accepts or rejects it in their feed.`}
+            </Typography>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDistributeTarget(null)} disabled={distributing}>
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            onClick={handleDistribute}
+            disabled={distributing}
+            startIcon={distributing ? <CircularProgress size={16} /> : <SendIcon />}
+          >
+            Distribute
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 };
