@@ -16,6 +16,8 @@ import {
   Autocomplete,
   Chip,
   Alert,
+  FormControlLabel,
+  Switch,
 } from "@mui/material";
 import SearchIcon from "@mui/icons-material/Search";
 import CloudUploadIcon from "@mui/icons-material/CloudUpload";
@@ -23,6 +25,8 @@ import CompareArrowsIcon from "@mui/icons-material/CompareArrows";
 import SignalWifiOffIcon from "@mui/icons-material/SignalWifiOff";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import ErrorIcon from "@mui/icons-material/Error";
+import SyncProblemIcon from "@mui/icons-material/SyncProblem";
+import HelpOutlineIcon from "@mui/icons-material/HelpOutlineOutlined";
 import { CopyableText } from "./CopyableText";
 import { PaginationControls } from "./Pagination";
 import { usePagination } from "../usePagination";
@@ -30,9 +34,17 @@ import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
 import { finderTableSx, zebraRow } from "../styles";
 import {
+  PACKAGE_GROUPS,
+  compareCell,
   compareUrl,
+  filterTerms,
+  indexPeer,
+  matchesPackageFilter,
   participantLabel,
   partyParticipants,
+  rowDiffers,
+  summarize,
+  type CellStatus,
   type ParticipantOption,
 } from "../packageCompare";
 import type {
@@ -113,6 +125,8 @@ export const PackagesPanel = ({
   );
   const [comparing, setComparing] = useState(false);
   const [search, setSearch] = useState("");
+  const [groupKeys, setGroupKeys] = useState<string[]>([]);
+  const [differencesOnly, setDifferencesOnly] = useState(false);
   const [peers, setPeers] = useState<Peer[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -187,24 +201,49 @@ export const PackagesPanel = ({
     [packages],
   );
 
-  const filteredSorted = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    if (!q) return sorted;
-    return sorted.filter(
-      (p) =>
-        (p.package_name || "").toLowerCase().includes(q) ||
-        (p.package_id || "").toLowerCase().includes(q),
+  const terms = useMemo(() => filterTerms(search), [search]);
+  const groups = useMemo(
+    () => PACKAGE_GROUPS.filter((g) => groupKeys.includes(g.key)),
+    [groupKeys],
+  );
+  const filterActive = terms.length > 0 || groups.length > 0;
+
+  const filteredSorted = useMemo(
+    () =>
+      sorted.filter((p) =>
+        matchesPackageFilter(
+          { name: p.package_name || "", package_id: p.package_id || "" },
+          groups,
+          terms,
+        ),
+      ),
+    [sorted, groups, terms],
+  );
+
+  const peerIndexes = useMemo(
+    () => (comparison ? comparison.peers.map(indexPeer) : []),
+    [comparison],
+  );
+
+  // The package set the operator asked about, before the differences-only
+  // switch: the summary describes this set, not just the rows left on screen.
+  const selectedPackages = useMemo(() => {
+    if (!comparison) return null;
+    return comparison.local_packages.filter((p) =>
+      matchesPackageFilter(p, groups, terms),
     );
-  }, [sorted, search]);
+  }, [comparison, groups, terms]);
+
+  const summary = useMemo(
+    () => (selectedPackages ? summarize(selectedPackages, peerIndexes) : null),
+    [selectedPackages, peerIndexes],
+  );
 
   const filteredComparison = useMemo(() => {
-    if (!comparison) return null;
-    const q = search.trim().toLowerCase();
-    if (!q) return comparison.local_packages;
-    return comparison.local_packages.filter((p) =>
-      (p.name || "").toLowerCase().includes(q),
-    );
-  }, [comparison, search]);
+    if (!selectedPackages) return null;
+    if (!differencesOnly) return selectedPackages;
+    return selectedPackages.filter((p) => rowDiffers(p, peerIndexes));
+  }, [selectedPackages, differencesOnly, peerIndexes]);
 
   const sortedComparison = useMemo(
     () => [...(filteredComparison ?? [])].sort((a, b) => a.name.localeCompare(b.name)),
@@ -237,44 +276,25 @@ export const PackagesPanel = ({
 
   const handleComparePeers = () => runComparison(selected);
 
-  // Build comparison lookup: for each peer, map "name:version" → true
-  const peerLookups = useMemo(() => {
-    if (!comparison) return [];
-    return comparison.peers.map((peer) => {
-      const lookup = new Set(
-        peer.packages.map((p) => `${p.name}:${p.version}`),
-      );
-      return { peer, lookup };
-    });
-  }, [comparison]);
-
-  const getPeerStatus = (
-    peer: PeerPackageResult,
-    lookup: Set<string>,
-    name: string,
-    version: string,
-  ): "match" | "mismatch" | "unreachable" => {
-    if (!peer.reachable) return "unreachable";
-    return lookup.has(`${name}:${version}`) ? "match" : "mismatch";
-  };
-
-  const statusColor = (
-    status: "match" | "mismatch" | "unreachable",
-    rowIndex: number,
-  ): string => {
+  const statusColor = (status: CellStatus, rowIndex: number): string => {
+    const even = rowIndex % 2 === 0;
     switch (status) {
       case "match":
-        return rowIndex % 2 === 0
-          ? "rgba(76, 175, 80, 0.08)"
-          : "rgba(76, 175, 80, 0.15)";
-      case "mismatch":
-        return rowIndex % 2 === 0
-          ? "rgba(244, 67, 54, 0.08)"
-          : "rgba(244, 67, 54, 0.15)";
+        return even ? "rgba(76, 175, 80, 0.08)" : "rgba(76, 175, 80, 0.15)";
+      case "other_version":
+        return even ? "rgba(255, 152, 0, 0.10)" : "rgba(255, 152, 0, 0.18)";
+      case "missing":
+        return even ? "rgba(244, 67, 54, 0.08)" : "rgba(244, 67, 54, 0.15)";
+      case "unknown":
       case "unreachable":
-        return rowIndex % 2 === 0 ? "transparent" : "action.hover";
+        return even ? "transparent" : "action.hover";
     }
   };
+
+  const toggleGroup = (key: string) =>
+    setGroupKeys((prev) =>
+      prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key],
+    );
 
   return (
     <Box sx={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
@@ -282,7 +302,9 @@ export const PackagesPanel = ({
         <Box sx={{ display: "flex", alignItems: "center", gap: 2, flex: 1, minWidth: 0 }}>
           <TextField
             size="small"
-            placeholder="Search packages"
+            multiline
+            maxRows={4}
+            placeholder="Search packages — paste several names"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             slotProps={{
@@ -294,11 +316,24 @@ export const PackagesPanel = ({
                 ),
               },
             }}
-            sx={{ width: 280 }}
+            sx={{ width: 320 }}
+            data-testid="package-filter"
           />
+          {PACKAGE_GROUPS.map((g) => (
+            <Chip
+              key={g.key}
+              label={g.label}
+              size="small"
+              clickable
+              color={groupKeys.includes(g.key) ? "primary" : "default"}
+              variant={groupKeys.includes(g.key) ? "filled" : "outlined"}
+              onClick={() => toggleGroup(g.key)}
+              data-testid={`package-group-${g.key}`}
+            />
+          ))}
           <Typography variant="body2" color="text.secondary" noWrap>
-            {search.trim()
-              ? `${comparison ? (filteredComparison?.length ?? 0) : filteredSorted.length} of ${comparison ? comparison.local_packages.length : packages.length} packages`
+            {filterActive
+              ? `${comparison ? (selectedPackages?.length ?? 0) : filteredSorted.length} of ${comparison ? comparison.local_packages.length : packages.length} packages`
               : `${packages.length} packages vetted on this participant`}
           </Typography>
         </Box>
@@ -381,11 +416,40 @@ export const PackagesPanel = ({
             data-testid="party-scope-chip"
           />
         )}
+        {comparison && (
+          <FormControlLabel
+            control={
+              <Switch
+                size="small"
+                checked={differencesOnly}
+                onChange={(e) => setDifferencesOnly(e.target.checked)}
+              />
+            }
+            label="Differences only"
+          />
+        )}
       </Box>
       {comparison && selected.length === 0 && (
         <Alert severity="info" sx={{ mx: "24px", mb: 2, flexShrink: 0 }}>
           Comparing with every configured peer. Select participants to narrow the comparison.
         </Alert>
+      )}
+      {summary && (
+        <Box sx={{ mx: "24px", mb: 2, flexShrink: 0 }} data-testid="comparison-summary">
+          {summary.differing === 0 && summary.missing === 0 ? (
+            <Alert severity="success">
+              No version differences found for the selected participants and package set.
+              {summary.unavailable > 0 &&
+                ` ${summary.unavailable} participant(s) had no package list and were not compared.`}
+            </Alert>
+          ) : (
+            <Alert severity="warning">
+              {`${summary.differing} other version(s) and ${summary.missing} missing package(s) across ${summary.packages} package(s).`}
+              {summary.unavailable > 0 &&
+                ` ${summary.unavailable} participant(s) had no package list and were not compared.`}
+            </Alert>
+          )}
+        </Box>
       )}
 
         <Box sx={{ position: "relative", flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
@@ -456,7 +520,7 @@ export const PackagesPanel = ({
                   minWidth:
                     PACKAGE_MIN_WIDTH +
                     VERSION_COL_WIDTH +
-                    peerLookups.length * PEER_COL_WIDTH,
+                    peerIndexes.length * PEER_COL_WIDTH,
                 }}
               >
                 {/* Columns are declared here rather than inferred from the
@@ -467,7 +531,7 @@ export const PackagesPanel = ({
                 <colgroup>
                   <col />
                   <col style={{ width: VERSION_COL_WIDTH }} />
-                  {peerLookups.map(({ peer }) => (
+                  {peerIndexes.map(({ peer }) => (
                     <col key={peer.participant_id} style={{ width: PEER_COL_WIDTH }} />
                   ))}
                 </colgroup>
@@ -479,7 +543,7 @@ export const PackagesPanel = ({
                     <TableCell sx={{ py: 1, fontWeight: "bold" }}>
                       Version
                     </TableCell>
-                    {peerLookups.map(({ peer }) => (
+                    {peerIndexes.map(({ peer }) => (
                       <TableCell
                         key={peer.participant_id}
                         sx={{
@@ -544,13 +608,13 @@ export const PackagesPanel = ({
                         <TableCell sx={{ py: 1 }}>
                           {pkg.version || "-"}
                         </TableCell>
-                        {peerLookups.map(({ peer, lookup }) => {
-                          const status = getPeerStatus(
-                            peer,
-                            lookup,
-                            pkg.name,
-                            pkg.version,
-                          );
+                        {peerIndexes.map((index) => {
+                          const { peer, unnamed } = index;
+                          const { status, versions } = compareCell(index, pkg);
+                          const missingHint =
+                            unnamed > 0
+                              ? ` It vets ${unnamed} package(s) this node does not hold, so it may have a version this node lacks.`
+                              : "";
                           return (
                             <TableCell
                               key={peer.participant_id}
@@ -570,20 +634,56 @@ export const PackagesPanel = ({
                                   />
                                 </Tooltip>
                               )}
-                              {status === "mismatch" && (
-                                <Tooltip title="Missing or version mismatch" arrow>
+                              {status === "other_version" && (
+                                <Tooltip
+                                  title={`Vets ${versions.join(", ")}, not ${pkg.version}`}
+                                  arrow
+                                >
+                                  <Box
+                                    component="span"
+                                    sx={{
+                                      display: "inline-flex",
+                                      alignItems: "center",
+                                      gap: 0.5,
+                                      color: "warning.main",
+                                    }}
+                                  >
+                                    <SyncProblemIcon sx={{ fontSize: 16 }} />
+                                    <Typography variant="caption" noWrap>
+                                      {versions.join(", ")}
+                                    </Typography>
+                                  </Box>
+                                </Tooltip>
+                              )}
+                              {status === "missing" && (
+                                <Tooltip
+                                  title={`No version of this package is vetted.${missingHint}`}
+                                  arrow
+                                >
                                   <ErrorIcon
                                     sx={{ fontSize: 16, color: "error.main" }}
                                   />
                                 </Tooltip>
                               )}
-                              {status === "unreachable" && (
-                                <Typography
-                                  variant="caption"
-                                  color="text.disabled"
+                              {status === "unknown" && (
+                                <Tooltip
+                                  title="This node has no name for this package, so only its id can be compared, and the id does not match"
+                                  arrow
                                 >
-                                  -
-                                </Typography>
+                                  <HelpOutlineIcon
+                                    sx={{ fontSize: 16, color: "text.disabled" }}
+                                  />
+                                </Tooltip>
+                              )}
+                              {status === "unreachable" && (
+                                <Tooltip title={peerErrorTooltip(peer)} arrow>
+                                  <Typography
+                                    variant="caption"
+                                    color="text.disabled"
+                                  >
+                                    unavailable
+                                  </Typography>
+                                </Tooltip>
                               )}
                             </TableCell>
                           );
