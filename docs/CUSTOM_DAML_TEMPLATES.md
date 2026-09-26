@@ -461,6 +461,27 @@ entity_name=GovernableAction
 interface=true
 ```
 
+Add `include_payload=true` to get each contract's fields as well as its id. A template query returns the create arguments; an interface query returns the view of the interface you queried, since Canton sends no create arguments through an interface filter. For the `GovernableAction` query above, each contract comes back with its proposer and label:
+
+```json
+{
+  "contracts": [
+    {
+      "contract_id": "00ab…",
+      "blob": "…",
+      "payload": {
+        "governanceParty": "my-domain-network::1220abc...",
+        "proposer": "alice::1220def...",
+        "actionLabel": "PauseTrading",
+        "description": "Pause trading on market 7"
+      }
+    }
+  ]
+}
+```
+
+The fields use the same JSON as the on-chain audit's `details`: numerics and parties are strings, a variant is `{"_variant": "<constructor>", "value": …}`, and `Time` and `Date` are the raw ledger integers (microseconds and days since the epoch). Without `include_payload` the response has no `payload` key, exactly as before.
+
 ## Testing
 
 ### Daml tests
@@ -556,7 +577,8 @@ curl -X POST http://node:8080/governance/execute \
   }"
 
 # 4. Audit: a GovernanceExecutionResult contract now records the executed action.
-curl "http://node:8080/contracts/query?party_id=${DEC_PARTY}&package_id=%23governance-core-<version>&module_name=Governance.ExecutionResult&entity_name=GovernanceExecutionResult&interface=false"
+#    include_payload=true returns its actionLabel, description, executor and confirmers.
+curl "http://node:8080/contracts/query?party_id=${DEC_PARTY}&package_id=%23governance-core-<version>&module_name=Governance.ExecutionResult&entity_name=GovernanceExecutionResult&interface=false&include_payload=true"
 ```
 
 That is the entire contract between a custom Daml template and DecMan: implement `GovernableAction`, ship the DAR, and drive the lifecycle through the existing API.

@@ -1493,6 +1493,13 @@ pub struct ProviderConfigurationsResponse {
 pub struct ContractWithBlob {
     pub contract_id: String,
     pub blob: String,
+    /// The contract's decoded fields, only when the query asked for
+    /// `include_payload`: the create arguments for a template query, the
+    /// queried interface's view for an interface query. Same JSON shape as the
+    /// chain audit's `details`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "typegen", ts(type = "any"))]
+    pub payload: Option<serde_json::Value>,
 }
 
 /// DSO network info (amulet rules + DSO party)
