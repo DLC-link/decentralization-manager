@@ -403,7 +403,7 @@ fn record_to_json_inner(r: &Record) -> JsonValue {
     JsonValue::Object(obj)
 }
 
-fn record_to_json(r: &Option<Record>) -> JsonValue {
+pub(super) fn record_to_json(r: &Option<Record>) -> JsonValue {
     match r {
         Some(r) => record_to_json_inner(r),
         None => JsonValue::Null,

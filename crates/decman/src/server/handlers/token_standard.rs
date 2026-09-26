@@ -66,6 +66,11 @@ pub struct ContractQueryParams {
     /// without an `executeBefore` field.
     #[serde(default)]
     pub active_only: bool,
+    /// Also return each contract's decoded fields as `payload`: the create
+    /// arguments for a template query, the interface view for an interface
+    /// query. Off by default, so existing callers get the same response.
+    #[serde(default)]
+    pub include_payload: bool,
 }
 
 /// Get ProviderService contracts
@@ -430,6 +435,7 @@ pub async fn get_transfer_preapprovals_handler(
         entity_name: "TransferPreapproval".to_string(),
         use_interface_filter: false,
         active_only: false,
+        include_payload: false,
     };
     let cc_proposal = QueryContractParams {
         package_id: "#splice-amulet".to_string(),
@@ -437,6 +443,7 @@ pub async fn get_transfer_preapprovals_handler(
         entity_name: "TransferPreapprovalProposal".to_string(),
         use_interface_filter: false,
         active_only: false,
+        include_payload: false,
     };
     let token_params = QueryContractParams {
         package_id: "#utility-registry-app-v0".to_string(),
@@ -444,6 +451,7 @@ pub async fn get_transfer_preapprovals_handler(
         entity_name: "TransferPreapproval".to_string(),
         use_interface_filter: false,
         active_only: false,
+        include_payload: false,
     };
 
     async fn count(
@@ -701,7 +709,8 @@ pub async fn get_holdings_handler(
     }
 }
 
-/// Query contract IDs by template
+/// Query contract IDs by template or interface, optionally with their decoded
+/// fields (`include_payload`)
 #[utoipa::path(
     tag = "Services",
     params(ContractQueryParams),
@@ -725,6 +734,7 @@ pub async fn query_contracts_handler(
         entity_name: query.entity_name.clone(),
         use_interface_filter: query.interface,
         active_only: query.active_only,
+        include_payload: query.include_payload,
     };
 
     match query_contracts_by_template(&data.config, party_id, token, &contract_params).await {

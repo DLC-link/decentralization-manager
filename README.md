@@ -455,7 +455,7 @@ The table below is a curated subset. A complete, interactive API reference is av
 | `/services/provider` | GET | Returns ProviderService contracts |
 | `/services/user` | GET | Returns UserService contracts |
 | `/services/registrar` | GET | Returns RegistrarService contracts |
-| `/contracts/query` | GET | Queries active contracts by template |
+| `/contracts/query` | GET | Queries active contracts by template or interface; `include_payload=true` adds their decoded fields |
 | `/packages` | GET | Returns configured package IDs for a party |
 | `/token-standard-contracts` | POST | Queries token standard contracts |
 | `/dars/upload` | POST | Uploads DARs to the current node only |
