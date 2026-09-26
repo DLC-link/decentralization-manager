@@ -34,6 +34,7 @@ use crate::{
 };
 
 use super::{
+    chain_audit::record_to_json,
     event_filters::{interface_filter, party_event_format, template_filter, wildcard_filter},
     ledger_paging::{
         AcsCursor, FETCH_CHUNK, fetch_active_contracts_filtered, fetch_first_active_contract,
@@ -1767,6 +1768,34 @@ pub struct ContractQueryParams {
     /// When true, drop contracts whose `executeBefore` field is already in
     /// the past. No-op for templates that don't carry an `executeBefore`.
     pub active_only: bool,
+    /// When true, fill each result's `payload` with its decoded fields. See
+    /// [`contract_payload`].
+    pub include_payload: bool,
+}
+
+/// A contract's decoded fields for `include_payload`.
+///
+/// Canton sends create arguments through a template filter only; an interface
+/// filter carries the computed view instead. So a template query gets the
+/// create arguments and an interface query gets the view of the interface it
+/// asked for, which is also the shape the caller filtered on. Field labels are
+/// present because the query reads verbose events. A view that failed to
+/// compute has no value and renders as `null`.
+fn contract_payload(created: &CreatedEvent, params: &ContractQueryParams) -> serde_json::Value {
+    if !params.use_interface_filter {
+        return record_to_json(&created.create_arguments);
+    }
+    created
+        .interface_views
+        .iter()
+        .find(|view| {
+            view.interface_id.as_ref().is_some_and(|id| {
+                id.module_name == params.module_name && id.entity_name == params.entity_name
+            })
+        })
+        .map_or(serde_json::Value::Null, |view| {
+            record_to_json(&view.view_value)
+        })
 }
 
 /// Uses TemplateFilter or InterfaceFilter, chosen by `params.use_interface_filter`.
@@ -1802,9 +1831,13 @@ pub async fn query_contracts_by_template(
         }
 
         let blob = base64::engine::general_purpose::STANDARD.encode(&created.created_event_blob);
+        let payload = params
+            .include_payload
+            .then(|| contract_payload(&created, params));
         Some(ContractWithBlob {
             contract_id: created.contract_id,
             blob,
+            payload,
         })
     })
     .await
@@ -2412,6 +2445,7 @@ async fn fetch_preapproved_instruments(
         entity_name: "TransferPreapproval".to_string(),
         use_interface_filter: false,
         active_only: false,
+        include_payload: false,
     };
     let has_amulet =
         match query_contracts_by_template(config, party_id, token.clone(), &amulet_params).await {
@@ -3300,5 +3334,164 @@ mod tests {
         assert!(walk_parties("wanted::1220bb", pages).await?.is_none());
 
         Ok(())
+    }
+
+    // ------------------------------------------------------------------------
+    // contract_payload (`/contracts/query?include_payload=true`)
+    // ------------------------------------------------------------------------
+
+    fn payload_params(
+        module_name: &str,
+        entity_name: &str,
+        interface: bool,
+    ) -> ContractQueryParams {
+        ContractQueryParams {
+            package_id: "#pkg".to_string(),
+            module_name: module_name.to_string(),
+            entity_name: entity_name.to_string(),
+            use_interface_filter: interface,
+            active_only: false,
+            include_payload: true,
+        }
+    }
+
+    fn view_of(module_name: &str, entity_name: &str, fields: Vec<RecordField>) -> InterfaceView {
+        InterfaceView {
+            interface_id: Some(Identifier {
+                package_id: "#pkg".to_string(),
+                module_name: module_name.to_string(),
+                entity_name: entity_name.to_string(),
+            }),
+            view_status: None,
+            view_value: Some(Record {
+                record_id: None,
+                fields,
+            }),
+            implementation_package_id: String::new(),
+        }
+    }
+
+    /// A template query returns the create arguments, with nested records,
+    /// variants and lists decoded the way the chain audit renders them.
+    #[test]
+    fn template_payload_is_the_create_arguments() {
+        let created = CreatedEvent {
+            contract_id: "batch-cid".to_string(),
+            create_arguments: Some(Record {
+                record_id: None,
+                fields: vec![
+                    field("operator", party_value("operator::1220aa")),
+                    field("batchId", text_value("window-1")),
+                    field("totalRequested", numeric_value("1000.0")),
+                    field(
+                        "rows",
+                        Value {
+                            sum: Some(value::Sum::List(List {
+                                elements: vec![record_value(vec![
+                                    field("requestId", text_value("r-1")),
+                                    field("allocatedUnits", numeric_value("240.0")),
+                                ])],
+                            })),
+                        },
+                    ),
+                    field("stage", variant_value("Open", unit_value())),
+                ],
+            }),
+            ..Default::default()
+        };
+
+        let payload = contract_payload(&created, &payload_params("Fund.Batch", "Batch", false));
+
+        assert_eq!(
+            payload,
+            serde_json::json!({
+                "operator": "operator::1220aa",
+                "batchId": "window-1",
+                "totalRequested": "1000.0",
+                "rows": [{ "requestId": "r-1", "allocatedUnits": "240.0" }],
+                "stage": { "_variant": "Open", "value": {} },
+            })
+        );
+    }
+
+    /// Canton sends no create arguments through an interface filter, so an
+    /// interface query returns the view — of the interface it asked for, even
+    /// when the contract implements others the party can also see.
+    #[test]
+    fn interface_payload_is_the_queried_interface_view() {
+        let created = CreatedEvent {
+            contract_id: "holding-cid".to_string(),
+            interface_views: vec![
+                view_of(
+                    "Other.Api",
+                    "Lockable",
+                    vec![field("locked", text_value("no"))],
+                ),
+                view_of(
+                    "Splice.Api.Token.HoldingV1",
+                    "Holding",
+                    vec![
+                        field("owner", party_value("owner::1220aa")),
+                        field("amount", numeric_value("12.5")),
+                    ],
+                ),
+            ],
+            ..Default::default()
+        };
+
+        let payload = contract_payload(
+            &created,
+            &payload_params("Splice.Api.Token.HoldingV1", "Holding", true),
+        );
+
+        assert_eq!(
+            payload,
+            serde_json::json!({ "owner": "owner::1220aa", "amount": "12.5" })
+        );
+    }
+
+    /// No view for the queried interface (or one that failed to compute and
+    /// carries no value) is `null`, never another interface's view.
+    #[test]
+    fn interface_payload_without_a_matching_view_is_null() {
+        let mut failed = view_of("Splice.Api.Token.HoldingV1", "Holding", vec![]);
+        failed.view_value = None;
+        let created = CreatedEvent {
+            interface_views: vec![
+                view_of(
+                    "Other.Api",
+                    "Lockable",
+                    vec![field("locked", text_value("no"))],
+                ),
+                failed,
+            ],
+            ..Default::default()
+        };
+        let params = payload_params("Splice.Api.Token.HoldingV1", "Holding", true);
+        assert_eq!(contract_payload(&created, &params), serde_json::Value::Null);
+
+        let unrelated = CreatedEvent {
+            interface_views: vec![view_of("Other.Api", "Lockable", vec![])],
+            ..Default::default()
+        };
+        assert_eq!(
+            contract_payload(&unrelated, &params),
+            serde_json::Value::Null
+        );
+    }
+
+    /// Callers that don't ask for the payload get the response they always
+    /// had: no `payload` key at all.
+    #[test]
+    fn contract_without_payload_serializes_as_before() {
+        let contract = ContractWithBlob {
+            contract_id: "cid".to_string(),
+            blob: "YmxvYg==".to_string(),
+            payload: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&contract).expect("serializes"),
+            serde_json::json!({ "contract_id": "cid", "blob": "YmxvYg==" })
+        );
     }
 }
