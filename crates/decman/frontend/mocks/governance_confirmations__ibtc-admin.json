@@ -34,6 +34,10 @@
           "expires_at": 1782214323
         }
       ],
+      "executable_confirmation_cids": [
+        "006141c7551141fc116abdfd041ce2dc06fc989908289728a66690274e1c252d5f",
+        "002dac1d7e654634908a142097ed6ec4289205fc4bc6b626838cd98919d5b02d7b"
+      ],
       "confirmation_count": 2,
       "can_execute": true,
       "last_confirmation_at": 1782126123
@@ -76,6 +80,11 @@
           "expires_at": 1782214323
         }
       ],
+      "executable_confirmation_cids": [
+        "0046bf36a4a1175aa4204c4153f466aa9ba5e9a0ab3f42731776098d60e6286196",
+        "004284b4d76380ac83366f0dadf4c5baf633f0755d077e7d8b3c4aff467ead7e96",
+        "00d7d60ad9a45ea528d3e630a581f95cbf0fa21c9e050524b55a042a6697a109a9"
+      ],
       "confirmation_count": 3,
       "can_execute": true,
       "last_confirmation_at": 1782126123
@@ -93,6 +102,9 @@
           "created_at": 1782124323,
           "expires_at": 1782214323
         }
+      ],
+      "executable_confirmation_cids": [
+        "0100a7e3b9c26d18f405ba7d2e69c31b58f07ae4c82d96b315fa9c7e24b8d1f300"
       ],
       "confirmation_count": 1,
       "can_execute": true,
@@ -112,6 +124,9 @@
           "created_at": 1782124323,
           "expires_at": 1782214323
         }
+      ],
+      "executable_confirmation_cids": [
+        "0067b2ae94c13d70f5a8ce21b937d40f86ac5e73b9d21f048ae6c395b7d0f2183"
       ],
       "confirmation_count": 1,
       "can_execute": true,

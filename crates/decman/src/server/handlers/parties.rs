@@ -435,7 +435,12 @@ async fn bounded_read<T>(
 /// Query parameters for decentralized parties endpoint
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
 pub struct PartiesQuery {
-    /// Filter parties by prefix (e.g., "cbtc-network")
+    /// Filter parties by prefix (e.g., "cbtc-network").
+    ///
+    /// Parties this node already knows locally (credentials, workflow runs,
+    /// cache) that match the prefix suppress discovery. A node that knows
+    /// `cbtc::A` and also hosts an unknown `cbtc-v2::B` answers `cb` with A
+    /// only. The unfiltered list behaves the same way.
     #[serde(default)]
     pub prefix: Option<String>,
     /// Force a synchronous Canton fetch, bypassing the cache. Used right after
@@ -1280,19 +1285,11 @@ async fn discover_hosted_party_ids(
 
     let response = bounded_read(
         "list_parties",
-        aggregation_client.list_parties(tonic::Request::new(ListPartiesRequest {
-            as_of: None,
-            limit: MAX_HOSTED_PARTIES,
+        aggregation_client.list_parties(tonic::Request::new(build_list_parties_request(
             synchronizer_ids,
-            // A bare prefix, with no `::`, narrows by party identifier on both
-            // sides of Canton's filtering: `identifier LIKE 'prefix%'` in the
-            // store query and `identifier.startsWith` in the post-filter. That
-            // is what keeps this bounded on a participant hosting a very large
-            // number of parties, where the result limit below would otherwise
-            // truncate before reaching any decentralized party.
-            filter_party: prefix_filter.unwrap_or_default().to_string(),
-            filter_participant: participant_id.to_string(),
-        })),
+            prefix_filter,
+            participant_id,
+        ))),
     )
     .await?
     .into_inner();
@@ -1318,6 +1315,27 @@ async fn discover_hosted_party_ids(
         response.results.into_iter().map(|result| result.party),
         owned_namespaces,
     ))
+}
+
+/// Build the `ListParties` request that discovers this participant's parties.
+fn build_list_parties_request(
+    synchronizer_ids: Vec<String>,
+    prefix_filter: Option<&str>,
+    participant_id: &str,
+) -> ListPartiesRequest {
+    ListPartiesRequest {
+        as_of: None,
+        limit: MAX_HOSTED_PARTIES,
+        synchronizer_ids,
+        // A bare prefix, with no `::`, narrows by party identifier on both
+        // sides of Canton's filtering: `identifier LIKE 'prefix%'` in the
+        // store query and `identifier.startsWith` in the post-filter. That
+        // is what keeps this bounded on a participant hosting a very large
+        // number of parties, where the result limit would otherwise truncate
+        // before reaching any decentralized party.
+        filter_party: prefix_filter.unwrap_or_default().to_string(),
+        filter_participant: participant_id.to_string(),
+    }
 }
 
 /// The logical synchronizer ID inside a physical one.
@@ -2524,13 +2542,22 @@ mod tests {
         // The prefix narrows within the namespace, and picks the party by name
         // rather than by whichever mapping arrived last.
         let filtered = pair_namespaces_with_parties(
-            vec![definition],
+            vec![definition.clone()],
             &parties_by_namespace,
             &fingerprints,
             Some("beta"),
         );
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].2.party, format!("beta::{namespace}"));
+
+        let partial = pair_namespaces_with_parties(
+            vec![definition],
+            &parties_by_namespace,
+            &fingerprints,
+            Some("b"),
+        );
+        assert_eq!(partial.len(), 1);
+        assert_eq!(partial[0].2.party, format!("beta::{namespace}"));
     }
 
     /// A namespace this node owns no key in is somebody else's party.
@@ -2555,6 +2582,26 @@ mod tests {
         );
 
         assert!(paired.is_empty());
+    }
+
+    /// Canton's `ListParties` matches a bare identifier by prefix on a DB
+    /// store, so a partial prefix goes to it as is. This pins the request
+    /// only; the `create_dec_party` integration phase pins Canton's behavior.
+    #[test]
+    fn list_parties_request_sends_a_partial_prefix_unchanged() {
+        let request = build_list_parties_request(
+            vec!["sync::1220abcd".to_string()],
+            Some("cb"),
+            "participant::abc123",
+        );
+
+        assert_eq!(request.filter_party, "cb");
+        assert_eq!(request.filter_participant, "participant::abc123");
+        assert_eq!(request.synchronizer_ids, vec!["sync::1220abcd".to_string()]);
+        assert_eq!(request.limit, MAX_HOSTED_PARTIES);
+
+        let unfiltered = build_list_parties_request(Vec::new(), None, "participant::abc123");
+        assert_eq!(unfiltered.filter_party, "");
     }
 
     fn a_mapping(party: &str) -> PartyToParticipant {

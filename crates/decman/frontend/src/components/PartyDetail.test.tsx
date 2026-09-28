@@ -1,9 +1,15 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { act, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { authenticatedFetch } from "../api";
 import { SnackbarProvider } from "../contexts";
 import { PartyDetail } from "./PartyDetail";
-import type { DecentralizedParty, PartyAuthStatus, RightsStatus } from "../types";
+import type {
+  DecentralizedParty,
+  GovernanceStateResponse,
+  PartyAuthStatus,
+  RightsStatus,
+} from "../types";
 
 // `PartyDetail` and its two gated children each fetch on mount. The gate under
 // test runs before any of that, so one stub that never resolves keeps the
@@ -39,18 +45,19 @@ const authStatus = (over?: Partial<RightsStatus>): PartyAuthStatus => ({
   rights: over === undefined ? undefined : rights(over),
 });
 
-const renderDetail = (status: PartyAuthStatus) =>
-  render(
-    <SnackbarProvider>
-      <PartyDetail
-        party={party}
-        onBack={() => {}}
-        onRefresh={() => {}}
-        onNavigateToNotifications={() => {}}
-        authStatus={status}
-      />
-    </SnackbarProvider>,
-  );
+const detail = (status: PartyAuthStatus, forParty = party) => (
+  <SnackbarProvider>
+    <PartyDetail
+      party={forParty}
+      onBack={() => {}}
+      onRefresh={() => {}}
+      onNavigateToNotifications={() => {}}
+      authStatus={status}
+    />
+  </SnackbarProvider>
+);
+
+const renderDetail = (status: PartyAuthStatus) => render(detail(status));
 
 /**
  * Both sections only read. Gating them on `actAs` hid the audit trail from a
@@ -84,5 +91,86 @@ describe("PartyDetail read-only sections", () => {
 
     expect(screen.queryByText("Holdings")).toBeNull();
     expect(screen.queryByText("Audit Trail")).toBeNull();
+  });
+});
+
+describe("PartyDetail governance membership", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("shows membership that a later poll returns", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const status = authStatus();
+    const withMembers = (members: string[]): GovernanceStateResponse => ({
+      state: {
+        contract_id: "00rules",
+        governance_party: party.party_id,
+        members,
+        threshold: 1,
+        out_of_date: false,
+      },
+    });
+    const responses = [
+      withMembers([`other::${ns}`]),
+      withMembers([`other::${ns}`, status.member_party_id]),
+    ];
+    let calls = 0;
+    vi.mocked(authenticatedFetch).mockImplementation((url) => {
+      if (!String(url).includes("/governance/state"))
+        return new Promise(() => {});
+      const body = responses[Math.min(calls, responses.length - 1)];
+      calls += 1;
+      return Promise.resolve(new Response(JSON.stringify(body)));
+    });
+
+    render(detail(status));
+    await waitFor(() =>
+      expect(
+        screen.getByLabelText(
+          "Authenticated, but the member party is not a governance member",
+        ),
+      ).toBeTruthy(),
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+
+    await waitFor(() =>
+      expect(screen.getByLabelText("Authenticated")).toBeTruthy(),
+    );
+    expect(calls).toBe(2);
+  });
+
+  it("drops the previous party's membership when the party changes", async () => {
+    const status = authStatus();
+    const loaded: GovernanceStateResponse = {
+      state: {
+        contract_id: "00rules",
+        governance_party: party.party_id,
+        members: [status.member_party_id],
+        threshold: 1,
+        out_of_date: false,
+      },
+    };
+    vi.mocked(authenticatedFetch).mockImplementation((url) =>
+      String(url).includes(encodeURIComponent(party.party_id))
+        ? Promise.resolve(new Response(JSON.stringify(loaded)))
+        : new Promise(() => {}),
+    );
+
+    const { rerender } = render(detail(status));
+    await waitFor(() =>
+      expect(screen.getByLabelText("Authenticated")).toBeTruthy(),
+    );
+
+    const other: DecentralizedParty = { ...party, party_id: `beta::${ns}` };
+    rerender(detail({ ...status, dec_party_id: other.party_id }, other));
+
+    expect(screen.queryByLabelText("Authenticated")).toBeNull();
+    expect(
+      screen.getByLabelText("Authenticated, governance membership unknown"),
+    ).toBeTruthy();
   });
 });
