@@ -39,6 +39,7 @@ import { useSnackbar } from "./contexts";
 import { API_BASE, ADMIN_ACCESS } from "./constants";
 import { authenticatedFetch, pingLatency } from "./api";
 import { useHiddenParties } from "./useHiddenParties";
+import { TAB_HASHES, buildHash, parseHash } from "./hashRoute";
 import { workflowKindLabel } from "./workflowSteps";
 import { columnSx } from "./styles";
 import type {
@@ -61,39 +62,12 @@ import type {
 /// than reading a party's whole proposal set at once.
 const ACTIONS_BATCH = 25;
 
-const TAB_HASHES = ["parties", "packages", "config", "notifications"] as const;
-
 // Saved in index.html <script> before any modules load.
 // Strip Keycloak OAuth params that get appended to the hash during check-sso.
 const SAVED_HASH = (
   (window as { __INITIAL_HASH__?: string }).__INITIAL_HASH__ ?? ""
 ).replace(/[&?#](state|session_state|iss|code)=.*/i, "");
 const INITIAL_ROUTE = parseHash(SAVED_HASH);
-
-function parseHash(hash: string): {
-  tab: number;
-  partySlug: string | null;
-  /// `#packages/<party id>`: the packages tab compares that party's hosts.
-  packagesPartyId: string | null;
-} {
-  const raw = hash.replace(/^#\/?/, "");
-  const [section, ...rest] = raw.split("/");
-  const slug = rest.join("/") || null;
-
-  const tabIndex = TAB_HASHES.indexOf(
-    section as (typeof TAB_HASHES)[number],
-  );
-  return {
-    tab: tabIndex >= 0 ? tabIndex : 0,
-    partySlug: tabIndex === 0 ? slug : null,
-    packagesPartyId: tabIndex === 1 ? slug : null,
-  };
-}
-
-function buildHash(tab: number, partySlug?: string | null): string {
-  const section = TAB_HASHES[tab] ?? "parties";
-  return partySlug ? `#${section}/${partySlug}` : `#${section}`;
-}
 
 /**
  * Wrap a refresh so a tick is skipped while the previous one is still running.

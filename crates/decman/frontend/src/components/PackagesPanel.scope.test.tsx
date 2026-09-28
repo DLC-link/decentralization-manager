@@ -1,7 +1,9 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { authenticatedFetch } from "../api";
+import { buildHash, parseHash, TAB_HASHES } from "../hashRoute";
 import { PackagesPanel } from "./PackagesPanel";
 import type { DecentralizedParty, PeerPackageComparison } from "../types";
 
@@ -90,5 +92,67 @@ describe("PackagesPanel party refresh", () => {
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
     expect(compareCalls()).toHaveLength(1);
+  });
+});
+
+const PACKAGES_TAB = TAB_HASHES.indexOf("packages");
+
+/** The packages tab as App wires it: the party comes from the fragment. */
+const PackagesRoute = () => {
+  const [partyId, setPartyId] = useState(
+    () => parseHash(window.location.hash).packagesPartyId,
+  );
+  return (
+    <PackagesPanel
+      party={partyId === party.party_id ? party : null}
+      selfParticipantId={self}
+      onClearParty={() => {
+        setPartyId(null);
+        window.history.pushState(null, "", buildHash(PACKAGES_TAB));
+      }}
+    />
+  );
+};
+
+const removeSelected = (label: string) => {
+  const del = screen
+    .getByText(label)
+    .closest(".MuiChip-root")
+    ?.querySelector(".MuiChip-deleteIcon");
+  if (!del) throw new Error(`no selected chip for ${label}`);
+  fireEvent.click(del);
+};
+
+describe("PackagesPanel selection edit", () => {
+  beforeEach(() => {
+    window.history.replaceState(null, "", buildHash(PACKAGES_TAB, party.party_id));
+  });
+
+  it("clears the party chip once the selection is not the party's hosts", async () => {
+    render(<PackagesRoute />);
+    await waitFor(() => expect(compareCalls()).toHaveLength(1));
+    expect(screen.getByTestId("party-scope-chip")).toBeTruthy();
+
+    removeSelected("host-c");
+
+    expect(screen.queryByTestId("party-scope-chip")).toBeNull();
+    expect(screen.getByText("Operator B")).toBeTruthy();
+    expect(window.location.hash).toBe(buildHash(PACKAGES_TAB));
+  });
+
+  it("does not restore the party's hosts on a reload after an edit", async () => {
+    const first = render(<PackagesRoute />);
+    await waitFor(() => expect(compareCalls()).toHaveLength(1));
+    removeSelected("host-c");
+    first.unmount();
+    fetchMock.mockClear();
+
+    render(<PackagesRoute />);
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    expect(compareCalls()).toHaveLength(0);
+    expect(screen.queryByTestId("party-scope-chip")).toBeNull();
+    expect(screen.queryByText("Operator B")).toBeNull();
+    expect(screen.queryByText("host-c")).toBeNull();
   });
 });

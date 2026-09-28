@@ -133,11 +133,12 @@ export const PackagesPanel = ({
       if (p.participant_id === selfParticipantId) continue;
       byId.set(p.participant_id, { id: p.participant_id, name: p.name });
     }
-    for (const id of party ? partyParticipants(party, selfParticipantId) : []) {
+    const extra = party ? partyParticipants(party, selfParticipantId) : [];
+    for (const id of [...extra, ...selected]) {
       if (!byId.has(id)) byId.set(id, { id, name: "" });
     }
     return [...byId.values()];
-  }, [peers, party, selfParticipantId]);
+  }, [peers, party, selfParticipantId, selected]);
 
   const runComparison = useCallback(async (participants: string[]) => {
     const seq = ++compareSeq.current;
@@ -169,6 +170,12 @@ export const PackagesPanel = ({
 
   const handleSelectionChange = (ids: string[]) => {
     setSelected(ids);
+    if (partyHosts !== null) {
+      const hosts = partyHosts ? partyHosts.split(",") : [];
+      const same =
+        ids.length === hosts.length && hosts.every((h) => ids.includes(h));
+      if (!same) onClearParty?.();
+    }
     // A comparison on screen must describe the selection above it.
     if (comparison) void runComparison(ids);
   };
