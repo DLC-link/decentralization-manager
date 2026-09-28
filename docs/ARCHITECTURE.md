@@ -269,9 +269,12 @@ and they are load-bearing enough to state rather than imply:
   kicked member.
 - **A legacy `PartyToKeyMapping` does not bound how many keys a proposal
   drops.** It still holds departed members' keys, so the removal count is not
-  checked, and a change-threshold can drop one member's key and keep a
-  departed member's key at the same count. Canton then requires the departed
-  key to sign, so this needs the holder of that key to collude.
+  checked for any workflow kind. A change-threshold or add-party can drop a
+  member's key and keep a departed member's key, and Canton then requires the
+  departed key to sign, so the holder of that key has to collude. A kick needs
+  no collusion: the proposal can keep the kicked member's key and drop a
+  surviving member's instead, and the key it keeps belongs to the member being
+  kicked.
 - **The contracts workflow constrains who a transaction acts as, not what it
   does.** The peer recomputes the hash and pins `act_as` to the accepted dec
   party, so it can only ever authorize the transaction it can read — but the
