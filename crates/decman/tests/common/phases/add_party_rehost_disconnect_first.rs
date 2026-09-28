@@ -1000,9 +1000,13 @@ async fn received_commitments(
     config: &NodeConfig,
     since: SystemTime,
 ) -> anyhow::Result<(usize, Vec<String>)> {
+    // Keep the nanoseconds. Truncating to whole seconds moves the window start
+    // backwards, which can pull in a period that began before the settle point
+    // and fail this assertion on a mismatch the phase caused itself.
+    let elapsed = since.duration_since(UNIX_EPOCH)?;
     let from = prost_types::Timestamp {
-        seconds: since.duration_since(UNIX_EPOCH)?.as_secs() as i64,
-        nanos: 0,
+        seconds: elapsed.as_secs() as i64,
+        nanos: elapsed.subsec_nanos() as i32,
     };
     let synchronizer_id = dec_party_manager::utils::get_synchronizer_id(config).await?;
     let mut client = ParticipantInspectionServiceClient::new(config.admin_channel().await?);
