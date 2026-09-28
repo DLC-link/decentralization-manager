@@ -97,7 +97,130 @@ template PauseProposal
 - ✅ Exercise any choice on a contract where `governanceParty` is a controller / signatory / observer with the necessary visibility.
 - ✅ Create new contracts whose required authorizations are a subset of `{proposer, governanceParty}`.
 - ✅ Return `pure ()` for pure "intent-only" actions (see `GenericVoteProposal`) — the audit trail is still recorded.
-- ❌ Require the authority of any party that is *not* `governanceParty` or `proposer`. Such an action will fail at execute time. If you need a third-party signature, model it as a two-step flow (first action creates an offer; second party accepts off-chain).
+- ❌ Require the authority of any party that is *not* `governanceParty` or `proposer`. Such an action will fail at execute time. If you need a third-party signature, model it as a two-step flow (first action creates an offer; second party accepts off-chain), or collect the signatures up front as described in [Require business sign-offs at execute time](#require-business-sign-offs-at-execute-time).
+
+### Require business sign-offs at execute time
+
+This is an application pattern built on `GovernableAction`, not DecMan behaviour. The members' threshold decides *whether the committee agrees*. Many domain actions also need sign-offs from people who are not members: a treasury officer, a compliance reviewer, an auditor. `executeImpl` cannot ask for their authority, but it can consume approvals they signed earlier and check them against a policy the committee controls. The check runs inside the execution, so an action that reached the member threshold still fails if a required sign-off is missing, and nothing is released.
+
+The pattern has three parts:
+
+- **A policy signed by `governanceParty`.** It says which roles must sign off, who may sign for each role, and how many. Only a governed action can create or replace it, so the committee controls the rules.
+- **A sign-off per approver.** The approver is the signatory, which authenticates them. `governanceParty` is an observer and controls a consuming choice, so `executeImpl` can use the sign-off exactly once. Each sign-off names the action and the exact contract it approves.
+- **An `executeImpl` that consumes the sign-offs and checks them against the policy** before doing anything else.
+
+The proposer must not be able to choose the policy. If the proposal carried a policy contract ID, a proposer could point at any active policy of the governance party, such as a lenient one, and the check would pass. So the policy is read from something governance controls: here the target contract names the policy its release needs.
+
+`MyResource` stands for the contract your action changes; here it has a `MyResource_Release` choice controlled by `governanceParty`.
+
+```daml
+module MyDomain.ReleaseProposal where
+
+import DA.Foldable (forA_)
+import DA.List (unique)
+import Governance.Action
+
+-- The contract the action changes. Governance controls it, and it names the
+-- policy its release needs, so a proposer cannot pick a different policy.
+template MyResource
+  with
+    governanceParty : Party
+    releasePolicy   : ContractId SignOffPolicy
+    released        : Bool
+  where
+    signatory governanceParty
+
+    choice MyResource_Release : ContractId MyResource
+      controller governanceParty
+      do create this with released = True
+
+data SignOffRole = Treasury | Compliance
+  deriving (Eq, Show)
+
+data RoleRule = RoleRule with
+    role    : SignOffRole
+    members : [Party]
+    quorum  : Int
+  deriving (Eq, Show)
+
+-- Who must sign off. Signed by the governance party, so only a governed
+-- action can create or replace it.
+template SignOffPolicy
+  with
+    governanceParty : Party
+    rules           : [RoleRule]
+  where
+    signatory governanceParty
+    -- An empty policy would pass every execution; an unsatisfiable one would block it.
+    ensure not (null rules) && all (\r -> r.quorum > 0 && r.quorum <= length r.members) rules
+
+releaseLabel : Text
+releaseLabel = "ReleaseResource"
+
+-- One approver's sign-off for one action on one exact target. The approver
+-- signs it; the governance party observes it and consumes it during execution.
+template SignOff
+  with
+    governanceParty : Party
+    approver        : Party
+    role            : SignOffRole
+    action          : Text
+    target          : ContractId MyResource
+  where
+    signatory approver
+    observer  governanceParty
+
+    choice SignOff_Consume : SignOff
+      controller governanceParty
+      do pure this
+
+template ReleaseProposal
+  with
+    governanceParty : Party
+    proposer        : Party
+    targetCid       : ContractId MyResource
+    signOffCids     : [ContractId SignOff]
+  where
+    signatory proposer
+    observer  governanceParty
+
+    interface instance GovernableAction for ReleaseProposal where
+      view = GovernableActionView with
+        governanceParty
+        proposer
+        actionLabel = releaseLabel
+        description = "Release " <> show targetCid
+
+      executeImpl = do
+        target <- fetch targetCid
+        assertMsg "Target belongs to another governance party" (target.governanceParty == governanceParty)
+        -- The policy comes from the governance-controlled target, not from the proposer.
+        policy <- fetch target.releasePolicy
+        assertMsg "Policy belongs to another governance party" (policy.governanceParty == governanceParty)
+        -- Consuming: each sign-off counts once, in one execution only.
+        signOffs <- forA signOffCids \cid -> exercise cid SignOff_Consume
+        let approvers = map (.approver) signOffs
+        assertMsg "Sign-off is for another action or target"
+          (all (\s -> s.action == releaseLabel && s.target == targetCid && s.governanceParty == governanceParty) signOffs)
+        assertMsg "A party signed off more than once" (unique approvers)
+        assertMsg "The proposer signed off on their own proposal" (proposer `notElem` approvers)
+        forA_ policy.rules \r ->
+          assertMsg ("Missing sign-off for " <> show r.role)
+            (length (filter (\s -> s.role == r.role && s.approver `elem` r.members) signOffs) >= r.quorum)
+        _ <- exercise targetCid MyResource_Release
+        pure ()
+```
+
+What this gives you:
+
+- **Missing or wrong sign-offs fail the whole execution.** Nothing is consumed, so the valid sign-offs can be reused in a corrected proposal. The member threshold and the business sign-offs are independent checks, and both must pass.
+- **The proposer cannot pick the rules.** The policy comes from the target, and its `ensure` rejects an empty policy or a quorum nobody can meet.
+- **Sign-offs are bound and single-use.** A sign-off for another action or another target, from someone not listed for its role, from the proposer, or reused after a successful execution does not count.
+- **Rule changes are governed.** Replace the policy with its own `GovernableAction` that archives the old policy, creates the new one and points the target at it. Proposals and sign-offs filed under the old rules then fail, because the old policy and the old target are gone.
+
+A further refinement: give each sign-off an expiry, and let the approver revoke it with a choice controlled by the approver.
+
+In the test package, cover at least: an empty policy rejected, a missing role rejected, a sign-off for another target or another action rejected, the right person under the wrong role rejected, the proposer's own sign-off rejected, successful execution, and reuse of consumed sign-offs rejected. Execute with `exerciseCmd (toInterfaceContractId @GovernableAction cid) GovernableAction_Execute` submitted as `governanceParty`, as `GovernanceRules` would.
 
 ## Package layout
 
