@@ -629,7 +629,7 @@ const ActionCard = ({
         party_id: party.partyId,
         rules_contract_id: party.rulesContractId,
         action: action.action,
-        confirmation_cids: action.confirmations.map((c) => c.contract_id),
+        confirmation_cids: action.executable_confirmation_cids,
         disclosed_contracts: disclosedContracts,
         governance_type: party.governanceType,
       };
@@ -1054,7 +1054,7 @@ const DomainActionCard = ({
         party_id: party.partyId,
         rules_contract_id: party.rulesContractId,
         action: placeholderAction,
-        confirmation_cids: domainAction.confirmations.map((c) => c.contract_id),
+        confirmation_cids: domainAction.executable_confirmation_cids,
         disclosed_contracts: [],
         governance_type: "core_domain" as const,
         proposal_cid: domainAction.proposal_cid,

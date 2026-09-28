@@ -7,10 +7,12 @@ import {
   CircularProgress,
   Alert,
   Tooltip,
+  type ChipProps,
 } from "@mui/material";
 import CancelIcon from "@mui/icons-material/Cancel";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import ErrorIcon from "@mui/icons-material/Error";
+import HelpOutlineIcon from "@mui/icons-material/HelpOutlineOutlined";
 import ScienceIcon from "@mui/icons-material/Science";
 import WarningIcon from "@mui/icons-material/Warning";
 import RefreshIcon from "@mui/icons-material/Refresh";
@@ -20,14 +22,36 @@ import { CopyableText } from "./CopyableText";
 import { GrantRightsDialog } from "./GrantRightsDialog";
 import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
+import type { GovernanceMembership } from "../governanceMembership";
 import type { PartyAuthStatus, RightsStatus, AuthTestResponse } from "../types";
 
 interface AuthSectionProps {
   partyId: string;
   authStatus?: PartyAuthStatus;
+  membership: GovernanceMembership;
   onRefresh?: () => void;
   onConfigure?: () => void;
 }
+
+const membershipChip: Record<
+  GovernanceMembership,
+  {
+    label: string;
+    color: ChipProps["color"];
+    icon: ChipProps["icon"];
+    tooltip?: string;
+  }
+> = {
+  member: { label: "Member", color: "success", icon: <CheckCircleIcon /> },
+  not_member: { label: "Not a member", color: "warning", icon: <WarningIcon /> },
+  unknown: {
+    label: "Unknown",
+    color: "default",
+    icon: <HelpOutlineIcon />,
+    tooltip:
+      "Governance state did not load, or the party has no rules contract",
+  },
+};
 
 const isRightsValid = (rights: RightsStatus | undefined): boolean => {
   if (!rights) return false;
@@ -39,7 +63,10 @@ const isRightsValid = (rights: RightsStatus | undefined): boolean => {
   );
 };
 
-export const getAuthStatusIcon = (authStatus: PartyAuthStatus | undefined) => {
+export const getAuthStatusIcon = (
+  authStatus: PartyAuthStatus | undefined,
+  membership: GovernanceMembership,
+) => {
   if (!authStatus) {
     return (
       <Tooltip title="Not authenticated">
@@ -49,6 +76,20 @@ export const getAuthStatusIcon = (authStatus: PartyAuthStatus | undefined) => {
   }
   switch (authStatus.status.status) {
     case "authenticated":
+      if (membership === "not_member") {
+        return (
+          <Tooltip title="Authenticated, but the member party is not a governance member">
+            <WarningIcon color="warning" fontSize="small" />
+          </Tooltip>
+        );
+      }
+      if (membership === "unknown") {
+        return (
+          <Tooltip title="Authenticated, governance membership unknown">
+            <HelpOutlineIcon color="disabled" fontSize="small" />
+          </Tooltip>
+        );
+      }
       return (
         <Tooltip title="Authenticated">
           <CheckCircleIcon color="success" fontSize="small" />
@@ -78,12 +119,14 @@ export const getAuthStatusIcon = (authStatus: PartyAuthStatus | undefined) => {
 export const AuthSection = ({
   partyId,
   authStatus,
+  membership,
   onRefresh,
   onConfigure,
 }: AuthSectionProps) => {
   const [testing, setTesting] = useState(false);
   const [testError, setTestError] = useState<string | null>(null);
   const [grantDialogOpen, setGrantDialogOpen] = useState(false);
+  const chip = membershipChip[membership];
 
   if (!authStatus) {
     return (
@@ -142,6 +185,22 @@ export const AuthSection = ({
           truncate={{ start: 16, end: 8 }}
           variant="body2"
         />
+      </Box>
+
+      <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 1 }}>
+        <Typography variant="body2" color="text.secondary">
+          <strong>Governance:</strong>
+        </Typography>
+        <Tooltip title={chip.tooltip ?? ""}>
+          <Chip
+            label={chip.label}
+            size="small"
+            color={chip.color}
+            variant="outlined"
+            icon={chip.icon}
+            data-testid="governance-membership"
+          />
+        </Tooltip>
       </Box>
 
       <Typography variant="body2" color="text.secondary" sx={{ mb: 0.5 }}>
@@ -226,6 +285,12 @@ export const AuthSection = ({
       {authStatus.status.status === "failed" && (
         <Alert severity="error" sx={{ mt: 1 }}>
           {authStatus.status.error}
+        </Alert>
+      )}
+      {membership === "not_member" && (
+        <Alert severity="warning" sx={{ mt: 1 }}>
+          The member party is not in the governance member set. This node
+          cannot confirm governance actions.
         </Alert>
       )}
       {authStatus.rights && !isRightsValid(authStatus.rights) && (

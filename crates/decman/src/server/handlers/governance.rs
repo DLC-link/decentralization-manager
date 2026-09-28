@@ -102,20 +102,26 @@ pub async fn get_governance(
     // threshold, which is a separate value used for signing
     // PartyToParticipant updates. Falling back to the DNS threshold for
     // historical compatibility only when the gov state isn't reachable.
-    let (rules_contract_id, gov_state_threshold, gov_core_out_of_date, gov_core_package_ref) =
-        match query_governance_state(&data.config, party_id, token.clone(), &packages).await {
-            Ok(Some(state)) => (
-                Some(state.contract_id),
-                Some(state.threshold as usize),
-                state.out_of_date,
-                state.package_ref,
-            ),
-            Ok(None) => (None, None, false, None),
-            Err(e) => {
-                tracing::warn!("Failed to fetch active rules contract: {e}");
-                (None, None, false, None)
-            }
-        };
+    let (
+        rules_contract_id,
+        gov_state_threshold,
+        gov_state_members,
+        gov_core_out_of_date,
+        gov_core_package_ref,
+    ) = match query_governance_state(&data.config, party_id, token.clone(), &packages).await {
+        Ok(Some(state)) => (
+            Some(state.contract_id),
+            Some(state.threshold as usize),
+            Some(state.members.into_iter().collect::<HashSet<_>>()),
+            state.out_of_date,
+            state.package_ref,
+        ),
+        Ok(None) => (None, None, None, false, None),
+        Err(e) => {
+            tracing::warn!("Failed to fetch active rules contract: {e}");
+            (None, None, None, false, None)
+        }
+    };
     let threshold = match gov_state_threshold {
         Some(t) => t,
         None => get_party_threshold(&data, party_id).await.unwrap_or(2),
@@ -131,6 +137,7 @@ pub async fn get_governance(
         &data.config,
         party_id,
         threshold,
+        gov_state_members.as_ref(),
         token,
         &packages,
         batch,
@@ -647,6 +654,7 @@ fn may_create_second_delegation(proposal: &ProposalType) -> bool {
         (status = 400, description = "Bad request", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
+        (status = 404, description = "No credentials configured for party", body = ErrorResponse),
         (status = 409, description = "A CouponReassignmentDelegation is already active; set prior_delegation to replace it", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
         (status = 503, description = "Node not provisioned for this proposal: the target package is not configured (the response says so, and whether the proposal was already created), or it cannot be confirmed whether a CouponReassignmentDelegation is already active", body = ErrorResponse)
@@ -670,7 +678,7 @@ pub async fn propose_action(
     let (token, member_party_id) = match get_party_credentials(&data, party_id).await {
         Ok(Some(creds)) => creds,
         Ok(None) => {
-            return HttpResponse::Unauthorized().json(ErrorResponse {
+            return HttpResponse::NotFound().json(ErrorResponse {
                 error: "No credentials configured for party".to_string(),
             });
         }
@@ -1130,6 +1138,7 @@ fn validate_inline_action(
         (status = 400, description = "Bad request", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
+        (status = 404, description = "No credentials configured for party", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     )
 )]
@@ -1152,7 +1161,7 @@ pub async fn confirm_action(
     let (token, member_party_id) = match get_party_credentials(&data, party_id).await {
         Ok(Some(creds)) => creds,
         Ok(None) => {
-            return HttpResponse::Unauthorized().json(ErrorResponse {
+            return HttpResponse::NotFound().json(ErrorResponse {
                 error: "No credentials configured for party".to_string(),
             });
         }
@@ -1222,6 +1231,7 @@ pub async fn confirm_action(
         (status = 400, description = "Bad request", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
+        (status = 404, description = "No credentials configured for party", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     )
 )]
@@ -1244,7 +1254,7 @@ pub async fn execute_action(
     let (token, member_party_id) = match get_party_credentials(&data, party_id).await {
         Ok(Some(creds)) => creds,
         Ok(None) => {
-            return HttpResponse::Unauthorized().json(ErrorResponse {
+            return HttpResponse::NotFound().json(ErrorResponse {
                 error: "No credentials configured for party".to_string(),
             });
         }
@@ -1327,6 +1337,7 @@ pub async fn execute_action(
         (status = 200, description = "Confirmation expired", body = MessageResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
+        (status = 404, description = "No credentials configured for party", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     )
 )]
@@ -1345,7 +1356,7 @@ pub async fn expire_confirmation(
     let (token, member_party_id) = match get_party_credentials(&data, party_id).await {
         Ok(Some(creds)) => creds,
         Ok(None) => {
-            return HttpResponse::Unauthorized().json(ErrorResponse {
+            return HttpResponse::NotFound().json(ErrorResponse {
                 error: "No credentials configured for party".to_string(),
             });
         }
@@ -1414,6 +1425,7 @@ pub async fn expire_confirmation(
     responses(
         (status = 200, description = "Confirmation cancelled", body = MessageResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 404, description = "No credentials configured for party", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     )
 )]
@@ -1427,7 +1439,7 @@ pub async fn cancel_confirmation(
     let (token, member_party_id) = match get_party_credentials(&data, party_id).await {
         Ok(Some(creds)) => creds,
         Ok(None) => {
-            return HttpResponse::Unauthorized().json(ErrorResponse {
+            return HttpResponse::NotFound().json(ErrorResponse {
                 error: "No credentials configured for party".to_string(),
             });
         }
@@ -1497,6 +1509,7 @@ pub async fn cancel_confirmation(
         (status = 200, description = "Proposal cancelled", body = MessageResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
+        (status = 404, description = "No credentials configured for party", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     )
 )]
@@ -1514,7 +1527,7 @@ pub async fn cancel_proposal(
     let (token, member_party_id) = match get_party_credentials(&data, party_id).await {
         Ok(Some(creds)) => creds,
         Ok(None) => {
-            return HttpResponse::Unauthorized().json(ErrorResponse {
+            return HttpResponse::NotFound().json(ErrorResponse {
                 error: "No credentials configured for party".to_string(),
             });
         }
@@ -1587,7 +1600,8 @@ pub async fn cancel_proposal(
             description = "Active delegations, newest first; empty when there are none",
             body = ActiveCouponReassignmentDelegation
         ),
-        (status = 401, description = "No credentials for party", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 404, description = "No credentials configured for party", body = ErrorResponse),
         (status = 500, description = "Failed to fetch an auth token for party", body = ErrorResponse),
         (status = 503, description = "The delegations could not be read", body = ErrorResponse)
     )
@@ -1601,7 +1615,7 @@ pub async fn get_coupon_reassignment_delegation(
     let (token, _member) = match get_party_credentials(&data, party_id).await {
         Ok(Some(creds)) => creds,
         Ok(None) => {
-            return HttpResponse::Unauthorized().json(ErrorResponse {
+            return HttpResponse::NotFound().json(ErrorResponse {
                 error: "No credentials configured for party".to_string(),
             });
         }

@@ -1,10 +1,17 @@
 use std::time::Duration;
 
 use anyhow::Context;
+use canton_proto_rs::com::digitalasset::canton::topology::admin::v30::{
+    ListPartiesRequest, ListPartyToParticipantRequest,
+    topology_aggregation_service_client::TopologyAggregationServiceClient,
+    topology_manager_read_service_client::TopologyManagerReadServiceClient,
+};
 use common::{
     api::DecentralizedPartiesResponse,
+    canton_id::CantonId,
     types::{InvitationType, WorkflowKind, WorkflowProgress, WorkflowRole},
 };
+use dec_party_manager::{config::NodeConfig, utils, workflow::topology::head_state_query};
 use serde_json::{Value, json};
 use tracing::info;
 
@@ -192,6 +199,61 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             }
         },
     )
+    .then(
+        "Canton ListParties matches the first two characters of the party hint",
+        Duration::from_secs(30),
+        |f, _| Box::pin(async move { Some(canton_matches_a_partial_hint(f).await) }),
+    )
     .run(f)
     .await
+}
+
+/// DecMan discovery sends a partial `?prefix=` to `ListParties` as is, so this
+/// pins that Canton answers it by prefix, while `ListPartyToParticipant`
+/// matches the same bare filter exactly.
+async fn canton_matches_a_partial_hint(f: &Fixture) -> anyhow::Result<()> {
+    let party_id = f.party_id()?.to_string();
+    let partial: String = f.party_prefix()?.chars().take(2).collect();
+
+    let admin_port: u16 = std::env::var("P1_CANTON_ADMIN")
+        .context("P1_CANTON_ADMIN not set")?
+        .parse()
+        .context("P1_CANTON_ADMIN is not a port")?;
+    let mut config = NodeConfig::default();
+    config.canton.admin_api_host = "127.0.0.1".to_string();
+    config.canton.admin_api_port = admin_port;
+    config.node.participant_id = Some(CantonId::parse(&f.p1.participant_id)?);
+    let synchronizer_id = utils::get_synchronizer_id(&config).await?;
+    let channel = config.admin_channel().await?;
+
+    let listed = TopologyAggregationServiceClient::new(channel.clone())
+        .list_parties(tonic::Request::new(ListPartiesRequest {
+            as_of: None,
+            limit: 5_000,
+            synchronizer_ids: Vec::new(),
+            filter_party: partial.clone(),
+            filter_participant: f.p1.participant_id.clone(),
+        }))
+        .await?
+        .into_inner();
+    anyhow::ensure!(
+        listed.results.iter().any(|result| result.party == party_id),
+        "ListParties with '{partial}' did not return {party_id}"
+    );
+
+    let mappings = TopologyManagerReadServiceClient::new(channel)
+        .list_party_to_participant(tonic::Request::new(ListPartyToParticipantRequest {
+            base_query: Some(head_state_query(&synchronizer_id)),
+            filter_party: partial.clone(),
+            filter_participant: String::new(),
+        }))
+        .await?
+        .into_inner();
+    anyhow::ensure!(
+        mappings.results.is_empty(),
+        "ListPartyToParticipant with '{partial}' returned {n} mappings, expected an exact \
+         identifier match",
+        n = mappings.results.len()
+    );
+    Ok(())
 }
