@@ -69,6 +69,8 @@ pub struct ContractQueryParams {
     /// Also return each contract's decoded fields as `payload`: the create
     /// arguments for a template query, the interface view for an interface
     /// query. Off by default, so existing callers get the same response.
+    /// Meant for targeted queries: on a broad one the response grows with
+    /// every contract's fields.
     #[serde(default)]
     pub include_payload: bool,
 }
