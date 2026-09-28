@@ -199,6 +199,12 @@ const InvitationCard = ({
       link.download = filename;
       link.click();
       URL.revokeObjectURL(url);
+      if (res.headers.get("X-Decman-Dar-Unpinned") === "true") {
+        showSnackbar(
+          `Downloaded ${filename}, but the invitation pins no hash, so its content was not checked`,
+          "error",
+        );
+      }
     } catch (err) {
       showSnackbar(
         err instanceof Error ? err.message : `Could not read ${filename}`,

@@ -460,6 +460,10 @@ async fn find_coordinator_peer(
         .find(|p| p.public_key == coordinator_pubkey)
 }
 
+/// Set on a DAR served from an invite that pins no hashes, so the caller can
+/// tell the operator the bytes were not checked.
+pub const UNPINNED_DAR_HEADER: &str = "X-Decman-Dar-Unpinned";
+
 /// Fetch one DAR of a pending DARs invitation from the coordinator so the
 /// operator can read it before accepting. The bytes are not stored: they are
 /// pulled over Noise on demand, checked against the hash the invite pinned,
@@ -473,6 +477,7 @@ async fn find_coordinator_peer(
     responses(
         (status = 200, description = "The DAR", content_type = "application/octet-stream"),
         (status = 404, description = "No such invitation or DAR", body = ErrorResponse),
+        (status = 422, description = "The invitation pins only some of its DARs", body = ErrorResponse),
         (status = 502, description = "The coordinator did not serve it", body = ErrorResponse),
     )
 )]
@@ -504,6 +509,16 @@ pub async fn get_invitation_dar(
             error: format!("Invitation {id} offers no DAR at index {index}"),
         });
     };
+    let expected_hash =
+        match pinned_dar_hash(&invitation.dar_filenames, &invitation.dar_hashes, index) {
+            Ok(hash) => hash.map(str::to_string),
+            Err(e) => {
+                tracing::warn!("Refused to serve {filename} of invitation {id}: {e}");
+                return HttpResponse::UnprocessableEntity().json(ErrorResponse {
+                    error: format!("{e}. Do not accept it."),
+                });
+            }
+        };
     let Some(workflow_instance) = invitation.workflow_instance.clone() else {
         return HttpResponse::NotFound().json(ErrorResponse {
             error: "This invitation predates run-scoped DAR reads".to_string(),
@@ -537,33 +552,66 @@ pub async fn get_invitation_dar(
         }
     };
 
-    // The invite pinned the content. Serving bytes that do not match it would
-    // show the operator one DAR and vet another, which is the whole point of
-    // reading it first. Older coordinators send no hashes; then there is
-    // nothing to check against.
-    if let Some(expected) = invitation.dar_hashes.get(index) {
-        let actual = crate::workflow::validation::hash_dar(&dar);
-        if &actual != expected {
-            tracing::warn!(
-                "Coordinator served a {filename} that is not the one it invited us to \
-                 ({actual}, invited {expected})"
-            );
-            return HttpResponse::BadGateway().json(ErrorResponse {
-                error: format!(
-                    "{filename} does not match the hash this invitation pinned. \
-                     Do not accept it."
-                ),
-            });
-        }
+    let Some(expected) = expected_hash else {
+        tracing::warn!(
+            "Served {filename} of invitation {id} unpinned: the invite carries no hashes"
+        );
+        return dar_response(&filename, dar, true);
+    };
+    let actual = crate::workflow::validation::hash_dar(&dar);
+    if actual != expected {
+        tracing::warn!(
+            "Coordinator served a {filename} that is not the one it invited us to \
+             ({actual}, invited {expected})"
+        );
+        return HttpResponse::BadGateway().json(ErrorResponse {
+            error: format!(
+                "{filename} does not match the hash this invitation pinned. \
+                 Do not accept it."
+            ),
+        });
     }
 
-    HttpResponse::Ok()
+    dar_response(&filename, dar, false)
+}
+
+fn dar_response(filename: &str, dar: Vec<u8>, unpinned: bool) -> HttpResponse {
+    let mut response = HttpResponse::Ok();
+    response
         .content_type("application/octet-stream")
         .insert_header((
             "Content-Disposition",
-            format!("attachment; filename=\"{}\"", sanitize_filename(&filename)),
-        ))
-        .body(dar)
+            format!("attachment; filename=\"{}\"", sanitize_filename(filename)),
+        ));
+    if unpinned {
+        response.insert_header((UNPINNED_DAR_HEADER, "true"));
+    }
+    response.body(dar)
+}
+
+/// The hash `dar_hashes` pins for DAR `index`, or `None` when the invite pins
+/// none at all (a coordinator that predates the field). A list that covers
+/// only some of the filenames is refused, as `validation.rs` refuses it at
+/// upload.
+fn pinned_dar_hash<'a>(
+    dar_filenames: &[String],
+    dar_hashes: &'a [String],
+    index: usize,
+) -> Result<Option<&'a str>, String> {
+    if dar_hashes.is_empty() {
+        return Ok(None);
+    }
+    if dar_hashes.len() != dar_filenames.len() {
+        return Err(format!(
+            "The invitation pins {hashes} DAR hash(es) for {names} filename(s)",
+            hashes = dar_hashes.len(),
+            names = dar_filenames.len(),
+        ));
+    }
+    dar_hashes
+        .get(index)
+        .map(|hash| Some(hash.as_str()))
+        .ok_or_else(|| format!("The invitation pins no hash for DAR {index}"))
 }
 
 /// Quotes and path separators out: this name comes off the wire and goes into
@@ -610,5 +658,70 @@ async fn fetch_dar_from_coordinator(
             String::from_utf8_lossy(&response.payload)
         )),
         other => Err(anyhow::anyhow!("unexpected answer {other:?}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("pkg-{i}.dar")).collect()
+    }
+
+    #[test]
+    fn full_hash_list_pins_the_index() {
+        let hashes = vec!["aa".to_string(), "bb".to_string()];
+
+        let pinned = pinned_dar_hash(&names(2), &hashes, 1);
+
+        assert_eq!(pinned, Ok(Some("bb")));
+    }
+
+    #[test]
+    fn empty_hash_list_serves_unpinned() {
+        let pinned = pinned_dar_hash(&names(2), &[], 0);
+
+        assert_eq!(pinned, Ok(None));
+    }
+
+    #[test]
+    fn partial_hash_list_is_refused_for_every_index() {
+        let hashes = vec!["aa".to_string()];
+
+        for index in 0..2 {
+            let pinned = pinned_dar_hash(&names(2), &hashes, index);
+
+            assert!(pinned.is_err(), "index {index} was not refused: {pinned:?}");
+        }
+    }
+
+    #[test]
+    fn longer_hash_list_is_refused() {
+        let hashes = vec!["aa".to_string(), "bb".to_string()];
+
+        let pinned = pinned_dar_hash(&names(1), &hashes, 0);
+
+        assert!(pinned.is_err(), "not refused: {pinned:?}");
+    }
+
+    #[test]
+    fn unpinned_response_carries_the_warning_header() {
+        let response = dar_response("pkg.dar", vec![1, 2, 3], true);
+
+        assert_eq!(
+            response
+                .headers()
+                .get(UNPINNED_DAR_HEADER)
+                .and_then(|v| v.to_str().ok()),
+            Some("true")
+        );
+    }
+
+    #[test]
+    fn pinned_response_has_no_warning_header() {
+        let response = dar_response("pkg.dar", vec![1, 2, 3], false);
+
+        assert!(response.headers().get(UNPINNED_DAR_HEADER).is_none());
     }
 }
