@@ -695,8 +695,21 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     )
     .when(
         "the ledger is quiet, so note where commitments must start agreeing",
-        |_, ctx| {
+        |f, ctx| {
             Box::pin(async move {
+                // Read the interval here, not inside the poll below, so a
+                // synchronizer that reconciles too rarely fails with that
+                // sentence instead of timing out with no reason given.
+                let p3 = admin_config(f, 3)?;
+                let interval = reconciliation_interval(&p3).await?;
+                info!("synchronizer reconciliation interval: {interval:?}");
+                anyhow::ensure!(
+                    interval <= MAX_RECONCILIATION,
+                    "the synchronizer reconciles every {interval:?}, so no period is compared \
+                     inside this phase's budget of {:?}. Lower it in the localnet configuration, \
+                     otherwise this assertion can only ever report that nothing was compared",
+                    commitment_budget(),
+                );
                 ctx.settled_at = Some(SystemTime::now());
                 Ok(())
             })
@@ -716,7 +729,16 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 };
                 let (matched, mismatched) = match received_commitments(&p3, settled_at).await {
                     Ok(v) => v,
-                    Err(_) => return None,
+                    // Retry, but say what went wrong. Swallowing this silently
+                    // turns every cause into the same bare timeout.
+                    Err(e) => {
+                        f.probe_diag.record(
+                            "P3 commitments",
+                            Class::Transient,
+                            format!("reading received commitments: {e:#}"),
+                        );
+                        return None;
+                    }
                 };
                 // A mismatch is recorded per period and never heals, so there
                 // is nothing to wait for.
@@ -978,14 +1000,6 @@ async fn received_commitments(
     config: &NodeConfig,
     since: SystemTime,
 ) -> anyhow::Result<(usize, Vec<String>)> {
-    let interval = reconciliation_interval(config).await?;
-    anyhow::ensure!(
-        interval <= MAX_RECONCILIATION,
-        "the synchronizer reconciles every {interval:?}, so no period is compared inside this \
-         phase's budget. Lower it in the localnet configuration, otherwise this assertion can \
-         only ever report that nothing was compared"
-    );
-
     let from = prost_types::Timestamp {
         seconds: since.duration_since(UNIX_EPOCH)?.as_secs() as i64,
         nanos: 0,
