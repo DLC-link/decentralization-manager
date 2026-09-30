@@ -32,7 +32,8 @@ import { PaginationControls } from "./Pagination";
 import { usePagination } from "../usePagination";
 import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
-import { finderTableSx, zebraRow } from "../styles";
+import type { Theme } from "@mui/material/styles";
+import { finderTableSx, ROW_HOVER_TINT, zebraRow, zebraStripe } from "../styles";
 import {
   PACKAGE_GROUPS,
   compareCell,
@@ -96,8 +97,50 @@ interface PackagesPanelProps {
 // grid however long their names are, and adding peers pushes the table wider —
 // into the scroller — instead of squeezing the name that identifies the row.
 const PEER_COL_WIDTH = 150;
-const VERSION_COL_WIDTH = 110;
+// Fits a Canton build version such as 3.4.0.20251020.14338.0 on one line.
+const VERSION_COL_WIDTH = 176;
 const PACKAGE_MIN_WIDTH = 260;
+// Local table: the id column fits the truncated id and its copy button, and the
+// name takes what is left, wrapping when it has to. Declared widths keep a
+// 64-character id or a long version from widening the table past the panel.
+const PACKAGE_ID_COL_WIDTH = 310;
+const LOCAL_NAME_MIN_WIDTH = 220;
+const LOCAL_TABLE_MIN_WIDTH =
+  LOCAL_NAME_MIN_WIDTH + VERSION_COL_WIDTH + PACKAGE_ID_COL_WIDTH;
+
+// A version stays on one line; one longer than its column ends in an ellipsis
+// and shows in full on hover instead of running into the next column.
+const versionCellSx = {
+  py: 1,
+  whiteSpace: "nowrap",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+} as const;
+
+// The comparison table's package column stays in view while the peer columns
+// scroll sideways. A pinned cell must be opaque, or the columns scrolling under
+// it show through, so it paints the row's stripe and hover tint as layers over
+// the page background instead of relying on the translucent row colour.
+const layer = (color: string) => `linear-gradient(${color}, ${color})`;
+const pinnedCellSx = (index: number) => ({
+  position: "sticky",
+  left: 0,
+  zIndex: 1,
+  backgroundImage: (theme: Theme) =>
+    `${layer(zebraStripe(theme, index))}, ${layer(theme.palette.background.default)}`,
+  "tr:hover > &": {
+    backgroundImage: (theme: Theme) =>
+      `${layer(ROW_HOVER_TINT)}, ${layer(theme.palette.background.default)}`,
+  },
+});
+
+const localColumns = (
+  <colgroup>
+    <col />
+    <col style={{ width: VERSION_COL_WIDTH }} />
+    <col style={{ width: PACKAGE_ID_COL_WIDTH }} />
+  </colgroup>
+);
 
 export const PackagesPanel = ({
   onUploadDars,
@@ -485,7 +528,12 @@ export const PackagesPanel = ({
             }}
           >
             {loadingPackages ? (
-              <Table size="small" sx={{ minWidth: 650, ...finderTableSx }}>
+              <Table
+                size="small"
+                stickyHeader
+                sx={{ minWidth: LOCAL_TABLE_MIN_WIDTH, tableLayout: "fixed", ...finderTableSx }}
+              >
+                {localColumns}
                 <TableHead>
                   <TableRow>
                     <TableCell sx={{ py: 1 }}><Skeleton width="60%" /></TableCell>
@@ -507,6 +555,8 @@ export const PackagesPanel = ({
               /* Comparison table */
               <Table
                 size="small"
+                // The header row stays in view while the rows scroll.
+                stickyHeader
                 sx={{
                   // Fixed rather than auto: auto treats a column width as a
                   // suggestion and takes the shortfall out of whichever column
@@ -544,7 +594,8 @@ export const PackagesPanel = ({
                 </colgroup>
                 <TableHead>
                   <TableRow>
-                    <TableCell sx={{ py: 1, fontWeight: "bold" }}>
+                    {/* Pinned left as well as to the top, above the other header cells. */}
+                    <TableCell sx={{ py: 1, fontWeight: "bold", left: 0, zIndex: 3 }}>
                       Package
                     </TableCell>
                     <TableCell sx={{ py: 1, fontWeight: "bold" }}>
@@ -557,16 +608,18 @@ export const PackagesPanel = ({
                           py: 1,
                           fontWeight: "bold",
                           textAlign: "center",
-                          opacity: peer.reachable ? 1 : 0.5,
                           whiteSpace: "nowrap",
                         }}
                       >
+                        {/* Dim the contents, not the cell: the header is sticky,
+                          * and a translucent cell would show the rows under it. */}
                         <Box
                           sx={{
                             display: "flex",
                             alignItems: "center",
                             justifyContent: "center",
                             gap: 0.5,
+                            opacity: peer.reachable ? 1 : 0.5,
                           }}
                         >
                           <Tooltip title={peer.participant_id} arrow>
@@ -608,11 +661,12 @@ export const PackagesPanel = ({
                             overflow: "hidden",
                             textOverflow: "ellipsis",
                             whiteSpace: "nowrap",
+                            ...pinnedCellSx(idx),
                           }}
                         >
                           {pkg.name || "-"}
                         </TableCell>
-                        <TableCell sx={{ py: 1 }}>
+                        <TableCell sx={versionCellSx} title={pkg.version || undefined}>
                           {pkg.version || "-"}
                         </TableCell>
                         {peerIndexes.map((index) => {
@@ -653,10 +707,14 @@ export const PackagesPanel = ({
                                       alignItems: "center",
                                       gap: 0.5,
                                       color: "warning.main",
+                                      // Shrinks to the peer column so a long
+                                      // version ends in an ellipsis; the
+                                      // tooltip carries the full list.
+                                      maxWidth: "100%",
                                     }}
                                   >
-                                    <SyncProblemIcon sx={{ fontSize: 16 }} />
-                                    <Typography variant="caption" noWrap>
+                                    <SyncProblemIcon sx={{ fontSize: 16, flexShrink: 0 }} />
+                                    <Typography variant="caption" noWrap sx={{ minWidth: 0 }}>
                                       {versions.join(", ")}
                                     </Typography>
                                   </Box>
@@ -703,22 +761,24 @@ export const PackagesPanel = ({
               /* Default local-only table */
               <Table
                 size="small"
-                sx={{ minWidth: 650, tableLayout: "fixed", ...finderTableSx }}
+                stickyHeader
+                sx={{ minWidth: LOCAL_TABLE_MIN_WIDTH, tableLayout: "fixed", ...finderTableSx }}
               >
+                {localColumns}
                 <TableHead>
                   <TableRow>
-                    <TableCell sx={{ py: 1, width: "48%" }}>Package Name</TableCell>
-                    <TableCell sx={{ py: 1, width: "16%" }}>Version</TableCell>
-                    <TableCell sx={{ py: 1, width: "36%" }}>Package ID</TableCell>
+                    <TableCell sx={{ py: 1 }}>Package Name</TableCell>
+                    <TableCell sx={{ py: 1 }}>Version</TableCell>
+                    <TableCell sx={{ py: 1 }}>Package ID</TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
                   {localPaging.pageItems.map((p, idx) => (
                     <TableRow key={p.package_id} sx={zebraRow(idx)}>
-                      <TableCell sx={{ py: 1 }}>
+                      <TableCell sx={{ py: 1, overflowWrap: "anywhere" }}>
                         {p.package_name || "-"}
                       </TableCell>
-                      <TableCell sx={{ py: 1 }}>
+                      <TableCell sx={versionCellSx} title={p.package_version || undefined}>
                         {p.package_version || "-"}
                       </TableCell>
                       <TableCell sx={{ py: 1 }}>

@@ -70,18 +70,24 @@ export const legendSx = {
   color: "text.secondary",
 };
 
+/** The zebra stripe colour for row `index`: transparent on even rows. */
+export const zebraStripe = (theme: Theme, index: number) =>
+  index % 2 === 0
+    ? "transparent"
+    : theme.palette.mode === "dark"
+      ? // The near-black dark substrate makes the default action.hover (8%
+        // white) read as a harsh stripe — keep the alternation barely-there.
+        "rgba(255, 255, 255, 0.025)"
+      : theme.palette.action.hover;
+
+/** Accent tint a table row takes on hover. */
+export const ROW_HOVER_TINT = "rgba(214, 58, 15, 0.08)";
+
 /** Zebra stripe sx for table rows — subtle alternating background and accent hover tint */
 export const zebraRow = (index: number) => ({
-  bgcolor: (theme: Theme) =>
-    index % 2 === 0
-      ? "transparent"
-      : theme.palette.mode === "dark"
-        ? // The near-black dark substrate makes the default action.hover (8%
-          // white) read as a harsh stripe — keep the alternation barely-there.
-          "rgba(255, 255, 255, 0.025)"
-        : theme.palette.action.hover,
+  bgcolor: (theme: Theme) => zebraStripe(theme, index),
   "&:hover td": {
-    backgroundColor: "rgba(214, 58, 15, 0.08)",
+    backgroundColor: ROW_HOVER_TINT,
     transition: "background-color 0.15s ease-out",
   },
 });
