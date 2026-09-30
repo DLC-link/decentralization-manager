@@ -1665,8 +1665,18 @@ export const GovernanceSection = ({
   // NOTE: proposalOperator / proposalExpectedDso are intentionally NOT
   // cleared — they're autofetched (operator from /operator-info, DSO from
   // /network-info) and should persist across submissions.
-  const resetProposalForm = () => {
-    setProposalProvider("");
+  // Clears every proposal field back to its default for `type`. Runs after a
+  // successful submit and whenever the proposal type changes: the fields are
+  // shared across types, so without it a value entered for one type lands in
+  // the next one's payload. Fields prefilled from app or network state get
+  // that value back rather than an empty string, because their fetches only
+  // run once.
+  const resetProposalForm = (type: ProposalType["type"] = proposalType) => {
+    setProposalProvider(type === "create_provider_service_request" ? partyId : "");
+    setProposalOperator(defaultOperatorParty || "");
+    setProposalExpectedDso(dsoPartyId);
+    setProposalMintRequestCid("");
+    setProposalBurnRequestCid("");
     setProposalInstrumentAdmin("");
     setProposalInstrumentAllowances([]);
     setProposalTransferFactoryCid("");
@@ -1675,9 +1685,7 @@ export const GovernanceSection = ({
     setProposalAmount("");
     setSelectedHoldingKey("");
     setShowTransferAdvanced(false);
-    setProposalInstrumentIdAdmin(
-      proposalType === "mint" || proposalType === "burn" ? partyId : "",
-    );
+    setProposalInstrumentIdAdmin(type === "mint" || type === "burn" ? partyId : "");
     setProposalInstrumentIdId("");
     setProposalInputHoldingCids("");
     setProposalTransferExpiryHours(String(DEFAULT_TRANSFER_EXPIRY_HOURS));
@@ -1687,11 +1695,11 @@ export const GovernanceSection = ({
     setProposalInstrumentIdText("");
     setProposalCreateTransferRule(true);
     setProposalCreateAllocationFactory(true);
-    setProposalUser("");
+    setProposalUser(type === "create_user_service_request" ? partyId : "");
     setProposalInstrumentConfigurationCid("");
     setProposalBeneficiaries([]);
     setProposalClearBeneficiaries(false);
-    setProposalDelegationDso("");
+    setProposalDelegationDso(dsoPartyId);
     setProposalDelegationAssigners([]);
     setProposalDelegationSplit([]);
     setProposalPriorDelegation("");
@@ -3003,7 +3011,11 @@ export const GovernanceSection = ({
                 <Select
                   value={proposalType}
                   label="Proposal Type"
-                  onChange={(e) => setProposalType(e.target.value as ProposalType["type"])}
+                  onChange={(e) => {
+                    const next = e.target.value as ProposalType["type"];
+                    if (next !== proposalType) resetProposalForm(next);
+                    setProposalType(next);
+                  }}
                 >
                   <ListSubheader sx={{ color: "primary.main", fontWeight: 600 }}>Governance Core</ListSubheader>
                   <MenuItem value="generic_vote">Generic Vote</MenuItem>
