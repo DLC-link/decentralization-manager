@@ -846,6 +846,20 @@ pub struct DarsInvitePayload {
     pub workflow_instance: Option<String>,
 }
 
+/// Peer -> coordinator: "send me this DAR of that run, I want to read it
+/// before I accept". The index is into the invite's `dar_filenames`, so a peer
+/// can only name a DAR it was offered, and the filename rides along for the
+/// coordinator to check that the two still agree.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RequestDarPayload {
+    /// The coordinator's run instance name, from the invite.
+    pub workflow_instance: String,
+    /// Index into the invite's `dar_filenames`.
+    pub index: usize,
+    /// The filename at that index, as the invite gave it.
+    pub filename: String,
+}
+
 /// Payload sent inside an `InviteKick` Noise message — gives the peer enough
 /// context to show "kicking X from dec party Y, threshold a→b" before the kick
 /// proposals arrive later in the workflow.
