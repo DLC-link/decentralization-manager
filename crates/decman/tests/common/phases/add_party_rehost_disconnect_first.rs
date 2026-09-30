@@ -111,7 +111,7 @@ const MIN_ARCHIVES_IN_WINDOW: usize = 3;
 
 /// Longest reconciliation interval this assertion can work with. Past it a run
 /// would end before the synchronizer compared a single period, so the phase
-/// says so instead of passing on no evidence.
+/// fails instead of passing on no evidence.
 const MAX_RECONCILIATION: Duration = Duration::from_secs(60);
 
 /// Periods to wait for beyond the first, so a match is not a single fluke.
@@ -702,19 +702,12 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 let p3 = admin_config(f, 3)?;
                 let interval = reconciliation_interval(&p3).await?;
                 if interval > MAX_RECONCILIATION {
-                    // The localnet bundle ships the MainNet default of 1800s.
-                    // A phase lasts minutes, so no period is ever compared and
-                    // there is nothing to assert on. Skip loudly: a quiet skip
-                    // would read as coverage this phase does not have.
-                    tracing::warn!(
-                        "SKIPPING the ACS commitment assertion: the synchronizer reconciles \
-                         every {interval:?} and this phase lasts {:?}, so no commitment period \
-                         is compared. Lower the reconciliation interval in the localnet \
-                         configuration to make this assertion mean anything.",
+                    anyhow::bail!(
+                        "the synchronizer reconciles every {interval:?} and this phase lasts {:?}, \
+                         so no commitment period is compared. start_localnet founds the DSO with \
+                         a short acs-commitment-reconciliation-interval; check that it applied",
                         commitment_budget(),
                     );
-                    ctx.settled_at = None;
-                    return Ok(());
                 }
                 info!("synchronizer reconciles every {interval:?}; commitments will be checked");
                 ctx.settled_at = Some(SystemTime::now());
@@ -727,9 +720,8 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         commitment_budget(),
         |f, ctx| {
             Box::pin(async move {
-                // None means the step above skipped, having already said why.
                 let Some(settled_at) = ctx.settled_at else {
-                    return Some(Ok(()));
+                    return Some(Err(anyhow::anyhow!("no settle point was recorded")));
                 };
                 let p3 = match admin_config(f, 3) {
                     Ok(c) => c,
