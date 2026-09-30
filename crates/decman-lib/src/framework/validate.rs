@@ -105,9 +105,17 @@ pub fn validate_positive_amount(amount: &DamlDecimal, field: &str) -> Result<(),
     Ok(())
 }
 
+/// Validates a provider-app reward beneficiary list that is being set. The
+/// `InstrumentConfiguration` template rejects an empty list, since its weights
+/// cannot sum to 1.0, and a proposal stores its payload, so an empty list
+/// would pass the vote and then fail at execution every time. Clearing the
+/// beneficiaries is `None`, not an empty list.
 pub fn validate_beneficiary_weights(beneficiaries: &[AppRewardBeneficiary]) -> Result<(), Error> {
     if beneficiaries.is_empty() {
-        return Ok(());
+        return Err(Error::Validation(
+            "provider_app_reward_beneficiaries must not be empty; omit it to clear the beneficiaries"
+                .to_string(),
+        ));
     }
     let sum: DamlDecimal = beneficiaries.iter().map(|b| b.weight).sum();
     let one: DamlDecimal = "1".parse().expect("'1' is a valid DamlDecimal");
@@ -233,5 +241,25 @@ mod tests {
 
         // Valid two-way split.
         assert!(validate_reward_beneficiaries(&[rb("a", "0.8"), rb("b", "0.2")]).is_ok());
+    }
+
+    fn arb(prefix: &str, weight: &str) -> AppRewardBeneficiary {
+        AppRewardBeneficiary {
+            beneficiary: cid(prefix),
+            weight: weight.parse().expect("valid decimal"),
+        }
+    }
+
+    /// An empty list would pass the vote and then fail the template's ensure at
+    /// execution; clearing the beneficiaries is `None`, not `Some([])`.
+    #[test]
+    fn validate_beneficiary_weights_rejects_an_empty_list() {
+        assert!(validate_beneficiary_weights(&[]).is_err());
+        assert!(validate_beneficiary_weights(&[arb("a", "1.0")]).is_ok());
+        assert!(
+            validate_beneficiary_weights(&[arb("a", "0.3"), arb("b", "0.6"), arb("c", "0.1")])
+                .is_ok()
+        );
+        assert!(validate_beneficiary_weights(&[arb("a", "0.7")]).is_err());
     }
 }

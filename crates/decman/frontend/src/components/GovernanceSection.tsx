@@ -34,6 +34,7 @@ import {
 } from "../constants";
 import { authenticatedFetch } from "../api";
 import { getActionTypeOptions } from "../governanceFormat";
+import { beneficiariesProblem, beneficiaryWeightSum } from "../rewardBeneficiaries";
 import { fieldHelpAdornment, TextHelp } from "./FieldHelp";
 import type {
   GovernanceResponse,
@@ -1719,6 +1720,13 @@ export const GovernanceSection = ({
     setProposalOffboardRows([]);
   };
 
+  // A beneficiary list the template would reject: submitting it would only
+  // fail after the committee voted, so the form refuses it up front.
+  const beneficiaryProblem =
+    proposalType === "set_provider_app_reward_beneficiaries"
+      ? beneficiariesProblem(proposalBeneficiaries, proposalClearBeneficiaries)
+      : null;
+
   const handleSubmitProposal = async () => {
     if (!rulesContractId) return;
     setProposalLoading(true);
@@ -1811,6 +1819,7 @@ export const GovernanceSection = ({
           };
           break;
         case "set_provider_app_reward_beneficiaries": {
+          if (beneficiaryProblem) throw new Error(beneficiaryProblem);
           let beneficiaries: AppRewardBeneficiary[] | null = null;
           if (!proposalClearBeneficiaries) {
             beneficiaries = proposalBeneficiaries.map((b, idx) => {
@@ -4096,11 +4105,8 @@ export const GovernanceSection = ({
                         </Button>
                         {proposalBeneficiaries.length > 0 &&
                           (() => {
-                            const sum = proposalBeneficiaries.reduce(
-                              (acc, b) => acc + (parseFloat(b.weight) || 0),
-                              0,
-                            );
-                            const isValid = Math.abs(sum - 1.0) < 1e-9;
+                            const sum = beneficiaryWeightSum(proposalBeneficiaries);
+                            const isValid = sum === "1";
                             return (
                               <Typography
                                 variant="caption"
@@ -4108,12 +4114,17 @@ export const GovernanceSection = ({
                                   isValid ? "success.main" : "error.main"
                                 }
                               >
-                                Sum: {sum.toFixed(4)}{" "}
+                                Sum: {sum ?? "?"}{" "}
                                 {isValid ? "" : "(must be 1.0)"}
                               </Typography>
                             );
                           })()}
                       </Box>
+                      {beneficiaryProblem && (
+                        <Typography variant="caption" color="error.main" role="alert">
+                          {beneficiaryProblem}
+                        </Typography>
+                      )}
                     </>
                   )}
                 </>
@@ -5230,7 +5241,8 @@ export const GovernanceSection = ({
                     onClick={handleSubmitProposal}
                     disabled={
                       proposalLoading ||
-                      proposalType === "offer_paid_credential"
+                      proposalType === "offer_paid_credential" ||
+                      beneficiaryProblem !== null
                     }
                     startIcon={
                       proposalLoading ? (
@@ -5248,7 +5260,8 @@ export const GovernanceSection = ({
                     onClick={handleSubmitProposal}
                     disabled={
                       proposalLoading ||
-                      proposalType === "offer_paid_credential"
+                      proposalType === "offer_paid_credential" ||
+                      beneficiaryProblem !== null
                     }
                     startIcon={
                       proposalLoading ? <CircularProgress size={16} /> : undefined
