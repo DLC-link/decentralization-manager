@@ -1264,6 +1264,12 @@ pub struct GovernanceState {
     pub governance_party: CantonId,
     pub members: Vec<CantonId>,
     pub threshold: i64,
+    /// Parties that may propose governance actions but not confirm or execute
+    /// them (`GovernanceRules.additionalProposers`). Empty when the rules
+    /// contract sets none; `default` accepts a response from a node that
+    /// predates the field.
+    #[serde(default)]
+    pub additional_proposers: Vec<CantonId>,
     // Optional on the wire: older governance rules contracts predate this field.
     // `skip_serializing_if` omits it when None and `default` accepts it missing;
     // ts-rs renders it as an optional TS property via the type's `optional_fields`.
@@ -1784,6 +1790,7 @@ mod tests {
             governance_party: party("mgr")?,
             members: vec![party("m1")?],
             threshold: 2,
+            additional_proposers: vec![],
             action_confirmation_timeout_microseconds: None,
             package_ref: None,
             out_of_date: false,
@@ -1793,6 +1800,15 @@ mod tests {
         let back: GovernanceState = serde_json::from_str(&json)?;
         assert_eq!(back.contract_id, state.contract_id);
         assert_eq!(back.package_ref, None);
+
+        // A node that predates `additional_proposers` omits it entirely.
+        let mut older = serde_json::to_value(&state)?;
+        older
+            .as_object_mut()
+            .expect("an object")
+            .remove("additional_proposers");
+        let back: GovernanceState = serde_json::from_value(older)?;
+        assert!(back.additional_proposers.is_empty());
 
         let json = serde_json::to_string(&GovernanceStateResponse { state: None })?;
         let back: GovernanceStateResponse = serde_json::from_str(&json)?;

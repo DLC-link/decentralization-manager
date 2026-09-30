@@ -324,6 +324,18 @@ pub fn extract_genmap_parties(value: &Value) -> Option<Vec<String>> {
     }
 }
 
+/// Extract an `Optional (Set Party)`. `None` reads as `Some(vec![])`, since an
+/// absent set and an empty one mean the same thing to a caller.
+pub fn extract_optional_party_set(value: &Value) -> Option<Vec<String>> {
+    match &value.sum {
+        Some(value::Sum::Optional(opt)) => match opt.value.as_deref() {
+            Some(inner) => extract_party_set(inner),
+            None => Some(Vec::new()),
+        },
+        _ => None,
+    }
+}
+
 /// Extract Optional RelTime (DA.Time.Types:RelTime is Record { microseconds: Int64 })
 pub fn extract_optional_reltime(value: &Value) -> Option<i64> {
     match &value.sum {
