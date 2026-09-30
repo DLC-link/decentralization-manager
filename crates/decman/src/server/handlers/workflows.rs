@@ -3166,17 +3166,20 @@ async fn read_acs_progress(db: &SqlitePool, instance_name: &str) -> Option<AcsTr
     serde_json::from_slice(&raw).ok()
 }
 
-/// List the external parties this participant currently hosts, read from its own
+/// List the external parties this participant currently hosts, cached from its own
 /// Canton topology (an authorized `PartyToParticipant` naming this participant
 /// with Confirmation and a self-owned single-key namespace). Wallet-driven
 /// onboarding keeps no local run row, so there is nothing DB-side to read.
 #[utoipa::path(
     tag = "Workflows",
-    responses((status = 200, description = "External parties", body = ExternalPartiesResponse))
+    responses(
+        (status = 200, description = "External parties", body = ExternalPartiesResponse),
+        (status = 503, description = "Discovery pending or failed", body = ErrorResponse)
+    )
 )]
 #[get("/external-parties")]
 pub async fn list_external_parties(data: web::Data<AppState>) -> impl Responder {
-    match workflow::external_party::steps::list_hosted_external_parties(&data.config).await {
+    match data.external_parties.snapshot().await {
         Ok(hosted) => {
             let parties = hosted
                 .into_iter()
@@ -3199,12 +3202,7 @@ pub async fn list_external_parties(data: web::Data<AppState>) -> impl Responder 
                 .collect();
             HttpResponse::Ok().json(ExternalPartiesResponse { parties })
         }
-        Err(e) => {
-            tracing::error!("Failed to list external parties from topology: {e:#}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to list external parties: {e}"),
-            })
-        }
+        Err(e) => HttpResponse::ServiceUnavailable().json(ErrorResponse { error: e }),
     }
 }
 
