@@ -989,6 +989,14 @@ fn commitment_budget() -> Duration {
     MAX_RECONCILIATION * (PERIODS_REQUIRED + 2)
 }
 
+fn proto_timestamp(t: SystemTime) -> anyhow::Result<prost_types::Timestamp> {
+    let elapsed = t.duration_since(UNIX_EPOCH)?;
+    Ok(prost_types::Timestamp {
+        seconds: elapsed.as_secs() as i64,
+        nanos: elapsed.subsec_nanos() as i32,
+    })
+}
+
 /// Commitments P3 received for periods beginning after `since`: how many
 /// matched, and which counter-participants disagreed.
 ///
@@ -1003,11 +1011,8 @@ async fn received_commitments(
     // Keep the nanoseconds. Truncating to whole seconds moves the window start
     // backwards, which can pull in a period that began before the settle point
     // and fail this assertion on a mismatch the phase caused itself.
-    let elapsed = since.duration_since(UNIX_EPOCH)?;
-    let from = prost_types::Timestamp {
-        seconds: elapsed.as_secs() as i64,
-        nanos: elapsed.subsec_nanos() as i32,
-    };
+    let from = proto_timestamp(since)?;
+    let to = proto_timestamp(SystemTime::now())?;
     let physical = dec_party_manager::utils::get_synchronizer_id(config).await?;
     let synchronizer_id = physical
         .rsplit_once("::")
@@ -1020,7 +1025,7 @@ async fn received_commitments(
                 synchronizer_id,
                 interval: Some(TimeRange {
                     from_exclusive: Some(from),
-                    to_inclusive: None,
+                    to_inclusive: Some(to),
                 }),
             }],
             counter_participant_ids: vec![],
