@@ -151,8 +151,12 @@ template SignOffPolicy
     rules           : [RoleRule]
   where
     signatory governanceParty
-    -- An empty policy would pass every execution; an unsatisfiable one would block it.
-    ensure not (null rules) && all (\r -> r.quorum > 0 && r.quorum <= length r.members) rules
+    -- An empty policy would pass every execution and an unreachable quorum would
+    -- block it. The governance party must not be a member: the committee could
+    -- then sign off through a governed action and skip the business check.
+    ensure not (null rules) && all (\r ->
+      unique r.members && governanceParty `notElem` r.members
+        && r.quorum > 0 && r.quorum <= length r.members) rules
 
 releaseLabel : Text
 releaseLabel = "ReleaseResource"
@@ -194,6 +198,7 @@ template ReleaseProposal
       executeImpl = do
         target <- fetch targetCid
         assertMsg "Target belongs to another governance party" (target.governanceParty == governanceParty)
+        assertMsg "Already released" (not target.released)
         -- The policy comes from the governance-controlled target, not from the proposer.
         policy <- fetch target.releasePolicy
         assertMsg "Policy belongs to another governance party" (policy.governanceParty == governanceParty)
@@ -214,13 +219,13 @@ template ReleaseProposal
 What this gives you:
 
 - **Missing or wrong sign-offs fail the whole execution.** Nothing is consumed, so the valid sign-offs can be reused in a corrected proposal. The member threshold and the business sign-offs are independent checks, and both must pass.
-- **The proposer cannot pick the rules.** The policy comes from the target, and its `ensure` rejects an empty policy or a quorum nobody can meet.
-- **Sign-offs are bound and single-use.** A sign-off for another action or another target, from someone not listed for its role, from the proposer, or reused after a successful execution does not count.
+- **The proposer cannot pick the rules.** The policy comes from the target, and its `ensure` rejects an empty policy, a quorum nobody can meet, duplicate members, and the governance party as a member. Without that last check the committee could create sign-offs as the governance party through a governed action and skip the business check.
+- **Sign-offs are bound and single-use.** A sign-off for another action or another target, from someone not listed for its role, from the proposer, or reused after a successful execution does not count, and a released target cannot be released again.
 - **Rule changes are governed.** Replace the policy with its own `GovernableAction` that archives the old policy, creates the new one and points the target at it. Proposals and sign-offs filed under the old rules then fail, because the old policy and the old target are gone.
 
 A further refinement: give each sign-off an expiry, and let the approver revoke it with a choice controlled by the approver.
 
-In the test package, cover at least: an empty policy rejected, a missing role rejected, a sign-off for another target or another action rejected, the right person under the wrong role rejected, the proposer's own sign-off rejected, successful execution, and reuse of consumed sign-offs rejected. Execute with `exerciseCmd (toInterfaceContractId @GovernableAction cid) GovernableAction_Execute` submitted as `governanceParty`, as `GovernanceRules` would.
+In the test package, cover at least: an empty policy, duplicate members and the governance party as a member rejected, a missing role rejected, a sign-off for another target or another action rejected, the right person under the wrong role rejected, the proposer's own sign-off rejected, successful execution, a second release rejected, and reuse of consumed sign-offs rejected. Execute with `exerciseCmd (toInterfaceContractId @GovernableAction cid) GovernableAction_Execute` submitted as `governanceParty`, as `GovernanceRules` would.
 
 ## Package layout
 
