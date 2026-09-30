@@ -1008,7 +1008,11 @@ async fn received_commitments(
         seconds: elapsed.as_secs() as i64,
         nanos: elapsed.subsec_nanos() as i32,
     };
-    let synchronizer_id = dec_party_manager::utils::get_synchronizer_id(config).await?;
+    let physical = dec_party_manager::utils::get_synchronizer_id(config).await?;
+    let synchronizer_id = physical
+        .rsplit_once("::")
+        .map_or(physical.as_str(), |(logical, _)| logical)
+        .to_string();
     let mut client = ParticipantInspectionServiceClient::new(config.admin_channel().await?);
     let response = client
         .lookup_received_acs_commitments(tonic::Request::new(LookupReceivedAcsCommitmentsRequest {
