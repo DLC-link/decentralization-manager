@@ -154,7 +154,7 @@ impl PartySignatureScheme {
 }
 
 /// Whether `bytes` are exactly one DER `SEQUENCE { INTEGER r, INTEGER s }`
-/// in short-form lengths, which covers every ECDSA signature up to P-521.
+/// in short-form lengths, which covers every curve Canton signs with, through P-384.
 fn is_der_ecdsa_signature(bytes: &[u8]) -> bool {
     let [0x30, seq_len, body @ ..] = bytes else {
         return false;

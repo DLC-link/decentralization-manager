@@ -1864,7 +1864,7 @@ mod tests {
     }
 
     /// The length rule follows the party key. A secp256k1 party may sign in
-    /// DER, which is never 64 bytes, and the mapping is what says so.
+    /// DER, which is seldom 64 bytes, and the mapping is what says so.
     #[test]
     fn accepts_a_der_signature_for_a_secp256k1_party() {
         let key = SigningPublicKey {
