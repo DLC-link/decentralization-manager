@@ -1658,13 +1658,6 @@ export const GovernanceSection = ({
     }
   };
 
-  // Same idea as resetActionForm but for the proposal half. Mint/Burn re-seed
-  // instrument_admin = partyId via a useEffect on proposalType change, but
-  // because proposalType isn't changing here we re-seed it manually so it
-  // stays populated after a successful submit.
-  // NOTE: proposalOperator / proposalExpectedDso are intentionally NOT
-  // cleared — they're autofetched (operator from /operator-info, DSO from
-  // /network-info) and should persist across submissions.
   // Clears every proposal field back to its default for `type`. Runs after a
   // successful submit and whenever the proposal type changes: the fields are
   // shared across types, so without it a value entered for one type lands in
@@ -1723,6 +1716,7 @@ export const GovernanceSection = ({
     setProposalHolderRequirements([]);
     setProposalIssuerRequirements([]);
     setProposalInitialInstrumentIssuersText("");
+    setProposalExternalPartySetupCid("");
     setProposalInstrumentIssuersText("");
     setProposalOffboardRows([]);
   };

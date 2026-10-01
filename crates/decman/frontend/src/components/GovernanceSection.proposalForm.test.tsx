@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { SnackbarProvider } from "../contexts";
@@ -6,18 +6,28 @@ import { GovernanceSection } from "./GovernanceSection";
 
 // The proposal form renders once /governance/confirmations answers. Every
 // other fetch stays pending, so only the form's own state is under test.
+const ns = "a".repeat(68);
+const dso = `DSO::${ns}`;
+
 vi.mock("../api", () => ({
-  authenticatedFetch: vi.fn((url: string) =>
-    url.includes("/governance/confirmations")
-      ? Promise.resolve({
-          ok: true,
-          json: async () => ({ rules_contract_id: "rules-1", threshold: 2, domain_actions: [] }),
-        })
-      : new Promise(() => {}),
-  ),
+  authenticatedFetch: vi.fn((url: string) => {
+    if (url.includes("/governance/confirmations")) {
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({ rules_contract_id: "rules-1", threshold: 2, domain_actions: [] }),
+      });
+    }
+    // The DSO forms prefill from here, and the reset has to give it back.
+    if (url.includes("/network-info")) {
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({ dso_party_id: dso, amulet_rules_cid: "amulet-rules-1" }),
+      });
+    }
+    return new Promise(() => {});
+  }),
 }));
 
-const ns = "a".repeat(68);
 const self = `gov::${ns}`;
 const operator = `operator::${ns}`;
 
@@ -70,11 +80,30 @@ describe("proposal form across proposal types", { timeout: 20_000 }, () => {
     expect(field("Provider Party")).toHaveProperty("value", "");
   });
 
-  it("keeps the form when the same type is picked again", async () => {
+  it("clears the external party setup cid when switching away and back", async () => {
     renderForm();
-    await chooseType("4. Create Registrar Service Request (as Registrar)");
-    fireEvent.change(field("Provider Party"), { target: { value: `other::${ns}` } });
-    await chooseType("4. Create Registrar Service Request (as Registrar)");
-    expect(field("Provider Party")).toHaveProperty("value", `other::${ns}`);
+    await chooseType("Accept External Party Setup");
+    fireEvent.change(field("External Party Setup Proposal Contract Id"), {
+      target: { value: "00abc" },
+    });
+    await chooseType("Generic Vote");
+    await chooseType("Accept External Party Setup");
+    expect(field("External Party Setup Proposal Contract Id")).toHaveProperty("value", "");
+  });
+
+  it("puts the network's DSO back after a type change", async () => {
+    renderForm();
+    await chooseType("Setup CC Preapproval");
+    await waitFor(() => expect(field("Expected DSO Party")).toHaveProperty("value", dso));
+    fireEvent.change(field("Expected DSO Party"), { target: { value: `typo::${ns}` } });
+
+    await chooseType("Setup Coupon Reassignment Delegation");
+    expect(field("DSO Party")).toHaveProperty("value", dso);
+    fireEvent.change(field("DSO Party"), { target: { value: `typo::${ns}` } });
+
+    await chooseType("Setup CC Preapproval");
+    expect(field("Expected DSO Party")).toHaveProperty("value", dso);
+    await chooseType("Setup Coupon Reassignment Delegation");
+    expect(field("DSO Party")).toHaveProperty("value", dso);
   });
 });
