@@ -251,7 +251,7 @@ mod tests {
         concat[0] = 0x80;
         concat[63] = 0x01;
         let der = ecdsa_concat_to_der(&concat);
-        let mut expected = vec![0x30, 0x25, 0x02, 0x21, 0x00, 0x80];
+        let mut expected = vec![0x30, 0x26, 0x02, 0x21, 0x00, 0x80];
         expected.extend([0u8; 31]);
         expected.extend([0x02, 0x01, 0x01]);
         assert_eq!(der, expected);
