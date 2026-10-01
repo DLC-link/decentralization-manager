@@ -1,0 +1,123 @@
+-- Copyright (c) 2026 No Witness Labs. Contributed under the Apache License 2.0.
+-- SPDX-License-Identifier: Apache-2.0
+
+module Governance.Test.PriceFeedTest where
+
+import Daml.Script
+import DA.Assert ((===))
+import qualified DA.Set as Set
+import DA.Time (hours)
+import Governance.Action
+import Governance.Confirmation
+import Governance.ExecutionResult (ExecuteConfirmedActionResult)
+import Governance.PriceFeed
+import Governance.Rules
+
+data Committee = Committee with
+  gov : Party
+  m1 : Party
+  m2 : Party
+  m3 : Party
+  rules : ContractId GovernanceRules
+
+-- A 2-of-3 committee. On a network each member hosts `gov` on its own
+-- participant; here members read as it.
+setup : Script Committee
+setup = do
+  gov <- allocateParty "price-committee"
+  [m1, m2, m3] <- mapA allocateParty ["member-1", "member-2", "member-3"]
+  rules <- submit gov do
+    createCmd GovernanceRules with
+      governanceParty = gov
+      members = Set.fromList [m1, m2, m3]
+      threshold = 2
+      actionConfirmationTimeout = hours 1
+      additionalProposers = None
+  pure Committee with ..
+
+confirm : Committee -> Party -> ContractId GovernableAction -> Script (ContractId GovernanceConfirmation)
+confirm c member action = do
+  r <- submit (actAs member <> readAs c.gov) do
+    exerciseCmd c.rules GovernanceRules_ConfirmAction with confirmer = member; actionProposalCid = action
+  pure r.confirmationCid
+
+executeCmd : Committee -> Party -> ContractId GovernableAction -> [ContractId GovernanceConfirmation] -> Commands ExecuteConfirmedActionResult
+executeCmd c member action confirmations =
+  exerciseCmd c.rules GovernanceRules_ExecuteConfirmedAction with
+    executor = member; actionProposalCid = action; confirmations
+
+openFeed : Committee -> [Party] -> Script (ContractId PriceFeed, PriceFeed)
+openFeed c subscribers = do
+  p <- submit c.m1 do
+    createCmd OpenPriceFeedProposal with
+      governanceParty = c.gov; proposer = c.m1; feedId = "tbill-usd"; asset = "T-Bill"
+      initialPrice = 1.0; subscribers
+  let action = toInterfaceContractId @GovernableAction p
+  a <- confirm c c.m1 action
+  b <- confirm c c.m2 action
+  _ <- submit (actAs c.m3 <> readAs c.gov) do executeCmd c c.m3 action [a, b]
+  [feed] <- query @PriceFeed c.gov
+  pure feed
+
+propose : Committee -> Party -> ContractId PriceFeed -> Int -> Decimal -> Decimal -> Script (ContractId GovernableAction)
+propose c member feedCid fromRound fromPrice newPrice = do
+  p <- submit member do
+    createCmd PublishPriceProposal with
+      governanceParty = c.gov; proposer = member; feedCid; asset = "T-Bill"; fromRound; fromPrice; newPrice
+  pure (toInterfaceContractId @GovernableAction p)
+
+-- Two members open a feed and move its price; one member alone cannot.
+test_publish_needs_threshold : Script ()
+test_publish_needs_threshold = do
+  c <- setup
+  app <- allocateParty "lending-app"
+  (feedCid, feed) <- openFeed c [app]
+  feed.price === 1.0
+  feed.round === 0
+
+  move <- propose c c.m2 feedCid 0 1.0 0.62
+  one <- confirm c c.m2 move
+  submitMustFail (actAs c.m2 <> readAs c.gov) do executeCmd c c.m2 move [one]
+  two <- confirm c c.m3 move
+  _ <- submit (actAs c.m1 <> readAs c.gov) do executeCmd c c.m1 move [one, two]
+
+  -- The subscribed app reads the new price.
+  [(_, updated)] <- query @PriceFeed app
+  updated.price === 0.62
+  updated.round === 1
+
+-- A proposal that names a superseded round, or misstates the current price,
+-- cannot execute even with valid confirmations.
+test_stale_or_misstated_proposals_fail : Script ()
+test_stale_or_misstated_proposals_fail = do
+  c <- setup
+  (feedCid, _) <- openFeed c []
+  first <- propose c c.m1 feedCid 0 1.0 0.9
+  second <- propose c c.m2 feedCid 0 1.0 1.1
+  f1 <- confirm c c.m1 first
+  f2 <- confirm c c.m3 first
+  s1 <- confirm c c.m2 second
+  s2 <- confirm c c.m3 second
+  _ <- submit (actAs c.m2 <> readAs c.gov) do executeCmd c c.m2 first [f1, f2]
+  submitMustFail (actAs c.m1 <> readAs c.gov) do executeCmd c c.m1 second [s1, s2]
+
+  [(currentCid, current)] <- query @PriceFeed c.gov
+  current.round === 1
+  wrong <- propose c c.m3 currentCid 1 1.0 0.5
+  w1 <- confirm c c.m1 wrong
+  w2 <- confirm c c.m2 wrong
+  submitMustFail (actAs c.m3 <> readAs c.gov) do executeCmd c c.m3 wrong [w1, w2]
+
+-- Non-members cannot confirm, and the feed is visible only to its subscribers.
+test_membership_and_visibility : Script ()
+test_membership_and_visibility = do
+  c <- setup
+  [app, outsider] <- mapA allocateParty ["lending-app", "outsider"]
+  (feedCid, _) <- openFeed c [app]
+  move <- propose c c.m1 feedCid 0 1.0 0.8
+  submitMustFail (actAs outsider <> readAs c.gov) do
+    exerciseCmd c.rules GovernanceRules_ConfirmAction with confirmer = outsider; actionProposalCid = move
+  seen <- query @PriceFeed app
+  length seen === 1
+  hidden <- query @PriceFeed outsider
+  length hidden === 0

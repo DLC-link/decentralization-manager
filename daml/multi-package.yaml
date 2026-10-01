@@ -12,3 +12,5 @@ packages:
   - governance-utility-credential-test
   - governance-utility-onboarding
   - governance-utility-onboarding-test
+  - governance-price-feed
+  - governance-price-feed-test

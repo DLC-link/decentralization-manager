@@ -1,0 +1,96 @@
+-- Copyright (c) 2026 No Witness Labs. Contributed under the Apache License 2.0.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | A price feed run by a decentralized party: a price is published only after
+-- the governance threshold of members confirms the exact move. Apps read the
+-- feed as subscribers (observers) and use it as an attested price, e.g. for
+-- loan-to-value checks, margin calls or settlement.
+module Governance.PriceFeed where
+
+import Governance.Action
+
+-- | The current price of one asset, signed by the governance party. Each
+-- update replaces the contract and increments `round`, so a proposal can
+-- name the exact round it moves from.
+template PriceFeed
+  with
+    governanceParty : Party
+    subscribers : [Party]
+      -- ^ Parties that may read the feed (apps, counterparties, auditors).
+    feedId : Text
+    asset : Text
+    price : Decimal
+    round : Int
+    observedAt : Time
+  where
+    signatory governanceParty
+    observer subscribers
+    ensure feedId /= "" && asset /= "" && price > 0.0 && round >= 0
+
+    choice PriceFeed_Update : ContractId PriceFeed
+      with
+        newPrice : Decimal
+      controller governanceParty
+      do
+        now <- getTime
+        create this with price = newPrice; round = round + 1; observedAt = now
+
+-- | Governance action: open a feed at an initial price.
+template OpenPriceFeedProposal
+  with
+    governanceParty : Party
+    proposer : Party
+    feedId : Text
+    asset : Text
+    initialPrice : Decimal
+    subscribers : [Party]
+  where
+    signatory proposer
+    observer governanceParty
+    ensure feedId /= "" && asset /= "" && initialPrice > 0.0
+
+    interface instance GovernableAction for OpenPriceFeedProposal where
+      view = GovernableActionView with
+        governanceParty
+        proposer
+        actionLabel = "OpenPriceFeed"
+        description = "Open price feed " <> feedId <> " for " <> asset <> " at " <> show initialPrice
+
+      executeImpl = do
+        now <- getTime
+        _ <- create PriceFeed with
+          governanceParty; subscribers; feedId; asset
+          price = initialPrice; round = 0; observedAt = now
+        pure ()
+
+-- | Governance action: move a feed from a stated round to a new price.
+-- Members confirm the exact move; if the feed was updated in between, the
+-- named contract is gone or its round differs, and execution fails.
+template PublishPriceProposal
+  with
+    governanceParty : Party
+    proposer : Party
+    feedCid : ContractId PriceFeed
+    asset : Text
+    fromRound : Int
+    fromPrice : Decimal
+    newPrice : Decimal
+  where
+    signatory proposer
+    observer governanceParty
+    ensure newPrice > 0.0
+
+    interface instance GovernableAction for PublishPriceProposal where
+      view = GovernableActionView with
+        governanceParty
+        proposer
+        actionLabel = "PublishPrice"
+        description = asset <> ": " <> show fromPrice <> " -> " <> show newPrice <> " (round " <> show fromRound <> ")"
+
+      executeImpl = do
+        feed <- fetch feedCid
+        assertMsg "feed belongs to another governance party" (feed.governanceParty == governanceParty)
+        assertMsg "feed is for another asset" (feed.asset == asset)
+        assertMsg "feed moved since the proposal" (feed.round == fromRound && feed.price == fromPrice)
+        _ <- exercise feedCid PriceFeed_Update with newPrice
+        pure ()

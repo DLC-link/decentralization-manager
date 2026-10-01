@@ -1,0 +1,19 @@
+sdk-version: 3.4.11
+name: governance-price-feed-test
+version: 0.1.0
+source: daml
+dependencies:
+  - daml-prim
+  - daml-stdlib
+  - daml-script
+data-dependencies:
+  - ../governance-action-v1/.daml/dist/governance-action-v1-0.1.0.dar
+  - ../governance-core/.daml/dist/governance-core-v1-0.1.0.dar
+  - ../governance-price-feed/.daml/dist/governance-price-feed-v1-0.1.0.dar
+  - ../dars/splice-util-0.1.4.dar
+build-options:
+  - --target=2.2
+  - -Wno-upgrade-interfaces
+  - -Wno-template-interface-depends-on-daml-script
+  - --ghc-option=-Wunused-binds
+  - --ghc-option=-Wunused-matches

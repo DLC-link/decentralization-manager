@@ -660,6 +660,25 @@ After execution:
 - All `GovernanceConfirmation` contracts are consumed
 - A `GovernanceExecutionResult` is created with the vote description, confirmers, and timestamp as a permanent on-chain record
 
+## Price Feed (Oracle)
+
+A decentralized party can act as a price oracle: no single operator can move the
+price an application depends on. The `governance-price-feed-v1` package
+([README](../daml/governance-price-feed/README.md)) provides a `PriceFeed`
+contract and two `GovernableAction` proposals:
+
+1. A member proposes `OpenPriceFeedProposal` with the asset, an initial price and
+   the parties allowed to read the feed.
+2. Members confirm; once the threshold is met, one executes it and the feed is
+   created, signed by the decentralized party.
+3. To move the price, a member proposes `PublishPriceProposal` naming the feed's
+   current round and price. After the threshold confirms, the feed is replaced
+   with the new price and the next round. A proposal made against an older round
+   cannot execute.
+
+Applications read the feed as subscribers and pass its contract ID to their own
+choices, for example a lending app's loan-to-value check or margin call.
+
 ## Token Custody
 
 The `governance-token-custody` package enables governance-controlled token operations. All token actions follow the same propose -> confirm -> execute flow as generic votes, but trigger real on-chain state changes when executed.
