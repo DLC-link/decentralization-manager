@@ -94,7 +94,7 @@ tracing = { version = "0.1" }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 ts-rs = { version = "12", features = ["no-serde-warnings"] }
 utoipa = { version = "5" }
-utoipa-actix-web = { version = "0.1" }
+utoipa-actix-web = { version = "0.2" }
 utoipa-swagger-ui = { version = "9", features = ["actix-web"] }
 uuid = { version = "1.11", features = ["v4"] }
 wiremock = { version = "0.6" }
