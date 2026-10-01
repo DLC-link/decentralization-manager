@@ -103,7 +103,9 @@ const PACKAGE_MIN_WIDTH = 260;
 // Local table: the id column fits the truncated id and its copy button, and the
 // name takes what is left, wrapping when it has to. Declared widths keep a
 // 64-character id or a long version from widening the table past the panel.
-const PACKAGE_ID_COL_WIDTH = 310;
+// 352 fits the widest form: from md up, CopyableText shows the id as 16…16
+// characters plus the button.
+const PACKAGE_ID_COL_WIDTH = 352;
 const LOCAL_NAME_MIN_WIDTH = 220;
 const LOCAL_TABLE_MIN_WIDTH =
   LOCAL_NAME_MIN_WIDTH + VERSION_COL_WIDTH + PACKAGE_ID_COL_WIDTH;
@@ -117,6 +119,23 @@ const versionCellSx = {
   textOverflow: "ellipsis",
 } as const;
 
+// The full version shows on hover only when the column cut it off.
+const VersionCell = ({ version }: { version?: string }) => {
+  const [cutOff, setCutOff] = useState(false);
+  return (
+    <Tooltip title={cutOff && version ? version : ""} arrow>
+      <TableCell
+        sx={versionCellSx}
+        onMouseEnter={(e) =>
+          setCutOff(e.currentTarget.scrollWidth > e.currentTarget.clientWidth)
+        }
+      >
+        {version || "-"}
+      </TableCell>
+    </Tooltip>
+  );
+};
+
 // The comparison table's package column stays in view while the peer columns
 // scroll sideways. A pinned cell must be opaque, or the columns scrolling under
 // it show through, so it paints the row's stripe and hover tint as layers over
@@ -128,9 +147,11 @@ const pinnedCellSx = (index: number) => ({
   zIndex: 1,
   backgroundImage: (theme: Theme) =>
     `${layer(zebraStripe(theme, index))}, ${layer(theme.palette.background.default)}`,
+  // A hovered row's other cells show the tint twice over the page, with no
+  // stripe, so this one layers it the same way.
   "tr:hover > &": {
     backgroundImage: (theme: Theme) =>
-      `${layer(ROW_HOVER_TINT)}, ${layer(theme.palette.background.default)}`,
+      `${layer(ROW_HOVER_TINT)}, ${layer(ROW_HOVER_TINT)}, ${layer(theme.palette.background.default)}`,
   },
 });
 
@@ -161,7 +182,6 @@ export const PackagesPanel = ({
       .catch(() => {})
       .finally(() => setLoadingPackages(false));
   }, [refreshNonce]);
-  const [canScrollUp, setCanScrollUp] = useState(false);
   const [canScrollDown, setCanScrollDown] = useState(false);
   const [comparison, setComparison] = useState<PeerPackageComparison | null>(
     null,
@@ -310,7 +330,6 @@ export const PackagesPanel = ({
   const updateScrollShadows = useCallback(() => {
     const el = scrollRef.current;
     if (el) {
-      setCanScrollUp(el.scrollTop > 0);
       setCanScrollDown(el.scrollTop < el.scrollHeight - el.clientHeight - 1);
     }
   }, []);
@@ -502,22 +521,9 @@ export const PackagesPanel = ({
         </Box>
       )}
 
+        {/* No "can scroll up" shadow: the sticky header stays in view and
+            would cover it. */}
         <Box sx={{ position: "relative", flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-          <Box
-            sx={{
-              position: "absolute",
-              top: 0,
-              left: 0,
-              right: 0,
-              height: 16,
-              background:
-                "linear-gradient(to bottom, rgba(0,0,0,0.08), transparent)",
-              pointerEvents: "none",
-              opacity: canScrollUp ? 1 : 0,
-              transition: "opacity 0.2s",
-              zIndex: 1,
-            }}
-          />
           <Box
             ref={scrollRef}
             sx={{
@@ -666,9 +672,7 @@ export const PackagesPanel = ({
                         >
                           {pkg.name || "-"}
                         </TableCell>
-                        <TableCell sx={versionCellSx} title={pkg.version || undefined}>
-                          {pkg.version || "-"}
-                        </TableCell>
+                        <VersionCell version={pkg.version} />
                         {peerIndexes.map((index) => {
                           const { peer, unnamed } = index;
                           const { status, versions } = compareCell(index, pkg);
@@ -778,9 +782,7 @@ export const PackagesPanel = ({
                       <TableCell sx={{ py: 1, overflowWrap: "anywhere" }}>
                         {p.package_name || "-"}
                       </TableCell>
-                      <TableCell sx={versionCellSx} title={p.package_version || undefined}>
-                        {p.package_version || "-"}
-                      </TableCell>
+                      <VersionCell version={p.package_version} />
                       <TableCell sx={{ py: 1 }}>
                         <CopyableText
                           text={p.package_id}
