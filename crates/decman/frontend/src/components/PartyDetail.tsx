@@ -39,6 +39,7 @@ import { ContractsDialog } from "./ContractsDialog";
 import { PartyConfigDialog } from "./PartyConfigDialog";
 import { GovernanceActionsDialog } from "./GovernanceActionsDialog";
 import { GovernanceAuditTrail } from "./GovernanceAuditTrail";
+import { GovernanceRules } from "./GovernanceRules";
 import { HoldingsSection } from "./HoldingsSection";
 import { AuthSection, getAuthStatusIcon } from "./AuthSection";
 import { SURFACE2, cardTableSx, sectionCardSx, zebraRow } from "../styles";
@@ -247,6 +248,7 @@ export const PartyDetail = ({
   const [holdingsExpanded, setHoldingsExpanded] = useState(false);
   const [authExpanded, setAuthExpanded] = useState(false);
   const [governanceExpanded, setGovernanceExpanded] = useState(false);
+  const [rulesExpanded, setRulesExpanded] = useState(true);
   const [holdingsCount, setHoldingsCount] = useState(0);
   const [holdingsLoading, setHoldingsLoading] = useState(false);
   const [holdingsRefreshNonce, setHoldingsRefreshNonce] = useState(0);
@@ -541,6 +543,28 @@ export const PartyDetail = ({
           />
         </Box>
       </CollapsibleSection>
+
+      {/* Governance rules */}
+      {governanceState && (
+        <CollapsibleSection
+          title="Governance"
+          expanded={rulesExpanded}
+          onToggle={() => setRulesExpanded(!rulesExpanded)}
+          helpText="The active governance rules: who governs this party, how many of them must confirm an action, and who else may propose one."
+          badge={
+            <Chip
+              label={governanceState.members.length}
+              size="small"
+              sx={{ ml: 1 }}
+            />
+          }
+        >
+          <GovernanceRules
+            state={governanceState}
+            memberPartyId={authStatus?.member_party_id}
+          />
+        </CollapsibleSection>
+      )}
 
       {/* Participants */}
       <CollapsibleSection

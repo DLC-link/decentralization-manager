@@ -3,6 +3,7 @@ import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { authenticatedFetch } from "../api";
+import { SnackbarProvider } from "../contexts";
 import { buildHash, parseHash, TAB_HASHES } from "../hashRoute";
 import { PackagesPanel } from "./PackagesPanel";
 import type { DecentralizedParty, PeerPackageComparison } from "../types";
@@ -59,7 +60,7 @@ const compareCalls = () =>
 
 describe("PackagesPanel opened for a party", () => {
   it("compares only the party's hosts other than this node", async () => {
-    render(<PackagesPanel party={party} selfParticipantId={self} />);
+    render(<PackagesPanel party={party} selfParticipantId={self} />, { wrapper: SnackbarProvider });
 
     await waitFor(() => expect(compareCalls()).toHaveLength(1));
     const params = new URL(compareCalls()[0], "http://x").searchParams;
@@ -67,7 +68,7 @@ describe("PackagesPanel opened for a party", () => {
   });
 
   it("shows the selected hosts, named where a peer row exists", async () => {
-    render(<PackagesPanel party={party} selfParticipantId={self} />);
+    render(<PackagesPanel party={party} selfParticipantId={self} />, { wrapper: SnackbarProvider });
 
     expect(await screen.findByText("Operator B")).toBeTruthy();
     expect(screen.getByText("host-c")).toBeTruthy();
@@ -76,7 +77,7 @@ describe("PackagesPanel opened for a party", () => {
   });
 
   it("does not compare on its own without a party", async () => {
-    render(<PackagesPanel selfParticipantId={self} />);
+    render(<PackagesPanel selfParticipantId={self} />, { wrapper: SnackbarProvider });
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
     expect(compareCalls()).toHaveLength(0);
@@ -85,7 +86,7 @@ describe("PackagesPanel opened for a party", () => {
 
 describe("PackagesPanel party refresh", () => {
   it("keeps the comparison when the parties poll hands over a new object", async () => {
-    const { rerender } = render(<PackagesPanel party={party} selfParticipantId={self} />);
+    const { rerender } = render(<PackagesPanel party={party} selfParticipantId={self} />, { wrapper: SnackbarProvider });
     await waitFor(() => expect(compareCalls()).toHaveLength(1));
 
     rerender(<PackagesPanel party={{ ...party }} selfParticipantId={self} />);
@@ -129,7 +130,7 @@ describe("PackagesPanel selection edit", () => {
   });
 
   it("clears the party chip once the selection is not the party's hosts", async () => {
-    render(<PackagesRoute />);
+    render(<PackagesRoute />, { wrapper: SnackbarProvider });
     await waitFor(() => expect(compareCalls()).toHaveLength(1));
     expect(screen.getByTestId("party-scope-chip")).toBeTruthy();
 
@@ -141,13 +142,13 @@ describe("PackagesPanel selection edit", () => {
   });
 
   it("does not restore the party's hosts on a reload after an edit", async () => {
-    const first = render(<PackagesRoute />);
+    const first = render(<PackagesRoute />, { wrapper: SnackbarProvider });
     await waitFor(() => expect(compareCalls()).toHaveLength(1));
     removeSelected("host-c");
     first.unmount();
     fetchMock.mockClear();
 
-    render(<PackagesRoute />);
+    render(<PackagesRoute />, { wrapper: SnackbarProvider });
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
     expect(compareCalls()).toHaveLength(0);

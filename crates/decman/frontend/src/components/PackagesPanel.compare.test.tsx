@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { authenticatedFetch } from "../api";
+import { SnackbarProvider } from "../contexts";
 import { PackagesPanel } from "./PackagesPanel";
 import type { PackageInfo, PeerPackageComparison } from "../types";
 
@@ -46,7 +47,7 @@ const statuses = () =>
 describe("PackagesPanel comparison", () => {
   it("says no differences were found for this selection, not that all is in sync", async () => {
     serve([registry, cbtc]);
-    render(<PackagesPanel />);
+    render(<PackagesPanel />, { wrapper: SnackbarProvider });
 
     const summary = await compare();
 
@@ -57,7 +58,7 @@ describe("PackagesPanel comparison", () => {
 
   it("marks an older version apart from a missing package", async () => {
     serve([{ ...registry, package_id: "reg-3", version: "0.3.0" }]);
-    render(<PackagesPanel />);
+    render(<PackagesPanel />, { wrapper: SnackbarProvider });
 
     await compare();
 
@@ -69,7 +70,7 @@ describe("PackagesPanel comparison", () => {
 
   it("narrows the comparison to a quick-filter group", async () => {
     serve([registry]);
-    render(<PackagesPanel />);
+    render(<PackagesPanel />, { wrapper: SnackbarProvider });
     await compare();
 
     fireEvent.click(screen.getByTestId("package-group-registry"));
@@ -82,7 +83,7 @@ describe("PackagesPanel comparison", () => {
 
   it("hides matching rows when differences only is on", async () => {
     serve([registry]);
-    render(<PackagesPanel />);
+    render(<PackagesPanel />, { wrapper: SnackbarProvider });
     await compare();
 
     fireEvent.click(screen.getByRole("switch", { name: "Differences only" }));

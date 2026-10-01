@@ -39,6 +39,7 @@ import { useSnackbar } from "./contexts";
 import { API_BASE, ADMIN_ACCESS } from "./constants";
 import { authenticatedFetch, pingLatency } from "./api";
 import { useHiddenParties } from "./useHiddenParties";
+import { favoritesFirst, useFavoriteParties } from "./useFavoriteParties";
 import { TAB_HASHES, buildHash, parseHash } from "./hashRoute";
 import { workflowKindLabel } from "./workflowSteps";
 import { columnSx } from "./styles";
@@ -166,12 +167,18 @@ const App = () => {
   const [showSearchBar, setShowSearchBar] = useState(true);
   const [showHidden, setShowHidden] = useState(false);
   const { toggle: toggleHidden, isHidden } = useHiddenParties();
+  const { favorites, toggle: toggleFavorite, isFavorite } = useFavoriteParties();
   // Only the Configuration tab shows node health, and only it pays for the
   // poll: the probe stops the moment the operator moves to another tab.
   const nodeHealth = useNodeHealth(activeTab === 2);
+  // Starred parties first, before the list paginates, so they land on page one.
   const visibleParties = useMemo(
-    () => (showHidden ? parties : parties.filter((p) => !isHidden(p.party_id))),
-    [parties, showHidden, isHidden],
+    () =>
+      favoritesFirst(
+        showHidden ? parties : parties.filter((p) => !isHidden(p.party_id)),
+        favorites,
+      ),
+    [parties, showHidden, isHidden, favorites],
   );
   const hiddenCount = useMemo(
     () => parties.filter((p) => isHidden(p.party_id)).length,
@@ -1167,6 +1174,8 @@ const App = () => {
                   }}
                   isHidden={isHidden}
                   onToggleHidden={toggleHidden}
+                  isFavorite={isFavorite}
+                  onToggleFavorite={toggleFavorite}
                 />
               ) : (
                 <ExternalPartyList parties={externalParties} />

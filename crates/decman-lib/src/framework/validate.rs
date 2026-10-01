@@ -105,12 +105,47 @@ pub fn validate_positive_amount(amount: &DamlDecimal, field: &str) -> Result<(),
     Ok(())
 }
 
+/// Validates a provider-app reward beneficiary list that is being set, with the
+/// rules of the `InstrumentConfiguration` template's
+/// `areValidProviderAppRewardBeneficiaries` (`utility-registry-v0` 0.6.0):
+/// each weight in (0.0, 1.0], weights summing to exactly 1.0, fewer than 20
+/// entries, and no duplicate beneficiary. A proposal stores its payload, so a
+/// list that breaks any of them would pass the vote and then fail at execution
+/// every time. An empty list can't sum to 1.0; clearing the beneficiaries is
+/// `None`, not an empty list.
+///
+/// The length limit is one lower than `validate_reward_beneficiaries`: this
+/// template needs `length < 20`, the coupon one allows 20.
 pub fn validate_beneficiary_weights(beneficiaries: &[AppRewardBeneficiary]) -> Result<(), Error> {
     if beneficiaries.is_empty() {
-        return Ok(());
+        return Err(Error::Validation(
+            "provider_app_reward_beneficiaries must not be empty; omit it to clear the beneficiaries"
+                .to_string(),
+        ));
+    }
+    if beneficiaries.len() >= 20 {
+        return Err(Error::Validation(format!(
+            "at most 19 provider app reward beneficiaries, got {}",
+            beneficiaries.len()
+        )));
+    }
+    let one: DamlDecimal = "1".parse().expect("'1' is a valid DamlDecimal");
+    let mut seen = std::collections::HashSet::new();
+    for b in beneficiaries {
+        if b.weight.value() <= DamlDecimal::ZERO.value() || b.weight.value() > one.value() {
+            return Err(Error::Validation(format!(
+                "each beneficiary weight must be in (0.0, 1.0], got {}",
+                b.weight
+            )));
+        }
+        if !seen.insert(&b.beneficiary) {
+            return Err(Error::Validation(format!(
+                "duplicate beneficiary not allowed: {}",
+                b.beneficiary
+            )));
+        }
     }
     let sum: DamlDecimal = beneficiaries.iter().map(|b| b.weight).sum();
-    let one: DamlDecimal = "1".parse().expect("'1' is a valid DamlDecimal");
     if sum != one {
         return Err(Error::Validation(format!(
             "FAR beneficiary weights must sum to exactly 1.0, got {sum}"
@@ -233,5 +268,45 @@ mod tests {
 
         // Valid two-way split.
         assert!(validate_reward_beneficiaries(&[rb("a", "0.8"), rb("b", "0.2")]).is_ok());
+    }
+
+    fn arb(prefix: &str, weight: &str) -> AppRewardBeneficiary {
+        AppRewardBeneficiary {
+            beneficiary: cid(prefix),
+            weight: weight.parse().expect("valid decimal"),
+        }
+    }
+
+    /// An empty list would pass the vote and then fail the template's ensure at
+    /// execution; clearing the beneficiaries is `None`, not `Some([])`.
+    #[test]
+    fn validate_beneficiary_weights_rejects_an_empty_list() {
+        assert!(validate_beneficiary_weights(&[]).is_err());
+        assert!(validate_beneficiary_weights(&[arb("a", "1.0")]).is_ok());
+        assert!(
+            validate_beneficiary_weights(&[arb("a", "0.3"), arb("b", "0.6"), arb("c", "0.1")])
+                .is_ok()
+        );
+        assert!(validate_beneficiary_weights(&[arb("a", "0.7")]).is_err());
+    }
+
+    /// The rest of `areValidProviderAppRewardBeneficiaries`: each of these sums
+    /// to 1.0, so only the per-entry rules can refuse it.
+    #[test]
+    fn validate_beneficiary_weights_matches_the_template_rules() {
+        // A zero weight, and a weight outside (0, 1] balanced by a negative one.
+        assert!(validate_beneficiary_weights(&[arb("a", "1"), arb("b", "0")]).is_err());
+        assert!(validate_beneficiary_weights(&[arb("a", "1.5"), arb("b", "-0.5")]).is_err());
+
+        // The same party twice.
+        assert!(validate_beneficiary_weights(&[arb("a", "0.5"), arb("a", "0.5")]).is_err());
+
+        // The template needs fewer than 20 entries: 19 pass, 20 don't.
+        let split =
+            |n: usize, w: &str| (0..n).map(|i| arb(&format!("p{i}"), w)).collect::<Vec<_>>();
+        let mut nineteen = split(18, "0.05");
+        nineteen.push(arb("last", "0.1"));
+        assert!(validate_beneficiary_weights(&nineteen).is_ok());
+        assert!(validate_beneficiary_weights(&split(20, "0.05")).is_err());
     }
 }

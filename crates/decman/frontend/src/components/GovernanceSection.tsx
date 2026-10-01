@@ -34,6 +34,7 @@ import {
 } from "../constants";
 import { authenticatedFetch } from "../api";
 import { getActionTypeOptions } from "../governanceFormat";
+import { beneficiariesProblem, beneficiaryWeightSum } from "../rewardBeneficiaries";
 import { fieldHelpAdornment, TextHelp } from "./FieldHelp";
 import type {
   GovernanceResponse,
@@ -1658,15 +1659,18 @@ export const GovernanceSection = ({
     }
   };
 
-  // Same idea as resetActionForm but for the proposal half. Mint/Burn re-seed
-  // instrument_admin = partyId via a useEffect on proposalType change, but
-  // because proposalType isn't changing here we re-seed it manually so it
-  // stays populated after a successful submit.
-  // NOTE: proposalOperator / proposalExpectedDso are intentionally NOT
-  // cleared — they're autofetched (operator from /operator-info, DSO from
-  // /network-info) and should persist across submissions.
-  const resetProposalForm = () => {
-    setProposalProvider("");
+  // Clears every proposal field back to its default for `type`. Runs after a
+  // successful submit and whenever the proposal type changes: the fields are
+  // shared across types, so without it a value entered for one type lands in
+  // the next one's payload. Fields prefilled from app or network state get
+  // that value back rather than an empty string, because their fetches only
+  // run once.
+  const resetProposalForm = (type: ProposalType["type"] = proposalType) => {
+    setProposalProvider(type === "create_provider_service_request" ? partyId : "");
+    setProposalOperator(defaultOperatorParty || "");
+    setProposalExpectedDso(dsoPartyId);
+    setProposalMintRequestCid("");
+    setProposalBurnRequestCid("");
     setProposalInstrumentAdmin("");
     setProposalInstrumentAllowances([]);
     setProposalTransferFactoryCid("");
@@ -1675,9 +1679,7 @@ export const GovernanceSection = ({
     setProposalAmount("");
     setSelectedHoldingKey("");
     setShowTransferAdvanced(false);
-    setProposalInstrumentIdAdmin(
-      proposalType === "mint" || proposalType === "burn" ? partyId : "",
-    );
+    setProposalInstrumentIdAdmin(type === "mint" || type === "burn" ? partyId : "");
     setProposalInstrumentIdId("");
     setProposalInputHoldingCids("");
     setProposalTransferExpiryHours(String(DEFAULT_TRANSFER_EXPIRY_HOURS));
@@ -1687,11 +1689,11 @@ export const GovernanceSection = ({
     setProposalInstrumentIdText("");
     setProposalCreateTransferRule(true);
     setProposalCreateAllocationFactory(true);
-    setProposalUser("");
+    setProposalUser(type === "create_user_service_request" ? partyId : "");
     setProposalInstrumentConfigurationCid("");
     setProposalBeneficiaries([]);
     setProposalClearBeneficiaries(false);
-    setProposalDelegationDso("");
+    setProposalDelegationDso(dsoPartyId);
     setProposalDelegationAssigners([]);
     setProposalDelegationSplit([]);
     setProposalPriorDelegation("");
@@ -1715,9 +1717,17 @@ export const GovernanceSection = ({
     setProposalHolderRequirements([]);
     setProposalIssuerRequirements([]);
     setProposalInitialInstrumentIssuersText("");
+    setProposalExternalPartySetupCid("");
     setProposalInstrumentIssuersText("");
     setProposalOffboardRows([]);
   };
+
+  // A beneficiary list the template would reject: submitting it would only
+  // fail after the committee voted, so the form refuses it up front.
+  const beneficiaryProblem =
+    proposalType === "set_provider_app_reward_beneficiaries"
+      ? beneficiariesProblem(proposalBeneficiaries, proposalClearBeneficiaries)
+      : null;
 
   const handleSubmitProposal = async () => {
     if (!rulesContractId) return;
@@ -1811,18 +1821,13 @@ export const GovernanceSection = ({
           };
           break;
         case "set_provider_app_reward_beneficiaries": {
+          if (beneficiaryProblem) throw new Error(beneficiaryProblem);
           let beneficiaries: AppRewardBeneficiary[] | null = null;
           if (!proposalClearBeneficiaries) {
-            beneficiaries = proposalBeneficiaries.map((b, idx) => {
-              const party = b.beneficiary.trim();
-              const weight = b.weight.trim();
-              if (!party || !weight) {
-                throw new Error(
-                  `Beneficiary row ${idx + 1}: party and weight are required`,
-                );
-              }
-              return { beneficiary: party, weight };
-            });
+            beneficiaries = proposalBeneficiaries.map((b) => ({
+              beneficiary: b.beneficiary.trim(),
+              weight: b.weight.trim(),
+            }));
           }
           proposal = {
             type: "set_provider_app_reward_beneficiaries",
@@ -3003,7 +3008,11 @@ export const GovernanceSection = ({
                 <Select
                   value={proposalType}
                   label="Proposal Type"
-                  onChange={(e) => setProposalType(e.target.value as ProposalType["type"])}
+                  onChange={(e) => {
+                    const next = e.target.value as ProposalType["type"];
+                    if (next !== proposalType) resetProposalForm(next);
+                    setProposalType(next);
+                  }}
                 >
                   <ListSubheader sx={{ color: "primary.main", fontWeight: 600 }}>Governance Core</ListSubheader>
                   <MenuItem value="generic_vote">Generic Vote</MenuItem>
@@ -4094,26 +4103,26 @@ export const GovernanceSection = ({
                         >
                           Add Beneficiary
                         </Button>
-                        {proposalBeneficiaries.length > 0 &&
-                          (() => {
-                            const sum = proposalBeneficiaries.reduce(
-                              (acc, b) => acc + (parseFloat(b.weight) || 0),
-                              0,
-                            );
-                            const isValid = Math.abs(sum - 1.0) < 1e-9;
-                            return (
-                              <Typography
-                                variant="caption"
-                                color={
-                                  isValid ? "success.main" : "error.main"
-                                }
-                              >
-                                Sum: {sum.toFixed(4)}{" "}
-                                {isValid ? "" : "(must be 1.0)"}
-                              </Typography>
-                            );
-                          })()}
+                        {(() => {
+                          // Just the running total: what is wrong with the
+                          // rows is the alert's job.
+                          const sum = beneficiaryWeightSum(proposalBeneficiaries);
+                          if (proposalBeneficiaries.length === 0 || sum === null) return null;
+                          return (
+                            <Typography
+                              variant="caption"
+                              color={sum === "1" ? "success.main" : "text.secondary"}
+                            >
+                              Sum: {sum}
+                            </Typography>
+                          );
+                        })()}
                       </Box>
+                      {beneficiaryProblem && (
+                        <Typography variant="caption" color="error.main" role="alert">
+                          {beneficiaryProblem}
+                        </Typography>
+                      )}
                     </>
                   )}
                 </>
@@ -5230,7 +5239,8 @@ export const GovernanceSection = ({
                     onClick={handleSubmitProposal}
                     disabled={
                       proposalLoading ||
-                      proposalType === "offer_paid_credential"
+                      proposalType === "offer_paid_credential" ||
+                      beneficiaryProblem !== null
                     }
                     startIcon={
                       proposalLoading ? (
@@ -5248,7 +5258,8 @@ export const GovernanceSection = ({
                     onClick={handleSubmitProposal}
                     disabled={
                       proposalLoading ||
-                      proposalType === "offer_paid_credential"
+                      proposalType === "offer_paid_credential" ||
+                      beneficiaryProblem !== null
                     }
                     startIcon={
                       proposalLoading ? <CircularProgress size={16} /> : undefined

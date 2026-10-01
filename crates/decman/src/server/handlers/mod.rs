@@ -31,8 +31,8 @@ pub(crate) use invitations::{accept_invitation, decline_invitation, get_invitati
 pub(crate) use keys::get_key_status;
 pub(crate) use parties::{
     Discovery, DiscoveryGate, MAX_CONCURRENT_DISCOVERIES, clear_acs_import_quarantine,
-    compare_peer_packages, discover_and_cache, get_decentralized_parties, get_participants_status,
-    get_vetted_packages, resolve_owner_keys_from_peers,
+    compare_peer_packages, discover_and_cache, get_decentralized_parties, get_expected_versions,
+    get_participants_status, get_vetted_packages, resolve_owner_keys_from_peers,
 };
 pub(crate) use party_config::{discover_member_party, get_party_config, save_party_config};
 pub(crate) use tenant::{
@@ -55,6 +55,6 @@ pub(crate) use workflows::{
     cancel_onboarding, cancel_workflow_instance, dismiss_workflow, get_add_party_status,
     get_change_threshold_status, get_contracts_status, get_dars_status, get_kick_status,
     get_onboarding_status, list_external_parties, list_workflows, retry_workflow, start_add_party,
-    start_change_threshold, start_contracts, start_dars, start_kick, start_onboarding,
-    upload_dars_local,
+    start_change_threshold, start_contracts, start_dars, start_dars_for_package, start_kick,
+    start_onboarding, upload_dars_local,
 };

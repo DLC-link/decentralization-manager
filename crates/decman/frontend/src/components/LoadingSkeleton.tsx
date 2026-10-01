@@ -1,6 +1,7 @@
 import { Box, Skeleton } from "@mui/material";
 import {
   AUTH_SLOT,
+  STAR_SLOT,
   VISIBILITY_SLOT,
   columnSx,
   fabGutterSx,
@@ -26,6 +27,12 @@ export const LoadingSkeleton = () => (
         sx={{ ...legendSx, width: AUTH_SLOT, textAlign: "right", flexShrink: 0 }}
       >
         Auth
+      </Box>
+      <Box
+        component="span"
+        sx={{ ...legendSx, width: STAR_SLOT, textAlign: "right", flexShrink: 0 }}
+      >
+        Star
       </Box>
       <Box
         component="span"
@@ -58,6 +65,16 @@ export const LoadingSkeleton = () => (
               justifyContent: "flex-end",
               minHeight: 30,
               alignItems: "center",
+            }}
+          >
+            <Skeleton variant="circular" width={18} height={18} />
+          </Box>
+          <Box
+            sx={{
+              width: STAR_SLOT,
+              flexShrink: 0,
+              display: "flex",
+              justifyContent: "flex-end",
             }}
           >
             <Skeleton variant="circular" width={18} height={18} />

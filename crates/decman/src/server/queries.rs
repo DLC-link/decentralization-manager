@@ -1154,6 +1154,7 @@ async fn fetch_governance_state_for_template(
             governance_party: rules.governance_party,
             members: rules.members,
             threshold: rules.threshold,
+            additional_proposers: rules.additional_proposers,
             action_confirmation_timeout_microseconds: rules.timeout_micros,
             // Both callers overwrite these with the package the contract was
             // actually found under, so the parse says nothing about them.

@@ -163,6 +163,26 @@ pub async fn current_inprogress_peer_instance(
     Ok(v)
 }
 
+/// The peer-side instance_name of the inprogress row that joined the
+/// coordinator run `coordinator_instance`.
+pub async fn inprogress_peer_instance_for(
+    db_path: &Path,
+    coordinator_instance: &str,
+) -> anyhow::Result<Option<String>> {
+    let pool = open(db_path).await?;
+    let v: Option<String> = sqlx::query_scalar(
+        "SELECT instance_name FROM workflow_runs \
+         WHERE role = 'Peer' AND status = 'inprogress' AND coordinator_instance = ?1 \
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(coordinator_instance)
+    .fetch_optional(&pool)
+    .await
+    .context("inprogress_peer_instance_for")?;
+    pool.close().await;
+    Ok(v)
+}
+
 /// Most recent peer-side instance_name of `kind` regardless of status.
 /// Used by chaos phases that need the row identity *after* it's flipped to a
 /// terminal state (failed/cancelled), where the inprogress lookup can no

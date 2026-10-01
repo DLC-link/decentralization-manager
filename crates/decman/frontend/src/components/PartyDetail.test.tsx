@@ -130,6 +130,7 @@ describe("PartyDetail governance membership", () => {
         governance_party: party.party_id,
         members,
         threshold: 1,
+        additional_proposers: [],
         out_of_date: false,
       },
     });
@@ -173,6 +174,7 @@ describe("PartyDetail governance membership", () => {
         governance_party: party.party_id,
         members: [status.member_party_id],
         threshold: 1,
+        additional_proposers: [],
         out_of_date: false,
       },
     };
@@ -186,6 +188,9 @@ describe("PartyDetail governance membership", () => {
     await waitFor(() =>
       expect(screen.getByLabelText("Authenticated")).toBeTruthy(),
     );
+    // The Governance section lists the member set from the same response.
+    expect(screen.getByText("Governance")).toBeTruthy();
+    expect(screen.getAllByTestId("governance-party-row")).toHaveLength(1);
 
     const other: DecentralizedParty = { ...party, party_id: `beta::${ns}` };
     rerender(detail({ ...status, dec_party_id: other.party_id }, other));

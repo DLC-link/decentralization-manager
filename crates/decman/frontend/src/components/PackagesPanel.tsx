@@ -18,6 +18,11 @@ import {
   Alert,
   FormControlLabel,
   Switch,
+  IconButton,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
 } from "@mui/material";
 import SearchIcon from "@mui/icons-material/Search";
 import CloudUploadIcon from "@mui/icons-material/CloudUpload";
@@ -27,10 +32,12 @@ import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import ErrorIcon from "@mui/icons-material/Error";
 import SyncProblemIcon from "@mui/icons-material/SyncProblem";
 import HelpOutlineIcon from "@mui/icons-material/HelpOutlineOutlined";
+import SendIcon from "@mui/icons-material/Send";
 import { CopyableText } from "./CopyableText";
 import { PaginationControls } from "./Pagination";
 import { usePagination } from "../usePagination";
-import { API_BASE } from "../constants";
+import { ADMIN_ACCESS, API_BASE } from "../constants";
+import { useSnackbar } from "../contexts";
 import { authenticatedFetch } from "../api";
 import type { Theme } from "@mui/material/styles";
 import { finderTableSx, ROW_HOVER_TINT, zebraRow, zebraStripe } from "../styles";
@@ -47,9 +54,15 @@ import {
   summarize,
   type CellStatus,
   type ParticipantOption,
+  canDistribute,
+  expectedIndex,
+  expectedNotHeld,
 } from "../packageCompare";
 import type {
   DecentralizedParty,
+  DistributePackageRequest,
+  ExpectedVersionsResponse,
+  PackageInfo,
   VettedPackageInfo,
   PeerPackageComparison,
   PeerPackageResult,
@@ -190,6 +203,14 @@ export const PackagesPanel = ({
   const [search, setSearch] = useState("");
   const [groupKeys, setGroupKeys] = useState<string[]>([]);
   const [differencesOnly, setDifferencesOnly] = useState(false);
+  const [distributeTarget, setDistributeTarget] = useState<{
+    pkg: PackageInfo;
+    peer: PeerPackageResult;
+  } | null>(null);
+  const [distributing, setDistributing] = useState(false);
+  const [expected, setExpected] = useState<ExpectedVersionsResponse | null>(null);
+  const [expectedError, setExpectedError] = useState<string | null>(null);
+  const { showSnackbar } = useSnackbar();
   const [peers, setPeers] = useState<Peer[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -217,9 +238,27 @@ export const PackagesPanel = ({
     return [...byId.values()];
   }, [peers, party, selfParticipantId, selected]);
 
+  // Read with every comparison, so the expected versions are as fresh as the
+  // vetting they sit beside.
+  const loadExpected = useCallback(async () => {
+    try {
+      const res = await authenticatedFetch(`${API_BASE}/packages/expected-versions`);
+      if (res.ok) {
+        setExpected(await res.json());
+        setExpectedError(null);
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setExpectedError(data.error || `HTTP ${res.status}`);
+      }
+    } catch (e) {
+      setExpectedError(e instanceof Error ? e.message : "request failed");
+    }
+  }, []);
+
   const runComparison = useCallback(async (participants: string[]) => {
     const seq = ++compareSeq.current;
     setComparing(true);
+    void loadExpected();
     try {
       const res = await authenticatedFetch(compareUrl(participants));
       if (res.ok && seq === compareSeq.current) {
@@ -231,7 +270,7 @@ export const PackagesPanel = ({
     } finally {
       if (seq === compareSeq.current) setComparing(false);
     }
-  }, []);
+  }, [loadExpected]);
 
   // Opening the page for a party selects its hosts and compares them at once:
   // that comparison is what the Check DARs action asked for.
@@ -304,6 +343,19 @@ export const PackagesPanel = ({
     );
   }, [comparison, groups, terms]);
 
+  const expectedByName = useMemo(
+    () => expectedIndex(expected?.packages ?? []),
+    [expected],
+  );
+
+  // Only for the packages the filter selects, like the rows.
+  const expectedMissingHere = useMemo(() => {
+    if (!comparison) return [];
+    return expectedNotHeld(expected?.packages ?? [], comparison.local_packages).filter((e) =>
+      matchesPackageFilter({ name: e.package_name, package_id: "" }, groups, terms),
+    );
+  }, [comparison, expected, groups, terms]);
+
   const summary = useMemo(
     () => (selectedPackages ? summarize(selectedPackages, peerIndexes) : null),
     [selectedPackages, peerIndexes],
@@ -357,6 +409,44 @@ export const PackagesPanel = ({
       case "unknown":
       case "unreachable":
         return even ? "transparent" : "action.hover";
+    }
+  };
+
+  const configuredPeerIds = useMemo(
+    () => new Set(peers.map((p) => p.participant_id)),
+    [peers],
+  );
+
+  const handleDistribute = async () => {
+    if (!distributeTarget) return;
+    const { pkg, peer } = distributeTarget;
+    setDistributing(true);
+    try {
+      const body: DistributePackageRequest = {
+        package_id: pkg.package_id,
+        peer_ids: [peer.participant_id],
+      };
+      const res = await authenticatedFetch(`${API_BASE}/dars/distribute-package`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (res.ok) {
+        showSnackbar(
+          `Distribution of ${pkg.name} started — follow progress in the feed`,
+        );
+        setDistributeTarget(null);
+      } else {
+        const data = await res.json().catch(() => ({}));
+        showSnackbar(data.error || "Failed to start the distribution", "error");
+      }
+    } catch (e) {
+      showSnackbar(
+        e instanceof Error ? e.message : "Failed to start the distribution",
+        "error",
+      );
+    } finally {
+      setDistributing(false);
     }
   };
 
@@ -503,6 +593,18 @@ export const PackagesPanel = ({
           Comparing with every configured peer. Select participants to narrow the comparison.
         </Alert>
       )}
+      {comparison && expectedMissingHere.length > 0 && (
+        <Alert severity="warning" sx={{ mx: "24px", mb: 2, flexShrink: 0 }} data-testid="expected-not-held">
+          {`This node does not hold the expected version of ${expectedMissingHere
+            .map((e) => `${e.package_name} ${e.version}`)
+            .join(", ")}.`}
+        </Alert>
+      )}
+      {comparison && expectedError && (
+        <Alert severity="info" sx={{ mx: "24px", mb: 2, flexShrink: 0 }}>
+          {`Expected versions are unavailable: ${expectedError}. Observed versions are still compared.`}
+        </Alert>
+      )}
       {summary && (
         <Box sx={{ mx: "24px", mb: 2, flexShrink: 0 }} data-testid="comparison-summary">
           {summary.differing === 0 && summary.missing === 0 ? (
@@ -582,7 +684,7 @@ export const PackagesPanel = ({
                   // column shrinking as peers are added.
                   minWidth:
                     PACKAGE_MIN_WIDTH +
-                    VERSION_COL_WIDTH +
+                    2 * VERSION_COL_WIDTH +
                     peerIndexes.length * PEER_COL_WIDTH,
                 }}
               >
@@ -593,6 +695,7 @@ export const PackagesPanel = ({
                   * takes whatever the stated columns leave. */}
                 <colgroup>
                   <col />
+                  <col style={{ width: VERSION_COL_WIDTH }} />
                   <col style={{ width: VERSION_COL_WIDTH }} />
                   {peerIndexes.map(({ peer }) => (
                     <col key={peer.participant_id} style={{ width: PEER_COL_WIDTH }} />
@@ -606,6 +709,18 @@ export const PackagesPanel = ({
                     </TableCell>
                     <TableCell sx={{ py: 1, fontWeight: "bold" }}>
                       Version
+                    </TableCell>
+                    <TableCell sx={{ py: 1, fontWeight: "bold" }}>
+                      <Tooltip
+                        title={
+                          expected
+                            ? `From the ${expected.source}, read ${new Date(expected.fetched_at * 1000).toLocaleString()}. Only Splice packages have an expected version.`
+                            : "Only Splice packages have an expected version"
+                        }
+                        arrow
+                      >
+                        <span>Expected</span>
+                      </Tooltip>
                     </TableCell>
                     {peerIndexes.map(({ peer }) => (
                       <TableCell
@@ -673,6 +788,39 @@ export const PackagesPanel = ({
                           {pkg.name || "-"}
                         </TableCell>
                         <VersionCell version={pkg.version} />
+                        <TableCell
+                          sx={{ py: 1 }}
+                          data-testid="expected-version"
+                          data-pkg={pkg.name}
+                        >
+                          {(() => {
+                            const want = expectedByName.get(pkg.name);
+                            if (!want) {
+                              return (
+                                <Tooltip
+                                  title="No trusted source gives an expected version for this package"
+                                  arrow
+                                >
+                                  <Typography variant="caption" color="text.disabled">
+                                    —
+                                  </Typography>
+                                </Tooltip>
+                              );
+                            }
+                            return (
+                              <Typography
+                                variant="body2"
+                                component="span"
+                                sx={{
+                                  color: want === pkg.version ? "success.main" : "text.secondary",
+                                  fontWeight: want === pkg.version ? 600 : 400,
+                                }}
+                              >
+                                {want}
+                              </Typography>
+                            );
+                          })()}
+                        </TableCell>
                         {peerIndexes.map((index) => {
                           const { peer, unnamed } = index;
                           const { status, versions } = compareCell(index, pkg);
@@ -732,6 +880,29 @@ export const PackagesPanel = ({
                                   <ErrorIcon
                                     sx={{ fontSize: 16, color: "error.main" }}
                                   />
+                                </Tooltip>
+                              )}
+                              {canDistribute(status) && ADMIN_ACCESS && (
+                                <Tooltip
+                                  title={
+                                    configuredPeerIds.has(peer.participant_id)
+                                      ? `Distribute ${pkg.name} ${pkg.version} to ${participantLabel({ id: peer.participant_id, name: peer.name })}`
+                                      : "Not a configured peer: DARs can only be distributed to configured peers"
+                                  }
+                                  arrow
+                                >
+                                  <span>
+                                    <IconButton
+                                      size="small"
+                                      aria-label={`Distribute ${pkg.name} to ${participantLabel({ id: peer.participant_id, name: peer.name })}`}
+                                      disabled={!configuredPeerIds.has(peer.participant_id)}
+                                      onClick={() => setDistributeTarget({ pkg, peer })}
+                                      sx={{ ml: 0.5, p: 0.25 }}
+                                      data-testid="distribute-dar"
+                                    >
+                                      <SendIcon sx={{ fontSize: 14 }} />
+                                    </IconButton>
+                                  </span>
                                 </Tooltip>
                               )}
                               {status === "unknown" && (
@@ -819,6 +990,34 @@ export const PackagesPanel = ({
           onChange={paging.setPage}
           sx={{ px: 3 }}
         />
+      <Dialog
+        open={distributeTarget !== null}
+        onClose={() => !distributing && setDistributeTarget(null)}
+        maxWidth="xs"
+        fullWidth
+      >
+        <DialogTitle>Distribute DAR</DialogTitle>
+        <DialogContent>
+          {distributeTarget && (
+            <Typography variant="body2">
+              {`Send the DAR that holds ${distributeTarget.pkg.name} ${distributeTarget.pkg.version} to ${participantLabel({ id: distributeTarget.peer.participant_id, name: distributeTarget.peer.name })}? The operator of that node accepts or rejects it in their feed.`}
+            </Typography>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDistributeTarget(null)} disabled={distributing}>
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            onClick={handleDistribute}
+            disabled={distributing}
+            startIcon={distributing ? <CircularProgress size={16} /> : <SendIcon />}
+          >
+            Distribute
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 };

@@ -9,7 +9,6 @@
 
 use std::time::Duration;
 
-use common::types::InvitationType;
 use serde_json::json;
 
 use crate::common::{Fixture, chaos, db, invitations::post_accept_invitation, processes};
@@ -21,20 +20,12 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     chaos::say("G3", &format!("starting onboarding with prefix {prefix}"));
     chaos::post_onboarding(f, &prefix).await?;
 
-    let p2_inv = chaos::wait_for_invite(
-        f,
-        f.p2.http,
-        InvitationType::Onboarding,
-        Duration::from_secs(60),
-    )
-    .await?;
-    let p3_inv = chaos::wait_for_invite(
-        f,
-        f.p3.http,
-        InvitationType::Onboarding,
-        Duration::from_secs(60),
-    )
-    .await?;
+    let p2_inv =
+        chaos::wait_for_invite_for_instance(f, f.p2.http, &instance, Duration::from_secs(60))
+            .await?;
+    let p3_inv =
+        chaos::wait_for_invite_for_instance(f, f.p3.http, &instance, Duration::from_secs(60))
+            .await?;
     post_accept_invitation(f, f.p2.http, &p2_inv).await?;
     post_accept_invitation(f, f.p3.http, &p3_inv).await?;
 
@@ -43,8 +34,8 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     // after they flip to terminal states.
     let p2_db = f.db_path(2);
     let p3_db = f.db_path(3);
-    let p2_inst = wait_for_peer_instance(&p2_db).await?;
-    let p3_inst = wait_for_peer_instance(&p3_db).await?;
+    let p2_inst = wait_for_peer_instance(&p2_db, &instance).await?;
+    let p3_inst = wait_for_peer_instance(&p3_db, &instance).await?;
 
     chaos::say("G3", "hard-killing both peers");
     processes::kill_node(f, 2).await?;
@@ -123,12 +114,15 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn wait_for_peer_instance(db_path: &std::path::Path) -> anyhow::Result<String> {
+async fn wait_for_peer_instance(
+    db_path: &std::path::Path,
+    coordinator_instance: &str,
+) -> anyhow::Result<String> {
     use std::time::Instant;
     let start = Instant::now();
     let deadline = Duration::from_secs(60);
     loop {
-        if let Some(name) = db::current_inprogress_peer_instance(db_path, "Onboarding").await? {
+        if let Some(name) = db::inprogress_peer_instance_for(db_path, coordinator_instance).await? {
             return Ok(name);
         }
         if start.elapsed() >= deadline {

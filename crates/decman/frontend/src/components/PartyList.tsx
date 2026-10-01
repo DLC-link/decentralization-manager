@@ -2,6 +2,8 @@ import { Box, IconButton, Tooltip, Typography } from "@mui/material";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import ErrorIcon from "@mui/icons-material/Error";
 import ScienceIcon from "@mui/icons-material/Science";
+import StarIcon from "@mui/icons-material/Star";
+import StarBorderIcon from "@mui/icons-material/StarBorder";
 import VisibilityIcon from "@mui/icons-material/Visibility";
 import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 import { PartyIdText } from "./PartyIdText";
@@ -10,6 +12,7 @@ import { PaginationControls } from "./Pagination";
 import { usePagination } from "../usePagination";
 import {
   AUTH_SLOT,
+  STAR_SLOT,
   VISIBILITY_SLOT,
   columnSx,
   fabGutterSx,
@@ -23,6 +26,9 @@ interface PartyListProps {
   onSelectParty: (partyId: string) => void;
   isHidden: (partyId: string) => boolean;
   onToggleHidden: (partyId: string) => void;
+  /** Starred parties; the caller sorts them to the top. */
+  isFavorite: (partyId: string) => boolean;
+  onToggleFavorite: (partyId: string) => void;
 }
 
 const AuthStatusIcon = ({ status }: { status?: PartyAuthStatus }) => {
@@ -57,6 +63,8 @@ export const PartyList = ({
   onSelectParty,
   isHidden,
   onToggleHidden,
+  isFavorite,
+  onToggleFavorite,
 }: PartyListProps) => {
   const { page, setPage, pageCount, pageItems, total } = usePagination(parties);
 
@@ -106,6 +114,17 @@ export const PartyList = ({
             component="span"
             sx={{
               ...legendSx,
+              width: STAR_SLOT,
+              textAlign: "right",
+              flexShrink: 0,
+            }}
+          >
+            Star
+          </Typography>
+          <Typography
+            component="span"
+            sx={{
+              ...legendSx,
               width: VISIBILITY_SLOT,
               textAlign: "right",
               flexShrink: 0,
@@ -122,6 +141,7 @@ export const PartyList = ({
               (a) => a.dec_party_id === party.party_id,
             );
             const hidden = isHidden(party.party_id);
+            const starred = isFavorite(party.party_id);
             return (
               <RowCard
                 key={party.party_id}
@@ -140,6 +160,33 @@ export const PartyList = ({
                   }}
                 >
                   <AuthStatusIcon status={auth} />
+                </Box>
+                <Box
+                  sx={{
+                    width: STAR_SLOT,
+                    flexShrink: 0,
+                    display: "flex",
+                    justifyContent: "flex-end",
+                  }}
+                >
+                  <Tooltip title={starred ? "Unstar party" : "Star party"}>
+                    <IconButton
+                      size="small"
+                      aria-label="Star party"
+                      aria-pressed={starred}
+                      onClick={(e) => {
+                        // Starring must not open the party.
+                        e.stopPropagation();
+                        onToggleFavorite(party.party_id);
+                      }}
+                    >
+                      {starred ? (
+                        <StarIcon sx={{ fontSize: 18, color: "warning.main" }} />
+                      ) : (
+                        <StarBorderIcon sx={{ fontSize: 18 }} />
+                      )}
+                    </IconButton>
+                  </Tooltip>
                 </Box>
                 <Box
                   sx={{

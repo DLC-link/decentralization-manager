@@ -1,0 +1,109 @@
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+
+import { SnackbarProvider } from "../contexts";
+import { GovernanceSection } from "./GovernanceSection";
+
+// The proposal form renders once /governance/confirmations answers. Every
+// other fetch stays pending, so only the form's own state is under test.
+const ns = "a".repeat(68);
+const dso = `DSO::${ns}`;
+
+vi.mock("../api", () => ({
+  authenticatedFetch: vi.fn((url: string) => {
+    if (url.includes("/governance/confirmations")) {
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({ rules_contract_id: "rules-1", threshold: 2, domain_actions: [] }),
+      });
+    }
+    // The DSO forms prefill from here, and the reset has to give it back.
+    if (url.includes("/network-info")) {
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({ dso_party_id: dso, amulet_rules_cid: "amulet-rules-1" }),
+      });
+    }
+    return new Promise(() => {});
+  }),
+}));
+
+const self = `gov::${ns}`;
+const operator = `operator::${ns}`;
+
+const renderForm = () =>
+  render(
+    <SnackbarProvider>
+      <GovernanceSection
+        partyId={self}
+        rulesContractId="rules-1"
+        defaultOperatorParty={operator}
+        view="proposals"
+      />
+    </SnackbarProvider>,
+  );
+
+// The Proposal Type select has no accessible name (its label is not linked),
+// and it sits above every form's own fields, so it is the first combobox.
+const chooseType = async (option: string) => {
+  fireEvent.mouseDown((await screen.findAllByRole("combobox", {}, { timeout: 5000 }))[0]);
+  fireEvent.click(within(screen.getByRole("listbox")).getByRole("option", { name: option }));
+};
+
+const field = (label: string) => screen.getByRole("textbox", { name: new RegExp(`^${label}`) });
+
+// GovernanceSection is large, so give each render room on a loaded CI runner.
+describe("proposal form across proposal types", { timeout: 20_000 }, () => {
+  it("does not carry this party into the next form's Provider Party", async () => {
+    renderForm();
+    await chooseType("2. Create Provider Service Request (as Provider)");
+    expect(field("Provider Party")).toHaveProperty("value", self);
+
+    await chooseType("4. Create Registrar Service Request (as Registrar)");
+    // Here the provider is the other decentralized party, so it starts empty.
+    expect(field("Provider Party")).toHaveProperty("value", "");
+    // Fields prefilled from app state keep their value.
+    expect(field("Operator Party")).toHaveProperty("value", operator);
+  });
+
+  it("clears a value typed for one type when switching to another", async () => {
+    renderForm();
+    await chooseType("4. Create Registrar Service Request (as Registrar)");
+    fireEvent.change(field("Provider Party"), { target: { value: `other::${ns}` } });
+    fireEvent.change(field("Operator Party"), { target: { value: `typo::${ns}` } });
+
+    await chooseType("2. Create Provider Service Request (as Provider)");
+    expect(field("Provider Party")).toHaveProperty("value", self);
+    expect(field("Operator Party")).toHaveProperty("value", operator);
+
+    await chooseType("4. Create Registrar Service Request (as Registrar)");
+    expect(field("Provider Party")).toHaveProperty("value", "");
+  });
+
+  it("clears the external party setup cid when switching away and back", async () => {
+    renderForm();
+    await chooseType("Accept External Party Setup");
+    fireEvent.change(field("External Party Setup Proposal Contract Id"), {
+      target: { value: "00abc" },
+    });
+    await chooseType("Generic Vote");
+    await chooseType("Accept External Party Setup");
+    expect(field("External Party Setup Proposal Contract Id")).toHaveProperty("value", "");
+  });
+
+  it("puts the network's DSO back after a type change", async () => {
+    renderForm();
+    await chooseType("Setup CC Preapproval");
+    await waitFor(() => expect(field("Expected DSO Party")).toHaveProperty("value", dso));
+    fireEvent.change(field("Expected DSO Party"), { target: { value: `typo::${ns}` } });
+
+    await chooseType("Setup Coupon Reassignment Delegation");
+    expect(field("DSO Party")).toHaveProperty("value", dso);
+    fireEvent.change(field("DSO Party"), { target: { value: `typo::${ns}` } });
+
+    await chooseType("Setup CC Preapproval");
+    expect(field("Expected DSO Party")).toHaveProperty("value", dso);
+    await chooseType("Setup Coupon Reassignment Delegation");
+    expect(field("DSO Party")).toHaveProperty("value", dso);
+  });
+});

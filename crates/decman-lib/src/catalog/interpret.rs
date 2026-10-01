@@ -19,9 +19,9 @@ use crate::catalog::types::{
     AcceptTransferDetails, ServiceRequestDetails, TransferProposalDetails,
 };
 use crate::framework::record::{
-    extract_optional_reltime, extract_party_set, extract_reltime, field_contract_id, field_int64,
-    field_numeric, field_party, field_record, field_text, field_timestamp, record_has_field,
-    record_value,
+    extract_optional_party_set, extract_optional_reltime, extract_party_set, extract_reltime,
+    field_contract_id, field_int64, field_numeric, field_party, field_record, field_text,
+    field_timestamp, record_has_field, record_value,
 };
 
 /// A parsed CBTC-governance or governance-core self-action confirmation.
@@ -58,6 +58,8 @@ pub struct RulesState {
     pub members: Vec<CantonId>,
     pub threshold: i64,
     pub timeout_micros: Option<i64>,
+    /// Parties that may propose but not confirm or execute.
+    pub additional_proposers: Vec<CantonId>,
 }
 
 /// Parse a confirmation contract's action, confirming party, and timestamps
@@ -194,12 +196,22 @@ pub fn extract_governance_state(created: &CreatedEvent) -> Option<RulesState> {
     let timeout_micros = record_value(record, "actionConfirmationTimeout")
         .and_then(|v| extract_optional_reltime(v).or_else(|| extract_reltime(v)));
 
+    // additionalProposers : Optional (Set Party). None, and older rules
+    // contracts that predate the field, read as no additional proposers.
+    let additional_proposers: Vec<CantonId> = record_value(record, "additionalProposers")
+        .and_then(extract_optional_party_set)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|s| s.parse().ok())
+        .collect();
+
     Some(RulesState {
         contract_id: created.contract_id.clone(),
         governance_party,
         members,
         threshold,
         timeout_micros,
+        additional_proposers,
     })
 }
 
@@ -997,6 +1009,46 @@ mod tests {
         let created3 = created_event("rules-5", record3, 1_700_000_900);
         let parsed3 = extract_governance_state(&created3).expect("parses");
         assert_eq!(parsed3.timeout_micros, None);
+    }
+
+    #[test]
+    fn rules_state_reads_additional_proposers() {
+        let members = || Value {
+            sum: Some(value::Sum::GenMap(gen_map_of(&[ALICE]))),
+        };
+        let optional = |inner: Option<Value>| Value {
+            sum: Some(value::Sum::Optional(Box::new(Optional {
+                value: inner.map(Box::new),
+            }))),
+        };
+        let rules = |additional: Option<Value>| {
+            let mut fields = vec![
+                field("governanceParty", make_party(GOV)),
+                field("members", members()),
+                field("threshold", make_int64(1)),
+            ];
+            if let Some(value) = additional {
+                fields.push(field("additionalProposers", value));
+            }
+            created_event("rules-ap", record_of(fields), 1_700_001_000)
+        };
+
+        // Some(Set Party): the set's parties.
+        let set = make_record(vec![field(
+            "map",
+            Value {
+                sum: Some(value::Sum::GenMap(gen_map_of(&[BOB]))),
+            },
+        )]);
+        let parsed = extract_governance_state(&rules(Some(optional(Some(set))))).expect("parses");
+        assert_eq!(parsed.additional_proposers, vec![cid(BOB)]);
+        assert_eq!(parsed.members, vec![cid(ALICE)]);
+
+        // None, and a rules contract that predates the field: no proposers.
+        let parsed = extract_governance_state(&rules(Some(optional(None)))).expect("parses");
+        assert!(parsed.additional_proposers.is_empty());
+        let parsed = extract_governance_state(&rules(None)).expect("parses");
+        assert!(parsed.additional_proposers.is_empty());
     }
 
     #[test]

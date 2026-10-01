@@ -11,6 +11,7 @@ const state = (members: string[]): GovernanceState => ({
   governance_party: `gov::${nsA}`,
   members,
   threshold: 1,
+  additional_proposers: [],
   out_of_date: false,
 });
 

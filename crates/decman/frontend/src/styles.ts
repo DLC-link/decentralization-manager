@@ -100,6 +100,7 @@ export const EXPANDER_SLOT = 18;
 // legend above them. These widths are shared by the legend, the cards and the
 // loading skeleton to keep all three aligned.
 export const AUTH_SLOT = 56;
+export const STAR_SLOT = 56;
 export const VISIBILITY_SLOT = 84;
 // Trailing space that holds the visibility toggle out from under the fixed
 // Create-Party FAB (56px, offset 24px) in this view's bottom-right corner.
