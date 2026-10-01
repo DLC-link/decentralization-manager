@@ -71,6 +71,10 @@ export const RowCard = ({
         onKeyDown={
           activate
             ? (e) => {
+                // Only keys pressed on the row itself: a button inside it
+                // (star, hide, copy) keeps Enter and Space for its own click,
+                // and Escape still reaches the tooltips.
+                if (e.target !== e.currentTarget) return;
                 if (e.key === "Enter" || e.key === " ") {
                   e.preventDefault();
                   activate();

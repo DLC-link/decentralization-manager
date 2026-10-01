@@ -14,16 +14,22 @@ function readStored(): Set<string> {
 }
 
 /**
- * Starred parties first, each group in its original order. Stable, so starred
- * parties keep their relative order and the rest keep the backend's.
+ * Starred parties first, in the order they were starred, then the rest in the
+ * backend's order. The starred group doesn't follow the backend's order, so
+ * two starred parties can't swap places between a load and a refresh.
  */
 export function favoritesFirst<T extends { party_id: string }>(
   parties: T[],
-  isFavorite: (partyId: string) => boolean,
+  favorites: ReadonlySet<string>,
 ): T[] {
-  const starred = parties.filter((p) => isFavorite(p.party_id));
+  if (favorites.size === 0) return parties;
+  // A Set iterates in insertion order, which is star order.
+  const rank = new Map([...favorites].map((id, i) => [id, i]));
+  const starred = parties
+    .filter((p) => rank.has(p.party_id))
+    .sort((a, b) => rank.get(a.party_id)! - rank.get(b.party_id)!);
   if (starred.length === 0) return parties;
-  return [...starred, ...parties.filter((p) => !isFavorite(p.party_id))];
+  return [...starred, ...parties.filter((p) => !rank.has(p.party_id))];
 }
 
 /** Parties the operator starred, kept in localStorage like hidden parties. */

@@ -1,4 +1,3 @@
-import type { KeyboardEvent } from "react";
 import { Box, IconButton, Tooltip, Typography } from "@mui/material";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import ErrorIcon from "@mui/icons-material/Error";
@@ -57,11 +56,6 @@ const AuthStatusIcon = ({ status }: { status?: PartyAuthStatus }) => {
       return null;
   }
 };
-
-// The row opens its party on Enter or Space and prevents the default, so a
-// key pressed on a button inside it would open the party instead of pressing
-// the button. Stopping it here lets the button's own click run.
-const stopRowKeys = (e: KeyboardEvent<HTMLElement>) => e.stopPropagation();
 
 export const PartyList = ({
   parties,
@@ -178,14 +172,13 @@ export const PartyList = ({
                   <Tooltip title={starred ? "Unstar party" : "Star party"}>
                     <IconButton
                       size="small"
-                      aria-label={starred ? "Unstar party" : "Star party"}
+                      aria-label="Star party"
                       aria-pressed={starred}
                       onClick={(e) => {
                         // Starring must not open the party.
                         e.stopPropagation();
                         onToggleFavorite(party.party_id);
                       }}
-                      onKeyDown={stopRowKeys}
                     >
                       {starred ? (
                         <StarIcon sx={{ fontSize: 18, color: "warning.main" }} />
@@ -211,7 +204,6 @@ export const PartyList = ({
                         e.stopPropagation();
                         onToggleHidden(party.party_id);
                       }}
-                      onKeyDown={stopRowKeys}
                     >
                       {hidden ? (
                         <VisibilityOffIcon sx={{ fontSize: 18 }} />

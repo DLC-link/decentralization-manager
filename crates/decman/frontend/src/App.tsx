@@ -167,7 +167,7 @@ const App = () => {
   const [showSearchBar, setShowSearchBar] = useState(true);
   const [showHidden, setShowHidden] = useState(false);
   const { toggle: toggleHidden, isHidden } = useHiddenParties();
-  const { toggle: toggleFavorite, isFavorite } = useFavoriteParties();
+  const { favorites, toggle: toggleFavorite, isFavorite } = useFavoriteParties();
   // Only the Configuration tab shows node health, and only it pays for the
   // poll: the probe stops the moment the operator moves to another tab.
   const nodeHealth = useNodeHealth(activeTab === 2);
@@ -176,9 +176,9 @@ const App = () => {
     () =>
       favoritesFirst(
         showHidden ? parties : parties.filter((p) => !isHidden(p.party_id)),
-        isFavorite,
+        favorites,
       ),
-    [parties, showHidden, isHidden, isFavorite],
+    [parties, showHidden, isHidden, favorites],
   );
   const hiddenCount = useMemo(
     () => parties.filter((p) => isHidden(p.party_id)).length,

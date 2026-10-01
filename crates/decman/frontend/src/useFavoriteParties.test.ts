@@ -5,19 +5,23 @@ import { favoritesFirst, useFavoriteParties } from "./useFavoriteParties";
 
 const parties = ["a", "b", "c", "d"].map((party_id) => ({ party_id }));
 
+const ids = (list: { party_id: string }[]) => list.map((p) => p.party_id);
+
 describe("favoritesFirst", () => {
-  it("moves starred parties to the top and keeps both groups in order", () => {
-    const starred = new Set(["d", "b"]);
-    expect(favoritesFirst(parties, (id) => starred.has(id)).map((p) => p.party_id)).toEqual([
-      "b",
-      "d",
-      "a",
-      "c",
-    ]);
+  it("puts starred parties on top in star order, the rest in backend order", () => {
+    expect(ids(favoritesFirst(parties, new Set(["d", "b"])))).toEqual(["d", "b", "a", "c"]);
   });
 
-  it("leaves the list as it is when nothing is starred", () => {
-    expect(favoritesFirst(parties, () => false)).toBe(parties);
+  it("keeps the starred order when the backend reorders the parties", () => {
+    const starred = new Set(["d", "b"]);
+    const refreshed = [...parties].reverse();
+    expect(ids(favoritesFirst(refreshed, starred)).slice(0, 2)).toEqual(["d", "b"]);
+    expect(ids(favoritesFirst(parties, starred)).slice(0, 2)).toEqual(["d", "b"]);
+  });
+
+  it("leaves the list as it is when no listed party is starred", () => {
+    expect(favoritesFirst(parties, new Set())).toBe(parties);
+    expect(favoritesFirst(parties, new Set(["gone"]))).toBe(parties);
   });
 });
 

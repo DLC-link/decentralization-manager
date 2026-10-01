@@ -41,20 +41,38 @@ describe("PartyList stars", () => {
     expect(onSelectParty).not.toHaveBeenCalled();
   });
 
-  it("shows which parties are starred", () => {
+  it("shows which parties are starred through aria-pressed, not the label", () => {
     renderList(["alpha"]);
-    const unstar = screen.getByRole("button", { name: "Unstar party" });
-    expect(unstar.getAttribute("aria-pressed")).toBe("true");
-    expect(screen.getAllByRole("button", { name: "Star party" })).toHaveLength(1);
+    const [alpha, beta] = screen.getAllByRole("button", { name: "Star party" });
+    expect(alpha.getAttribute("aria-pressed")).toBe("true");
+    expect(beta.getAttribute("aria-pressed")).toBe("false");
   });
 
-  it("keeps Enter on a row's buttons from opening the party", () => {
+  it("leaves Enter and Space on a row's buttons to the buttons", () => {
     const { onSelectParty } = renderList();
-    fireEvent.keyDown(screen.getAllByRole("button", { name: "Star party" })[0], { key: "Enter" });
-    fireEvent.keyDown(screen.getAllByRole("button", { name: "Hide party" })[0], { key: "Enter" });
+    const buttons = [
+      screen.getAllByRole("button", { name: "Star party" })[0],
+      screen.getAllByRole("button", { name: "Hide party" })[0],
+      screen.getAllByRole("button", { name: "Copy party id" })[0],
+    ];
+    for (const button of buttons) {
+      // true: the row didn't prevent the default, so the button still clicks.
+      expect(fireEvent.keyDown(button, { key: "Enter" })).toBe(true);
+      expect(fireEvent.keyDown(button, { key: " " })).toBe(true);
+    }
     expect(onSelectParty).not.toHaveBeenCalled();
     // Enter on the row itself still opens it.
     fireEvent.keyDown(screen.getByRole("button", { name: `Open party ${party("alpha").party_id}` }), { key: "Enter" });
     expect(onSelectParty).toHaveBeenCalledWith(party("alpha").party_id);
+  });
+
+  it("lets Escape on a row's buttons reach the document, where tooltips close", () => {
+    renderList();
+    const onDocumentKey = vi.fn();
+    document.addEventListener("keydown", onDocumentKey);
+    fireEvent.keyDown(screen.getAllByRole("button", { name: "Star party" })[0], { key: "Escape" });
+    fireEvent.keyDown(screen.getAllByRole("button", { name: "Hide party" })[0], { key: "Escape" });
+    document.removeEventListener("keydown", onDocumentKey);
+    expect(onDocumentKey).toHaveBeenCalledTimes(2);
   });
 });
