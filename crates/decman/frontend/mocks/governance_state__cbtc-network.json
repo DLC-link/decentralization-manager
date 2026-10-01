@@ -9,6 +9,7 @@
       "ibtc-member-fra1::1220a1acf8c8e3be7e4a0a6f2cac5a620d1a6a8362671f665a372ef73d5c9427bac7"
     ],
     "threshold": 2,
+    "additional_proposers": [],
     "action_confirmation_timeout_microseconds": 86400000000,
     "package_ref": "#governance-core-v0",
     "out_of_date": false

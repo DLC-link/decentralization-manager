@@ -52,12 +52,18 @@ export const GovernanceRules = ({ state, memberPartyId }: GovernanceRulesProps) 
       >
         <Fact label="Threshold">
           <Typography variant="body2" data-testid="governance-threshold">
-            {state.threshold} of {state.members.length} member
-            {state.members.length === 1 ? "" : "s"} must confirm
+            {/* An empty member set is a failed read (getGovernanceMembership
+                treats it so), not a party nobody governs. */}
+            {state.members.length === 0
+              ? "The member set could not be read"
+              : `${state.threshold} of ${state.members.length} member${
+                  state.members.length === 1 ? "" : "s"
+                } must confirm`}
           </Typography>
         </Fact>
         {state.action_confirmation_timeout_microseconds != null && (
-          <Fact label="Confirmations expire after">
+          // Same wording as the Action Timeout stat card above.
+          <Fact label="Action timeout">
             <Typography variant="body2">
               {formatMicroseconds(state.action_confirmation_timeout_microseconds)}
             </Typography>

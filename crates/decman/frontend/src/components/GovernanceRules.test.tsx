@@ -51,6 +51,13 @@ describe("GovernanceRules", () => {
     expect(screen.getByTestId("governance-threshold").textContent).toBe("2 of 2 members must confirm");
   });
 
+  it("says the member set could not be read when it is empty", () => {
+    render(<GovernanceRules state={state({ members: [] })} />);
+    expect(screen.getByTestId("governance-threshold").textContent).toBe(
+      "The member set could not be read",
+    );
+  });
+
   it("marks this node's member party", () => {
     render(<GovernanceRules state={state()} memberPartyId={bob} />);
     const marked = screen.getAllByTestId("governance-party-row").filter((row) => within(row).queryByText("This node"));
@@ -68,7 +75,8 @@ describe("GovernanceRules", () => {
         })}
       />,
     );
-    expect(screen.getByText("Confirmations expire after")).toBeTruthy();
+    expect(screen.getByText("Action timeout")).toBeTruthy();
+    expect(screen.getByText("1.0 h")).toBeTruthy();
     expect(screen.getByText("#governance-core-v0-rc4 (older package)")).toBeTruthy();
   });
 });
