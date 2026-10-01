@@ -43,7 +43,6 @@
 
 use anyhow::Context;
 use canton_proto_rs::com::digitalasset::canton::{
-    crypto::v30::{Signature, SignatureFormat, SigningAlgorithmSpec},
     protocol::v30::{
         PartyToParticipant, SignedTopologyTransaction, TopologyMapping, TopologyTransaction,
         enums::{ParticipantPermission, TopologyChangeOp},
@@ -71,7 +70,7 @@ use crate::{
     error::Result,
     utils,
     workflow::{
-        external_party::steps::party_query,
+        external_party::{keys::PartySignatureScheme, steps::party_query},
         party_replication::{
             ArtifactStore, ReplicationArtifacts, ReplicationTarget, capture_offset_once,
         },
@@ -1101,19 +1100,14 @@ pub async fn submit_add_hosts(
         .map_err(AddHostsError::Canton)?;
     let store = topology::synchronizer_store_id(&synchronizer_id);
 
+    let scheme = PartySignatureScheme::for_party(&current.mapping, &bundle.signed_by);
     let signed: Vec<SignedTopologyTransaction> = bundle
         .topology_transactions
         .iter()
         .zip(&bundle.signatures)
         .map(|(transaction, signature)| SignedTopologyTransaction {
             transaction: transaction.clone(),
-            signatures: vec![Signature {
-                format: SignatureFormat::Concat as i32,
-                signature: signature.clone(),
-                signed_by: bundle.signed_by.clone(),
-                signing_algorithm_spec: SigningAlgorithmSpec::Ed25519 as i32,
-                signature_delegation: None,
-            }],
+            signatures: vec![scheme.canton_signature(signature, &bundle.signed_by)],
             proposal: true,
             multi_transaction_signatures: vec![],
         })

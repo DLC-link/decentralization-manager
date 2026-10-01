@@ -70,6 +70,13 @@ safely.
 it, two hosts reading head state a moment apart build different transactions and
 the comparison fails for a reason that is not an attack.
 
+The wallet signs each `transaction_hash` exactly as returned, base64-decoded
+whole, with the party's own key. The host reads that key's type off the party's
+mapping and labels the signature for Canton accordingly. An Ed25519 key sends
+its 64 bytes as they are. An ECDSA key (secp256k1, P-256 or P-384) signs with
+the curve's SHA-2 digest and may send either the fixed-width `r || s` pair,
+which the host re-encodes as DER, or DER itself.
+
 Then `/v0/tenant/add-hosts/onboard` on **each joining host only**. Canton needs
 the party namespace plus each new participant; existing hosts are neither and
 have nothing to add.
