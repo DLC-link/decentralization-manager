@@ -1822,16 +1822,10 @@ export const GovernanceSection = ({
           if (beneficiaryProblem) throw new Error(beneficiaryProblem);
           let beneficiaries: AppRewardBeneficiary[] | null = null;
           if (!proposalClearBeneficiaries) {
-            beneficiaries = proposalBeneficiaries.map((b, idx) => {
-              const party = b.beneficiary.trim();
-              const weight = b.weight.trim();
-              if (!party || !weight) {
-                throw new Error(
-                  `Beneficiary row ${idx + 1}: party and weight are required`,
-                );
-              }
-              return { beneficiary: party, weight };
-            });
+            beneficiaries = proposalBeneficiaries.map((b) => ({
+              beneficiary: b.beneficiary.trim(),
+              weight: b.weight.trim(),
+            }));
           }
           proposal = {
             type: "set_provider_app_reward_beneficiaries",
@@ -4103,22 +4097,20 @@ export const GovernanceSection = ({
                         >
                           Add Beneficiary
                         </Button>
-                        {proposalBeneficiaries.length > 0 &&
-                          (() => {
-                            const sum = beneficiaryWeightSum(proposalBeneficiaries);
-                            const isValid = sum === "1";
-                            return (
-                              <Typography
-                                variant="caption"
-                                color={
-                                  isValid ? "success.main" : "error.main"
-                                }
-                              >
-                                Sum: {sum ?? "?"}{" "}
-                                {isValid ? "" : "(must be 1.0)"}
-                              </Typography>
-                            );
-                          })()}
+                        {(() => {
+                          // Just the running total: what is wrong with the
+                          // rows is the alert's job.
+                          const sum = beneficiaryWeightSum(proposalBeneficiaries);
+                          if (proposalBeneficiaries.length === 0 || sum === null) return null;
+                          return (
+                            <Typography
+                              variant="caption"
+                              color={sum === "1" ? "success.main" : "text.secondary"}
+                            >
+                              Sum: {sum}
+                            </Typography>
+                          );
+                        })()}
                       </Box>
                       {beneficiaryProblem && (
                         <Typography variant="caption" color="error.main" role="alert">

@@ -35,12 +35,17 @@ export const beneficiaryWeightSum = (rows: BeneficiaryRow[]): string | null => {
   return formatScaled(sum);
 };
 
+/** The template needs fewer than 20 beneficiaries. */
+export const MAX_BENEFICIARIES = 19;
+
 /**
  * Why a Set Provider App Reward Beneficiaries proposal cannot be submitted,
- * or null when it can. The InstrumentConfiguration template rejects an empty
- * list and weights that do not sum to exactly 1.0, and a proposal stores its
- * payload, so one the template rejects can never execute: it has to be
- * retracted and proposed again after the committee has voted.
+ * or null when it can. These are the InstrumentConfiguration template's
+ * rules (`areValidProviderAppRewardBeneficiaries`): at least one and at most
+ * 19 beneficiaries, each weight greater than 0 and at most 1, no party
+ * twice, and weights summing to exactly 1.0. A proposal stores its payload,
+ * so one the template rejects can never execute: it has to be retracted and
+ * proposed again after the committee has voted.
  */
 export const beneficiariesProblem = (
   rows: BeneficiaryRow[],
@@ -50,13 +55,26 @@ export const beneficiariesProblem = (
   if (rows.length === 0) {
     return "Add at least one beneficiary, or tick Clear beneficiaries";
   }
+  if (rows.length > MAX_BENEFICIARIES) {
+    return `At most ${MAX_BENEFICIARIES} beneficiaries (now ${rows.length})`;
+  }
+  const seen = new Set<string>();
   for (const [index, row] of rows.entries()) {
-    if (!row.beneficiary.trim() || !row.weight.trim()) {
+    const party = row.beneficiary.trim();
+    if (!party || !row.weight.trim()) {
       return `Beneficiary row ${index + 1}: party and weight are required`;
     }
-    if (parseWeight(row.weight) === null) {
+    const weight = parseWeight(row.weight);
+    if (weight === null) {
       return `Beneficiary row ${index + 1}: weight must be a decimal such as 0.25`;
     }
+    if (weight === 0n || weight > ONE) {
+      return `Beneficiary row ${index + 1}: weight must be greater than 0 and at most 1`;
+    }
+    if (seen.has(party)) {
+      return `Beneficiary row ${index + 1}: ${party} is already listed`;
+    }
+    seen.add(party);
   }
   const sum = beneficiaryWeightSum(rows);
   if (sum !== "1") return `Weights must sum to 1.0 (now ${sum})`;

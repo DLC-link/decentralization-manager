@@ -43,6 +43,42 @@ describe("beneficiariesProblem", () => {
     expect(0.3 + 0.6 + 0.1).not.toBe(1);
     expect(beneficiariesProblem(rows, false)).toBeNull();
   });
+
+  it("compares the sum exactly, without a tolerance", () => {
+    // Within 1e-9 of 1.0, so a tolerant float check accepted it; the template
+    // compares Decimals exactly and rejects it.
+    expect(
+      beneficiariesProblem([row("a::1220", "0.5"), row("b::1220", "0.5000000001")], false),
+    ).toBe("Weights must sum to 1.0 (now 1.0000000001)");
+  });
+
+  it("requires every weight to be greater than 0 and at most 1", () => {
+    expect(beneficiariesProblem([row("a::1220", "1"), row("b::1220", "0")], false)).toBe(
+      "Beneficiary row 2: weight must be greater than 0 and at most 1",
+    );
+    expect(beneficiariesProblem([row("a::1220", "0.000")], false)).toBe(
+      "Beneficiary row 1: weight must be greater than 0 and at most 1",
+    );
+    expect(beneficiariesProblem([row("a::1220", "1.5")], false)).toBe(
+      "Beneficiary row 1: weight must be greater than 0 and at most 1",
+    );
+  });
+
+  it("refuses the same party twice, ignoring surrounding spaces", () => {
+    expect(
+      beneficiariesProblem([row("a::1220", "0.5"), row(" a::1220 ", "0.5")], false),
+    ).toBe("Beneficiary row 2: a::1220 is already listed");
+  });
+
+  it("allows at most 19 beneficiaries", () => {
+    const split = (n: number, weight: string) =>
+      Array.from({ length: n }, (_, i) => row(`p${i}::1220`, weight));
+    const nineteen = [...split(18, "0.05"), row("last::1220", "0.1")];
+    expect(beneficiariesProblem(nineteen, false)).toBeNull();
+    expect(beneficiariesProblem(split(20, "0.05"), false)).toBe(
+      "At most 19 beneficiaries (now 20)",
+    );
+  });
 });
 
 describe("beneficiaryWeightSum", () => {
