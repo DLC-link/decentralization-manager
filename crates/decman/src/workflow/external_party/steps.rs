@@ -644,6 +644,7 @@ pub async fn host_onboarding_status(
 }
 
 /// One external party this participant hosts, read from topology.
+#[derive(Clone)]
 pub struct HostedExternalParty {
     pub party_id: String,
     pub fingerprint: String,
@@ -669,6 +670,7 @@ pub struct HostedExternalParty {
 /// the raw Canton `ParticipantPermission` discriminant: mapping it to the wire
 /// enum is the server's job (see `server::types::permission_from_proto`), which
 /// keeps the proto dependency out of the wire DTOs.
+#[derive(Clone)]
 pub struct HostedExternalPartyHost {
     pub participant_uid: String,
     pub permission: i32,

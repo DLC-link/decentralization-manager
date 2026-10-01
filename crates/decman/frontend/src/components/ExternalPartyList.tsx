@@ -1,4 +1,4 @@
-import { Box, Chip, Tooltip, Typography } from "@mui/material";
+import { Alert, Box, Chip, LinearProgress, Tooltip, Typography } from "@mui/material";
 import { CopyableText } from "./CopyableText";
 import { PartyIdText } from "./PartyIdText";
 import { RowCard } from "./RowCard";
@@ -9,6 +9,8 @@ import type { ExternalPartyInfo } from "../types";
 
 interface ExternalPartyListProps {
   parties: ExternalPartyInfo[];
+  loading?: boolean;
+  error?: string | null;
 }
 
 // Shared by the legend and the cards so the columns line up.
@@ -81,8 +83,19 @@ const formatCreated = (iso: string | null | undefined) => {
   return date.toISOString().replace("T", " ").slice(0, 16) + " UTC";
 };
 
-export const ExternalPartyList = ({ parties }: ExternalPartyListProps) => {
+export const ExternalPartyList = ({
+  parties,
+  loading,
+  error,
+}: ExternalPartyListProps) => {
   const { page, setPage, pageCount, pageItems, total } = usePagination(parties);
+
+  if (error) {
+    return <Alert severity="error" sx={{ mt: 2 }}>{error}</Alert>;
+  }
+  if (loading) {
+    return <LinearProgress aria-label="Loading external parties" sx={{ mt: 2 }} />;
+  }
 
   if (parties.length === 0) {
     return (

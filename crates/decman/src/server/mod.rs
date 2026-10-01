@@ -11,6 +11,7 @@ mod assets;
 mod audit;
 mod chain_audit;
 mod event_filters;
+mod external_parties;
 mod handlers;
 mod ledger_paging;
 mod middleware;
@@ -182,6 +183,8 @@ pub struct AppState {
     /// the warm gRPC channels the probes reuse. Shared so a Config tab open in
     /// many browsers costs one probe per TTL, not one per browser.
     pub health_cache: HealthCache,
+    /// Topology snapshot refreshed by a single background worker.
+    pub external_parties: external_parties::ExternalPartiesCache,
 }
 
 #[cfg(test)]
@@ -219,6 +222,7 @@ impl AppState {
             discovery_completed: Arc::new(RwLock::new(HashMap::new())),
             http_client: reqwest::Client::new(),
             health_cache: HealthCache::new(),
+            external_parties: Default::default(),
         }))
     }
 }
@@ -1089,7 +1093,15 @@ pub async fn start_server(
         discovery_completed: Arc::new(RwLock::new(HashMap::new())),
         http_client,
         health_cache: HealthCache::new(),
+        external_parties: Default::default(),
     });
+
+    let external_parties_state = app_state.clone();
+    spawn_supervised(
+        "external parties refresh",
+        "the external parties cache stops updating",
+        async move { external_parties::refresh_forever(external_parties_state).await },
+    );
 
     // Boot-time workflow recovery. For any `workflow_runs` row that was
     // InProgress when we shut down, re-spawn the coordinator task (which
