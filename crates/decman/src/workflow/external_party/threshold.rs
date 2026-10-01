@@ -348,6 +348,16 @@ pub fn validate_threshold_topology(
             s = bundle.signatures.len()
         );
     }
+    let scheme = PartySignatureScheme::for_party(&current.mapping, &bundle.signed_by);
+    for (index, signature) in bundle.signatures.iter().enumerate() {
+        if !scheme.accepts(signature) {
+            anyhow::bail!(
+                "signature {index} is {len} byte(s); {expected}",
+                len = signature.len(),
+                expected = scheme.expected_form()
+            );
+        }
+    }
     let next_serial = current.serial.checked_add(1).with_context(|| {
         format!(
             "{party} is at serial {s}, which cannot be advanced",

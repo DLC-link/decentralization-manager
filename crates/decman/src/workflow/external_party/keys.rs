@@ -16,6 +16,9 @@ use crate::utils::compute_fingerprint;
 
 pub use common::fingerprint::fingerprint_from_public_key;
 
+/// Length of an Ed25519 signature, the only form Canton takes for that key.
+const ED25519_SIGNATURE_LEN: usize = 64;
+
 /// How Canton verifies a signature made with a party's key: the algorithm, and
 /// the wire format the bytes must take.
 ///
@@ -96,19 +99,49 @@ impl PartySignatureScheme {
         }
     }
 
+    /// Whether `signature` has a form this scheme can forward to Canton.
+    ///
+    /// Ed25519 takes exactly 64 bytes. ECDSA takes either the fixed-width
+    /// `r || s` pair or a DER `SEQUENCE` of two `INTEGER`s. Checking here turns
+    /// a truncated or mis-encoded signature into a 400 instead of a Canton RPC
+    /// failure that would surface as a 500.
+    #[must_use]
+    pub fn accepts(self, signature: &[u8]) -> bool {
+        match self.concat_len {
+            None => signature.len() == ED25519_SIGNATURE_LEN,
+            Some(len) => signature.len() == len || is_der_ecdsa_signature(signature),
+        }
+    }
+
+    /// The forms [`Self::accepts`] takes, for an error message.
+    #[must_use]
+    pub fn expected_form(self) -> String {
+        match self.concat_len {
+            None => format!("an Ed25519 signature is always {ED25519_SIGNATURE_LEN} bytes"),
+            Some(len) => format!(
+                "an ECDSA signature is the {len}-byte r || s pair or a DER SEQUENCE of two INTEGERs"
+            ),
+        }
+    }
+
     /// The Canton signature for `signature` as the wallet sent it.
     ///
-    /// An ECDSA signature that arrives as the fixed-width `r || s` pair is
-    /// re-encoded as DER, the only ECDSA format Canton accepts; one that is
-    /// already DER passes through. Ed25519 bytes go as they are.
+    /// An ECDSA signature that is already DER passes through. One that arrives
+    /// as the fixed-width `r || s` pair is re-encoded as DER, the only ECDSA
+    /// format Canton accepts. DER is detected by structure, not by length: a
+    /// DER signature whose integers lost leading zero octets can be exactly as
+    /// long as the pair. Ed25519 bytes go as they are.
     #[must_use]
     pub fn canton_signature(self, signature: &[u8], signed_by: &str) -> Signature {
         let (format, bytes) = match self.concat_len {
+            None => (SignatureFormat::Concat, signature.to_vec()),
+            Some(_) if is_der_ecdsa_signature(signature) => {
+                (SignatureFormat::Der, signature.to_vec())
+            }
             Some(len) if signature.len() == len => {
                 (SignatureFormat::Der, ecdsa_concat_to_der(signature))
             }
             Some(_) => (SignatureFormat::Der, signature.to_vec()),
-            None => (SignatureFormat::Concat, signature.to_vec()),
         };
         Signature {
             format: format as i32,
@@ -118,6 +151,33 @@ impl PartySignatureScheme {
             signature_delegation: None,
         }
     }
+}
+
+/// Whether `bytes` are exactly one DER `SEQUENCE { INTEGER r, INTEGER s }`
+/// in short-form lengths, which covers every ECDSA signature up to P-521.
+fn is_der_ecdsa_signature(bytes: &[u8]) -> bool {
+    let [0x30, seq_len, body @ ..] = bytes else {
+        return false;
+    };
+    if *seq_len >= 0x80 || usize::from(*seq_len) != body.len() {
+        return false;
+    }
+    let Some(rest) = der_integer_tail(body) else {
+        return false;
+    };
+    der_integer_tail(rest).is_some_and(<[u8]>::is_empty)
+}
+
+/// The bytes after one short-form DER `INTEGER` at the start of `bytes`, or
+/// `None` when there is no well-formed, non-empty INTEGER there.
+fn der_integer_tail(bytes: &[u8]) -> Option<&[u8]> {
+    let [0x02, len, rest @ ..] = bytes else {
+        return None;
+    };
+    if *len == 0 || *len >= 0x80 || rest.len() < usize::from(*len) {
+        return None;
+    }
+    Some(&rest[usize::from(*len)..])
 }
 
 /// DER `SEQUENCE { INTEGER r, INTEGER s }` for a fixed-width big-endian
@@ -194,6 +254,16 @@ mod tests {
         }
     }
 
+    /// A well-formed 71-byte DER signature: a 33-byte r (sign-padded) and a
+    /// 32-byte s.
+    fn der_signature() -> Vec<u8> {
+        let mut der = vec![0x30, 0x45, 0x02, 0x21, 0x00];
+        der.extend([0x80; 32]);
+        der.extend([0x02, 0x20]);
+        der.extend([0x7f; 32]);
+        der
+    }
+
     #[test]
     fn secp256k1_key_on_the_mapping_selects_ecdsa_sha256_in_der() {
         let k = key(SigningKeySpec::EcSecp256k1, 7);
@@ -238,11 +308,61 @@ mod tests {
 
     #[test]
     fn der_ecdsa_signature_passes_through() {
-        let der = vec![0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01];
+        let der = der_signature();
         let sig = PartySignatureScheme::for_key_spec(SigningKeySpec::EcSecp256k1)
             .map(|scheme| scheme.canton_signature(&der, "1220aa"));
         assert_eq!(sig.as_ref().map(|s| s.signature.clone()), Some(der));
         assert_eq!(sig.map(|s| s.format), Some(SignatureFormat::Der as i32));
+    }
+
+    #[test]
+    fn a_64_byte_der_signature_is_not_re_encoded() {
+        // r and s each lost three leading zero octets: 6 + 29 + 29 = 64 bytes.
+        let mut der = vec![0x30, 0x3e, 0x02, 0x1d];
+        der.extend([0x11; 29]);
+        der.extend([0x02, 0x1d]);
+        der.extend([0x22; 29]);
+        assert_eq!(der.len(), 64);
+        let sig = PartySignatureScheme::for_key_spec(SigningKeySpec::EcSecp256k1)
+            .map(|scheme| scheme.canton_signature(&der, "1220aa").signature);
+        assert_eq!(sig, Some(der));
+    }
+
+    #[test]
+    fn accepts_the_forms_each_scheme_can_forward() {
+        let ed = PartySignatureScheme::ED25519;
+        assert!(ed.accepts(&[0; 64]));
+        assert!(!ed.accepts(&[0; 63]));
+        assert!(!ed.accepts(&der_signature()));
+
+        let ecdsa = PartySignatureScheme::for_key_spec(SigningKeySpec::EcP256);
+        assert_eq!(ecdsa.map(|s| s.accepts(&[0; 64])), Some(true));
+        assert_eq!(ecdsa.map(|s| s.accepts(&der_signature())), Some(true));
+        assert_eq!(ecdsa.map(|s| s.accepts(&[0; 65])), Some(false));
+        assert_eq!(ecdsa.map(|s| s.accepts(&[])), Some(false));
+
+        let p384 = PartySignatureScheme::for_key_spec(SigningKeySpec::EcP384);
+        assert_eq!(p384.map(|s| s.accepts(&[0; 96])), Some(true));
+        assert_eq!(p384.map(|s| s.accepts(&[0; 64])), Some(false));
+    }
+
+    #[test]
+    fn der_detection_is_structural() {
+        assert!(is_der_ecdsa_signature(&der_signature()));
+        assert!(!is_der_ecdsa_signature(&[0x30; 64]));
+        // Right tags, outer length one byte short.
+        let mut short = der_signature();
+        short[1] -= 1;
+        assert!(!is_der_ecdsa_signature(&short));
+        // Trailing byte after the second INTEGER.
+        let mut long = der_signature();
+        long[1] += 1;
+        long.push(0x00);
+        assert!(!is_der_ecdsa_signature(&long));
+        // An empty INTEGER is not a number.
+        assert!(!is_der_ecdsa_signature(&[
+            0x30, 0x04, 0x02, 0x00, 0x02, 0x00
+        ]));
     }
 
     #[test]
