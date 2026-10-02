@@ -1,0 +1,351 @@
+-- Copyright (c) 2026 No Witness Labs. Contributed under the Apache License 2.0.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | A price feed run by a decentralized party: a price is published only after
+-- the governance threshold of members confirms the exact move. Apps read the
+-- feed as subscribers (observers) and use it as an attested price, e.g. for
+-- loan-to-value checks, margin calls or settlement.
+--
+-- Anyone can create a `PriceFeed` that names their own party as
+-- `governanceParty`. A consumer must therefore never trust a `PriceFeed`
+-- contract ID it is handed: it reads the feed through `fetchAttestedPrice`,
+-- which checks the governance party, the feed ID and the price's age.
+module Governance.PriceFeed where
+
+import DA.Optional (fromOptional)
+import DA.Set (Set)
+import DA.Set qualified as Set
+import DA.Text qualified as T
+import DA.Time (RelTime, addRelTime)
+import Splice.Util (require)
+
+import Governance.Action
+
+-- ============================================================================
+-- Consumer helper
+-- ============================================================================
+
+-- | Fetch a feed and check that it is the attested feed the caller expects:
+-- signed by `expectedGovernanceParty`, with id `expectedFeedId`, and observed
+-- no longer than `maxAge` ago. Consumers call this from their own choices
+-- instead of a bare `fetch`, because a `PriceFeed` that names another
+-- governance party (for example the counterparty's own party) fetches fine.
+fetchAttestedPrice : Party -> Text -> RelTime -> ContractId PriceFeed -> Update PriceFeed
+fetchAttestedPrice expectedGovernanceParty expectedFeedId maxAge feedCid = do
+  feed <- fetch feedCid
+  require "Feed is signed by the expected governance party"
+    (feed.governanceParty == expectedGovernanceParty)
+  require "Feed has the expected feed id" (feed.feedId == expectedFeedId)
+  now <- getTime
+  require "Price is not older than the maximum age" (now <= addRelTime feed.observedAt maxAge)
+  pure feed
+
+-- ============================================================================
+-- Result types
+-- ============================================================================
+
+-- | Return type of `PriceFeed_Update`.
+data PriceFeed_UpdateResult = PriceFeed_UpdateResult
+  with
+    feedCid : ContractId PriceFeed
+      -- ^ The new feed contract, at the next round.
+  deriving (Eq, Show)
+
+-- | Return type of `PriceFeed_SetSubscribers`.
+data PriceFeed_SetSubscribersResult = PriceFeed_SetSubscribersResult
+  with
+    feedCid : ContractId PriceFeed
+      -- ^ The new feed contract, at the same round and price.
+  deriving (Eq, Show)
+
+-- | Return type of `PriceFeedRegistry_Register`.
+data PriceFeedRegistry_RegisterResult = PriceFeedRegistry_RegisterResult
+  with
+    registryCid : ContractId PriceFeedRegistry
+      -- ^ The new registry contract, with the feed id added.
+  deriving (Eq, Show)
+
+-- | Return type of `PriceFeedRegistry_Release`.
+data PriceFeedRegistry_ReleaseResult = PriceFeedRegistry_ReleaseResult
+  with
+    registryCid : ContractId PriceFeedRegistry
+      -- ^ The new registry contract, with the feed id removed.
+  deriving (Eq, Show)
+
+-- ============================================================================
+-- Contracts
+-- ============================================================================
+
+-- | The current price of one asset, signed by the governance party. Each
+-- price update replaces the contract and increments `round`. Every
+-- subscriber observes the same contract, so subscribers see each other.
+template PriceFeed
+  with
+    governanceParty : Party
+      -- ^ The decentralized party that signs the feed. Consumers must check it.
+    subscribers : Set Party
+      -- ^ Parties that may read the feed (apps, counterparties, auditors).
+    feedId : Text
+      -- ^ Unique id of the feed among the governance party's open feeds, e.g. "tbill-usd".
+    asset : Text
+      -- ^ What is priced, e.g. "T-Bill".
+    price : Decimal
+      -- ^ The confirmed price.
+    round : Int
+      -- ^ Number of price updates since the feed opened; 0 at open.
+    observedAt : Time
+      -- ^ When the price was observed, as stated in the confirmed proposal.
+  where
+    signatory governanceParty
+    observer subscribers
+    ensure feedId /= "" && asset /= "" && price > 0.0 && round >= 0
+
+    choice PriceFeed_Update : PriceFeed_UpdateResult
+      with
+        newPrice : Decimal
+          -- ^ The confirmed new price.
+        newObservedAt : Time
+          -- ^ When the new price was observed.
+      controller governanceParty
+      do
+        feedCid <- create this with price = newPrice; round = round + 1; observedAt = newObservedAt
+        pure PriceFeed_UpdateResult with feedCid
+
+    choice PriceFeed_SetSubscribers : PriceFeed_SetSubscribersResult
+      with
+        newSubscribers : Set Party
+          -- ^ The full new subscriber list; it replaces the old one.
+      controller governanceParty
+      do
+        feedCid <- create this with subscribers = newSubscribers
+        pure PriceFeed_SetSubscribersResult with feedCid
+
+-- | The governance party's set of open feed ids. Opening a feed registers its
+-- id and fails if the id is already open; closing a feed releases it. Daml LF
+-- 2.x has no contract keys, so this contract is what keeps one active feed per
+-- `feedId`. Deploy exactly one per governance party (see the README).
+template PriceFeedRegistry
+  with
+    governanceParty : Party
+      -- ^ The decentralized party that owns the registry and its feeds.
+    openFeedIds : Optional (Set Text)
+      -- ^ Ids of the open feeds. `None` when no feed is open, so the registry
+      -- can be created through `POST /contracts` with `{ "type": "none" }`.
+  where
+    signatory governanceParty
+
+    choice PriceFeedRegistry_Register : PriceFeedRegistry_RegisterResult
+      with
+        feedId : Text
+          -- ^ The id of the feed being opened.
+      controller governanceParty
+      do
+        let ids = fromOptional Set.empty openFeedIds
+        require "Feed id is not already open" (Set.notMember feedId ids)
+        registryCid <- create this with openFeedIds = Some (Set.insert feedId ids)
+        pure PriceFeedRegistry_RegisterResult with registryCid
+
+    choice PriceFeedRegistry_Release : PriceFeedRegistry_ReleaseResult
+      with
+        feedId : Text
+          -- ^ The id of the feed being closed.
+      controller governanceParty
+      do
+        let ids = fromOptional Set.empty openFeedIds
+        require "Feed id is open" (Set.member feedId ids)
+        let remaining = Set.delete feedId ids
+        registryCid <- create this with
+          openFeedIds = if Set.null remaining then None else Some remaining
+        pure PriceFeedRegistry_ReleaseResult with registryCid
+
+-- ============================================================================
+-- Governance actions
+-- ============================================================================
+
+-- | Governance action: open a feed at an initial price and register its id.
+template OpenPriceFeedProposal
+  with
+    governanceParty : Party
+      -- ^ The governance party that will sign the feed.
+    proposer : Party
+      -- ^ The member or additional proposer who created this proposal.
+    registryCid : ContractId PriceFeedRegistry
+      -- ^ The governance party's feed registry; execution fails if the id is already open.
+    feedId : Text
+      -- ^ Id of the new feed.
+    asset : Text
+      -- ^ What the feed prices.
+    initialPrice : Decimal
+      -- ^ The price the feed opens at.
+    subscribers : Set Party
+      -- ^ Parties that will read every price of this feed.
+    observedAt : Time
+      -- ^ When the initial price was observed; recorded on the feed.
+    executeBefore : Time
+      -- ^ Execution fails after this time, so an old price cannot be published late.
+  where
+    signatory proposer
+    observer governanceParty
+    ensure feedId /= "" && asset /= "" && initialPrice > 0.0
+
+    interface instance GovernableAction for OpenPriceFeedProposal where
+      view = GovernableActionView with
+        governanceParty
+        proposer
+        actionLabel = "OpenPriceFeed"
+        description =
+          "Open price feed " <> feedId <> " for " <> asset <> " at " <> show initialPrice
+            <> ", observed at " <> show observedAt
+            <> ", execute before " <> show executeBefore
+            <> ", subscribers: " <> showParties subscribers
+
+      executeImpl = do
+        checkExecutionWindow observedAt executeBefore
+        registry <- fetch registryCid
+        require "Registry belongs to the governance party" (registry.governanceParty == governanceParty)
+        _ <- exercise registryCid PriceFeedRegistry_Register with feedId
+        _ <- create PriceFeed with
+          governanceParty; subscribers; feedId; asset
+          price = initialPrice; round = 0; observedAt
+        pure ()
+
+-- | Governance action: move a feed from a stated round and price to a new price.
+-- A proposal names the exact feed contract. If the feed was updated after the
+-- proposal, that contract is archived and execution fails at the fetch. The
+-- id, asset, round and price checks catch a proposal whose description
+-- misstates the feed it would move.
+template PublishPriceProposal
+  with
+    governanceParty : Party
+      -- ^ The governance party that signs the feed.
+    proposer : Party
+      -- ^ The member or additional proposer who created this proposal.
+    feedCid : ContractId PriceFeed
+      -- ^ The feed contract this proposal moves.
+    feedId : Text
+      -- ^ The id of that feed, as shown to the confirming members.
+    asset : Text
+      -- ^ The asset of that feed, as shown to the confirming members.
+    fromRound : Int
+      -- ^ The feed's current round.
+    fromPrice : Decimal
+      -- ^ The feed's current price.
+    newPrice : Decimal
+      -- ^ The price to publish.
+    observedAt : Time
+      -- ^ When the new price was observed; recorded on the feed.
+    executeBefore : Time
+      -- ^ Execution fails after this time, so an old price cannot be published late.
+  where
+    signatory proposer
+    observer governanceParty
+    ensure feedId /= "" && asset /= "" && newPrice > 0.0
+
+    interface instance GovernableAction for PublishPriceProposal where
+      view = GovernableActionView with
+        governanceParty
+        proposer
+        actionLabel = "PublishPrice"
+        description =
+          feedId <> " (" <> asset <> "): " <> show fromPrice <> " -> " <> show newPrice
+            <> " from round " <> show fromRound
+            <> ", observed at " <> show observedAt
+            <> ", execute before " <> show executeBefore
+
+      executeImpl = do
+        checkExecutionWindow observedAt executeBefore
+        feed <- fetch feedCid
+        require "Feed belongs to the governance party" (feed.governanceParty == governanceParty)
+        require "Proposal names the feed's id" (feed.feedId == feedId)
+        require "Proposal names the feed's asset" (feed.asset == asset)
+        require "Proposal states the feed's current round and price"
+          (feed.round == fromRound && feed.price == fromPrice)
+        _ <- exercise feedCid PriceFeed_Update with newPrice; newObservedAt = observedAt
+        pure ()
+
+-- | Governance action: replace a feed's subscriber list. Removed subscribers
+-- stop seeing new prices; added ones see the feed from the next contract on.
+template SetPriceFeedSubscribersProposal
+  with
+    governanceParty : Party
+      -- ^ The governance party that signs the feed.
+    proposer : Party
+      -- ^ The member or additional proposer who created this proposal.
+    feedCid : ContractId PriceFeed
+      -- ^ The feed contract whose subscribers change.
+    feedId : Text
+      -- ^ The id of that feed, as shown to the confirming members.
+    subscribers : Set Party
+      -- ^ The full new subscriber list.
+  where
+    signatory proposer
+    observer governanceParty
+    ensure feedId /= ""
+
+    interface instance GovernableAction for SetPriceFeedSubscribersProposal where
+      view = GovernableActionView with
+        governanceParty
+        proposer
+        actionLabel = "SetPriceFeedSubscribers"
+        description = "Set subscribers of price feed " <> feedId <> " to: " <> showParties subscribers
+
+      executeImpl = do
+        feed <- fetch feedCid
+        require "Feed belongs to the governance party" (feed.governanceParty == governanceParty)
+        require "Proposal names the feed's id" (feed.feedId == feedId)
+        _ <- exercise feedCid PriceFeed_SetSubscribers with newSubscribers = subscribers
+        pure ()
+
+-- | Governance action: archive a feed and release its id in the registry, so
+-- the id can be opened again.
+template ClosePriceFeedProposal
+  with
+    governanceParty : Party
+      -- ^ The governance party that signs the feed.
+    proposer : Party
+      -- ^ The member or additional proposer who created this proposal.
+    registryCid : ContractId PriceFeedRegistry
+      -- ^ The governance party's feed registry.
+    feedCid : ContractId PriceFeed
+      -- ^ The feed contract to archive.
+    feedId : Text
+      -- ^ The id of that feed, as shown to the confirming members.
+  where
+    signatory proposer
+    observer governanceParty
+    ensure feedId /= ""
+
+    interface instance GovernableAction for ClosePriceFeedProposal where
+      view = GovernableActionView with
+        governanceParty
+        proposer
+        actionLabel = "ClosePriceFeed"
+        description = "Close price feed " <> feedId
+
+      executeImpl = do
+        feed <- fetch feedCid
+        require "Feed belongs to the governance party" (feed.governanceParty == governanceParty)
+        require "Proposal names the feed's id" (feed.feedId == feedId)
+        registry <- fetch registryCid
+        require "Registry belongs to the governance party" (registry.governanceParty == governanceParty)
+        archive feedCid
+        _ <- exercise registryCid PriceFeedRegistry_Release with feedId
+        pure ()
+
+-- ============================================================================
+-- Helpers
+-- ============================================================================
+
+-- | A proposal executes only inside its window: the price was observed in the
+-- past and the deadline has not passed.
+checkExecutionWindow : Time -> Time -> Update ()
+checkExecutionWindow observedAt executeBefore = do
+  now <- getTime
+  require "Proposal has not expired" (now <= executeBefore)
+  require "Price was not observed in the future" (observedAt <= now)
+
+-- | Render a party set for a proposal description.
+showParties : Set Party -> Text
+showParties parties
+  | Set.null parties = "none"
+  | otherwise = T.intercalate ", " (map partyToText (Set.toList parties))

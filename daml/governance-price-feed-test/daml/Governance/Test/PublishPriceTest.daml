@@ -1,0 +1,209 @@
+-- Copyright (c) 2026 No Witness Labs. Contributed under the Apache License 2.0.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Tests for PublishPriceProposal.
+module Governance.Test.PublishPriceTest where
+
+import DA.Time (addRelTime, hours, minutes)
+import Daml.Script
+
+import Governance.ExecutionResult
+import Governance.PriceFeed
+import Governance.Rules
+
+import Governance.Test.PriceFeedTestUtils
+import TestHarness
+
+-- ============================================================================
+-- When
+-- ============================================================================
+
+data PublishResult = PublishResult
+  with
+    proposal : PublishPriceProposal
+      -- ^ The executed proposal.
+    executionResult : GovernanceExecutionResult
+      -- ^ The audit record of the execution.
+    appFeeds : [(ContractId PriceFeed, PriceFeed)]
+      -- ^ The feeds the subscribed app sees afterwards.
+  deriving (Eq, Show)
+
+when_publish_confirmed_and_executed : FeedFixture -> Script PublishResult
+when_publish_confirmed_and_executed f = do
+  -- Observe after the feed opened and execute later still, so the feed must
+  -- take the proposal's observedAt rather than keep its own or use the execution time.
+  passTime (minutes 5)
+  proposal <- publishProposal f
+  action <- propose proposal.proposer proposal
+  passTime (minutes 5)
+  executionResult <- confirmAndExecute f.committee action
+  appFeeds <- query @PriceFeed f.committee.parties.app
+  pure PublishResult with ..
+
+when_publish_confirmed_once : FeedFixture -> Script Text
+when_publish_confirmed_once f = do
+  proposal <- publishProposal f
+  action <- propose proposal.proposer proposal
+  confirmations <- confirmBy f.committee action [f.committee.parties.member1]
+  tryExecute f.committee action confirmations
+
+-- | Two proposals against round 0; the second executes after the first moved the feed.
+when_publish_against_superseded_feed : FeedFixture -> Script Text
+when_publish_against_superseded_feed f = do
+  first <- publishProposal f
+  second <- publishProposal f
+  firstAction <- propose first.proposer first
+  secondAction <- propose second.proposer (second with newPrice = 1.1)
+  secondConfirmations <- confirmBy f.committee secondAction [f.committee.parties.member1, f.committee.parties.member2]
+  _ <- confirmAndExecute f.committee firstAction
+  tryExecute f.committee secondAction secondConfirmations
+
+-- | Publish a proposal built from the fixture with `change` applied, against the current feed.
+when_publish_executed_with : (PublishPriceProposal -> PublishPriceProposal) -> FeedFixture -> Script Text
+when_publish_executed_with change f = do
+  proposal <- change <$> publishProposal f
+  action <- propose proposal.proposer proposal
+  confirmAndTryExecute f.committee action
+
+-- | Move the feed to round 1 at 0.9, then propose the correct price with round 0.
+when_publish_states_wrong_round : FeedFixture -> Script Text
+when_publish_states_wrong_round f = do
+  moved <- publishProposal f
+  _ <- propose moved.proposer moved >>= confirmAndExecute f.committee
+  [(currentCid, current)] <- query @PriceFeed f.committee.parties.governanceParty
+  wrongRound <- publishProposal (f with feedCid = currentCid; feed = current)
+  action <- propose wrongRound.proposer (wrongRound with fromRound = 0; newPrice = 0.8)
+  confirmAndTryExecute f.committee action
+
+when_publish_executed_after_deadline : FeedFixture -> Script Text
+when_publish_executed_after_deadline f = do
+  proposal <- publishProposal f
+  action <- propose proposal.proposer proposal
+  confirmations <- confirmBy f.committee action [f.committee.parties.member1, f.committee.parties.member2]
+  -- Past the 10-minute execution window, inside the 30-minute confirmation timeout.
+  passTime (minutes 20)
+  tryExecute f.committee action confirmations
+
+when_publish_created_with : (PublishPriceProposal -> PublishPriceProposal) -> FeedFixture -> Script Text
+when_publish_created_with change f = do
+  proposal <- publishProposal f
+  errorText <$> trySubmit proposal.proposer (createCmd (change proposal))
+
+when_outsider_confirms_publish : FeedFixture -> Script Text
+when_outsider_confirms_publish f = do
+  proposal <- publishProposal f
+  action <- propose proposal.proposer proposal
+  let p = f.committee.parties
+  errorText <$> trySubmit (memberContext p.outsider p.governanceParty)
+    (exerciseCmd f.committee.rulesCid GovernanceRules_ConfirmAction with
+      confirmer = p.outsider; actionProposalCid = action)
+
+-- ============================================================================
+-- Then
+-- ============================================================================
+
+then_price_moved_and_recorded : FeedFixture -> PublishResult -> Script Failures
+then_price_moved_and_recorded _ r = pure $ case r.appFeeds of
+  [(_, feed)] ->
+    shouldBe "price" 0.9 feed.price <>
+    shouldBe "round" 1 feed.round <>
+    shouldBe "observedAt is the proposal's" r.proposal.observedAt feed.observedAt <>
+    shouldBe "actionLabel" "PublishPrice" r.executionResult.actionLabel <>
+    shouldContain "description names the feed" r.executionResult.description defaultFeedId <>
+    shouldContain "description shows the move" r.executionResult.description "1.0 -> 0.9 from round 0" <>
+    shouldContain "description shows observedAt" r.executionResult.description ("observed at " <> show r.proposal.observedAt) <>
+    shouldContain "description shows executeBefore" r.executionResult.description ("execute before " <> show r.proposal.executeBefore)
+  feeds -> shouldBe "feeds the app sees" 1 (length feeds)
+
+then_fails_with : Text -> a -> Text -> Script Failures
+then_fails_with expected _ actual = pure (shouldFailWith expected actual)
+
+-- ============================================================================
+-- Tests
+-- ============================================================================
+
+test_when_threshold_confirms_publish_then_price_moves_and_result_recorded = script do
+  run Test with
+    given = given_open_feed
+    when = when_publish_confirmed_and_executed
+    then_ = then_price_moved_and_recorded
+
+test_when_one_member_confirms_publish_then_execute_fails = script do
+  run Test with
+    given = given_open_feed
+    when = when_publish_confirmed_once
+    then_ = then_fails_with (requirement "Enough confirmations to execute action")
+
+test_when_feed_superseded_then_publish_fails_at_fetch = script do
+  run Test with
+    given = given_open_feed
+    when = when_publish_against_superseded_feed
+    then_ = then_fails_with "NotActive"
+
+test_when_publish_states_wrong_round_then_execute_fails = script do
+  run Test with
+    given = given_open_feed
+    when = when_publish_states_wrong_round
+    then_ = then_fails_with (requirement "Proposal states the feed's current round and price")
+
+test_when_publish_states_wrong_price_then_execute_fails = script do
+  run Test with
+    given = given_open_feed
+    when = when_publish_executed_with (\p -> p with fromPrice = 2.0)
+    then_ = then_fails_with (requirement "Proposal states the feed's current round and price")
+
+test_when_publish_names_other_asset_then_execute_fails = script do
+  run Test with
+    given = given_open_feed
+    when = when_publish_executed_with (\p -> p with asset = "Gold")
+    then_ = then_fails_with (requirement "Proposal names the feed's asset")
+
+test_when_publish_names_other_feed_id_then_execute_fails = script do
+  run Test with
+    given = given_open_feed
+    when = when_publish_executed_with (\p -> p with feedId = "tbill-eur")
+    then_ = then_fails_with (requirement "Proposal names the feed's id")
+
+test_when_publish_executed_after_deadline_then_execute_fails = script do
+  run Test with
+    given = given_open_feed
+    when = when_publish_executed_after_deadline
+    then_ = then_fails_with (requirement "Proposal has not expired")
+
+test_when_publish_price_observed_in_future_then_execute_fails = script do
+  run Test with
+    given = given_open_feed
+    when = when_publish_executed_with (\p -> p with
+      observedAt = addRelTime p.observedAt (hours 1)
+      executeBefore = addRelTime p.observedAt (hours 2))
+    then_ = then_fails_with (requirement "Price was not observed in the future")
+
+test_when_publish_new_price_zero_then_create_rejected = script do
+  run Test with
+    given = given_open_feed
+    when = when_publish_created_with (\p -> p with newPrice = 0.0)
+    then_ = then_fails_with preconditionFailure
+
+test_when_publish_new_price_negative_then_create_rejected = script do
+  run Test with
+    given = given_open_feed
+    when = when_publish_created_with (\p -> p with newPrice = -0.5)
+    then_ = then_fails_with preconditionFailure
+
+test_when_publish_feed_id_empty_then_create_rejected = script do
+  run Test with
+    given = given_open_feed
+    when = when_publish_created_with (\p -> p with feedId = "")
+    then_ = then_fails_with preconditionFailure
+
+test_when_publish_asset_empty_then_create_rejected = script do
+  run Test with
+    given = given_open_feed
+    when = when_publish_created_with (\p -> p with asset = "")
+    then_ = then_fails_with preconditionFailure
+
+test_when_non_member_confirms_publish_then_confirm_rejected = script do
+  run Test with
+    given = given_open_feed
+    when = when_outsider_confirms_publish
+    then_ = then_fails_with (requirement "Confirmer is a governance member")

@@ -1,0 +1,201 @@
+-- Copyright (c) 2026 No Witness Labs. Contributed under the Apache License 2.0.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Tests for closing a feed, changing its subscribers, its visibility and
+-- the PriceFeed's own `ensure` clause.
+module Governance.Test.PriceFeedLifecycleTest where
+
+import DA.Set qualified as Set
+import Daml.Script
+
+import Governance.ExecutionResult
+import Governance.PriceFeed
+
+import Governance.Test.PriceFeedTestUtils
+import TestHarness
+
+-- ============================================================================
+-- When
+-- ============================================================================
+
+data CloseResult = CloseResult
+  with
+    executionResult : GovernanceExecutionResult
+      -- ^ The audit record of the close.
+    feeds : [(ContractId PriceFeed, PriceFeed)]
+      -- ^ The governance party's feeds afterwards.
+    registry : PriceFeedRegistry
+      -- ^ The registry afterwards.
+  deriving (Eq, Show)
+
+closeProposal : FeedFixture -> Script ClosePriceFeedProposal
+closeProposal f = do
+  (registryCid, _) <- currentRegistry f.committee
+  pure ClosePriceFeedProposal with
+    governanceParty = f.committee.parties.governanceParty
+    proposer = f.committee.parties.member1
+    registryCid
+    feedCid = f.feedCid
+    feedId = f.feed.feedId
+
+when_feed_closed : FeedFixture -> Script CloseResult
+when_feed_closed f = do
+  proposal <- closeProposal f
+  executionResult <- propose proposal.proposer proposal >>= confirmAndExecute f.committee
+  feeds <- query @PriceFeed f.committee.parties.governanceParty
+  (_, registry) <- currentRegistry f.committee
+  pure CloseResult with ..
+
+when_feed_closed_and_reopened : FeedFixture -> Script [(ContractId PriceFeed, PriceFeed)]
+when_feed_closed_and_reopened f = do
+  proposal <- closeProposal f
+  _ <- propose proposal.proposer proposal >>= confirmAndExecute f.committee
+  _ <- openFeed f.committee defaultFeedId (Set.singleton f.committee.parties.app)
+  query @PriceFeed f.committee.parties.governanceParty
+
+when_close_names_other_feed_id : FeedFixture -> Script Text
+when_close_names_other_feed_id f = do
+  proposal <- closeProposal f
+  action <- propose proposal.proposer (proposal with feedId = "tbill-eur")
+  confirmAndTryExecute f.committee action
+
+data SubscribersResult = SubscribersResult
+  with
+    executionResult : GovernanceExecutionResult
+      -- ^ The audit record of the change.
+    appFeeds : [(ContractId PriceFeed, PriceFeed)]
+      -- ^ The feeds the removed subscriber (the app) sees afterwards.
+    outsiderFeeds : [(ContractId PriceFeed, PriceFeed)]
+      -- ^ The feeds the added subscriber (the outsider) sees afterwards.
+  deriving (Eq, Show)
+
+subscribersProposal : FeedFixture -> Script SetPriceFeedSubscribersProposal
+subscribersProposal f = pure SetPriceFeedSubscribersProposal with
+  governanceParty = f.committee.parties.governanceParty
+  proposer = f.committee.parties.member1
+  feedCid = f.feedCid
+  feedId = f.feed.feedId
+  subscribers = Set.singleton f.committee.parties.outsider
+
+when_subscribers_replaced : FeedFixture -> Script SubscribersResult
+when_subscribers_replaced f = do
+  proposal <- subscribersProposal f
+  executionResult <- propose proposal.proposer proposal >>= confirmAndExecute f.committee
+  appFeeds <- query @PriceFeed f.committee.parties.app
+  outsiderFeeds <- query @PriceFeed f.committee.parties.outsider
+  pure SubscribersResult with ..
+
+when_set_subscribers_names_other_feed_id : FeedFixture -> Script Text
+when_set_subscribers_names_other_feed_id f = do
+  proposal <- subscribersProposal f
+  action <- propose proposal.proposer (proposal with feedId = "tbill-eur")
+  confirmAndTryExecute f.committee action
+
+when_outsider_queries_feeds : FeedFixture -> Script [(ContractId PriceFeed, PriceFeed)]
+when_outsider_queries_feeds f = query @PriceFeed f.committee.parties.outsider
+
+-- | Anyone can create a PriceFeed naming themselves; its `ensure` still applies.
+when_feed_created_with : (PriceFeed -> PriceFeed) -> FeedFixture -> Script Text
+when_feed_created_with change f = do
+  let forger = f.committee.parties.outsider
+  errorText <$> trySubmit forger (createCmd (change (f.feed with governanceParty = forger)))
+
+-- ============================================================================
+-- Then
+-- ============================================================================
+
+then_feed_archived_and_id_released : FeedFixture -> CloseResult -> Script Failures
+then_feed_archived_and_id_released _ r = pure $
+  shouldBe "actionLabel" "ClosePriceFeed" r.executionResult.actionLabel <>
+  shouldContain "description names the feed" r.executionResult.description defaultFeedId <>
+  shouldBe "feeds" 0 (length r.feeds) <>
+  shouldBe "registry" None r.registry.openFeedIds
+
+then_one_feed_at_round_zero : FeedFixture -> [(ContractId PriceFeed, PriceFeed)] -> Script Failures
+then_one_feed_at_round_zero _ feeds = pure $ case feeds of
+  [(_, feed)] -> shouldBe "round" 0 feed.round <> shouldBe "feedId" defaultFeedId feed.feedId
+  _ -> shouldBe "feeds" 1 (length feeds)
+
+then_only_new_subscriber_sees_feed : FeedFixture -> SubscribersResult -> Script Failures
+then_only_new_subscriber_sees_feed f r = pure $
+  shouldBe "actionLabel" "SetPriceFeedSubscribers" r.executionResult.actionLabel <>
+  shouldContain "description lists subscribers" r.executionResult.description
+    (partyToText f.committee.parties.outsider) <>
+  shouldBe "feeds the removed app sees" 0 (length r.appFeeds) <>
+  shouldBe "feeds the added subscriber sees" 1 (length r.outsiderFeeds)
+
+then_no_feed_visible : FeedFixture -> [(ContractId PriceFeed, PriceFeed)] -> Script Failures
+then_no_feed_visible _ feeds = pure (shouldBe "feeds the outsider sees" 0 (length feeds))
+
+then_fails_with : Text -> a -> Text -> Script Failures
+then_fails_with expected _ actual = pure (shouldFailWith expected actual)
+
+-- ============================================================================
+-- Tests
+-- ============================================================================
+
+test_when_feed_closed_then_feed_archived_and_id_released = script do
+  run Test with
+    given = given_open_feed
+    when = when_feed_closed
+    then_ = then_feed_archived_and_id_released
+
+test_when_feed_closed_then_same_id_reopens = script do
+  run Test with
+    given = given_open_feed
+    when = when_feed_closed_and_reopened
+    then_ = then_one_feed_at_round_zero
+
+test_when_close_names_other_feed_id_then_execute_fails = script do
+  run Test with
+    given = given_open_feed
+    when = when_close_names_other_feed_id
+    then_ = then_fails_with (requirement "Proposal names the feed's id")
+
+test_when_subscribers_replaced_then_only_new_subscriber_sees_feed = script do
+  run Test with
+    given = given_open_feed
+    when = when_subscribers_replaced
+    then_ = then_only_new_subscriber_sees_feed
+
+test_when_set_subscribers_names_other_feed_id_then_execute_fails = script do
+  run Test with
+    given = given_open_feed
+    when = when_set_subscribers_names_other_feed_id
+    then_ = then_fails_with (requirement "Proposal names the feed's id")
+
+test_when_non_subscriber_queries_then_feed_hidden = script do
+  run Test with
+    given = given_open_feed
+    when = when_outsider_queries_feeds
+    then_ = then_no_feed_visible
+
+test_when_feed_price_zero_then_create_rejected = script do
+  run Test with
+    given = given_open_feed
+    when = when_feed_created_with (\p -> p with price = 0.0)
+    then_ = then_fails_with preconditionFailure
+
+test_when_feed_price_negative_then_create_rejected = script do
+  run Test with
+    given = given_open_feed
+    when = when_feed_created_with (\p -> p with price = -1.0)
+    then_ = then_fails_with preconditionFailure
+
+test_when_feed_id_empty_then_create_rejected = script do
+  run Test with
+    given = given_open_feed
+    when = when_feed_created_with (\p -> p with feedId = "")
+    then_ = then_fails_with preconditionFailure
+
+test_when_feed_asset_empty_then_create_rejected = script do
+  run Test with
+    given = given_open_feed
+    when = when_feed_created_with (\p -> p with asset = "")
+    then_ = then_fails_with preconditionFailure
+
+test_when_feed_round_negative_then_create_rejected = script do
+  run Test with
+    given = given_open_feed
+    when = when_feed_created_with (\p -> p with round = -1)
+    then_ = then_fails_with preconditionFailure
