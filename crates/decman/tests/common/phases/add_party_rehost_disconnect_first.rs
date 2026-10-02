@@ -45,14 +45,17 @@ use anyhow::Context;
 use canton_proto_rs::com::digitalasset::canton::{
     admin::participant::v30::{
         DisconnectSynchronizerRequest, ListConnectedSynchronizersRequest,
-        ListRegisteredSynchronizersRequest, PurgeContractsRequest, ReconnectSynchronizerRequest,
+        ListRegisteredSynchronizersRequest, LookupReceivedAcsCommitmentsRequest,
+        PurgeContractsRequest, ReceivedCommitmentState, ReconnectSynchronizerRequest,
+        SynchronizerTimeRange, TimeRange,
+        participant_inspection_service_client::ParticipantInspectionServiceClient,
         participant_repair_service_client::ParticipantRepairServiceClient,
         synchronizer_connectivity_service_client::SynchronizerConnectivityServiceClient,
     },
     protocol::v30::{TopologyMapping, enums::TopologyChangeOp, topology_mapping},
     topology::admin::v30::{
         AuthorizeRequest, ForceFlag, ListDecentralizedNamespaceDefinitionRequest,
-        ListPartyToParticipantRequest, authorize_request,
+        ListPartyToParticipantRequest, ListSynchronizerParametersStateRequest, authorize_request,
         list_party_to_participant_response::result::Item as P2pItem,
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
     },
@@ -106,6 +109,14 @@ const SAMPLE_INTERVAL: Duration = Duration::from_millis(200);
 /// count as a reproduction of the incident's precondition.
 const MIN_ARCHIVES_IN_WINDOW: usize = 3;
 
+/// Longest reconciliation interval this assertion can work with. Past it a run
+/// would end before the synchronizer compared a single period, so the phase
+/// fails instead of passing on no evidence.
+const MAX_RECONCILIATION: Duration = Duration::from_secs(60);
+
+/// Periods to wait for beyond the first, so a match is not a single fluke.
+const PERIODS_REQUIRED: u32 = 2;
+
 /// How far ahead the seeded coupons expire. Below the reward automation's
 /// expiry margin (120 s by default), so its sweeps never assign them and the
 /// archiver stays the only thing that changes them; the later split phase then
@@ -120,6 +131,10 @@ struct Ctx {
     watch: Option<Arc<Mutex<Watch>>>,
     stop: Option<Arc<AtomicBool>>,
     tasks: Vec<JoinHandle<()>>,
+    /// Commitments are only required to agree for periods that begin after
+    /// this. Everything earlier covers the disconnect and the import, where a
+    /// mismatch is the test's own doing.
+    settled_at: Option<SystemTime>,
 }
 
 /// What the two background watchers observed.
@@ -678,6 +693,79 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             })
         },
     )
+    .when(
+        "the ledger is quiet, so note where commitments must start agreeing",
+        |f, ctx| {
+            Box::pin(async move {
+                // Read the interval here, not inside the poll below, so its
+                // consequences are decided once and said out loud.
+                let p3 = admin_config(f, 3)?;
+                let interval = reconciliation_interval(&p3).await?;
+                if interval > MAX_RECONCILIATION {
+                    anyhow::bail!(
+                        "the synchronizer reconciles every {interval:?} and this phase lasts {:?}, \
+                         so no commitment period is compared. start_localnet founds the DSO with \
+                         a short acs-commitment-reconciliation-interval; check that it applied",
+                        commitment_budget(),
+                    );
+                }
+                info!("synchronizer reconciles every {interval:?}; commitments will be checked");
+                ctx.settled_at = Some(SystemTime::now());
+                Ok(())
+            })
+        },
+    )
+    .then(
+        "P3's ACS commitments agree with the network",
+        commitment_budget(),
+        |f, ctx| {
+            Box::pin(async move {
+                let Some(settled_at) = ctx.settled_at else {
+                    return Some(Err(anyhow::anyhow!("no settle point was recorded")));
+                };
+                let p3 = match admin_config(f, 3) {
+                    Ok(c) => c,
+                    Err(e) => return Some(Err(e)),
+                };
+                let (matched, mismatched) = match received_commitments(&p3, settled_at).await {
+                    Ok(v) => v,
+                    // Retry, but say what went wrong. Swallowing this silently
+                    // turns every cause into the same bare timeout.
+                    Err(e) => {
+                        f.probe_diag.record(
+                            "P3 commitments",
+                            Class::Transient,
+                            format!("reading received commitments: {e:#}"),
+                        );
+                        return None;
+                    }
+                };
+                // A mismatch is recorded per period and never heals, so there
+                // is nothing to wait for.
+                if !mismatched.is_empty() {
+                    return Some(Err(anyhow::anyhow!(
+                        "P3's ACS disagrees with {} counter-participant(s) after the import: {:?}. \
+                         Contract sets can match while commitments do not: the transfer moves the \
+                         contracts, and P3's view of them can still differ from the network's",
+                        mismatched.len(),
+                        mismatched,
+                    )));
+                }
+                // Zero mismatches proves nothing until a period has actually
+                // been compared, or a run where no commitment was exchanged
+                // would pass.
+                if matched < PERIODS_REQUIRED as usize {
+                    f.probe_diag.record(
+                        "P3 commitments",
+                        Class::Transient,
+                        format!("{matched} matched period(s) so far, need {PERIODS_REQUIRED}"),
+                    );
+                    return None;
+                }
+                Some(Ok(()))
+            })
+        },
+    )
     .run(f)
     .await
 }
@@ -892,4 +980,102 @@ fn spawn_archiver(
             tokio::time::sleep(ARCHIVE_INTERVAL).await;
         }
     })
+}
+
+/// How long the commitment assertion waits. The synchronizer only compares on
+/// reconciliation ticks, so the budget spans several of them. The real interval
+/// is read at runtime and checked against `MAX_RECONCILIATION`.
+fn commitment_budget() -> Duration {
+    MAX_RECONCILIATION * (PERIODS_REQUIRED + 2)
+}
+
+fn proto_timestamp(t: SystemTime) -> anyhow::Result<prost_types::Timestamp> {
+    let elapsed = t.duration_since(UNIX_EPOCH)?;
+    Ok(prost_types::Timestamp {
+        seconds: elapsed.as_secs() as i64,
+        nanos: elapsed.subsec_nanos() as i32,
+    })
+}
+
+/// Commitments P3 received for periods beginning after `since`: how many
+/// matched, and which counter-participants disagreed.
+///
+/// This is the network's own verdict on P3's contract set, and it is a
+/// different question from "do P1 and P3 list the same contract ids". The two
+/// can disagree: the ids match while the commitments do not. A phase that only
+/// compares ids therefore passes on a whole class of import faults.
+async fn received_commitments(
+    config: &NodeConfig,
+    since: SystemTime,
+) -> anyhow::Result<(usize, Vec<String>)> {
+    // Keep the nanoseconds. Truncating to whole seconds moves the window start
+    // backwards, which can pull in a period that began before the settle point
+    // and fail this assertion on a mismatch the phase caused itself.
+    let from = proto_timestamp(since)?;
+    let to = proto_timestamp(SystemTime::now())?;
+    let physical = dec_party_manager::utils::get_synchronizer_id(config).await?;
+    let synchronizer_id = physical
+        .rsplit_once("::")
+        .map_or(physical.as_str(), |(logical, _)| logical)
+        .to_string();
+    let mut client = ParticipantInspectionServiceClient::new(config.admin_channel().await?);
+    let response = client
+        .lookup_received_acs_commitments(tonic::Request::new(LookupReceivedAcsCommitmentsRequest {
+            time_ranges: vec![SynchronizerTimeRange {
+                synchronizer_id,
+                interval: Some(TimeRange {
+                    from_exclusive: Some(from),
+                    to_inclusive: Some(to),
+                }),
+            }],
+            counter_participant_ids: vec![],
+            commitment_state: vec![],
+            verbose: false,
+        }))
+        .await?
+        .into_inner();
+
+    let mut matched = 0usize;
+    let mut mismatched = Vec::new();
+    for per_synchronizer in response.received {
+        for commitment in per_synchronizer.received {
+            match ReceivedCommitmentState::try_from(commitment.state) {
+                Ok(ReceivedCommitmentState::Match) => matched += 1,
+                Ok(ReceivedCommitmentState::Mismatch) => {
+                    mismatched.push(commitment.origin_counter_participant_uid)
+                }
+                // Buffered and outstanding both mean "not compared yet", which
+                // the caller waits out rather than judges.
+                _ => {}
+            }
+        }
+    }
+    mismatched.sort();
+    mismatched.dedup();
+    Ok((matched, mismatched))
+}
+
+/// The synchronizer's reconciliation interval, which decides how often
+/// commitments are compared at all.
+async fn reconciliation_interval(config: &NodeConfig) -> anyhow::Result<Duration> {
+    let synchronizer_id = dec_party_manager::utils::get_synchronizer_id(config).await?;
+    let mut client = TopologyManagerReadServiceClient::new(config.admin_channel().await?);
+    let response = client
+        .list_synchronizer_parameters_state(tonic::Request::new(
+            ListSynchronizerParametersStateRequest {
+                base_query: Some(head_state_query(&synchronizer_id)),
+                filter_synchronizer_id: String::new(),
+            },
+        ))
+        .await?
+        .into_inner();
+    let parameters = response
+        .results
+        .first()
+        .and_then(|r| r.item)
+        .context("synchronizer has no parameters in head state")?;
+    let interval = parameters
+        .reconciliation_interval
+        .context("synchronizer parameters carry no reconciliation interval")?;
+    Ok(Duration::from_secs(interval.seconds.max(0) as u64))
 }
