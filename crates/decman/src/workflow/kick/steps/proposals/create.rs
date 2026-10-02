@@ -124,6 +124,7 @@ pub async fn create_proposals(
 
     // Create new P2P mapping without kicked participant
     let kick_participant_str = kick_config.participant_id.to_string();
+    let member_count = current_p2p.participants.len();
     let new_participants: Vec<_> = current_p2p
         .participants
         .into_iter()
@@ -151,11 +152,20 @@ pub async fn create_proposals(
         .iter()
         .map(|p| p.participant_uid.clone())
         .collect();
-    let new_signing_keys = if current_signing_keys.is_empty() {
+    let new_signing_keys = if current_signing_keys.len() < member_count {
         // A party onboarded before Canton 3.4 keeps its keys in a deprecated
-        // PartyToKeyMapping. Adopting the survivors' keys moves them inline
-        // and leaves the departing member's behind in the same step.
-        adopt_legacy_signing_keys(config, storage, &synchronizer_id, &party_id, &survivors).await?
+        // PartyToKeyMapping, and a pre-1.10.0 add leaves a party holding some
+        // inline and the rest there. Adopting the survivors' keys moves them
+        // inline and leaves the departing member's behind in the same step.
+        adopt_legacy_signing_keys(
+            config,
+            storage,
+            &synchronizer_id,
+            &party_id,
+            &survivors,
+            &current_signing_keys,
+        )
+        .await?
     } else {
         let claims =
             known_signing_keys_by_member(config, storage, &party_id, &current_signing_keys).await?;

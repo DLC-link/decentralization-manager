@@ -380,43 +380,77 @@ pub fn signing_keys_without_member(
 /// Load the party's signing keys from its deprecated `PartyToKeyMapping` and
 /// attribute them to `members`.
 ///
-/// Only for a party whose `PartyToParticipant` carries no inline
-/// `party_signing_keys` — see [`legacy_signing_keys_for_members`] for what the
-/// attribution rejects.
+/// For a party whose inline `party_signing_keys` do not cover every member.
+/// That is a party which never had them, and also one a pre-1.10.0 build left
+/// half-migrated: adding a member then wrote only the joiner's key inline
+/// instead of adopting the legacy set, and every later membership change was
+/// refused because the counts no longer matched.
+///
+/// `inline` is whatever the `PartyToParticipant` already carries. Those keys
+/// join the legacy mapping's as candidates, because a half-migrated party
+/// holds some members' keys in one place and the rest in the other. Attribution
+/// is per member either way, so a key no current member claims is left behind.
+///
+/// See [`legacy_signing_keys_for_members`] for what the attribution rejects.
 ///
 /// # Errors
 ///
-/// Errors when the party has no `PartyToKeyMapping` either, or when the keys
-/// it holds cannot be attributed to every current member.
+/// Errors when the party has no `PartyToKeyMapping` and the inline keys do not
+/// cover every member, or when the keys available cannot be attributed to every
+/// current member.
 pub async fn adopt_legacy_signing_keys(
     config: &NodeConfig,
     db: &SqlitePool,
     synchronizer_id: &str,
     dec_party_id: &CantonId,
     members: &[String],
+    inline: &[SigningPublicKey],
 ) -> Result<Vec<SigningPublicKey>> {
-    let mapping = topology::fetch_party_to_key_mapping(config, synchronizer_id, dec_party_id)
-        .await?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Party {dec_party_id} carries neither inline party signing keys nor a legacy \
-                 PartyToKeyMapping, so its signing key set cannot be rebuilt"
-            )
-        })?;
+    let mapping =
+        topology::fetch_party_to_key_mapping(config, synchronizer_id, dec_party_id).await?;
 
-    tracing::info!(
-        "Party {dec_party_id} keeps its signing keys in a legacy PartyToKeyMapping: \
-         {keys} key(s) at threshold {threshold}, against {members} current member(s)",
-        keys = mapping.signing_keys.len(),
-        threshold = mapping.threshold,
-        members = members.len()
-    );
+    if mapping.is_none() && inline.is_empty() {
+        anyhow::bail!(
+            "Party {dec_party_id} carries neither inline party signing keys nor a legacy \
+             PartyToKeyMapping, so its signing key set cannot be rebuilt"
+        );
+    }
+
+    let legacy_keys = mapping
+        .as_ref()
+        .map(|m| m.signing_keys.clone())
+        .unwrap_or_default();
+
+    match &mapping {
+        Some(m) => tracing::info!(
+            "Party {dec_party_id} keeps signing keys in a legacy PartyToKeyMapping: {keys} key(s) \
+             at threshold {threshold}, plus {inline} inline, against {members} current member(s)",
+            keys = m.signing_keys.len(),
+            threshold = m.threshold,
+            inline = inline.len(),
+            members = members.len()
+        ),
+        None => tracing::info!(
+            "Party {dec_party_id} has no legacy PartyToKeyMapping; rebuilding from the {inline} \
+             inline key(s) against {members} current member(s)",
+            inline = inline.len(),
+            members = members.len()
+        ),
+    }
 
     warn_if_namespace_applies_early(config, synchronizer_id, dec_party_id).await;
 
-    let claims =
-        known_signing_keys_by_member(config, db, dec_party_id, &mapping.signing_keys).await?;
-    legacy_signing_keys_for_members(&mapping.signing_keys, members, &claims)
+    // Deduped by fingerprint so a key held in both places is one candidate.
+    let mut candidates = legacy_keys;
+    let mut seen: BTreeSet<String> = candidates.iter().map(utils::compute_fingerprint).collect();
+    for key in inline {
+        if seen.insert(utils::compute_fingerprint(key)) {
+            candidates.push(key.clone());
+        }
+    }
+
+    let claims = known_signing_keys_by_member(config, db, dec_party_id, &candidates).await?;
+    legacy_signing_keys_for_members(&candidates, members, &claims)
 }
 
 /// Warn when a legacy migration runs against a party whose namespace
@@ -805,5 +839,55 @@ mod tests {
             vec![fingerprint(1), fingerprint(2)]
         );
         Ok(())
+    }
+
+    /// The half-migrated shape a pre-1.10.0 add leaves behind: the joiner's key
+    /// inline, every other member's still in the legacy mapping, and a key in
+    /// that mapping no current member claims. Resolving over both sources has
+    /// to produce one key per member, in member order, and leave the stray one.
+    #[test]
+    fn resolves_members_split_across_legacy_and_inline() -> Result {
+        let legacy = vec![key(1), key(2), key(9)];
+        let inline = vec![key(3)];
+        let claims = claims(&[("p1", 1), ("p2", 2), ("p3", 3)]);
+
+        let mut candidates = legacy;
+        let mut seen: BTreeSet<String> =
+            candidates.iter().map(utils::compute_fingerprint).collect();
+        for k in &inline {
+            if seen.insert(utils::compute_fingerprint(k)) {
+                candidates.push(k.clone());
+            }
+        }
+
+        let adopted =
+            legacy_signing_keys_for_members(&candidates, &uids(&["p1", "p2", "p3"]), &claims)?;
+
+        assert_eq!(
+            adopted
+                .iter()
+                .map(utils::compute_fingerprint)
+                .collect::<Vec<_>>(),
+            vec![fingerprint(1), fingerprint(2), fingerprint(3)],
+            "one key per member, in member order, with the unclaimed key left behind"
+        );
+        Ok(())
+    }
+
+    /// A member whose key is in neither place must stop the run rather than
+    /// produce a short key set that the membership check rejects later with a
+    /// count that says nothing about which member is missing.
+    #[test]
+    fn refuses_a_member_whose_key_is_in_neither_place() {
+        let candidates = vec![key(1), key(2)];
+        let claims = claims(&[("p1", 1), ("p2", 2), ("p3", 3)]);
+
+        let err = legacy_signing_keys_for_members(&candidates, &uids(&["p1", "p2", "p3"]), &claims)
+            .expect_err("a member with no key anywhere must be refused");
+
+        assert!(
+            err.to_string().contains("p3"),
+            "the error names the member that cannot be resolved: {err}"
+        );
     }
 }

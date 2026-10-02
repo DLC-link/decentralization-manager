@@ -107,16 +107,25 @@ pub async fn create_proposals(
         .party_signing_keys
         .map(|sk| sk.keys)
         .unwrap_or_default();
-    let signing_keys = if current_signing_keys.is_empty() {
+    let signing_keys = if current_signing_keys.len() < current_p2p.participants.len() {
         // A party onboarded before Canton 3.4 keeps its keys in a deprecated
-        // PartyToKeyMapping, which carries a threshold of its own. Moving the
-        // members' keys inline is what puts both thresholds in one place.
+        // PartyToKeyMapping, which carries a threshold of its own, and a
+        // pre-1.10.0 add leaves a party holding some inline and the rest there.
+        // Moving the members' keys inline puts both thresholds in one place.
         let members: Vec<String> = current_p2p
             .participants
             .iter()
             .map(|p| p.participant_uid.clone())
             .collect();
-        adopt_legacy_signing_keys(config, storage, &synchronizer_id, &party_id, &members).await?
+        adopt_legacy_signing_keys(
+            config,
+            storage,
+            &synchronizer_id,
+            &party_id,
+            &members,
+            &current_signing_keys,
+        )
+        .await?
     } else {
         current_signing_keys
     };

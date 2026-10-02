@@ -145,17 +145,30 @@ pub async fn create_proposals(
     // sit in the deprecated PartyToKeyMapping instead. Merging into that empty
     // set proposed a party whose only signing key was the new member's, which
     // Canton refuses outright above a threshold of one.
+    //
+    // Fewer keys than members, rather than none, because a pre-1.10.0 add left
+    // parties holding exactly that: one inline key, the joiner's, and the rest
+    // still in the legacy mapping. Adopting only on an empty set left those
+    // parties unable to change membership at all.
     let current_signing_keys = current_p2p
         .party_signing_keys
         .map(|sk| sk.keys)
         .unwrap_or_default();
-    let mut signing_keys = if current_signing_keys.is_empty() {
+    let mut signing_keys = if current_signing_keys.len() < current_p2p.participants.len() {
         let members: Vec<String> = current_p2p
             .participants
             .iter()
             .map(|p| p.participant_uid.clone())
             .collect();
-        adopt_legacy_signing_keys(config, storage, &synchronizer_id, party_id, &members).await?
+        adopt_legacy_signing_keys(
+            config,
+            storage,
+            &synchronizer_id,
+            party_id,
+            &members,
+            &current_signing_keys,
+        )
+        .await?
     } else {
         current_signing_keys
     };
