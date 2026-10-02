@@ -1124,20 +1124,35 @@ async fn check_against_head(
     // A party onboarded before Canton 3.4 keeps its keys in a legacy
     // PartyToKeyMapping that still holds departed members' keys, so the
     // proposal adopts a subset of it rather than the whole set.
-    let (current_keys, legacy) = match current_p2p.party_signing_keys {
-        Some(keys) if !keys.keys.is_empty() => (keys.keys, false),
-        _ => {
-            let legacy_keys = head
-                .party_to_key_mapping(dec_party_id)
-                .await?
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "{dec_party_id} carries neither inline signing keys nor a \
-                         PartyToKeyMapping, so the proposed keys cannot be checked"
-                    )
-                })?;
-            (legacy_keys.signing_keys, true)
+    //
+    // The baseline has to match what the coordinator built its proposal from,
+    // or the keys it restored read as additions and the peer refuses to sign.
+    // A pre-1.10.0 add left parties half-migrated, holding one member's key
+    // inline and the rest in the mapping, so a short inline set means the
+    // baseline is both sources together.
+    let members = current_p2p.participants.len();
+    let inline = current_p2p
+        .party_signing_keys
+        .map(|keys| keys.keys)
+        .unwrap_or_default();
+    let (current_keys, legacy) = if inline.len() >= members && !inline.is_empty() {
+        (inline, false)
+    } else {
+        let legacy_keys = head.party_to_key_mapping(dec_party_id).await?;
+        if legacy_keys.is_none() && inline.is_empty() {
+            anyhow::bail!(
+                "{dec_party_id} carries neither inline signing keys nor a PartyToKeyMapping, \
+                 so the proposed keys cannot be checked"
+            );
         }
+        let mut union = legacy_keys.map(|m| m.signing_keys).unwrap_or_default();
+        let mut seen: BTreeSet<String> = union.iter().map(utils::compute_fingerprint).collect();
+        for key in inline {
+            if seen.insert(utils::compute_fingerprint(&key)) {
+                union.push(key);
+            }
+        }
+        (union, true)
     };
 
     let proposed_keys = mapping
@@ -2553,6 +2568,22 @@ mod tests {
             "unexpected error: {error}"
         );
         Ok(())
+    }
+
+    /// A pre-1.10.0 add left parties holding one member's key inline and the
+    /// rest in the legacy mapping. The peer baseline has to be both sources,
+    /// or the keys the coordinator restores read as additions and every peer
+    /// refuses to sign the repair.
+    #[tokio::test]
+    async fn a_half_migrated_party_checks_against_inline_and_legacy_together() -> Result {
+        let all = signing_keys(3, 2).keys;
+        let inline = SigningKeysWithThreshold {
+            keys: all[2..].to_vec(),
+            threshold: 1,
+        };
+        let legacy = all[..2].to_vec();
+
+        change_threshold_against(Some(inline), Some(legacy)).await
     }
 
     #[tokio::test]
