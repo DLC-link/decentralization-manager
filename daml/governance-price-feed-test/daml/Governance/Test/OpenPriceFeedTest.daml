@@ -1,0 +1,177 @@
+-- Copyright (c) 2026 No Witness Labs. Contributed under the Apache License 2.0.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Tests for OpenPriceFeedProposal and the feed registry's uniqueness check.
+module Governance.Test.OpenPriceFeedTest where
+
+import DA.Set qualified as Set
+import DA.Time (addRelTime, hours, minutes)
+import Daml.Script
+
+import Governance.Action
+import Governance.ExecutionResult
+import Governance.PriceFeed
+import Governance.Rules
+
+import Governance.Test.PriceFeedTestUtils
+import TestHarness
+
+-- ============================================================================
+-- When
+-- ============================================================================
+
+data OpenResult = OpenResult
+  with
+    proposal : OpenPriceFeedProposal
+      -- ^ The executed proposal.
+    executionResult : GovernanceExecutionResult
+      -- ^ The audit record of the execution.
+    appFeeds : [(ContractId PriceFeed, PriceFeed)]
+      -- ^ The feeds the subscribed app sees afterwards.
+    registry : PriceFeedRegistry
+      -- ^ The registry afterwards.
+  deriving (Eq, Show)
+
+when_open_confirmed_and_executed : Committee -> Script OpenResult
+when_open_confirmed_and_executed c = do
+  proposal <- openProposal c defaultFeedId (Set.singleton c.parties.app)
+  action <- propose c.parties.member1 proposal
+  -- Execute after the observation, so the feed must keep observedAt, not the execution time.
+  passTime (minutes 5)
+  executionResult <- confirmAndExecute c action
+  appFeeds <- query @PriceFeed c.parties.app
+  (_, registry) <- currentRegistry c
+  pure OpenResult with ..
+
+when_same_feed_id_opened_twice : FeedFixture -> Script Text
+when_same_feed_id_opened_twice f = do
+  proposal <- openProposal f.committee defaultFeedId Set.empty
+  action <- propose f.committee.parties.member1 proposal
+  confirmAndTryExecute f.committee action
+
+when_open_executed_after_deadline : Committee -> Script Text
+when_open_executed_after_deadline c = do
+  proposal <- openProposal c defaultFeedId Set.empty
+  action <- propose c.parties.member1 proposal
+  confirmations <- confirmBy c action [c.parties.member1, c.parties.member2]
+  -- Past the 10-minute execution window, inside the 30-minute confirmation timeout.
+  passTime (minutes 20)
+  tryExecute c action confirmations
+
+when_open_price_observed_in_future : Committee -> Script Text
+when_open_price_observed_in_future c = do
+  now <- getTime
+  proposal <- openProposal c defaultFeedId Set.empty
+  action <- propose c.parties.member1 (proposal with
+    observedAt = addRelTime now (hours 1)
+    executeBefore = addRelTime now (hours 2))
+  confirmAndTryExecute c action
+
+when_open_created_with : (OpenPriceFeedProposal -> OpenPriceFeedProposal) -> Committee -> Script Text
+when_open_created_with change c = do
+  proposal <- openProposal c defaultFeedId Set.empty
+  errorText <$> trySubmit c.parties.member1 (createCmd (change proposal))
+
+when_outsider_proposes_open : Committee -> Script Text
+when_outsider_proposes_open c = do
+  proposal <- openProposal c defaultFeedId Set.empty
+  action <- propose c.parties.outsider (proposal with proposer = c.parties.outsider)
+  errorText <$> trySubmit (memberContext c.parties.member1 c.parties.governanceParty)
+    (exerciseCmd c.rulesCid GovernanceRules_ConfirmAction with
+      confirmer = c.parties.member1; actionProposalCid = action)
+
+when_proposer_cancels_open : Committee -> Script [(ContractId OpenPriceFeedProposal, OpenPriceFeedProposal)]
+when_proposer_cancels_open c = do
+  proposal <- openProposal c defaultFeedId Set.empty
+  action <- propose c.parties.member1 proposal
+  submit c.parties.member1 $ exerciseCmd action GovernableAction_ProposerCancel
+  query @OpenPriceFeedProposal c.parties.member1
+
+-- ============================================================================
+-- Then
+-- ============================================================================
+
+then_feed_opened_and_recorded : Committee -> OpenResult -> Script Failures
+then_feed_opened_and_recorded c r = pure $ case r.appFeeds of
+  [(_, feed)] ->
+    shouldBe "feedId" defaultFeedId feed.feedId <>
+    shouldBe "price" 1.0 feed.price <>
+    shouldBe "round" 0 feed.round <>
+    shouldBe "observedAt is the proposal's" r.proposal.observedAt feed.observedAt <>
+    shouldBe "actionLabel" "OpenPriceFeed" r.executionResult.actionLabel <>
+    shouldContain "description names the feed" r.executionResult.description defaultFeedId <>
+    shouldContain "description lists subscribers" r.executionResult.description (partyToText c.parties.app) <>
+    shouldContain "description shows observedAt" r.executionResult.description ("observed at " <> show r.proposal.observedAt) <>
+    shouldContain "description shows executeBefore" r.executionResult.description ("execute before " <> show r.proposal.executeBefore) <>
+    shouldBe "registry" (Some (Set.singleton defaultFeedId)) r.registry.openFeedIds
+  feeds -> shouldBe "feeds the app sees" 1 (length feeds)
+
+then_fails_with : Text -> a -> Text -> Script Failures
+then_fails_with expected _ actual = pure (shouldFailWith expected actual)
+
+then_proposal_consumed : Committee -> [(ContractId OpenPriceFeedProposal, OpenPriceFeedProposal)] -> Script Failures
+then_proposal_consumed _ remaining = pure (shouldBe "open proposals" 0 (length remaining))
+
+-- ============================================================================
+-- Tests
+-- ============================================================================
+
+test_when_open_executed_then_feed_opened_and_result_recorded = script do
+  run Test with
+    given = given_committee
+    when = when_open_confirmed_and_executed
+    then_ = then_feed_opened_and_recorded
+
+test_when_feed_id_already_open_then_open_fails = script do
+  run Test with
+    given = given_open_feed
+    when = when_same_feed_id_opened_twice
+    then_ = then_fails_with (requirement "Feed id is not already open")
+
+test_when_open_executed_after_deadline_then_execute_fails = script do
+  run Test with
+    given = given_committee
+    when = when_open_executed_after_deadline
+    then_ = then_fails_with (requirement "Proposal has not expired")
+
+test_when_open_price_observed_in_future_then_execute_fails = script do
+  run Test with
+    given = given_committee
+    when = when_open_price_observed_in_future
+    then_ = then_fails_with (requirement "Price was not observed in the future")
+
+test_when_open_initial_price_zero_then_create_rejected = script do
+  run Test with
+    given = given_committee
+    when = when_open_created_with (\p -> p with initialPrice = 0.0)
+    then_ = then_fails_with preconditionFailure
+
+test_when_open_initial_price_negative_then_create_rejected = script do
+  run Test with
+    given = given_committee
+    when = when_open_created_with (\p -> p with initialPrice = -1.0)
+    then_ = then_fails_with preconditionFailure
+
+test_when_open_feed_id_empty_then_create_rejected = script do
+  run Test with
+    given = given_committee
+    when = when_open_created_with (\p -> p with feedId = "")
+    then_ = then_fails_with preconditionFailure
+
+test_when_open_asset_empty_then_create_rejected = script do
+  run Test with
+    given = given_committee
+    when = when_open_created_with (\p -> p with asset = "")
+    then_ = then_fails_with preconditionFailure
+
+test_when_non_member_proposes_then_confirm_rejected = script do
+  run Test with
+    given = given_committee
+    when = when_outsider_proposes_open
+    then_ = then_fails_with (requirement "Proposer is authorized (member or additional proposer)")
+
+test_when_proposer_cancels_then_proposal_consumed = script do
+  run Test with
+    given = given_committee
+    when = when_proposer_cancels_open
+    then_ = then_proposal_consumed

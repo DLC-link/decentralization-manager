@@ -665,19 +665,37 @@ After execution:
 A decentralized party can act as a price oracle: no single operator can move the
 price an application depends on. The `governance-price-feed-v1` package
 ([README](../daml/governance-price-feed/README.md)) provides a `PriceFeed`
-contract and two `GovernableAction` proposals:
+contract, a `PriceFeedRegistry` and four `GovernableAction` proposals:
 
-1. A member proposes `OpenPriceFeedProposal` with the asset, an initial price and
-   the parties allowed to read the feed.
-2. Members confirm; once the threshold is met, one executes it and the feed is
-   created, signed by the decentralized party.
-3. To move the price, a member proposes `PublishPriceProposal` naming the feed's
-   current round and price. After the threshold confirms, the feed is replaced
-   with the new price and the next round. A proposal made against an older round
-   cannot execute.
+1. Once per governance party, create the `PriceFeedRegistry` through
+   `POST /contracts` with the fields `decentralized_party` and `none`. It keeps one
+   active feed per `feedId`.
+2. A member proposes `OpenPriceFeedProposal` with the registry, the feed id, the
+   asset, an initial price, when it was observed, an execution deadline and the
+   parties allowed to read the feed.
+3. Members confirm; once the threshold is met, one executes it. The id is
+   registered (execution fails if it is already open) and the feed is created,
+   signed by the decentralized party.
+4. To move the price, a member proposes `PublishPriceProposal` naming the feed, its
+   id, asset, current round and price, the new price, when it was observed and a
+   deadline. After the threshold confirms, the feed is replaced with the new price,
+   the next round and the proposal's `observedAt`. A proposal against a superseded
+   feed, a misstated feed, past its deadline or with a future `observedAt` cannot
+   execute.
+5. `SetPriceFeedSubscribersProposal` replaces the subscriber list;
+   `ClosePriceFeedProposal` archives the feed and releases its id.
 
 Applications read the feed as subscribers and pass its contract ID to their own
 choices, for example a lending app's loan-to-value check or margin call.
+
+> **A consumer must check the feed's `governanceParty` and `feedId`.** Anyone can
+> create a `PriceFeed` that names their own party as `governanceParty`, so a fetch
+> of a contract ID handed in by a counterparty proves nothing. Read the feed with
+> `fetchAttestedPrice committeeParty feedId maxAge feedCid`, which checks the
+> governance party, the feed id and the price's age.
+
+All subscribers observe the same contract and so see each other. An app that must
+stay confidential should use a separate feed.
 
 ## Token Custody
 

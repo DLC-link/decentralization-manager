@@ -1,0 +1,204 @@
+-- Copyright (c) 2026 No Witness Labs. Contributed under the Apache License 2.0.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Fixtures and helpers for the price feed tests. In Canton each member
+-- hosts the governance party on its own participant; Daml Script simulates
+-- that with actAs member <> readAs governanceParty.
+module Governance.Test.PriceFeedTestUtils where
+
+import DA.Set (Set)
+import DA.Set qualified as Set
+import DA.Text (isInfixOf)
+import DA.Time (RelTime, addRelTime, minutes)
+import Daml.Script
+
+import Governance.Action (GovernableAction)
+import Governance.Confirmation (GovernanceConfirmation)
+import Governance.ExecutionResult
+import Governance.PriceFeed
+import Governance.Rules
+
+import TestHarness
+
+-- | Parties of a 2-of-3 price committee plus a subscribing app and an outsider.
+data FeedParties = FeedParties
+  with
+    governanceParty : Party
+      -- ^ The committee's decentralized party.
+    member1 : Party
+      -- ^ First committee member.
+    member2 : Party
+      -- ^ Second committee member.
+    member3 : Party
+      -- ^ Third committee member.
+    app : Party
+      -- ^ A lending app that subscribes to the feed.
+    outsider : Party
+      -- ^ A party with no role.
+  deriving (Eq, Show)
+
+-- | A committee with its rules and an empty feed registry.
+data Committee = Committee
+  with
+    parties : FeedParties
+      -- ^ The allocated parties.
+    rulesCid : ContractId GovernanceRules
+      -- ^ The committee's governance rules (2 of 3, 30-minute confirmations).
+  deriving (Eq, Show)
+
+-- | A committee with one open feed.
+data FeedFixture = FeedFixture
+  with
+    committee : Committee
+      -- ^ The committee that runs the feed.
+    feedCid : ContractId PriceFeed
+      -- ^ The open feed.
+    feed : PriceFeed
+      -- ^ The open feed's payload.
+  deriving (Eq, Show)
+
+-- | The feed every test opens.
+defaultFeedId : Text
+defaultFeedId = "tbill-usd"
+
+defaultAsset : Text
+defaultAsset = "T-Bill"
+
+-- | A proposal's execution window: proposals in the tests may execute for
+-- ten minutes, well inside the 30-minute confirmation timeout.
+executionWindow : RelTime
+executionWindow = minutes 10
+
+memberContext : Party -> Party -> SubmitOptions
+memberContext member gp = actAs member <> readAs gp
+
+given_committee : Script Committee
+given_committee = do
+  governanceParty <- allocateParty "PriceCommittee"
+  [member1, member2, member3, app, outsider] <-
+    mapA allocateParty ["Member1", "Member2", "Member3", "LendingApp", "Outsider"]
+  let parties = FeedParties with ..
+  rulesCid <- submit governanceParty $ createCmd GovernanceRules with
+    governanceParty
+    members = Set.fromList [member1, member2, member3]
+    threshold = 2
+    actionConfirmationTimeout = minutes 30
+    additionalProposers = None
+  _ <- submit governanceParty $ createCmd PriceFeedRegistry with
+    governanceParty
+    openFeedIds = None
+  pure Committee with ..
+
+-- | A committee whose `tbill-usd` feed is open at 1.0, subscribed by the app.
+given_open_feed : Script FeedFixture
+given_open_feed = do
+  committee <- given_committee
+  (feedCid, feed) <- openFeed committee defaultFeedId (Set.singleton committee.parties.app)
+  pure FeedFixture with ..
+
+-- | The committee's current registry.
+currentRegistry : Committee -> Script (ContractId PriceFeedRegistry, PriceFeedRegistry)
+currentRegistry c = do
+  [r] <- query @PriceFeedRegistry c.parties.governanceParty
+  pure r
+
+-- | An open proposal for `feedId` at 1.0, observed now.
+openProposal : Committee -> Text -> Set Party -> Script OpenPriceFeedProposal
+openProposal c feedId subscribers = do
+  now <- getTime
+  (registryCid, _) <- currentRegistry c
+  pure OpenPriceFeedProposal with
+    governanceParty = c.parties.governanceParty
+    proposer = c.parties.member1
+    registryCid
+    feedId
+    asset = defaultAsset
+    initialPrice = 1.0
+    subscribers
+    observedAt = now
+    executeBefore = addRelTime now executionWindow
+
+-- | A publish proposal moving the fixture's feed from round 0 at 1.0 to 0.9.
+publishProposal : FeedFixture -> Script PublishPriceProposal
+publishProposal f = do
+  now <- getTime
+  pure PublishPriceProposal with
+    governanceParty = f.committee.parties.governanceParty
+    proposer = f.committee.parties.member1
+    feedCid = f.feedCid
+    feedId = f.feed.feedId
+    asset = f.feed.asset
+    fromRound = f.feed.round
+    fromPrice = f.feed.price
+    newPrice = 0.9
+    observedAt = now
+    executeBefore = addRelTime now executionWindow
+
+-- | Create a proposal as its proposer and return it as a governable action.
+propose : (Template t, HasEnsure t, HasToInterface t GovernableAction) => Party -> t -> Script (ContractId GovernableAction)
+propose proposer proposal = do
+  cid <- submit proposer $ createCmd proposal
+  pure (toInterfaceContractId @GovernableAction cid)
+
+-- | Confirm an action by each listed member.
+confirmBy : Committee -> ContractId GovernableAction -> [Party] -> Script [ContractId GovernanceConfirmation]
+confirmBy c action members = forA members \confirmer -> do
+  r <- submit (memberContext confirmer c.parties.governanceParty) $
+    exerciseCmd c.rulesCid GovernanceRules_ConfirmAction with
+      confirmer; actionProposalCid = action
+  pure r.confirmationCid
+
+executeCmd : Committee -> Party -> ContractId GovernableAction -> [ContractId GovernanceConfirmation] -> Commands ExecuteConfirmedActionResult
+executeCmd c executor action confirmations =
+  exerciseCmd c.rulesCid GovernanceRules_ExecuteConfirmedAction with
+    executor; actionProposalCid = action; confirmations
+
+-- | Confirm by members 1 and 2, execute by member 3, return the audit record.
+confirmAndExecute : Committee -> ContractId GovernableAction -> Script GovernanceExecutionResult
+confirmAndExecute c action = do
+  confirmations <- confirmBy c action [c.parties.member1, c.parties.member2]
+  r <- submit (memberContext c.parties.member3 c.parties.governanceParty) $
+    executeCmd c c.parties.member3 action confirmations
+  Some result <- queryContractId c.parties.governanceParty r.executionResultCid
+  pure result
+
+-- | Confirm by members 1 and 2 and try to execute; return the error text,
+-- or "succeeded" if execution went through.
+confirmAndTryExecute : Committee -> ContractId GovernableAction -> Script Text
+confirmAndTryExecute c action = do
+  confirmations <- confirmBy c action [c.parties.member1, c.parties.member2]
+  tryExecute c action confirmations
+
+tryExecute : Committee -> ContractId GovernableAction -> [ContractId GovernanceConfirmation] -> Script Text
+tryExecute c action confirmations =
+  errorText <$> trySubmit (memberContext c.parties.member3 c.parties.governanceParty)
+    (executeCmd c c.parties.member3 action confirmations)
+
+-- | Open a feed through governance and return it.
+openFeed : Committee -> Text -> Set Party -> Script (ContractId PriceFeed, PriceFeed)
+openFeed c feedId subscribers = do
+  proposal <- openProposal c feedId subscribers
+  action <- propose proposal.proposer proposal
+  _ <- confirmAndExecute c action
+  [feed] <- filter (\(_, p) -> p.feedId == feedId) <$> query @PriceFeed c.parties.governanceParty
+  pure feed
+
+-- | The text of a failed submission, or "succeeded".
+errorText : Show e => Either e a -> Text
+errorText (Left err) = show err
+errorText (Right _) = "succeeded"
+
+-- | Assert that a submission failed with a message containing `expected`.
+shouldFailWith : Text -> Text -> Failures
+shouldFailWith expected actual
+  | actual == "succeeded" = ["Expected a failure containing " <> show expected <> ", but the submission succeeded"]
+  | expected `isInfixOf` actual = []
+  | otherwise = ["Expected a failure containing " <> show expected <> "\n  Received: " <> actual]
+
+-- | Failure text of a violated `ensure` clause.
+preconditionFailure : Text
+preconditionFailure = "Template precondition violated"
+
+-- | Failure text of a `require` from Splice.Util.
+requirement : Text -> Text
+requirement msg = "The requirement '" <> msg <> "' was not met."

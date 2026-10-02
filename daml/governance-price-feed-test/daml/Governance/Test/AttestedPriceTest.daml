@@ -1,0 +1,108 @@
+-- Copyright (c) 2026 No Witness Labs. Contributed under the Apache License 2.0.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Tests for fetchAttestedPrice, the check a consumer runs before using a price.
+module Governance.Test.AttestedPriceTest where
+
+import DA.Set qualified as Set
+import DA.Time (RelTime, hours)
+import Daml.Script
+
+import Governance.PriceFeed
+
+import Governance.Test.PriceFeedTestUtils
+import TestHarness
+
+-- | Stands in for a consumer app's choice (e.g. a margin call) that reads a feed.
+template PriceReader
+  with
+    reader : Party
+      -- ^ The subscribed app that reads the feed.
+  where
+    signatory reader
+
+    choice PriceReader_Read : PriceFeed
+      with
+        governanceParty : Party
+          -- ^ The committee the app trusts.
+        feedId : Text
+          -- ^ The feed the app expects.
+        maxAge : RelTime
+          -- ^ The oldest price the app accepts.
+        feedCid : ContractId PriceFeed
+          -- ^ The feed contract the app was handed.
+      controller reader
+      do fetchAttestedPrice governanceParty feedId maxAge feedCid
+
+-- | The app reads `feedCid`, expecting the committee's `tbill-usd` feed no older than one hour.
+readAsApp : FeedFixture -> ContractId PriceFeed -> Script Text
+readAsApp f feedCid = do
+  let p = f.committee.parties
+  errorText <$> trySubmit p.app (createAndExerciseCmd (PriceReader p.app) PriceReader_Read with
+    governanceParty = p.governanceParty
+    feedId = defaultFeedId
+    maxAge = hours 1
+    feedCid)
+
+-- ============================================================================
+-- When
+-- ============================================================================
+
+when_app_reads_committee_feed : FeedFixture -> Script Text
+when_app_reads_committee_feed f = readAsApp f f.feedCid
+
+-- | A borrower creates a feed under its own party, with the right id and the app subscribed.
+when_app_reads_forged_feed : FeedFixture -> Script Text
+when_app_reads_forged_feed f = do
+  let borrower = f.committee.parties.outsider
+  forgedCid <- submit borrower $ createCmd (f.feed with governanceParty = borrower; price = 5.0)
+  readAsApp f forgedCid
+
+-- | The committee's other feed, passed where `tbill-usd` is expected.
+when_app_reads_other_feed : FeedFixture -> Script Text
+when_app_reads_other_feed f = do
+  (otherCid, _) <- openFeed f.committee "tbill-eur" (Set.singleton f.committee.parties.app)
+  readAsApp f otherCid
+
+when_app_reads_stale_feed : FeedFixture -> Script Text
+when_app_reads_stale_feed f = do
+  passTime (hours 2)
+  readAsApp f f.feedCid
+
+-- ============================================================================
+-- Then
+-- ============================================================================
+
+then_read_succeeds : FeedFixture -> Text -> Script Failures
+then_read_succeeds _ actual = pure (shouldBe "read" "succeeded" actual)
+
+then_fails_with : Text -> a -> Text -> Script Failures
+then_fails_with expected _ actual = pure (shouldFailWith expected actual)
+
+-- ============================================================================
+-- Tests
+-- ============================================================================
+
+test_when_app_reads_fresh_committee_feed_then_price_accepted = script do
+  run Test with
+    given = given_open_feed
+    when = when_app_reads_committee_feed
+    then_ = then_read_succeeds
+
+test_when_app_reads_forged_feed_then_rejected = script do
+  run Test with
+    given = given_open_feed
+    when = when_app_reads_forged_feed
+    then_ = then_fails_with (requirement "Feed is signed by the expected governance party")
+
+test_when_app_reads_other_feed_id_then_rejected = script do
+  run Test with
+    given = given_open_feed
+    when = when_app_reads_other_feed
+    then_ = then_fails_with (requirement "Feed has the expected feed id")
+
+test_when_app_reads_stale_price_then_rejected = script do
+  run Test with
+    given = given_open_feed
+    when = when_app_reads_stale_feed
+    then_ = then_fails_with (requirement "Price is not older than the maximum age")

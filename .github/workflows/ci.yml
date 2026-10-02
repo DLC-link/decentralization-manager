@@ -309,3 +309,5 @@ jobs:
         run: cd governance-token-custody-test && ~/.dpm/bin/dpm test
       - name: Test governance-utility-onboarding
         run: cd governance-utility-onboarding-test && ~/.dpm/bin/dpm test
+      - name: Test governance-price-feed
+        run: cd governance-price-feed-test && ~/.dpm/bin/dpm test
