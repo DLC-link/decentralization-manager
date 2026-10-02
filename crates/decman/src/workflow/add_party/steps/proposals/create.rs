@@ -1,5 +1,7 @@
+use std::collections::BTreeMap;
+
 use canton_proto_rs::com::digitalasset::canton::{
-    crypto::v30::SigningKeysWithThreshold,
+    crypto::v30::{SigningKeyUsage, SigningKeysWithThreshold},
     protocol::v30::{
         DecentralizedNamespaceDefinition, PartyToParticipant, TopologyMapping, enums,
         party_to_participant::{HostingParticipant, hosting_participant},
@@ -11,12 +13,13 @@ use sqlx::SqlitePool;
 
 use crate::{
     config::NodeConfig,
+    db::schema::SchemaRead,
     error::Result,
     utils,
     workflow::{
         add_party::AddPartyConfig,
         onboarding::steps::proposals::create::decode_keys_payload,
-        signing_keys::adopt_legacy_signing_keys,
+        signing_keys::{adopt_legacy_signing_keys, own_namespace_key},
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
         topology,
     },
@@ -91,10 +94,23 @@ pub async fn create_proposals(
     let party_id = &add_party_config.decentralized_party_id;
     let current_p2p = topology::fetch_p2p_mapping(config, &synchronizer_id, party_id).await?;
 
+    let current_members: Vec<String> = current_p2p
+        .participants
+        .iter()
+        .map(|p| p.participant_uid.clone())
+        .collect();
+    let own_namespace = own_namespace_key(config, party_id, &synchronizer_id)
+        .await?
+        .map(|key| utils::compute_fingerprint(&key));
     let rehost = is_former_host(
         storage,
         party_id,
         &new_member_id,
+        &current_members,
+        (
+            &config.participant_id().to_string(),
+            own_namespace.as_deref(),
+        ),
         &current_namespace_def,
         &new_namespace_fingerprint,
     )
@@ -277,13 +293,26 @@ pub async fn create_proposals(
 /// Whether the member being added already owns the party's namespace because
 /// it hosted the party before and only its hosting entry was removed.
 ///
-/// Confirmed against this node's identity record for that participant: a
-/// namespace key this node cannot attribute to it is refused, since two
-/// participants sharing one namespace key would let either act for the other.
+/// The danger is one participant claiming another's namespace key, which would
+/// let either act for the other. So the add is refused when this node can tie
+/// `namespace_fingerprint` to anyone other than the member being added, and
+/// also when it cannot tell which key some current member holds, since that
+/// unknown key might be this one.
+///
+/// An owner key that no member claims, with every member accounted for, is a
+/// former host's, left behind when its `PartyToParticipant` entry went and the
+/// namespace stayed. Hosting that member again is the case this function exists
+/// to allow, and the re-host path leaves the owner set exactly as it is.
+///
+/// `own` is this node's participant id and the namespace fingerprint its vault
+/// holds for the party. No peer reports this node's key back to it, so the vault
+/// is the only source for that one member.
 async fn is_former_host(
     storage: &SqlitePool,
     party_id: &crate::canton_id::CantonId,
     new_member_id: &str,
+    current_members: &[String],
+    own: (&str, Option<&str>),
     namespace_def: &DecentralizedNamespaceDefinition,
     namespace_fingerprint: &str,
 ) -> Result<bool> {
@@ -294,20 +323,106 @@ async fn is_former_host(
     {
         return Ok(false);
     }
-    let recorded = storage
-        .read_identity(party_id, identity_kinds::PEER_PUBLIC_KEYS, new_member_id)
-        .await?
-        .map(|payload| decode_keys_payload(&payload))
-        .transpose()?
-        .and_then(|keys| keys.first().map(utils::compute_fingerprint));
-    if recorded.as_deref() == Some(namespace_fingerprint) {
+
+    let recorded = recorded_namespace_keys(storage, party_id).await?;
+    // A record ties the key to whoever it names, whether or not that member
+    // still hosts the party.
+    if let Some((owner, _)) = recorded
+        .iter()
+        .find(|(member, key)| *key == namespace_fingerprint && member.as_str() != new_member_id)
+    {
+        anyhow::bail!(
+            "Namespace fingerprint {namespace_fingerprint} is already a DNS owner and this node \
+             attributes it to {owner}, not {new_member_id} — the new member appears to reuse an \
+             existing member's namespace key"
+        );
+    }
+
+    let mut unattributed = Vec::new();
+    for member in current_members {
+        let cached = storage
+            .get_dec_party_participant_owner_key(party_id, member)
+            .await?;
+        let claim = match (recorded.get(member), cached) {
+            (Some(key), Some(cached)) => {
+                if *key != cached {
+                    tracing::warn!(
+                        "{member} reports namespace key {cached} for {party_id} but this node \
+                         recorded {key}; taking the recorded one"
+                    );
+                }
+                Some(key.clone())
+            }
+            (Some(key), None) => Some(key.clone()),
+            (None, Some(cached)) => Some(cached),
+            (None, None) if member == own.0 => own.1.map(str::to_string),
+            (None, None) => None,
+        };
+        match claim {
+            Some(key) if key == namespace_fingerprint => anyhow::bail!(
+                "Namespace fingerprint {namespace_fingerprint} is already a DNS owner and this \
+                 node attributes it to {member}, not {new_member_id} — the new member appears to \
+                 reuse an existing member's namespace key"
+            ),
+            Some(_) => {}
+            None => unattributed.push(member.as_str()),
+        }
+    }
+    if !unattributed.is_empty() {
+        anyhow::bail!(
+            "Namespace fingerprint {namespace_fingerprint} is already a DNS owner, and this node \
+             does not know the namespace key of {members} for {party_id}, so it cannot rule out \
+             that {new_member_id} is reusing one of them. Refresh the decentralized parties so \
+             each member reports its key, then retry",
+            members = unattributed.join(", ")
+        );
+    }
+
+    if recorded.get(new_member_id).map(String::as_str) == Some(namespace_fingerprint) {
         return Ok(true);
     }
-    anyhow::bail!(
-        "Namespace fingerprint {namespace_fingerprint} is already a DNS owner and this node \
-         has no record of it belonging to {new_member_id} — the new member appears to reuse \
-         an existing member's namespace key"
-    )
+    tracing::warn!(
+        "Namespace fingerprint {namespace_fingerprint} owns {party_id} and no member of the \
+         party claims it, so it belongs to a former host; hosting {new_member_id} again under \
+         it. This node holds no identity record for {new_member_id}, which is expected when \
+         another node coordinated the run that first added it."
+    );
+    Ok(true)
+}
+
+/// The namespace fingerprint this node recorded for each member, from the
+/// identity rows written by the run that added it.
+///
+/// Rows exist for every member on the node that coordinated the onboarding,
+/// and for itself alone on each peer, so an absent row says nothing about who
+/// owns a key. A row whose first key is not a namespace key records no
+/// namespace at all and is left out: older builds and chain backfills wrote the
+/// Daml key there, and counting that as an answer would mark a member as
+/// accounted for without knowing its namespace.
+async fn recorded_namespace_keys(
+    storage: &SqlitePool,
+    party_id: &crate::canton_id::CantonId,
+) -> Result<BTreeMap<String, String>> {
+    let mut recorded = BTreeMap::new();
+    for (member, payload) in storage
+        .list_identity(party_id, identity_kinds::PEER_PUBLIC_KEYS)
+        .await?
+    {
+        match decode_keys_payload(&payload) {
+            Ok(keys) => {
+                if let Some(key) = keys
+                    .first()
+                    .filter(|key| key.usage.contains(&(SigningKeyUsage::Namespace as i32)))
+                {
+                    recorded.insert(member, utils::compute_fingerprint(key));
+                }
+            }
+            Err(e) => {
+                tracing::warn!("PEER_PUBLIC_KEYS for {member} on {party_id} will not decode: {e:#}")
+            }
+        }
+    }
+    Ok(recorded)
 }
 
 /// Build an `AuthorizeRequest` proposing `mapping` against the synchronizer
@@ -346,7 +461,12 @@ mod tests {
 
     use super::*;
     use crate::{
-        canton_id::CantonId, db::MIGRATOR,
+        canton_id::CantonId,
+        db::{
+            MIGRATOR,
+            rows::{DecPartyParticipantRow, DecPartyRow},
+            schema::{Commitable, SchemaWrite},
+        },
         workflow::onboarding::steps::generate_keys::encode_keys_payload,
     };
 
@@ -363,6 +483,57 @@ mod tests {
             .expect("valid party id")
     }
 
+    /// This node's participant id in these tests, and a vault that names none of
+    /// the party's owners, as on a node that is not itself a member.
+    const NO_VAULT: (&str, Option<&str>) = ("p1::1220cc", None);
+
+    /// Put `member` in the party's participant cache with `owner_key`, the way
+    /// `resolve_owner_keys_from_peers` does after a peer answers. `None` is a
+    /// member whose answer has not arrived yet.
+    async fn seed_party_with_owner_key(
+        pool: &SqlitePool,
+        party_id: &CantonId,
+        member: &str,
+        owner_key: Option<&str>,
+    ) -> Result {
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_dec_party(&DecPartyRow {
+            party_id: party_id.to_string(),
+            prefix: "party".to_string(),
+            threshold: 1,
+            updated_at: 0,
+            my_owner_key: None,
+        })
+        .await?;
+        tx.replace_dec_party_participants(
+            party_id,
+            &[DecPartyParticipantRow {
+                dec_party_id: party_id.to_string(),
+                participant_uid: member.to_string(),
+                permission: "confirmation".to_string(),
+                owner_key: owner_key.map(str::to_string),
+                signing_key: None,
+            }],
+        )
+        .await?;
+        Commitable::commit(tx).await
+    }
+
+    async fn record_keys(
+        pool: &SqlitePool,
+        party_id: &CantonId,
+        member: &str,
+        first: &SigningPublicKey,
+    ) -> Result {
+        pool.write_identity(
+            party_id,
+            identity_kinds::PEER_PUBLIC_KEYS,
+            member,
+            &encode_keys_payload(first, &key(2, SigningKeyUsage::Protocol)),
+        )
+        .await
+    }
+
     fn namespace_def(owners: &[String]) -> DecentralizedNamespaceDefinition {
         DecentralizedNamespaceDefinition {
             decentralized_namespace: "ns".to_string(),
@@ -371,11 +542,25 @@ mod tests {
         }
     }
 
+    fn assert_refused(err: anyhow::Error, needle: &str) {
+        assert!(format!("{err}").contains(needle), "{err}");
+    }
+
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn a_namespace_that_is_not_an_owner_is_a_plain_add(pool: SqlitePool) -> Result {
         let fingerprint = utils::compute_fingerprint(&key(1, SigningKeyUsage::Namespace));
         let def = namespace_def(&["other".to_string()]);
-        assert!(!is_former_host(&pool, &party(), "p3::1220aa", &def, &fingerprint).await?);
+        let rehost = is_former_host(
+            &pool,
+            &party(),
+            "p3::1220aa",
+            &[],
+            NO_VAULT,
+            &def,
+            &fingerprint,
+        )
+        .await?;
+        assert!(!rehost);
         Ok(())
     }
 
@@ -384,38 +569,192 @@ mod tests {
         let namespace = key(1, SigningKeyUsage::Namespace);
         let fingerprint = utils::compute_fingerprint(&namespace);
         let party = party();
-        pool.write_identity(
+        record_keys(&pool, &party, "p3::1220aa", &namespace).await?;
+        let def = namespace_def(&[fingerprint.clone(), "other".to_string()]);
+        let rehost = is_former_host(
+            &pool,
             &party,
-            identity_kinds::PEER_PUBLIC_KEYS,
             "p3::1220aa",
-            &encode_keys_payload(&namespace, &key(2, SigningKeyUsage::Protocol)),
+            &[],
+            NO_VAULT,
+            &def,
+            &fingerprint,
         )
         .await?;
-        let def = namespace_def(&[fingerprint.clone(), "other".to_string()]);
-        assert!(is_former_host(&pool, &party, "p3::1220aa", &def, &fingerprint).await?);
+        assert!(rehost);
         Ok(())
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
-    async fn an_owner_without_a_matching_record_is_refused(pool: SqlitePool) -> Result {
+    async fn an_owner_recorded_for_another_member_is_refused(pool: SqlitePool) -> Result {
+        let namespace = key(1, SigningKeyUsage::Namespace);
+        let fingerprint = utils::compute_fingerprint(&namespace);
+        let party = party();
+        record_keys(&pool, &party, "p2::1220bb", &namespace).await?;
+        let def = namespace_def(std::slice::from_ref(&fingerprint));
+        let members = ["p2::1220bb".to_string()];
+        let err = is_former_host(
+            &pool,
+            &party,
+            "p3::1220aa",
+            &members,
+            NO_VAULT,
+            &def,
+            &fingerprint,
+        )
+        .await
+        .expect_err("an owner key another member holds must be refused");
+        assert_refused(err, "attributes it to p2::1220bb");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_owner_a_current_member_claims_in_the_cache_is_refused(pool: SqlitePool) -> Result {
         let fingerprint = utils::compute_fingerprint(&key(1, SigningKeyUsage::Namespace));
         let party = party();
-        // Recorded for a different participant: the key belongs to someone else.
-        pool.write_identity(
+        seed_party_with_owner_key(&pool, &party, "p2::1220bb", Some(&fingerprint)).await?;
+        let def = namespace_def(std::slice::from_ref(&fingerprint));
+        let members = ["p2::1220bb".to_string()];
+        let err = is_former_host(
+            &pool,
             &party,
-            identity_kinds::PEER_PUBLIC_KEYS,
+            "p3::1220aa",
+            &members,
+            NO_VAULT,
+            &def,
+            &fingerprint,
+        )
+        .await
+        .expect_err("an owner key a current member claims must be refused");
+        assert_refused(err, "attributes it to p2::1220bb");
+        Ok(())
+    }
+
+    /// A record for the new member does not settle it: a current member that
+    /// also claims the key would share it with the new one.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_key_also_claimed_by_a_current_member_is_refused(pool: SqlitePool) -> Result {
+        let namespace = key(1, SigningKeyUsage::Namespace);
+        let fingerprint = utils::compute_fingerprint(&namespace);
+        let party = party();
+        record_keys(&pool, &party, "p3::1220aa", &namespace).await?;
+        seed_party_with_owner_key(&pool, &party, "p2::1220bb", Some(&fingerprint)).await?;
+        let def = namespace_def(std::slice::from_ref(&fingerprint));
+        let members = ["p2::1220bb".to_string()];
+        let err = is_former_host(
+            &pool,
+            &party,
+            "p3::1220aa",
+            &members,
+            NO_VAULT,
+            &def,
+            &fingerprint,
+        )
+        .await
+        .expect_err("a key two participants claim must be refused");
+        assert_refused(err, "attributes it to p2::1220bb");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_current_member_with_no_known_key_fails_closed(pool: SqlitePool) -> Result {
+        let fingerprint = utils::compute_fingerprint(&key(1, SigningKeyUsage::Namespace));
+        let party = party();
+        seed_party_with_owner_key(&pool, &party, "p2::1220bb", None).await?;
+        let def = namespace_def(std::slice::from_ref(&fingerprint));
+        let members = ["p2::1220bb".to_string()];
+        let err = is_former_host(
+            &pool,
+            &party,
+            "p3::1220aa",
+            &members,
+            NO_VAULT,
+            &def,
+            &fingerprint,
+        )
+        .await
+        .expect_err("an unattributed current member must not be read as a non-owner");
+        assert_refused(err, "does not know the namespace key of p2::1220bb");
+        Ok(())
+    }
+
+    /// Older builds recorded the Daml key where the namespace key belongs. Such
+    /// a row says nothing about the member's namespace.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_record_without_a_namespace_key_does_not_attribute(pool: SqlitePool) -> Result {
+        let fingerprint = utils::compute_fingerprint(&key(1, SigningKeyUsage::Namespace));
+        let party = party();
+        record_keys(
+            &pool,
+            &party,
             "p2::1220bb",
-            &encode_keys_payload(
-                &key(1, SigningKeyUsage::Namespace),
-                &key(2, SigningKeyUsage::Protocol),
-            ),
+            &key(3, SigningKeyUsage::Protocol),
         )
         .await?;
         let def = namespace_def(std::slice::from_ref(&fingerprint));
-        let err = is_former_host(&pool, &party, "p3::1220aa", &def, &fingerprint)
-            .await
-            .expect_err("an owner key this node cannot attribute to the member must be refused");
-        assert!(format!("{err}").contains("already a DNS owner"), "{err}");
+        let members = ["p2::1220bb".to_string()];
+        let err = is_former_host(
+            &pool,
+            &party,
+            "p3::1220aa",
+            &members,
+            NO_VAULT,
+            &def,
+            &fingerprint,
+        )
+        .await
+        .expect_err("a Daml key at [0] must not count as the member's namespace");
+        assert_refused(err, "does not know the namespace key of p2::1220bb");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn this_nodes_own_key_comes_from_its_vault(pool: SqlitePool) -> Result {
+        let fingerprint = utils::compute_fingerprint(&key(1, SigningKeyUsage::Namespace));
+        let party = party();
+        let def = namespace_def(std::slice::from_ref(&fingerprint));
+        let members = ["p1::1220cc".to_string()];
+        let err = is_former_host(
+            &pool,
+            &party,
+            "p3::1220aa",
+            &members,
+            ("p1::1220cc", Some(fingerprint.as_str())),
+            &def,
+            &fingerprint,
+        )
+        .await
+        .expect_err("a key this node's own vault holds must be refused");
+        assert_refused(err, "attributes it to p1::1220cc");
+        Ok(())
+    }
+
+    /// The case that blocked re-hosting a former member: the key is an owner,
+    /// every current member is accounted for and none claims it, and this node
+    /// never recorded it because a different node coordinated the run that first
+    /// added that member.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_owner_no_member_claims_is_a_former_hosts_key(pool: SqlitePool) -> Result {
+        let fingerprint = utils::compute_fingerprint(&key(1, SigningKeyUsage::Namespace));
+        let party = party();
+        seed_party_with_owner_key(&pool, &party, "p2::1220bb", Some("someone-elses-key")).await?;
+        let def = namespace_def(&[
+            fingerprint.clone(),
+            "someone-elses-key".to_string(),
+            "own-key".to_string(),
+        ]);
+        let members = ["p1::1220cc".to_string(), "p2::1220bb".to_string()];
+        let rehost = is_former_host(
+            &pool,
+            &party,
+            "p3::1220aa",
+            &members,
+            ("p1::1220cc", Some("own-key")),
+            &def,
+            &fingerprint,
+        )
+        .await?;
+        assert!(rehost);
         Ok(())
     }
 }
