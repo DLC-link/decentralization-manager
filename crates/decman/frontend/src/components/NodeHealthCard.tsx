@@ -3,6 +3,7 @@ import { CopyableText } from "./CopyableText";
 import { LatencySpark, type LatencyTone } from "./LatencySpark";
 import { StatusDot } from "./StatusDot";
 import { useLatencyHistory } from "../useLatencyHistory";
+import { formatAge } from "../formatAge";
 import type {
   ComponentHealth,
   LinkHealth,
@@ -66,15 +67,6 @@ const formatUptime = (seconds: number): string => {
   const h = Math.floor((seconds % 86400) / 3600);
   const m = Math.floor((seconds % 3600) / 60);
   return `${d}d ${String(h).padStart(2, "0")}h ${String(m).padStart(2, "0")}m`;
-};
-
-const formatAge = (checkedAt: string): string => {
-  const seconds = Math.max(0, Math.round((Date.now() - Date.parse(checkedAt)) / 1000));
-  if (!Number.isFinite(seconds)) return "";
-  if (seconds < 60) return `updated ${seconds}s ago`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `updated ${minutes}m ago`;
-  return `updated ${Math.floor(minutes / 60)}h ago`;
 };
 
 const LABEL_SX = { fontSize: "0.78rem", color: "text.secondary" } as const;

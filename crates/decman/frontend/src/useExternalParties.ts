@@ -1,11 +1,10 @@
 import { useEffect, useState } from "react";
 import { authenticatedFetch } from "./api";
 import { API_BASE } from "./constants";
-import type { ExternalPartiesResponse, ExternalPartyInfo } from "./types";
+import type { ExternalPartiesResponse } from "./types";
 
 export function useExternalParties(active: boolean) {
-  const [parties, setParties] = useState<ExternalPartyInfo[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [snapshot, setSnapshot] = useState<ExternalPartiesResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -21,7 +20,7 @@ export function useExternalParties(active: boolean) {
         }
         const data: ExternalPartiesResponse = await response.json();
         if (!cancelled) {
-          setParties(data.parties);
+          setSnapshot(data);
           setError(null);
         }
       } catch (error) {
@@ -30,8 +29,8 @@ export function useExternalParties(active: boolean) {
         }
       } finally {
         if (!cancelled) {
-          setLoading(false);
-          // Poll the cheap snapshot, including after a cold-cache 503 or failure.
+          // Poll the cheap snapshot. A poll of a stale snapshot starts a
+          // server scan, so scans run only while the tab is open.
           timer = setTimeout(refresh, 10_000);
         }
       }
@@ -43,5 +42,14 @@ export function useExternalParties(active: boolean) {
     };
   }, [active]);
 
-  return { parties, loading, error };
+  return {
+    parties: snapshot?.parties ?? [],
+    // Without `fetched_at`, the server's first scan has not finished, so an
+    // empty list means "not known yet" rather than "hosts nothing".
+    loading: !error && !snapshot?.fetched_at,
+    error,
+    fetchedAt: snapshot?.fetched_at ?? null,
+    refreshing: snapshot?.refreshing ?? false,
+    refreshError: snapshot?.refresh_error ?? null,
+  };
 }

@@ -183,7 +183,8 @@ pub struct AppState {
     /// the warm gRPC channels the probes reuse. Shared so a Config tab open in
     /// many browsers costs one probe per TTL, not one per browser.
     pub health_cache: HealthCache,
-    /// Topology snapshot refreshed by a single background worker.
+    /// Topology snapshot of the external parties this node hosts. A request
+    /// for a stale one starts a single background scan.
     pub external_parties: external_parties::ExternalPartiesCache,
 }
 
@@ -1095,13 +1096,6 @@ pub async fn start_server(
         health_cache: HealthCache::new(),
         external_parties: Default::default(),
     });
-
-    let external_parties_state = app_state.clone();
-    spawn_supervised(
-        "external parties refresh",
-        "the external parties cache stops updating",
-        async move { external_parties::refresh_forever(external_parties_state).await },
-    );
 
     // Boot-time workflow recovery. For any `workflow_runs` row that was
     // InProgress when we shut down, re-spawn the coordinator task (which

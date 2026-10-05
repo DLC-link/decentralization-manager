@@ -22,7 +22,7 @@ use crate::{
         send_noise_message_with_retry,
     },
     server::{
-        AppState,
+        AppState, external_parties,
         health::classify_health_reply,
         middleware::require_admin,
         respawn_coordinator,
@@ -3170,40 +3170,62 @@ async fn read_acs_progress(db: &SqlitePool, instance_name: &str) -> Option<AcsTr
 /// Canton topology (an authorized `PartyToParticipant` naming this participant
 /// with Confirmation and a self-owned single-key namespace). Wallet-driven
 /// onboarding keeps no local run row, so there is nothing DB-side to read.
+///
+/// The answer comes from a snapshot, and a stale one starts a background scan.
+/// Until the first scan finishes, the response carries no `fetched_at`.
 #[utoipa::path(
     tag = "Workflows",
     responses(
         (status = 200, description = "External parties", body = ExternalPartiesResponse),
-        (status = 503, description = "Discovery pending or failed", body = ErrorResponse)
+        (status = 503, description = "Discovery failed and no earlier result exists", body = ErrorResponse)
     )
 )]
 #[get("/external-parties")]
 pub async fn list_external_parties(data: web::Data<AppState>) -> impl Responder {
-    match data.external_parties.snapshot().await {
-        Ok(hosted) => {
-            let parties = hosted
-                .into_iter()
-                .map(|p| ExternalPartyInfo {
-                    party_id: p.party_id,
-                    fingerprint: p.fingerprint,
-                    threshold: p.threshold,
-                    host_count: p.host_count,
-                    created_at: p.created_at,
-                    onboarding: p.onboarding,
-                    hosts: p
-                        .hosts
-                        .into_iter()
-                        .map(|h| ExternalPartyHost {
-                            participant_uid: h.participant_uid,
-                            permission: permission_from_proto(h.permission),
-                        })
-                        .collect(),
-                })
-                .collect();
-            HttpResponse::Ok().json(ExternalPartiesResponse { parties })
+    let (snapshot, refreshing, refresh_error) = match external_parties::read(&data) {
+        external_parties::View::Pending => {
+            return HttpResponse::Ok().json(ExternalPartiesResponse {
+                parties: Vec::new(),
+                fetched_at: None,
+                refreshing: true,
+                refresh_error: None,
+            });
         }
-        Err(e) => HttpResponse::ServiceUnavailable().json(ErrorResponse { error: e }),
-    }
+        external_parties::View::Failed(error) => {
+            return HttpResponse::ServiceUnavailable().json(ErrorResponse { error });
+        }
+        external_parties::View::Ready {
+            snapshot,
+            refreshing,
+            refresh_error,
+        } => (snapshot, refreshing, refresh_error),
+    };
+    let parties = snapshot
+        .parties
+        .into_iter()
+        .map(|p| ExternalPartyInfo {
+            party_id: p.party_id,
+            fingerprint: p.fingerprint,
+            threshold: p.threshold,
+            host_count: p.host_count,
+            created_at: p.created_at,
+            onboarding: p.onboarding,
+            hosts: p
+                .hosts
+                .into_iter()
+                .map(|h| ExternalPartyHost {
+                    participant_uid: h.participant_uid,
+                    permission: permission_from_proto(h.permission),
+                })
+                .collect(),
+        })
+        .collect();
+    HttpResponse::Ok().json(ExternalPartiesResponse {
+        parties,
+        fetched_at: Some(snapshot.fetched_at.to_rfc3339()),
+        refreshing,
+        refresh_error,
+    })
 }
 
 /// Pull `prefix` + `participants` out of the run's `config_json` and lift
