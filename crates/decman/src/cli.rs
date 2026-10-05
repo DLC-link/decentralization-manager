@@ -269,6 +269,11 @@ pub enum Commands {
         /// this and the sweep interval is shorter. Defaults to 3600.
         #[arg(long, env = "DECPM_REWARD_EXPIRY_READ_INTERVAL_SECS")]
         reward_expiry_read_interval_secs: Option<u64>,
+        /// How long the External Parties snapshot serves requests before a
+        /// request starts the next topology scan, in seconds. A scan reads the
+        /// whole topology store, so keep this in minutes. Defaults to 300.
+        #[arg(long, env = "DECPM_EXTERNAL_PARTIES_TTL_SECS")]
+        external_parties_ttl_secs: Option<u64>,
         /// Output contracts one Delegation_Assign may create, bounding the
         /// coupons per transaction. Raise stepwise to find the ledger's real
         /// ceiling; set too high, assigns fail and nothing is assigned.

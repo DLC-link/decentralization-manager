@@ -210,6 +210,7 @@ The database file path can be overridden with the `--db` CLI flag.
 | `DECPM_REWARD_EXPIRY_READ_INTERVAL_SECS` | How often the automation re-reads the backlog purely to refresh `decman_reward_oldest_unassigned_expires_in_seconds`, in seconds, when no sweep is due. Both expiry alert rules read that gauge, so this bounds how stale their input can get. A sweep reads the ledger too, so the gauge refreshes at whichever interval is shorter | `3600` |
 | `DECPM_REWARD_MAX_CREATES` | Output contracts one `Delegation_Assign` may create, which bounds the coupons per transaction. Lower it if assigns start failing | `100` |
 | `DECPM_REWARD_MIN_EXPIRY_MARGIN_SECS` | Time a coupon must have left before expiry to be assigned, in seconds. Guards against a coupon expiring mid-submission | `120` |
+| `DECPM_EXTERNAL_PARTIES_TTL_SECS` | How long the External Parties list serves requests before a request starts the next topology scan, in seconds. A scan reads the whole topology store, so keep this in minutes | `300` |
 
 All environment variables can also be passed as CLI arguments (e.g., `--canton-admin-host`).
 

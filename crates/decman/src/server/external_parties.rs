@@ -12,10 +12,8 @@ use chrono::{DateTime, Utc};
 use super::AppState;
 use crate::workflow::external_party::steps::{HostedExternalParty, list_hosted_external_parties};
 
-/// How long a snapshot serves requests before one of them starts the next scan.
-const SNAPSHOT_TTL: Duration = Duration::from_secs(5 * 60);
-
-/// How long requests wait after a failed scan before one starts another.
+/// How long requests wait after a failed scan before one starts another. A
+/// shorter snapshot TTL shortens this too.
 const RETRY_AFTER: Duration = Duration::from_secs(60);
 
 /// Devnet scans take minutes. Bound a stuck scan, but let it outlive HTTP and
@@ -32,9 +30,8 @@ struct CacheInner {
     /// Why the latest scan failed. A successful scan clears it.
     error: Option<String>,
     scanning: bool,
-    /// The earliest time a request may start the next scan. `None` until a
-    /// scan finishes.
-    next_scan: Option<Instant>,
+    /// When the latest scan finished. `None` until a scan finishes.
+    finished: Option<Instant>,
 }
 
 #[derive(Clone)]
@@ -59,7 +56,8 @@ pub enum View {
 
 /// Read the snapshot, and start a background scan if it is missing or stale.
 pub fn read(data: &web::Data<AppState>) -> View {
-    let (view, start) = data.external_parties.observe(Instant::now());
+    let ttl = Duration::from_secs(data.config.external_parties_ttl_secs);
+    let (view, start) = data.external_parties.observe(Instant::now(), ttl);
     if start {
         tokio::spawn(scan(data.clone()));
     }
@@ -121,9 +119,14 @@ impl ExternalPartiesCache {
 
     /// Return what a request sees, and whether the caller must start a scan.
     /// The claim happens under the lock, so at most one scan runs at a time.
-    fn observe(&self, now: Instant) -> (View, bool) {
+    fn observe(&self, now: Instant, ttl: Duration) -> (View, bool) {
         let mut inner = self.lock();
-        let start = !inner.scanning && inner.next_scan.is_none_or(|at| now >= at);
+        let wait = if inner.error.is_some() {
+            RETRY_AFTER.min(ttl)
+        } else {
+            ttl
+        };
+        let start = !inner.scanning && inner.finished.is_none_or(|at| now >= at + wait);
         inner.scanning |= start;
         (inner.view(), start)
     }
@@ -138,13 +141,10 @@ impl ExternalPartiesCache {
                     fetched_at: Utc::now(),
                 });
                 inner.error = None;
-                inner.next_scan = Some(now + SNAPSHOT_TTL);
             }
-            Err(error) => {
-                inner.error = Some(error);
-                inner.next_scan = Some(now + RETRY_AFTER);
-            }
+            Err(error) => inner.error = Some(error),
         }
+        inner.finished = Some(now);
     }
 }
 
@@ -168,6 +168,7 @@ mod tests {
     use actix_web::{App, http::StatusCode};
 
     const SECOND: Duration = Duration::from_secs(1);
+    const TTL: Duration = Duration::from_secs(300);
 
     fn party(party_id: &str) -> HostedExternalParty {
         HostedExternalParty {
@@ -203,10 +204,10 @@ mod tests {
     fn first_request_starts_one_scan_and_reports_pending() {
         let cache = ExternalPartiesCache::default();
         let now = Instant::now();
-        let (view, start) = cache.observe(now);
+        let (view, start) = cache.observe(now, TTL);
         assert!(start);
         assert!(matches!(view, View::Pending));
-        let (view, start) = cache.observe(now + SECOND);
+        let (view, start) = cache.observe(now + SECOND, TTL);
         assert!(!start, "a running scan must not start a second one");
         assert!(matches!(view, View::Pending));
     }
@@ -215,17 +216,17 @@ mod tests {
     fn snapshot_serves_until_ttl_then_refreshes_while_still_served() {
         let cache = ExternalPartiesCache::default();
         let t0 = Instant::now();
-        cache.observe(t0);
+        cache.observe(t0, TTL);
         cache.finish(Ok(vec![party("a::key")]), t0);
 
-        let (view, start) = cache.observe(t0 + SNAPSHOT_TTL - SECOND);
+        let (view, start) = cache.observe(t0 + TTL - SECOND, TTL);
         assert!(!start);
         let (parties, fetched_at, refreshing, refresh_error) = ready(view);
         assert_eq!(parties, ["a::key"]);
         assert!(!refreshing);
         assert_eq!(refresh_error, None);
 
-        let (view, start) = cache.observe(t0 + SNAPSHOT_TTL);
+        let (view, start) = cache.observe(t0 + TTL, TTL);
         assert!(start);
         let (parties, stale_fetched_at, refreshing, _) = ready(view);
         assert_eq!(parties, ["a::key"]);
@@ -237,14 +238,14 @@ mod tests {
     fn failed_refresh_keeps_last_good_snapshot_and_retries_after_backoff() {
         let cache = ExternalPartiesCache::default();
         let t0 = Instant::now();
-        cache.observe(t0);
+        cache.observe(t0, TTL);
         cache.finish(Ok(vec![party("a::key")]), t0);
-        let (_, fetched_at, _, _) = ready(cache.observe(t0).0);
+        let (_, fetched_at, _, _) = ready(cache.observe(t0, TTL).0);
 
-        let t1 = t0 + SNAPSHOT_TTL;
-        assert!(cache.observe(t1).1);
+        let t1 = t0 + TTL;
+        assert!(cache.observe(t1, TTL).1);
         cache.finish(Err("Canton unavailable".into()), t1);
-        let (view, start) = cache.observe(t1 + RETRY_AFTER - SECOND);
+        let (view, start) = cache.observe(t1 + RETRY_AFTER - SECOND, TTL);
         assert!(!start);
         let (parties, kept_fetched_at, refreshing, refresh_error) = ready(view);
         assert_eq!(parties, ["a::key"]);
@@ -253,9 +254,9 @@ mod tests {
         assert_eq!(refresh_error.as_deref(), Some("Canton unavailable"));
 
         let t2 = t1 + RETRY_AFTER;
-        assert!(cache.observe(t2).1);
+        assert!(cache.observe(t2, TTL).1);
         cache.finish(Ok(vec![party("b::key")]), t2);
-        let (parties, _, _, refresh_error) = ready(cache.observe(t2).0);
+        let (parties, _, _, refresh_error) = ready(cache.observe(t2, TTL).0);
         assert_eq!(parties, ["b::key"]);
         assert_eq!(refresh_error, None);
     }
@@ -264,36 +265,47 @@ mod tests {
     fn failure_without_snapshot_stays_failed_while_retrying() {
         let cache = ExternalPartiesCache::default();
         let t0 = Instant::now();
-        cache.observe(t0);
+        cache.observe(t0, TTL);
         cache.finish(Err("Canton unavailable".into()), t0);
 
-        let (view, start) = cache.observe(t0 + RETRY_AFTER - SECOND);
+        let (view, start) = cache.observe(t0 + RETRY_AFTER - SECOND, TTL);
         assert!(!start);
         assert!(matches!(view, View::Failed(e) if e == "Canton unavailable"));
         // The retry keeps the error visible: switching to Pending would hide
         // it for the whole scan and then show it again.
-        let (view, start) = cache.observe(t0 + RETRY_AFTER);
+        let (view, start) = cache.observe(t0 + RETRY_AFTER, TTL);
         assert!(start);
         assert!(matches!(view, View::Failed(e) if e == "Canton unavailable"));
+    }
+
+    #[test]
+    fn a_short_ttl_also_shortens_the_retry_delay() {
+        let cache = ExternalPartiesCache::default();
+        let ttl = 5 * SECOND;
+        let t0 = Instant::now();
+        cache.observe(t0, ttl);
+        cache.finish(Err("Canton unavailable".into()), t0);
+        assert!(!cache.observe(t0 + ttl - SECOND, ttl).1);
+        assert!(cache.observe(t0 + ttl, ttl).1);
     }
 
     #[actix_web::test]
     async fn scan_that_never_finishes_still_frees_the_next_scan() {
         let state = AppState::for_test(None).await.unwrap();
         let t0 = Instant::now();
-        assert!(state.external_parties.observe(t0).1);
+        assert!(state.external_parties.observe(t0, TTL).1);
         // A panicking or dropped scan task drops its guard without a result.
         drop(ScanGuard {
             data: state.clone(),
             result: None,
         });
-        let (view, start) = state.external_parties.observe(Instant::now());
+        let (view, start) = state.external_parties.observe(Instant::now(), TTL);
         assert!(!start, "the failure waits out the retry delay");
         assert!(matches!(view, View::Failed(e) if e.contains("stopped")));
         assert!(
             state
                 .external_parties
-                .observe(Instant::now() + RETRY_AFTER)
+                .observe(Instant::now() + RETRY_AFTER, TTL)
                 .1
         );
     }
@@ -314,7 +326,7 @@ mod tests {
         };
         // Claim the first scan as a request would, so the handler sees it
         // running and does not reach for the Canton the test config lacks.
-        assert!(state.external_parties.observe(Instant::now()).1);
+        assert!(state.external_parties.observe(Instant::now(), TTL).1);
         let response = actix_web::test::call_service(&app, request()).await;
         assert_eq!(response.status(), StatusCode::OK);
         let body: serde_json::Value = actix_web::test::read_body_json(response).await;

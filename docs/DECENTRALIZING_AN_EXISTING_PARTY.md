@@ -30,7 +30,8 @@ A party listed there is external. One whose namespace equals a participant's own
 namespace is local to that participant.
 
 The node answers from its last topology scan. A request for a list older than
-five minutes starts a new scan in the background. `fetched_at` says when the
+five minutes starts a new scan in the background.
+`DECPM_EXTERNAL_PARTIES_TTL_SECS` changes that age. `fetched_at` says when the
 last scan finished, and `refreshing` says whether a new one runs now. To read a
 fresh list, repeat the request until `refreshing` is `false`.
 

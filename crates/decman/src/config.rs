@@ -266,6 +266,9 @@ pub struct NodeConfig {
     /// the sweep interval stay long enough to fill a `Delegation_Assign` chunk
     /// without making the expiry signal that stale. Default 3600s.
     pub reward_expiry_read_interval_secs: u64,
+    /// How long (seconds) the external-parties snapshot serves requests before
+    /// a request starts the next topology scan. Default 300s.
+    pub external_parties_ttl_secs: u64,
     /// Ceiling on an ACS snapshot the wallet relays over the tenant API, in
     /// bytes.
     ///
@@ -327,6 +330,7 @@ impl Default for NodeConfig {
             noise_retry: NoiseRetryConfig::default(),
             reward_automation_interval_secs: 300,
             reward_expiry_read_interval_secs: 3600,
+            external_parties_ttl_secs: 300,
             reward_max_creates: 100,
             reward_min_expiry_margin_secs: 120,
             metrics_port: 9464,

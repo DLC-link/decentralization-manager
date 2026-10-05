@@ -29,6 +29,12 @@ export DECPM_TOPOLOGY_PROPAGATION_DELAY_SECS=3
 # the 48s/109s/219s spread this phase showed across runs.
 export DECPM_REWARD_AUTOMATION_INTERVAL_SECS=3
 
+# The External Parties snapshot TTL. The add-hosts phase polls
+# /external-parties for a host count that changes after the first scan, and
+# the 300s production default outlasts that step's 180s deadline. Exported for
+# the same respawn reason as the reward tick above.
+export DECPM_EXTERNAL_PARTIES_TTL_SECS=3
+
 # The peer's coordinator-poll cadence, which quantizes every multi-step
 # workflow: 100% of the suite's waits >=2s floored to an even second on the 2s
 # default, and "onboarding reaches completed" was exactly 22.0s (11 polls) in
