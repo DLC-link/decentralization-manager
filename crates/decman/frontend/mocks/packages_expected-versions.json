@@ -1,0 +1,12 @@
+{
+  "source": "DSO AmuletRules",
+  "fetched_at": 1790812800,
+  "packages": [
+    { "package_name": "splice-amulet", "version": "0.1.9" },
+    { "package_name": "splice-amulet-name-service", "version": "0.1.9" },
+    { "package_name": "splice-dso-governance", "version": "0.1.12" },
+    { "package_name": "splice-validator-lifecycle", "version": "0.1.3" },
+    { "package_name": "splice-wallet", "version": "0.1.10" },
+    { "package_name": "splice-wallet-payments", "version": "0.1.9" }
+  ]
+}
