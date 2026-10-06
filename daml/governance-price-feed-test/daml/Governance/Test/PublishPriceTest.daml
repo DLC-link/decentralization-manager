@@ -207,3 +207,17 @@ test_when_non_member_confirms_publish_then_confirm_rejected = script do
     given = given_open_feed
     when = when_outsider_confirms_publish
     then_ = then_fails_with (requirement "Confirmer is a governance member")
+
+-- | A proposal whose price was observed before the feed's current price.
+when_publish_observed_before_current_price : FeedFixture -> Script Text
+when_publish_observed_before_current_price f = do
+  passTime (minutes 5)
+  proposal <- publishProposal f
+  action <- propose proposal.proposer (proposal with observedAt = addRelTime f.feed.observedAt (minutes (-1)))
+  confirmAndTryExecute f.committee action
+
+test_when_publish_observed_before_current_price_then_execute_fails = script do
+  run Test with
+    given = given_open_feed
+    when = when_publish_observed_before_current_price
+    then_ = then_fails_with (requirement "Price is not older than the feed's price")

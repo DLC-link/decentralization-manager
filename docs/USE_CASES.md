@@ -680,8 +680,8 @@ contract, a `PriceFeedRegistry` and four `GovernableAction` proposals:
    id, asset, current round and price, the new price, when it was observed and a
    deadline. After the threshold confirms, the feed is replaced with the new price,
    the next round and the proposal's `observedAt`. A proposal against a superseded
-   feed, a misstated feed, past its deadline or with a future `observedAt` cannot
-   execute.
+   feed, a misstated feed, past its deadline, with a future `observedAt` or with an
+   `observedAt` older than the feed's current price cannot execute.
 5. `SetPriceFeedSubscribersProposal` replaces the subscriber list;
    `ClosePriceFeedProposal` archives the feed and releases its id.
 

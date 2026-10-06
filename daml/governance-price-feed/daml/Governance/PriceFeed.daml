@@ -45,28 +45,28 @@ fetchAttestedPrice expectedGovernanceParty expectedFeedId maxAge feedCid = do
 -- ============================================================================
 
 -- | Return type of `PriceFeed_Update`.
-data PriceFeed_UpdateResult = PriceFeed_UpdateResult
+data PriceFeed_Update_Result = PriceFeed_Update_Result
   with
     feedCid : ContractId PriceFeed
       -- ^ The new feed contract, at the next round.
   deriving (Eq, Show)
 
 -- | Return type of `PriceFeed_SetSubscribers`.
-data PriceFeed_SetSubscribersResult = PriceFeed_SetSubscribersResult
+data PriceFeed_SetSubscribers_Result = PriceFeed_SetSubscribers_Result
   with
     feedCid : ContractId PriceFeed
       -- ^ The new feed contract, at the same round and price.
   deriving (Eq, Show)
 
 -- | Return type of `PriceFeedRegistry_Register`.
-data PriceFeedRegistry_RegisterResult = PriceFeedRegistry_RegisterResult
+data PriceFeedRegistry_Register_Result = PriceFeedRegistry_Register_Result
   with
     registryCid : ContractId PriceFeedRegistry
       -- ^ The new registry contract, with the feed id added.
   deriving (Eq, Show)
 
 -- | Return type of `PriceFeedRegistry_Release`.
-data PriceFeedRegistry_ReleaseResult = PriceFeedRegistry_ReleaseResult
+data PriceFeedRegistry_Release_Result = PriceFeedRegistry_Release_Result
   with
     registryCid : ContractId PriceFeedRegistry
       -- ^ The new registry contract, with the feed id removed.
@@ -100,7 +100,7 @@ template PriceFeed
     observer subscribers
     ensure feedId /= "" && asset /= "" && price > 0.0 && round >= 0
 
-    choice PriceFeed_Update : PriceFeed_UpdateResult
+    choice PriceFeed_Update : PriceFeed_Update_Result
       with
         newPrice : Decimal
           -- ^ The confirmed new price.
@@ -109,16 +109,16 @@ template PriceFeed
       controller governanceParty
       do
         feedCid <- create this with price = newPrice; round = round + 1; observedAt = newObservedAt
-        pure PriceFeed_UpdateResult with feedCid
+        pure PriceFeed_Update_Result with feedCid
 
-    choice PriceFeed_SetSubscribers : PriceFeed_SetSubscribersResult
+    choice PriceFeed_SetSubscribers : PriceFeed_SetSubscribers_Result
       with
         newSubscribers : Set Party
           -- ^ The full new subscriber list; it replaces the old one.
       controller governanceParty
       do
         feedCid <- create this with subscribers = newSubscribers
-        pure PriceFeed_SetSubscribersResult with feedCid
+        pure PriceFeed_SetSubscribers_Result with feedCid
 
 -- | The governance party's set of open feed ids. Opening a feed registers its
 -- id and fails if the id is already open; closing a feed releases it. Daml LF
@@ -134,7 +134,7 @@ template PriceFeedRegistry
   where
     signatory governanceParty
 
-    choice PriceFeedRegistry_Register : PriceFeedRegistry_RegisterResult
+    choice PriceFeedRegistry_Register : PriceFeedRegistry_Register_Result
       with
         feedId : Text
           -- ^ The id of the feed being opened.
@@ -143,9 +143,9 @@ template PriceFeedRegistry
         let ids = fromOptional Set.empty openFeedIds
         require "Feed id is not already open" (Set.notMember feedId ids)
         registryCid <- create this with openFeedIds = Some (Set.insert feedId ids)
-        pure PriceFeedRegistry_RegisterResult with registryCid
+        pure PriceFeedRegistry_Register_Result with registryCid
 
-    choice PriceFeedRegistry_Release : PriceFeedRegistry_ReleaseResult
+    choice PriceFeedRegistry_Release : PriceFeedRegistry_Release_Result
       with
         feedId : Text
           -- ^ The id of the feed being closed.
@@ -156,7 +156,7 @@ template PriceFeedRegistry
         let remaining = Set.delete feedId ids
         registryCid <- create this with
           openFeedIds = if Set.null remaining then None else Some remaining
-        pure PriceFeedRegistry_ReleaseResult with registryCid
+        pure PriceFeedRegistry_Release_Result with registryCid
 
 -- ============================================================================
 -- Governance actions
@@ -260,6 +260,7 @@ template PublishPriceProposal
         require "Proposal names the feed's asset" (feed.asset == asset)
         require "Proposal states the feed's current round and price"
           (feed.round == fromRound && feed.price == fromPrice)
+        require "Price is not older than the feed's price" (observedAt >= feed.observedAt)
         _ <- exercise feedCid PriceFeed_Update with newPrice; newObservedAt = observedAt
         pure ()
 

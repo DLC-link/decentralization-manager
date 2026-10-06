@@ -54,6 +54,8 @@ Both price-carrying proposals have `observedAt` (when the price was observed) an
 `executeBefore` (a deadline). Execution fails if `now > executeBefore` or if
 `observedAt` lies in the future. The feed records the proposal's `observedAt`, not
 the execution time, so a vote executed late cannot make an old price look fresh.
+A publish also fails if its `observedAt` is older than the feed's current
+`observedAt`, so a new round never holds an older price than the round it replaces.
 
 ## One active feed per id
 

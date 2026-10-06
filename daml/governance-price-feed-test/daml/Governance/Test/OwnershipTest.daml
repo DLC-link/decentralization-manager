@@ -1,0 +1,167 @@
+-- Copyright (c) 2026 No Witness Labs. Contributed under the Apache License 2.0.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Tests for the checks that a proposal's feed and registry belong to the
+-- governance party. `executeImpl` runs with the proposer's authority as well
+-- as the governance party's, so a single member can otherwise point a
+-- proposal at a contract that member signed alone.
+module Governance.Test.OwnershipTest where
+
+import DA.Set qualified as Set
+import Daml.Script
+
+import Governance.Action (GovernableAction)
+import Governance.ExecutionResult
+import Governance.PriceFeed
+
+import Governance.Test.PriceFeedTestUtils
+import TestHarness
+
+-- ============================================================================
+-- When
+-- ============================================================================
+
+data Outcome = Outcome
+  with
+    executeError : Text
+      -- ^ The error text of the member's execute, or "succeeded".
+    committeeFeeds : [PriceFeed]
+      -- ^ The committee-signed `tbill-usd` feeds afterwards.
+    executionLabels : [Text]
+      -- ^ The action labels of every execution result afterwards.
+  deriving (Eq, Show)
+
+-- | Member1 and member2 confirm, and member1 executes. Member1 executes
+-- because only member1 can see the contract it signed alone.
+confirmAndExecuteAsMember1 : Committee -> ContractId GovernableAction -> Script Text
+confirmAndExecuteAsMember1 c action = do
+  let p = c.parties
+  confirmations <- confirmBy c action [p.member1, p.member2]
+  errorText <$> trySubmit (memberContext p.member1 p.governanceParty)
+    (executeCmd c p.member1 action confirmations)
+
+outcome : FeedFixture -> Text -> Script Outcome
+outcome f executeError = do
+  let gp = f.committee.parties.governanceParty
+  feeds <- query @PriceFeed gp
+  results <- query @GovernanceExecutionResult gp
+  pure Outcome with
+    executeError
+    committeeFeeds = [x | (_, x) <- feeds, x.governanceParty == gp, x.feedId == defaultFeedId]
+    executionLabels = map (\(_, r) -> r.actionLabel) results
+
+-- | A registry that member1 signs alone.
+memberRegistry : FeedFixture -> Optional (Set.Set Text) -> Script (ContractId PriceFeedRegistry)
+memberRegistry f openFeedIds =
+  submit f.committee.parties.member1 $ createCmd PriceFeedRegistry with
+    governanceParty = f.committee.parties.member1; openFeedIds
+
+-- | A copy of the committee's feed that member1 signs alone.
+memberFeed : FeedFixture -> Script (ContractId PriceFeed)
+memberFeed f =
+  submit f.committee.parties.member1 $ createCmd (f.feed with governanceParty = f.committee.parties.member1)
+
+-- | Member1 opens a second `tbill-usd` against a registry it signed.
+when_open_names_member_registry : FeedFixture -> Script Outcome
+when_open_names_member_registry f = do
+  registryCid <- memberRegistry f None
+  proposal <- openProposal f.committee defaultFeedId (Set.singleton f.committee.parties.app)
+  action <- propose proposal.proposer (proposal with registryCid)
+  confirmAndExecuteAsMember1 f.committee action >>= outcome f
+
+-- | Member1 closes the committee's feed against a registry it signed, so the
+-- committee's registry keeps `tbill-usd` open with no feed behind it.
+when_close_names_member_registry : FeedFixture -> Script Outcome
+when_close_names_member_registry f = do
+  registryCid <- memberRegistry f (Some (Set.singleton defaultFeedId))
+  action <- propose f.committee.parties.member1 ClosePriceFeedProposal with
+    governanceParty = f.committee.parties.governanceParty
+    proposer = f.committee.parties.member1
+    registryCid
+    feedCid = f.feedCid
+    feedId = defaultFeedId
+  confirmAndExecuteAsMember1 f.committee action >>= outcome f
+
+-- | Member1 closes its own feed against the committee's registry, which
+-- releases `tbill-usd` while the committee's feed is still open. An honest
+-- open then succeeds.
+when_close_names_member_feed_then_id_reopened : FeedFixture -> Script Outcome
+when_close_names_member_feed_then_id_reopened f = do
+  feedCid <- memberFeed f
+  (registryCid, _) <- currentRegistry f.committee
+  action <- propose f.committee.parties.member1 ClosePriceFeedProposal with
+    governanceParty = f.committee.parties.governanceParty
+    proposer = f.committee.parties.member1
+    registryCid
+    feedCid
+    feedId = defaultFeedId
+  executeError <- confirmAndExecuteAsMember1 f.committee action
+  reopen <- openProposal f.committee defaultFeedId Set.empty
+  _ <- propose reopen.proposer reopen >>= confirmAndTryExecute f.committee
+  outcome f executeError
+
+-- | Member1 publishes against its own feed; the committee's feed does not move.
+when_publish_names_member_feed : FeedFixture -> Script Outcome
+when_publish_names_member_feed f = do
+  feedCid <- memberFeed f
+  proposal <- publishProposal (f with feedCid)
+  action <- propose proposal.proposer proposal
+  confirmAndExecuteAsMember1 f.committee action >>= outcome f
+
+-- | Member1 changes the subscribers of its own feed.
+when_set_subscribers_names_member_feed : FeedFixture -> Script Outcome
+when_set_subscribers_names_member_feed f = do
+  feedCid <- memberFeed f
+  action <- propose f.committee.parties.member1 SetPriceFeedSubscribersProposal with
+    governanceParty = f.committee.parties.governanceParty
+    proposer = f.committee.parties.member1
+    feedCid
+    feedId = defaultFeedId
+    subscribers = Set.singleton f.committee.parties.outsider
+  confirmAndExecuteAsMember1 f.committee action >>= outcome f
+
+-- ============================================================================
+-- Then
+-- ============================================================================
+
+-- | The execute failed with `expected`, the committee still has exactly its
+-- original feed, and no execution result exists apart from the fixture's open.
+then_rejected_and_nothing_changed : Text -> FeedFixture -> Outcome -> Script Failures
+then_rejected_and_nothing_changed expected f o = pure $
+  shouldFailWith (requirement expected) o.executeError <>
+  shouldBe "committee tbill-usd feeds" [f.feed] o.committeeFeeds <>
+  shouldBe "execution results" ["OpenPriceFeed"] o.executionLabels
+
+-- ============================================================================
+-- Tests
+-- ============================================================================
+
+test_when_open_names_member_registry_then_execute_fails = script do
+  run Test with
+    given = given_open_feed
+    when = when_open_names_member_registry
+    then_ = then_rejected_and_nothing_changed "Registry belongs to the governance party"
+
+test_when_close_names_member_registry_then_execute_fails = script do
+  run Test with
+    given = given_open_feed
+    when = when_close_names_member_registry
+    then_ = then_rejected_and_nothing_changed "Registry belongs to the governance party"
+
+test_when_close_names_member_feed_then_execute_fails = script do
+  run Test with
+    given = given_open_feed
+    when = when_close_names_member_feed_then_id_reopened
+    then_ = then_rejected_and_nothing_changed "Feed belongs to the governance party"
+
+test_when_publish_names_member_feed_then_execute_fails = script do
+  run Test with
+    given = given_open_feed
+    when = when_publish_names_member_feed
+    then_ = then_rejected_and_nothing_changed "Feed belongs to the governance party"
+
+test_when_set_subscribers_names_member_feed_then_execute_fails = script do
+  run Test with
+    given = given_open_feed
+    when = when_set_subscribers_names_member_feed
+    then_ = then_rejected_and_nothing_changed "Feed belongs to the governance party"
