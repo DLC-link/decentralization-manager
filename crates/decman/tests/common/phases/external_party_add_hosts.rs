@@ -109,7 +109,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     });
                     for host in [f.p1.http, f.p2.http] {
                         let _: Value = f
-                            .post_json(host, "/v0/tenant/onboard", &onboard_req)
+                            .post_json(host, "/v0/tenant/execute", &onboard_req)
                             .await?;
                     }
                     Ok(())
@@ -233,7 +233,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                             "signed_by": ExternalKeyPair::from_seed(seed).fingerprint(),
                         });
                         let _: Value = f
-                            .post_json(f.p3.http, "/v0/tenant/add-hosts/onboard", &onboard_req)
+                            .post_json(f.p3.http, "/v0/tenant/add-hosts/execute", &onboard_req)
                             .await?;
                         Ok(())
                     })
@@ -510,7 +510,7 @@ async fn raise_threshold(f: &mut Fixture, party_id: &str, seed: [u8; 32]) -> any
                     // A threshold change needs the party namespace alone, so one
                     // host carries it.
                     let _: Value = f
-                        .post_json(f.p1.http, "/v0/tenant/threshold/onboard", &onboard)
+                        .post_json(f.p1.http, "/v0/tenant/threshold/execute", &onboard)
                         .await?;
                     Ok(())
                 })

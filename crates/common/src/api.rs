@@ -469,7 +469,7 @@ pub struct TenantPrepareResponse {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct TenantOnboardRequest {
+pub struct TenantExecuteRequest {
     pub party_hint: String,
     /// The party's raw Ed25519 public key, base64-encoded.
     pub public_key: String,
@@ -486,13 +486,13 @@ pub struct TenantOnboardRequest {
 }
 
 /// Response to a wallet onboarding request. Reports this host's view only: the
-/// wallet calls `/onboard` on every host and aggregates. `Completed` means this
+/// wallet calls `/execute` on every host and aggregates. `Completed` means this
 /// host's authorized `PartyToParticipant` names it; `InProgress` means the
 /// topology is still a proposal here (more hosts must sign).
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct TenantOnboardResponse {
+pub struct TenantExecuteResponse {
     pub status: WorkflowProgress,
     pub party_id: String,
 }
@@ -567,7 +567,7 @@ pub struct TenantAddHostsPrepareResponse {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct TenantAddHostsOnboardRequest {
+pub struct TenantAddHostsExecuteRequest {
     /// Full party id of the party gaining hosts.
     pub party_id: String,
     /// The serial the wallet pinned when it prepared. Re-checked against this
@@ -588,7 +588,7 @@ pub struct TenantAddHostsOnboardRequest {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct TenantAddHostsOnboardResponse {
+pub struct TenantAddHostsExecuteResponse {
     pub status: WorkflowProgress,
     pub party_id: String,
     /// The serial this host now has for the party. Advances once the change is
@@ -718,7 +718,7 @@ pub struct TenantThresholdRequest {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct TenantThresholdOnboardRequest {
+pub struct TenantThresholdExecuteRequest {
     pub party_id: String,
     pub base_serial: u32,
     pub topology_transactions: Vec<String>,
@@ -746,7 +746,7 @@ pub struct LocalPartyAdoptRequest {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct LocalPartyAdoptOnboardRequest {
+pub struct LocalPartyAdoptExecuteRequest {
     pub party_id: String,
     pub base_serial: u32,
     /// The adopted key, so the host can rebuild what the mapping must carry

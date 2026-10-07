@@ -375,7 +375,7 @@ pub async fn prepare_topology(
     // same party. Without it each host lists itself first, the serialized bytes
     // differ, and the wallet cannot compare what the hosts prepared against each
     // other — which is the only thing standing between it and a lying host (see
-    // `onboard_co_validated` in the wallet crate). Order carries no meaning to
+    // `execute_co_validated` in the wallet crate). Order carries no meaning to
     // Canton; the hosting set is a set.
     participants.sort_by(|a, b| a.participant_uid.cmp(&b.participant_uid));
 
@@ -440,7 +440,7 @@ pub async fn prepare_topology(
 }
 
 /// The party-signed onboarding bundle the wallet submits to each host's
-/// `/v0/tenant/onboard`: the unsigned topology transactions plus the party's
+/// `/v0/tenant/execute`: the unsigned topology transactions plus the party's
 /// signature per transaction. Each host attaches those signatures, adds its own
 /// participant authorization, and submits to its own synchronizer store.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -461,7 +461,7 @@ pub struct ExternalPartyAllocatePayload {
 
 /// Authorize hosting the external party on this node's participant: attach the
 /// party's signatures to the onboarding transactions, have this node co-sign, and
-/// submit them to the synchronizer store. Called by `/v0/tenant/onboard`, which the
+/// submit them to the synchronizer store. Called by `/v0/tenant/execute`, which the
 /// wallet invokes on each host independently.
 ///
 /// All three RPCs are on the tokenless Admin API, so this needs no ledger

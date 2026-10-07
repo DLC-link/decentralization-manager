@@ -464,17 +464,17 @@ The table below is a curated subset. A complete, interactive API reference is av
 | `/packages/vetted` | GET | Returns packages uploaded on this node |
 | `/external-parties` | GET | Lists the external (co-validated) parties this node hosts |
 | `/v0/tenant/prepare` | POST | Wallet-facing: builds an external party's onboarding topology and returns the hash to sign |
-| `/v0/tenant/onboard` | POST | Wallet-facing: validates the wallet's signed topology, co-signs, and submits it |
+| `/v0/tenant/execute` | POST | Wallet-facing: validates the wallet's signed topology, co-signs, and submits it |
 | `/v0/tenant/{party}/status` | GET | Wallet-facing: reports whether this host has the party hosted yet |
 | `/v0/tenant/{party}/state` | GET | Wallet-facing: the party's current serial, threshold and host count, so a caller can pin `base_serial` on the next write |
 | `/v0/tenant/add-hosts/prepare` | POST | Wallet-facing: builds the serial-N+1 topology that adds hosts to an existing external party |
-| `/v0/tenant/add-hosts/onboard` | POST | Wallet-facing: validates the wallet-signed add-hosts topology, co-signs, and submits it |
+| `/v0/tenant/add-hosts/execute` | POST | Wallet-facing: validates the wallet-signed add-hosts topology, co-signs, and submits it |
 | `/v0/tenant/{party}/acs/{target}` | GET | Wallet-facing: serves one block of the party's ACS scoped to a joining host (`?seq=`), for the wallet to relay. The host keeps the Canton export stream open between blocks |
 | `/v0/tenant/add-hosts/import` | POST | Wallet-facing: feeds one relayed block straight into this host's open Canton import, clearing the onboarding marker when the final block lands |
 | `/v0/tenant/threshold/prepare` | POST | Wallet-facing: builds a confirmation-threshold change |
-| `/v0/tenant/threshold/onboard` | POST | Wallet-facing: submits the wallet-signed threshold change |
+| `/v0/tenant/threshold/execute` | POST | Wallet-facing: submits the wallet-signed threshold change |
 | `/v0/tenant/local-party/adopt-key/prepare` | POST | Wallet-facing: builds the conversion that gives a local party an owner-held signing key |
-| `/v0/tenant/local-party/adopt-key/onboard` | POST | Wallet-facing: co-signs and submits the owner-signed conversion |
+| `/v0/tenant/local-party/adopt-key/execute` | POST | Wallet-facing: co-signs and submits the owner-signed conversion |
 
 The `/v0/tenant/*` endpoints are the tenant API. They authenticate with a
 separate tenant API key rather than the operator JWT, and are driven by

@@ -9,10 +9,10 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use common::{
     api::{
         TenantAcsBlockResponse, TenantAcsImportRequest, TenantAcsImportResponse,
-        TenantAddHostsOnboardRequest, TenantAddHostsOnboardResponse, TenantAddHostsPrepareResponse,
-        TenantAddHostsRequest, TenantOnboardRequest, TenantOnboardResponse,
+        TenantAddHostsExecuteRequest, TenantAddHostsExecuteResponse, TenantAddHostsPrepareResponse,
+        TenantAddHostsRequest, TenantExecuteRequest, TenantExecuteResponse,
         TenantPartyStateResponse, TenantPrepareRequest, TenantPrepareResponse,
-        TenantThresholdOnboardRequest, TenantThresholdRequest,
+        TenantThresholdExecuteRequest, TenantThresholdRequest,
     },
     canton_id::CantonId,
     types::WorkflowProgress,
@@ -88,10 +88,10 @@ impl TenantClient {
         self.post("/v0/tenant/prepare", req).await
     }
 
-    /// `POST /v0/tenant/onboard` — submit the wallet-signed bundle to THIS host.
+    /// `POST /v0/tenant/execute` — submit the wallet-signed bundle to THIS host.
     /// Idempotent, so a retry after a network blip is safe.
-    pub async fn onboard(&self, req: &TenantOnboardRequest) -> Result<TenantOnboardResponse> {
-        self.post("/v0/tenant/onboard", req).await
+    pub async fn execute(&self, req: &TenantExecuteRequest) -> Result<TenantExecuteResponse> {
+        self.post("/v0/tenant/execute", req).await
     }
 
     /// `GET /v0/tenant/{party}/status` — this host's view of the party.
@@ -129,13 +129,13 @@ impl TenantClient {
         self.post("/v0/tenant/add-hosts/prepare", req).await
     }
 
-    /// `POST /v0/tenant/add-hosts/onboard` — submit the signed add-hosts bundle
+    /// `POST /v0/tenant/add-hosts/execute` — submit the signed add-hosts bundle
     /// to THIS host.
-    pub async fn add_hosts_onboard(
+    pub async fn add_hosts_execute(
         &self,
-        req: &TenantAddHostsOnboardRequest,
-    ) -> Result<TenantAddHostsOnboardResponse> {
-        self.post("/v0/tenant/add-hosts/onboard", req).await
+        req: &TenantAddHostsExecuteRequest,
+    ) -> Result<TenantAddHostsExecuteResponse> {
+        self.post("/v0/tenant/add-hosts/execute", req).await
     }
 
     /// `GET /v0/tenant/{party}/acs/{target}?seq=` — one block of the party's ACS
@@ -176,12 +176,12 @@ impl TenantClient {
         self.post("/v0/tenant/threshold/prepare", req).await
     }
 
-    /// `POST /v0/tenant/threshold/onboard` — submit the signed threshold change.
-    pub async fn threshold_onboard(
+    /// `POST /v0/tenant/threshold/execute` — submit the signed threshold change.
+    pub async fn threshold_execute(
         &self,
-        req: &TenantThresholdOnboardRequest,
-    ) -> Result<TenantAddHostsOnboardResponse> {
-        self.post("/v0/tenant/threshold/onboard", req).await
+        req: &TenantThresholdExecuteRequest,
+    ) -> Result<TenantAddHostsExecuteResponse> {
+        self.post("/v0/tenant/threshold/execute", req).await
     }
 
     /// Base64-decode a field the host sent us, tagging which field it was.

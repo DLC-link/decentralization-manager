@@ -27,12 +27,12 @@ use crate::{
         AppState,
         middleware::require_tenant_api_key,
         types::{
-            ErrorResponse, LocalPartyAdoptOnboardRequest, LocalPartyAdoptRequest,
+            ErrorResponse, LocalPartyAdoptExecuteRequest, LocalPartyAdoptRequest,
             TenantAcsBlockResponse, TenantAcsImportRequest, TenantAcsImportResponse,
-            TenantAddHostsOnboardRequest, TenantAddHostsOnboardResponse,
-            TenantAddHostsPrepareResponse, TenantAddHostsRequest, TenantOnboardRequest,
-            TenantOnboardResponse, TenantPartyStateResponse, TenantPrepareRequest,
-            TenantPrepareResponse, TenantThresholdOnboardRequest, TenantThresholdRequest,
+            TenantAddHostsExecuteRequest, TenantAddHostsExecuteResponse,
+            TenantAddHostsPrepareResponse, TenantAddHostsRequest, TenantExecuteRequest,
+            TenantExecuteResponse, TenantPartyStateResponse, TenantPrepareRequest,
+            TenantPrepareResponse, TenantThresholdExecuteRequest, TenantThresholdRequest,
             WorkflowProgress, WorkflowStatusResponse,
         },
     },
@@ -107,7 +107,7 @@ pub async fn tenant_prepare(
     };
 
     // No run is registered here — the wallet signs the returned hashes and calls
-    // `/v0/tenant/onboard` next.
+    // `/v0/tenant/execute` next.
     match prepare_topology(
         &data.config,
         &body.party_hint,
@@ -145,19 +145,19 @@ pub async fn tenant_prepare(
 /// (`ALREADY_EXISTS` counts as success), so the wallet can safely retry a host.
 #[utoipa::path(
     tag = "Tenant",
-    request_body = TenantOnboardRequest,
+    request_body = TenantExecuteRequest,
     responses(
-        (status = 202, description = "Allocated on this host (status reflects this host's view)", body = TenantOnboardResponse),
+        (status = 202, description = "Allocated on this host (status reflects this host's view)", body = TenantExecuteResponse),
         (status = 400, description = "Bad request (bad base64, or signed_by != public_key fingerprint)", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
         (status = 500, description = "Allocation failed on this participant", body = ErrorResponse)
     )
 )]
-#[post("/v0/tenant/onboard")]
-pub async fn tenant_onboard(
+#[post("/v0/tenant/execute")]
+pub async fn tenant_execute(
     http_req: HttpRequest,
     data: web::Data<AppState>,
-    body: web::Json<TenantOnboardRequest>,
+    body: web::Json<TenantExecuteRequest>,
 ) -> impl Responder {
     if let Err(resp) = require_tenant_api_key(&http_req, &data) {
         return resp;
@@ -227,12 +227,12 @@ pub async fn tenant_onboard(
         signed_by: body.signed_by.clone(),
     };
 
-    // Submit on THIS participant only. The wallet calls `/onboard` on every host
+    // Submit on THIS participant only. The wallet calls `/execute` on every host
     // itself; no host relays to another. Canton keeps the topology a proposal until
     // every host has authorized it, and re-submitting an identical transaction is a
     // no-op, so a wallet retry converges.
     if let Err(e) = allocate_party(&data.config, &bundle).await {
-        tracing::error!("tenant onboard: allocate on this participant failed: {e:#}");
+        tracing::error!("tenant execute: allocate on this participant failed: {e:#}");
         return HttpResponse::InternalServerError().json(ErrorResponse {
             error: "Failed to allocate the external party on this host; see the host's logs"
                 .to_string(),
@@ -245,11 +245,11 @@ pub async fn tenant_onboard(
         Ok(HostOnboardingStatus::Hosted) => WorkflowProgress::Completed,
         Ok(_) => WorkflowProgress::InProgress,
         Err(e) => {
-            tracing::warn!("tenant onboard: post-allocate status read failed: {e:#}");
+            tracing::warn!("tenant execute: post-allocate status read failed: {e:#}");
             WorkflowProgress::InProgress
         }
     };
-    HttpResponse::Accepted().json(TenantOnboardResponse { status, party_id })
+    HttpResponse::Accepted().json(TenantExecuteResponse { status, party_id })
 }
 
 /// Onboarding status of a wallet-held party on THIS host, read from the
@@ -383,11 +383,11 @@ pub async fn tenant_add_hosts_prepare(
 
 /// Authorize the add-hosts change with THIS node's own namespace key.
 ///
-/// The counterpart to `add-hosts/onboard` for a party nobody can sign for from
+/// The counterpart to `add-hosts/execute` for a party nobody can sign for from
 /// outside Canton: one that is, or once was, local. Its namespace is a
 /// participant's root key, that key lives in Canton's vault, and adopting a
 /// signing key does not move the namespace — so no wallet signature can ever
-/// satisfy `onboard`.
+/// satisfy `execute`.
 ///
 /// The caller invokes this on the node owning the party's namespace AND on each
 /// joining node. Canton wants both halves for an add and neither node holds
@@ -397,7 +397,7 @@ pub async fn tenant_add_hosts_prepare(
     tag = "Tenant",
     request_body = TenantAddHostsRequest,
     responses(
-        (status = 202, description = "Authorized on this node", body = TenantAddHostsOnboardResponse),
+        (status = 202, description = "Authorized on this node", body = TenantAddHostsExecuteResponse),
         (status = 400, description = "Bad host set, or a change this node holds no key for", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
         (status = 404, description = "No authorized PartyToParticipant for this party", body = ErrorResponse),
@@ -452,7 +452,7 @@ pub async fn tenant_add_hosts_authorize(
         }
     };
 
-    HttpResponse::Accepted().json(TenantAddHostsOnboardResponse {
+    HttpResponse::Accepted().json(TenantAddHostsExecuteResponse {
         status,
         party_id: body.party_id.clone(),
         serial,
@@ -468,9 +468,9 @@ pub async fn tenant_add_hosts_authorize(
 /// contracts, so a forged serial N+1 could otherwise evict its current hosts.
 #[utoipa::path(
     tag = "Tenant",
-    request_body = TenantAddHostsOnboardRequest,
+    request_body = TenantAddHostsExecuteRequest,
     responses(
-        (status = 202, description = "Submitted on this host", body = TenantAddHostsOnboardResponse),
+        (status = 202, description = "Submitted on this host", body = TenantAddHostsExecuteResponse),
         (status = 400, description = "Bad request, or topology that is not a plain add-hosts", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
         (status = 404, description = "No authorized PartyToParticipant for this party", body = ErrorResponse),
@@ -478,11 +478,11 @@ pub async fn tenant_add_hosts_authorize(
         (status = 500, description = "A Canton call failed on this host", body = ErrorResponse)
     )
 )]
-#[post("/v0/tenant/add-hosts/onboard")]
-pub async fn tenant_add_hosts_onboard(
+#[post("/v0/tenant/add-hosts/execute")]
+pub async fn tenant_add_hosts_execute(
     http_req: HttpRequest,
     data: web::Data<AppState>,
-    body: web::Json<TenantAddHostsOnboardRequest>,
+    body: web::Json<TenantAddHostsExecuteRequest>,
 ) -> impl Responder {
     if let Err(resp) = require_tenant_api_key(&http_req, &data) {
         return resp;
@@ -518,7 +518,7 @@ pub async fn tenant_add_hosts_onboard(
 
     let base_serial = match submit_add_hosts(&data.config, &bundle).await {
         Ok(serial) => serial,
-        Err(e) => return add_hosts_error_response("onboard", e),
+        Err(e) => return add_hosts_error_response("execute", e),
     };
 
     // Report this host's view. The serial advances only once the change is
@@ -530,12 +530,12 @@ pub async fn tenant_add_hosts_onboard(
         Ok(Some(current)) => (WorkflowProgress::InProgress, current.serial),
         Ok(None) => (WorkflowProgress::InProgress, base_serial),
         Err(e) => {
-            tracing::warn!("tenant add-hosts onboard: post-submit status read failed: {e:#}");
+            tracing::warn!("tenant add-hosts execute: post-submit status read failed: {e:#}");
             (WorkflowProgress::InProgress, base_serial)
         }
     };
 
-    HttpResponse::Accepted().json(TenantAddHostsOnboardResponse {
+    HttpResponse::Accepted().json(TenantAddHostsExecuteResponse {
         status,
         party_id: body.party_id.clone(),
         serial,
@@ -952,8 +952,8 @@ pub async fn tenant_threshold_prepare(
 
 /// Authorize a threshold change with THIS node's own namespace key.
 ///
-/// The counterpart to `threshold/onboard` for a party nobody can sign for from
-/// outside Canton: one that is, or once was, local. `onboard` submits the
+/// The counterpart to `threshold/execute` for a party nobody can sign for from
+/// outside Canton: one that is, or once was, local. `execute` submits the
 /// caller's signature untouched and no node co-signs, so it can never serve a
 /// party whose namespace key sits in Canton's vault.
 ///
@@ -964,7 +964,7 @@ pub async fn tenant_threshold_prepare(
     tag = "Tenant",
     request_body = TenantThresholdRequest,
     responses(
-        (status = 202, description = "Authorized on this node", body = TenantAddHostsOnboardResponse),
+        (status = 202, description = "Authorized on this node", body = TenantAddHostsExecuteResponse),
         (status = 400, description = "A threshold this party cannot field, or a party this node holds no key for", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
         (status = 404, description = "No authorized PartyToParticipant for this party", body = ErrorResponse),
@@ -1008,7 +1008,7 @@ pub async fn tenant_threshold_authorize(
         }
     };
 
-    HttpResponse::Accepted().json(TenantAddHostsOnboardResponse {
+    HttpResponse::Accepted().json(TenantAddHostsExecuteResponse {
         status,
         party_id: body.party_id.clone(),
         serial,
@@ -1021,9 +1021,9 @@ pub async fn tenant_threshold_authorize(
 /// submits to its own store.
 #[utoipa::path(
     tag = "Tenant",
-    request_body = TenantThresholdOnboardRequest,
+    request_body = TenantThresholdExecuteRequest,
     responses(
-        (status = 202, description = "Submitted on this host", body = TenantAddHostsOnboardResponse),
+        (status = 202, description = "Submitted on this host", body = TenantAddHostsExecuteResponse),
         (status = 400, description = "Bad request, or a bundle that changes more than the threshold", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
         (status = 404, description = "This host does not host this party", body = ErrorResponse),
@@ -1031,11 +1031,11 @@ pub async fn tenant_threshold_authorize(
         (status = 500, description = "A Canton call failed on this host", body = ErrorResponse)
     )
 )]
-#[post("/v0/tenant/threshold/onboard")]
-pub async fn tenant_threshold_onboard(
+#[post("/v0/tenant/threshold/execute")]
+pub async fn tenant_threshold_execute(
     http_req: HttpRequest,
     data: web::Data<AppState>,
-    body: web::Json<TenantThresholdOnboardRequest>,
+    body: web::Json<TenantThresholdExecuteRequest>,
 ) -> impl Responder {
     if let Err(resp) = require_tenant_api_key(&http_req, &data) {
         return resp;
@@ -1060,7 +1060,7 @@ pub async fn tenant_threshold_onboard(
 
     let base_serial = match submit_threshold(&data.config, &bundle).await {
         Ok(serial) => serial,
-        Err(e) => return add_hosts_error_response("threshold onboard", e),
+        Err(e) => return add_hosts_error_response("threshold execute", e),
     };
 
     let (status, serial) = match read_party_to_participant(&data.config, &body.party_id).await {
@@ -1070,12 +1070,12 @@ pub async fn tenant_threshold_onboard(
         Ok(Some(current)) => (WorkflowProgress::InProgress, current.serial),
         Ok(None) => (WorkflowProgress::InProgress, base_serial),
         Err(e) => {
-            tracing::warn!("tenant threshold onboard: post-submit status read failed: {e:#}");
+            tracing::warn!("tenant threshold execute: post-submit status read failed: {e:#}");
             (WorkflowProgress::InProgress, base_serial)
         }
     };
 
-    HttpResponse::Accepted().json(TenantAddHostsOnboardResponse {
+    HttpResponse::Accepted().json(TenantAddHostsExecuteResponse {
         status,
         party_id: body.party_id.clone(),
         serial,
@@ -1201,9 +1201,9 @@ pub async fn tenant_local_party_adopt_prepare(
 /// which for a local party is the party's own namespace.
 #[utoipa::path(
     tag = "Tenant",
-    request_body = LocalPartyAdoptOnboardRequest,
+    request_body = LocalPartyAdoptExecuteRequest,
     responses(
-        (status = 202, description = "Submitted on this host", body = TenantAddHostsOnboardResponse),
+        (status = 202, description = "Submitted on this host", body = TenantAddHostsExecuteResponse),
         (status = 400, description = "Bad request, not local to this participant, or a bundle that changes more than adopting the key", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
         (status = 404, description = "No authorized mapping for this party on this host", body = ErrorResponse),
@@ -1211,11 +1211,11 @@ pub async fn tenant_local_party_adopt_prepare(
         (status = 500, description = "A Canton call failed on this host", body = ErrorResponse)
     )
 )]
-#[post("/v0/tenant/local-party/adopt-key/onboard")]
-pub async fn tenant_local_party_adopt_onboard(
+#[post("/v0/tenant/local-party/adopt-key/execute")]
+pub async fn tenant_local_party_adopt_execute(
     http_req: HttpRequest,
     data: web::Data<AppState>,
-    body: web::Json<LocalPartyAdoptOnboardRequest>,
+    body: web::Json<LocalPartyAdoptExecuteRequest>,
 ) -> impl Responder {
     if let Err(resp) = require_tenant_api_key(&http_req, &data) {
         return resp;
@@ -1224,7 +1224,7 @@ pub async fn tenant_local_party_adopt_onboard(
         Ok(key) => key,
         Err(resp) => return resp,
     };
-    // The same check `tenant_onboard` makes. Canton refuses the mismatch anyway,
+    // The same check `tenant_execute` makes. Canton refuses the mismatch anyway,
     // but as a 500 reading "AddTransactions RPC failed" — which does not tell
     // the caller which of the two fields was wrong.
     let derived_fingerprint = fingerprint_from_public_key(&public_key);
@@ -1258,7 +1258,7 @@ pub async fn tenant_local_party_adopt_onboard(
 
     let base_serial = match submit_adoption(&data.config, &bundle).await {
         Ok(serial) => serial,
-        Err(e) => return add_hosts_error_response("local-party adopt onboard", e),
+        Err(e) => return add_hosts_error_response("local-party adopt execute", e),
     };
 
     let (status, serial) = match read_party_to_participant(&data.config, &body.party_id).await {
@@ -1273,7 +1273,7 @@ pub async fn tenant_local_party_adopt_onboard(
         }
     };
 
-    HttpResponse::Accepted().json(TenantAddHostsOnboardResponse {
+    HttpResponse::Accepted().json(TenantAddHostsExecuteResponse {
         status,
         party_id: body.party_id.clone(),
         serial,
@@ -1419,7 +1419,7 @@ mod tests {
     }
 
     #[test]
-    fn add_hosts_onboard_request_keeps_its_wire_shape() {
+    fn add_hosts_execute_request_keeps_its_wire_shape() {
         let json = serde_json::json!({
             "party_id": "alice::1220aa",
             "base_serial": 4,
@@ -1427,8 +1427,8 @@ mod tests {
             "signatures": ["BAU="],
             "signed_by": "1220aa",
         });
-        let Ok(request) = serde_json::from_value::<TenantAddHostsOnboardRequest>(json) else {
-            panic!("the documented add-hosts onboard shape must deserialize");
+        let Ok(request) = serde_json::from_value::<TenantAddHostsExecuteRequest>(json) else {
+            panic!("the documented add-hosts execute shape must deserialize");
         };
         assert_eq!(
             request.signatures.len(),

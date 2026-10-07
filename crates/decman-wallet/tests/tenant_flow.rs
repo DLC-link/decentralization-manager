@@ -12,11 +12,11 @@
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use common::{
-    api::{HostPermission, TenantOnboardRequest, TenantPrepareRequest},
+    api::{HostPermission, TenantExecuteRequest, TenantPrepareRequest},
     canton_id::CantonId,
 };
 use decman_wallet::{
-    ExternalKeyPair, HostStatus, TenantClient, WalletHost, onboard_co_validated, statuses,
+    ExternalKeyPair, HostStatus, TenantClient, WalletHost, execute_co_validated, statuses,
 };
 use ed25519_dalek::{Verifier, VerifyingKey};
 use serde_json::json;
@@ -53,7 +53,7 @@ async fn stub_prepare(server: &MockServer, party_id: &str) {
 
 async fn stub_onboard(server: &MockServer, party_id: &str, status: &str) {
     Mock::given(method("POST"))
-        .and(path("/v0/tenant/onboard"))
+        .and(path("/v0/tenant/execute"))
         .respond_with(ResponseTemplate::new(202).set_body_json(json!({
             "status": status,
             "party_id": party_id,
@@ -82,13 +82,13 @@ async fn prepare_calls(server: &MockServer) -> usize {
 }
 
 /// Every onboard body the stub host received, decoded.
-async fn onboard_bodies(server: &MockServer) -> Vec<TenantOnboardRequest> {
+async fn onboard_bodies(server: &MockServer) -> Vec<TenantExecuteRequest> {
     let requests = server.received_requests().await.unwrap_or_default();
     requests
         .iter()
-        .filter(|r| r.url.path() == "/v0/tenant/onboard")
+        .filter(|r| r.url.path() == "/v0/tenant/execute")
         .map(
-            |r| match serde_json::from_slice::<TenantOnboardRequest>(&r.body) {
+            |r| match serde_json::from_slice::<TenantExecuteRequest>(&r.body) {
                 Ok(body) => body,
                 Err(e) => panic!("onboard body must match the wire DTO: {e}"),
             },
@@ -118,7 +118,7 @@ async fn onboarding_has_every_host_prepare_and_submits_one_signed_bundle_to_all(
         host_for(&p3, 0x33),
     ];
 
-    let party = match onboard_co_validated(&hosts, &key, "alice", Some(2)).await {
+    let party = match execute_co_validated(&hosts, &key, "alice", Some(2)).await {
         Ok(p) => p,
         Err(e) => panic!("onboarding must succeed against stub hosts: {e}"),
     };
@@ -245,7 +245,7 @@ async fn onboarding_refuses_to_sign_when_the_host_derives_a_different_party_id()
     stub_onboard(&p2, "alice::1220deadbeef", "inprogress").await;
     let hosts = vec![host_for(&p1, 0x11), host_for(&p2, 0x22)];
 
-    let error = match onboard_co_validated(&hosts, &key, "alice", None).await {
+    let error = match execute_co_validated(&hosts, &key, "alice", None).await {
         Ok(_) => panic!("a party-id mismatch must not be onboarded"),
         Err(e) => e,
     };
@@ -300,7 +300,7 @@ async fn refuses_to_sign_when_one_host_returns_a_different_hash() {
         host_for(&p3, 0x33),
     ];
 
-    let error = match onboard_co_validated(&hosts, &key, "alice", Some(2)).await {
+    let error = match execute_co_validated(&hosts, &key, "alice", Some(2)).await {
         Ok(_) => panic!("a host that disagrees about the hash must stop onboarding"),
         Err(e) => e,
     };
@@ -341,7 +341,7 @@ async fn refuses_to_sign_when_one_host_returns_different_transactions() {
         .await;
     let hosts = vec![host_for(&p1, 0x11), host_for(&p2, 0x22)];
 
-    let error = match onboard_co_validated(&hosts, &key, "alice", None).await {
+    let error = match execute_co_validated(&hosts, &key, "alice", None).await {
         Ok(_) => panic!("divergent topology must stop onboarding"),
         Err(e) => e,
     };
@@ -368,7 +368,7 @@ async fn a_failing_host_is_reported_without_stopping_the_others() {
     }
     stub_onboard(&p1, &party_id, "completed").await;
     Mock::given(method("POST"))
-        .and(path("/v0/tenant/onboard"))
+        .and(path("/v0/tenant/execute"))
         .respond_with(
             ResponseTemplate::new(500).set_body_json(json!({"error": "allocate failed here"})),
         )
@@ -381,7 +381,7 @@ async fn a_failing_host_is_reported_without_stopping_the_others() {
         host_for(&p3, 0x33),
     ];
 
-    let party = match onboard_co_validated(&hosts, &key, "alice", None).await {
+    let party = match execute_co_validated(&hosts, &key, "alice", None).await {
         Ok(p) => p,
         Err(e) => panic!("one bad host must not fail the whole run: {e}"),
     };
@@ -407,7 +407,7 @@ async fn onboarding_needs_more_than_one_host() {
     let p1 = MockServer::start().await;
     let hosts = vec![host_for(&p1, 0x11)];
 
-    let error = match onboard_co_validated(&hosts, &key, "alice", None).await {
+    let error = match execute_co_validated(&hosts, &key, "alice", None).await {
         Ok(_) => panic!("a single host is not co-validation"),
         Err(e) => e,
     };
@@ -504,9 +504,9 @@ async fn stub_add_hosts_prepare(server: &MockServer, serial: u32) {
         .await;
 }
 
-async fn stub_add_hosts_onboard(server: &MockServer, serial: u32) {
+async fn stub_add_hosts_execute(server: &MockServer, serial: u32) {
     Mock::given(method("POST"))
-        .and(path("/v0/tenant/add-hosts/onboard"))
+        .and(path("/v0/tenant/add-hosts/execute"))
         .respond_with(ResponseTemplate::new(202).set_body_json(json!({
             "status": "completed",
             "party_id": "alice::1220aa",
@@ -603,7 +603,7 @@ async fn add_hosts_prepares_on_every_host_and_submits_only_to_joiners() {
     for (s, serial) in [(&p1, 5u32), (&p2, 5), (&p3, 5)] {
         stub_add_hosts_prepare(s, serial).await;
     }
-    stub_add_hosts_onboard(&p3, 5).await;
+    stub_add_hosts_execute(&p3, 5).await;
     stub_acs_relay(&p1, &p3).await;
 
     let key = ExternalKeyPair::from_seed([4u8; 32]);
@@ -634,9 +634,9 @@ async fn add_hosts_prepares_on_every_host_and_submits_only_to_joiners() {
     }
     // Only the joiner submits: Canton needs the party namespace plus each new
     // participant, and the existing hosts are neither.
-    assert_eq!(add_hosts_onboard_calls(&p1).await, 0);
-    assert_eq!(add_hosts_onboard_calls(&p2).await, 0);
-    assert_eq!(add_hosts_onboard_calls(&p3).await, 1);
+    assert_eq!(add_hosts_execute_calls(&p1).await, 0);
+    assert_eq!(add_hosts_execute_calls(&p2).await, 0);
+    assert_eq!(add_hosts_execute_calls(&p3).await, 1);
     assert!(added.replicated, "the joiner should have been switched on");
     assert!(added.without_package_preflight.is_empty());
 }
@@ -655,7 +655,7 @@ async fn add_hosts_waits_out_a_marker_the_import_did_not_clear() {
     for s in [&p1, &p2, &p3] {
         stub_add_hosts_prepare(s, 5).await;
     }
-    stub_add_hosts_onboard(&p3, 5).await;
+    stub_add_hosts_execute(&p3, 5).await;
     stub_acs_source(&p1).await;
     // Imported, clear only requested.
     stub_import_blocks(&p3, false).await;
@@ -724,7 +724,7 @@ async fn add_hosts_falls_back_to_another_source_for_the_acs() {
     for s in [&p1, &p2, &p3] {
         stub_add_hosts_prepare(s, 5).await;
     }
-    stub_add_hosts_onboard(&p3, 5).await;
+    stub_add_hosts_execute(&p3, 5).await;
     Mock::given(method("GET"))
         .and(wiremock::matchers::path_regex(r"^/v0/tenant/.+/acs/.+$"))
         .respond_with(ResponseTemplate::new(500).set_body_json(json!({"error": "export failed"})))
@@ -773,7 +773,7 @@ async fn add_hosts_refuses_when_hosts_disagree() {
     stub_add_hosts_prepare(&p2, 5).await;
     // A different serial is a different transaction.
     stub_add_hosts_prepare(&p3, 9).await;
-    stub_add_hosts_onboard(&p3, 5).await;
+    stub_add_hosts_execute(&p3, 5).await;
 
     let key = ExternalKeyPair::from_seed([4u8; 32]);
     let current = vec![host_for(&p1, 1), host_for(&p2, 2)];
@@ -793,7 +793,7 @@ async fn add_hosts_refuses_when_hosts_disagree() {
     };
     assert!(format!("{e}").contains("disagree") || format!("{e:?}").contains("HostDisagreement"));
     // Nothing was submitted, so nothing was signed into topology.
-    assert_eq!(add_hosts_onboard_calls(&p3).await, 0);
+    assert_eq!(add_hosts_execute_calls(&p3).await, 0);
 }
 
 /// A threshold change needs fewer Canton signatures than an add, but the wallet
@@ -863,13 +863,13 @@ async fn add_hosts_prepare_calls(server: &MockServer) -> usize {
         .unwrap_or(0)
 }
 
-async fn add_hosts_onboard_calls(server: &MockServer) -> usize {
+async fn add_hosts_execute_calls(server: &MockServer) -> usize {
     server
         .received_requests()
         .await
         .map(|reqs| {
             reqs.iter()
-                .filter(|r| r.url.path() == "/v0/tenant/add-hosts/onboard")
+                .filter(|r| r.url.path() == "/v0/tenant/add-hosts/execute")
                 .count()
         })
         .unwrap_or(0)

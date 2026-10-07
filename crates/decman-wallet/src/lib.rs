@@ -13,7 +13,7 @@
 //! anywhere, and the node-side code cannot generate a party key at all.
 //!
 //! ```no_run
-//! use decman_wallet::{ExternalKeyPair, TenantClient, WalletHost, onboard_co_validated};
+//! use decman_wallet::{ExternalKeyPair, TenantClient, WalletHost, execute_co_validated};
 //! use common::canton_id::CantonId;
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -33,7 +33,7 @@
 //! let key = ExternalKeyPair::generate();
 //!
 //! // Prepare on one host, sign locally, onboard on every host.
-//! let party = onboard_co_validated(&hosts, &key, "alice", None).await?;
+//! let party = execute_co_validated(&hosts, &key, "alice", None).await?;
 //! println!("party {} across {} hosts", party.party_id, party.hosts.len());
 //! # Ok(())
 //! # }
@@ -54,7 +54,7 @@ pub mod signer;
 pub use client::{HostStatus, TenantClient};
 pub use error::{Error, Result};
 pub use flow::{
-    AddedHosts, HostReport, OnboardedParty, WalletHost, add_hosts, onboard_co_validated,
+    AddedHosts, HostReport, OnboardedParty, WalletHost, add_hosts, execute_co_validated,
     raise_threshold, statuses,
 };
 pub use key::ExternalKeyPair;

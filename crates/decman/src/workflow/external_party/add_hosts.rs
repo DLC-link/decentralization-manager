@@ -9,7 +9,7 @@
 //!
 //! Two rules make this a read-modify-write rather than a rewrite, and both exist
 //! because the wallet compares what every host prepared byte-for-byte before it
-//! signs (see `onboard_co_validated` in the wallet crate):
+//! signs (see `execute_co_validated` in the wallet crate):
 //!
 //! * The wallet pins the base serial in the request. Without it, two hosts that
 //!   read head state a moment apart would build different transactions and the

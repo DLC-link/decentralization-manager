@@ -559,7 +559,7 @@ only coordination store.
 | 1 | prepare | Wallet -> every host | `POST /v0/tenant/prepare`. Each host independently builds the serial-1 `PartyToParticipant` and returns it with the hash to sign |
 | 2 | compare | Wallet | Require every host's bytes to be identical; reject the onboarding otherwise |
 | 3 | sign | Wallet | Sign the hashes locally. The private key never leaves the wallet process |
-| 4 | onboard | Wallet -> every host | `POST /v0/tenant/onboard`. Each host re-validates the bytes, co-signs with its own topology key, and submits |
+| 4 | execute | Wallet -> every host | `POST /v0/tenant/execute`. Each host re-validates the bytes, co-signs with its own topology key, and submits |
 | 5 | poll | Wallet | `GET /v0/tenant/{party}/status` on every host until each reports the party hosted |
 
 Canton promotes the mapping once every host has authorized. The party's signing

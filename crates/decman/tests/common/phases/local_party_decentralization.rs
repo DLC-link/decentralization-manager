@@ -456,7 +456,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 let _: Value = f
                     .post_json(
                         f.p1.http,
-                        "/v0/tenant/local-party/adopt-key/onboard",
+                        "/v0/tenant/local-party/adopt-key/execute",
                         &json!({
                             "party_id": party_id,
                             "base_serial": base_serial,
@@ -600,7 +600,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     let refused: anyhow::Result<Value> = f
                         .post_json(
                             f.p2.http,
-                            "/v0/tenant/add-hosts/onboard",
+                            "/v0/tenant/add-hosts/execute",
                             &json!({
                                 "party_id": party_id,
                                 "base_serial": base_serial,
