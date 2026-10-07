@@ -167,6 +167,15 @@ fn normalize_intent_value(
                         .ok_or_else(|| anyhow::anyhow!("Missing record field value"))?,
                 )?;
             }
+            // LF's upgrade-friendly normalization omits trailing optional None
+            // fields from records. They are equivalent to omitted fields for
+            // the same pinned template; interior None and Some values are not.
+            while record.fields.last().is_some_and(|field| {
+                matches!(field.value.as_ref().and_then(|v| v.sum.as_ref()),
+                    Some(Sum::Optional(optional)) if optional.value.is_none())
+            }) {
+                record.fields.pop();
+            }
         }
         Some(Sum::Variant(variant)) => {
             variant.variant_id = None;

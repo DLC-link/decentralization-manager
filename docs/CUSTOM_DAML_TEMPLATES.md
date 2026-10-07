@@ -35,7 +35,8 @@ create. Peers reject substituted arguments, templates, exercises, and extra
 nodes before signing, and independently verify the prepared transaction hash.
 
 Argument commitments use DecMan's Daml value encoding after removing optional
-record labels and type annotations and sorting map entries. They are not hashes
+record labels and type annotations, sorting map entries, and omitting trailing
+optional `None` fields from records, as Canton does. They are not hashes
 of JSON. Contract invitations accepted before these commitments were introduced
 must be restarted from an upgraded coordinator; upgraded peers refuse to sign
 them. Upgrade the whole mesh before starting a deployment: Noise protocol 0xD3

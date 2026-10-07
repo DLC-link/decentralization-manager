@@ -552,6 +552,54 @@ mod deployment_intent_tests {
     }
 
     #[test]
+    fn argument_commitments_match_lf_trailing_none_normalization() -> Result {
+        let optional = |inner: Option<Value>| Value {
+            sum: Some(value::Sum::Optional(Box::new(
+                canton_proto_rs::com::daml::ledger::api::v2::Optional {
+                    value: inner.map(Box::new),
+                },
+            ))),
+        };
+        let record = |values: Vec<Value>| Value {
+            sum: Some(value::Sum::Record(Record {
+                record_id: None,
+                fields: values
+                    .into_iter()
+                    .map(|v| RecordField {
+                        label: String::new(),
+                        value: Some(v),
+                    })
+                    .collect(),
+            })),
+        };
+        let original = record(vec![argument("accepted"), optional(None)]);
+        let normalized = record(vec![argument("accepted")]);
+        assert_eq!(
+            canton_hash::hash_value(&original)?,
+            canton_hash::hash_value(&normalized)?
+        );
+        // Normalize recursively, including the outer record's trailing None.
+        assert_eq!(
+            canton_hash::hash_value(&record(vec![original, optional(None)]))?,
+            canton_hash::hash_value(&record(vec![normalized.clone()]))?
+        );
+        for changed in [
+            record(vec![
+                argument("accepted"),
+                optional(Some(argument("injected"))),
+            ]),
+            record(vec![optional(None), argument("accepted")]),
+            record(vec![argument("changed")]),
+        ] {
+            assert_ne!(
+                canton_hash::hash_value(&changed)?,
+                canton_hash::hash_value(&normalized)?
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn only_the_accepted_create_can_be_signed() -> Result {
         let intent = common::api::ContractDeploymentIntent {
             package_id: "a".repeat(64),
