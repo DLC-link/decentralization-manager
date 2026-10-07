@@ -52,8 +52,13 @@ pub async fn sign_submissions(
     db: &SqlitePool,
     instance_name: &str,
     dec_party_id: &CantonId,
+    intents: &[common::api::ContractDeploymentIntent],
 ) -> Result {
     tracing::info!("Signing submissions...");
+    anyhow::ensure!(
+        !intents.is_empty(),
+        "Contracts invitation has no deployment commitments; restart this workflow with an upgraded coordinator"
+    );
 
     let node_id = config.participant_id().to_string();
 
@@ -205,11 +210,18 @@ pub async fn sign_submissions(
     // for.
     let mut prepared_submissions: Vec<PrepareSubmissionResponse> =
         Vec::with_capacity(submission_rows.len());
-    for (ordinal, payload) in &submission_rows {
+    anyhow::ensure!(
+        submission_rows.len() == intents.len(),
+        "Prepared submission count differs from the accepted invitation"
+    );
+    for ((ordinal, payload), intent) in submission_rows.iter().zip(intents) {
         let prepared_sub: PrepareSubmissionResponse =
             utils::read_first_message_from_bytes(payload)?;
         verify_prepared_transaction(&prepared_sub, dec_party_id)
             .with_context(|| format!("prepared submission {ordinal} failed validation"))?;
+        verify_deployment_intent(&prepared_sub, intent).with_context(|| {
+            format!("prepared submission {ordinal} differs from the accepted create")
+        })?;
         tracing::debug!("Loaded prepared submission ordinal {ordinal}");
         prepared_submissions.push(prepared_sub);
     }
@@ -260,6 +272,56 @@ pub async fn sign_submissions(
     .await?;
 
     tracing::info!("Signatures saved successfully");
+    Ok(())
+}
+
+fn verify_deployment_intent(
+    prepared: &PrepareSubmissionResponse,
+    intent: &common::api::ContractDeploymentIntent,
+) -> Result {
+    use canton_proto_rs::com::daml::ledger::api::v2::interactive::{
+        daml_transaction::node::VersionedNode, transaction::v1::node::NodeType,
+    };
+    let transaction = prepared
+        .prepared_transaction
+        .as_ref()
+        .and_then(|p| p.transaction.as_ref())
+        .ok_or_else(|| anyhow::anyhow!("Missing transaction"))?;
+    anyhow::ensure!(
+        transaction.nodes.len() == 1 && transaction.roots.len() == 1,
+        "Each accepted contract authorizes exactly one create node"
+    );
+    let node = &transaction.nodes[0];
+    anyhow::ensure!(
+        transaction.roots[0] == node.node_id,
+        "Create must be the transaction root"
+    );
+    let Some(VersionedNode::V1(inner)) = &node.versioned_node else {
+        anyhow::bail!("Unsupported transaction node version");
+    };
+    let Some(NodeType::Create(create)) = &inner.node_type else {
+        anyhow::bail!(
+            "Contract deployment only authorizes creates, never exercises or other node types"
+        );
+    };
+    let template = create
+        .template_id
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Missing create template"))?;
+    anyhow::ensure!(
+        template.package_id == intent.package_id
+            && template.module_name == intent.module_name
+            && template.entity_name == intent.entity_name,
+        "Create template differs from the accepted invitation"
+    );
+    let argument = create
+        .argument
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Missing create argument"))?;
+    anyhow::ensure!(
+        canton_hash::hash_value(argument)? == intent.argument_hash,
+        "Create arguments differ from the accepted invitation"
+    );
     Ok(())
 }
 
@@ -461,4 +523,139 @@ async fn backfill_peer_keys(
     .fetch_optional(db)
     .await?;
     Ok(row.map(|(bytes,)| bytes))
+}
+
+#[cfg(test)]
+mod deployment_intent_tests {
+    use super::*;
+    use canton_proto_rs::com::daml::ledger::api::v2::{
+        Identifier, Record, RecordField, Value,
+        interactive::{
+            DamlTransaction, PreparedTransaction, daml_transaction,
+            transaction::v1::{self, node::NodeType},
+        },
+        value,
+    };
+
+    fn argument(text: &str) -> Value {
+        Value {
+            sum: Some(value::Sum::Record(Record {
+                record_id: None,
+                fields: vec![RecordField {
+                    label: String::new(),
+                    value: Some(Value {
+                        sum: Some(value::Sum::Text(text.into())),
+                    }),
+                }],
+            })),
+        }
+    }
+
+    #[test]
+    fn only_the_accepted_create_can_be_signed() -> Result {
+        let intent = common::api::ContractDeploymentIntent {
+            package_id: "a".repeat(64),
+            module_name: "Governance".into(),
+            entity_name: "Rules".into(),
+            argument_hash: canton_hash::hash_value(&argument("accepted"))?,
+        };
+        let create = v1::Create {
+            template_id: Some(Identifier {
+                package_id: intent.package_id.clone(),
+                module_name: intent.module_name.clone(),
+                entity_name: intent.entity_name.clone(),
+            }),
+            argument: Some(argument("accepted")),
+            ..Default::default()
+        };
+        let response = |node_type| PrepareSubmissionResponse {
+            prepared_transaction: Some(PreparedTransaction {
+                transaction: Some(DamlTransaction {
+                    roots: vec!["0".into()],
+                    nodes: vec![daml_transaction::Node {
+                        node_id: "0".into(),
+                        versioned_node: Some(daml_transaction::node::VersionedNode::V1(v1::Node {
+                            node_type: Some(node_type),
+                        })),
+                    }],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        verify_deployment_intent(&response(NodeType::Create(create.clone())), &intent)?;
+        for field in ["package", "module", "entity", "argument"] {
+            let mut changed = create.clone();
+            let template = changed
+                .template_id
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("missing test template"))?;
+            match field {
+                "package" => template.package_id = "b".repeat(64),
+                "module" => template.module_name = "Other".into(),
+                "entity" => template.entity_name = "Other".into(),
+                _ => changed.argument = Some(argument("substituted")),
+            }
+            assert!(
+                verify_deployment_intent(&response(NodeType::Create(changed)), &intent).is_err(),
+                "accepted changed {field}"
+            );
+        }
+        for node in [
+            NodeType::Exercise(Default::default()),
+            NodeType::Fetch(Default::default()),
+            NodeType::Rollback(Default::default()),
+        ] {
+            assert!(verify_deployment_intent(&response(node), &intent).is_err());
+        }
+        let mut extra = response(NodeType::Create(create));
+        let tx = extra
+            .prepared_transaction
+            .as_mut()
+            .and_then(|t| t.transaction.as_mut())
+            .ok_or_else(|| anyhow::anyhow!("missing transaction"))?;
+        tx.nodes.push(tx.nodes[0].clone());
+        assert!(verify_deployment_intent(&extra, &intent).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn argument_commitments_ignore_ledger_annotations_and_map_order() -> Result {
+        let original = argument("accepted");
+        let mut enriched = original.clone();
+        if let Some(value::Sum::Record(record)) = enriched.sum.as_mut() {
+            record.record_id = Some(Identifier {
+                package_id: "a".repeat(64),
+                module_name: "M".into(),
+                entity_name: "T".into(),
+            });
+            record.fields[0].label = "ledgerFieldName".into();
+        }
+        assert_eq!(
+            canton_hash::hash_value(&original)?,
+            canton_hash::hash_value(&enriched)?
+        );
+        let entries: Vec<_> = ["alice", "bob"]
+            .into_iter()
+            .map(
+                |party| canton_proto_rs::com::daml::ledger::api::v2::gen_map::Entry {
+                    key: Some(Value {
+                        sum: Some(value::Sum::Party(party.into())),
+                    }),
+                    value: Some(enriched.clone()),
+                },
+            )
+            .collect();
+        let map = |entries| Value {
+            sum: Some(value::Sum::GenMap(
+                canton_proto_rs::com::daml::ledger::api::v2::GenMap { entries },
+            )),
+        };
+        assert_eq!(
+            canton_hash::hash_value(&map(entries.clone()))?,
+            canton_hash::hash_value(&map(entries.into_iter().rev().collect()))?
+        );
+        Ok(())
+    }
 }

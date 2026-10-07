@@ -27,6 +27,8 @@ pub enum ChangeThresholdStep {
     SignProposals,
     /// Coordinator submits the change
     Submit,
+    /// Members retire the shadowed PartyToKeyMapping after the new topology is effective.
+    RetireLegacyKeys,
     /// Workflow complete
     Complete,
 }
@@ -35,6 +37,7 @@ impl WorkflowStep for ChangeThresholdStep {
     fn to_command(&self) -> Option<MessageType> {
         match self {
             Self::SignProposals => Some(MessageType::SignChangeThreshold),
+            Self::RetireLegacyKeys => Some(MessageType::RetireLegacyKeys),
             Self::Complete => Some(MessageType::Disconnect),
             Self::WaitingForPeers | Self::ExportState | Self::CreateProposals | Self::Submit => {
                 None
@@ -48,7 +51,8 @@ impl WorkflowStep for ChangeThresholdStep {
             Self::ExportState => Some(Self::CreateProposals),
             Self::CreateProposals => Some(Self::SignProposals),
             Self::SignProposals => Some(Self::Submit),
-            Self::Submit => Some(Self::Complete),
+            Self::Submit => Some(Self::RetireLegacyKeys),
+            Self::RetireLegacyKeys => Some(Self::Complete),
             Self::Complete => None,
         }
     }
@@ -68,12 +72,13 @@ impl WorkflowStep for ChangeThresholdStep {
             Self::CreateProposals => 2,
             Self::SignProposals => 3,
             Self::Submit => 4,
-            Self::Complete => 5,
+            Self::RetireLegacyKeys => 5,
+            Self::Complete => 6,
         }
     }
 
     fn step_total() -> i64 {
-        6
+        7
     }
 
     fn step_name(&self) -> &'static str {
@@ -83,6 +88,7 @@ impl WorkflowStep for ChangeThresholdStep {
             Self::CreateProposals => "CreateProposals",
             Self::SignProposals => "SignProposals",
             Self::Submit => "Submit",
+            Self::RetireLegacyKeys => "RetireLegacyKeys",
             Self::Complete => "Complete",
         }
     }
@@ -94,6 +100,7 @@ impl WorkflowStep for ChangeThresholdStep {
             "CreateProposals" => Self::CreateProposals,
             "SignProposals" => Self::SignProposals,
             "Submit" => Self::Submit,
+            "RetireLegacyKeys" => Self::RetireLegacyKeys,
             "Complete" => Self::Complete,
             _ => return None,
         })
@@ -126,6 +133,7 @@ mod tests {
                 ChangeThresholdStep::CreateProposals,
                 ChangeThresholdStep::SignProposals,
                 ChangeThresholdStep::Submit,
+                ChangeThresholdStep::RetireLegacyKeys,
                 ChangeThresholdStep::Complete,
             ]
         );
@@ -133,13 +141,14 @@ mod tests {
     }
 
     #[test]
-    fn only_sign_step_requires_peers_and_carries_a_command() {
+    fn only_sign_step_requires_peer_status_quorum() {
         for step in [
             ChangeThresholdStep::WaitingForPeers,
             ChangeThresholdStep::ExportState,
             ChangeThresholdStep::CreateProposals,
             ChangeThresholdStep::SignProposals,
             ChangeThresholdStep::Submit,
+            ChangeThresholdStep::RetireLegacyKeys,
             ChangeThresholdStep::Complete,
         ] {
             assert_eq!(
@@ -167,6 +176,7 @@ mod tests {
             ChangeThresholdStep::CreateProposals,
             ChangeThresholdStep::SignProposals,
             ChangeThresholdStep::Submit,
+            ChangeThresholdStep::RetireLegacyKeys,
             ChangeThresholdStep::Complete,
         ] {
             assert_eq!(

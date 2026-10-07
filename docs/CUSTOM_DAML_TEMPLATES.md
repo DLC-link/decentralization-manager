@@ -22,6 +22,22 @@ Anything beyond that — for example a bespoke proposal type wired into `POST /g
 
 > **One `GovernanceRules` handles every custom action.** You do **not** deploy a new `GovernanceRules` per new template. A single instance bound to a `governanceParty` matches *any* `ContractId GovernableAction` whose view's `governanceParty` field equals its own — regardless of the underlying template's package, module, or entity name. Custom templates extend an existing governance domain at zero infrastructure cost; the engine is universal.
 
+## Deployment approvals
+
+Contracts invitations pin an ordered list of creates: resolved package ID,
+module, template, and a SHA-256 commitment to the create arguments. Compare
+these values in the invitation with the intended deployment before accepting.
+Package IDs must be resolved 64-character hex IDs; package-name selectors are
+not accepted. Each prepared submission must contain exactly the approved
+create. Peers reject substituted arguments, templates, exercises, and extra
+nodes before signing, and independently verify the prepared transaction hash.
+
+Argument commitments use DecMan's Daml value encoding after removing optional
+record labels and type annotations and sorting map entries. They are not hashes
+of JSON. Contract invitations accepted before these commitments were introduced
+must be restarted from an upgraded coordinator; upgraded peers refuse to sign
+them. Upgrade all participating members before starting a deployment.
+
 ## The `GovernableAction` interface
 
 Every governable template must implement [`Governance.Action.GovernableAction`](../daml/governance-action-v1/daml/Governance/Action.daml):

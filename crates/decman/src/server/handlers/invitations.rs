@@ -126,6 +126,7 @@ pub(crate) async fn insert_peer_run(
             "new_threshold": invitation.new_threshold,
             "previous_threshold": invitation.previous_threshold,
             "package_names": invitation.package_names,
+            "contract_intents": invitation.contract_intents,
         })
         .to_string(),
         coordinator_pubkey: Some(invitation.coordinator_pubkey.clone()),

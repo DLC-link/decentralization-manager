@@ -275,12 +275,14 @@ and they are load-bearing enough to state rather than imply:
   no collusion: the proposal can keep the kicked member's key and drop a
   surviving member's instead, and the key it keeps belongs to the member being
   kicked.
-- **The contracts workflow constrains who a transaction acts as, not what it
-  does.** The peer recomputes the hash and pins `act_as` to the accepted dec
-  party, so it can only ever authorize the transaction it can read — but the
-  accepted package names are never compared against the transaction's nodes, so
-  any create or exercise acting as that party passes
-  (DLC-link/decentralization-manager#423).
+- **Contracts approvals pin the creates as well as the acting party.** The
+  invitation commits to each resolved package/module/template and its normalized
+  argument hash. Peers persist those commitments on acceptance, recompute the
+  prepared transaction hash, pin `act_as` to the accepted party, and require
+  exactly one matching create per commitment in the accepted order. Exercises,
+  extra nodes, and substitutions are refused. Operators must still approve the
+  intended commitments; accepting a malicious invitation authorizes its stated
+  creates. Older invitations without commitments fail closed and must be restarted.
 - **An older coordinator may send an invitation without the DAR hashes.** The
   peer then checks filenames only and logs a warning, so a network mid-upgrade
   keeps working. This is the only leniency left for an absent field, alongside

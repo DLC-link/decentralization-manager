@@ -91,6 +91,8 @@ pub enum MessageType {
     /// Command: every party member signs the change-threshold DNS + P2P
     /// proposals.
     SignChangeThreshold = 0x0025,
+    /// Members authorize removal of shadowed legacy keys after topology migration.
+    RetireLegacyKeys = 0x0026,
 
     // Invites (0x0010 - 0x001F)
     InviteOnboarding = 0x0010,
@@ -253,6 +255,7 @@ impl TryFrom<u16> for MessageType {
             0x0023 => Ok(Self::ClearOnboardingFlag),
             0x0024 => Ok(Self::SignClearOnboarding),
             0x0025 => Ok(Self::SignChangeThreshold),
+            0x0026 => Ok(Self::RetireLegacyKeys),
             0x0018 => Ok(Self::InviteChangeThreshold),
             0x0101 => Ok(Self::Ack),
             0x0102 => Ok(Self::Data),

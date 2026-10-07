@@ -931,9 +931,24 @@ pub struct ContractsInvitePayload {
     /// Human-readable contract/package names (from `ContractDefinition.name`).
     #[serde(default)]
     pub package_names: Vec<String>,
+    /// Ordered creates committed to before acceptance, independent of ledger preparation.
+    #[serde(default)]
+    pub contract_intents: Vec<ContractDeploymentIntent>,
     /// The coordinator's run instance name (see `OnboardingInvitePayload`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_instance: Option<String>,
+}
+
+/// The exact create a contracts invitation authorizes. The argument hash uses
+/// DecMan's normalized Daml value encoding (record labels and type annotations omitted).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct ContractDeploymentIntent {
+    pub package_id: String,
+    pub module_name: String,
+    pub entity_name: String,
+    pub argument_hash: String,
 }
 
 /// Response for pending invitations endpoint

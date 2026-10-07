@@ -615,6 +615,8 @@ pub struct PendingInvitation {
     /// so the peer card shows the same "Packages" row the coordinator shows.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub package_names: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contract_intents: Vec<crate::api::ContractDeploymentIntent>,
     /// The coordinator's run instance name from the invite payload. Echoed
     /// back on decline so the coordinator only fails the matching run.
     #[serde(default, skip_serializing_if = "Option::is_none")]

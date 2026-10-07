@@ -135,6 +135,104 @@ pub fn verify_prepared_submission(response: &PrepareSubmissionResponse) -> Resul
     Ok(())
 }
 
+/// Hash an intended create argument before preparing a ledger transaction.
+/// Normalizes optional record labels/type IDs and map ordering before using
+/// the transaction value encoder, so ledger annotations cannot change the commitment.
+pub fn hash_value(value: &canton_proto_rs::com::daml::ledger::api::v2::Value) -> Result<String> {
+    let mut value = value.clone();
+    normalize_intent_value(&mut value, 0)?;
+    let mut encoder = Encoder::new();
+    encoder.value(&value)?;
+    Ok(hex::encode(encoder.digest()))
+}
+
+fn normalize_intent_value(
+    value: &mut canton_proto_rs::com::daml::ledger::api::v2::Value,
+    depth: usize,
+) -> Result {
+    use canton_proto_rs::com::daml::ledger::api::v2::value::Sum;
+    anyhow::ensure!(depth <= 100, "Intent value nesting exceeds 100 levels");
+    let normalize = |v: &mut canton_proto_rs::com::daml::ledger::api::v2::Value| {
+        normalize_intent_value(v, depth + 1)
+    };
+    match value.sum.as_mut() {
+        Some(Sum::Record(record)) => {
+            record.record_id = None;
+            for field in &mut record.fields {
+                field.label.clear();
+                normalize(
+                    field
+                        .value
+                        .as_mut()
+                        .ok_or_else(|| anyhow::anyhow!("Missing record field value"))?,
+                )?;
+            }
+        }
+        Some(Sum::Variant(variant)) => {
+            variant.variant_id = None;
+            normalize(
+                variant
+                    .value
+                    .as_deref_mut()
+                    .ok_or_else(|| anyhow::anyhow!("Missing variant value"))?,
+            )?;
+        }
+        Some(Sum::Enum(v)) => v.enum_id = None,
+        Some(Sum::Optional(v)) => {
+            if let Some(inner) = v.value.as_deref_mut() {
+                normalize(inner)?;
+            }
+        }
+        Some(Sum::List(v)) => {
+            for item in &mut v.elements {
+                normalize(item)?;
+            }
+        }
+        Some(Sum::TextMap(v)) => {
+            for entry in &mut v.entries {
+                normalize(
+                    entry
+                        .value
+                        .as_mut()
+                        .ok_or_else(|| anyhow::anyhow!("Missing map value"))?,
+                )?;
+            }
+            v.entries.sort_by(|a, b| a.key.cmp(&b.key));
+            anyhow::ensure!(
+                !v.entries.windows(2).any(|p| p[0].key == p[1].key),
+                "Duplicate map key"
+            );
+        }
+        Some(Sum::GenMap(v)) => {
+            let mut entries = Vec::with_capacity(v.entries.len());
+            for mut entry in std::mem::take(&mut v.entries) {
+                let key = entry
+                    .key
+                    .as_mut()
+                    .ok_or_else(|| anyhow::anyhow!("Missing map key"))?;
+                normalize(key)?;
+                let mut encoder = Encoder::new();
+                encoder.value(key)?;
+                normalize(
+                    entry
+                        .value
+                        .as_mut()
+                        .ok_or_else(|| anyhow::anyhow!("Missing map value"))?,
+                )?;
+                entries.push((encoder.into_bytes(), entry));
+            }
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            anyhow::ensure!(
+                !entries.windows(2).any(|p| p[0].0 == p[1].0),
+                "Duplicate map key"
+            );
+            v.entries = entries.into_iter().map(|(_, entry)| entry).collect();
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use canton_proto_rs::com::daml::ledger::api::v2::{

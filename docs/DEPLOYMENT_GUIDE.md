@@ -590,6 +590,19 @@ Downgrading requires reversing migration `000014` and `000013`; note the
 `000013` down-migration fails while concurrent InProgress rows exist (finish
 or dismiss them first).
 
+## Legacy party-key retirement
+
+Add-member, remove-member, and threshold-change workflows now end with a
+`RetireLegacyKeys` phase. Once inline `PartyToParticipant` signing keys are
+effective, members authorize removal of the obsolete `PartyToKeyMapping` under
+the current namespace threshold. A workflow completes only after the removal
+is visible on Canton. Parties without a legacy mapping skip this phase.
+
+Upgrade participating members before running these workflows. If retirement
+times out, bring enough upgraded namespace owners online and retry the failed
+workflow; it resumes at cleanup without repeating the applied topology change.
+The inline keys remain authoritative while cleanup is pending.
+
 ## Troubleshooting
 
 - **Pod is `CrashLoopBackOff`**: `kubectl logs` will usually show a missing required env var. Compare against the configuration reference above.

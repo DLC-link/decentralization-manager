@@ -978,8 +978,9 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 previous_threshold,
                 dec_party_id,
                 package_names,
+                contract_intents,
                 workflow_instance
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ",
         )
         .bind(&row.id)
@@ -996,6 +997,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         .bind(row.previous_threshold)
         .bind(&row.dec_party_id)
         .bind(&row.package_names)
+        .bind(&row.contract_intents)
         .bind(&row.workflow_instance)
         .execute(&mut **self)
         .await?;
@@ -2345,6 +2347,7 @@ mod tests {
             previous_threshold: None,
             dec_party_id: None,
             package_names: Vec::new(),
+            contract_intents: Vec::new(),
             workflow_instance: Some("my-party-creation".to_string()),
         };
         let inv_b = PendingInvitation {
@@ -2363,6 +2366,7 @@ mod tests {
             previous_threshold: Some(3),
             dec_party_id: Some(CantonId::parse(&format!("dec::{TEST_NS}")).unwrap()),
             package_names: Vec::new(),
+            contract_intents: Vec::new(),
             workflow_instance: None,
         };
 
@@ -2387,6 +2391,7 @@ mod tests {
             previous_threshold: None,
             dec_party_id: None,
             package_names: Vec::new(),
+            contract_intents: Vec::new(),
             workflow_instance: None,
         };
         let mut tx = pool.begin_transaction().await?;
@@ -2448,6 +2453,12 @@ mod tests {
             previous_threshold: None,
             dec_party_id: Some(CantonId::parse(&format!("dec::{TEST_NS}")).unwrap()),
             package_names: vec!["Governance Core".to_string(), "Token Custody".to_string()],
+            contract_intents: vec![common::api::ContractDeploymentIntent {
+                package_id: "ab".repeat(32),
+                module_name: "Governance".to_string(),
+                entity_name: "Settings".to_string(),
+                argument_hash: "cd".repeat(32),
+            }],
             workflow_instance: Some("dec-contracts-4000".to_string()),
         };
 
@@ -2465,6 +2476,7 @@ mod tests {
             Some(format!("dec::{TEST_NS}"))
         );
         assert_eq!(got.package_names, vec!["Governance Core", "Token Custody"]);
+        assert_eq!(got.contract_intents, inv.contract_intents);
         assert_eq!(got.workflow_instance.as_deref(), Some("dec-contracts-4000"));
 
         Ok(())
@@ -3036,6 +3048,7 @@ mod tests {
             previous_threshold: None,
             dec_party_id: None,
             package_names: Vec::new(),
+            contract_intents: Vec::new(),
             workflow_instance: None,
         };
         let dars = PendingInvitation {
@@ -3054,6 +3067,7 @@ mod tests {
             previous_threshold: None,
             dec_party_id: None,
             package_names: Vec::new(),
+            contract_intents: Vec::new(),
             workflow_instance: None,
         };
 

@@ -2855,6 +2855,7 @@ mod tests {
                 dec_party_id: None,
                 new_participant: None,
                 package_names: Vec::new(),
+                contract_intents: Vec::new(),
                 workflow_instance: None,
             }),
         ];

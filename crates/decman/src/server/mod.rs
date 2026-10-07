@@ -591,6 +591,7 @@ impl WorkflowTriggers {
         let mut previous_threshold = None;
         let mut dec_party_id = None;
         let mut package_names = Vec::new();
+        let mut contract_intents = Vec::new();
         let mut workflow_instance = None;
         match meta {
             InvitationMeta::None => {}
@@ -618,6 +619,7 @@ impl WorkflowTriggers {
                 dec_party_id = Some(p.dec_party_id);
                 participants = p.participants;
                 package_names = p.package_names;
+                contract_intents = p.contract_intents;
                 workflow_instance = p.workflow_instance;
             }
             InvitationMeta::AddParty(p) => {
@@ -667,6 +669,7 @@ impl WorkflowTriggers {
             previous_threshold,
             dec_party_id,
             package_names,
+            contract_intents,
             workflow_instance,
         };
 

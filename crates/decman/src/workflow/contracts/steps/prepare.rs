@@ -44,66 +44,9 @@ pub async fn prepare_submissions(
 ) -> Result {
     tracing::info!("Preparing submissions...");
 
-    // Use the decentralized party ID from config
-    let decentralized_registrar = contracts_config.decentralized_party_id.clone();
-    tracing::debug!("Using decentralized party: {decentralized_registrar}");
-
+    let context = submission_context(db, contracts_config).await?;
+    let decentralized_registrar = &context.decentralized_party;
     let token_opt = Some(token.to_string());
-
-    // Get participant parties from config (provided by API caller)
-    let participant_parties: Vec<CantonId> = contracts_config.participant_parties.clone();
-
-    // Use the dec party's OWN threshold (set at onboarding, baked into its
-    // namespace definition), not a recomputed mesh majority. Contract
-    // deployment is signed by the party, so it needs at least `threshold` of
-    // its owners to sign — and the deployed governance contract should carry
-    // that same threshold. This also replaces the former hardcoded
-    // 3-participant minimum.
-    let party_threshold = db
-        .get_dec_parties_by_prefix(&decentralized_registrar.prefix)
-        .await?
-        .into_iter()
-        .find(|p| p.party_id == decentralized_registrar.to_string())
-        .map(|p| p.threshold)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Decentralized party {decentralized_registrar} not found in cache; \
-                 refresh /decentralized-parties before deploying contracts"
-            )
-        })?;
-
-    if participant_parties.is_empty() {
-        anyhow::bail!("No participant parties provided in contracts config");
-    }
-    if (participant_parties.len() as i64) < party_threshold {
-        anyhow::bail!(
-            "Need at least {party_threshold} participant(s) to meet the party's threshold \
-             for contract operations, found {count}",
-            count = participant_parties.len()
-        );
-    }
-
-    tracing::info!(
-        "Parties for {count} participants: {parties}",
-        count = participant_parties.len(),
-        parties = participant_parties
-            .iter()
-            .map(|p| p.to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-
-    // Get operator party from config
-    let operator = contracts_config.operator_party.clone();
-    tracing::info!("Operator party: {operator}");
-
-    // Build context for field value building
-    let context = SubmissionContext {
-        decentralized_party: decentralized_registrar.clone(),
-        operator_party: operator.clone(),
-        participant_parties: participant_parties.clone(),
-        governance_threshold: party_threshold,
-    };
 
     let mut submission_client = utils::create_submission_client(config, token_opt.clone()).await?;
 
@@ -189,6 +132,106 @@ pub async fn prepare_submissions(
         count = contracts_config.contracts.len()
     );
     Ok(())
+}
+
+async fn submission_context(
+    db: &SqlitePool,
+    contracts_config: &ContractsConfig,
+) -> Result<SubmissionContext> {
+    // Use the decentralized party ID from config
+    let decentralized_registrar = contracts_config.decentralized_party_id.clone();
+    tracing::debug!("Using decentralized party: {decentralized_registrar}");
+
+    // Get participant parties from config (provided by API caller)
+    let participant_parties: Vec<CantonId> = contracts_config.participant_parties.clone();
+
+    // Use the dec party's OWN threshold (set at onboarding, baked into its
+    // namespace definition), not a recomputed mesh majority. Contract
+    // deployment is signed by the party, so it needs at least `threshold` of
+    // its owners to sign — and the deployed governance contract should carry
+    // that same threshold. This also replaces the former hardcoded
+    // 3-participant minimum.
+    let party_threshold = db
+        .get_dec_parties_by_prefix(&decentralized_registrar.prefix)
+        .await?
+        .into_iter()
+        .find(|p| p.party_id == decentralized_registrar.to_string())
+        .map(|p| p.threshold)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Decentralized party {decentralized_registrar} not found in cache; \
+                 refresh /decentralized-parties before deploying contracts"
+            )
+        })?;
+
+    if participant_parties.is_empty() {
+        anyhow::bail!("No participant parties provided in contracts config");
+    }
+    if (participant_parties.len() as i64) < party_threshold {
+        anyhow::bail!(
+            "Need at least {party_threshold} participant(s) to meet the party's threshold \
+             for contract operations, found {count}",
+            count = participant_parties.len()
+        );
+    }
+
+    tracing::info!(
+        "Parties for {count} participants: {parties}",
+        count = participant_parties.len(),
+        parties = participant_parties
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
+    // Get operator party from config
+    let operator = contracts_config.operator_party.clone();
+    tracing::info!("Operator party: {operator}");
+
+    // Build context for field value building
+    Ok(SubmissionContext {
+        decentralized_party: decentralized_registrar.clone(),
+        operator_party: operator.clone(),
+        participant_parties: participant_parties.clone(),
+        governance_threshold: party_threshold,
+    })
+}
+
+/// Commit to every requested create before an operator accepts the invitation.
+pub async fn deployment_intents(
+    db: &SqlitePool,
+    config: &ContractsConfig,
+) -> Result<Vec<common::api::ContractDeploymentIntent>> {
+    let context = submission_context(db, config).await?;
+    config
+        .contracts
+        .iter()
+        .map(|contract| {
+            anyhow::ensure!(
+                contract.package_id.len() == 64
+                    && contract.package_id.bytes().all(|b| b.is_ascii_hexdigit()),
+                "Contract {} must name a resolved package ID before invitation",
+                contract.name
+            );
+            let argument = Value {
+                sum: Some(value::Sum::Record(Record {
+                    record_id: None,
+                    fields: contract
+                        .fields
+                        .iter()
+                        .map(|field| build_record_field(field, &context))
+                        .collect::<Result<Vec<_>>>()?,
+                })),
+            };
+            Ok(common::api::ContractDeploymentIntent {
+                package_id: contract.package_id.clone(),
+                module_name: contract.module_name.clone(),
+                entity_name: contract.entity_name.clone(),
+                argument_hash: crate::canton_hash::hash_value(&argument)?,
+            })
+        })
+        .collect()
 }
 
 /// Context for building field values in contract submissions

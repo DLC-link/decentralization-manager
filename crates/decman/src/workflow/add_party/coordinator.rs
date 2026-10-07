@@ -305,6 +305,14 @@ async fn run_workflow(
                 }
                 workflow_state.advance_step().await;
             }
+            AddPartyStep::RetireLegacyKeys => {
+                crate::workflow::topology::retire_legacy_keys_and_wait(
+                    &node_config,
+                    &add_party_config.decentralized_party_id,
+                )
+                .await?;
+                workflow_state.advance_step().await;
+            }
             AddPartyStep::Complete => {
                 tracing::info!("Add-party workflow complete!");
                 tracing::debug!("Waiting for peers to receive Disconnect command...");

@@ -3809,6 +3809,11 @@ async fn send_contracts_invites(
         dec_party_id: contracts_config.decentralized_party_id.clone(),
         participants: invitees.to_vec(),
         package_names,
+        contract_intents: workflow::contracts::steps::prepare::deployment_intents(
+            db,
+            contracts_config,
+        )
+        .await?,
         workflow_instance: Some(contracts_config.instance_name.clone()),
     };
     let payload_bytes = serde_json::to_vec(&payload).context("encode ContractsInvitePayload")?;
@@ -4174,6 +4179,7 @@ mod tests {
             dec_party_id: test_cid("dec")?,
             participants: vec![test_cid("node1")?],
             package_names: vec!["Governance Core".to_string()],
+            contract_intents: Vec::new(),
             workflow_instance: Some("dec-contracts-1".to_string()),
         };
         let bytes = serde_json::to_vec(&payload)?;

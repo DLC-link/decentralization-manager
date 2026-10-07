@@ -68,6 +68,7 @@ pub struct PeerExpectations {
     /// The workflow kind the operator accepted. Commands belonging to any
     /// other kind are refused outright.
     pub kind: WorkflowKind,
+    pub contract_intents: Vec<common::api::ContractDeploymentIntent>,
     /// The full member set: the participants named in the invitation plus the
     /// coordinator itself (onboarding and kick invitations list only the
     /// invitees; add-party and change-threshold already include the
@@ -96,6 +97,8 @@ pub struct PeerExpectations {
 /// The invitation fields `insert_peer_run` stores on the run row.
 #[derive(serde::Deserialize)]
 struct PeerRunConfig {
+    #[serde(default)]
+    contract_intents: Vec<common::api::ContractDeploymentIntent>,
     #[serde(default)]
     prefix: Option<String>,
     #[serde(default)]
@@ -140,6 +143,7 @@ impl PeerExpectations {
 
         Ok(Self {
             kind: run.kind,
+            contract_intents: config.contract_intents,
             members,
             dec_party_id: run.dec_party_id,
             prefix: config.prefix,
@@ -1384,6 +1388,7 @@ mod tests {
     fn expectations(members: Vec<CantonId>, self_id: CantonId) -> PeerExpectations {
         PeerExpectations {
             kind: WorkflowKind::ChangeThreshold,
+            contract_intents: Vec::new(),
             members: members.into_iter().collect(),
             dec_party_id: None,
             prefix: None,

@@ -154,6 +154,14 @@ pub async fn start_coordinator(
                         submit_change(&node_config, &db, &instance_name).await?;
                         workflow_state.advance_step().await;
                     }
+                    ChangeThresholdStep::RetireLegacyKeys => {
+                        crate::workflow::topology::retire_legacy_keys_and_wait(
+                            &node_config,
+                            &change_config.decentralized_party_id,
+                        )
+                        .await?;
+                        workflow_state.advance_step().await;
+                    }
                     ChangeThresholdStep::Complete => {
                         tracing::info!("Change-threshold workflow complete!");
                         tracing::debug!("Waiting for peers to receive Disconnect command...");
