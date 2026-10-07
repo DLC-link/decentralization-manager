@@ -35,7 +35,16 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: change_threshold");
 
     round("lower the threshold to 1", 2, 1).run(f).await?;
+    let legacy = if matches!(f.target, crate::common::TestTarget::Localnet) {
+        Some(super::legacy_key_retirement::seed(f).await?)
+    } else {
+        None
+    };
     round("restore the threshold to 2", 1, 2).run(f).await?;
+    if let Some(legacy) = legacy {
+        super::legacy_key_retirement::assert_removed(f, &legacy).await?;
+        super::legacy_key_retirement::retry_after_partial_authorization(f).await?;
+    }
     Ok(())
 }
 

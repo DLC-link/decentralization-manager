@@ -2,6 +2,9 @@ use canton_proto_rs::com::daml::ledger::api::v2::{
     Command, CreateCommand, GenMap, Identifier, Optional, Record, RecordField, Value, command,
     gen_map, interactive::PrepareSubmissionRequest, value,
 };
+use canton_proto_rs::com::digitalasset::canton::admin::participant::v30::{
+    ListPackagesRequest, PackageDescription, package_service_client::PackageServiceClient,
+};
 use sqlx::SqlitePool;
 
 use crate::{
@@ -11,10 +14,58 @@ use crate::{
     error::Result,
     utils,
     workflow::{
-        contracts::{ContractsConfig, FieldDefinition},
+        contracts::{ContractDefinition, ContractsConfig, FieldDefinition},
         storage::{WorkflowStorage, artifact_kinds},
     },
 };
+
+/// Resolve package-name selectors once, before an invitation commits to a create.
+/// Persisting the result prevents later package uploads changing the approved deployment.
+pub async fn resolve_package_ids(
+    config: &NodeConfig,
+    contracts: &mut [ContractDefinition],
+) -> Result {
+    let packages = if contracts.iter().any(|c| c.package_id.starts_with('#')) {
+        PackageServiceClient::new(config.admin_channel().await?)
+            .list_packages(ListPackagesRequest {
+                limit: 0,
+                filter_name: String::new(),
+            })
+            .await?
+            .into_inner()
+            .package_descriptions
+    } else {
+        Vec::new()
+    };
+    for contract in contracts {
+        contract.package_id = resolve_package_id(&contract.package_id, &packages)?;
+    }
+    Ok(())
+}
+
+fn resolve_package_id(reference: &str, packages: &[PackageDescription]) -> Result<String> {
+    let Some(name) = reference.strip_prefix('#') else {
+        anyhow::ensure!(
+            reference.len() == 64 && reference.bytes().all(|b| b.is_ascii_hexdigit()),
+            "Invalid package ID {reference}"
+        );
+        return Ok(reference.to_ascii_lowercase());
+    };
+    let mut matches: Vec<_> = packages.iter().filter(|p| p.name == name).collect();
+    matches.sort_by(|a, b| crate::server::compare_versions(&b.version, &a.version));
+    let selected = matches
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("Package {reference} is not installed"))?;
+    anyhow::ensure!(
+        !matches
+            .iter()
+            .skip(1)
+            .any(|p| p.version == selected.version && p.package_id != selected.package_id),
+        "Package {reference} has ambiguous IDs at version {}; specify an exact package ID",
+        selected.version
+    );
+    resolve_package_id(&selected.package_id, &[])
+}
 
 /// Prepare ledger submissions for governance contracts
 ///
@@ -364,4 +415,33 @@ fn build_field_value(field_def: &FieldDefinition, context: &SubmissionContext) -
     };
 
     Ok(Value { sum: Some(sum) })
+}
+
+#[cfg(test)]
+mod package_resolution_tests {
+    use super::*;
+
+    #[test]
+    fn aliases_pin_the_newest_exact_package_and_reject_ambiguity() -> Result {
+        let package = |name: &str, version: &str, id: &str| PackageDescription {
+            name: name.into(),
+            version: version.into(),
+            package_id: id.repeat(64),
+            ..Default::default()
+        };
+        let mut packages = vec![
+            package("governance", "1.9.0", "a"),
+            package("governance", "1.10.0", "b"),
+            package("governance-other", "9.0.0", "c"),
+        ];
+        let pinned = resolve_package_id("#governance", &packages)?;
+        assert_eq!(pinned, "b".repeat(64));
+        packages.push(package("governance", "2.0.0", "d"));
+        assert_eq!(resolve_package_id(&pinned, &packages)?, pinned);
+        packages.push(package("governance", "2.0.0", "e"));
+        assert!(resolve_package_id("#governance", &packages).is_err());
+        assert!(resolve_package_id("#missing", &packages).is_err());
+        assert!(resolve_package_id("not-a-package", &packages).is_err());
+        Ok(())
+    }
 }

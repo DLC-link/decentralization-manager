@@ -2222,7 +2222,7 @@ pub async fn start_contracts(
         "{}-contracts-{timestamp}",
         body.decentralized_party_id.prefix
     );
-    let contracts_config = workflow::ContractsConfig::new(
+    let mut contracts_config = workflow::ContractsConfig::new(
         body.decentralized_party_id.clone(),
         body.participant_ids.clone(),
         body.participant_parties.clone(),
@@ -2278,6 +2278,19 @@ pub async fn start_contracts(
     if !incompatible.is_empty() {
         return HttpResponse::Conflict().json(ErrorResponse {
             error: format_incompatible_peers(&incompatible),
+        });
+    }
+
+    // Resolve aliases once, before persisting or inviting. Preparation and
+    // retries must use the same package IDs the operators approved.
+    if let Err(error) = workflow::contracts::steps::prepare::resolve_package_ids(
+        &data.config,
+        &mut contracts_config.contracts,
+    )
+    .await
+    {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: format!("Cannot resolve deployment packages: {error:#}"),
         });
     }
 

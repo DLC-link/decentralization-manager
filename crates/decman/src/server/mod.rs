@@ -28,6 +28,8 @@ mod serde_snapshots;
 pub(crate) mod health;
 pub(crate) mod peer_status;
 
+pub(crate) use queries::compare_versions;
+
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,

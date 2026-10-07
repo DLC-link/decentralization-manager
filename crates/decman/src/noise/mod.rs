@@ -313,7 +313,12 @@ impl MessageType {
 /// topology change is already live. Rejecting the frame outright keeps an old
 /// build from ever reaching that, and it fails the invite's health probe, so
 /// the run does not start at all.
-pub const WIRE_VERSION: u8 = 0xD2;
+/// 0xD2 -> 0xD3: Contracts invitations now require deployment-intent
+/// verification, and membership workflows retire legacy keys. Old peers must
+/// not silently ignore the commitments and contribute unchecked signatures.
+/// The version byte rejects both old invitations and old command streams,
+/// including retries of persisted runs; health preflight rejects mixed meshes.
+pub const WIRE_VERSION: u8 = 0xD3;
 
 /// Message structure for Noise protocol communication.
 ///
@@ -1255,6 +1260,22 @@ mod tests {
             err.contains("version mismatch"),
             "expected a version-mismatch error, got: {err}"
         );
+    }
+
+    #[test]
+    fn rejects_peers_without_deployment_intent_enforcement() {
+        for command in [
+            MessageType::Health,
+            MessageType::InviteContracts,
+            MessageType::SignSubmissions,
+        ] {
+            let mut frame = Message::new_empty(command).to_bytes();
+            frame[0] = 0xD2;
+            assert!(
+                Message::from_bytes(&frame).is_err(),
+                "accepted an old {command:?} frame"
+            );
+        }
     }
 
     #[test]

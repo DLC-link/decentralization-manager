@@ -592,6 +592,13 @@ or dismiss them first).
 
 ## Legacy party-key retirement
 
+This release bumps the Noise protocol from 0xD2 to 0xD3 to require contract
+deployment-intent verification and legacy-key retirement. Finish or cancel active
+workflows, stop all members, upgrade the whole mesh, then restart it. Old peers
+cannot accept the new invitations or signing commands, and mixed versions fail
+the workflow health preflight. Previously accepted Contracts invitations without
+commitments must be restarted after the upgrade.
+
 Add-member, remove-member, and threshold-change workflows now end with a
 `RetireLegacyKeys` phase. Once inline `PartyToParticipant` signing keys are
 effective, members authorize removal of the obsolete `PartyToKeyMapping` under

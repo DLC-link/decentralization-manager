@@ -27,8 +27,10 @@ Anything beyond that — for example a bespoke proposal type wired into `POST /g
 Contracts invitations pin an ordered list of creates: resolved package ID,
 module, template, and a SHA-256 commitment to the create arguments. Compare
 these values in the invitation with the intended deployment before accepting.
-Package IDs must be resolved 64-character hex IDs; package-name selectors are
-not accepted. Each prepared submission must contain exactly the approved
+Package-name selectors are resolved to the newest installed version with that
+exact name before the workflow is persisted. Ambiguous versions require an
+explicit package ID. The resolved ID stays pinned through preparation and retries,
+even if another version is uploaded. Each prepared submission must contain exactly the approved
 create. Peers reject substituted arguments, templates, exercises, and extra
 nodes before signing, and independently verify the prepared transaction hash.
 
@@ -36,7 +38,9 @@ Argument commitments use DecMan's Daml value encoding after removing optional
 record labels and type annotations and sorting map entries. They are not hashes
 of JSON. Contract invitations accepted before these commitments were introduced
 must be restarted from an upgraded coordinator; upgraded peers refuse to sign
-them. Upgrade all participating members before starting a deployment.
+them. Upgrade the whole mesh before starting a deployment: Noise protocol 0xD3
+rejects peers that predate deployment-intent enforcement, including peers resuming
+an existing run. Mixed versions fail the health preflight before invitations.
 
 ## The `GovernableAction` interface
 
