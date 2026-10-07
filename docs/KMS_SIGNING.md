@@ -20,6 +20,13 @@ must reach the KMS itself. decman discovers the KMS key id automatically from
 the participant (`VaultService.ListMyKeys` reports `kms_key_id`; grpcurl's
 JSON output renders the same field as `kmsKeyId`).
 
+The metadata must contain a bare key ID: a UUID or `mrk-` followed by 32
+hexadecimal digits. decman rejects ARNs, aliases, and malformed IDs before
+calling `Sign`. Bare IDs resolve in the AWS credentials' account and configured
+region, so metadata cannot redirect signing to another account. If the
+participant's keys are in another account, configure decman's credentials for
+that account. Signatures are still verified against the registered public key.
+
 ## What the operator must set up
 
 1. **AWS credentials for decman.** decman uses the default AWS credential
@@ -82,6 +89,7 @@ JSON output renders the same field as `kmsKeyId`).
 |---|---|
 | `KMS signing failed: ... AccessDeniedException` | decman's role lacks `kms:Sign` on the key (step 2). |
 | `KMS signing failed: ... dispatch failure` | No AWS credentials or wrong region (step 1). |
+| `Invalid kms_key_id` | Vault metadata contains an ARN, alias, or malformed ID. Use the bare ID of the participant's key and credentials for its account. |
 | `failed local verification against the registered public key` | The KMS key does not match the registered public key. Check that the `kms_key_id` belongs to this party's Daml key. |
 | Workflow fails at export with `ExportKeyPair` | The key carries no `kms_key_id`, so decman used the vault-export path. Expected on JCE nodes; on a KMS node this means the key metadata is inconsistent. |
 

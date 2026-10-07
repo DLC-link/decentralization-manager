@@ -67,6 +67,7 @@ impl TransactionSigner for AwsKmsSigner {
                 fingerprint = key.fingerprint
             )
         })?;
+        validate_key_id(kms_key_id)?;
 
         // Only EC-P256 is supported: it is the spec KMS-backed nodes generate
         // (the KMS provider default), and the only one whose Canton signature
@@ -170,9 +171,95 @@ fn algorithms_for(key_spec: SigningKeySpec) -> Option<(KmsSigningAlgorithm, Sign
     }
 }
 
+/// Accept immutable, account-local key IDs only. ARNs can select another
+/// account, and aliases can be retargeted independently of the vault metadata.
+/// AWS documents UUID key IDs and `mrk-` followed by 32 hexadecimal digits:
+/// https://docs.aws.amazon.com/kms/latest/developerguide/concepts.html#key-id
+fn validate_key_id(key_id: &str) -> anyhow::Result<()> {
+    let valid = if let Some(id) = key_id.strip_prefix("mrk-") {
+        id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit())
+    } else {
+        key_id.len() == 36
+            && key_id.bytes().enumerate().all(|(index, byte)| {
+                if matches!(index, 8 | 13 | 18 | 23) {
+                    byte == b'-'
+                } else {
+                    byte.is_ascii_hexdigit()
+                }
+            })
+    };
+    anyhow::ensure!(
+        valid,
+        "Invalid kms_key_id: expected a bare AWS KMS key ID (UUID or mrk- followed by \
+         32 hex digits); ARNs and aliases are not accepted. Use credentials and a region \
+         for the account that owns the participant's key"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accepts_account_local_key_ids() -> anyhow::Result<()> {
+        for id in [
+            "1234abcd-12ab-34cd-56ef-1234567890ab",
+            "1234ABCD-12AB-34CD-56EF-1234567890AB",
+            "mrk-1234abcd12ab34cd56ef1234567890ab",
+        ] {
+            validate_key_id(id)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_arns_aliases_and_malformed_key_ids() {
+        for id in [
+            "",
+            "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+            "arn:aws-us-gov:kms:us-gov-west-1:111122223333:key/mrk-1234abcd12ab34cd56ef1234567890ab",
+            "arn:aws:kms:us-east-1:111122223333:alias/party",
+            "alias/party",
+            "1234abcd12ab34cd56ef1234567890ab",
+            "1234abcd_12ab-34cd-56ef-1234567890ab",
+            "1234abcd-12ab-34cd-56ef-1234567890ag",
+            " 1234abcd-12ab-34cd-56ef-1234567890ab",
+            "1234abcd-12ab-34cd-56ef-1234567890ab\n",
+            "mrk-1234abcd12ab34cd56ef1234567890a",
+            "mrk-1234abcd12ab34cd56ef1234567890abc",
+            "mrk-1234abcd12ab34cd56ef1234567890ag",
+            "mrk-1234abcd-12ab-34cd-56ef-1234567890ab",
+            "mrk-あいうえおかきくけこab",
+        ] {
+            assert!(validate_key_id(id).is_err(), "accepted {id:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_metadata_before_signing() -> anyhow::Result<()> {
+        // No credentials or endpoint: reaching the SDK would fail differently.
+        let config = aws_sdk_kms::Config::builder()
+            .behavior_version_latest()
+            .region(aws_sdk_kms::config::Region::new("us-east-1"))
+            .build();
+        let signer = AwsKmsSigner {
+            client: aws_sdk_kms::Client::from_conf(config),
+        };
+        let key = SigningKeyContext {
+            fingerprint: "test-fingerprint".into(),
+            public_key: Default::default(),
+            kms_key_id: Some("arn:aws:kms:us-east-1:111122223333:key/foreign".into()),
+        };
+        let result = signer
+            .sign(&[PreparedTransactionHash::new(vec![0; 32])], &key)
+            .await;
+        let error = result
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("invalid metadata was accepted"))?;
+        assert!(error.to_string().contains("Invalid kms_key_id"), "{error}");
+        Ok(())
+    }
 
     #[test]
     fn p256_maps_to_ecdsa_sha256() {
