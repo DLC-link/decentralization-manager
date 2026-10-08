@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::canton_id::CantonId;
+use crate::{canton_id::CantonId, error::Result};
 
 /// Wire DTOs for contract / DAR deployment. Defined in `common::api` (the
 /// frontend's TypeScript is generated from them); re-exported so
@@ -27,6 +27,20 @@ pub struct ContractsConfig {
     /// Workflow instance name for directory organization (e.g., "xyz-network-contracts-20260108-143052")
     #[serde(default)]
     pub instance_name: String,
+    /// The creates this run committed to before it invited any peer
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committed_deployment: Option<CommittedDeployment>,
+}
+
+/// The creates a contracts run commits to when it starts. Peers verify every
+/// prepared transaction against `intents`, so preparation must reproduce them
+/// exactly, including the threshold read from the party cache at that moment.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct CommittedDeployment {
+    /// The party threshold that unset `GovernanceThreshold` fields resolved to
+    pub governance_threshold: i64,
+    /// One create commitment per contract, in contract order
+    pub intents: Vec<common::api::ContractDeploymentIntent>,
 }
 
 impl ContractsConfig {
@@ -45,6 +59,20 @@ impl ContractsConfig {
             operator_party,
             contracts,
             instance_name,
+            committed_deployment: None,
         }
+    }
+
+    /// The creates this run committed to when it started.
+    ///
+    /// # Errors
+    /// Fails for a run that an older version started without recording them.
+    pub fn committed(&self) -> Result<&CommittedDeployment> {
+        self.committed_deployment.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Contracts run {} has no recorded deployment commitments; start a new run",
+                self.instance_name
+            )
+        })
     }
 }

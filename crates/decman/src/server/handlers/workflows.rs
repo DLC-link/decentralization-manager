@@ -2302,6 +2302,18 @@ pub async fn start_contracts(
         });
     }
 
+    // Commit to the exact creates before persisting or inviting. Peers verify
+    // the prepared transactions against these, including on a resumed run.
+    match workflow::contracts::steps::prepare::commit_deployment(&data.db, &contracts_config).await
+    {
+        Ok(committed) => contracts_config.committed_deployment = Some(committed),
+        Err(error) => {
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                error: format!("Cannot commit the deployment: {error:#}"),
+            });
+        }
+    }
+
     // Register + persist atomically w.r.t. duplicates (registry insert dedups
     // before the upsert; a persist failure unregisters so nothing leaks).
     if let Err(resp) = register_and_persist(
@@ -3830,11 +3842,7 @@ async fn send_contracts_invites(
         dec_party_id: contracts_config.decentralized_party_id.clone(),
         participants: invitees.to_vec(),
         package_names,
-        contract_intents: workflow::contracts::steps::prepare::deployment_intents(
-            db,
-            contracts_config,
-        )
-        .await?,
+        contract_intents: contracts_config.committed()?.intents.clone(),
         workflow_instance: Some(contracts_config.instance_name.clone()),
     };
     let payload_bytes = serde_json::to_vec(&payload).context("encode ContractsInvitePayload")?;

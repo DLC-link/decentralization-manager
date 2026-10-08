@@ -132,8 +132,8 @@ async fn run_workflow(
             }
             ContractsStep::SignSubmissions => {
                 tracing::info!("Coordinator executing: Sign submissions");
-                let intents = super::steps::prepare::deployment_intents(&db, &config).await?;
-                sign_submissions(&node_config, &db, &instance_name, &dec_party_id, &intents)
+                let intents = &config.committed()?.intents;
+                sign_submissions(&node_config, &db, &instance_name, &dec_party_id, intents)
                     .await
                     .context("Failed to sign submissions")?;
                 if coordinator_only {

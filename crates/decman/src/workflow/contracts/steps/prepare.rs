@@ -14,7 +14,7 @@ use crate::{
     error::Result,
     utils,
     workflow::{
-        contracts::{ContractDefinition, ContractsConfig, FieldDefinition},
+        contracts::{CommittedDeployment, ContractDefinition, ContractsConfig, FieldDefinition},
         storage::{WorkflowStorage, artifact_kinds},
     },
 };
@@ -95,7 +95,7 @@ pub async fn prepare_submissions(
 ) -> Result {
     tracing::info!("Preparing submissions...");
 
-    let context = submission_context(db, contracts_config).await?;
+    let context = committed_submission_context(db, contracts_config).await?;
     let decentralized_registrar = &context.decentralized_party;
     let token_opt = Some(token.to_string());
 
@@ -250,12 +250,16 @@ async fn submission_context(
 }
 
 /// Commit to every requested create before an operator accepts the invitation.
-pub async fn deployment_intents(
+///
+/// # Errors
+/// Fails when the party is missing from the cache, when too few participants
+/// are given, or when a contract does not name a resolved package ID.
+pub async fn commit_deployment(
     db: &SqlitePool,
     config: &ContractsConfig,
-) -> Result<Vec<common::api::ContractDeploymentIntent>> {
+) -> Result<CommittedDeployment> {
     let context = submission_context(db, config).await?;
-    config
+    let intents = config
         .contracts
         .iter()
         .map(|contract| {
@@ -282,7 +286,31 @@ pub async fn deployment_intents(
                 argument_hash: crate::canton_hash::hash_value(&argument)?,
             })
         })
-        .collect()
+        .collect::<Result<_>>()?;
+    Ok(CommittedDeployment {
+        governance_threshold: context.governance_threshold,
+        intents,
+    })
+}
+
+/// The submission context for a run's committed creates. Peers accepted the
+/// threshold that was cached when the run started, so a changed threshold
+/// stops the run here instead of preparing creates they will refuse.
+async fn committed_submission_context(
+    db: &SqlitePool,
+    config: &ContractsConfig,
+) -> Result<SubmissionContext> {
+    let committed = config.committed()?;
+    let context = submission_context(db, config).await?;
+    anyhow::ensure!(
+        context.governance_threshold == committed.governance_threshold,
+        "The threshold of {party} changed from {old} to {new} after this contracts run \
+         started; start a new run so the members confirm the new threshold",
+        party = config.decentralized_party_id,
+        old = committed.governance_threshold,
+        new = context.governance_threshold,
+    );
+    Ok(context)
 }
 
 /// Context for building field values in contract submissions
@@ -442,6 +470,111 @@ mod package_resolution_tests {
         assert!(resolve_package_id("#governance", &packages).is_err());
         assert!(resolve_package_id("#missing", &packages).is_err());
         assert!(resolve_package_id("not-a-package", &packages).is_err());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod commitment_tests {
+    use super::*;
+    use crate::db::{
+        MIGRATOR,
+        rows::DecPartyRow,
+        schema::{Commitable, SchemaWrite},
+    };
+
+    const NS: &str = "1220aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn id(prefix: &str) -> Result<CantonId> {
+        CantonId::parse(&format!("{prefix}::{NS}"))
+    }
+
+    async fn cache_threshold(pool: &SqlitePool, party: &CantonId, threshold: i64) -> Result {
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_dec_party(&DecPartyRow {
+            party_id: party.to_string(),
+            prefix: party.prefix.clone(),
+            threshold,
+            updated_at: 0,
+            my_owner_key: None,
+        })
+        .await?;
+        Commitable::commit(tx).await
+    }
+
+    /// One governance create whose threshold comes from the party cache.
+    fn governance_run(party: &CantonId) -> Result<ContractsConfig> {
+        Ok(ContractsConfig::new(
+            party.clone(),
+            vec![id("node-1")?, id("node-2")?, id("node-3")?],
+            vec![id("member-1")?, id("member-2")?, id("member-3")?],
+            id("operator")?,
+            vec![ContractDefinition {
+                id: "rules".to_string(),
+                name: "GovernanceRules".to_string(),
+                package_id: "ab".repeat(32),
+                module_name: "Governance.Rules".to_string(),
+                entity_name: "GovernanceRules".to_string(),
+                fields: vec![FieldDefinition::GovernanceThreshold { value: None }],
+            }],
+            "dec-contracts-1".to_string(),
+        ))
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_threshold_change_after_the_commit_stops_preparation(pool: SqlitePool) -> Result {
+        let party = id("dec")?;
+        cache_threshold(&pool, &party, 2).await?;
+        let mut run = governance_run(&party)?;
+        let committed = commit_deployment(&pool, &run).await?;
+        assert_eq!(committed.governance_threshold, 2);
+        assert_eq!(committed.intents.len(), 1);
+        run.committed_deployment = Some(committed);
+
+        let unchanged = committed_submission_context(&pool, &run).await?;
+        assert_eq!(unchanged.governance_threshold, 2);
+
+        cache_threshold(&pool, &party, 3).await?;
+        let error = committed_submission_context(&pool, &run)
+            .await
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("a changed threshold must stop preparation"))?;
+        assert!(
+            format!("{error:#}").contains("changed from 2 to 3"),
+            "unexpected error: {error:#}"
+        );
+        Ok(())
+    }
+
+    /// A different threshold yields a different create, which is why the
+    /// threshold has to be pinned: peers compare these hashes.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_threshold_is_part_of_the_commitment(pool: SqlitePool) -> Result {
+        let party = id("dec")?;
+        let run = governance_run(&party)?;
+        cache_threshold(&pool, &party, 2).await?;
+        let at_two = commit_deployment(&pool, &run).await?;
+        cache_threshold(&pool, &party, 3).await?;
+        let at_three = commit_deployment(&pool, &run).await?;
+
+        assert_ne!(at_two.intents, at_three.intents);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_run_without_a_commitment_is_not_prepared(pool: SqlitePool) -> Result {
+        let party = id("dec")?;
+        cache_threshold(&pool, &party, 2).await?;
+        let run = governance_run(&party)?;
+
+        let error = committed_submission_context(&pool, &run)
+            .await
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("a run without a commitment must not be prepared"))?;
+        assert!(
+            format!("{error:#}").contains("no recorded deployment commitments"),
+            "unexpected error: {error:#}"
+        );
         Ok(())
     }
 }
