@@ -33,10 +33,10 @@ read_participant_ids() {
 }
 
 find_party_id() {
-    local attempt=0 found
+    local attempt=0 found json
     while [ "$attempt" -lt 60 ]; do
-        found=$(try_get 8081 /decentralized-parties \
-            | jq -r --arg p "$PARTY_PREFIX" 'first(.parties[]? | select(.party_id | startswith($p + "::")) | .party_id) // empty')
+        json=$(try_get 8081 /decentralized-parties) || return 1
+        found=$(printf '%s' "$json" | jq -r --arg p "$PARTY_PREFIX" 'first(.parties[]? | select(.party_id | startswith($p + "::")) | .party_id) // empty')
         if [ -n "$found" ]; then
             printf '%s' "$found"
             return 0
@@ -172,12 +172,14 @@ configure_party_on_nodes() {
 }
 
 find_rules_cid() {
-    local attempt=0 cid
+    local attempt=0 cid json
     while [ "$attempt" -lt 30 ]; do
-        cid=$(try_get 8081 /decentralized-parties | jq -r --arg id "$DEC_PARTY_ID" \
+        json=$(try_get 8081 /decentralized-parties) || return 1
+        cid=$(printf '%s' "$json" | jq -r --arg id "$DEC_PARTY_ID" \
             'first(.parties[]? | select(.party_id == $id) | .contracts[]? | select(.template_id | contains("GovernanceRules")) | .contract_id) // empty')
         if [ -z "$cid" ]; then
-            cid=$(try_get 8081 "/governance/state?party_id=$DEC_PARTY_ID" | jq -r '.state.contract_id // empty')
+            json=$(try_get 8081 "/governance/state?party_id=$DEC_PARTY_ID") || return 1
+            cid=$(printf '%s' "$json" | jq -r '.state.contract_id // empty')
         fi
         if [ -n "$cid" ]; then
             printf '%s' "$cid"
