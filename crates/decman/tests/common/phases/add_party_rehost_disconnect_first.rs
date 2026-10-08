@@ -12,11 +12,13 @@
 //! Setup: P3 hosts the party (the add_party phase put it back). P3 removes its
 //! own hosting entry, which a participant may do alone once it forces past
 //! Canton's active-contracts guard, and stays a namespace owner: the shape
-//! MainNet is in. P3 then leaves the synchronizer, purges its copy of the
-//! party's contracts and reconnects, the way the recovery procedure does;
-//! contracts left behind would stay active on P3 forever, since it no longer
-//! sees the party's archives. Contracts the party observes are then created
-//! while P3 is out, so P3 holds none of them.
+//! MainNet is in. P3 then leaves the synchronizer, purges the contracts it held
+//! only for the party and reconnects, the way the recovery procedure does.
+//! Those contracts would stay active on P3 forever, since it no longer sees
+//! the party's archives. P3 keeps the contracts another of its parties is a
+//! stakeholder of: it still sees their archives, and the add-party export
+//! leaves them out. Contracts the party observes are then created while P3 is
+//! out, so P3 holds none of them.
 //!
 //! P3 is then added back. From the moment P3 accepts the invitation until the
 //! run completes, two watchers run alongside: all but the last few seeded
@@ -80,8 +82,8 @@ use crate::common::{
     http::{probe_workflow_run_visible, probe_workflow_status},
     invitations::{InvitationIds, post_accept_invitation, probe_pending_invitation},
     ledger_api::{
-        P1_JSON_API, P3_JSON_API, REWARD_COUPON_V2_TEMPLATE, SeedCoupon, archive_command,
-        reward_coupon_create_command,
+        ActiveContract, P1_JSON_API, P3_JSON_API, REWARD_COUPON_V2_TEMPLATE, SeedCoupon,
+        archive_command, reward_coupon_create_command,
     },
     phases::deploy_gov_core::grant_rights,
     probe::Class,
@@ -252,12 +254,19 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         },
     )
     .when(
-        "P3 leaves the synchronizer, purges its copy of the party's contracts, reconnects",
+        "P3 leaves the synchronizer, purges the contracts it held only for the party, reconnects",
         |f, _| {
             Box::pin(async move {
                 let p3 = admin_config(f, 3)?;
                 let party = f.party_id()?.to_string();
-                let held = f.active_contract_ids(P3_JSON_API, &party).await?;
+                let synchronizer_id = dec_party_manager::utils::get_synchronizer_id(&p3).await?;
+                let hosted = hosted_parties(&p3, &synchronizer_id, &f.p3.participant_id).await?;
+                let (held, kept) = split_by_other_hosts(
+                    f.active_contracts(P3_JSON_API, &party).await?,
+                    &party,
+                    &f.p3.participant_id,
+                    &hosted,
+                );
                 let alias = p3.synchronizer().to_string();
                 let mut connectivity =
                     SynchronizerConnectivityServiceClient::new(p3.admin_channel().await?);
@@ -300,9 +309,14 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     }))
                     .await
                     .context("reconnect P3")?;
+                let mut kept_templates: Vec<&str> =
+                    kept.iter().map(|c| c.template_id.as_str()).collect();
+                kept_templates.sort();
                 info!(
-                    "P3 purged {} contract(s) of the party and reconnected",
-                    held.len()
+                    "P3 purged {} contract(s) of the party and reconnected. It kept {} that \
+                     another of its parties is a stakeholder of: {kept_templates:?}",
+                    held.len(),
+                    kept.len(),
                 );
                 Ok(())
             })
@@ -852,6 +866,56 @@ async fn read_hosting(
     }))
 }
 
+/// Parties the head state has `participant_uid` hosting.
+async fn hosted_parties(
+    config: &NodeConfig,
+    synchronizer_id: &str,
+    participant_uid: &str,
+) -> anyhow::Result<HashSet<String>> {
+    let mut client = TopologyManagerReadServiceClient::new(config.admin_channel().await?);
+    let response = client
+        .list_party_to_participant(tonic::Request::new(ListPartyToParticipantRequest {
+            base_query: Some(head_state_query(synchronizer_id)),
+            filter_party: String::new(),
+            filter_participant: String::new(),
+        }))
+        .await?
+        .into_inner();
+    Ok(response
+        .results
+        .into_iter()
+        .filter_map(|r| {
+            let P2pItem::V30(mapping) = r.item?;
+            mapping
+                .participants
+                .iter()
+                .any(|p| p.participant_uid == participant_uid)
+                .then_some(mapping.party)
+        })
+        .collect())
+}
+
+/// Split the party's contracts on a participant into the ids it held only for
+/// the party, and the contracts another party it hosts is a stakeholder of.
+///
+/// This is the rule ExportPartyAcs applies to its target: it skips every
+/// contract with a stakeholder the target already hosts, other than the party
+/// and the target's admin party. A purge of the second kind would leave the
+/// participant without contracts that no import puts back.
+fn split_by_other_hosts(
+    contracts: Vec<ActiveContract>,
+    party: &str,
+    participant_uid: &str,
+    hosted: &HashSet<String>,
+) -> (Vec<String>, Vec<ActiveContract>) {
+    let (alone, shared): (Vec<_>, Vec<_>) = contracts.into_iter().partition(|c| {
+        !c.stakeholders
+            .iter()
+            .any(|s| s != party && s != participant_uid && hosted.contains(s))
+    });
+    (alone.into_iter().map(|c| c.contract_id).collect(), shared)
+}
+
 fn to_system_time(ts: prost_types::Timestamp) -> SystemTime {
     let secs = u64::try_from(ts.seconds).unwrap_or_default();
     let nanos = u32::try_from(ts.nanos).unwrap_or_default();
@@ -1201,5 +1265,36 @@ mod commitment_tests {
                 tonic::Status::new(code, "retry")
             )));
         }
+    }
+}
+
+#[cfg(test)]
+mod purge_tests {
+    use super::*;
+
+    #[test]
+    fn purges_only_what_no_other_hosted_party_sees() {
+        let contract = |id: &str, stakeholders: &[&str]| ActiveContract {
+            contract_id: id.into(),
+            template_id: "T".into(),
+            stakeholders: stakeholders.iter().map(|s| s.to_string()).collect(),
+        };
+        let hosted: HashSet<String> = ["party", "member-p3", "participant::p3"]
+            .map(String::from)
+            .into();
+        let (purged, kept) = split_by_other_hosts(
+            vec![
+                contract("party-only", &["party"]),
+                contract("remote-member", &["party", "member-p1"]),
+                contract("admin-party", &["party", "participant::p3"]),
+                contract("local-member", &["member-p3", "party"]),
+            ],
+            "party",
+            "participant::p3",
+            &hosted,
+        );
+        assert_eq!(purged, ["party-only", "remote-member", "admin-party"]);
+        let kept: Vec<&str> = kept.iter().map(|c| c.contract_id.as_str()).collect();
+        assert_eq!(kept, ["local-member"]);
     }
 }
