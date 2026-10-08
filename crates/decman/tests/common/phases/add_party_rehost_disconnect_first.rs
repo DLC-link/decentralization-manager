@@ -46,8 +46,8 @@ use canton_proto_rs::com::digitalasset::canton::{
     admin::participant::v30::{
         DisconnectSynchronizerRequest, ListConnectedSynchronizersRequest,
         ListRegisteredSynchronizersRequest, LookupReceivedAcsCommitmentsRequest,
-        PurgeContractsRequest, ReceivedCommitmentState, ReconnectSynchronizerRequest,
-        SynchronizerTimeRange, TimeRange,
+        PurgeContractsRequest, ReceivedAcsCommitment, ReceivedCommitmentState,
+        ReconnectSynchronizerRequest, SynchronizerTimeRange, TimeRange,
         participant_inspection_service_client::ParticipantInspectionServiceClient,
         participant_repair_service_client::ParticipantRepairServiceClient,
         synchronizer_connectivity_service_client::SynchronizerConnectivityServiceClient,
@@ -729,8 +729,9 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 };
                 let (matched, mismatched) = match received_commitments(&p3, settled_at).await {
                     Ok(v) => v,
-                    // Retry, but say what went wrong. Swallowing this silently
-                    // turns every cause into the same bare timeout.
+                    // Transport interruptions can recover; invalid requests and
+                    // server errors should retain their original diagnostics.
+                    Err(e) if !retryable_commitment_error(&e) => return Some(Err(e)),
                     Err(e) => {
                         f.probe_diag.record(
                             "P3 commitments",
@@ -744,7 +745,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 // is nothing to wait for.
                 if !mismatched.is_empty() {
                     return Some(Err(anyhow::anyhow!(
-                        "P3's ACS disagrees with {} counter-participant(s) after the import: {:?}. \
+                        "P3's ACS has {} mismatched commitment(s) after the import: {:?}. \
                          Contract sets can match while commitments do not: the transfer moves the \
                          contracts, and P3's view of them can still differ from the network's",
                         mismatched.len(),
@@ -1008,9 +1009,8 @@ async fn received_commitments(
     config: &NodeConfig,
     since: SystemTime,
 ) -> anyhow::Result<(usize, Vec<String>)> {
-    // Keep the nanoseconds. Truncating to whole seconds moves the window start
-    // backwards, which can pull in a period that began before the settle point
-    // and fail this assertion on a mismatch the phase caused itself.
+    // Canton returns overlapping periods, not just periods beginning in this
+    // range. Filter the returned intervals below as well as retaining nanos.
     let from = proto_timestamp(since)?;
     let to = proto_timestamp(SystemTime::now())?;
     let physical = dec_party_manager::utils::get_synchronizer_id(config).await?;
@@ -1035,24 +1035,66 @@ async fn received_commitments(
         .await?
         .into_inner();
 
-    let mut matched = 0usize;
+    summarize_commitments(
+        response.received.into_iter().flat_map(|sync| sync.received),
+        from,
+        to,
+    )
+}
+
+fn retryable_commitment_error(error: &anyhow::Error) -> bool {
+    match error.downcast_ref::<tonic::Status>() {
+        Some(status) => matches!(
+            status.code(),
+            tonic::Code::Unavailable | tonic::Code::DeadlineExceeded
+        ),
+        // Channel establishment failures do not carry an RPC status.
+        None => true,
+    }
+}
+
+fn summarize_commitments(
+    commitments: impl IntoIterator<Item = ReceivedAcsCommitment>,
+    since: prost_types::Timestamp,
+    until: prost_types::Timestamp,
+) -> anyhow::Result<(usize, Vec<String>)> {
+    let mut matched = HashSet::new();
     let mut mismatched = Vec::new();
-    for per_synchronizer in response.received {
-        for commitment in per_synchronizer.received {
-            match ReceivedCommitmentState::try_from(commitment.state) {
-                Ok(ReceivedCommitmentState::Match) => matched += 1,
-                Ok(ReceivedCommitmentState::Mismatch) => {
-                    mismatched.push(commitment.origin_counter_participant_uid)
-                }
-                // Buffered and outstanding both mean "not compared yet", which
-                // the caller waits out rather than judges.
-                _ => {}
+    for commitment in commitments {
+        let interval = commitment
+            .interval
+            .context("received commitment has no interval")?;
+        let start = interval
+            .start_tick_exclusive
+            .context("commitment has no start tick")?;
+        let end = interval
+            .end_tick_inclusive
+            .context("commitment has no end tick")?;
+        let start = (start.seconds, start.nanos);
+        let end = (end.seconds, end.nanos);
+        // DbAcsCommitmentStore.searchReceivedBetween is an overlap query.
+        // A period straddling the settle point can describe the rehost itself.
+        // Only complete periods starting at/after settlement prove convergence.
+        if start < (since.seconds, since.nanos) || end > (until.seconds, until.nanos) {
+            continue;
+        }
+        anyhow::ensure!(start < end, "commitment has a non-positive interval");
+        match ReceivedCommitmentState::try_from(commitment.state) {
+            Ok(ReceivedCommitmentState::Match) => {
+                // Multiple counterparties in one period still prove one period.
+                matched.insert((start, end));
             }
+            Ok(ReceivedCommitmentState::Mismatch) => mismatched.push(format!(
+                "{} in ({start:?}, {end:?}]",
+                commitment.origin_counter_participant_uid,
+            )),
+            // Buffered and outstanding have not been compared yet.
+            _ => {}
         }
     }
     mismatched.sort();
     mismatched.dedup();
-    Ok((matched, mismatched))
+    Ok((matched.len(), mismatched))
 }
 
 /// The synchronizer's reconciliation interval, which decides how often
@@ -1078,4 +1120,86 @@ async fn reconciliation_interval(config: &NodeConfig) -> anyhow::Result<Duration
         .reconciliation_interval
         .context("synchronizer parameters carry no reconciliation interval")?;
     Ok(Duration::from_secs(interval.seconds.max(0) as u64))
+}
+
+#[cfg(test)]
+mod commitment_tests {
+    use super::*;
+    use canton_proto_rs::com::digitalasset::canton::admin::participant::v30::Interval;
+
+    fn timestamp(seconds: i64, nanos: i32) -> prost_types::Timestamp {
+        prost_types::Timestamp { seconds, nanos }
+    }
+
+    fn commitment(
+        start: i64,
+        end: i64,
+        peer: &str,
+        state: ReceivedCommitmentState,
+    ) -> ReceivedAcsCommitment {
+        ReceivedAcsCommitment {
+            interval: Some(Interval {
+                start_tick_exclusive: Some(timestamp(start, 0)),
+                end_tick_inclusive: Some(timestamp(end, 0)),
+            }),
+            origin_counter_participant_uid: peer.into(),
+            state: state as i32,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn excludes_disturbed_period_but_keeps_later_mismatch() -> anyhow::Result<()> {
+        use ReceivedCommitmentState::{Match, Mismatch};
+        let (matched, mismatched) = summarize_commitments(
+            [
+                commitment(0, 30, "P1", Mismatch),
+                commitment(30, 60, "P1", Match),
+                commitment(60, 90, "P1", Mismatch),
+            ],
+            timestamp(0, 900_000_000),
+            timestamp(90, 0),
+        )?;
+        assert_eq!(matched, 1);
+        assert_eq!(mismatched.len(), 1);
+        assert!(mismatched[0].contains("(60, 0), (90, 0)"));
+        Ok(())
+    }
+
+    #[test]
+    fn counts_distinct_complete_periods_and_waits_for_comparison() -> anyhow::Result<()> {
+        use ReceivedCommitmentState::{Buffered, Match, Outstanding};
+        let (matched, mismatched) = summarize_commitments(
+            [
+                commitment(30, 60, "P1", Match),
+                commitment(30, 60, "P2", Match),
+                commitment(60, 90, "P1", Buffered),
+                commitment(60, 90, "P2", Outstanding),
+                commitment(90, 120, "P1", Match),
+            ],
+            timestamp(30, 0),
+            timestamp(100, 0),
+        )?;
+        assert_eq!(matched, 1);
+        assert!(mismatched.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn permanent_rpc_errors_fail_even_with_context() {
+        for code in [
+            tonic::Code::InvalidArgument,
+            tonic::Code::Internal,
+            tonic::Code::PermissionDenied,
+        ] {
+            let error = anyhow::Error::new(tonic::Status::new(code, "broken request"))
+                .context("lookup received commitments");
+            assert!(!retryable_commitment_error(&error));
+        }
+        for code in [tonic::Code::Unavailable, tonic::Code::DeadlineExceeded] {
+            assert!(retryable_commitment_error(&anyhow::Error::new(
+                tonic::Status::new(code, "retry")
+            )));
+        }
+    }
 }
