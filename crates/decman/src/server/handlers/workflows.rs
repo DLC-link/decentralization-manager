@@ -2201,6 +2201,7 @@ async fn verify_peer_mesh(
     request_body = ContractsRequest,
     responses(
         (status = 202, description = "Contracts workflow started", body = WorkflowResponse),
+        (status = 400, description = "No contracts to deploy, or the deployment cannot be resolved", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 409, description = "Workflow already in progress", body = ErrorResponse)
@@ -2214,6 +2215,13 @@ pub async fn start_contracts(
 ) -> impl Responder {
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
+    }
+    // Peers sign one prepared create per contract, so an empty run would
+    // invite them and then fail on every one of them at signing.
+    if body.contracts.is_empty() {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: "The request lists no contracts to deploy".to_string(),
+        });
     }
 
     // Create contracts config from request
@@ -3899,8 +3907,10 @@ async fn send_contracts_invites(
 
 #[cfg(test)]
 mod tests {
+    use actix_web::{App, HttpMessage, http::StatusCode, test as actix_test};
+
     use super::*;
-    use crate::db::MIGRATOR;
+    use crate::{auth::Principal, db::MIGRATOR, server::AppState};
 
     /// A minimal coordinator run row for `party`, in progress.
     fn in_progress_run(instance: &str, party: &CantonId) -> WorkflowRun {
@@ -4205,6 +4215,41 @@ mod tests {
             serde_json::from_str(&format!(r#"{{"dec_party_id":"{}"}}"#, test_cid("dec")?))?;
         assert!(minimal.participants.is_empty());
         assert!(minimal.package_names.is_empty());
+        Ok(())
+    }
+
+    /// A run with nothing to create would invite every peer and then fail on
+    /// each of them at signing, so it is refused before anything is persisted
+    /// or sent.
+    #[actix_web::test]
+    async fn start_contracts_refuses_a_request_with_no_contracts() -> anyhow::Result<()> {
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(AppState::for_test(None).await?)
+                .service(start_contracts),
+        )
+        .await;
+        let party = pid(9)?;
+        let request = actix_test::TestRequest::post()
+            .uri("/contracts")
+            .set_json(serde_json::json!({
+                "decentralized_party_id": party.to_string(),
+                "participant_ids": [pid(10)?.to_string()],
+                "participant_parties": [pid(11)?.to_string()],
+                "operator_party": party.to_string(),
+                "contracts": [],
+            }))
+            .to_request();
+        request.extensions_mut().insert(Principal {
+            sub: "admin".to_string(),
+            issuer: "test".to_string(),
+            roles: Vec::new(),
+            email: None,
+        });
+
+        let response = actix_test::call_service(&app, request).await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         Ok(())
     }
 }
