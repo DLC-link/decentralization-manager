@@ -1,12 +1,19 @@
-use std::{collections::HashSet, marker::PhantomData, sync::Arc, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    marker::PhantomData,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use sqlx::SqlitePool;
+use tokio::sync::RwLock;
 
 use common::types::AcsTransferProgress;
 
 use crate::{
     canton_id::CantonId,
     config::{NetworkConfig, NodeConfig, Peer},
+    consts::PEER_SILENCE_LIMIT,
     db::schema::SchemaRead,
     noise::{
         CHUNK_SIZE, MAX_PAYLOAD_SIZE, Message, MessageType, NoiseError, NoiseKeypair,
@@ -35,6 +42,9 @@ use crate::{
 /// disconnected from every synchronizer for the whole transfer, so both sides
 /// need to show movement in production logs.
 const ACS_PROGRESS_EVERY_BLOCKS: u64 = 64;
+
+/// How often a coordinator checks whether its peers can still finish the run.
+const PEER_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Whether an outgoing command should carry the workflow's `command_payload`.
 ///
@@ -79,6 +89,11 @@ pub struct NoiseServer<S: WorkflowStep + 'static> {
     peers: Vec<Peer>,
     workflow_state: Arc<WorkflowState<S>>,
     last_seen: LastSeen,
+    /// Peers that reported giving up on this run, with why.
+    departed: RwLock<HashMap<CantonId, String>>,
+    /// When this process began serving the run. A peer not heard from since
+    /// counts as silent from here, so a restart does not count it out at once.
+    serving_since: Instant,
     _p: PhantomData<S>,
 }
 
@@ -111,6 +126,19 @@ impl ActiveWorkflow {
             Self::Dars(s) => s.handle_command(peer_id, message).await,
             Self::AddParty(s) => s.handle_command(peer_id, message).await,
             Self::ChangeThreshold(s) => s.handle_command(peer_id, message).await,
+        }
+    }
+
+    /// Resolve once this run can no longer finish, with the reason. See
+    /// [`NoiseServer::wait_until_stranded`].
+    pub async fn wait_until_stranded(&self) -> String {
+        match self {
+            Self::Onboarding(s) => s.wait_until_stranded().await,
+            Self::Kick(s) => s.wait_until_stranded().await,
+            Self::Contracts(s) => s.wait_until_stranded().await,
+            Self::Dars(s) => s.wait_until_stranded().await,
+            Self::AddParty(s) => s.wait_until_stranded().await,
+            Self::ChangeThreshold(s) => s.wait_until_stranded().await,
         }
     }
 
@@ -400,12 +428,70 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
             peers,
             workflow_state,
             last_seen,
+            departed: RwLock::new(HashMap::new()),
+            serving_since: Instant::now(),
             _p: PhantomData,
         })
     }
 
     pub fn get_workflow_state(&self) -> Arc<WorkflowState<S>> {
         self.workflow_state.clone()
+    }
+
+    /// Resolve once this run can no longer finish, with the reason: the
+    /// current step waits on peers that gave up or went silent, and the rest
+    /// cannot reach its quorum.
+    ///
+    /// A step that waits on peers advances only when they report, so without
+    /// this a peer that dies mid-step parks the run forever (#442).
+    pub async fn wait_until_stranded(&self) -> String {
+        let mut check = tokio::time::interval(PEER_CHECK_INTERVAL);
+        loop {
+            check.tick().await;
+            if let Some(reason) = self.stranded_reason(Instant::now()).await {
+                return reason;
+            }
+        }
+    }
+
+    /// Why this run can no longer finish as of `now`, or `None` while it can.
+    pub(crate) async fn stranded_reason(&self, now: Instant) -> Option<String> {
+        let unavailable = self.unavailable_peers(now).await;
+        if unavailable.is_empty() {
+            return None;
+        }
+        let (step, missing) = self.workflow_state.stranded_by(&unavailable).await?;
+        let peers = missing
+            .iter()
+            .map(|(peer, why)| format!("peer {peer} {why}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        Some(format!("{step} cannot complete: {peers}"))
+    }
+
+    /// The peers this run can no longer count on, with why: those that reported
+    /// giving up, and those not heard from for [`PEER_SILENCE_LIMIT`] as of
+    /// `now`. `last_seen` counts heartbeats as well as workflow traffic, so a
+    /// peer busy in a long step stays available.
+    async fn unavailable_peers(&self, now: Instant) -> HashMap<CantonId, String> {
+        let mut unavailable = self.departed.read().await.clone();
+        let last_seen = self.last_seen.read().await;
+        for peer in self.workflow_state.expected_peers() {
+            if unavailable.contains_key(peer) {
+                continue;
+            }
+            let heard = last_seen
+                .get(&peer.to_string())
+                .map_or(self.serving_since, |seen| (*seen).max(self.serving_since));
+            let silent = now.saturating_duration_since(heard);
+            if silent >= PEER_SILENCE_LIMIT {
+                unavailable.insert(
+                    peer.clone(),
+                    format!("has been unreachable for {}s", silent.as_secs()),
+                );
+            }
+        }
+        unavailable
     }
 
     /// Handle a workflow-command message routed from the always-on listener.
@@ -658,6 +744,11 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
     /// back instead of hanging. Always replies with `Ack` — the declining
     /// peer treats the send as fire-and-forget.
     ///
+    /// An `abandoned` decline comes from a peer that accepted and later gave
+    /// up. It only counts that peer out; [`Self::wait_until_stranded`] fails
+    /// the run if the rest cannot finish it. The other peers keep their runs,
+    /// so a coordinator retry can still re-drive them.
+    ///
     /// The decline is validated before failing the run: the always-on
     /// listener routes EVERY `DeclineInvitation` to whatever workflow is
     /// currently active, so a peer denying a STALE invitation card (left
@@ -689,6 +780,19 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                 active_kind = S::kind(),
                 active_instance = self.workflow_state.instance_name()
             );
+            return Message::new_empty(MessageType::Ack);
+        }
+
+        if payload.abandoned {
+            let reason = payload.reason.as_deref().unwrap_or("no reason given");
+            tracing::warn!(
+                "Peer {peer_id} gave up on run {}: {reason}",
+                self.workflow_state.instance_name()
+            );
+            self.departed
+                .write()
+                .await
+                .insert(peer_id, format!("gave up: {reason}"));
             return Message::new_empty(MessageType::Ack);
         }
 
@@ -773,6 +877,7 @@ mod tests {
             kind,
             reason: None,
             workflow_instance: workflow_instance.map(str::to_string),
+            abandoned: false,
         }
     }
 

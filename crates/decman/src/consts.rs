@@ -133,6 +133,23 @@ pub const DECLINE_NOTIFY_BACKOFF_SECS: u64 = 2;
 
 pub const MAX_CONSECUTIVE_NO_WORKFLOW_POLLS: usize = 4;
 
+/// How long a coordinator waits on a peer it cannot hear from before it counts
+/// the peer out of a run, and how long a peer that gave up keeps trying to tell
+/// the coordinator.
+///
+/// "Hear from" means authenticated Noise traffic in either direction: the
+/// peer's own requests, or a heartbeat ping the coordinator sends and the peer
+/// answers. Heartbeats run on their own task, so a peer busy in a long step
+/// (DAR vetting, a multi-hour ACS import) is still heard. A live peer is never
+/// silent for much more than 30s: 15s until the entry goes stale, one 5s tick,
+/// and a 10s ping timeout.
+///
+/// Ten minutes outlasts the longest outage a peer rides out on its own side,
+/// the ~9-minute ACS block re-ask budget ([`ACS_BLOCK_FETCH_ATTEMPTS`]), so the
+/// coordinator never gives up on a peer that has not yet given up on it. It
+/// also outlasts a pod restart, after which a peer resumes its run.
+pub const PEER_SILENCE_LIMIT: std::time::Duration = std::time::Duration::from_secs(600);
+
 /// Delay before a peer re-polls the coordinator after a `Wait` reply, in
 /// milliseconds.
 /// Default value; the actual delay is read via [`peer_wait_poll_delay_ms`].

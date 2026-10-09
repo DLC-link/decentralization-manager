@@ -841,6 +841,12 @@ pub struct DeclineInvitationPayload {
     /// falls back to kind + membership checks only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_instance: Option<String>,
+    /// Set when the peer accepted the invitation and later gave up on the
+    /// run, with `reason` saying why. The coordinator then counts the peer
+    /// out of the run instead of treating it as a decline. A coordinator
+    /// that predates the field ignores it and fails the run as declined.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub abandoned: bool,
 }
 
 /// Payload sent inside an `InviteDars` Noise message.
