@@ -27,7 +27,9 @@ pub(crate) use governance::{
 // re-exported here so they are reachable through the private `governance`
 // submodule.
 pub(crate) use governance::{get_party_credentials, packages};
-pub(crate) use invitations::{accept_invitation, decline_invitation, get_invitations};
+pub(crate) use invitations::{
+    accept_invitation, decline_invitation, get_invitation_dar, get_invitations,
+};
 pub(crate) use keys::get_key_status;
 pub(crate) use parties::{
     Discovery, DiscoveryGate, MAX_CONCURRENT_DISCOVERIES, clear_acs_import_quarantine,
