@@ -843,6 +843,36 @@ fn delegation_template_id(package_id: String) -> Identifier {
     }
 }
 
+/// Localnet-only submit shim. The release binary does not compile this hook.
+/// A per-node file lets the harness change faults without restarting the loop.
+#[cfg(feature = "test-mode")]
+async fn inject_assignment_failure(decparty: &CantonId) -> anyhow::Result<()> {
+    let Some(path) = std::env::var_os("DECPM_TEST_REWARD_ASSIGN_FAILURE_FILE") else {
+        return Ok(());
+    };
+    let contents = match tokio::fs::read_to_string(path).await {
+        Ok(contents) => contents,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    let Some((party, error_id)) = contents.trim().split_once(' ') else {
+        anyhow::bail!("invalid reward assignment test fault");
+    };
+    if party != decparty.to_string() {
+        return Ok(());
+    }
+    let status = match error_id {
+        "LOCAL_VERDICT_LOCKED_CONTRACTS" => {
+            tonic::Status::aborted(format!("{error_id}(10,test): injected contention"))
+        }
+        "COMMAND_PREPROCESSING_FAILED" => {
+            tonic::Status::invalid_argument(format!("{error_id}(8,test): injected rejection"))
+        }
+        _ => anyhow::bail!("unsupported reward assignment test fault: {error_id}"),
+    };
+    Err(status.into())
+}
+
 /// Pin the exercise to the verified concrete package, including older versions
 /// of the configured package name. Never trust module/entity names alone.
 fn verified_delegation_template(
@@ -887,6 +917,9 @@ pub(crate) async fn submit_delegation_assign(
     additional: &[String],
     packages: &PackageConfig,
 ) -> anyhow::Result<()> {
+    #[cfg(feature = "test-mode")]
+    inject_assignment_failure(decparty).await?;
+
     let choice_argument = Value {
         sum: Some(value::Sum::Record(build_delegation_assign_arg(
             assigner, primary, additional,

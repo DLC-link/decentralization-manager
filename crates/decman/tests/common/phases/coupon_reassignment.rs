@@ -186,6 +186,113 @@ async fn counter_total(f: &Fixture, ports: &[u16], name: &str) -> anyhow::Result
     Ok(total)
 }
 
+/// Removing the files on every exit prevents a failed assertion from leaving
+/// the node's background loop faulted during subsequent diagnostics.
+struct AssignmentFault(Vec<std::path::PathBuf>);
+
+impl AssignmentFault {
+    fn install(f: &Fixture, party: &str) -> anyhow::Result<Self> {
+        let fault = Self(
+            (1..=2)
+                .map(|i| {
+                    f.dev_dir
+                        .join(format!("participant-{i}/reward-assign-failure"))
+                })
+                .collect(),
+        );
+        fault.set(party, "LOCAL_VERDICT_LOCKED_CONTRACTS")?;
+        Ok(fault)
+    }
+
+    fn set(&self, party: &str, error_id: &str) -> anyhow::Result<()> {
+        for path in &self.0 {
+            let staging = path.with_extension("tmp");
+            std::fs::write(&staging, format!("{party} {error_id}"))?;
+            std::fs::rename(staging, path)?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for AssignmentFault {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            if let Err(error) = std::fs::remove_file(path)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                warn!(%error, path = %path.display(), "removing assignment test fault failed");
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct AssignmentMetrics {
+    zero: f64,
+    skipped: f64,
+    assigned: f64,
+    expiry: Option<f64>,
+}
+
+async fn assignment_metrics(f: &Fixture, party: &str) -> anyhow::Result<Vec<AssignmentMetrics>> {
+    let mut values = Vec::new();
+    for port in [f.p1.metrics, f.p2.metrics] {
+        let body = f.get_text(port, "/metrics").await?;
+        let metric = |name: &str| -> anyhow::Result<Option<f64>> {
+            let prefix = format!("{name}{{decparty=\"{party}\"}} ");
+            body.lines()
+                .find_map(|line| line.strip_prefix(&prefix))
+                .map(|value| value.parse::<f64>().map_err(Into::into))
+                .transpose()
+        };
+        values.push(AssignmentMetrics {
+            zero: metric("decman_reward_sweep_zero_assigned_total")?.unwrap_or(0.0),
+            skipped: metric("decman_reward_coupons_skipped_total")?.unwrap_or(0.0),
+            assigned: metric("decman_reward_coupons_assigned_total")?.unwrap_or(0.0),
+            expiry: metric("decman_reward_oldest_unassigned_expires_in_seconds")?,
+        });
+    }
+    Ok(values)
+}
+
+async fn assert_assignment_fault(
+    f: &Fixture,
+    party: &str,
+    baseline: &[AssignmentMetrics],
+    transient: bool,
+) -> anyhow::Result<()> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(90);
+    loop {
+        let current = assignment_metrics(f, party).await?;
+        let mut ready = true;
+        for (now, before) in current.iter().zip(baseline) {
+            anyhow::ensure!(
+                now.assigned == before.assigned,
+                "faulted assignment reached the ledger: {now:?}"
+            );
+            if transient {
+                anyhow::ensure!(
+                    now.skipped == before.skipped,
+                    "contention counted coupons as rejected: {now:?}"
+                );
+            }
+            ready &= now.zero > before.zero
+                && (transient || now.skipped > before.skipped)
+                && now
+                    .expiry
+                    .is_some_and(|expiry| expiry.is_finite() && expiry > 0.0);
+        }
+        if ready {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            std::time::Instant::now() < deadline,
+            "assignment failure metrics did not converge (transient={transient}): {current:?}"
+        );
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: coupon_reassignment (CIP-104 Mode A delegation model)");
 
@@ -278,6 +385,18 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             f.p3_member_party()?.to_string(),
         ),
     };
+    // Install the fault on both assigners before enabling the loop, so no
+    // healthy node can drain the coupons before the failure assertions run.
+    let fault = if matches!(f.target, crate::common::TestTarget::Localnet) {
+        Some(AssignmentFault::install(f, &decparty)?)
+    } else {
+        None
+    };
+    let baseline = if fault.is_some() {
+        assignment_metrics(f, &decparty).await?
+    } else {
+        Vec::new()
+    };
     propose_confirm_execute(
         "SetupCouponReassignmentDelegation",
         json!({
@@ -295,6 +414,15 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     )
     .run(f)
     .await?;
+
+    if let Some(fault) = fault {
+        assert_assignment_fault(f, &decparty, &baseline, true).await?;
+        let after_contention = assignment_metrics(f, &decparty).await?;
+        fault.set(&decparty, "COMMAND_PREPROCESSING_FAILED")?;
+        assert_assignment_fault(f, &decparty, &after_contention, false).await?;
+        drop(fault);
+        info!("assignment failure metrics verified; restored real ledger submission");
+    }
 
     Scenario::new("CouponReassignmentDelegation present")
         .then(

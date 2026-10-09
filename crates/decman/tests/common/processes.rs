@@ -242,6 +242,10 @@ pub async fn spawn_node(spawn: &NodeSpawn, restarted_pids_file: &PathBuf) -> Res
             spawn.canton_ledger_port.to_string(),
         )
         .env("DECPM_CANTON_NETWORK", "devnet")
+        .env(
+            "DECPM_TEST_REWARD_ASSIGN_FAILURE_FILE",
+            spawn.data_dir.join("reward-assign-failure"),
+        )
         .env("DECPM_METRICS_PORT", spawn.metrics_port.to_string())
         .env("DECPM_NOISE_PORT", spawn.noise_port.to_string())
         .envs(
