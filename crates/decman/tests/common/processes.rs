@@ -116,6 +116,42 @@ pub async fn kill_pid(pid: u32) -> Result<()> {
     Ok(())
 }
 
+/// Pause (`SIGSTOP`) or resume (`SIGCONT`) `participant`'s tracked process.
+///
+/// A paused node keeps its sockets but answers nothing. A coordinator that
+/// already counted it as joined keeps waiting for it, which is how a phase
+/// stages a member that joins a run and then never signs.
+async fn signal_node(fixture: &Fixture, participant: u8, signal: &str) -> Result<()> {
+    let idx = (participant as usize)
+        .checked_sub(1)
+        .context("participant index must be 1-based")?;
+    let pid = fixture
+        .current_pids
+        .get(idx)
+        .copied()
+        .flatten()
+        .with_context(|| format!("no tracked pid for participant-{participant}"))?;
+    let status = Command::new("kill")
+        .args([signal, &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .with_context(|| format!("spawn `kill {signal} {pid}`"))?;
+    anyhow::ensure!(status.success(), "`kill {signal} {pid}` failed: {status}");
+    Ok(())
+}
+
+/// Pause `participant` with `SIGSTOP`. See [`signal_node`].
+pub async fn pause_node(fixture: &Fixture, participant: u8) -> Result<()> {
+    signal_node(fixture, participant, "-STOP").await
+}
+
+/// Resume a node [`pause_node`] paused.
+pub async fn resume_node(fixture: &Fixture, participant: u8) -> Result<()> {
+    signal_node(fixture, participant, "-CONT").await
+}
+
 /// Block (with deadline) until `pid` is no longer alive — i.e., `kill -0`
 /// returns non-zero. Used immediately after `kill_pid` to make sure the
 /// HTTP/Noise ports are released before respawning.
