@@ -201,6 +201,7 @@ pub struct PendingInvitationRow {
     pub previous_threshold: Option<i64>,
     pub dec_party_id: Option<String>,
     pub package_names: Option<String>,
+    pub contract_intents: Option<String>,
     pub workflow_instance: Option<String>,
 }
 
@@ -249,6 +250,10 @@ impl PendingInvitationRow {
             previous_threshold: inv.previous_threshold.map(i64::from),
             dec_party_id: inv.dec_party_id.as_ref().map(|p| p.to_string()),
             package_names: encode_list(&inv.package_names, "pending invitation package_names")?,
+            contract_intents: encode_list(
+                &inv.contract_intents,
+                "pending invitation contract_intents",
+            )?,
             workflow_instance: inv.workflow_instance.clone(),
         })
     }
@@ -266,6 +271,7 @@ impl PendingInvitationRow {
         let dar_filenames = decode_list(self.dar_filenames, &self.id, "dar_filenames")?;
         let dar_hashes = decode_list(self.dar_hashes, &self.id, "dar_hashes")?;
         let package_names = decode_list(self.package_names, &self.id, "package_names")?;
+        let contract_intents = decode_list(self.contract_intents, &self.id, "contract_intents")?;
         let kicked_participant = self
             .kicked_participant
             .map(|s| CantonId::parse(&s))
@@ -297,6 +303,7 @@ impl PendingInvitationRow {
             previous_threshold: self.previous_threshold.map(|v| v as i32),
             dec_party_id,
             package_names,
+            contract_intents,
             workflow_instance: self.workflow_instance,
         })
     }
@@ -477,6 +484,7 @@ mod tests {
             previous_threshold: None,
             dec_party_id: None,
             package_names: None,
+            contract_intents: None,
             workflow_instance: None,
         }
     }

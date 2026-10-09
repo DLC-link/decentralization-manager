@@ -163,6 +163,14 @@ pub async fn start_coordinator(
                         }
                         workflow_state.advance_step().await;
                     }
+                    KickStep::RetireLegacyKeys => {
+                        crate::workflow::topology::retire_legacy_keys_and_wait(
+                            &node_config,
+                            &kick_config.decentralized_party_id,
+                        )
+                        .await?;
+                        workflow_state.advance_step().await;
+                    }
                     KickStep::Complete => {
                         tracing::info!("Kick workflow complete!");
                         tracing::debug!("Waiting for peers to receive Disconnect command...");

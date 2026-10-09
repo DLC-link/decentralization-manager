@@ -3,7 +3,9 @@ pub mod coordinator;
 pub mod peer;
 pub mod steps;
 
-pub use config::{ContractDefinition, ContractsConfig, DarFile, FieldDefinition};
+pub use config::{
+    CommittedDeployment, ContractDefinition, ContractsConfig, DarFile, FieldDefinition,
+};
 pub use steps::{
     execute_submissions, prepare_submissions, sign_submissions, upload_dars, upload_dars_from_bytes,
 };

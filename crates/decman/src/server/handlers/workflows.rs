@@ -2201,6 +2201,7 @@ async fn verify_peer_mesh(
     request_body = ContractsRequest,
     responses(
         (status = 202, description = "Contracts workflow started", body = WorkflowResponse),
+        (status = 400, description = "No contracts to deploy, or the deployment cannot be resolved", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 409, description = "Workflow already in progress", body = ErrorResponse)
@@ -2215,6 +2216,13 @@ pub async fn start_contracts(
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
     }
+    // Peers sign one prepared create per contract, so an empty run would
+    // invite them and then fail on every one of them at signing.
+    if body.contracts.is_empty() {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: "The request lists no contracts to deploy".to_string(),
+        });
+    }
 
     // Create contracts config from request
     let timestamp = now_secs();
@@ -2222,7 +2230,7 @@ pub async fn start_contracts(
         "{}-contracts-{timestamp}",
         body.decentralized_party_id.prefix
     );
-    let contracts_config = workflow::ContractsConfig::new(
+    let mut contracts_config = workflow::ContractsConfig::new(
         body.decentralized_party_id.clone(),
         body.participant_ids.clone(),
         body.participant_parties.clone(),
@@ -2279,6 +2287,31 @@ pub async fn start_contracts(
         return HttpResponse::Conflict().json(ErrorResponse {
             error: format_incompatible_peers(&incompatible),
         });
+    }
+
+    // Resolve aliases once, before persisting or inviting. Preparation and
+    // retries must use the same package IDs the operators approved.
+    if let Err(error) = workflow::contracts::steps::prepare::resolve_package_ids(
+        &data.config,
+        &mut contracts_config.contracts,
+    )
+    .await
+    {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: format!("Cannot resolve deployment packages: {error:#}"),
+        });
+    }
+
+    // Commit to the exact creates before persisting or inviting. Peers verify
+    // the prepared transactions against these, including on a resumed run.
+    match workflow::contracts::steps::prepare::commit_deployment(&data.db, &contracts_config).await
+    {
+        Ok(committed) => contracts_config.committed_deployment = Some(committed),
+        Err(error) => {
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                error: format!("Cannot commit the deployment: {error:#}"),
+            });
+        }
     }
 
     // Register + persist atomically w.r.t. duplicates (registry insert dedups
@@ -3829,6 +3862,7 @@ async fn send_contracts_invites(
         dec_party_id: contracts_config.decentralized_party_id.clone(),
         participants: invitees.to_vec(),
         package_names,
+        contract_intents: contracts_config.committed()?.intents.clone(),
         workflow_instance: Some(contracts_config.instance_name.clone()),
     };
     let payload_bytes = serde_json::to_vec(&payload).context("encode ContractsInvitePayload")?;
@@ -3901,8 +3935,10 @@ async fn send_contracts_invites(
 
 #[cfg(test)]
 mod tests {
+    use actix_web::{App, HttpMessage, http::StatusCode, test as actix_test};
+
     use super::*;
-    use crate::db::MIGRATOR;
+    use crate::{auth::Principal, db::MIGRATOR, server::AppState};
 
     /// A minimal coordinator run row for `party`, in progress.
     fn in_progress_run(instance: &str, party: &CantonId) -> WorkflowRun {
@@ -4194,6 +4230,7 @@ mod tests {
             dec_party_id: test_cid("dec")?,
             participants: vec![test_cid("node1")?],
             package_names: vec!["Governance Core".to_string()],
+            contract_intents: Vec::new(),
             workflow_instance: Some("dec-contracts-1".to_string()),
         };
         let bytes = serde_json::to_vec(&payload)?;
@@ -4206,6 +4243,41 @@ mod tests {
             serde_json::from_str(&format!(r#"{{"dec_party_id":"{}"}}"#, test_cid("dec")?))?;
         assert!(minimal.participants.is_empty());
         assert!(minimal.package_names.is_empty());
+        Ok(())
+    }
+
+    /// A run with nothing to create would invite every peer and then fail on
+    /// each of them at signing, so it is refused before anything is persisted
+    /// or sent.
+    #[actix_web::test]
+    async fn start_contracts_refuses_a_request_with_no_contracts() -> anyhow::Result<()> {
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(AppState::for_test(None).await?)
+                .service(start_contracts),
+        )
+        .await;
+        let party = pid(9)?;
+        let request = actix_test::TestRequest::post()
+            .uri("/contracts")
+            .set_json(serde_json::json!({
+                "decentralized_party_id": party.to_string(),
+                "participant_ids": [pid(10)?.to_string()],
+                "participant_parties": [pid(11)?.to_string()],
+                "operator_party": party.to_string(),
+                "contracts": [],
+            }))
+            .to_request();
+        request.extensions_mut().insert(Principal {
+            sub: "admin".to_string(),
+            issuer: "test".to_string(),
+            roles: Vec::new(),
+            email: None,
+        });
+
+        let response = actix_test::call_service(&app, request).await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         Ok(())
     }
 }

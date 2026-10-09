@@ -44,7 +44,10 @@ const ACS_PROGRESS_EVERY_BLOCKS: u64 = 64;
 /// message into a multi-MB chunked transfer and delay the peer's invite
 /// listener from resuming, which has caused Contracts-invite races in CI.
 const fn command_carries_payload(command: MessageType) -> bool {
-    !matches!(command, MessageType::Disconnect)
+    !matches!(
+        command,
+        MessageType::Disconnect | MessageType::RetireLegacyKeys
+    )
 }
 
 /// Whether a peer's invitation decline targets THIS coordinator run. The
@@ -746,6 +749,7 @@ mod tests {
     #[test]
     fn disconnect_never_carries_a_payload() {
         assert!(!command_carries_payload(MessageType::Disconnect));
+        assert!(!command_carries_payload(MessageType::RetireLegacyKeys));
     }
 
     #[test]

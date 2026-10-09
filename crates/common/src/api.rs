@@ -476,7 +476,7 @@ pub struct TenantPrepareResponse {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct TenantOnboardRequest {
+pub struct TenantExecuteRequest {
     pub party_hint: String,
     /// The party's raw Ed25519 public key, base64-encoded.
     pub public_key: String,
@@ -493,13 +493,13 @@ pub struct TenantOnboardRequest {
 }
 
 /// Response to a wallet onboarding request. Reports this host's view only: the
-/// wallet calls `/onboard` on every host and aggregates. `Completed` means this
+/// wallet calls `/execute` on every host and aggregates. `Completed` means this
 /// host's authorized `PartyToParticipant` names it; `InProgress` means the
 /// topology is still a proposal here (more hosts must sign).
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct TenantOnboardResponse {
+pub struct TenantExecuteResponse {
     pub status: WorkflowProgress,
     pub party_id: String,
 }
@@ -574,7 +574,7 @@ pub struct TenantAddHostsPrepareResponse {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct TenantAddHostsOnboardRequest {
+pub struct TenantAddHostsExecuteRequest {
     /// Full party id of the party gaining hosts.
     pub party_id: String,
     /// The serial the wallet pinned when it prepared. Re-checked against this
@@ -595,7 +595,7 @@ pub struct TenantAddHostsOnboardRequest {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct TenantAddHostsOnboardResponse {
+pub struct TenantAddHostsExecuteResponse {
     pub status: WorkflowProgress,
     pub party_id: String,
     /// The serial this host now has for the party. Advances once the change is
@@ -725,7 +725,7 @@ pub struct TenantThresholdRequest {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct TenantThresholdOnboardRequest {
+pub struct TenantThresholdExecuteRequest {
     pub party_id: String,
     pub base_serial: u32,
     pub topology_transactions: Vec<String>,
@@ -753,7 +753,7 @@ pub struct LocalPartyAdoptRequest {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct LocalPartyAdoptOnboardRequest {
+pub struct LocalPartyAdoptExecuteRequest {
     pub party_id: String,
     pub base_serial: u32,
     /// The adopted key, so the host can rebuild what the mapping must carry
@@ -938,9 +938,24 @@ pub struct ContractsInvitePayload {
     /// Human-readable contract/package names (from `ContractDefinition.name`).
     #[serde(default)]
     pub package_names: Vec<String>,
+    /// Ordered creates committed to before acceptance, independent of ledger preparation.
+    #[serde(default)]
+    pub contract_intents: Vec<ContractDeploymentIntent>,
     /// The coordinator's run instance name (see `OnboardingInvitePayload`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_instance: Option<String>,
+}
+
+/// The exact create a contracts invitation authorizes. The argument hash uses
+/// DecMan's normalized Daml value encoding (record labels and type annotations omitted).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct ContractDeploymentIntent {
+    pub package_id: String,
+    pub module_name: String,
+    pub entity_name: String,
+    pub argument_hash: String,
 }
 
 /// Response for pending invitations endpoint

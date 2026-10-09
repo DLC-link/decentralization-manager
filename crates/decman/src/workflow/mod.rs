@@ -358,6 +358,18 @@ pub async fn start_peer(
                 tokio::time::sleep(tokio::time::Duration::from_millis(peer_wait_poll_delay_ms()))
                     .await;
             }
+            MessageType::RetireLegacyKeys => {
+                // The target comes from the accepted invitation, never this command's payload.
+                let party = expectations.dec_party_id.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("No accepted party for legacy key retirement")
+                })?;
+                let synchronizer_id = utils::get_synchronizer_id(&node_config).await?;
+                topology::retire_legacy_keys(&node_config, &synchronizer_id, party).await?;
+                consecutive_step_failures = 0;
+                client
+                    .send_status(b"RetireLegacyKeys completed".to_vec())
+                    .await?;
+            }
             MessageType::Disconnect => {
                 tracing::info!("Received disconnect command, shutting down");
                 break;
@@ -637,9 +649,14 @@ pub async fn start_peer(
                     continue;
                 }
 
-                if let Err(e) =
-                    contracts::sign_submissions(&node_config, &db, &instance_name, &dec_party_id)
-                        .await
+                if let Err(e) = contracts::sign_submissions(
+                    &node_config,
+                    &db,
+                    &instance_name,
+                    &dec_party_id,
+                    &expectations.contract_intents,
+                )
+                .await
                 {
                     fail_step!("Step execution failed: {e:#}");
                     continue;
@@ -1249,6 +1266,7 @@ fn peer_step_for_command(
         WorkflowKind::Kick => {
             let step = match command {
                 MessageType::SignKick => KickStep::SignProposals,
+                MessageType::RetireLegacyKeys => KickStep::RetireLegacyKeys,
                 MessageType::Disconnect => KickStep::Complete,
                 _ => return None,
             };
@@ -1278,6 +1296,7 @@ fn peer_step_for_command(
             let step = match command {
                 MessageType::GenerateAddPartyKeys => AddPartyStep::GenerateNewMemberKeys,
                 MessageType::SignAddParty => AddPartyStep::SignProposals,
+                MessageType::RetireLegacyKeys => AddPartyStep::RetireLegacyKeys,
                 MessageType::ImportAcs => AddPartyStep::SyncAcs,
                 MessageType::ClearOnboardingFlag => AddPartyStep::ProposeClearOnboarding,
                 MessageType::SignClearOnboarding => AddPartyStep::SignClearOnboarding,
@@ -1293,6 +1312,7 @@ fn peer_step_for_command(
         WorkflowKind::ChangeThreshold => {
             let step = match command {
                 MessageType::SignChangeThreshold => ChangeThresholdStep::SignProposals,
+                MessageType::RetireLegacyKeys => ChangeThresholdStep::RetireLegacyKeys,
                 MessageType::Disconnect => ChangeThresholdStep::Complete,
                 _ => return None,
             };
@@ -1374,6 +1394,24 @@ async fn save_prepared_submissions_from_payload(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_retirement_is_limited_to_membership_changes() {
+        for kind in [
+            WorkflowKind::Kick,
+            WorkflowKind::AddParty,
+            WorkflowKind::ChangeThreshold,
+        ] {
+            assert!(command_matches_kind(kind, MessageType::RetireLegacyKeys));
+        }
+        for kind in [
+            WorkflowKind::Onboarding,
+            WorkflowKind::Contracts,
+            WorkflowKind::Dars,
+        ] {
+            assert!(!command_matches_kind(kind, MessageType::RetireLegacyKeys));
+        }
+    }
 
     /// An accepted invitation authorizes one workflow. A command belonging to
     /// another kind is the coordinator reaching past what the operator agreed

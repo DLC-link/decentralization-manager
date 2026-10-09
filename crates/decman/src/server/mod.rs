@@ -29,6 +29,8 @@ mod serde_snapshots;
 pub(crate) mod health;
 pub(crate) mod peer_status;
 
+pub(crate) use queries::compare_versions;
+
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -596,6 +598,7 @@ impl WorkflowTriggers {
         let mut previous_threshold = None;
         let mut dec_party_id = None;
         let mut package_names = Vec::new();
+        let mut contract_intents = Vec::new();
         let mut workflow_instance = None;
         match meta {
             InvitationMeta::None => {}
@@ -623,6 +626,7 @@ impl WorkflowTriggers {
                 dec_party_id = Some(p.dec_party_id);
                 participants = p.participants;
                 package_names = p.package_names;
+                contract_intents = p.contract_intents;
                 workflow_instance = p.workflow_instance;
             }
             InvitationMeta::AddParty(p) => {
@@ -672,6 +676,7 @@ impl WorkflowTriggers {
             previous_threshold,
             dec_party_id,
             package_names,
+            contract_intents,
             workflow_instance,
         };
 
@@ -1357,17 +1362,17 @@ pub async fn start_server(
             .service(handlers::cancel_change_threshold)
             .service(handlers::list_external_parties)
             .service(handlers::tenant_prepare)
-            .service(handlers::tenant_onboard)
+            .service(handlers::tenant_execute)
             .service(handlers::tenant_add_hosts_prepare)
             .service(handlers::tenant_add_hosts_authorize)
-            .service(handlers::tenant_add_hosts_onboard)
+            .service(handlers::tenant_add_hosts_execute)
             .service(handlers::tenant_acs_snapshot)
             .service(handlers::tenant_acs_import)
             .service(handlers::tenant_threshold_prepare)
             .service(handlers::tenant_threshold_authorize)
-            .service(handlers::tenant_threshold_onboard)
+            .service(handlers::tenant_threshold_execute)
             .service(handlers::tenant_local_party_adopt_prepare)
-            .service(handlers::tenant_local_party_adopt_onboard)
+            .service(handlers::tenant_local_party_adopt_execute)
             .service(handlers::tenant_party_state)
             .service(handlers::tenant_status)
             .service(handlers::start_onboarding)

@@ -5,7 +5,7 @@
 //! provider uses, so there is one implementation of the key handling and the
 //! fingerprint derivation), calls `POST /v0/tenant/prepare` on one host to get
 //! the multi-host onboarding topology + one hash per transaction, signs each hash
-//! locally, then submits the same signed bundle to `POST /v0/tenant/onboard` on
+//! locally, then submits the same signed bundle to `POST /v0/tenant/execute` on
 //! EACH host itself — DPM never relays between hosts and never sees the private
 //! key. Asserts each host reports the party hosted via
 //! `GET /v0/tenant/{party}/status`.
@@ -105,7 +105,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     });
                     for host in [f.p1.http, f.p2.http, f.p3.http] {
                         let _: Value = f
-                            .post_json(host, "/v0/tenant/onboard", &onboard_req)
+                            .post_json(host, "/v0/tenant/execute", &onboard_req)
                             .await?;
                     }
                     Ok(())

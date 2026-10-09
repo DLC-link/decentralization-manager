@@ -3,6 +3,12 @@
 How to give a party that already exists more hosts, and how to give a local
 party a key its owner holds.
 
+The wallet-facing `/v0/tenant/*` API uses `prepare` then `execute`. Clients of
+the earlier API must replace the final `/onboard` path segment with `/execute`
+for allocation, add-hosts, threshold changes, and adopt-key. The wallet library's
+matching methods and DTOs use `execute`/`Execute` too. This is a breaking rename
+of the v0 API; the decentralized-party `/onboarding` workflow is unchanged.
+
 This is the operator's counterpart to the scoping study. It covers what to run,
 in what order, what each step can fail with, and how to recover. For why the
 design is shaped this way, read the module docs in
@@ -87,7 +93,7 @@ its 64 bytes as they are. An ECDSA key (secp256k1, P-256 or P-384) signs with
 the curve's SHA-2 digest and may send either the fixed-width `r || s` pair,
 which the host re-encodes as DER, or DER itself.
 
-Then `/v0/tenant/add-hosts/onboard` on **each joining host only**. Canton needs
+Then `/v0/tenant/add-hosts/execute` on **each joining host only**. Canton needs
 the party namespace plus each new participant; existing hosts are neither and
 have nothing to add.
 
@@ -95,7 +101,7 @@ have nothing to add.
 
 A party that is, or once was, local takes a different call. Its namespace is a
 participant's root key, that key lives in Canton's vault, and no admin RPC signs
-a hash with a vault key — so no wallet signature can ever satisfy `onboard`.
+a hash with a vault key — so no wallet signature can ever satisfy `execute`.
 **Converting the party does not change this.** The adopted key is a
 `party_signing_keys` entry with no `NamespaceDelegation` behind it: it signs the
 party's transactions and authorizes none of its topology.
@@ -156,13 +162,13 @@ confirms nothing.
 
 ### Phase 4 — threshold, optional
 
-`/v0/tenant/threshold/{prepare,onboard}`, and only after the markers clear. A
+`/v0/tenant/threshold/{prepare,execute}`, and only after the markers clear. A
 marked host cannot confirm, so a threshold raised to count one is a threshold
 the party cannot meet.
 
 When the party's namespace is a participant's key, use
 `/v0/tenant/threshold/authorize` instead, for the reason the host add uses
-`authorize`: `onboard` submits the caller's signature untouched and no node
+`authorize`: `execute` submits the caller's signature untouched and no node
 co-signs, so nothing outside Canton can authorize it. Canton wants the party
 namespace alone for a threshold change, so this is one call on the node owning
 that namespace, and no second signature is awaited. Any other node refuses.
@@ -176,7 +182,7 @@ than merely redundant. Below that each host still acts alone.
 
 ## Converting a local party
 
-`/v0/tenant/local-party/adopt-key/{prepare,onboard}` on the party's own node.
+`/v0/tenant/local-party/adopt-key/{prepare,execute}` on the party's own node.
 
 The owner must sign. Canton requires "party namespace + all the new signing key"
 for adding a signing key, so the node's signature alone is not enough — the
@@ -229,7 +235,7 @@ The minimum is therefore:
    perform the conversion. It needs no ledger credential and no IdP — the whole
    tenant path is tokenless on the Admin API.
 2. They call `local-party/adopt-key/prepare`, sign the returned hash with the key
-   they intend the party to answer to, and call `adopt-key/onboard`.
+   they intend the party to answer to, and call `adopt-key/execute`.
 3. After that they can stop it. Adding hosts and replicating the ACS are driven
    by the wallet against the *hosting* nodes, not theirs.
 
@@ -242,7 +248,7 @@ one code path.
 
 | Symptom | Cause | Do |
 |---|---|---|
-| `409` from prepare or onboard | The party's serial moved between the wallet's read and the call | Re-read the party and retry with the new `base_serial` |
+| `409` from prepare or execute | The party's serial moved between the wallet's read and the call | Re-read the party and retry with the new `base_serial` |
 | `404` from any of these | No authorized mapping for this party on this host | Not the same as "this host does not hold it": a joiner that does not host the party still reads the mapping from the shared synchronizer store and answers 200. A 404 means the store has nothing for the party at all |
 | `400` naming a field | The submitted bundle failed validation against the host's own head state | Do not retry as-is. Something built a different mapping than the host would |
 | `marker_cleared: false` | The ACS imported but the flag has not cleared | Canton clears it past a safe time. Poll `/v0/tenant/{party}/status`; `InProgress` with the marker reason means wait |

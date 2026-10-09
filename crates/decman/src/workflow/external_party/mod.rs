@@ -8,7 +8,7 @@
 //! There is no inter-DPM coordination: the wallet asks one host to build the
 //! multi-host onboarding topology (`prepare_topology`), signs each transaction hash
 //! locally, then submits the same signed bundle to each host's
-//! `/v0/tenant/onboard`, which allocates it on that host's own participant
+//! `/v0/tenant/execute`, which allocates it on that host's own participant
 //! ([`steps::allocate_party`]). Canton keeps the topology a proposal until the
 //! last host signs, so a partial failure leaves a pending party, never a
 //! half-created one — the wallet just retries the host that failed.

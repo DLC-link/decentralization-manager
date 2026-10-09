@@ -17,7 +17,7 @@ code cannot generate a party key at all.
 
 ```rust
 use common::canton_id::CantonId;
-use decman_wallet::{ExternalKeyPair, TenantClient, WalletHost, onboard_co_validated, statuses};
+use decman_wallet::{ExternalKeyPair, TenantClient, WalletHost, execute_co_validated, statuses};
 
 // The hosting set: one DecMan endpoint + participant id per host.
 let hosts = vec![
@@ -30,7 +30,7 @@ let hosts = vec![
 let key = ExternalKeyPair::generate();
 
 // Every host prepares, the wallet signs locally, and onboards on every host.
-let party = onboard_co_validated(&hosts, &key, "alice", Some(2)).await?;
+let party = execute_co_validated(&hosts, &key, "alice", Some(2)).await?;
 
 // Authorization is not instant — poll until every host reports the party hosted.
 let reports = statuses(&hosts, &party.party_id).await;
@@ -43,7 +43,7 @@ another. The wallet signs a hash it cannot itself recompute, so agreement betwee
 hosts is what stands between it and a host that returns the hash of a mapping it
 never showed — one honest host defeats a lying one. Canton keeps the topology a
 proposal until the last host signs, so the party is only live once all of them
-report it. `onboard_co_validated` records a failed host in its report rather than
+report it. `execute_co_validated` records a failed host in its report rather than
 aborting, and onboarding is idempotent, so stragglers can simply be retried.
 
 The wallet signs one hash per topology transaction, each hash computed by Canton

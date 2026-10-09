@@ -2,6 +2,9 @@ use canton_proto_rs::com::daml::ledger::api::v2::{
     Command, CreateCommand, GenMap, Identifier, Optional, Record, RecordField, Value, command,
     gen_map, interactive::PrepareSubmissionRequest, value,
 };
+use canton_proto_rs::com::digitalasset::canton::admin::participant::v30::{
+    ListPackagesRequest, PackageDescription, package_service_client::PackageServiceClient,
+};
 use sqlx::SqlitePool;
 
 use crate::{
@@ -11,10 +14,58 @@ use crate::{
     error::Result,
     utils,
     workflow::{
-        contracts::{ContractsConfig, FieldDefinition},
+        contracts::{CommittedDeployment, ContractDefinition, ContractsConfig, FieldDefinition},
         storage::{WorkflowStorage, artifact_kinds},
     },
 };
+
+/// Resolve package-name selectors once, before an invitation commits to a create.
+/// Persisting the result prevents later package uploads changing the approved deployment.
+pub async fn resolve_package_ids(
+    config: &NodeConfig,
+    contracts: &mut [ContractDefinition],
+) -> Result {
+    let packages = if contracts.iter().any(|c| c.package_id.starts_with('#')) {
+        PackageServiceClient::new(config.admin_channel().await?)
+            .list_packages(ListPackagesRequest {
+                limit: 0,
+                filter_name: String::new(),
+            })
+            .await?
+            .into_inner()
+            .package_descriptions
+    } else {
+        Vec::new()
+    };
+    for contract in contracts {
+        contract.package_id = resolve_package_id(&contract.package_id, &packages)?;
+    }
+    Ok(())
+}
+
+fn resolve_package_id(reference: &str, packages: &[PackageDescription]) -> Result<String> {
+    let Some(name) = reference.strip_prefix('#') else {
+        anyhow::ensure!(
+            reference.len() == 64 && reference.bytes().all(|b| b.is_ascii_hexdigit()),
+            "Invalid package ID {reference}"
+        );
+        return Ok(reference.to_ascii_lowercase());
+    };
+    let mut matches: Vec<_> = packages.iter().filter(|p| p.name == name).collect();
+    matches.sort_by(|a, b| crate::server::compare_versions(&b.version, &a.version));
+    let selected = matches
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("Package {reference} is not installed"))?;
+    anyhow::ensure!(
+        !matches
+            .iter()
+            .skip(1)
+            .any(|p| p.version == selected.version && p.package_id != selected.package_id),
+        "Package {reference} has ambiguous IDs at version {}; specify an exact package ID",
+        selected.version
+    );
+    resolve_package_id(&selected.package_id, &[])
+}
 
 /// Prepare ledger submissions for governance contracts
 ///
@@ -44,66 +95,9 @@ pub async fn prepare_submissions(
 ) -> Result {
     tracing::info!("Preparing submissions...");
 
-    // Use the decentralized party ID from config
-    let decentralized_registrar = contracts_config.decentralized_party_id.clone();
-    tracing::debug!("Using decentralized party: {decentralized_registrar}");
-
+    let context = committed_submission_context(db, contracts_config).await?;
+    let decentralized_registrar = &context.decentralized_party;
     let token_opt = Some(token.to_string());
-
-    // Get participant parties from config (provided by API caller)
-    let participant_parties: Vec<CantonId> = contracts_config.participant_parties.clone();
-
-    // Use the dec party's OWN threshold (set at onboarding, baked into its
-    // namespace definition), not a recomputed mesh majority. Contract
-    // deployment is signed by the party, so it needs at least `threshold` of
-    // its owners to sign — and the deployed governance contract should carry
-    // that same threshold. This also replaces the former hardcoded
-    // 3-participant minimum.
-    let party_threshold = db
-        .get_dec_parties_by_prefix(&decentralized_registrar.prefix)
-        .await?
-        .into_iter()
-        .find(|p| p.party_id == decentralized_registrar.to_string())
-        .map(|p| p.threshold)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Decentralized party {decentralized_registrar} not found in cache; \
-                 refresh /decentralized-parties before deploying contracts"
-            )
-        })?;
-
-    if participant_parties.is_empty() {
-        anyhow::bail!("No participant parties provided in contracts config");
-    }
-    if (participant_parties.len() as i64) < party_threshold {
-        anyhow::bail!(
-            "Need at least {party_threshold} participant(s) to meet the party's threshold \
-             for contract operations, found {count}",
-            count = participant_parties.len()
-        );
-    }
-
-    tracing::info!(
-        "Parties for {count} participants: {parties}",
-        count = participant_parties.len(),
-        parties = participant_parties
-            .iter()
-            .map(|p| p.to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-
-    // Get operator party from config
-    let operator = contracts_config.operator_party.clone();
-    tracing::info!("Operator party: {operator}");
-
-    // Build context for field value building
-    let context = SubmissionContext {
-        decentralized_party: decentralized_registrar.clone(),
-        operator_party: operator.clone(),
-        participant_parties: participant_parties.clone(),
-        governance_threshold: party_threshold,
-    };
 
     let mut submission_client = utils::create_submission_client(config, token_opt.clone()).await?;
 
@@ -189,6 +183,134 @@ pub async fn prepare_submissions(
         count = contracts_config.contracts.len()
     );
     Ok(())
+}
+
+async fn submission_context(
+    db: &SqlitePool,
+    contracts_config: &ContractsConfig,
+) -> Result<SubmissionContext> {
+    // Use the decentralized party ID from config
+    let decentralized_registrar = contracts_config.decentralized_party_id.clone();
+    tracing::debug!("Using decentralized party: {decentralized_registrar}");
+
+    // Get participant parties from config (provided by API caller)
+    let participant_parties: Vec<CantonId> = contracts_config.participant_parties.clone();
+
+    // Use the dec party's OWN threshold (set at onboarding, baked into its
+    // namespace definition), not a recomputed mesh majority. Contract
+    // deployment is signed by the party, so it needs at least `threshold` of
+    // its owners to sign — and the deployed governance contract should carry
+    // that same threshold. This also replaces the former hardcoded
+    // 3-participant minimum.
+    let party_threshold = db
+        .get_dec_parties_by_prefix(&decentralized_registrar.prefix)
+        .await?
+        .into_iter()
+        .find(|p| p.party_id == decentralized_registrar.to_string())
+        .map(|p| p.threshold)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Decentralized party {decentralized_registrar} not found in cache; \
+                 refresh /decentralized-parties before deploying contracts"
+            )
+        })?;
+
+    if participant_parties.is_empty() {
+        anyhow::bail!("No participant parties provided in contracts config");
+    }
+    if (participant_parties.len() as i64) < party_threshold {
+        anyhow::bail!(
+            "Need at least {party_threshold} participant(s) to meet the party's threshold \
+             for contract operations, found {count}",
+            count = participant_parties.len()
+        );
+    }
+
+    tracing::info!(
+        "Parties for {count} participants: {parties}",
+        count = participant_parties.len(),
+        parties = participant_parties
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
+    // Get operator party from config
+    let operator = contracts_config.operator_party.clone();
+    tracing::info!("Operator party: {operator}");
+
+    // Build context for field value building
+    Ok(SubmissionContext {
+        decentralized_party: decentralized_registrar.clone(),
+        operator_party: operator.clone(),
+        participant_parties: participant_parties.clone(),
+        governance_threshold: party_threshold,
+    })
+}
+
+/// Commit to every requested create before an operator accepts the invitation.
+///
+/// # Errors
+/// Fails when the party is missing from the cache, when too few participants
+/// are given, or when a contract does not name a resolved package ID.
+pub async fn commit_deployment(
+    db: &SqlitePool,
+    config: &ContractsConfig,
+) -> Result<CommittedDeployment> {
+    let context = submission_context(db, config).await?;
+    let intents = config
+        .contracts
+        .iter()
+        .map(|contract| {
+            anyhow::ensure!(
+                contract.package_id.len() == 64
+                    && contract.package_id.bytes().all(|b| b.is_ascii_hexdigit()),
+                "Contract {} must name a resolved package ID before invitation",
+                contract.name
+            );
+            let argument = Value {
+                sum: Some(value::Sum::Record(Record {
+                    record_id: None,
+                    fields: contract
+                        .fields
+                        .iter()
+                        .map(|field| build_record_field(field, &context))
+                        .collect::<Result<Vec<_>>>()?,
+                })),
+            };
+            Ok(common::api::ContractDeploymentIntent {
+                package_id: contract.package_id.clone(),
+                module_name: contract.module_name.clone(),
+                entity_name: contract.entity_name.clone(),
+                argument_hash: crate::canton_hash::hash_value(&argument)?,
+            })
+        })
+        .collect::<Result<_>>()?;
+    Ok(CommittedDeployment {
+        governance_threshold: context.governance_threshold,
+        intents,
+    })
+}
+
+/// The submission context for a run's committed creates. Peers accepted the
+/// threshold that was cached when the run started, so a changed threshold
+/// stops the run here instead of preparing creates they will refuse.
+async fn committed_submission_context(
+    db: &SqlitePool,
+    config: &ContractsConfig,
+) -> Result<SubmissionContext> {
+    let committed = config.committed()?;
+    let context = submission_context(db, config).await?;
+    anyhow::ensure!(
+        context.governance_threshold == committed.governance_threshold,
+        "The threshold of {party} changed from {old} to {new} after this contracts run \
+         started; start a new run so the members confirm the new threshold",
+        party = config.decentralized_party_id,
+        old = committed.governance_threshold,
+        new = context.governance_threshold,
+    );
+    Ok(context)
 }
 
 /// Context for building field values in contract submissions
@@ -321,4 +443,138 @@ fn build_field_value(field_def: &FieldDefinition, context: &SubmissionContext) -
     };
 
     Ok(Value { sum: Some(sum) })
+}
+
+#[cfg(test)]
+mod package_resolution_tests {
+    use super::*;
+
+    #[test]
+    fn aliases_pin_the_newest_exact_package_and_reject_ambiguity() -> Result {
+        let package = |name: &str, version: &str, id: &str| PackageDescription {
+            name: name.into(),
+            version: version.into(),
+            package_id: id.repeat(64),
+            ..Default::default()
+        };
+        let mut packages = vec![
+            package("governance", "1.9.0", "a"),
+            package("governance", "1.10.0", "b"),
+            package("governance-other", "9.0.0", "c"),
+        ];
+        let pinned = resolve_package_id("#governance", &packages)?;
+        assert_eq!(pinned, "b".repeat(64));
+        packages.push(package("governance", "2.0.0", "d"));
+        assert_eq!(resolve_package_id(&pinned, &packages)?, pinned);
+        packages.push(package("governance", "2.0.0", "e"));
+        assert!(resolve_package_id("#governance", &packages).is_err());
+        assert!(resolve_package_id("#missing", &packages).is_err());
+        assert!(resolve_package_id("not-a-package", &packages).is_err());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod commitment_tests {
+    use super::*;
+    use crate::db::{
+        MIGRATOR,
+        rows::DecPartyRow,
+        schema::{Commitable, SchemaWrite},
+    };
+
+    const NS: &str = "1220aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn id(prefix: &str) -> Result<CantonId> {
+        CantonId::parse(&format!("{prefix}::{NS}"))
+    }
+
+    async fn cache_threshold(pool: &SqlitePool, party: &CantonId, threshold: i64) -> Result {
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_dec_party(&DecPartyRow {
+            party_id: party.to_string(),
+            prefix: party.prefix.clone(),
+            threshold,
+            updated_at: 0,
+            my_owner_key: None,
+        })
+        .await?;
+        Commitable::commit(tx).await
+    }
+
+    /// One governance create whose threshold comes from the party cache.
+    fn governance_run(party: &CantonId) -> Result<ContractsConfig> {
+        Ok(ContractsConfig::new(
+            party.clone(),
+            vec![id("node-1")?, id("node-2")?, id("node-3")?],
+            vec![id("member-1")?, id("member-2")?, id("member-3")?],
+            id("operator")?,
+            vec![ContractDefinition {
+                id: "rules".to_string(),
+                name: "GovernanceRules".to_string(),
+                package_id: "ab".repeat(32),
+                module_name: "Governance.Rules".to_string(),
+                entity_name: "GovernanceRules".to_string(),
+                fields: vec![FieldDefinition::GovernanceThreshold { value: None }],
+            }],
+            "dec-contracts-1".to_string(),
+        ))
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_threshold_change_after_the_commit_stops_preparation(pool: SqlitePool) -> Result {
+        let party = id("dec")?;
+        cache_threshold(&pool, &party, 2).await?;
+        let mut run = governance_run(&party)?;
+        let committed = commit_deployment(&pool, &run).await?;
+        assert_eq!(committed.governance_threshold, 2);
+        assert_eq!(committed.intents.len(), 1);
+        run.committed_deployment = Some(committed);
+
+        let unchanged = committed_submission_context(&pool, &run).await?;
+        assert_eq!(unchanged.governance_threshold, 2);
+
+        cache_threshold(&pool, &party, 3).await?;
+        let error = committed_submission_context(&pool, &run)
+            .await
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("a changed threshold must stop preparation"))?;
+        assert!(
+            format!("{error:#}").contains("changed from 2 to 3"),
+            "unexpected error: {error:#}"
+        );
+        Ok(())
+    }
+
+    /// A different threshold yields a different create, which is why the
+    /// threshold has to be pinned: peers compare these hashes.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_threshold_is_part_of_the_commitment(pool: SqlitePool) -> Result {
+        let party = id("dec")?;
+        let run = governance_run(&party)?;
+        cache_threshold(&pool, &party, 2).await?;
+        let at_two = commit_deployment(&pool, &run).await?;
+        cache_threshold(&pool, &party, 3).await?;
+        let at_three = commit_deployment(&pool, &run).await?;
+
+        assert_ne!(at_two.intents, at_three.intents);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_run_without_a_commitment_is_not_prepared(pool: SqlitePool) -> Result {
+        let party = id("dec")?;
+        cache_threshold(&pool, &party, 2).await?;
+        let run = governance_run(&party)?;
+
+        let error = committed_submission_context(&pool, &run)
+            .await
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("a run without a commitment must not be prepared"))?;
+        assert!(
+            format!("{error:#}").contains("no recorded deployment commitments"),
+            "unexpected error: {error:#}"
+        );
+        Ok(())
+    }
 }

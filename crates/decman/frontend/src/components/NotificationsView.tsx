@@ -223,6 +223,7 @@ const InvitationCard = ({
     invitation.new_threshold != null ||
     (invitation.participants?.length ?? 0) > 0 ||
     (invitation.package_names?.length ?? 0) > 0 ||
+    (invitation.contract_intents?.length ?? 0) > 0 ||
     (invitation.dar_filenames?.length ?? 0) > 0;
 
   // The type is already in the eyebrow — make the title describe the target.
@@ -496,6 +497,26 @@ const InvitationCard = ({
                   <Chip key={name} size="small" variant="outlined" label={name} />
                 ))}
               </Box>
+            </Box>
+          )}
+          {(invitation.contract_intents?.length ?? 0) > 0 && (
+            <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+              <Typography variant="caption" color="text.secondary">
+                Approved creates — compare these commitments with your deployment configuration before accepting.
+              </Typography>
+              {invitation.contract_intents?.map((intent, index) => (
+                <Box key={index} sx={{ overflowWrap: "anywhere" }}>
+                  <Typography variant="caption" sx={{ display: "block" }}>
+                    {intent.module_name}:{intent.entity_name}
+                  </Typography>
+                  <Typography variant="caption" sx={{ display: "block" }} color="text.secondary">
+                    Package: {intent.package_id}
+                  </Typography>
+                  <Typography variant="caption" sx={{ display: "block" }} color="text.secondary">
+                    Arguments SHA-256: {intent.argument_hash}
+                  </Typography>
+                </Box>
+              ))}
             </Box>
           )}
           {invitation.dar_filenames && invitation.dar_filenames.length > 0 && (

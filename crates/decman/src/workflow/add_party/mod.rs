@@ -85,6 +85,8 @@ pub enum AddPartyStep {
     SignClearOnboarding,
     /// Coordinator submits the clearing proposal and waits for the flag to drop
     SubmitClearOnboarding,
+    /// Members retire the shadowed PartyToKeyMapping after the new topology is effective.
+    RetireLegacyKeys,
     /// Workflow complete
     Complete,
 }
@@ -97,6 +99,7 @@ impl WorkflowStep for AddPartyStep {
             Self::SyncAcs => Some(MessageType::ImportAcs),
             Self::ProposeClearOnboarding => Some(MessageType::ClearOnboardingFlag),
             Self::SignClearOnboarding => Some(MessageType::SignClearOnboarding),
+            Self::RetireLegacyKeys => Some(MessageType::RetireLegacyKeys),
             Self::Complete => Some(MessageType::Disconnect),
             Self::WaitingForPeers
             | Self::ExportState
@@ -121,7 +124,8 @@ impl WorkflowStep for AddPartyStep {
             Self::ProposeClearOnboarding => Some(Self::PrepareClearSign),
             Self::PrepareClearSign => Some(Self::SignClearOnboarding),
             Self::SignClearOnboarding => Some(Self::SubmitClearOnboarding),
-            Self::SubmitClearOnboarding => Some(Self::Complete),
+            Self::SubmitClearOnboarding => Some(Self::RetireLegacyKeys),
+            Self::RetireLegacyKeys => Some(Self::Complete),
             Self::Complete => None,
         }
     }
@@ -155,12 +159,13 @@ impl WorkflowStep for AddPartyStep {
             Self::PrepareClearSign => 9,
             Self::SignClearOnboarding => 10,
             Self::SubmitClearOnboarding => 11,
-            Self::Complete => 12,
+            Self::RetireLegacyKeys => 12,
+            Self::Complete => 13,
         }
     }
 
     fn step_total() -> i64 {
-        13
+        14
     }
 
     fn step_name(&self) -> &'static str {
@@ -177,6 +182,7 @@ impl WorkflowStep for AddPartyStep {
             Self::PrepareClearSign => "PrepareClearSign",
             Self::SignClearOnboarding => "SignClearOnboarding",
             Self::SubmitClearOnboarding => "SubmitClearOnboarding",
+            Self::RetireLegacyKeys => "RetireLegacyKeys",
             Self::Complete => "Complete",
         }
     }
@@ -195,6 +201,7 @@ impl WorkflowStep for AddPartyStep {
             "PrepareClearSign" => Self::PrepareClearSign,
             "SignClearOnboarding" => Self::SignClearOnboarding,
             "SubmitClearOnboarding" => Self::SubmitClearOnboarding,
+            "RetireLegacyKeys" => Self::RetireLegacyKeys,
             "Complete" => Self::Complete,
             _ => return None,
         })

@@ -91,6 +91,8 @@ pub enum MessageType {
     /// Command: every party member signs the change-threshold DNS + P2P
     /// proposals.
     SignChangeThreshold = 0x0025,
+    /// Members authorize removal of shadowed legacy keys after topology migration.
+    RetireLegacyKeys = 0x0026,
 
     // Invites (0x0010 - 0x001F)
     InviteOnboarding = 0x0010,
@@ -253,6 +255,7 @@ impl TryFrom<u16> for MessageType {
             0x0023 => Ok(Self::ClearOnboardingFlag),
             0x0024 => Ok(Self::SignClearOnboarding),
             0x0025 => Ok(Self::SignChangeThreshold),
+            0x0026 => Ok(Self::RetireLegacyKeys),
             0x0018 => Ok(Self::InviteChangeThreshold),
             0x0101 => Ok(Self::Ack),
             0x0102 => Ok(Self::Data),
@@ -310,7 +313,12 @@ impl MessageType {
 /// topology change is already live. Rejecting the frame outright keeps an old
 /// build from ever reaching that, and it fails the invite's health probe, so
 /// the run does not start at all.
-pub const WIRE_VERSION: u8 = 0xD2;
+/// 0xD2 -> 0xD3: Contracts invitations now require deployment-intent
+/// verification, and membership workflows retire legacy keys. Old peers must
+/// not silently ignore the commitments and contribute unchecked signatures.
+/// The version byte rejects both old invitations and old command streams,
+/// including retries of persisted runs; health preflight rejects mixed meshes.
+pub const WIRE_VERSION: u8 = 0xD3;
 
 /// Message structure for Noise protocol communication.
 ///
@@ -1252,6 +1260,22 @@ mod tests {
             err.contains("version mismatch"),
             "expected a version-mismatch error, got: {err}"
         );
+    }
+
+    #[test]
+    fn rejects_peers_without_deployment_intent_enforcement() {
+        for command in [
+            MessageType::Health,
+            MessageType::InviteContracts,
+            MessageType::SignSubmissions,
+        ] {
+            let mut frame = Message::new_empty(command).to_bytes();
+            frame[0] = 0xD2;
+            assert!(
+                Message::from_bytes(&frame).is_err(),
+                "accepted an old {command:?} frame"
+            );
+        }
     }
 
     #[test]

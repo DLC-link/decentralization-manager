@@ -8,9 +8,9 @@
 
 use common::{
     api::{
-        HostPermission, TenantAcsImportRequest, TenantAddHostsOnboardRequest,
-        TenantAddHostsRequest, TenantOnboardRequest, TenantPrepareRequest,
-        TenantThresholdOnboardRequest, TenantThresholdRequest,
+        HostPermission, TenantAcsImportRequest, TenantAddHostsExecuteRequest,
+        TenantAddHostsRequest, TenantExecuteRequest, TenantPrepareRequest,
+        TenantThresholdExecuteRequest, TenantThresholdRequest,
     },
     canton_id::CantonId,
     types::WorkflowProgress,
@@ -131,7 +131,7 @@ fn progress_to_status(progress: WorkflowProgress) -> HostStatus {
 /// prepared party id is not the one `key` derives — a mismatch there means the node
 /// did not read the public key we sent, and signing would bind the wallet to the
 /// wrong party.
-pub async fn onboard_co_validated(
+pub async fn execute_co_validated(
     hosts: &[WalletHost],
     key: &dyn Signer,
     party_hint: &str,
@@ -235,7 +235,7 @@ pub async fn onboard_co_validated(
         signatures.push(key.sign_b64_async(&hash).await?);
     }
 
-    let onboard_request = TenantOnboardRequest {
+    let execute_request = TenantExecuteRequest {
         party_hint: party_hint.to_string(),
         public_key: public_key.clone(),
         topology_transactions: prepared.topology_transactions.clone(),
@@ -245,7 +245,7 @@ pub async fn onboard_co_validated(
 
     let mut reports = Vec::with_capacity(hosts.len());
     for host in hosts {
-        let report = match host.client.onboard(&onboard_request).await {
+        let report = match host.client.execute(&execute_request).await {
             Ok(resp) => {
                 tracing::info!(
                     host = host.client.base_url(),
@@ -256,7 +256,7 @@ pub async fn onboard_co_validated(
                 HostReport::ok(host, progress_to_status(resp.status))
             }
             Err(e) => {
-                tracing::warn!(host = host.client.base_url(), "onboard failed: {e}");
+                tracing::warn!(host = host.client.base_url(), "execute failed: {e}");
                 HostReport::failed(host, &e)
             }
         };
@@ -453,7 +453,7 @@ pub async fn add_hosts(
         signatures.push(key.sign_b64_async(&hash).await?);
     }
 
-    let onboard_request = TenantAddHostsOnboardRequest {
+    let execute_request = TenantAddHostsExecuteRequest {
         party_id: party_id.to_string(),
         base_serial,
         topology_transactions: prepared.topology_transactions.clone(),
@@ -465,7 +465,7 @@ pub async fn add_hosts(
     // participant, and the existing hosts are neither.
     let mut reports = Vec::with_capacity(new_hosts.len());
     for host in new_hosts {
-        let report = match host.client.add_hosts_onboard(&onboard_request).await {
+        let report = match host.client.add_hosts_execute(&execute_request).await {
             Ok(resp) => {
                 tracing::info!(
                     host = host.client.base_url(),
@@ -692,7 +692,7 @@ pub async fn raise_threshold(
         signatures.push(key.sign_b64_async(&hash).await?);
     }
 
-    let onboard = TenantThresholdOnboardRequest {
+    let execute_request = TenantThresholdExecuteRequest {
         party_id: party_id.to_string(),
         base_serial,
         topology_transactions: prepared.topology_transactions.clone(),
@@ -702,7 +702,7 @@ pub async fn raise_threshold(
 
     let mut reports = Vec::with_capacity(hosts.len());
     for host in hosts {
-        let report = match host.client.threshold_onboard(&onboard).await {
+        let report = match host.client.threshold_execute(&execute_request).await {
             Ok(resp) => HostReport::ok(host, progress_to_status(resp.status)),
             Err(e) => {
                 tracing::warn!(

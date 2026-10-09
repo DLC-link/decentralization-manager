@@ -23,6 +23,8 @@ pub enum KickStep {
     SignProposals,
     /// Coordinator submits kick
     SubmitKick,
+    /// Members retire the shadowed PartyToKeyMapping after the new topology is effective.
+    RetireLegacyKeys,
     /// Workflow complete
     Complete,
 }
@@ -31,6 +33,7 @@ impl WorkflowStep for KickStep {
     fn to_command(&self) -> Option<MessageType> {
         match self {
             Self::SignProposals => Some(MessageType::SignKick),
+            Self::RetireLegacyKeys => Some(MessageType::RetireLegacyKeys),
             Self::Complete => Some(MessageType::Disconnect),
             Self::WaitingForPeers
             | Self::ExportState
@@ -45,7 +48,8 @@ impl WorkflowStep for KickStep {
             Self::ExportState => Some(Self::CreateProposals),
             Self::CreateProposals => Some(Self::SignProposals),
             Self::SignProposals => Some(Self::SubmitKick),
-            Self::SubmitKick => Some(Self::Complete),
+            Self::SubmitKick => Some(Self::RetireLegacyKeys),
+            Self::RetireLegacyKeys => Some(Self::Complete),
             Self::Complete => None,
         }
     }
@@ -65,12 +69,13 @@ impl WorkflowStep for KickStep {
             Self::CreateProposals => 2,
             Self::SignProposals => 3,
             Self::SubmitKick => 4,
-            Self::Complete => 5,
+            Self::RetireLegacyKeys => 5,
+            Self::Complete => 6,
         }
     }
 
     fn step_total() -> i64 {
-        6
+        7
     }
 
     fn step_name(&self) -> &'static str {
@@ -80,6 +85,7 @@ impl WorkflowStep for KickStep {
             Self::CreateProposals => "CreateProposals",
             Self::SignProposals => "SignProposals",
             Self::SubmitKick => "SubmitKick",
+            Self::RetireLegacyKeys => "RetireLegacyKeys",
             Self::Complete => "Complete",
         }
     }
@@ -91,6 +97,7 @@ impl WorkflowStep for KickStep {
             "CreateProposals" => Self::CreateProposals,
             "SignProposals" => Self::SignProposals,
             "SubmitKick" => Self::SubmitKick,
+            "RetireLegacyKeys" => Self::RetireLegacyKeys,
             "Complete" => Self::Complete,
             _ => return None,
         })
