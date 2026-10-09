@@ -31,7 +31,7 @@ pub const PAGE_SIZE: i32 = 25;
 // Config DTOs (shared with the server's config layer)
 // ============================================================================
 
-/// Package identifiers for Daml contracts (configurable per party)
+/// Package identifiers used by the built-in Daml integrations
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
@@ -1571,6 +1571,7 @@ pub struct ContractQueryResponse {
 #[derive(Clone, Debug, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+#[serde(deny_unknown_fields)]
 pub struct PartyConfigRequest {
     /// The decentralized party ID
     pub dec_party_id: CantonId,
@@ -1609,9 +1610,6 @@ pub struct PartyConfigRequest {
     /// Auth0 M2M client secret. None = keep existing, "" = clear.
     #[serde(default)]
     pub auth0_client_secret: Option<String>,
-    /// Package identifiers for deployed Daml contracts
-    #[serde(default)]
-    pub packages: PackageConfig,
 }
 
 /// Response with party configuration (secrets masked)

@@ -72,7 +72,7 @@ This deploys a `GovernanceRules` contract with all 3 members, threshold 2, and a
 
 The complete end-to-end deployment follows these steps. Steps 6-9 are **domain proposals**: `POST /governance/propose`, then the same confirm -> threshold -> execute flow as any other proposal. `GovernanceRules` accepts only self-management actions on the inline `POST /governance/confirm` path (add/remove member, threshold, timeout, additional proposers) — every domain operation goes through a proposal.
 
-> **Note:** `#governance-*-<version>` package IDs use `<version>` as a placeholder — substitute the version of the governance packages you deployed (these are configured per party via `PUT /party-config`).
+> **Note:** `#governance-*-<version>` package IDs use `<version>` as a placeholder — substitute the version of the governance packages you deployed (the built-in integrations use the aliases in `default_package_config()`; `PUT /party-config` configures credentials only).
 
 | # | Step | Actor | Description |
 |---|------|-------|-------------|

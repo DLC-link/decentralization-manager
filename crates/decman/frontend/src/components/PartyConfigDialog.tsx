@@ -262,7 +262,6 @@ export const PartyConfigDialog = ({
       keycloak_url: "",
       keycloak_realm: "",
       keycloak_client_id: "",
-      packages: {},
     };
 
     if (provider === "auth0") {
