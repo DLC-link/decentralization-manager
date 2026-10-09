@@ -77,7 +77,7 @@ The complete end-to-end deployment follows these steps. Steps 6-9 are **domain p
 | # | Step | Actor | Description |
 |---|------|-------|-------------|
 | 1 | Create decentralized party | DecMan (onboarding workflow) | Create the shared party identity |
-| 2 | Configure party credentials | DecMan (`PUT /party-config` API) | Configure OAuth credentials (Keycloak or Auth0) and package IDs for each party |
+| 2 | Configure party credentials | DecMan (`PUT /party-config` API) | Configure OAuth credentials (Keycloak or Auth0) for each party |
 | 3 | Grant Ledger API rights | External (Canton admin) | Grant `actAs`/`readAs` rights for member parties on the decentralized party |
 | 4 | Upload DARs | DecMan (DARs workflow) | Upload DAR packages to all participant nodes |
 | 5 | Deploy GovernanceRules | DecMan (contracts workflow) | Deploy `GovernanceRules` contract with package `#governance-core-<version>` |

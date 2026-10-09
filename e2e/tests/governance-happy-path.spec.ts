@@ -45,7 +45,6 @@ async function configurePartyForGovCore(partyId: string) {
         keycloak_realm: env("DECPM_KEYCLOAK_REALM"),
         keycloak_client_id: env(`P${n}_MEMBER_KEYCLOAK_CLIENT_ID`),
         keycloak_client_secret: env(`P${n}_MEMBER_KEYCLOAK_CLIENT_SECRET`),
-        packages: PACKAGES,
       }),
     });
     // Cap the echoed body: these requests carry keycloak_client_secret. The
