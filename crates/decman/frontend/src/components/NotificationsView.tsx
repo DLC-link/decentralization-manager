@@ -1147,10 +1147,13 @@ const DomainActionCard = ({
     <ApprovalCard
       accent={needsYou}
       // As on the action card: a pill only where no button says it already.
-      // Orphaned keeps one — that is a problem, not a step.
+      // Orphaned and an unauthorized proposer keep one — each is a problem,
+      // not a step.
       pill={
         domainAction.orphaned ? (
           <Pill label="Orphaned" tone="danger" />
+        ) : domainAction.proposer_not_authorized ? (
+          <Pill label="Proposer not authorized" tone="danger" />
         ) : !domainAction.can_execute && ownConfirmation ? (
           <Pill label="Awaiting others" tone="neutral" />
         ) : undefined
@@ -1259,7 +1262,8 @@ const DomainActionCard = ({
                 Revoke
               </Button>
             ) : (
-              !domainAction.can_execute && (
+              !domainAction.can_execute &&
+              !domainAction.proposer_not_authorized && (
                 <Button
                   size="small"
                   variant="contained"
@@ -1315,6 +1319,17 @@ const DomainActionCard = ({
           The underlying proposal has been archived, so these confirmation
           contracts are stranded on the ledger. Each member revokes their own.
           Anyone can dismiss the rest once they expire.
+        </Alert>
+      )}
+
+      {domainAction.proposer_not_authorized && (
+        <Alert severity="warning" sx={{ py: 0.5 }}>
+          The governance rules no longer list{" "}
+          {domainAction.proposer
+            ? truncatePartyId(domainAction.proposer)
+            : "the proposer"}{" "}
+          as a member or an additional proposer, so the ledger rejects every
+          new confirmation of this proposal. Only the proposer can cancel it.
         </Alert>
       )}
 

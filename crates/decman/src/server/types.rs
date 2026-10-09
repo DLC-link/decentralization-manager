@@ -607,6 +607,12 @@ pub struct DomainGovernanceAction {
     /// is no longer readable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposer: Option<CantonId>,
+    /// `true` when the live rules contract lists `proposer` neither as a
+    /// member nor as an additional proposer. `GovernanceRules_ConfirmAction`
+    /// then rejects every confirmation, so the card withholds Confirm. `false`
+    /// when the rules contract or the proposer could not be read.
+    #[serde(default)]
+    pub proposer_not_authorized: bool,
     /// Ledger effective time of the proposal's create event, in seconds. The
     /// notification feed sorts on this, so a proposal holds its place between
     /// refreshes whether or not anyone has confirmed it. Absent on an orphaned
@@ -1273,6 +1279,7 @@ mod tests {
                 accept_transfer_details: None,
                 service_request_details: None,
                 proposer: None,
+                proposer_not_authorized: false,
                 created_at: None,
             }],
             threshold: 2,
@@ -1284,7 +1291,7 @@ mod tests {
 
         let json = serde_json::to_string(&response)?;
         assert!(
-            !json.contains("member_party_id") && !json.contains("proposer"),
+            !json.contains("member_party_id") && !json.contains("\"proposer\""),
             "optional fields must be omitted on the wire: {json}"
         );
 
@@ -1349,6 +1356,7 @@ mod tests {
                 accept_transfer_details: None,
                 service_request_details: None,
                 proposer: None,
+                proposer_not_authorized: false,
                 created_at: None,
             }],
             threshold: 2,
