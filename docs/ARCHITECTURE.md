@@ -219,9 +219,10 @@ everything that follows (`workflow::validation::PeerExpectations`).
   A party whose keys still sit in a legacy `PartyToKeyMapping` may drop
   departed members' keys, and may gain only the new member's key on
   add-party. A topology read that fails refuses the proposal. A proposal at
-  the head serial that equals the head mapping is already in effect (a
-  threshold-1 namespace applies it when the coordinator proposes it), so the
-  peer signs it without the delta check. The same serial with any other
+  the head serial that equals the head mapping is already in effect, so the
+  peer signs it without the delta check. Only a coordinator built before #448
+  sends one: it proposed with `Authorize` against the synchronizer, which puts
+  a threshold-1 namespace in force at once. The same serial with any other
   mapping is refused, and so is every serial but the head serial + 1: Canton
   checks the serial only on submission, so a signature on a later serial could
   be held back and submitted against a state the peer never checked.
@@ -441,7 +442,8 @@ Removes a participant from an existing decentralized party.
 **Canton API calls:**
 - `TopologyManagerReadService.ListDecentralizedNamespaceDefinition` -- Read current DNS (step 2)
 - `TopologyManagerReadService.ListPartyToParticipant` -- Read current P2P mappings (step 2)
-- `TopologyManagerWriteService.Authorize` -- Sign proposals (step 4)
+- `TopologyManagerWriteService.CreateTemporaryTopologyStore` / `AddTransactions` / `Authorize` / `DropTemporaryTopologyStore` -- Sign the coordinator's proposals without publishing them (step 3, see [Party Topology Proposals](#party-topology-proposals))
+- `TopologyManagerWriteService.SignTransactions` -- Each member signs the proposals (step 4)
 - `TopologyManagerWriteService.AddTransactions` -- Submit proposals (step 5)
 
 **Minimum participants:** 2
@@ -512,7 +514,9 @@ suspends it only on the joining node.
 
 **Canton API calls:**
 - `VaultService.GenerateKey` / `ExportKeyPair` -- New member's keys (step 2)
-- `TopologyManagerWriteService.Authorize` / `AddTransactions` -- Proposals (steps 5, 6, 11, 12)
+- `TopologyManagerWriteService.CreateTemporaryTopologyStore` / `AddTransactions` / `Authorize` / `DropTemporaryTopologyStore` -- Sign the coordinator's proposals, then publish only the P2P proposal for the new member (step 4, see [Party Topology Proposals](#party-topology-proposals))
+- `TopologyManagerWriteService.SignTransactions` / `AddTransactions` -- Sign and submit the proposals (steps 5, 6)
+- `TopologyManagerWriteService.Authorize` / `AddTransactions` -- The onboarding-flag clearing proposal (steps 9, 11, 12)
 - `PartyManagementService.GetHighestOffsetByTimestamp` -- Capture the export offset (step 3)
 - `PartyManagementService.ExportPartyAcs` -- Export the snapshot, scoped to the joiner (step 6)
 - `SynchronizerConnectivityService.DisconnectSynchronizer` / `ReconnectSynchronizers` -- Bracket the import (step 7)
@@ -542,10 +546,54 @@ Changes the signing threshold of an existing decentralized party's namespace.
 | 6 | Complete | All | Disconnect peers |
 
 **Canton API calls:**
-- `TopologyManagerWriteService.Authorize` -- Sign the proposals (step 4)
+- `TopologyManagerWriteService.CreateTemporaryTopologyStore` / `AddTransactions` / `Authorize` / `DropTemporaryTopologyStore` -- Sign the coordinator's proposals without publishing them (step 3, see [Party Topology Proposals](#party-topology-proposals))
+- `TopologyManagerWriteService.SignTransactions` -- Each member signs the proposals (step 4)
 - `TopologyManagerWriteService.AddTransactions` -- Submit the change (step 5)
 
 **Minimum participants:** 2 (party members)
+
+### Party Topology Proposals
+
+Kick, add-party and change-threshold each change two mappings: the party's
+`DecentralizedNamespaceDefinition` (DNS) and its `PartyToParticipant` (P2P).
+Nothing that can take effect reaches the synchronizer before the submit step.
+
+- **Signing.** The coordinator authorizes each proposal in a temporary
+  topology store. Canton keeps that store in the participant's memory and
+  distributes nothing from it. `Authorize` against the synchronizer store
+  would distribute the proposal. At namespace threshold 1 the coordinator's
+  signature alone would also put the DNS in force at once (#448).
+- **Serials.** A temporary store starts empty, and Canton accepts an explicit
+  serial only after the store's own head for the mapping. The coordinator
+  therefore replays the party's DNS and P2P history, and the namespace
+  delegations behind their signatures, into the store. It signs only once the
+  store's heads match the synchronizer's, at serial head + 1 for each.
+- **Fallback above threshold 1.** A replay can fail to rebuild the heads, for
+  example on a history with revoked delegations. The coordinator then decides
+  by the party's current namespace threshold. At threshold 1 the run stops
+  and nothing is signed or published, because only there can the
+  coordinator's signature alone put the DNS in force. At threshold 2 or more
+  the coordinator signs with `Authorize` against the synchronizer store, as
+  before #448, and logs one warning. Its signature alone cannot meet the
+  threshold, so the proposals stay pending until the members sign. A
+  participant that cannot be reached is not a failed replay: the step fails
+  and retries on either path.
+- **Add-party's P2P.** The new member disconnects before the mapping that
+  hosts it is authorized, and its ACS import needs that mapping in its own
+  synchronizer store. The coordinator therefore publishes the P2P proposal
+  with its own signature before the signing round. Canton requires an added
+  host's signature, so that proposal stays pending until the new member signs.
+  The add-party DNS still waits for submit.
+- **Submit.** Before it publishes anything, the coordinator compares both
+  serials with the synchronizer's heads again. A serial that moved stops the
+  run with nothing published. A proposal that is already the head is in force
+  from an earlier attempt and is not sent again. A proposal published earlier
+  as a pending proposal is not a head, so it is sent again with the peers'
+  signatures.
+- **Cleanup.** Every store is dropped after signing, after an error, and by a
+  drop guard when a cancel aborts the run. A resumed run drops what its
+  earlier attempt left, and each boot drops every store an earlier process
+  left (`decman-proposals-*`). A participant restart clears them as well.
 
 ### External Party Onboarding (Tenant API)
 

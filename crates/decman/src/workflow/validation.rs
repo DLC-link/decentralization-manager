@@ -453,9 +453,10 @@ impl PeerExpectations {
     /// the existing owners' quorum, not by the new participant.
     ///
     /// A proposal at the head serial that equals the head mapping is already
-    /// effective (a threshold-1 namespace applies it on `Authorize`), so
-    /// signing it changes nothing and it skips the delta. Any other proposal
-    /// must sit at the next serial.
+    /// effective, so signing it changes nothing and it skips the delta. Only a
+    /// coordinator built before #448 sends one: it proposed with `Authorize`
+    /// against the synchronizer, which puts a threshold-1 namespace in force
+    /// at once. Any other proposal must sit at the next serial.
     async fn check_on_chain_delta(
         &self,
         config: &NodeConfig,

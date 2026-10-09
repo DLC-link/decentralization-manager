@@ -30,7 +30,8 @@ use crate::common::{Fixture, chaos::poll_until};
 
 type Legacy = (i32, PartyToKeyMapping);
 
-fn configs(f: &Fixture) -> anyhow::Result<Vec<NodeConfig>> {
+/// A `NodeConfig` per participant that reaches its Canton admin API directly.
+pub fn configs(f: &Fixture) -> anyhow::Result<Vec<NodeConfig>> {
     [&f.p1, &f.p2, &f.p3]
         .into_iter()
         .enumerate()
