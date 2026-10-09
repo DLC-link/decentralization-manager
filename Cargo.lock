@@ -2786,8 +2786,7 @@ dependencies = [
 [[package]]
 name = "hyper-noise"
 version = "0.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d559beceeeec56ccc0f7bd2f3ca30d3903ceb6bc07a76634c769058ea578bf2a"
+source = "git+https://github.com/DLC-link/hyper-noise?rev=0121fa74845383534249c35e4aaea20e963ac879#0121fa74845383534249c35e4aaea20e963ac879"
 dependencies = [
  "hyper 0.14.32",
  "log",
@@ -5987,8 +5986,8 @@ dependencies = [
 
 [[package]]
 name = "tokio-noise"
-version = "0.0.5"
-source = "git+https://github.com/conduition/tokio-noise?rev=a7dc4e543e4d117ee5f02125b0c898e1984973f2#a7dc4e543e4d117ee5f02125b0c898e1984973f2"
+version = "0.0.6"
+source = "git+https://github.com/DLC-link/tokio-noise?rev=ec951a06d1156981b54a05eeef92860ebec2b1df#ec951a06d1156981b54a05eeef92860ebec2b1df"
 dependencies = [
  "log",
  "snow",
