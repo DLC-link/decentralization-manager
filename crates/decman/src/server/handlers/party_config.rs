@@ -587,6 +587,42 @@ mod tests {
         server::{AppState, middleware::AuthMiddleware},
     };
 
+    #[actix_web::test]
+    async fn party_config_rejects_unsupported_packages_before_saving() -> anyhow::Result<()> {
+        let state = AppState::for_test(None).await?;
+        let app = test::init_service(
+            App::new()
+                .app_data(state.clone())
+                .service(save_party_config),
+        )
+        .await;
+        let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
+        let mut payload = json!({
+            "dec_party_id": format!("dec::{ns}"),
+            "member_party_id": format!("member::{ns}"),
+            "user_id": "test-user",
+        });
+        // Existing credential-only clients still deserialize.
+        let _: crate::server::types::PartyConfigRequest = serde_json::from_value(payload.clone())?;
+        // Even an empty map must not appear to be a supported setting.
+        for packages in [json!({}), json!({"governance_core": "#custom-core"})] {
+            payload["packages"] = packages;
+            let response = test::call_service(
+                &app,
+                TestRequest::put()
+                    .uri("/party-config")
+                    .set_json(&payload)
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = test::read_body(response).await;
+            assert!(std::str::from_utf8(&body)?.contains("packages"));
+            assert!(state.party_credentials.read().await.is_empty());
+        }
+        Ok(())
+    }
+
     /// `discover_member_party` is admin-gated. Drive the handler without the
     /// `AuthMiddleware` wrap so no `Principal` is attached to the request,
     /// then assert `require_admin`'s 401 fires before any Keycloak/Canton

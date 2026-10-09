@@ -326,19 +326,17 @@ curl http://localhost:8080/packages/vetted
 curl http://localhost:8080/packages/compare-peers   # admin-only — catches missing/extra packages across peers
 ```
 
-### 3. Register the package id for the party (optional)
+### 3. Check the built-in package aliases
 
-`PUT /party-config` accepts a `packages` map that DecMan threads through governance endpoints. The keys are hard-coded in `crates/decman/src/config.rs::PackageConfig`:
+The built-in integrations use the package aliases in
+`crates/decman/src/config.rs::default_package_config`. `GET /party-config`
+reports them; `PUT /party-config` configures credentials and does not accept a
+`packages` field. Requests containing that unsupported field return HTTP 400.
 
-```
-governance_action, governance_core, governance_token_custody,
-governance_utility_credential, governance_utility_onboarding,
-utility_credential, utility_credential_app, utility_registry
-```
-
-Custom packages are **not** in that map. That is fine — for the `core_domain` flow, only `governance_core` is dereferenced by name (to target `GovernanceRules`); the proposal's own package id is implied by the contract id and never needs to be resolved by DecMan.
-
-You only need to register a package id under one of those slots if you are *replacing* one of the standard packages (e.g. forking `governance-token-custody`).
+Custom action packages are supplied through the custom-action flow, rather than
+registered as per-party package overrides. Replacing a built-in governance
+package with a differently named fork currently requires changing the built-in
+aliases in DecMan and rebuilding it.
 
 ## Bootstrapping a `GovernanceRules` for your domain
 

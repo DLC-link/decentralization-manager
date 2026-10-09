@@ -189,6 +189,7 @@ start_nodes() {
         DECPM_METRICS_PORT="${metrics_ports[$idx]}" \
         DECPM_NOISE_PORT="${noise_ports[$idx]}" \
         DECPM_PORT="${http_ports[$idx]}" \
+        DECPM_TEST_REWARD_ASSIGN_FAILURE_FILE="$DEV_DIR/participant-$i/reward-assign-failure" \
         DECPM_REWARD_AUTOMATION_INTERVAL_SECS="${DECPM_REWARD_AUTOMATION_INTERVAL_SECS:-15}" \
         DECPM_EXTERNAL_PARTIES_TTL_SECS="${DECPM_EXTERNAL_PARTIES_TTL_SECS:-15}" \
         "$BINARY" -d "$DEV_DIR/participant-$i" serve \

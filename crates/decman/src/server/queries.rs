@@ -1193,14 +1193,14 @@ pub(crate) async fn resolve_contract_package_ref(
     }
 }
 
-/// Look up a contract's created event and map its concrete package id back
-/// to a `#name` ref via the participant's package inventory.
-async fn fetch_contract_package_ref(
+/// Read the actual created template. Absence and RPC errors are distinct;
+/// callers exercising delegated authority must not substitute a configured ref.
+pub(crate) async fn fetch_contract_template_id(
     config: &NodeConfig,
     party_id: &CantonId,
     token: Option<String>,
     contract_id: &str,
-) -> Result<Option<String>> {
+) -> Result<Option<Identifier>> {
     let mut client = utils::create_event_query_client(config, token).await?;
 
     let request = GetEventsByContractIdRequest {
@@ -1212,17 +1212,28 @@ async fn fetch_contract_package_ref(
         )),
     };
 
-    let package_id = client
+    Ok(client
         .get_events_by_contract_id(tonic::Request::new(request))
         .await?
         .into_inner()
         .created
         .and_then(|c| c.created_event)
-        .and_then(|e| e.template_id)
-        .map(|t| t.package_id);
-    let Some(package_id) = package_id else {
+        .and_then(|e| e.template_id))
+}
+
+/// Look up a contract's created event and map its concrete package id back
+/// to a `#name` ref via the participant's package inventory.
+async fn fetch_contract_package_ref(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    contract_id: &str,
+) -> Result<Option<String>> {
+    let Some(template) = fetch_contract_template_id(config, party_id, token, contract_id).await?
+    else {
         return Ok(None);
     };
+    let package_id = template.package_id;
     // Already a `#name` ref — use it directly.
     if package_id.starts_with('#') {
         return Ok(Some(package_id));

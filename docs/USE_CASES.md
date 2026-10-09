@@ -72,12 +72,12 @@ This deploys a `GovernanceRules` contract with all 3 members, threshold 2, and a
 
 The complete end-to-end deployment follows these steps. Steps 6-9 are **domain proposals**: `POST /governance/propose`, then the same confirm -> threshold -> execute flow as any other proposal. `GovernanceRules` accepts only self-management actions on the inline `POST /governance/confirm` path (add/remove member, threshold, timeout, additional proposers) — every domain operation goes through a proposal.
 
-> **Note:** `#governance-*-<version>` package IDs use `<version>` as a placeholder — substitute the version of the governance packages you deployed (these are configured per party via `PUT /party-config`).
+> **Note:** `#governance-*-<version>` package IDs use `<version>` as a placeholder — substitute the version of the governance packages you deployed (the built-in integrations use the aliases in `default_package_config()`; `PUT /party-config` configures credentials only).
 
 | # | Step | Actor | Description |
 |---|------|-------|-------------|
 | 1 | Create decentralized party | DecMan (onboarding workflow) | Create the shared party identity |
-| 2 | Configure party credentials | DecMan (`PUT /party-config` API) | Configure OAuth credentials (Keycloak or Auth0) and package IDs for each party |
+| 2 | Configure party credentials | DecMan (`PUT /party-config` API) | Configure OAuth credentials (Keycloak or Auth0) for each party |
 | 3 | Grant Ledger API rights | External (Canton admin) | Grant `actAs`/`readAs` rights for member parties on the decentralized party |
 | 4 | Upload DARs | DecMan (DARs workflow) | Upload DAR packages to all participant nodes |
 | 5 | Deploy GovernanceRules | DecMan (contracts workflow) | Deploy `GovernanceRules` contract with package `#governance-core-<version>` |

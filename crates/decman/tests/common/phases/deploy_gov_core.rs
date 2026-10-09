@@ -128,13 +128,6 @@ async fn update_party_config(
         "keycloak_url": keycloak_url,
         "keycloak_realm": keycloak_realm,
         "keycloak_client_id": keycloak_client_id,
-        "packages": {
-            "governance_action": "#governance-action-v1",
-            "governance_core": "#governance-core-v1",
-            "governance_token_custody": "#governance-token-custody-v1",
-            "governance_utility_onboarding": "#governance-utility-onboarding-v1",
-            "utility_registry": "#utility-registry-app-v0",
-        },
     });
     if let Some(secret) = keycloak_client_secret {
         req["keycloak_client_secret"] = serde_json::Value::String(secret);
