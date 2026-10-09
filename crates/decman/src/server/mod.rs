@@ -1105,6 +1105,29 @@ pub async fn start_server(
         external_parties: Default::default(),
     });
 
+    // A coordinator killed while it signed a party proposal leaves that
+    // proposal's temporary topology store on the participant. Sweep them
+    // before any run resumes, because a resumed run creates its own and a
+    // sweep running alongside would drop it (#448). Bounded, so a participant
+    // that is down does not hold up the boot.
+    match tokio::time::timeout(
+        Duration::from_secs(15),
+        workflow::proposal_store::drop_leftover_stores(&config),
+    )
+    .await
+    {
+        Ok(Ok(0)) => {}
+        Ok(Ok(dropped)) => tracing::info!(
+            dropped,
+            "Dropped temporary topology stores an earlier process left behind"
+        ),
+        Ok(Err(e)) => tracing::warn!(
+            error = format!("{e:#}"),
+            "Could not sweep leftover temporary topology stores"
+        ),
+        Err(_) => tracing::warn!("Timed out sweeping leftover temporary topology stores"),
+    }
+
     // Boot-time workflow recovery. For any `workflow_runs` row that was
     // InProgress when we shut down, re-spawn the coordinator task (which
     // resumes at the persisted `current_step` via `WorkflowState::from_persisted`)
