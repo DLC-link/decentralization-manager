@@ -12,11 +12,13 @@
 //! Setup: P3 hosts the party (the add_party phase put it back). P3 removes its
 //! own hosting entry, which a participant may do alone once it forces past
 //! Canton's active-contracts guard, and stays a namespace owner: the shape
-//! MainNet is in. P3 then leaves the synchronizer, purges its copy of the
-//! party's contracts and reconnects, the way the recovery procedure does;
-//! contracts left behind would stay active on P3 forever, since it no longer
-//! sees the party's archives. Contracts the party observes are then created
-//! while P3 is out, so P3 holds none of them.
+//! MainNet is in. P3 then leaves the synchronizer, purges the contracts it held
+//! only for the party and reconnects, the way the recovery procedure does.
+//! Those contracts would stay active on P3 forever, since it no longer sees
+//! the party's archives. P3 keeps the contracts another of its parties is a
+//! stakeholder of: it still sees their archives, and the add-party export
+//! leaves them out. Contracts the party observes are then created while P3 is
+//! out, so P3 holds none of them.
 //!
 //! P3 is then added back. From the moment P3 accepts the invitation until the
 //! run completes, two watchers run alongside: all but the last few seeded
@@ -45,14 +47,17 @@ use anyhow::Context;
 use canton_proto_rs::com::digitalasset::canton::{
     admin::participant::v30::{
         DisconnectSynchronizerRequest, ListConnectedSynchronizersRequest,
-        ListRegisteredSynchronizersRequest, PurgeContractsRequest, ReconnectSynchronizerRequest,
+        ListRegisteredSynchronizersRequest, LookupReceivedAcsCommitmentsRequest,
+        PurgeContractsRequest, ReceivedAcsCommitment, ReceivedCommitmentState,
+        ReconnectSynchronizerRequest, SynchronizerTimeRange, TimeRange,
+        participant_inspection_service_client::ParticipantInspectionServiceClient,
         participant_repair_service_client::ParticipantRepairServiceClient,
         synchronizer_connectivity_service_client::SynchronizerConnectivityServiceClient,
     },
     protocol::v30::{TopologyMapping, enums::TopologyChangeOp, topology_mapping},
     topology::admin::v30::{
         AuthorizeRequest, ForceFlag, ListDecentralizedNamespaceDefinitionRequest,
-        ListPartyToParticipantRequest, authorize_request,
+        ListPartyToParticipantRequest, ListSynchronizerParametersStateRequest, authorize_request,
         list_party_to_participant_response::result::Item as P2pItem,
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
     },
@@ -77,8 +82,8 @@ use crate::common::{
     http::{probe_workflow_run_visible, probe_workflow_status},
     invitations::{InvitationIds, post_accept_invitation, probe_pending_invitation},
     ledger_api::{
-        P1_JSON_API, P3_JSON_API, REWARD_COUPON_V2_TEMPLATE, SeedCoupon, archive_command,
-        reward_coupon_create_command,
+        ActiveContract, P1_JSON_API, P3_JSON_API, REWARD_COUPON_V2_TEMPLATE, SeedCoupon,
+        archive_command, reward_coupon_create_command,
     },
     phases::deploy_gov_core::grant_rights,
     probe::Class,
@@ -106,6 +111,14 @@ const SAMPLE_INTERVAL: Duration = Duration::from_millis(200);
 /// count as a reproduction of the incident's precondition.
 const MIN_ARCHIVES_IN_WINDOW: usize = 3;
 
+/// Longest reconciliation interval this assertion can work with. Past it a run
+/// would end before the synchronizer compared a single period, so the phase
+/// fails instead of passing on no evidence.
+const MAX_RECONCILIATION: Duration = Duration::from_secs(60);
+
+/// Periods to wait for beyond the first, so a match is not a single fluke.
+const PERIODS_REQUIRED: u32 = 2;
+
 /// How far ahead the seeded coupons expire. Below the reward automation's
 /// expiry margin (120 s by default), so its sweeps never assign them and the
 /// archiver stays the only thing that changes them; the later split phase then
@@ -120,6 +133,10 @@ struct Ctx {
     watch: Option<Arc<Mutex<Watch>>>,
     stop: Option<Arc<AtomicBool>>,
     tasks: Vec<JoinHandle<()>>,
+    /// Commitments are only required to agree for periods that begin after
+    /// this. Everything earlier covers the disconnect and the import, where a
+    /// mismatch is the test's own doing.
+    settled_at: Option<SystemTime>,
 }
 
 /// What the two background watchers observed.
@@ -237,12 +254,19 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         },
     )
     .when(
-        "P3 leaves the synchronizer, purges its copy of the party's contracts, reconnects",
+        "P3 leaves the synchronizer, purges the contracts it held only for the party, reconnects",
         |f, _| {
             Box::pin(async move {
                 let p3 = admin_config(f, 3)?;
                 let party = f.party_id()?.to_string();
-                let held = f.active_contract_ids(P3_JSON_API, &party).await?;
+                let synchronizer_id = dec_party_manager::utils::get_synchronizer_id(&p3).await?;
+                let hosted = hosted_parties(&p3, &synchronizer_id, &f.p3.participant_id).await?;
+                let (held, kept) = split_by_other_hosts(
+                    f.active_contracts(P3_JSON_API, &party).await?,
+                    &party,
+                    &f.p3.participant_id,
+                    &hosted,
+                );
                 let alias = p3.synchronizer().to_string();
                 let mut connectivity =
                     SynchronizerConnectivityServiceClient::new(p3.admin_channel().await?);
@@ -285,9 +309,14 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     }))
                     .await
                     .context("reconnect P3")?;
+                let mut kept_templates: Vec<&str> =
+                    kept.iter().map(|c| c.template_id.as_str()).collect();
+                kept_templates.sort();
                 info!(
-                    "P3 purged {} contract(s) of the party and reconnected",
-                    held.len()
+                    "P3 purged {} contract(s) of the party and reconnected. It kept {} that \
+                     another of its parties is a stakeholder of: {kept_templates:?}",
+                    held.len(),
+                    kept.len(),
                 );
                 Ok(())
             })
@@ -678,6 +707,80 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             })
         },
     )
+    .when(
+        "the ledger is quiet, so note where commitments must start agreeing",
+        |f, ctx| {
+            Box::pin(async move {
+                // Read the interval here, not inside the poll below, so its
+                // consequences are decided once and said out loud.
+                let p3 = admin_config(f, 3)?;
+                let interval = reconciliation_interval(&p3).await?;
+                if interval > MAX_RECONCILIATION {
+                    anyhow::bail!(
+                        "the synchronizer reconciles every {interval:?} and this phase lasts {:?}, \
+                         so no commitment period is compared. start_localnet founds the DSO with \
+                         a short acs-commitment-reconciliation-interval; check that it applied",
+                        commitment_budget(),
+                    );
+                }
+                info!("synchronizer reconciles every {interval:?}; commitments will be checked");
+                ctx.settled_at = Some(SystemTime::now());
+                Ok(())
+            })
+        },
+    )
+    .then(
+        "P3's ACS commitments agree with the network",
+        commitment_budget(),
+        |f, ctx| {
+            Box::pin(async move {
+                let Some(settled_at) = ctx.settled_at else {
+                    return Some(Err(anyhow::anyhow!("no settle point was recorded")));
+                };
+                let p3 = match admin_config(f, 3) {
+                    Ok(c) => c,
+                    Err(e) => return Some(Err(e)),
+                };
+                let (matched, mismatched) = match received_commitments(&p3, settled_at).await {
+                    Ok(v) => v,
+                    // Transport interruptions can recover; invalid requests and
+                    // server errors should retain their original diagnostics.
+                    Err(e) if !retryable_commitment_error(&e) => return Some(Err(e)),
+                    Err(e) => {
+                        f.probe_diag.record(
+                            "P3 commitments",
+                            Class::Transient,
+                            format!("reading received commitments: {e:#}"),
+                        );
+                        return None;
+                    }
+                };
+                // A mismatch is recorded per period and never heals, so there
+                // is nothing to wait for.
+                if !mismatched.is_empty() {
+                    return Some(Err(anyhow::anyhow!(
+                        "P3's ACS has {} mismatched commitment(s) after the import: {:?}. \
+                         Contract sets can match while commitments do not: the transfer moves the \
+                         contracts, and P3's view of them can still differ from the network's",
+                        mismatched.len(),
+                        mismatched,
+                    )));
+                }
+                // Zero mismatches proves nothing until a period has actually
+                // been compared, or a run where no commitment was exchanged
+                // would pass.
+                if matched < PERIODS_REQUIRED as usize {
+                    f.probe_diag.record(
+                        "P3 commitments",
+                        Class::Transient,
+                        format!("{matched} matched period(s) so far, need {PERIODS_REQUIRED}"),
+                    );
+                    return None;
+                }
+                Some(Ok(()))
+            })
+        },
+    )
     .run(f)
     .await
 }
@@ -761,6 +864,56 @@ async fn read_hosting(
         let P2pItem::V30(mapping) = r.item?;
         (mapping.party == party_id).then_some((mapping, valid_from))
     }))
+}
+
+/// Parties the head state has `participant_uid` hosting.
+async fn hosted_parties(
+    config: &NodeConfig,
+    synchronizer_id: &str,
+    participant_uid: &str,
+) -> anyhow::Result<HashSet<String>> {
+    let mut client = TopologyManagerReadServiceClient::new(config.admin_channel().await?);
+    let response = client
+        .list_party_to_participant(tonic::Request::new(ListPartyToParticipantRequest {
+            base_query: Some(head_state_query(synchronizer_id)),
+            filter_party: String::new(),
+            filter_participant: String::new(),
+        }))
+        .await?
+        .into_inner();
+    Ok(response
+        .results
+        .into_iter()
+        .filter_map(|r| {
+            let P2pItem::V30(mapping) = r.item?;
+            mapping
+                .participants
+                .iter()
+                .any(|p| p.participant_uid == participant_uid)
+                .then_some(mapping.party)
+        })
+        .collect())
+}
+
+/// Split the party's contracts on a participant into the ids it held only for
+/// the party, and the contracts another party it hosts is a stakeholder of.
+///
+/// This is the rule ExportPartyAcs applies to its target: it skips every
+/// contract with a stakeholder the target already hosts, other than the party
+/// and the target's admin party. A purge of the second kind would leave the
+/// participant without contracts that no import puts back.
+fn split_by_other_hosts(
+    contracts: Vec<ActiveContract>,
+    party: &str,
+    participant_uid: &str,
+    hosted: &HashSet<String>,
+) -> (Vec<String>, Vec<ActiveContract>) {
+    let (alone, shared): (Vec<_>, Vec<_>) = contracts.into_iter().partition(|c| {
+        !c.stakeholders
+            .iter()
+            .any(|s| s != party && s != participant_uid && hosted.contains(s))
+    });
+    (alone.into_iter().map(|c| c.contract_id).collect(), shared)
 }
 
 fn to_system_time(ts: prost_types::Timestamp) -> SystemTime {
@@ -892,4 +1045,256 @@ fn spawn_archiver(
             tokio::time::sleep(ARCHIVE_INTERVAL).await;
         }
     })
+}
+
+/// How long the commitment assertion waits. The synchronizer only compares on
+/// reconciliation ticks, so the budget spans several of them. The real interval
+/// is read at runtime and checked against `MAX_RECONCILIATION`.
+fn commitment_budget() -> Duration {
+    MAX_RECONCILIATION * (PERIODS_REQUIRED + 2)
+}
+
+fn proto_timestamp(t: SystemTime) -> anyhow::Result<prost_types::Timestamp> {
+    let elapsed = t.duration_since(UNIX_EPOCH)?;
+    Ok(prost_types::Timestamp {
+        seconds: elapsed.as_secs() as i64,
+        nanos: elapsed.subsec_nanos() as i32,
+    })
+}
+
+/// Commitments P3 received for periods beginning after `since`: how many
+/// matched, and which counter-participants disagreed.
+///
+/// This is the network's own verdict on P3's contract set, and it is a
+/// different question from "do P1 and P3 list the same contract ids". The two
+/// can disagree: the ids match while the commitments do not. A phase that only
+/// compares ids therefore passes on a whole class of import faults.
+async fn received_commitments(
+    config: &NodeConfig,
+    since: SystemTime,
+) -> anyhow::Result<(usize, Vec<String>)> {
+    // Canton returns overlapping periods, not just periods beginning in this
+    // range. Filter the returned intervals below as well as retaining nanos.
+    let from = proto_timestamp(since)?;
+    let to = proto_timestamp(SystemTime::now())?;
+    let physical = dec_party_manager::utils::get_synchronizer_id(config).await?;
+    let synchronizer_id = physical
+        .rsplit_once("::")
+        .map_or(physical.as_str(), |(logical, _)| logical)
+        .to_string();
+    let mut client = ParticipantInspectionServiceClient::new(config.admin_channel().await?);
+    let response = client
+        .lookup_received_acs_commitments(tonic::Request::new(LookupReceivedAcsCommitmentsRequest {
+            time_ranges: vec![SynchronizerTimeRange {
+                synchronizer_id,
+                interval: Some(TimeRange {
+                    from_exclusive: Some(from),
+                    to_inclusive: Some(to),
+                }),
+            }],
+            counter_participant_ids: vec![],
+            commitment_state: vec![],
+            verbose: false,
+        }))
+        .await?
+        .into_inner();
+
+    summarize_commitments(
+        response.received.into_iter().flat_map(|sync| sync.received),
+        from,
+        to,
+    )
+}
+
+fn retryable_commitment_error(error: &anyhow::Error) -> bool {
+    match error.downcast_ref::<tonic::Status>() {
+        Some(status) => matches!(
+            status.code(),
+            tonic::Code::Unavailable | tonic::Code::DeadlineExceeded
+        ),
+        // Channel establishment failures do not carry an RPC status.
+        None => true,
+    }
+}
+
+fn summarize_commitments(
+    commitments: impl IntoIterator<Item = ReceivedAcsCommitment>,
+    since: prost_types::Timestamp,
+    until: prost_types::Timestamp,
+) -> anyhow::Result<(usize, Vec<String>)> {
+    let mut matched = HashSet::new();
+    let mut mismatched = Vec::new();
+    for commitment in commitments {
+        let interval = commitment
+            .interval
+            .context("received commitment has no interval")?;
+        let start = interval
+            .start_tick_exclusive
+            .context("commitment has no start tick")?;
+        let end = interval
+            .end_tick_inclusive
+            .context("commitment has no end tick")?;
+        let start = (start.seconds, start.nanos);
+        let end = (end.seconds, end.nanos);
+        // DbAcsCommitmentStore.searchReceivedBetween is an overlap query.
+        // A period straddling the settle point can describe the rehost itself.
+        // Only complete periods starting at/after settlement prove convergence.
+        if start < (since.seconds, since.nanos) || end > (until.seconds, until.nanos) {
+            continue;
+        }
+        anyhow::ensure!(start < end, "commitment has a non-positive interval");
+        match ReceivedCommitmentState::try_from(commitment.state) {
+            Ok(ReceivedCommitmentState::Match) => {
+                // Multiple counterparties in one period still prove one period.
+                matched.insert((start, end));
+            }
+            Ok(ReceivedCommitmentState::Mismatch) => mismatched.push(format!(
+                "{} in ({start:?}, {end:?}]",
+                commitment.origin_counter_participant_uid,
+            )),
+            // Buffered and outstanding have not been compared yet.
+            _ => {}
+        }
+    }
+    mismatched.sort();
+    mismatched.dedup();
+    Ok((matched.len(), mismatched))
+}
+
+/// The synchronizer's reconciliation interval, which decides how often
+/// commitments are compared at all.
+async fn reconciliation_interval(config: &NodeConfig) -> anyhow::Result<Duration> {
+    let synchronizer_id = dec_party_manager::utils::get_synchronizer_id(config).await?;
+    let mut client = TopologyManagerReadServiceClient::new(config.admin_channel().await?);
+    let response = client
+        .list_synchronizer_parameters_state(tonic::Request::new(
+            ListSynchronizerParametersStateRequest {
+                base_query: Some(head_state_query(&synchronizer_id)),
+                filter_synchronizer_id: String::new(),
+            },
+        ))
+        .await?
+        .into_inner();
+    let parameters = response
+        .results
+        .first()
+        .and_then(|r| r.item)
+        .context("synchronizer has no parameters in head state")?;
+    let interval = parameters
+        .reconciliation_interval
+        .context("synchronizer parameters carry no reconciliation interval")?;
+    Ok(Duration::from_secs(interval.seconds.max(0) as u64))
+}
+
+#[cfg(test)]
+mod commitment_tests {
+    use super::*;
+    use canton_proto_rs::com::digitalasset::canton::admin::participant::v30::Interval;
+
+    fn timestamp(seconds: i64, nanos: i32) -> prost_types::Timestamp {
+        prost_types::Timestamp { seconds, nanos }
+    }
+
+    fn commitment(
+        start: i64,
+        end: i64,
+        peer: &str,
+        state: ReceivedCommitmentState,
+    ) -> ReceivedAcsCommitment {
+        ReceivedAcsCommitment {
+            interval: Some(Interval {
+                start_tick_exclusive: Some(timestamp(start, 0)),
+                end_tick_inclusive: Some(timestamp(end, 0)),
+            }),
+            origin_counter_participant_uid: peer.into(),
+            state: state as i32,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn excludes_disturbed_period_but_keeps_later_mismatch() -> anyhow::Result<()> {
+        use ReceivedCommitmentState::{Match, Mismatch};
+        let (matched, mismatched) = summarize_commitments(
+            [
+                commitment(0, 30, "P1", Mismatch),
+                commitment(30, 60, "P1", Match),
+                commitment(60, 90, "P1", Mismatch),
+            ],
+            timestamp(0, 900_000_000),
+            timestamp(90, 0),
+        )?;
+        assert_eq!(matched, 1);
+        assert_eq!(mismatched.len(), 1);
+        assert!(mismatched[0].contains("(60, 0), (90, 0)"));
+        Ok(())
+    }
+
+    #[test]
+    fn counts_distinct_complete_periods_and_waits_for_comparison() -> anyhow::Result<()> {
+        use ReceivedCommitmentState::{Buffered, Match, Outstanding};
+        let (matched, mismatched) = summarize_commitments(
+            [
+                commitment(30, 60, "P1", Match),
+                commitment(30, 60, "P2", Match),
+                commitment(60, 90, "P1", Buffered),
+                commitment(60, 90, "P2", Outstanding),
+                commitment(90, 120, "P1", Match),
+            ],
+            timestamp(30, 0),
+            timestamp(100, 0),
+        )?;
+        assert_eq!(matched, 1);
+        assert!(mismatched.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn permanent_rpc_errors_fail_even_with_context() {
+        for code in [
+            tonic::Code::InvalidArgument,
+            tonic::Code::Internal,
+            tonic::Code::PermissionDenied,
+        ] {
+            let error = anyhow::Error::new(tonic::Status::new(code, "broken request"))
+                .context("lookup received commitments");
+            assert!(!retryable_commitment_error(&error));
+        }
+        for code in [tonic::Code::Unavailable, tonic::Code::DeadlineExceeded] {
+            assert!(retryable_commitment_error(&anyhow::Error::new(
+                tonic::Status::new(code, "retry")
+            )));
+        }
+    }
+}
+
+#[cfg(test)]
+mod purge_tests {
+    use super::*;
+
+    #[test]
+    fn purges_only_what_no_other_hosted_party_sees() {
+        let contract = |id: &str, stakeholders: &[&str]| ActiveContract {
+            contract_id: id.into(),
+            template_id: "T".into(),
+            stakeholders: stakeholders.iter().map(|s| s.to_string()).collect(),
+        };
+        let hosted: HashSet<String> = ["party", "member-p3", "participant::p3"]
+            .map(String::from)
+            .into();
+        let (purged, kept) = split_by_other_hosts(
+            vec![
+                contract("party-only", &["party"]),
+                contract("remote-member", &["party", "member-p1"]),
+                contract("admin-party", &["party", "participant::p3"]),
+                contract("local-member", &["member-p3", "party"]),
+            ],
+            "party",
+            "participant::p3",
+            &hosted,
+        );
+        assert_eq!(purged, ["party-only", "remote-member", "admin-party"]);
+        let kept: Vec<&str> = kept.iter().map(|c| c.contract_id.as_str()).collect();
+        assert_eq!(kept, ["local-member"]);
+    }
 }

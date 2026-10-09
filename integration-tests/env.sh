@@ -202,6 +202,29 @@ download_localnet() {
     echo "Localnet bundle ready"
 }
 
+# The bundle founds the DSO with the MainNet ACS commitment interval of 1800s.
+# The re-host phase checks P3's commitments, and a phase lasts minutes, so at
+# that interval it never sees a compared period. The SV app keeps the
+# synchronizer on the DsoRules value, so the interval is set where the DSO is
+# founded. Idempotent: the bundle stays cached between runs.
+LOCALNET_ACS_COMMITMENT_INTERVAL="30s"
+
+configure_localnet_reconciliation() {
+    local conf="$LOCALNET_COMPOSE_DIR/conf/splice/sv/app.conf"
+    if grep -q "acs-commitment-reconciliation-interval" "$conf"; then
+        return 0
+    fi
+    awk -v interval="$LOCALNET_ACS_COMMITMENT_INTERVAL" '
+        { print }
+        /type = found-dso/ { print "      acs-commitment-reconciliation-interval = " interval }
+    ' "$conf" > "$conf.tmp"
+    mv "$conf.tmp" "$conf"
+    grep -q "acs-commitment-reconciliation-interval" "$conf" || {
+        echo "Failed to set the ACS commitment interval in $conf" >&2
+        return 1
+    }
+}
+
 localnet_compose() {
     export IMAGE_TAG="$LOCALNET_VERSION"
     docker compose \
@@ -219,6 +242,8 @@ start_localnet() {
     # Clean up any existing chain data from previous runs (keeps images)
     echo "Cleaning up previous localnet data..."
     localnet_compose down -v 2>/dev/null || true
+
+    configure_localnet_reconciliation
 
     echo "Starting localnet..."
     # Only start the services our tests actually use. The 3 active profiles

@@ -129,6 +129,37 @@ pub fn parse_coupon_ids(acs_response: &Value) -> Vec<(String, i64)> {
         .collect()
 }
 
+/// One contract in an ACS response.
+pub struct ActiveContract {
+    pub contract_id: String,
+    pub template_id: String,
+    /// Signatories and observers.
+    pub stakeholders: Vec<String>,
+}
+
+/// Every contract in an ACS response, whatever its template.
+pub fn parse_active_contracts(acs_response: &Value) -> Vec<ActiveContract> {
+    acs_response
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let created = entry.pointer("/contractEntry/JsActiveContract/createdEvent")?;
+            let stakeholders = ["signatories", "observers"]
+                .into_iter()
+                .filter_map(|field| created.get(field)?.as_array())
+                .flatten()
+                .filter_map(|p| p.as_str().map(str::to_string))
+                .collect();
+            Some(ActiveContract {
+                contract_id: created.get("contractId")?.as_str()?.to_string(),
+                template_id: created.get("templateId")?.as_str()?.to_string(),
+                stakeholders,
+            })
+        })
+        .collect()
+}
+
 /// Build the `/v2/state/active-contracts` body: active `RewardCouponV2`
 /// contracts visible to `party`, as of `offset`.
 pub fn active_contracts_request(party: &str, template_id: &str, offset: i64) -> Value {
@@ -225,9 +256,13 @@ impl Fixture {
             .context("ledger-end response missing integer offset")
     }
 
-    /// Contract ids of every active contract visible to `party`, whatever the
-    /// template, as of the current ledger end.
-    pub async fn active_contract_ids(&self, port: u16, party: &str) -> anyhow::Result<Vec<String>> {
+    /// Every active contract visible to `party`, whatever the template, as of
+    /// the current ledger end.
+    pub async fn active_contracts(
+        &self,
+        port: u16,
+        party: &str,
+    ) -> anyhow::Result<Vec<ActiveContract>> {
         let offset = self.ledger_end(port).await?;
         let body = active_contracts_request_all(party, offset);
         let (status, text) = self
@@ -237,10 +272,7 @@ impl Fixture {
         if !status.is_success() {
             anyhow::bail!("POST /v2/state/active-contracts returned {status}: {text}");
         }
-        Ok(parse_coupon_ids(&normalize_acs_body(&text)?)
-            .into_iter()
-            .map(|(cid, _)| cid)
-            .collect())
+        Ok(parse_active_contracts(&normalize_acs_body(&text)?))
     }
 
     /// `(contract_id, round)` of the active `RewardCouponV2` coupons visible to
