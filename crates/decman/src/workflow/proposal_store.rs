@@ -10,7 +10,10 @@
 //! The coordinator now authorizes both proposals in a temporary topology
 //! store. Canton keeps such a store in the participant's memory, signs into
 //! it without distributing anything, and forgets it when it is dropped. The
-//! proposals reach the synchronizer only when submit publishes them.
+//! proposals reach the synchronizer only when submit publishes them. The one
+//! exception is add-party's P2P, which its create step publishes as a pending
+//! proposal for the new member: adding a host needs that host's signature, so
+//! the proposal cannot take effect early.
 //!
 //! Canton accepts an explicit serial in a store only as the successor of that
 //! store's head for the mapping, and a new store has no head. So the store is

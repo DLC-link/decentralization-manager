@@ -7,7 +7,10 @@ use canton_proto_rs::com::digitalasset::canton::{
         party_to_participant::{HostingParticipant, hosting_participant},
         topology_mapping,
     },
-    topology::admin::v30::{AuthorizeRequest, ForceFlag, authorize_request},
+    topology::admin::v30::{
+        AuthorizeRequest, ForceFlag, authorize_request,
+        topology_manager_write_service_client::TopologyManagerWriteServiceClient,
+    },
 };
 use sqlx::SqlitePool;
 
@@ -223,9 +226,18 @@ pub async fn create_proposals(
         }),
     };
 
-    // Signed without being published: nothing reaches the synchronizer until
-    // submit, so a member that never signs leaves the party unchanged (#448).
-    // A re-host leaves the namespace as it is, so no DNS is signed for it.
+    // Publishing the P2P proposal before submit (below) is safe only while it
+    // adds the new member as a host, so check that before anything is signed.
+    if !adds_host(&head.p2p, &new_p2p, &new_member_id) {
+        anyhow::bail!(
+            "The add-party P2P proposal does not add {new_member_id} as a host, so this node's \
+             signature alone could put it in force"
+        );
+    }
+
+    // Signed without being published, so a member that never signs leaves the
+    // party unchanged (#448). A re-host leaves the namespace as it is, so no
+    // DNS is signed for it.
     tracing::info!("Signing add-party proposals...");
     let signed = proposal_store::sign_party_proposals(
         config,
@@ -250,6 +262,21 @@ pub async fn create_proposals(
         }
     };
     let p2p_transaction = signed.p2p;
+
+    // The one proposal published before submit. The new member disconnects
+    // before the mapping that hosts it is authorized (#469), and its ACS
+    // import needs that mapping in its own synchronizer store, which holds
+    // only what was sequenced. Adding a host needs that host's own signature,
+    // so the proposal stays pending until the new member signs. The DNS stays
+    // unpublished until submit.
+    tracing::info!("Publishing the add-party P2P proposal for the new member's store...");
+    TopologyManagerWriteServiceClient::new(config.admin_channel().await?)
+        .add_transactions(tonic::Request::new(topology::add_transactions_request(
+            &synchronizer_id,
+            p2p_transaction.clone(),
+            topology::party_proposal_force_flags(),
+        )))
+        .await?;
 
     storage
         .write_artifact(
@@ -383,6 +410,25 @@ async fn is_former_host(
          another node coordinated the run that first added it."
     );
     Ok(true)
+}
+
+/// Whether `proposed` hosts `new_member` and `current` does not.
+///
+/// Canton requires an added host's own signature on the mapping that adds it.
+/// A proposal that adds `new_member` therefore cannot take effect before
+/// `new_member` signs, whatever the namespace threshold.
+fn adds_host(
+    current: &PartyToParticipant,
+    proposed: &PartyToParticipant,
+    new_member: &str,
+) -> bool {
+    let hosts = |mapping: &PartyToParticipant| {
+        mapping
+            .participants
+            .iter()
+            .any(|host| host.participant_uid == new_member)
+    };
+    hosts(proposed) && !hosts(current)
 }
 
 /// The namespace fingerprint this node recorded for each member, from the
@@ -539,6 +585,42 @@ mod tests {
 
     fn assert_refused(err: anyhow::Error, needle: &str) {
         assert!(format!("{err}").contains(needle), "{err}");
+    }
+
+    fn hosting(uids: &[&str]) -> PartyToParticipant {
+        PartyToParticipant {
+            participants: uids
+                .iter()
+                .map(|uid| HostingParticipant {
+                    participant_uid: (*uid).to_string(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    /// The P2P proposal is published before submit only because it adds the
+    /// new member, whose own signature Canton then requires.
+    #[test]
+    fn only_a_proposal_that_adds_the_new_member_counts_as_adding_a_host() {
+        let current = hosting(&["p1::ns", "p2::ns"]);
+        assert!(adds_host(
+            &current,
+            &hosting(&["p1::ns", "p2::ns", "p3::ns"]),
+            "p3::ns"
+        ));
+        assert!(!adds_host(&current, &current, "p3::ns"));
+        assert!(!adds_host(
+            &hosting(&["p1::ns", "p3::ns"]),
+            &hosting(&["p1::ns", "p3::ns"]),
+            "p3::ns"
+        ));
+        assert!(!adds_host(
+            &current,
+            &hosting(&["p1::ns", "p2::ns", "p4::ns"]),
+            "p3::ns"
+        ));
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
