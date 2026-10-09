@@ -550,6 +550,8 @@ Changes the signing threshold of an existing decentralized party's namespace.
 - `TopologyManagerWriteService.SignTransactions` -- Each member signs the proposals (step 4)
 - `TopologyManagerWriteService.AddTransactions` -- Submit the change (step 5)
 
+**Minimum participants:** 2 (party members)
+
 ### Party Topology Proposals
 
 Kick, add-party and change-threshold each change two mappings: the party's
@@ -566,6 +568,16 @@ Nothing that can take effect reaches the synchronizer before the submit step.
   therefore replays the party's DNS and P2P history, and the namespace
   delegations behind their signatures, into the store. It signs only once the
   store's heads match the synchronizer's, at serial head + 1 for each.
+- **Fallback above threshold 1.** A replay can fail to rebuild the heads, for
+  example on a history with revoked delegations. The coordinator then decides
+  by the party's current namespace threshold. At threshold 1 the run stops
+  and nothing is signed or published, because only there can the
+  coordinator's signature alone put the DNS in force. At threshold 2 or more
+  the coordinator signs with `Authorize` against the synchronizer store, as
+  before #448, and logs one warning. Its signature alone cannot meet the
+  threshold, so the proposals stay pending until the members sign. A
+  participant that cannot be reached is not a failed replay: the step fails
+  and retries on either path.
 - **Add-party's P2P.** The new member disconnects before the mapping that
   hosts it is authorized, and its ACS import needs that mapping in its own
   synchronizer store. The coordinator therefore publishes the P2P proposal
@@ -575,13 +587,13 @@ Nothing that can take effect reaches the synchronizer before the submit step.
 - **Submit.** Before it publishes anything, the coordinator compares both
   serials with the synchronizer's heads again. A serial that moved stops the
   run with nothing published. A proposal that is already the head is in force
-  from an earlier attempt and is not sent again.
+  from an earlier attempt and is not sent again. A proposal published earlier
+  as a pending proposal is not a head, so it is sent again with the peers'
+  signatures.
 - **Cleanup.** Every store is dropped after signing, after an error, and by a
   drop guard when a cancel aborts the run. A resumed run drops what its
   earlier attempt left, and each boot drops every store an earlier process
   left (`decman-proposals-*`). A participant restart clears them as well.
-
-**Minimum participants:** 2 (party members)
 
 ### External Party Onboarding (Tenant API)
 
