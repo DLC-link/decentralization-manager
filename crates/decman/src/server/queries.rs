@@ -523,12 +523,14 @@ where
 /// in one request is what left the approvals feed spinning (#424). The
 /// confirmations behind the batch come from a short-lived per-party cache, so
 /// scrolling does not re-read them.
+///
+/// `rules` is the live rules contract, or `None` when it could not be read.
 #[allow(clippy::too_many_arguments)]
 pub async fn get_governance_confirmations(
     config: &NodeConfig,
     party_id: &CantonId,
     threshold: usize,
-    members: Option<&HashSet<CantonId>>,
+    rules: Option<&GovernanceState>,
     token: Option<String>,
     packages: &PackageConfig,
     limit: usize,
@@ -606,7 +608,14 @@ pub async fn get_governance_confirmations(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
-    let actions = assemble_self_actions(confirmations_by_hash, threshold, members, now_seconds);
+    let members: Option<HashSet<CantonId>> =
+        rules.map(|rules| rules.members.iter().cloned().collect());
+    let actions = assemble_self_actions(
+        confirmations_by_hash,
+        threshold,
+        members.as_ref(),
+        now_seconds,
+    );
 
     let domain_actions: Vec<DomainGovernanceAction> = interpret::assemble_domain_actions(
         domain_confirmations,
@@ -614,32 +623,53 @@ pub async fn get_governance_confirmations(
         proposal_infos_complete,
         domain_confirmations_complete,
         threshold,
-        members,
+        members.as_ref(),
         now_seconds,
     )
     .into_iter()
-    .map(|action| DomainGovernanceAction {
-        proposal_cid: action.proposal_cid,
-        action_label: action.action_label,
-        description: action.description,
-        confirmations: action
-            .confirmations
-            .into_iter()
-            .map(domain_confirmation_dto)
-            .collect(),
-        confirmation_count: action.confirmation_count,
-        executable_confirmation_cids: action.executable_confirmation_cids,
-        can_execute: action.can_execute,
-        orphaned: action.orphaned,
-        transfer_details: action.transfer_details,
-        accept_transfer_details: action.accept_transfer_details,
-        service_request_details: action.service_request_details,
-        proposer: action.proposer,
-        created_at: action.created_at,
+    .map(|action| {
+        let not_authorized = proposer_not_authorized(action.proposer.as_ref(), rules);
+        DomainGovernanceAction {
+            proposal_cid: action.proposal_cid,
+            action_label: action.action_label,
+            description: action.description,
+            confirmations: action
+                .confirmations
+                .into_iter()
+                .map(domain_confirmation_dto)
+                .collect(),
+            confirmation_count: action.confirmation_count,
+            executable_confirmation_cids: action.executable_confirmation_cids,
+            can_execute: action.can_execute,
+            orphaned: action.orphaned,
+            transfer_details: action.transfer_details,
+            accept_transfer_details: action.accept_transfer_details,
+            service_request_details: action.service_request_details,
+            proposer: action.proposer,
+            proposer_not_authorized: not_authorized,
+            created_at: action.created_at,
+        }
     })
     .collect();
 
     Ok((actions, domain_actions, next_cursor))
+}
+
+/// Whether `GovernanceRules_ConfirmAction` rejects every confirmation of a
+/// proposal from `proposer`. That choice accepts a proposer only when the rules
+/// contract lists it as a member or as an additional proposer.
+///
+/// An unknown reads as authorized, so the card keeps Confirm and the ledger
+/// decides. That covers an unread rules contract, an unparsed proposer, and an
+/// empty member set, which the template's `ensure` rules out on-ledger and so
+/// can only mean a decode failure.
+fn proposer_not_authorized(proposer: Option<&CantonId>, rules: Option<&GovernanceState>) -> bool {
+    let (Some(proposer), Some(rules)) = (proposer, rules) else {
+        return false;
+    };
+    !rules.members.is_empty()
+        && !rules.members.contains(proposer)
+        && !rules.additional_proposers.contains(proposer)
 }
 
 /// Group self-action confirmations into cards. Only executable confirmations
@@ -3419,6 +3449,89 @@ mod tests {
         cids.sort();
         assert_eq!(cids, vec!["member".to_string(), "proposer".to_string()]);
 
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------------
+    // proposer_not_authorized
+    //
+    // Mirrors the proposer check in `GovernanceRules_ConfirmAction`
+    // (daml/governance-core/daml/Governance/Rules.daml).
+    // ------------------------------------------------------------------------
+
+    fn party(hint: &str, namespace_byte: &str) -> Result<CantonId> {
+        format!("{hint}::1220{}", namespace_byte.repeat(32)).parse()
+    }
+
+    fn rules_with(
+        members: &[&CantonId],
+        additional_proposers: &[&CantonId],
+    ) -> Result<GovernanceState> {
+        Ok(GovernanceState {
+            contract_id: "00rules".to_string(),
+            governance_party: party("gov", "00")?,
+            members: members.iter().map(|p| (*p).clone()).collect(),
+            threshold: 1,
+            additional_proposers: additional_proposers.iter().map(|p| (*p).clone()).collect(),
+            action_confirmation_timeout_microseconds: None,
+            package_ref: None,
+            out_of_date: false,
+        })
+    }
+
+    #[test]
+    fn members_and_additional_proposers_may_propose() -> Result {
+        let member = party("member", "aa")?;
+        let agent = party("agent", "bb")?;
+        let rules = rules_with(&[&member], &[&agent])?;
+
+        assert!(!proposer_not_authorized(Some(&member), Some(&rules)));
+        assert!(!proposer_not_authorized(Some(&agent), Some(&rules)));
+        Ok(())
+    }
+
+    #[test]
+    fn a_proposer_the_live_rules_no_longer_list_cannot_gather_confirmations() -> Result {
+        // The #518 case: the proposal came from an earlier seat's paying agent,
+        // and the live rules authorize a different one.
+        let member = party("member", "aa")?;
+        let former_agent = party("agent", "bb")?;
+        let current_agent = party("agent", "cc")?;
+        let rules = rules_with(&[&member], &[&current_agent])?;
+
+        assert!(proposer_not_authorized(Some(&former_agent), Some(&rules)));
+        Ok(())
+    }
+
+    #[test]
+    fn a_party_sharing_a_members_namespace_is_not_that_member() -> Result {
+        // Daml compares whole party ids. Parties allocated on one participant
+        // share its namespace, so a sibling party must not pass as the member.
+        let member = party("member", "aa")?;
+        let sibling = party("operator", "aa")?;
+        let rules = rules_with(&[&member], &[])?;
+
+        assert!(proposer_not_authorized(Some(&sibling), Some(&rules)));
+        Ok(())
+    }
+
+    #[test]
+    fn an_unknown_never_withholds_confirm() -> Result {
+        let member = party("member", "aa")?;
+        let stranger = party("stranger", "dd")?;
+        let rules = rules_with(&[&member], &[])?;
+        // `ensure not (Set.null members)` holds on-ledger, so no members means
+        // the decode failed, not that nobody may propose.
+        let undecoded_rules = rules_with(&[], &[])?;
+
+        // The rules contract could not be read.
+        assert!(!proposer_not_authorized(Some(&stranger), None));
+        // The proposal named no proposer we could parse.
+        assert!(!proposer_not_authorized(None, Some(&rules)));
+        assert!(!proposer_not_authorized(
+            Some(&stranger),
+            Some(&undecoded_rules)
+        ));
         Ok(())
     }
 

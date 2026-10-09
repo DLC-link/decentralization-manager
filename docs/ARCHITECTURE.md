@@ -714,6 +714,8 @@ The proposer retracts their own proposal with `GovernableAction_ProposerCancel`,
 
 A cancel archives the proposal, and it leaves the confirmations behind. Those confirmations are inert, because execution fetches the proposal and fails without it. Decman marks such a card `orphaned` and shows the stranded contracts.
 
+`GovernanceRules_ConfirmAction` accepts a confirmation only while the live rules contract lists the proposer as a member or an additional proposer. A proposal whose proposer has left both sets therefore never reaches threshold. Decman marks such a card `proposer_not_authorized` and withholds Confirm. Only the proposer can cancel it.
+
 Each member clears their own confirmation whenever they want, through `GovernanceConfirmation_Cancel` ("Revoke"). Nobody clears another member's confirmation early: `GovernanceConfirmation_Expire` requires the confirmation to be past `expiresAt`, which is `actionConfirmationTimeout` after the vote. That time lock is deliberate, because the same choice would otherwise let one member strip another member's live vote.
 
 The cancel endpoint therefore archives the proposer's own confirmation in the same transaction as the proposal. `POST /governance/propose` always creates that confirmation, so a cancel would otherwise strand a contract that only the proposer could clear.
