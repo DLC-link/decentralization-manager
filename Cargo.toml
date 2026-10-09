@@ -79,7 +79,7 @@ tokio = { version = "1.48.0", features = [
     "signal",
     "sync",
 ] }
-tokio-noise = { version = "0.0.5" }
+tokio-noise = { version = "0.0.6" }
 tokio-rustls = { version = "0.26", default-features = false, features = [
     "aws-lc-rs",
 ] }
@@ -110,7 +110,10 @@ decman-wallet = { path = "crates/decman-wallet" }
 keycloak = { git = "https://github.com/DLC-link/canton-lib", rev = "651ea5221b4794f55bd152e9f3e762a92af69afd" }
 
 [patch.crates-io]
-tokio-noise = { git = "https://github.com/conduition/tokio-noise", rev = "a7dc4e543e4d117ee5f02125b0c898e1984973f2" }
+# hyper-noise 0.0.3, changed only to require tokio-noise 0.0.6, so the pin below reaches it.
+hyper-noise = { git = "https://github.com/DLC-link/hyper-noise", rev = "0121fa74845383534249c35e4aaea20e963ac879" }
+# Carries conduition/tokio-noise#6 (read bytes lost on Pending, #441) until upstream merges it.
+tokio-noise = { git = "https://github.com/DLC-link/tokio-noise", rev = "ec951a06d1156981b54a05eeef92860ebec2b1df" }
 
 [profile.release]
 opt-level = 3
