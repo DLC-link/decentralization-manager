@@ -102,28 +102,16 @@ pub async fn get_governance(
     // threshold, which is a separate value used for signing
     // PartyToParticipant updates. Falling back to the DNS threshold for
     // historical compatibility only when the gov state isn't reachable.
-    let (
-        rules_contract_id,
-        gov_state_threshold,
-        gov_state_members,
-        gov_core_out_of_date,
-        gov_core_package_ref,
-    ) = match query_governance_state(&data.config, party_id, token.clone(), &packages).await {
-        Ok(Some(state)) => (
-            Some(state.contract_id),
-            Some(state.threshold as usize),
-            Some(state.members.into_iter().collect::<HashSet<_>>()),
-            state.out_of_date,
-            state.package_ref,
-        ),
-        Ok(None) => (None, None, None, false, None),
-        Err(e) => {
-            tracing::warn!("Failed to fetch active rules contract: {e}");
-            (None, None, None, false, None)
-        }
-    };
-    let threshold = match gov_state_threshold {
-        Some(t) => t,
+    let gov_state =
+        match query_governance_state(&data.config, party_id, token.clone(), &packages).await {
+            Ok(state) => state,
+            Err(e) => {
+                tracing::warn!("Failed to fetch active rules contract: {e}");
+                None
+            }
+        };
+    let threshold = match &gov_state {
+        Some(state) => state.threshold as usize,
         None => get_party_threshold(&data, party_id).await.unwrap_or(2),
     };
 
@@ -137,7 +125,7 @@ pub async fn get_governance(
         &data.config,
         party_id,
         threshold,
-        gov_state_members.as_ref(),
+        gov_state.as_ref(),
         token,
         &packages,
         batch,
@@ -151,9 +139,9 @@ pub async fn get_governance(
             domain_actions,
             threshold,
             member_party_id,
-            rules_contract_id,
-            gov_core_out_of_date,
-            gov_core_package_ref,
+            rules_contract_id: gov_state.as_ref().map(|state| state.contract_id.clone()),
+            gov_core_out_of_date: gov_state.as_ref().is_some_and(|state| state.out_of_date),
+            gov_core_package_ref: gov_state.and_then(|state| state.package_ref),
         }),
         Err(e) => {
             tracing::error!("Failed to fetch governance confirmations: {e}");
