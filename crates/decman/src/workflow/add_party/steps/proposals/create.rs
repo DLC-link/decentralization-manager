@@ -19,6 +19,7 @@ use crate::{
     workflow::{
         add_party::AddPartyConfig,
         onboarding::steps::proposals::create::decode_keys_payload,
+        proposal_store,
         signing_keys::{adopt_legacy_signing_keys, own_namespace_key},
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
         topology,
@@ -92,7 +93,11 @@ pub async fn create_proposals(
 
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
     let party_id = &add_party_config.decentralized_party_id;
-    let current_p2p = topology::fetch_p2p_mapping(config, &synchronizer_id, party_id).await?;
+    // The serials the proposals are pinned to, read with the mappings they
+    // are built on so the two cannot disagree.
+    let head = proposal_store::fetch_party_head(config, &synchronizer_id, party_id).await?;
+    head.ensure_namespace_is(&current_namespace_def)?;
+    let current_p2p = head.p2p.clone();
 
     let current_members: Vec<String> = current_p2p
         .participants
@@ -218,40 +223,33 @@ pub async fn create_proposals(
         }),
     };
 
-    // A proposal is signed in a temporary store, which has no history of
-    // these mappings, so both serials have to be pinned explicitly.
-    let serials = topology::fetch_current_serials(config, &synchronizer_id, party_id).await?;
-
-    let dns_transaction = if rehost {
-        topology::fetch_signed_namespace_definition(
-            config,
-            &synchronizer_id,
-            &new_namespace_def.decentralized_namespace,
-        )
-        .await?
-    } else {
-        tracing::info!("Creating DNS add-party proposal...");
-        topology::build_signed_proposal(
-            config,
-            &synchronizer_id,
-            topology_mapping::Mapping::DecentralizedNamespaceDefinition(new_namespace_def.clone()),
-            serials.dns + 1,
-            topology::party_proposal_force_flags(),
-            "add-party DNS",
-        )
-        .await?
-    };
-
-    tracing::info!("Creating P2P add-party proposal...");
-    let p2p_transaction = topology::build_signed_proposal(
+    // Signed without being published: nothing reaches the synchronizer until
+    // submit, so a member that never signs leaves the party unchanged (#448).
+    // A re-host leaves the namespace as it is, so no DNS is signed for it.
+    tracing::info!("Signing add-party proposals...");
+    let signed = proposal_store::sign_party_proposals(
         config,
         &synchronizer_id,
-        topology_mapping::Mapping::PartyToParticipant(new_p2p),
-        serials.p2p + 1,
+        instance_name,
+        party_id,
+        &head,
+        (!rehost).then(|| new_namespace_def.clone()),
+        new_p2p,
         topology::party_proposal_force_flags(),
-        "add-party P2P",
     )
     .await?;
+    let dns_transaction = match signed.dns {
+        Some(dns) => dns,
+        None => {
+            topology::fetch_signed_namespace_definition(
+                config,
+                &synchronizer_id,
+                &new_namespace_def.decentralized_namespace,
+            )
+            .await?
+        }
+    };
+    let p2p_transaction = signed.p2p;
 
     storage
         .write_artifact(

@@ -16,14 +16,13 @@ use std::{
 use canton_proto_rs::com::digitalasset::canton::{
     protocol::v30::{
         DecentralizedNamespaceDefinition, PartyToKeyMapping, PartyToParticipant,
-        SignedTopologyTransaction, TopologyMapping, TopologyTransaction, enums, topology_mapping,
+        SignedTopologyTransaction, TopologyTransaction, enums, topology_mapping,
     },
     topology::admin::v30::{
-        AddTransactionsRequest, AuthorizeRequest, AuthorizeResponse, BaseQuery,
-        CreateTemporaryTopologyStoreRequest, DropTemporaryTopologyStoreRequest, ForceFlag,
-        ListAllRequest, ListAllV2Request, ListDecentralizedNamespaceDefinitionRequest,
-        ListPartyToKeyMappingRequest, ListPartyToParticipantRequest, SignTransactionsRequest,
-        SignTransactionsResponse, StoreId, Synchronizer, authorize_request, base_query,
+        AddTransactionsRequest, AuthorizeRequest, AuthorizeResponse, BaseQuery, ForceFlag,
+        ListAllRequest, ListDecentralizedNamespaceDefinitionRequest, ListPartyToKeyMappingRequest,
+        ListPartyToParticipantRequest, SignTransactionsRequest, SignTransactionsResponse, StoreId,
+        Synchronizer, base_query,
         list_party_to_key_mapping_response::result::Item as PartyToKeyItem,
         list_party_to_participant_response::result::Item as P2pItem, store_id, synchronizer,
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
@@ -194,8 +193,14 @@ pub fn synchronizer_store_id(synchronizer_id: &str) -> StoreId {
 /// A head-state [`BaseQuery`] against the synchronizer store — the boilerplate
 /// every topology read in these workflows shares.
 pub fn head_state_query(synchronizer_id: &str) -> BaseQuery {
+    head_state_query_in(synchronizer_store_id(synchronizer_id))
+}
+
+/// A head-state [`BaseQuery`] against any store, such as the temporary store
+/// a proposal is signed in.
+pub fn head_state_query_in(store: StoreId) -> BaseQuery {
     BaseQuery {
-        store: Some(synchronizer_store_id(synchronizer_id)),
+        store: Some(store),
         proposals: false,
         operation: 0,
         time_query: Some(base_query::TimeQuery::HeadState(())),
@@ -274,10 +279,11 @@ pub async fn fetch_p2p_history(
 
 /// An [`AddTransactionsRequest`] submitting a single signed transaction to the
 /// synchronizer store.
+///
 /// `force_changes` carries the [`ForceFlag`]s the transaction needs to pass
-/// Canton's validation. They matter here rather than at creation time because
-/// [`build_signed_proposal`] deliberately does not store the transaction, so
-/// this is the first time the synchronizer store validates it.
+/// Canton's validation. A party proposal is signed in a temporary store (see
+/// [`super::proposal_store`]), so this request is the first time the
+/// synchronizer store validates it.
 pub fn add_transactions_request(
     synchronizer_id: &str,
     transaction: SignedTopologyTransaction,
@@ -294,223 +300,6 @@ pub fn add_transactions_request(
 // ---------------------------------------------------------------------------
 // Shared head-state topology reads
 // ---------------------------------------------------------------------------
-
-/// Build this node's signed topology proposal **without** publishing it.
-///
-/// `Authorize` would be shorter, but per `topology_manager_write_service.proto`
-/// it "propose[s] a transaction and distribute[s] it", authorizing it outright
-/// when this node alone holds enough signing keys. For a party whose namespace
-/// threshold is 1 that applies the mapping the moment the proposal is created,
-/// which is before any check the caller runs at submit time — and for a paired
-/// DNS and P2P that is how a migration half-applies.
-///
-/// `GenerateTransactions` builds the transaction and `SignTransactions` signs
-/// it "but will not be stored in the authorized store", so nothing reaches the
-/// synchronizer until `add_transactions` publishes it.
-///
-/// The transaction is marked a proposal: this node's signature alone is not
-/// the party's authorization, and the peers' signatures are merged in before
-/// submission.
-///
-/// # Errors
-///
-/// Errors when either RPC fails or returns other than the one transaction
-/// asked for.
-pub async fn build_signed_proposal(
-    config: &NodeConfig,
-    synchronizer_id: &str,
-    mapping: topology_mapping::Mapping,
-    serial: u32,
-    force_flags: Vec<i32>,
-    label: &str,
-) -> Result<SignedTopologyTransaction> {
-    let protocol_version = protocol_version_of(synchronizer_id)?;
-    let name = format!(
-        "decman-{label}-{nanos}",
-        label = label.replace(|c: char| !c.is_ascii_alphanumeric(), "-"),
-        nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_nanos())
-            .unwrap_or_default()
-    );
-
-    let mut write_client = TopologyManagerWriteServiceClient::new(config.admin_channel().await?);
-    let temporary = write_client
-        .create_temporary_topology_store(tonic::Request::new(CreateTemporaryTopologyStoreRequest {
-            name: name.clone(),
-            protocol_version,
-        }))
-        .await?
-        .into_inner()
-        .store_id
-        .ok_or_else(|| {
-            anyhow::anyhow!("{label}: CreateTemporaryTopologyStore returned no store id")
-        })?;
-
-    // The store starts empty, and Canton validates a proposal's serial against
-    // the store it is authorized in. Without the current state it expects
-    // serial 1 and refuses the real next serial, so seed it first.
-    let seeded = seed_temporary_store(config, synchronizer_id, &temporary, label).await;
-
-    let authorized = match seeded {
-        Ok(count) => {
-            tracing::debug!("{label}: seeded the temporary store with {count} transaction(s)");
-            authorize_with_topology_retry(
-                config,
-                AuthorizeRequest {
-                    r#type: Some(authorize_request::Type::Proposal(
-                        authorize_request::Proposal {
-                            change: enums::TopologyChangeOp::AddReplace as i32,
-                            serial,
-                            mapping: Some(authorize_request::proposal::Mapping::V30(
-                                TopologyMapping {
-                                    mapping: Some(mapping),
-                                },
-                            )),
-                        },
-                    )),
-                    must_fully_authorize: false,
-                    force_changes: force_flags,
-                    signed_by: vec![],
-                    store: Some(StoreId {
-                        store: Some(store_id::Store::Temporary(temporary.clone())),
-                    }),
-                    wait_to_become_effective: None,
-                },
-                label,
-            )
-            .await
-        }
-        Err(e) => Err(e),
-    };
-
-    // Drop the store whatever the outcome. It exists for this one proposal,
-    // and a leaked one is a name collision waiting for the next run.
-    if let Err(e) = write_client
-        .drop_temporary_topology_store(tonic::Request::new(DropTemporaryTopologyStoreRequest {
-            store_id: Some(temporary),
-        }))
-        .await
-    {
-        tracing::warn!("{label}: could not drop the temporary topology store {name}: {e}");
-    }
-
-    authorized?
-        .transaction
-        .ok_or_else(|| anyhow::anyhow!("{label}: Authorize returned no transaction"))
-}
-
-/// Whether a signed transaction is one the temporary store needs to validate a
-/// party proposal: the delegations that prove a signing key belongs to a
-/// namespace, and the party mappings whose serial is being replaced.
-fn authorizes_a_party_change(signed: &SignedTopologyTransaction) -> bool {
-    let Ok(transaction) = utils::decode_versioned::<TopologyTransaction>(&signed.transaction)
-    else {
-        return false;
-    };
-    // `PartyToKeyMapping` is deprecated, and a legacy party's serial lives in
-    // it, so it is matched deliberately rather than by name.
-    #[allow(deprecated)]
-    let wanted = matches!(
-        transaction.mapping.and_then(|m| m.mapping),
-        Some(
-            topology_mapping::Mapping::NamespaceDelegation(_)
-                | topology_mapping::Mapping::DecentralizedNamespaceDefinition(_)
-                | topology_mapping::Mapping::PartyToParticipant(_)
-                | topology_mapping::Mapping::PartyToKeyMapping(_)
-        )
-    );
-    wanted
-}
-
-/// Copy the synchronizer store's current topology into a temporary store.
-///
-/// A temporary store is created empty. Canton checks a proposal's serial
-/// against the store it is authorized in, so an empty one expects serial 1 and
-/// refuses the serial the synchronizer actually needs next. It also has to see
-/// the namespace delegations that justify this node's signature.
-///
-/// The whole head state is copied rather than the party's namespace alone,
-/// because the owners of a decentralized namespace sign under their own
-/// namespaces, and a filtered copy would leave those delegations behind.
-///
-/// # Errors
-///
-/// Errors when the state cannot be read, decoded, or added to the store.
-async fn seed_temporary_store(
-    config: &NodeConfig,
-    synchronizer_id: &str,
-    temporary: &store_id::Temporary,
-    label: &str,
-) -> Result<usize> {
-    let mut read_client = TopologyManagerReadServiceClient::new(config.admin_channel().await?);
-    let response = read_client
-        .list_all_v2(tonic::Request::new(ListAllV2Request {
-            base_query: Some(head_state_query(synchronizer_id)),
-            include_mappings: vec![],
-            filter_namespace: String::new(),
-        }))
-        .await?
-        .into_inner();
-
-    // Only the mappings that justify a signature and carry the serial being
-    // replaced. Copying the whole state drags in other members' key mappings
-    // and vetting, which Canton refuses as alien or unknown, and none of it
-    // has any bearing on authorizing this proposal.
-    let transactions: Vec<SignedTopologyTransaction> = response
-        .result
-        .map(|result| result.items)
-        .unwrap_or_default()
-        .iter()
-        .map(|item| utils::decode_versioned::<SignedTopologyTransaction>(&item.transaction))
-        .filter(|signed| signed.as_ref().is_ok_and(authorizes_a_party_change))
-        .collect::<Result<_>>()?;
-
-    if transactions.is_empty() {
-        anyhow::bail!("{label}: the synchronizer head state came back empty");
-    }
-
-    let count = transactions.len();
-    let mut write_client = TopologyManagerWriteServiceClient::new(config.admin_channel().await?);
-    write_client
-        .add_transactions(tonic::Request::new(AddTransactionsRequest {
-            transactions,
-            force_changes: vec![
-                ForceFlag::AllowUnvalidatedSigningKeys as i32,
-                ForceFlag::AlienMember as i32,
-            ],
-            store: Some(StoreId {
-                store: Some(store_id::Store::Temporary(temporary.clone())),
-            }),
-            wait_to_become_effective: None,
-        }))
-        .await?;
-
-    Ok(count)
-}
-
-/// The protocol version a physical synchronizer id ends with, e.g. `35` from
-/// `global-domain::1220ab::35-0`.
-///
-/// A temporary store has to be created at the protocol version of the store
-/// the transaction is eventually published to, or the signed bytes are not
-/// accepted there.
-///
-/// # Errors
-///
-/// Errors when the id does not end in a protocol version.
-fn protocol_version_of(synchronizer_id: &str) -> Result<u32> {
-    synchronizer_id
-        .rsplit("::")
-        .next()
-        .and_then(|suffix| suffix.split('-').next())
-        .and_then(|version| version.parse::<u32>().ok())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "cannot read a protocol version from physical synchronizer id {synchronizer_id}"
-            )
-        })
-}
 
 /// Fetch the party's current `PartyToParticipant` mapping from the
 /// synchronizer head state. Errors if the party has no mapping.
@@ -534,11 +323,25 @@ pub async fn fetch_p2p_mapping_at_head(
     synchronizer_id: &str,
     party_id: &CantonId,
 ) -> Result<(u32, PartyToParticipant)> {
+    fetch_p2p_mapping_at_head_in(config, synchronizer_store_id(synchronizer_id), party_id).await
+}
+
+/// [`fetch_p2p_mapping_at_head`] against any store.
+///
+/// # Errors
+///
+/// Errors if the party has no mapping in that store or the serial is out of
+/// range.
+pub async fn fetch_p2p_mapping_at_head_in(
+    config: &NodeConfig,
+    store: StoreId,
+    party_id: &CantonId,
+) -> Result<(u32, PartyToParticipant)> {
     let mut topology_read_client =
         TopologyManagerReadServiceClient::new(config.admin_channel().await?);
 
     let request = tonic::Request::new(ListPartyToParticipantRequest {
-        base_query: Some(head_state_query(synchronizer_id)),
+        base_query: Some(head_state_query_in(store)),
         filter_party: party_id.to_string(),
         filter_participant: String::new(),
     });
@@ -573,35 +376,6 @@ pub async fn fetch_p2p_mapping_at_head(
         ),
         None => anyhow::bail!("No P2P mapping found for party {party_id}"),
     }
-}
-
-/// The serials a party's paired mappings are currently at.
-///
-/// A proposal built in a temporary store cannot have its serial
-/// auto-determined, because that store has no history of the mapping being
-/// replaced. Reading both here keeps the two calls next to each other, so a
-/// caller cannot pin one and forget the other.
-pub struct CurrentSerials {
-    pub dns: u32,
-    pub p2p: u32,
-}
-
-/// Read the serials of the party's namespace definition and participant
-/// mapping from the synchronizer head state.
-///
-/// # Errors
-///
-/// Errors when either mapping is missing.
-pub async fn fetch_current_serials(
-    config: &NodeConfig,
-    synchronizer_id: &str,
-    party_id: &CantonId,
-) -> Result<CurrentSerials> {
-    let (dns, _) =
-        fetch_namespace_definition_at_head(config, synchronizer_id, &party_id.namespace.to_hex())
-            .await?;
-    let (p2p, _) = fetch_p2p_mapping_at_head(config, synchronizer_id, party_id).await?;
-    Ok(CurrentSerials { dns, p2p })
 }
 
 /// Fetch the deprecated `PartyToKeyMapping` for a party from the
@@ -885,11 +659,30 @@ pub async fn fetch_namespace_definition_at_head(
     synchronizer_id: &str,
     namespace_hex: &str,
 ) -> Result<(u32, DecentralizedNamespaceDefinition)> {
+    fetch_namespace_definition_at_head_in(
+        config,
+        synchronizer_store_id(synchronizer_id),
+        namespace_hex,
+    )
+    .await
+}
+
+/// [`fetch_namespace_definition_at_head`] against any store.
+///
+/// # Errors
+///
+/// Errors if the namespace has no add-or-replace definition in that store, or
+/// the serial is out of range.
+pub async fn fetch_namespace_definition_at_head_in(
+    config: &NodeConfig,
+    store: StoreId,
+    namespace_hex: &str,
+) -> Result<(u32, DecentralizedNamespaceDefinition)> {
     let mut topology_read_client =
         TopologyManagerReadServiceClient::new(config.admin_channel().await?);
 
     let request = tonic::Request::new(ListDecentralizedNamespaceDefinitionRequest {
-        base_query: Some(head_state_query(synchronizer_id)),
+        base_query: Some(head_state_query_in(store)),
         filter_namespace: namespace_hex.to_string(),
     });
 
@@ -1124,15 +917,14 @@ pub fn dedupe_signatures(transaction: &mut SignedTopologyTransaction) {
         .retain(|sig| seen.insert(sig.signed_by.clone()));
 }
 
-/// The force flags a party's DNS and P2P proposals need at publish time.
+/// The force flags a party's DNS and P2P proposals carry, both where they are
+/// signed and where they are published.
 ///
-/// A P2P that adds a member's Daml key carries a key Canton has not seen
-/// validated, which it refuses without this. The paired DNS is published the
-/// same way rather than through a second code path.
-///
-/// They belong at publish time because [`build_signed_proposal`] deliberately
-/// does not store the transaction, so `add_transactions` is the first time the
-/// synchronizer store validates it.
+/// Add-party built its proposals with `AllowUnvalidatedSigningKeys`, because a
+/// new member's keys may not have reached the synchronizer store yet. The pair
+/// is now signed in a temporary store and first validated by the synchronizer
+/// store at `AddTransactions`, so the flags travel to both places. Kick and
+/// change-threshold share them rather than keeping a second code path.
 pub fn party_proposal_force_flags() -> Vec<i32> {
     vec![ForceFlag::AllowUnvalidatedSigningKeys as i32]
 }
