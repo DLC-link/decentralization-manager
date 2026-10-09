@@ -12,6 +12,9 @@ pub mod storage;
 pub mod topology;
 pub mod validation;
 
+#[cfg(test)]
+mod peer_retry_tests;
+
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -329,21 +332,20 @@ pub async fn start_peer(
         let command = message.msg_type;
         let payload = message.payload;
 
+        // Keep every failure path on the same counter and backoff policy.
+        macro_rules! fail_step {
+            ($($reason:tt)*) => {
+                retry_peer_step(&mut consecutive_step_failures, command, format!($($reason)*)).await?
+            };
+        }
+
         // Only commands that belong to the accepted workflow kind are
         // executed. A Contracts invitation must not become a licence to sign
         // a kick's topology transactions.
         if !command_matches_kind(peer_kind, command) {
-            tracing::error!(
+            fail_step!(
                 "Refusing {command:?}: the accepted invitation is for a {peer_kind:?} workflow"
             );
-            consecutive_step_failures += 1;
-            if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                anyhow::bail!(
-                    "Aborting peer: coordinator sent {MAX_CONSECUTIVE_STEP_FAILURES} commands \
-                     that do not belong to the accepted {peer_kind:?} workflow"
-                );
-            }
-            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
             continue;
         }
 
@@ -370,14 +372,7 @@ pub async fn start_peer(
                     match utils::decode_files(&payload) {
                         Ok(files) => files,
                         Err(e) => {
-                            tracing::error!("Failed to decode DARs from coordinator: {e}");
-                            consecutive_step_failures += 1;
-                            if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                                anyhow::bail!(
-                                    "Aborting peer: coordinator's DAR payload will not decode: {e}"
-                                );
-                            }
-                            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                            fail_step!("Failed to decode DARs from coordinator: {e}");
                             continue;
                         }
                     }
@@ -386,26 +381,12 @@ pub async fn start_peer(
                 // Vetting a DAR makes this participant willing to execute its
                 // code, so the files must be the ones the operator accepted.
                 if let Err(e) = expectations.check_dars(&dar_files) {
-                    tracing::error!("Refusing the coordinator's DARs: {e}");
-                    consecutive_step_failures += 1;
-                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                        anyhow::bail!(
-                            "Aborting peer: coordinator's DARs do not match the invitation: {e}"
-                        );
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    fail_step!("Refusing the coordinator's DARs: {e}");
                     continue;
                 }
 
                 if let Err(e) = contracts::upload_dars_from_bytes(&node_config, dar_files).await {
-                    tracing::error!("Step execution failed: {e}");
-                    consecutive_step_failures += 1;
-                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                        anyhow::bail!(
-                            "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
-                        );
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    fail_step!("Step execution failed: {e}");
                     continue;
                 }
                 consecutive_step_failures = 0;
@@ -419,35 +400,21 @@ pub async fn start_peer(
                 // the prefix for namespace_key_name / daml_key_name; the
                 // config's `instance_name` is the coordinator's view and is
                 // intentionally unused here).
-                let onboarding_config: onboarding::OnboardingConfig = match serde_json::from_slice(
-                    &payload,
-                ) {
-                    Ok(config) => config,
-                    Err(e) => {
-                        tracing::error!("Failed to deserialize onboarding config: {e}");
-                        consecutive_step_failures += 1;
-                        if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                            anyhow::bail!(
-                                "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures"
-                            );
+                let onboarding_config: onboarding::OnboardingConfig =
+                    match serde_json::from_slice(&payload) {
+                        Ok(config) => config,
+                        Err(e) => {
+                            fail_step!("Failed to deserialize onboarding config: {e}");
+                            continue;
                         }
-                        continue;
-                    }
-                };
+                    };
 
                 // The prefix names the vault keys this step creates or reuses,
                 // so it is pinned before any key material is touched.
                 if let Err(e) =
                     expectations.check_onboarding_config(&onboarding_config.party_id_prefix)
                 {
-                    tracing::error!("Refusing the coordinator's onboarding config: {e}");
-                    consecutive_step_failures += 1;
-                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                        anyhow::bail!(
-                            "Aborting peer: onboarding config does not match the accepted invitation: {e}"
-                        );
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    fail_step!("Refusing the coordinator's onboarding config: {e}");
                     continue;
                 }
 
@@ -455,14 +422,7 @@ pub async fn start_peer(
                     onboarding::generate_keys(&node_config, &db, &instance_name, &onboarding_config)
                         .await
                 {
-                    tracing::error!("Step execution failed: {e}");
-                    consecutive_step_failures += 1;
-                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                        anyhow::bail!(
-                            "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
-                        );
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    fail_step!("Step execution failed: {e}");
                     continue;
                 }
                 consecutive_step_failures = 0;
@@ -480,12 +440,7 @@ pub async fn start_peer(
             MessageType::SignDns => {
                 tracing::info!("Executing: Sign DNS proposal");
                 if payload.is_empty() {
-                    tracing::error!("No DNS proposal payload received from coordinator");
-                    consecutive_step_failures += 1;
-                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                        anyhow::bail!("Aborting peer: coordinator sent no DNS proposal to check");
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    fail_step!("No DNS proposal payload received from coordinator");
                     continue;
                 }
                 match expectations
@@ -508,29 +463,15 @@ pub async fn start_peer(
                             )
                             .await
                         {
-                            tracing::error!(
+                            fail_step!(
                                 "Refusing to sign DNS: the accepted namespace could not be \
                                  recorded, so the P2P cross-check would be lost: {e}"
                             );
-                            consecutive_step_failures += 1;
-                            if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                                anyhow::bail!(
-                                    "Aborting peer: cannot record the accepted DNS namespace: {e}"
-                                );
-                            }
-                            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                             continue;
                         }
                     }
                     Err(e) => {
-                        tracing::error!("Refusing the coordinator's DNS proposal: {e}");
-                        consecutive_step_failures += 1;
-                        if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                            anyhow::bail!(
-                                "Aborting peer: DNS proposal does not match the accepted invitation: {e}"
-                            );
-                        }
-                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                        fail_step!("Refusing the coordinator's DNS proposal: {e}");
                         continue;
                     }
                 }
@@ -538,14 +479,7 @@ pub async fn start_peer(
                     onboarding::sign_dns_proposals(&node_config, &db, &instance_name, &payload)
                         .await
                 {
-                    tracing::error!("Step execution failed: {e}");
-                    consecutive_step_failures += 1;
-                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                        anyhow::bail!(
-                            "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
-                        );
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    fail_step!("Step execution failed: {e}");
                     continue;
                 }
                 consecutive_step_failures = 0;
@@ -563,12 +497,7 @@ pub async fn start_peer(
             MessageType::SignP2p => {
                 tracing::info!("Executing: Sign P2P proposals");
                 if payload.is_empty() {
-                    tracing::error!("No P2P proposal payload received from coordinator");
-                    consecutive_step_failures += 1;
-                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                        anyhow::bail!("Aborting peer: coordinator sent no P2P proposal to check");
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    fail_step!("No P2P proposal payload received from coordinator");
                     continue;
                 }
                 // Absent means the DNS step ran on a build that did not record
@@ -589,32 +518,18 @@ pub async fn start_peer(
                     Ok(Some(bytes)) => match String::from_utf8(bytes) {
                         Ok(namespace) => Some(namespace),
                         Err(e) => {
-                            tracing::error!(
+                            fail_step!(
                                 "Refusing to sign P2P: the recorded DNS namespace is not \
                                  readable, so the cross-check cannot be applied: {e}"
                             );
-                            consecutive_step_failures += 1;
-                            if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                                anyhow::bail!(
-                                    "Aborting peer: the recorded DNS namespace is corrupt: {e}"
-                                );
-                            }
-                            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                             continue;
                         }
                     },
                     Err(e) => {
-                        tracing::error!(
+                        fail_step!(
                             "Refusing to sign P2P: cannot read the DNS namespace this run \
                              accepted, so the cross-check cannot be applied: {e}"
                         );
-                        consecutive_step_failures += 1;
-                        if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                            anyhow::bail!(
-                                "Aborting peer: cannot read the accepted DNS namespace: {e}"
-                            );
-                        }
-                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                         continue;
                     }
                 };
@@ -628,28 +543,14 @@ pub async fn start_peer(
                     )
                     .await
                 {
-                    tracing::error!("Refusing the coordinator's P2P proposal: {e}");
-                    consecutive_step_failures += 1;
-                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                        anyhow::bail!(
-                            "Aborting peer: P2P proposal does not match the accepted invitation: {e}"
-                        );
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    fail_step!("Refusing the coordinator's P2P proposal: {e}");
                     continue;
                 }
                 if let Err(e) =
                     onboarding::sign_p2p_proposals(&node_config, &db, &instance_name, &payload)
                         .await
                 {
-                    tracing::error!("Step execution failed: {e}");
-                    consecutive_step_failures += 1;
-                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                        anyhow::bail!(
-                            "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
-                        );
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    fail_step!("Step execution failed: {e}");
                     continue;
                 }
                 consecutive_step_failures = 0;
@@ -698,7 +599,7 @@ pub async fn start_peer(
                 tracing::info!("Executing: Sign submissions");
 
                 if payload.is_empty() {
-                    tracing::error!("No submissions payload received from coordinator");
+                    fail_step!("No submissions payload received from coordinator");
                     continue;
                 }
 
@@ -706,7 +607,7 @@ pub async fn start_peer(
                 let items = match utils::decode_length_prefixed(&payload, 2) {
                     Ok(items) => items,
                     Err(e) => {
-                        tracing::error!("Failed to decode SignSubmissions payload: {e}");
+                        fail_step!("Failed to decode SignSubmissions payload: {e}");
                         continue;
                     }
                 };
@@ -715,21 +616,14 @@ pub async fn start_peer(
                     match serde_json::from_slice(&items[0]) {
                         Ok(config) => config,
                         Err(e) => {
-                            tracing::error!("Failed to deserialize contracts config: {e}");
+                            fail_step!("Failed to deserialize contracts config: {e}");
                             continue;
                         }
                     };
 
                 let dec_party_id = contracts_config.decentralized_party_id.clone();
                 if let Err(e) = expectations.check_dec_party(&dec_party_id) {
-                    tracing::error!("Refusing the coordinator's contracts config: {e}");
-                    consecutive_step_failures += 1;
-                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                        anyhow::bail!(
-                            "Aborting peer: contracts config does not match the accepted invitation: {e}"
-                        );
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    fail_step!("Refusing the coordinator's contracts config: {e}");
                     continue;
                 }
 
@@ -739,14 +633,7 @@ pub async fn start_peer(
                 if let Err(e) =
                     save_prepared_submissions_from_payload(&items[1], &db, &instance_name).await
                 {
-                    tracing::error!("Failed to save prepared submissions from coordinator: {e}");
-                    consecutive_step_failures += 1;
-                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                        anyhow::bail!(
-                            "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
-                        );
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    fail_step!("Failed to save prepared submissions from coordinator: {e}");
                     continue;
                 }
 
@@ -754,14 +641,7 @@ pub async fn start_peer(
                     contracts::sign_submissions(&node_config, &db, &instance_name, &dec_party_id)
                         .await
                 {
-                    tracing::error!("Step execution failed: {e:#}");
-                    consecutive_step_failures += 1;
-                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                        anyhow::bail!(
-                            "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
-                        );
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    fail_step!("Step execution failed: {e:#}");
                     continue;
                 }
                 consecutive_step_failures = 0;
@@ -779,14 +659,14 @@ pub async fn start_peer(
             MessageType::SignKick => {
                 tracing::info!("Executing: Sign kick proposals");
                 if payload.is_empty() {
-                    tracing::error!("No kick proposals payload received from coordinator");
+                    fail_step!("No kick proposals payload received from coordinator");
                     continue;
                 }
 
                 let items = match utils::decode_length_prefixed(&payload, 3) {
                     Ok(items) => items,
                     Err(e) => {
-                        tracing::error!("Failed to decode SignKick payload: {e}");
+                        fail_step!("Failed to decode SignKick payload: {e}");
                         continue;
                     }
                 };
@@ -794,7 +674,7 @@ pub async fn start_peer(
                 let _kick_config: kick::KickConfig = match serde_json::from_slice(&items[0]) {
                     Ok(config) => config,
                     Err(e) => {
-                        tracing::error!("Failed to deserialize kick config: {e}");
+                        fail_step!("Failed to deserialize kick config: {e}");
                         continue;
                     }
                 };
@@ -803,14 +683,7 @@ pub async fn start_peer(
                     .check_party_proposals(&node_config, &db, &instance_name, &items[1], &items[2])
                     .await
                 {
-                    tracing::error!("Refusing the coordinator's kick proposals: {e}");
-                    consecutive_step_failures += 1;
-                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                        anyhow::bail!(
-                            "Aborting peer: kick proposals do not match the accepted invitation: {e}"
-                        );
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    fail_step!("Refusing the coordinator's kick proposals: {e}");
                     continue;
                 }
 
@@ -818,14 +691,7 @@ pub async fn start_peer(
                 if let Err(e) =
                     kick::sign_proposals(&node_config, &db, &instance_name, &kick_data).await
                 {
-                    tracing::error!("Step execution failed: {e}");
-                    consecutive_step_failures += 1;
-                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                        anyhow::bail!(
-                            "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
-                        );
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    fail_step!("Step execution failed: {e}");
                     continue;
                 }
                 consecutive_step_failures = 0;
@@ -843,16 +709,14 @@ pub async fn start_peer(
             MessageType::SignChangeThreshold => {
                 tracing::info!("Executing: Sign change-threshold proposals");
                 if payload.is_empty() {
-                    tracing::error!(
-                        "No change-threshold proposals payload received from coordinator"
-                    );
+                    fail_step!("No change-threshold proposals payload received from coordinator");
                     continue;
                 }
 
                 let items = match utils::decode_length_prefixed(&payload, 3) {
                     Ok(items) => items,
                     Err(e) => {
-                        tracing::error!("Failed to decode SignChangeThreshold payload: {e}");
+                        fail_step!("Failed to decode SignChangeThreshold payload: {e}");
                         continue;
                     }
                 };
@@ -861,7 +725,7 @@ pub async fn start_peer(
                     match serde_json::from_slice(&items[0]) {
                         Ok(config) => config,
                         Err(e) => {
-                            tracing::error!("Failed to deserialize change-threshold config: {e}");
+                            fail_step!("Failed to deserialize change-threshold config: {e}");
                             continue;
                         }
                     };
@@ -870,14 +734,7 @@ pub async fn start_peer(
                     .check_party_proposals(&node_config, &db, &instance_name, &items[1], &items[2])
                     .await
                 {
-                    tracing::error!("Refusing the coordinator's change-threshold proposals: {e}");
-                    consecutive_step_failures += 1;
-                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                        anyhow::bail!(
-                            "Aborting peer: change-threshold proposals do not match the accepted invitation: {e}"
-                        );
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    fail_step!("Refusing the coordinator's change-threshold proposals: {e}");
                     continue;
                 }
 
@@ -890,14 +747,7 @@ pub async fn start_peer(
                 )
                 .await
                 {
-                    tracing::error!("Step execution failed: {e}");
-                    consecutive_step_failures += 1;
-                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                        anyhow::bail!(
-                            "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
-                        );
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    fail_step!("Step execution failed: {e}");
                     continue;
                 }
                 consecutive_step_failures = 0;
@@ -917,8 +767,12 @@ pub async fn start_peer(
             }
             MessageType::GenerateAddPartyKeys => {
                 tracing::info!("Executing: Generate add-party keys");
-                let Some(add_party_config) = decode_add_party_config(&payload) else {
-                    continue;
+                let add_party_config = match decode_add_party_config(&payload) {
+                    Ok(config) => config,
+                    Err(e) => {
+                        fail_step!("Failed to deserialize add-party config: {e:#}");
+                        continue;
+                    }
                 };
                 // Both the party and the new member are pinned before
                 // `is_new_member` reads `new_participant_id` to decide this
@@ -931,17 +785,11 @@ pub async fn start_peer(
                         expectations.check_new_participant(&add_party_config.new_participant_id)
                     })
                 {
-                    tracing::error!("Refusing the coordinator's add-party config: {e}");
-                    consecutive_step_failures += 1;
-                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                        anyhow::bail!(
-                            "Aborting peer: the add-party config does not match the accepted invitation: {e}"
-                        );
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    fail_step!("Refusing the coordinator's add-party config: {e}");
                     continue;
                 }
                 if !is_new_member(&node_config, &add_party_config) {
+                    consecutive_step_failures = 0;
                     send_skip_status(&client, "GenerateAddPartyKeys").await;
                     continue;
                 }
@@ -960,14 +808,7 @@ pub async fn start_peer(
                 )
                 .await
                 {
-                    tracing::error!("Step execution failed: {e}");
-                    consecutive_step_failures += 1;
-                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                        anyhow::bail!(
-                            "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
-                        );
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    fail_step!("Step execution failed: {e}");
                     continue;
                 }
                 consecutive_step_failures = 0;
@@ -985,19 +826,23 @@ pub async fn start_peer(
             MessageType::SignAddParty => {
                 tracing::info!("Executing: Sign add-party proposals");
                 if payload.is_empty() {
-                    tracing::error!("No add-party proposals payload received from coordinator");
+                    fail_step!("No add-party proposals payload received from coordinator");
                     continue;
                 }
 
                 let items = match utils::decode_length_prefixed(&payload, 3) {
                     Ok(items) => items,
                     Err(e) => {
-                        tracing::error!("Failed to decode SignAddParty payload: {e}");
+                        fail_step!("Failed to decode SignAddParty payload: {e}");
                         continue;
                     }
                 };
-                let Some(add_party_config) = decode_add_party_config(&items[0]) else {
-                    continue;
+                let add_party_config = match decode_add_party_config(&items[0]) {
+                    Ok(config) => config,
+                    Err(e) => {
+                        fail_step!("Failed to deserialize add-party config: {e:#}");
+                        continue;
+                    }
                 };
 
                 let add_party_check = async {
@@ -1015,14 +860,7 @@ pub async fn start_peer(
                 }
                 .await;
                 if let Err(e) = add_party_check {
-                    tracing::error!("Refusing the coordinator's add-party proposals: {e}");
-                    consecutive_step_failures += 1;
-                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                        anyhow::bail!(
-                            "Aborting peer: add-party proposals do not match the accepted invitation: {e}"
-                        );
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    fail_step!("Refusing the coordinator's add-party proposals: {e}");
                     continue;
                 }
 
@@ -1031,14 +869,7 @@ pub async fn start_peer(
                     add_party::sign_proposals(&node_config, &db, &instance_name, &proposal_data)
                         .await
                 {
-                    tracing::error!("Step execution failed: {e}");
-                    consecutive_step_failures += 1;
-                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                        anyhow::bail!(
-                            "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
-                        );
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    fail_step!("Step execution failed: {e}");
                     continue;
                 }
                 // The new member leaves the synchronizer before its signature can
@@ -1063,14 +894,7 @@ pub async fn start_peer(
                     }
                     .await
                 {
-                    tracing::error!("Failed to open the ACS import window: {e:#}");
-                    consecutive_step_failures += 1;
-                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                        anyhow::bail!(
-                            "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
-                        );
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    fail_step!("Failed to open the ACS import window: {e:#}");
                     continue;
                 }
                 consecutive_step_failures = 0;
@@ -1112,19 +936,16 @@ pub async fn start_peer(
                 let items = match utils::decode_length_prefixed(&payload, 2) {
                     Ok(items) => items,
                     Err(e) => {
-                        tracing::error!("Failed to decode ImportAcs payload: {e}");
-                        consecutive_step_failures += 1;
-                        if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                            anyhow::bail!(
-                                "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
-                            );
-                        }
-                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                        fail_step!("Failed to decode ImportAcs payload: {e}");
                         continue;
                     }
                 };
-                let Some(add_party_config) = decode_add_party_config(&items[0]) else {
-                    continue;
+                let add_party_config = match decode_add_party_config(&items[0]) {
+                    Ok(config) => config,
+                    Err(e) => {
+                        fail_step!("Failed to deserialize add-party config: {e:#}");
+                        continue;
+                    }
                 };
                 // Both the party and the new member are pinned before
                 // `is_new_member` reads `new_participant_id` to decide this
@@ -1137,17 +958,11 @@ pub async fn start_peer(
                         expectations.check_new_participant(&add_party_config.new_participant_id)
                     })
                 {
-                    tracing::error!("Refusing the coordinator's ACS import: {e}");
-                    consecutive_step_failures += 1;
-                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                        anyhow::bail!(
-                            "Aborting peer: the ACS import does not match the accepted invitation: {e}"
-                        );
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    fail_step!("Refusing the coordinator's ACS import: {e}");
                     continue;
                 }
                 if !is_new_member(&node_config, &add_party_config) {
+                    consecutive_step_failures = 0;
                     send_skip_status(&client, "ImportAcs").await;
                     continue;
                 }
@@ -1187,8 +1002,12 @@ pub async fn start_peer(
             }
             MessageType::ClearOnboardingFlag => {
                 tracing::info!("Executing: Clear onboarding flag");
-                let Some(add_party_config) = decode_add_party_config(&payload) else {
-                    continue;
+                let add_party_config = match decode_add_party_config(&payload) {
+                    Ok(config) => config,
+                    Err(e) => {
+                        fail_step!("Failed to deserialize add-party config: {e:#}");
+                        continue;
+                    }
                 };
                 // Both the party and the new member are pinned before
                 // `is_new_member` reads `new_participant_id` to decide this
@@ -1201,17 +1020,11 @@ pub async fn start_peer(
                         expectations.check_new_participant(&add_party_config.new_participant_id)
                     })
                 {
-                    tracing::error!("Refusing the coordinator's clearing request: {e}");
-                    consecutive_step_failures += 1;
-                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                        anyhow::bail!(
-                            "Aborting peer: the clearing request does not match the accepted invitation: {e}"
-                        );
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    fail_step!("Refusing the coordinator's clearing request: {e}");
                     continue;
                 }
                 if !is_new_member(&node_config, &add_party_config) {
+                    consecutive_step_failures = 0;
                     send_skip_status(&client, "ClearOnboardingFlag").await;
                     continue;
                 }
@@ -1252,14 +1065,7 @@ pub async fn start_peer(
                                 }
                             }
                             Err(e) => {
-                                tracing::error!("Step execution failed: {e}");
-                                consecutive_step_failures += 1;
-                                if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                                    anyhow::bail!(
-                                        "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
-                                    );
-                                }
-                                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                                fail_step!("Step execution failed: {e}");
                             }
                         }
                     }
@@ -1273,14 +1079,7 @@ pub async fn start_peer(
                         }
                     }
                     Err(e) => {
-                        tracing::error!("Step execution failed: {e}");
-                        consecutive_step_failures += 1;
-                        if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                            anyhow::bail!(
-                                "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
-                            );
-                        }
-                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                        fail_step!("Step execution failed: {e}");
                     }
                 }
             }
@@ -1289,26 +1088,20 @@ pub async fn start_peer(
                 let items = match utils::decode_length_prefixed(&payload, 2) {
                     Ok(items) => items,
                     Err(e) => {
-                        tracing::error!("Failed to decode SignClearOnboarding payload: {e}");
+                        fail_step!("Failed to decode SignClearOnboarding payload: {e}");
                         continue;
                     }
                 };
                 if items[1].is_empty() {
                     // Skip marker: the flag already cleared without a
                     // signing round (e.g. a single-owner-threshold party).
+                    consecutive_step_failures = 0;
                     send_skip_status(&client, "SignClearOnboarding").await;
                     continue;
                 }
 
                 if let Err(e) = expectations.check_clear_onboarding(&items[1]) {
-                    tracing::error!("Refusing the coordinator's clearing proposal: {e}");
-                    consecutive_step_failures += 1;
-                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                        anyhow::bail!(
-                            "Aborting peer: clearing proposal does not match the accepted invitation: {e}"
-                        );
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    fail_step!("Refusing the coordinator's clearing proposal: {e}");
                     continue;
                 }
 
@@ -1316,14 +1109,7 @@ pub async fn start_peer(
                     add_party::sign_clear_proposal(&node_config, &db, &instance_name, &items[1])
                         .await
                 {
-                    tracing::error!("Step execution failed: {e}");
-                    consecutive_step_failures += 1;
-                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                        anyhow::bail!(
-                            "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
-                        );
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    fail_step!("Step execution failed: {e}");
                     continue;
                 }
                 consecutive_step_failures = 0;
@@ -1348,17 +1134,33 @@ pub async fn start_peer(
     Ok(())
 }
 
-/// Decode an `AddPartyConfig` from a command payload. Errors are logged and
-/// collapse to `None` so the peer loop's `continue` keeps polling (the
-/// coordinator re-serves the command until the peer completes).
-fn decode_add_party_config(payload: &[u8]) -> Option<add_party::AddPartyConfig> {
-    match serde_json::from_slice(payload) {
-        Ok(config) => Some(config),
-        Err(e) => {
-            tracing::error!("Failed to deserialize add-party config: {e}");
-            None
-        }
+/// Apply one retry budget to decoding, authorization, and execution failures.
+/// Control messages do not reset it; only completing (or legitimately skipping)
+/// a step does. The last failure returns immediately without another delay.
+async fn retry_peer_step(
+    consecutive_failures: &mut usize,
+    command: MessageType,
+    reason: String,
+) -> Result {
+    *consecutive_failures += 1;
+    tracing::warn!(
+        ?command,
+        attempt = *consecutive_failures,
+        error = %reason,
+        "Peer step failed"
+    );
+    if *consecutive_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+        anyhow::bail!(
+            "Aborting peer after {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures \
+             ({command:?}): {reason}"
+        );
     }
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    Ok(())
+}
+
+fn decode_add_party_config(payload: &[u8]) -> Result<add_party::AddPartyConfig> {
+    serde_json::from_slice(payload).context("Failed to deserialize add-party config")
 }
 
 /// Whether this node is the member being added by the run.
