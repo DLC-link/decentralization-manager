@@ -619,6 +619,35 @@ pub async fn fetch_signed_namespace_definition(
     synchronizer_id: &str,
     namespace_hex: &str,
 ) -> Result<SignedTopologyTransaction> {
+    signed_head_for(config, synchronizer_id, namespace_hex, |mapping| {
+        matches!(
+            mapping,
+            topology_mapping::Mapping::DecentralizedNamespaceDefinition(def)
+                if def.decentralized_namespace == namespace_hex
+        )
+    })
+    .await?
+    .map(|(signed, _)| signed)
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "No DecentralizedNamespaceDefinition transaction for {namespace_hex} in the \
+             synchronizer head state"
+        )
+    })
+}
+
+/// The first add-or-replace transaction in the synchronizer head state under
+/// `namespace_hex` whose mapping `wanted` accepts, signed and decoded.
+///
+/// The typed `List*` reads return the mapping without its signatures or its
+/// transaction, and a caller that compares transactions or hands one to the
+/// peers needs both.
+async fn signed_head_for(
+    config: &NodeConfig,
+    synchronizer_id: &str,
+    namespace_hex: &str,
+    wanted: impl Fn(&topology_mapping::Mapping) -> bool,
+) -> Result<Option<(SignedTopologyTransaction, TopologyTransaction)>> {
     let mut topology_read_client =
         TopologyManagerReadServiceClient::new(config.admin_channel().await?);
     // `ListAll` is the variant Canton 3.5 serves; its successor is 3.6-only.
@@ -634,17 +663,118 @@ pub async fn fetch_signed_namespace_definition(
     for item in response.result.map(|r| r.items).unwrap_or_default() {
         let signed: SignedTopologyTransaction = utils::decode_versioned(&item.transaction)?;
         let transaction: TopologyTransaction = utils::decode_versioned(&signed.transaction)?;
-        if let Some(topology_mapping::Mapping::DecentralizedNamespaceDefinition(def)) =
-            transaction.mapping.and_then(|m| m.mapping)
-            && def.decentralized_namespace == namespace_hex
+        if transaction.operation != enums::TopologyChangeOp::AddReplace as i32 {
+            continue;
+        }
+        if transaction
+            .mapping
+            .as_ref()
+            .and_then(|m| m.mapping.as_ref())
+            .is_some_and(&wanted)
         {
-            return Ok(signed);
+            return Ok(Some((signed, transaction)));
         }
     }
+    Ok(None)
+}
+
+/// Where a proposal stands against the transaction the synchronizer holds for
+/// the same mapping.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Standing {
+    /// The proposal carries the next serial, so it has not been published.
+    Next,
+    /// The proposal is the head transaction itself. An earlier attempt of the
+    /// same submit published it, before a restart or a later failure.
+    InForce,
+}
+
+/// Compare a proposal with the head transaction for its mapping.
+///
+/// The coordinator pins each serial when it builds a proposal, and the peers
+/// sign that serial. A change that lands before submit moves the head. The
+/// proposal must then not be published: Canton refuses a stale serial, and a
+/// DNS that goes in while its P2P is refused leaves the party half changed.
+///
+/// `head` is `None` when the synchronizer holds no transaction for the
+/// mapping, which only a first serial can follow.
+///
+/// # Errors
+///
+/// Errors when the head moved, naming both serials.
+pub fn proposal_standing(
+    what: &str,
+    proposal: &TopologyTransaction,
+    head: Option<&TopologyTransaction>,
+) -> Result<Standing> {
+    if head == Some(proposal) {
+        return Ok(Standing::InForce);
+    }
+    let head_serial = head.map_or(0, |h| h.serial);
+    if head_serial.checked_add(1) == Some(proposal.serial) {
+        return Ok(Standing::Next);
+    }
+    if head_serial == proposal.serial {
+        anyhow::bail!(
+            "Another {what} change already holds serial {head_serial}, the serial this \
+             proposal was built for. The proposal is not submitted; start the workflow again \
+             so it is built on the current state"
+        );
+    }
     anyhow::bail!(
-        "No DecentralizedNamespaceDefinition transaction for {namespace_hex} in the \
-         synchronizer head state"
+        "The {what} proposal is at serial {proposal_serial}, but the synchronizer holds \
+         serial {head_serial}. Another change landed after the proposals were built, so the \
+         proposal is not submitted; start the workflow again so it is built on the current \
+         state",
+        proposal_serial = proposal.serial
     )
+}
+
+/// Read the head transaction for a proposal's mapping and decide whether the
+/// proposal may still be published. See [`proposal_standing`].
+///
+/// # Errors
+///
+/// Errors when the proposal is neither a DNS nor a P2P, when the head cannot
+/// be read, or when the head moved.
+pub async fn check_proposal_standing(
+    config: &NodeConfig,
+    synchronizer_id: &str,
+    proposal: &SignedTopologyTransaction,
+) -> Result<Standing> {
+    let transaction: TopologyTransaction = utils::decode_versioned(&proposal.transaction)?;
+    let (what, head) = match transaction
+        .mapping
+        .as_ref()
+        .and_then(|m| m.mapping.as_ref())
+    {
+        Some(topology_mapping::Mapping::DecentralizedNamespaceDefinition(def)) => {
+            let namespace = def.decentralized_namespace.as_str();
+            let head = signed_head_for(config, synchronizer_id, namespace, |mapping| {
+                matches!(
+                    mapping,
+                    topology_mapping::Mapping::DecentralizedNamespaceDefinition(head)
+                        if head.decentralized_namespace == namespace
+                )
+            })
+            .await?;
+            ("DNS", head)
+        }
+        Some(topology_mapping::Mapping::PartyToParticipant(p2p)) => {
+            let party = p2p.party.as_str();
+            let namespace = CantonId::parse(party)?.namespace.to_hex();
+            let head = signed_head_for(config, synchronizer_id, &namespace, |mapping| {
+                matches!(
+                    mapping,
+                    topology_mapping::Mapping::PartyToParticipant(head) if head.party == party
+                )
+            })
+            .await?;
+            ("P2P", head)
+        }
+        _ => anyhow::bail!("Only a DNS or a P2P proposal can be checked against the head"),
+    };
+    proposal_standing(what, &transaction, head.as_ref().map(|(_, head)| head))
 }
 
 /// Fetch the current `DecentralizedNamespaceDefinition` from the synchronizer
@@ -951,6 +1081,11 @@ pub struct DnsP2pSubmission {
 /// for the new threshold value, add-party for owner / participant membership —
 /// so each caller supplies those as `confirm_dns` / `confirm_p2p`.
 ///
+/// Each proposal carries the serial the coordinator pinned when it built it.
+/// A serial that moved since then stops the submit before anything is
+/// published (see [`proposal_standing`]); one already in force, from an
+/// earlier attempt of the same submit, is not sent again.
+///
 /// `label` is a short workflow tag included in the log lines.
 pub async fn submit_dns_then_p2p<DnsFut, P2pFut>(
     config: &NodeConfig,
@@ -970,17 +1105,27 @@ where
         force_changes,
     } = submission;
 
-    let mut topology_write_client =
-        TopologyManagerWriteServiceClient::new(config.admin_channel().await?);
+    // Both serials are checked before either transaction goes out. The DNS is
+    // submitted first, so a P2P whose serial moved would otherwise be refused
+    // only after the namespace change was already in force.
+    let dns_standing = check_proposal_standing(config, synchronizer_id, &dns_transaction).await?;
+    check_proposal_standing(config, synchronizer_id, &p2p_transaction).await?;
 
-    tracing::info!("Submitting DNS {label} proposal...");
-    topology_write_client
-        .add_transactions(tonic::Request::new(add_transactions_request(
-            synchronizer_id,
-            dns_transaction,
-            force_changes.clone(),
-        )))
-        .await?;
+    if dns_standing == Standing::InForce {
+        tracing::info!(
+            label,
+            "DNS proposal is already in force; not submitting it again"
+        );
+    } else {
+        tracing::info!("Submitting DNS {label} proposal...");
+        TopologyManagerWriteServiceClient::new(config.admin_channel().await?)
+            .add_transactions(tonic::Request::new(add_transactions_request(
+                synchronizer_id,
+                dns_transaction,
+                force_changes.clone(),
+            )))
+            .await?;
+    }
     confirm_dns().await?;
     tracing::info!("DNS {label} confirmed in topology");
 
@@ -998,6 +1143,9 @@ where
 /// Submit the aggregated P2P mapping alone, await its confirmation, and finish
 /// with the shared topology-propagation delay. The second half of
 /// [`submit_dns_then_p2p`], for a change that leaves the namespace as it is.
+///
+/// The P2P serial is checked against the synchronizer again right before it
+/// is published, which narrows the window a concurrent change can use.
 pub async fn submit_p2p<P2pFut>(
     config: &NodeConfig,
     synchronizer_id: &str,
@@ -1009,17 +1157,23 @@ pub async fn submit_p2p<P2pFut>(
 where
     P2pFut: Future<Output = Result>,
 {
-    let mut topology_write_client =
-        TopologyManagerWriteServiceClient::new(config.admin_channel().await?);
-
-    tracing::info!("Submitting P2P {label} proposal...");
-    topology_write_client
-        .add_transactions(tonic::Request::new(add_transactions_request(
-            synchronizer_id,
-            p2p_transaction,
-            force_changes,
-        )))
-        .await?;
+    if check_proposal_standing(config, synchronizer_id, &p2p_transaction).await?
+        == Standing::InForce
+    {
+        tracing::info!(
+            label,
+            "P2P proposal is already in force; not submitting it again"
+        );
+    } else {
+        tracing::info!("Submitting P2P {label} proposal...");
+        TopologyManagerWriteServiceClient::new(config.admin_channel().await?)
+            .add_transactions(tonic::Request::new(add_transactions_request(
+                synchronizer_id,
+                p2p_transaction,
+                force_changes,
+            )))
+            .await?;
+    }
     confirm_p2p().await?;
     tracing::info!("P2P {label} confirmed in topology");
 
@@ -1182,5 +1336,88 @@ mod tests {
             .map(|s| s.signed_by.as_str())
             .collect();
         assert_eq!(kept, ["a", "b", "c"]);
+    }
+
+    fn namespace_change(serial: u32, threshold: i32) -> TopologyTransaction {
+        use canton_proto_rs::com::digitalasset::canton::protocol::v30::TopologyMapping;
+        TopologyTransaction {
+            operation: enums::TopologyChangeOp::AddReplace as i32,
+            serial,
+            mapping: Some(TopologyMapping {
+                mapping: Some(topology_mapping::Mapping::DecentralizedNamespaceDefinition(
+                    DecentralizedNamespaceDefinition {
+                        decentralized_namespace: "ns".into(),
+                        threshold,
+                        owners: vec!["a".into(), "b".into()],
+                    },
+                )),
+            }),
+        }
+    }
+
+    fn standing_error(
+        proposal: &TopologyTransaction,
+        head: Option<&TopologyTransaction>,
+    ) -> Result<String> {
+        match proposal_standing("DNS", proposal, head) {
+            Ok(standing) => anyhow::bail!("expected a refusal, got {standing:?}"),
+            Err(e) => Ok(format!("{e:#}")),
+        }
+    }
+
+    #[test]
+    fn a_proposal_at_the_next_serial_may_be_published() -> Result {
+        let proposal = namespace_change(5, 2);
+        assert_eq!(
+            proposal_standing("DNS", &proposal, Some(&namespace_change(4, 1)))?,
+            Standing::Next
+        );
+        assert_eq!(
+            proposal_standing("DNS", &namespace_change(1, 2), None)?,
+            Standing::Next
+        );
+        Ok(())
+    }
+
+    /// A resumed submit finds what it published before the restart. That is
+    /// not a moved serial, and it must not be sent again.
+    #[test]
+    fn a_proposal_that_is_the_head_is_in_force() -> Result {
+        let proposal = namespace_change(5, 2);
+        assert_eq!(
+            proposal_standing("DNS", &proposal, Some(&proposal.clone()))?,
+            Standing::InForce
+        );
+        Ok(())
+    }
+
+    /// The head moved past the serial the proposal was built for. Publishing
+    /// it would replace a change nobody signed against.
+    #[test]
+    fn a_proposal_behind_the_head_is_refused() -> Result {
+        let error = standing_error(&namespace_change(5, 2), Some(&namespace_change(6, 3)))?;
+        assert!(
+            error.contains("at serial 5") && error.contains("holds serial 6"),
+            "{error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn another_change_at_the_same_serial_is_refused() -> Result {
+        let error = standing_error(&namespace_change(5, 2), Some(&namespace_change(5, 3)))?;
+        assert!(
+            error.contains("Another DNS change already holds serial 5"),
+            "{error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_proposal_that_skips_a_serial_is_refused() -> Result {
+        let error = standing_error(&namespace_change(5, 2), Some(&namespace_change(3, 1)))?;
+        assert!(error.contains("holds serial 3"), "{error}");
+        standing_error(&namespace_change(2, 2), None)?;
+        Ok(())
     }
 }
