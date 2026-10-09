@@ -1,0 +1,109 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Governable action to settle a Token Standard V2 batch.
+--
+-- `SettlementFactory_SettleBatch` is controlled by its actors, and the
+-- standard's default implementation requires those actors to equal the
+-- settlement's executors. Naming a governance party among the executors at
+-- allocation time therefore makes every settlement of that batch require a
+-- threshold of its members.
+--
+-- Authority passes along the exercise chain: GovernanceRules →
+-- GovernableAction_Execute → executeImpl → SettlementFactory_SettleBatch. That
+-- chain carries the governance party's authority and the proposer's, and no
+-- other, which is what the `ensure` clause below enforces.
+--
+-- Contract ID capture:
+-- `factoryCid`, `allocationCids` and the contract ids inside `extraArgs` are
+-- captured when the proposal is created. If the registry replaces any of them
+-- before execution, SettlementFactory_SettleBatch fails and the proposer must
+-- file again. Mitigations:
+--   1. Keep action confirmation timeouts short
+--   2. Re-file if the registry rotates its rules contract
+--
+-- Visibility: the executors see every leg of the batch, because allocations
+-- list their executors as observers.
+--
+-- Supported settlement subset, stated rather than implied:
+-- every allocation is finalized with `extraTransferLegSides = []` and
+-- `nextIterationFunding = None`. V2 models both per `FinalizedAllocation`, so
+-- a batch that needs either cannot use this action as written. The proposal
+-- carries `[ContractId V2.Allocation]` and builds the finalization itself,
+-- which keeps what the members approve equal to what executes while leaving
+-- callers nothing to construct for the common case.
+--
+-- Widening it is a small change: carry `[V2.FinalizedAllocation]` instead and
+-- pass the approved values straight through. It is deliberately not done here,
+-- because it would put that construction on every caller for a case most do
+-- not have, and because the approved value should stay the executed value.
+module Governance.Settlement.BatchSettlement where
+
+import DA.List (unique)
+
+import Governance.Action
+import Splice.Api.Token.MetadataV1 (ExtraArgs)
+import Splice.Api.Token.AllocationV2 qualified as V2
+
+-- | Proposal to settle one batch once the members have confirmed to
+-- threshold. The proposer signs it; the governance party observes it.
+template BatchSettlementProposal
+  with
+    governanceParty : Party
+      -- ^ The governance party whose authority is required. Must be one of
+      -- the settlement's executors.
+    proposer        : Party
+      -- ^ The member or additional proposer filing the batch. Must also be
+      -- one of the settlement's executors.
+    factoryCid      : ContractId V2.SettlementFactory
+      -- ^ The registry's settlement factory. Normally disclosed by the
+      -- caller at execution time.
+    settlement      : V2.SettlementInfo
+      -- ^ The settlement every allocation of the batch was made for.
+    transferLegs    : [V2.TransferLeg]
+      -- ^ Every leg of the batch, as the allocations authorise them.
+    allocationCids  : [ContractId V2.Allocation]
+      -- ^ The allocations authorising the legs, senders' and receivers'.
+      -- The standard checks completeness; this template does not.
+    extraArgs       : ExtraArgs
+      -- ^ The registry's choice context, for example its rules contract id.
+    label           : Text
+      -- ^ Groups this action in the audit trail.
+    description     : Text
+      -- ^ Copied verbatim into GovernanceExecutionResult.
+  where
+    signatory proposer
+    observer governanceParty
+
+    -- Executors must be exactly the governance party and the proposer.
+    -- executeImpl holds no other authority, so any further executor would
+    -- pass creation and the vote, then fail at execution.
+    ensure
+      governanceParty `elem` settlement.executors
+        && proposer `elem` settlement.executors
+        && all (\p -> p == governanceParty || p == proposer) settlement.executors
+        && not (null allocationCids)
+        && not (null transferLegs)
+        && unique (map (.transferLegId) transferLegs)
+
+    interface instance GovernableAction for BatchSettlementProposal where
+      view = GovernableActionView with
+        governanceParty
+        proposer
+        actionLabel = label
+        description
+
+      executeImpl = do
+        _ <- exercise factoryCid V2.SettlementFactory_SettleBatch with
+          settlement
+          transferLegs
+          allocations =
+            [ V2.FinalizedAllocation with
+                allocationCid
+                extraTransferLegSides = []
+                nextIterationFunding = None
+            | allocationCid <- allocationCids
+            ]
+          actors = settlement.executors
+          extraArgs
+        pure ()

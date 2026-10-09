@@ -3,6 +3,8 @@ packages:
   - governance-core
   - orphan-marker
   - governance-core-test
+  - governance-settlement
+  - governance-settlement-test
   - governance-rewards-automation
   - governance-rewards-assign-test
   - governance-rewards-test
