@@ -11,6 +11,7 @@ mod assets;
 mod audit;
 mod chain_audit;
 mod event_filters;
+mod external_parties;
 mod handlers;
 mod ledger_paging;
 mod middleware;
@@ -182,6 +183,9 @@ pub struct AppState {
     /// the warm gRPC channels the probes reuse. Shared so a Config tab open in
     /// many browsers costs one probe per TTL, not one per browser.
     pub health_cache: HealthCache,
+    /// Topology snapshot of the external parties this node hosts. A request
+    /// for a stale one starts a single background scan.
+    pub external_parties: external_parties::ExternalPartiesCache,
 }
 
 #[cfg(test)]
@@ -219,6 +223,7 @@ impl AppState {
             discovery_completed: Arc::new(RwLock::new(HashMap::new())),
             http_client: reqwest::Client::new(),
             health_cache: HealthCache::new(),
+            external_parties: Default::default(),
         }))
     }
 }
@@ -1089,6 +1094,7 @@ pub async fn start_server(
         discovery_completed: Arc::new(RwLock::new(HashMap::new())),
         http_client,
         health_cache: HealthCache::new(),
+        external_parties: Default::default(),
     });
 
     // Boot-time workflow recovery. For any `workflow_runs` row that was

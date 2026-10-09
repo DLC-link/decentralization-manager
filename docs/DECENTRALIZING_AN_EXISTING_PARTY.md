@@ -29,6 +29,16 @@ curl -s "$HOST/external-parties" | jq '.parties[] | {party_id, fingerprint, host
 A party listed there is external. One whose namespace equals a participant's own
 namespace is local to that participant.
 
+The node answers from its last topology scan. A request for a list older than
+five minutes starts a new scan in the background.
+`DECPM_EXTERNAL_PARTIES_TTL_SECS` changes that age. `fetched_at` says when the
+last scan finished, and `refreshing` says whether a new one runs now. To read a
+fresh list, repeat the request until `refreshing` is `false`.
+
+After a restart, the first scan can take minutes. Until it finishes,
+`fetched_at` is `null` and `parties` is empty. An empty list then does not mean
+that the node hosts nothing.
+
 **A party can never change its namespace.** The party id embeds it. Converting a
 local party gives it a signing key; it does not make it a decentralized-namespace
 party, and no sequence of operations will.

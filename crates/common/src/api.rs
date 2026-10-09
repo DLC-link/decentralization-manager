@@ -408,6 +408,13 @@ pub struct ExternalPartyHost {
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ExternalPartiesResponse {
     pub parties: Vec<ExternalPartyInfo>,
+    /// When the topology scan behind `parties` finished, RFC 3339. `None`
+    /// until the first scan finishes, and `parties` is then not yet known.
+    pub fetched_at: Option<String>,
+    /// Whether a topology scan is running now.
+    pub refreshing: bool,
+    /// Why the latest scan failed, when `parties` comes from an earlier one.
+    pub refresh_error: Option<String>,
 }
 
 // ============================================================================

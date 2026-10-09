@@ -174,6 +174,7 @@ async fn run() -> Result {
             noise_retry_backoff_ms,
             reward_automation_interval_secs,
             reward_expiry_read_interval_secs,
+            external_parties_ttl_secs,
             reward_max_creates,
             reward_min_expiry_margin_secs,
             metrics_port,
@@ -309,6 +310,9 @@ async fn run() -> Result {
             }
             if let Some(v) = reward_expiry_read_interval_secs {
                 config.reward_expiry_read_interval_secs = *v;
+            }
+            if let Some(v) = external_parties_ttl_secs {
+                config.external_parties_ttl_secs = *v;
             }
             if let Some(v) = reward_max_creates {
                 config.reward_max_creates = *v;

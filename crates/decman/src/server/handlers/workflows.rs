@@ -22,7 +22,7 @@ use crate::{
         send_noise_message_with_retry,
     },
     server::{
-        AppState,
+        AppState, external_parties,
         health::classify_health_reply,
         middleware::require_admin,
         package_inventory::fetch_dar_for_package,
@@ -3230,46 +3230,66 @@ async fn read_acs_progress(db: &SqlitePool, instance_name: &str) -> Option<AcsTr
     serde_json::from_slice(&raw).ok()
 }
 
-/// List the external parties this participant currently hosts, read from its own
+/// List the external parties this participant currently hosts, cached from its own
 /// Canton topology (an authorized `PartyToParticipant` naming this participant
 /// with Confirmation and a self-owned single-key namespace). Wallet-driven
 /// onboarding keeps no local run row, so there is nothing DB-side to read.
+///
+/// The answer comes from a snapshot, and a stale one starts a background scan.
+/// Until the first scan finishes, the response carries no `fetched_at`.
 #[utoipa::path(
     tag = "Workflows",
-    responses((status = 200, description = "External parties", body = ExternalPartiesResponse))
+    responses(
+        (status = 200, description = "External parties", body = ExternalPartiesResponse),
+        (status = 503, description = "Discovery failed and no earlier result exists", body = ErrorResponse)
+    )
 )]
 #[get("/external-parties")]
 pub async fn list_external_parties(data: web::Data<AppState>) -> impl Responder {
-    match workflow::external_party::steps::list_hosted_external_parties(&data.config).await {
-        Ok(hosted) => {
-            let parties = hosted
+    let (snapshot, refreshing, refresh_error) = match external_parties::read(&data) {
+        external_parties::View::Pending => {
+            return HttpResponse::Ok().json(ExternalPartiesResponse {
+                parties: Vec::new(),
+                fetched_at: None,
+                refreshing: true,
+                refresh_error: None,
+            });
+        }
+        external_parties::View::Failed(error) => {
+            return HttpResponse::ServiceUnavailable().json(ErrorResponse { error });
+        }
+        external_parties::View::Ready {
+            snapshot,
+            refreshing,
+            refresh_error,
+        } => (snapshot, refreshing, refresh_error),
+    };
+    let parties = snapshot
+        .parties
+        .into_iter()
+        .map(|p| ExternalPartyInfo {
+            party_id: p.party_id,
+            fingerprint: p.fingerprint,
+            threshold: p.threshold,
+            host_count: p.host_count,
+            created_at: p.created_at,
+            onboarding: p.onboarding,
+            hosts: p
+                .hosts
                 .into_iter()
-                .map(|p| ExternalPartyInfo {
-                    party_id: p.party_id,
-                    fingerprint: p.fingerprint,
-                    threshold: p.threshold,
-                    host_count: p.host_count,
-                    created_at: p.created_at,
-                    onboarding: p.onboarding,
-                    hosts: p
-                        .hosts
-                        .into_iter()
-                        .map(|h| ExternalPartyHost {
-                            participant_uid: h.participant_uid,
-                            permission: permission_from_proto(h.permission),
-                        })
-                        .collect(),
+                .map(|h| ExternalPartyHost {
+                    participant_uid: h.participant_uid,
+                    permission: permission_from_proto(h.permission),
                 })
-                .collect();
-            HttpResponse::Ok().json(ExternalPartiesResponse { parties })
-        }
-        Err(e) => {
-            tracing::error!("Failed to list external parties from topology: {e:#}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to list external parties: {e}"),
-            })
-        }
-    }
+                .collect(),
+        })
+        .collect();
+    HttpResponse::Ok().json(ExternalPartiesResponse {
+        parties,
+        fetched_at: Some(snapshot.fetched_at.to_rfc3339()),
+        refreshing,
+        refresh_error,
+    })
 }
 
 /// Pull `prefix` + `participants` out of the run's `config_json` and lift

@@ -148,6 +148,11 @@ export DECPM_TOPOLOGY_RETRY_MAX_ATTEMPTS=90
 # network and a 3s tick would hammer it.
 export DECPM_REWARD_AUTOMATION_INTERVAL_SECS=15
 
+# The add-hosts phase polls /external-parties within a 180s deadline, which
+# the 300s production TTL outlasts. Only one scan runs at a time, so a short
+# TTL costs devnet back-to-back scans for that step and nothing after it.
+export DECPM_EXTERNAL_PARTIES_TTL_SECS=15
+
 # ---------------------------------------------------------------------------
 # Per-participant ports.
 # - HTTP: 8081/8082/8083 (DecMan's own HTTP API)

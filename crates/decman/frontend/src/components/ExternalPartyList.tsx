@@ -1,14 +1,20 @@
-import { Box, Chip, Tooltip, Typography } from "@mui/material";
+import { Alert, Box, Chip, LinearProgress, Tooltip, Typography } from "@mui/material";
 import { CopyableText } from "./CopyableText";
 import { PartyIdText } from "./PartyIdText";
 import { RowCard } from "./RowCard";
 import { PaginationControls } from "./Pagination";
 import { usePagination } from "../usePagination";
+import { formatAge } from "../formatAge";
 import { EXPANDER_SLOT, columnSx, legendSx } from "../styles";
 import type { ExternalPartyInfo } from "../types";
 
 interface ExternalPartyListProps {
   parties: ExternalPartyInfo[];
+  loading?: boolean;
+  error?: string | null;
+  fetchedAt?: string | null;
+  refreshing?: boolean;
+  refreshError?: string | null;
 }
 
 // Shared by the legend and the cards so the columns line up.
@@ -73,6 +79,42 @@ const HostsPanel = ({ party }: { party: ExternalPartyInfo }) => (
   </Box>
 );
 
+/**
+ * How old the list is, and why it is old when a later topology scan failed.
+ * The server keeps the last good list through a failed scan, so the age is
+ * what tells an operator the list may be out of date.
+ */
+const SnapshotStatus = ({
+  fetchedAt,
+  refreshing,
+  refreshError,
+}: Pick<ExternalPartyListProps, "fetchedAt" | "refreshing" | "refreshError">) => (
+  <>
+    {refreshError && (
+      <Alert severity="warning" sx={{ mt: 2 }}>
+        The latest topology scan failed, so this list comes from an earlier scan.{" "}
+        {refreshError}
+      </Alert>
+    )}
+    {fetchedAt && (
+      <Typography
+        title={fetchedAt}
+        sx={{
+          fontFamily: "var(--font-mono)",
+          fontSize: "0.68rem",
+          color: "text.disabled",
+          textAlign: "right",
+          px: "16px",
+          pt: 1,
+        }}
+      >
+        {formatAge(fetchedAt)}
+        {refreshing && " · refreshing"}
+      </Typography>
+    )}
+  </>
+);
+
 /** Render an RFC 3339 timestamp as a readable UTC date + time. */
 const formatCreated = (iso: string | null | undefined) => {
   if (!iso) return "—";
@@ -81,24 +123,65 @@ const formatCreated = (iso: string | null | undefined) => {
   return date.toISOString().replace("T", " ").slice(0, 16) + " UTC";
 };
 
-export const ExternalPartyList = ({ parties }: ExternalPartyListProps) => {
+export const ExternalPartyList = ({
+  parties,
+  loading,
+  error,
+  fetchedAt,
+  refreshing,
+  refreshError,
+}: ExternalPartyListProps) => {
   const { page, setPage, pageCount, pageItems, total } = usePagination(parties);
+
+  if (error) {
+    return <Alert severity="error" sx={{ mt: 2 }}>{error}</Alert>;
+  }
+  if (loading) {
+    return (
+      <Box sx={{ mt: 2 }}>
+        <LinearProgress aria-label="Loading external parties" />
+        {/* Only the server's first scan sets `refreshing` while still loading.
+          * That scan can take minutes, so a bare bar would look stuck. */}
+        {refreshing && (
+          <Typography
+            variant="body2"
+            color="text.secondary"
+            sx={{ textAlign: "center", pt: 1.5 }}
+          >
+            This node is reading its topology. The first scan after a restart can take a few minutes.
+          </Typography>
+        )}
+      </Box>
+    );
+  }
+
+  const status = (
+    <SnapshotStatus
+      fetchedAt={fetchedAt}
+      refreshing={refreshing}
+      refreshError={refreshError}
+    />
+  );
 
   if (parties.length === 0) {
     return (
-      <Typography
-        variant="body2"
-        color="text.secondary"
-        sx={{ textAlign: "center", py: 6 }}
-      >
-        No external parties hosted on this node
-      </Typography>
+      <Box sx={columnSx}>
+        {status}
+        <Typography
+          variant="body2"
+          color="text.secondary"
+          sx={{ textAlign: "center", py: 6 }}
+        >
+          No external parties hosted on this node
+        </Typography>
+      </Box>
     );
   }
 
   return (
     <Box sx={{ pt: 1, flex: 1, display: "flex", flexDirection: "column" }}>
       <Box sx={{ ...columnSx, flex: 1 }}>
+        {status}
         {/* Legend — padded to line up with the cards' own 16px inset. */}
         <Box
           sx={{

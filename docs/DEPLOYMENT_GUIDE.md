@@ -515,6 +515,7 @@ Most variables have a default that's only useful for local development (loopback
 | `DECPM_REWARD_EXPIRY_READ_INTERVAL_SECS` | `3600` | optional | How often the automation re-reads the backlog purely to refresh `decman_reward_oldest_unassigned_expires_in_seconds`. Both expiry alert rules read that gauge, so this bounds how stale their input can get. A sweep reads the ledger too, so the gauge refreshes at whichever interval is shorter |
 | `DECPM_REWARD_MAX_CREATES` | `100` | optional | Output contracts one `Delegation_Assign` may create, bounding the coupons per transaction. Lower it if assigns start failing |
 | `DECPM_REWARD_MIN_EXPIRY_MARGIN_SECS` | `120` | optional | Time a coupon must have left before expiry to be assigned |
+| `DECPM_EXTERNAL_PARTIES_TTL_SECS` | `300` | optional | How long the External Parties list serves requests before a request starts the next topology scan. A scan reads the whole topology store, so keep this in minutes |
 | `DECPM_PUBLIC_ADDRESS` | falls back to `DECPM_LISTEN_ADDRESS` | **yes** | Hostname peers use to reach this node from the public internet |
 | `DECPM_CANTON_ADMIN_HOST` | `127.0.0.1` | **yes** | Canton Admin API host |
 | `DECPM_CANTON_ADMIN_PORT` | `5002` | optional | Canton Admin API port |

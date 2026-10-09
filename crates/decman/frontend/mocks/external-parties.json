@@ -1,4 +1,7 @@
 {
+  "fetched_at": "2026-10-05T09:58:00Z",
+  "refreshing": false,
+  "refresh_error": null,
   "parties": [
     {
       "party_id": "alice-wallet::122066961557dcdb0d3aedbd9cf2bb4b01d610049279d442ad501e0a9994cc82b4bd",
