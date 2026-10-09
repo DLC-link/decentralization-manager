@@ -236,6 +236,11 @@ everything that follows (`workflow::validation::PeerExpectations`).
 
 Any mismatch fails the step. Repeated mismatches abort the peer run.
 
+A peer that aborts its run reports why to the coordinator. The coordinator
+also counts out a peer it has not heard from for 10 minutes, heartbeats
+included. It fails the run, naming the peer and the reason, once the step it
+is on can no longer reach its peer quorum.
+
 **What this does not cover.** The checks bound what a coordinator can obtain a
 signature for; they do not make the coordinator trustworthy. Six gaps remain,
 and they are load-bearing enough to state rather than imply:
@@ -345,7 +350,7 @@ Minimum message size: 6 bytes (type + length with zero payload).
 | 0x0013 | InviteDars | Invite to DARs upload workflow |
 | 0x0014 | CancelInvite | Cancel a previously sent invitation |
 | 0x0015 | RetryWorkflow | Coordinator tells peers to retry a failed run |
-| 0x0016 | DeclineInvitation | Peer declines an invitation (frees coordinator's run) |
+| 0x0016 | DeclineInvitation | Peer declines an invitation, or reports that it gave up on an accepted run (`abandoned`) |
 | 0x0017 | InviteAddParty | Invite to add a new member to a decentralized party |
 | 0x0018 | InviteChangeThreshold | Invite to change a decentralized party's threshold |
 
@@ -815,6 +820,7 @@ Weights are decimal strings and must sum to exactly 1.0; `SetProviderAppRewardBe
 - **Topology propagation delay**: 30 seconds after the effective time of a topology change before it can be used. Without this wait, transactions may be rejected with `LOCAL_VERDICT_TIMEOUT`.
 - **Topology retry settings**: 30 attempts with 2-second delays when polling for topology state changes
 - **Heartbeat interval**: 5-second ping cycle for peer connectivity monitoring
+- **Peer silence limit**: 10 minutes without hearing from a peer before a coordinator counts it out of a run
 - **Noise timeouts**: 10-second request timeout, 25-second chunk-fetch timeout, 45-second handler timeout, 30-second handshake timeout (configurable), 120-second message timeout (configurable)
 
 ### Participant Minimums

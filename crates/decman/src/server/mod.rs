@@ -24,6 +24,8 @@ mod transfer_context;
 mod types;
 
 #[cfg(test)]
+mod peer_failure_tests;
+#[cfg(test)]
 mod serde_snapshots;
 
 pub(crate) mod health;

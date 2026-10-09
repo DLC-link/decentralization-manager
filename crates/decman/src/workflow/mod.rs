@@ -30,12 +30,13 @@ use crate::{
     canton_id::CantonId,
     config::{NetworkConfig, NodeConfig, Peer},
     consts::{
-        MAX_CONSECUTIVE_NO_WORKFLOW_POLLS, MAX_CONSECUTIVE_STEP_FAILURES, peer_wait_poll_delay_ms,
+        MAX_CONSECUTIVE_NO_WORKFLOW_POLLS, MAX_CONSECUTIVE_STEP_FAILURES, PEER_SILENCE_LIMIT,
+        peer_wait_poll_delay_ms,
     },
     db::schema::{Commitable, SchemaRead, SchemaWrite},
     error::Result,
-    noise::{MessageType, NoiseError, client::NoiseClient, server::ActiveWorkflow},
-    server::{WorkflowInstance, WorkflowKind, peer_status::LastSeen},
+    noise::{MessageType, NoiseError, client::NoiseClient, is_transient, server::ActiveWorkflow},
+    server::{DeclineInvitationPayload, WorkflowInstance, WorkflowKind, peer_status::LastSeen},
     utils,
     workflow::{
         state::WorkflowStep,
@@ -203,13 +204,24 @@ pub async fn start_coordinator(
 /// removed by the caller's [`WorkflowGuard`](crate::server::WorkflowGuard) on
 /// return (success, error, or panic), so a finished or failed workflow stops
 /// receiving routed commands.
+///
+/// The run fails, naming the peers and why, once peers it still waits on have
+/// given up or gone silent and the rest cannot finish it.
 pub async fn run_workflow_with_handler(
     active: ActiveWorkflow,
     instance: Arc<WorkflowInstance>,
-    workflow_handle: tokio::task::JoinHandle<Result>,
+    mut workflow_handle: tokio::task::JoinHandle<Result>,
 ) -> Result {
-    instance.set_active(active);
-    match workflow_handle.await {
+    instance.set_active(active.clone());
+    let outcome = tokio::select! {
+        outcome = &mut workflow_handle => outcome,
+        reason = active.wait_until_stranded() => {
+            workflow_handle.abort();
+            tracing::error!("Workflow failed: {reason}");
+            anyhow::bail!("{reason}");
+        }
+    };
+    match outcome {
         Ok(Ok(())) => {
             tracing::info!("Workflow completed successfully, shutting down");
             Ok(())
@@ -256,11 +268,50 @@ pub async fn start_peer(
     let coordinator_id = coordinator.participant_id.clone();
     let expectations =
         PeerExpectations::load(&db, &instance_name, &node_config, &coordinator_id).await?;
-    let peer_kind = expectations.kind;
 
-    let client = NoiseClient::new(node_config.clone(), coordinator, coordinator_instance).await?;
+    let client = NoiseClient::new(
+        node_config.clone(),
+        coordinator,
+        coordinator_instance.clone(),
+    )
+    .await?;
 
     tracing::info!("Noise client initialized, entering command polling loop");
+
+    let kind = expectations.kind;
+    let reporter = client.clone();
+    let result = run_peer(
+        node_config,
+        client,
+        db,
+        instance_name,
+        expectations,
+        workflow_auth,
+    )
+    .await;
+    if let Err(e) = &result {
+        let report = DeclineInvitationPayload {
+            kind,
+            reason: Some(format!("{e:#}")),
+            workflow_instance: (!coordinator_instance.is_empty()).then_some(coordinator_instance),
+            abandoned: true,
+        };
+        tokio::spawn(report_departure(reporter, report));
+    }
+    result
+}
+
+/// Poll the coordinator and execute its commands until it disconnects this
+/// peer, or until a failure ends the run.
+async fn run_peer(
+    node_config: NodeConfig,
+    client: NoiseClient,
+    db: SqlitePool,
+    instance_name: String,
+    expectations: PeerExpectations,
+    workflow_auth: Option<WorkflowAuth>,
+) -> Result {
+    let peer_kind = expectations.kind;
 
     // Command polling loop
     let mut consecutive_errors = 0;
@@ -321,7 +372,9 @@ pub async fn start_peer(
                     tracing::error!(
                         "Failed to communicate with coordinator after 3 attempts. Aborting."
                     );
-                    anyhow::bail!("Peer failed: persistent communication errors with coordinator");
+                    anyhow::bail!(
+                        "Peer failed: persistent communication errors with coordinator: {e}"
+                    );
                 }
 
                 tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
@@ -1150,6 +1203,48 @@ pub async fn start_peer(
     tracing::info!("Peer shutting down");
     Ok(())
 }
+
+/// Tell the coordinator this peer gave up on the run, so it stops waiting for a
+/// completion that will never come (#442).
+///
+/// Sent as an abandoned `DeclineInvitation`, which a coordinator that predates
+/// the flag still handles by failing the run. Retried for
+/// [`PEER_SILENCE_LIMIT`]: a coordinator that cannot hear from this peer for
+/// that long counts it out anyway, so only a report lost to a shorter outage
+/// needs the retries. A 503 means the coordinator no longer has the run.
+async fn report_departure(client: NoiseClient, report: DeclineInvitationPayload) {
+    let payload = match serde_json::to_vec(&report) {
+        Ok(payload) => payload,
+        Err(e) => {
+            tracing::warn!("Could not encode this peer's failure report: {e}");
+            return;
+        }
+    };
+    let deadline = tokio::time::Instant::now() + PEER_SILENCE_LIMIT;
+    loop {
+        match client.report_failure(payload.clone()).await {
+            Ok(()) => return,
+            Err(NoiseError::BadStatusCode(code, _)) if code.as_u16() == 503 => {
+                tracing::info!("Coordinator no longer runs this workflow; nothing to report");
+                return;
+            }
+            Err(e)
+                if is_transient(&e)
+                    && tokio::time::Instant::now() + FAILURE_REPORT_BACKOFF < deadline =>
+            {
+                tracing::warn!("Could not report this peer's failure to the coordinator: {e}");
+                tokio::time::sleep(FAILURE_REPORT_BACKOFF).await;
+            }
+            Err(e) => {
+                tracing::warn!("Gave up reporting this peer's failure to the coordinator: {e}");
+                return;
+            }
+        }
+    }
+}
+
+/// Pause between attempts to report a peer's failure.
+const FAILURE_REPORT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Apply one retry budget to decoding, authorization, and execution failures.
 /// Control messages do not reset it; only completing (or legitimately skipping)
