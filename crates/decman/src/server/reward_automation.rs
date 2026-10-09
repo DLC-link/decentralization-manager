@@ -61,11 +61,11 @@ use super::event_filters::{
     interface_filter, party_event_format, template_filter, wildcard_filter,
 };
 use super::handlers::{get_party_credentials, packages};
-use super::queries::resolve_contract_package_ref;
 use super::record::{
     field_decimal, field_list_len, field_optional_is_none, field_party_id, field_party_list,
     field_time,
 };
+use super::{package_inventory::fetch_package_id_to_name, queries::fetch_contract_template_id};
 
 // ============================================================================
 // Shared decoded ACS read
@@ -843,6 +843,33 @@ fn delegation_template_id(package_id: String) -> Identifier {
     }
 }
 
+/// Pin the exercise to the verified concrete package, including older versions
+/// of the configured package name. Never trust module/entity names alone.
+fn verified_delegation_template(
+    actual: Identifier,
+    configured: &str,
+    package_name: Option<&str>,
+) -> anyhow::Result<Identifier> {
+    let expected = delegation_template_id(configured.to_string());
+    let package_matches = match configured.strip_prefix('#') {
+        Some(name) => package_name == Some(name),
+        None => actual.package_id == configured,
+    };
+    anyhow::ensure!(
+        package_matches
+            && actual.module_name == expected.module_name
+            && actual.entity_name == expected.entity_name,
+        "refusing delegation from {}:{}:{}; expected {}:{}:{}",
+        actual.package_id,
+        actual.module_name,
+        actual.entity_name,
+        configured,
+        expected.module_name,
+        expected.entity_name,
+    );
+    Ok(actual)
+}
+
 /// Exercise `Delegation_Assign` as a plain ledger command (no governance
 /// round). Adapted from `execute_confirm_action`
 /// (`handlers/governance.rs:2107`); the differences are the target contract
@@ -869,17 +896,20 @@ pub(crate) async fn submit_delegation_assign(
         .governance_rewards
         .as_deref()
         .context("governance_rewards package not configured")?;
-    // The delegation may live under an older package ref — resolve its actual
-    // one (same as `execute_confirm_action`, governance.rs:2177-2184).
-    let package_id = resolve_contract_package_ref(
-        config,
-        decparty,
-        Some(token.to_string()),
-        delegation_cid,
-        fallback,
-    )
-    .await;
-    let template_id = delegation_template_id(package_id);
+    // A wildcard read under mock auth can find a look-alike delegation. Read
+    // its actual template and fail closed before borrowing the member's authority.
+    let actual =
+        fetch_contract_template_id(config, decparty, Some(token.to_string()), delegation_cid)
+            .await?
+            .context("delegation created event has no template id")?;
+    let package_name = if fallback.starts_with('#') {
+        fetch_package_id_to_name(config)
+            .await?
+            .remove(&actual.package_id)
+    } else {
+        None
+    };
+    let template_id = verified_delegation_template(actual, fallback, package_name.as_deref())?;
     // `ledger_channel` (not a raw `Channel::from_shared`) so this respects the
     // configured Canton TLS/mTLS settings — the automation's own reads go through
     // it via `create_state_client`, and an assign that bypassed it would be the
@@ -1769,6 +1799,34 @@ mod tests {
         "carol::1220cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
     const DAVE: &str = "dave::1220dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
     const EVE: &str = "eve::1220eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+
+    #[test]
+    fn delegation_identity_rejects_lookalikes_and_missing_inventory() -> anyhow::Result<()> {
+        let actual = delegation_template_id("concrete-id".into());
+        assert!(
+            verified_delegation_template(
+                actual.clone(),
+                "#governance-rewards-v1",
+                Some("attacker-rewards")
+            )
+            .is_err()
+        );
+        assert!(
+            verified_delegation_template(actual.clone(), "#governance-rewards-v1", None).is_err()
+        );
+        assert!(verified_delegation_template(actual.clone(), "other-id", None).is_err());
+        let verified = verified_delegation_template(
+            actual.clone(),
+            "#governance-rewards-v1",
+            Some("governance-rewards-v1"),
+        )?;
+        assert_eq!(verified.package_id, "concrete-id");
+        assert!(verified_delegation_template(actual.clone(), "concrete-id", None).is_ok());
+        let mut wrong_template = actual;
+        wrong_template.entity_name = "DifferentChoiceCarrier".into();
+        assert!(verified_delegation_template(wrong_template, "concrete-id", None).is_err());
+        Ok(())
+    }
 
     #[test]
     fn parse_delegation_record_reads_assigners_and_split() {
