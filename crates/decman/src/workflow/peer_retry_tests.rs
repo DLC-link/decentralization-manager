@@ -9,12 +9,21 @@ use tokio_noise::handshakes::nn_psk2::Responder;
 use super::*;
 use crate::noise::{Message, NoiseKeypair};
 
-/// Return the peer's outcome, poll times, and number of completion messages.
+/// What the scripted coordinator saw of one peer run.
+struct PeerRun {
+    result: Result,
+    polls: Vec<std::time::Instant>,
+    completions: usize,
+    /// Failure reports the peer sent after giving up.
+    reports: Vec<DeclineInvitationPayload>,
+}
+
+/// Drive the real peer loop through `commands` from a scripted coordinator.
 async fn run_commands(
     db: SqlitePool,
     kind: WorkflowKind,
     commands: Vec<Message>,
-) -> Result<(Result, Vec<std::time::Instant>, usize)> {
+) -> Result<PeerRun> {
     let root = tempfile::tempdir()?;
     let mut node = NodeConfig::default().with_root_dir(root.path());
     node.node.participant_id = Some(CantonId::parse(&format!("peer::1220{}", "a".repeat(64)))?);
@@ -47,15 +56,18 @@ async fn run_commands(
 
     let polls = Arc::new(Mutex::new(Vec::new()));
     let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let reports = Arc::new(Mutex::new(Vec::new()));
     let commands = Arc::new(Mutex::new(VecDeque::from(commands)));
     let server_polls = polls.clone();
     let server_completions = completions.clone();
+    let server_reports = reports.clone();
     let server = tokio::spawn(async move {
         loop {
             let (socket, _) = listener.accept().await?;
             let commands = commands.clone();
             let polls = server_polls.clone();
             let completions = server_completions.clone();
+            let reports = server_reports.clone();
             hyper_noise::server::serve_http(
                 socket,
                 Responder::new(move |_: &[u8]| Some(psk)),
@@ -63,10 +75,17 @@ async fn run_commands(
                     let commands = commands.clone();
                     let polls = polls.clone();
                     let completions = completions.clone();
+                    let reports = reports.clone();
                     async move {
                         let bytes = hyper::body::to_bytes(request.into_body()).await?;
                         let message = Message::from_bytes(&bytes)?;
-                        let reply = if message.msg_type == MessageType::GetNextCommand {
+                        let reply = if message.msg_type == MessageType::DeclineInvitation {
+                            reports
+                                .lock()
+                                .map_err(|_| anyhow::anyhow!("report lock poisoned"))?
+                                .push(serde_json::from_slice(&message.payload)?);
+                            Message::new_empty(MessageType::Ack)
+                        } else if message.msg_type == MessageType::GetNextCommand {
                             polls
                                 .lock()
                                 .map_err(|_| anyhow::anyhow!("poll lock poisoned"))?
@@ -102,20 +121,49 @@ async fn run_commands(
         ),
     )
     .await;
+    if matches!(outcome, Ok(Err(_))) {
+        // The peer reports its failure from a background task.
+        let reported = async {
+            while reports.lock().map_or(true, |reports| reports.is_empty()) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        let _ = tokio::time::timeout(Duration::from_secs(5), reported).await;
+    }
     server.abort();
     match server.await {
         Err(error) if error.is_cancelled() => {}
         result => result??,
     }
-    let poll_times = polls
+    let polls = polls
         .lock()
         .map_err(|_| anyhow::anyhow!("poll lock poisoned"))?
         .clone();
-    Ok((
-        outcome?,
-        poll_times,
-        completions.load(std::sync::atomic::Ordering::Relaxed),
-    ))
+    let reports = reports
+        .lock()
+        .map_err(|_| anyhow::anyhow!("report lock poisoned"))?
+        .clone();
+    Ok(PeerRun {
+        result: outcome?,
+        polls,
+        completions: completions.load(std::sync::atomic::Ordering::Relaxed),
+        reports,
+    })
+}
+
+/// Check that a peer which gave up told the coordinator, once, and why.
+fn assert_reported(run: &PeerRun, kind: WorkflowKind) {
+    let [report] = run.reports.as_slice() else {
+        panic!("expected one failure report, got {}", run.reports.len());
+    };
+    let error = run.result.as_ref().err().map(|e| format!("{e:#}"));
+    assert!(report.abandoned, "the report was sent as a plain decline");
+    assert_eq!(report.kind, kind);
+    assert_eq!(report.workflow_instance.as_deref(), Some("coordinator-run"));
+    assert_eq!(
+        report.reason, error,
+        "the report must carry the peer's error"
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -162,18 +210,24 @@ async fn malformed_commands_back_off_and_exhaust_the_budget(db: SqlitePool) -> R
         let db = db.clone();
         async move {
             let command = message.msg_type;
-            let (result, polls, completions) =
-                run_commands(db, kind, vec![message; MAX_CONSECUTIVE_STEP_FAILURES]).await?;
-            let error = result
+            let run = run_commands(db, kind, vec![message; MAX_CONSECUTIVE_STEP_FAILURES]).await?;
+            let error = run
+                .result
+                .as_ref()
                 .err()
                 .ok_or_else(|| anyhow::anyhow!("{command:?} did not abort"))?;
             assert!(
                 error.to_string().contains(&format!("({command:?})")),
                 "{error}"
             );
-            assert_eq!(polls.len(), MAX_CONSECUTIVE_STEP_FAILURES, "{command:?}");
-            assert_eq!(completions, 0, "malformed {command:?} was completed");
-            for pair in polls.windows(2) {
+            assert_reported(&run, kind);
+            assert_eq!(
+                run.polls.len(),
+                MAX_CONSECUTIVE_STEP_FAILURES,
+                "{command:?}"
+            );
+            assert_eq!(run.completions, 0, "malformed {command:?} was completed");
+            for pair in run.polls.windows(2) {
                 assert!(
                     pair[1].duration_since(pair[0]) >= Duration::from_secs(2),
                     "{command:?} polled without backoff"
@@ -204,20 +258,22 @@ async fn control_messages_preserve_failures_but_completed_steps_reset_them(
         utils::encode_length_prefixed(&[b"{}", b""]),
     ));
     recovered.push(bad);
-    let (control_result, recovered_result) = tokio::try_join!(
+    let (control, recovered) = tokio::try_join!(
         run_commands(db.clone(), WorkflowKind::AddParty, controls),
         run_commands(db, WorkflowKind::AddParty, recovered),
     )?;
-    assert!(
-        control_result.0.is_err(),
-        "Wait/Ping reset the failure count"
-    );
+    assert!(control.result.is_err(), "Wait/Ping reset the failure count");
+    assert_reported(&control, WorkflowKind::AddParty);
     assert_eq!(
-        control_result.1.len(),
+        control.polls.len(),
         (MAX_CONSECUTIVE_STEP_FAILURES - 1) * 3 + 1
     );
-    recovered_result.0?;
-    assert_eq!(recovered_result.1.len(), MAX_CONSECUTIVE_STEP_FAILURES + 2);
-    assert_eq!(recovered_result.2, 1);
+    recovered.result?;
+    assert_eq!(recovered.polls.len(), MAX_CONSECUTIVE_STEP_FAILURES + 2);
+    assert_eq!(recovered.completions, 1);
+    assert!(
+        recovered.reports.is_empty(),
+        "a peer that finished reported a failure"
+    );
     Ok(())
 }

@@ -22,6 +22,7 @@ use crate::{
 const CHUNK_FETCH_MAX_ATTEMPTS: usize = 3;
 
 /// Client for connecting to the coordinator
+#[derive(Clone)]
 pub struct NoiseClient {
     node_config: Arc<NodeConfig>,
     keypair: Arc<NoiseKeypair>,
@@ -336,6 +337,17 @@ impl NoiseClient {
             MessageType::DeclineInvitation,
             payload,
             "Sending decline-invitation to coordinator",
+        )
+        .await
+    }
+
+    /// Tell the coordinator this peer gave up on the run. Payload is the
+    /// JSON-encoded `DeclineInvitationPayload` with `abandoned` set.
+    pub async fn report_failure(&self, payload: Vec<u8>) -> Result<(), NoiseError> {
+        self.send_and_verify_ack(
+            MessageType::DeclineInvitation,
+            payload,
+            "Reporting this peer's failure to coordinator",
         )
         .await
     }

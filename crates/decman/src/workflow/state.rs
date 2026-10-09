@@ -144,6 +144,43 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
         &self.instance_name
     }
 
+    /// The peers this run waits on.
+    pub fn expected_peers(&self) -> &HashSet<CantonId> {
+        &self.expected_peers
+    }
+
+    /// Whether the current step can no longer reach its peer quorum once the
+    /// `unavailable` peers are counted out. A peer that already completed the
+    /// step still counts. Returns the step's name and the unavailable peers it
+    /// still waits on when it cannot; `None` while it can, and on steps that do
+    /// not wait on peer completions.
+    pub async fn stranded_by(
+        &self,
+        unavailable: &HashMap<CantonId, String>,
+    ) -> Option<(&'static str, Vec<(CantonId, String)>)> {
+        let step = *self.current_step.read().await;
+        if !step.requires_peers() {
+            return None;
+        }
+        let completed = self.completed_peers.read().await.clone();
+        // An advance clears the completed set, so a set read across one
+        // belongs to the next step.
+        if *self.current_step.read().await != step {
+            return None;
+        }
+        let mut missing: Vec<(CantonId, String)> = self
+            .expected_peers
+            .iter()
+            .filter(|peer| !completed.contains(*peer))
+            .filter_map(|peer| unavailable.get(peer).map(|why| (peer.clone(), why.clone())))
+            .collect();
+        if self.expected_peers.len() - missing.len() >= self.peers_quorum() {
+            return None;
+        }
+        missing.sort();
+        Some((step.step_name(), missing))
+    }
+
     /// Set payload data to be sent with the next command
     pub async fn set_command_payload(&self, payload: Vec<u8>) {
         let mut cmd_payload = self.command_payload.write().await;
@@ -869,6 +906,81 @@ mod tests {
 
         state.peer_connected(peer(2)).await;
         assert_eq!(state.current_step().await, TestStep::Sign);
+    }
+
+    fn unavailable(peers: &[u8]) -> HashMap<CantonId, String> {
+        peers
+            .iter()
+            .map(|&n| (peer(n), format!("gave up: reason {n}")))
+            .collect()
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_step_needing_every_peer_strands_on_one_unavailable_peer(pool: SqlitePool) {
+        let state = WorkflowState::new(
+            pool,
+            "test-run".to_string(),
+            TestStep::Sign,
+            vec![peer(1), peer(2)],
+            None,
+        );
+
+        assert_eq!(
+            state.stranded_by(&unavailable(&[2])).await,
+            Some(("Sign", vec![(peer(2), "gave up: reason 2".to_string())]))
+        );
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_quorum_step_strands_only_when_the_quorum_is_out_of_reach(pool: SqlitePool) {
+        let state = WorkflowState::new(
+            pool,
+            "test-run".to_string(),
+            TestStep::Sign,
+            vec![peer(1), peer(2), peer(3)],
+            Some(2),
+        );
+
+        assert_eq!(state.stranded_by(&unavailable(&[3])).await, None);
+        let (step, missing) = state
+            .stranded_by(&unavailable(&[2, 3]))
+            .await
+            .expect("two of three out leaves one peer for a quorum of two");
+        assert_eq!(step, "Sign");
+        assert_eq!(
+            missing.into_iter().map(|(p, _)| p).collect::<Vec<_>>(),
+            vec![peer(2), peer(3)]
+        );
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_peer_that_completed_the_step_still_counts(pool: SqlitePool) {
+        let state = WorkflowState::new(
+            pool,
+            "test-run".to_string(),
+            TestStep::Sign,
+            vec![peer(1), peer(2)],
+            None,
+        );
+
+        state.peer_completed(peer(1)).await;
+        assert_eq!(state.stranded_by(&unavailable(&[1])).await, None);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn steps_that_wait_on_no_peer_completion_never_strand(pool: SqlitePool) {
+        // WaitPeers waits on operators accepting invitations, at human pace;
+        // Done waits on nobody.
+        for step in [TestStep::WaitPeers, TestStep::Done] {
+            let state = WorkflowState::new(
+                pool.clone(),
+                "test-run".to_string(),
+                step,
+                vec![peer(1)],
+                None,
+            );
+            assert_eq!(state.stranded_by(&unavailable(&[1])).await, None);
+        }
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
