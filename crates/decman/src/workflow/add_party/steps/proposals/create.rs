@@ -218,6 +218,10 @@ pub async fn create_proposals(
         }),
     };
 
+    // A proposal is signed in a temporary store, which has no history of
+    // these mappings, so both serials have to be pinned explicitly.
+    let serials = topology::fetch_current_serials(config, &synchronizer_id, party_id).await?;
+
     let dns_transaction = if rehost {
         topology::fetch_signed_namespace_definition(
             config,
@@ -227,34 +231,27 @@ pub async fn create_proposals(
         .await?
     } else {
         tracing::info!("Creating DNS add-party proposal...");
-        topology::authorize_with_topology_retry(
+        topology::build_signed_proposal(
             config,
-            proposal_request(
-                &synchronizer_id,
-                topology_mapping::Mapping::DecentralizedNamespaceDefinition(
-                    new_namespace_def.clone(),
-                ),
-            ),
+            &synchronizer_id,
+            topology_mapping::Mapping::DecentralizedNamespaceDefinition(new_namespace_def.clone()),
+            serials.dns + 1,
+            topology::party_proposal_force_flags(),
             "add-party DNS",
         )
         .await?
-        .transaction
-        .ok_or_else(|| anyhow::anyhow!("No DNS transaction returned"))?
     };
 
     tracing::info!("Creating P2P add-party proposal...");
-    let p2p_response = topology::authorize_with_topology_retry(
+    let p2p_transaction = topology::build_signed_proposal(
         config,
-        proposal_request(
-            &synchronizer_id,
-            topology_mapping::Mapping::PartyToParticipant(new_p2p),
-        ),
+        &synchronizer_id,
+        topology_mapping::Mapping::PartyToParticipant(new_p2p),
+        serials.p2p + 1,
+        topology::party_proposal_force_flags(),
         "add-party P2P",
     )
     .await?;
-    let p2p_transaction = p2p_response
-        .transaction
-        .ok_or_else(|| anyhow::anyhow!("No P2P transaction returned"))?;
 
     storage
         .write_artifact(

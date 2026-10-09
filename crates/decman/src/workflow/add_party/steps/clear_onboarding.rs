@@ -195,6 +195,7 @@ pub async fn submit_clear_proposal(
         .add_transactions(tonic::Request::new(add_transactions_request(
             &synchronizer_id,
             transaction,
+            vec![],
         )))
         .await?;
 
