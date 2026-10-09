@@ -20,6 +20,14 @@
 //! first seeded with the party's history from the synchronizer, replayed in
 //! order, until its DNS and P2P heads are the synchronizer's.
 //!
+//! A replay can fail to rebuild the heads. `signing_route` then decides by
+//! the party's current namespace threshold. At threshold 1 the run stops with
+//! nothing signed, because only there can the coordinator alone put the DNS in
+//! force. Above it the coordinator signs with `Authorize` against the
+//! synchronizer store, as before #448: its signature alone cannot meet the
+//! threshold, so nothing takes effect early. A participant that cannot be
+//! reached is never a replay failure; that error goes back to the step.
+//!
 //! Every store is dropped on every way out of [`sign_party_proposals`]: after
 //! success, after an error, and from a drop guard when the task is aborted.
 //! Store names carry the run's instance name, so a run that resumes after a
@@ -38,9 +46,9 @@ use canton_proto_rs::com::digitalasset::canton::{
         TopologyMapping, TopologyTransaction, enums, topology_mapping,
     },
     topology::admin::v30::{
-        AddTransactionsRequest, AuthorizeRequest, CreateTemporaryTopologyStoreRequest,
-        DropTemporaryTopologyStoreRequest, ForceFlag, ListAllRequest, ListAvailableStoresRequest,
-        StoreId, authorize_request, store_id,
+        AddTransactionsRequest, AuthorizeRequest, AuthorizeResponse,
+        CreateTemporaryTopologyStoreRequest, DropTemporaryTopologyStoreRequest, ForceFlag,
+        ListAllRequest, ListAvailableStoresRequest, StoreId, authorize_request, store_id,
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
         topology_manager_write_service_client::TopologyManagerWriteServiceClient,
     },
@@ -48,6 +56,87 @@ use canton_proto_rs::com::digitalasset::canton::{
 use tonic::transport::Channel;
 
 use crate::{canton_id::CantonId, config::NodeConfig, error::Result, utils, workflow::topology};
+
+/// What the replay into a temporary store came to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RebuildOutcome {
+    /// The store's DNS and P2P heads are the synchronizer's.
+    Rebuilt,
+    /// The history was read, but replaying it did not rebuild the heads.
+    ReplayFailed,
+    /// The participant could not be reached, so nothing is known about the
+    /// history. The step's own retry handles this.
+    Unreachable,
+}
+
+/// How the coordinator signs a party's proposals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Route {
+    /// Sign in the rebuilt temporary store; nothing is published.
+    TemporaryStore,
+    /// Sign with `Authorize` against the synchronizer store, which publishes
+    /// each proposal as it signs it.
+    Synchronizer,
+    /// Stop the run: nothing is signed or published.
+    Refuse,
+    /// Return the error to the step, which retries it.
+    Retry,
+}
+
+/// Decide how to sign, from the party's current namespace threshold and what
+/// the replay came to.
+///
+/// The temporary store is always the first choice. Only a failed replay falls
+/// back, and only above threshold 1: there the coordinator's signature alone
+/// cannot meet the threshold, so a proposal published early stays pending. At
+/// threshold 1 (or a malformed lower one) it would take effect at once, so
+/// the run stops. An unreachable participant says nothing about the history,
+/// so it never falls back.
+fn signing_route(head_threshold: i32, outcome: RebuildOutcome) -> Route {
+    match outcome {
+        RebuildOutcome::Rebuilt => Route::TemporaryStore,
+        RebuildOutcome::Unreachable => Route::Retry,
+        RebuildOutcome::ReplayFailed if head_threshold >= 2 => Route::Synchronizer,
+        RebuildOutcome::ReplayFailed => Route::Refuse,
+    }
+}
+
+/// Classify a replay result. An error is [`RebuildOutcome::Unreachable`] when
+/// anything in its chain is a transport failure; every other error means the
+/// replay itself failed.
+fn rebuild_outcome(result: &Result<usize>) -> RebuildOutcome {
+    match result {
+        Ok(_) => RebuildOutcome::Rebuilt,
+        Err(e) if is_unreachable(e) => RebuildOutcome::Unreachable,
+        Err(_) => RebuildOutcome::ReplayFailed,
+    }
+}
+
+/// Whether an error comes from the connection to the participant rather than
+/// from Canton refusing what it was asked.
+fn is_unreachable(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.downcast_ref::<tonic::transport::Error>().is_some()
+            || cause
+                .downcast_ref::<tonic::Status>()
+                .is_some_and(|status| is_transport_code(status.code()))
+    })
+}
+
+/// gRPC codes a connection problem surfaces as. `Unknown` is among them
+/// because tonic reports some broken connections that way, and an ambiguous
+/// error must retry rather than fall back.
+fn is_transport_code(code: tonic::Code) -> bool {
+    matches!(
+        code,
+        tonic::Code::Unavailable
+            | tonic::Code::DeadlineExceeded
+            | tonic::Code::Cancelled
+            | tonic::Code::Unknown
+            | tonic::Code::ResourceExhausted
+            | tonic::Code::Aborted
+    )
+}
 
 /// Every temporary store this tool creates is named with this prefix, so a
 /// sweep never touches a store something else created.
@@ -151,16 +240,20 @@ pub struct SignedProposals {
 }
 
 /// Sign the party's new DNS (when `new_dns` is set) and new P2P at the serial
-/// after `head`'s, without publishing either.
+/// after `head`'s.
 ///
-/// `head` must be what the proposals were built from. The store is seeded
-/// until its heads equal `head`'s serials, so a proposal can never be signed
-/// against a state other than the one it was built on.
+/// `head` must be what the proposals were built from. The proposals are
+/// signed in a temporary store seeded until its heads equal `head`'s serials,
+/// and nothing is published. When the replay cannot rebuild those heads,
+/// `signing_route` decides: above namespace threshold 1 the proposals are
+/// signed and published with `Authorize` against the synchronizer store, as
+/// before #448; at threshold 1 the run stops.
 ///
 /// # Errors
 ///
-/// Errors when the store cannot be created or seeded to `head`, or when
-/// Canton refuses to sign. Nothing is published in any case.
+/// Errors when the store cannot be created, when the participant cannot be
+/// reached, when a threshold-1 party's history does not replay, or when
+/// Canton refuses to sign.
 #[allow(clippy::too_many_arguments)]
 pub async fn sign_party_proposals(
     config: &NodeConfig,
@@ -173,62 +266,181 @@ pub async fn sign_party_proposals(
     force_flags: Vec<i32>,
 ) -> Result<SignedProposals> {
     let protocol_version = protocol_version_of(synchronizer_id)?;
-    let dns_serial = next_serial("DNS", head.dns_serial)?;
-    let p2p_serial = next_serial("P2P", head.p2p_serial)?;
+    let serials = (
+        next_serial("DNS", head.dns_serial)?,
+        next_serial("P2P", head.p2p_serial)?,
+    );
     let channel = config.admin_channel().await?;
     let stores = CantonStores {
         channel: channel.clone(),
     };
+    let proposals = (new_dns, new_p2p);
 
-    let config = config.clone();
-    let synchronizer_id = synchronizer_id.to_string();
-    let party_id = party_id.clone();
-    let head = head.clone();
-    in_store(
-        stores,
-        instance_name,
-        protocol_version,
-        move |store| async move {
-            let replayed = seed(&channel, &synchronizer_id, &store, &party_id).await?;
-            ensure_seeded_to(&config, &store, &party_id, &head).await?;
-            tracing::info!(
-                replayed,
+    let attempt = {
+        let config = config.clone();
+        let synchronizer_id = synchronizer_id.to_string();
+        let party_id = party_id.clone();
+        let head = head.clone();
+        let proposals = proposals.clone();
+        let force_flags = force_flags.clone();
+        in_store(
+            stores,
+            instance_name,
+            protocol_version,
+            move |store| async move {
+                let rebuilt = async {
+                    let replayed = seed(&channel, &synchronizer_id, &store, &party_id).await?;
+                    ensure_seeded_to(&config, &store, &party_id, &head).await?;
+                    Ok(replayed)
+                }
+                .await;
+                let route = signing_route(head.dns.threshold, rebuild_outcome(&rebuilt));
+                match (route, rebuilt) {
+                    (Route::TemporaryStore, Ok(replayed)) => {
+                        tracing::info!(
+                            replayed,
+                            %party_id,
+                            %store,
+                            dns_serial = serials.0,
+                            p2p_serial = serials.1,
+                            "Replayed the party's topology history into a temporary store; \
+                             signing there"
+                        );
+                        let signed = sign(
+                            &channel,
+                            &temporary_store_id(&store),
+                            proposals,
+                            serials,
+                            force_flags,
+                        )
+                        .await?;
+                        Ok(Attempt::Signed(signed))
+                    }
+                    (Route::Synchronizer, Err(e)) => Ok(Attempt::FallBack(format!("{e:#}"))),
+                    (Route::Refuse, Err(e)) => Err(e.context(format!(
+                        "Could not rebuild {party_id}'s topology history in a temporary store, \
+                         and its namespace threshold is {threshold}. Signing against the \
+                         synchronizer would put the namespace change in force on this node's \
+                         signature alone, so nothing was signed or published",
+                        threshold = head.dns.threshold
+                    ))),
+                    // `Route::Retry`: the participant could not be reached.
+                    (_, Err(e)) => Err(e),
+                    (route, Ok(_)) => anyhow::bail!("{route:?} chosen for a rebuilt store"),
+                }
+            },
+        )
+        .await?
+    };
+
+    match attempt {
+        Attempt::Signed(signed) => Ok(signed),
+        Attempt::FallBack(reason) => {
+            tracing::warn!(
                 %party_id,
-                %store,
-                dns_serial,
-                p2p_serial,
-                "Replayed the party's topology history into a temporary store; signing there"
+                threshold = head.dns.threshold,
+                reason,
+                "Could not rebuild the party's topology history in a temporary store; signing \
+                 against the synchronizer store instead. Above threshold 1 the proposals stay \
+                 pending until the members sign"
             );
+            let store = topology::synchronizer_store_id(synchronizer_id);
+            let signed =
+                sign_on_synchronizer(config, &store, proposals, serials, force_flags).await?;
+            Ok(signed)
+        }
+    }
+}
 
-            let dns = match new_dns {
-                Some(definition) => Some(
-                    authorize(
-                        &channel,
-                        proposal_request(
-                            &store,
-                            topology_mapping::Mapping::DecentralizedNamespaceDefinition(definition),
-                            dns_serial,
-                            force_flags.clone(),
-                        ),
-                    )
-                    .await?,
-                ),
-                None => None,
-            };
-            let p2p = authorize(
-                &channel,
+/// What signing in the temporary store came to.
+enum Attempt {
+    Signed(SignedProposals),
+    /// The replay failed above threshold 1; the reason, for the log.
+    FallBack(String),
+}
+
+/// Sign the DNS (when there is one) and then the P2P in `store`.
+async fn sign(
+    channel: &Channel,
+    store: &StoreId,
+    (new_dns, new_p2p): (Option<DecentralizedNamespaceDefinition>, PartyToParticipant),
+    (dns_serial, p2p_serial): (u32, u32),
+    force_flags: Vec<i32>,
+) -> Result<SignedProposals> {
+    let dns = match new_dns {
+        Some(definition) => Some(
+            authorize(
+                channel,
                 proposal_request(
-                    &store,
-                    topology_mapping::Mapping::PartyToParticipant(new_p2p),
-                    p2p_serial,
-                    force_flags,
+                    store.clone(),
+                    topology_mapping::Mapping::DecentralizedNamespaceDefinition(definition),
+                    dns_serial,
+                    force_flags.clone(),
                 ),
             )
-            .await?;
-            Ok(SignedProposals { dns, p2p })
-        },
+            .await?,
+        ),
+        None => None,
+    };
+    let p2p = authorize(
+        channel,
+        proposal_request(
+            store.clone(),
+            topology_mapping::Mapping::PartyToParticipant(new_p2p),
+            p2p_serial,
+            force_flags,
+        ),
     )
-    .await
+    .await?;
+    Ok(SignedProposals { dns, p2p })
+}
+
+/// Sign the pair against the synchronizer store, as the coordinator did before
+/// #448. `Authorize` there publishes each proposal as it signs it. The serials
+/// stay pinned to `head` + 1, so a head that moved in the meantime is refused
+/// rather than replaced.
+async fn sign_on_synchronizer(
+    config: &NodeConfig,
+    store: &StoreId,
+    (new_dns, new_p2p): (Option<DecentralizedNamespaceDefinition>, PartyToParticipant),
+    (dns_serial, p2p_serial): (u32, u32),
+    force_flags: Vec<i32>,
+) -> Result<SignedProposals> {
+    let signed = |response: AuthorizeResponse| {
+        response
+            .transaction
+            .ok_or_else(|| anyhow::anyhow!("Authorize returned no transaction"))
+    };
+    let dns = match new_dns {
+        Some(definition) => Some(signed(
+            topology::authorize_with_topology_retry(
+                config,
+                proposal_request(
+                    store.clone(),
+                    topology_mapping::Mapping::DecentralizedNamespaceDefinition(definition),
+                    dns_serial,
+                    force_flags.clone(),
+                ),
+                "DNS proposal",
+            )
+            .await?,
+        )?),
+        None => None,
+    };
+    let p2p = signed(
+        topology::authorize_with_topology_retry(
+            config,
+            proposal_request(
+                store.clone(),
+                topology_mapping::Mapping::PartyToParticipant(new_p2p),
+                p2p_serial,
+                force_flags,
+            ),
+            "P2P proposal",
+        )
+        .await?,
+    )?;
+    Ok(SignedProposals { dns, p2p })
 }
 
 /// Drop every temporary store an earlier process of this tool left behind.
@@ -506,15 +718,15 @@ fn next_serial(what: &str, head: u32) -> Result<u32> {
 // Signing
 // ---------------------------------------------------------------------------
 
-/// An `Authorize` that proposes `mapping` at `serial` in temporary store
-/// `store`.
+/// An `Authorize` that proposes `mapping` at `serial` in `store`.
 ///
 /// `must_fully_authorize` stays false: this node's signature alone is not the
 /// party's authorization, and the peers' signatures are merged in before
-/// submit. The serial is explicit because the temporary store is not where the
-/// transaction is published.
+/// submit. The serial is explicit: a temporary store is not where the
+/// transaction is published, and against the synchronizer store it refuses a
+/// head that moved.
 fn proposal_request(
-    store: &str,
+    store: StoreId,
     mapping: topology_mapping::Mapping,
     serial: u32,
     force_flags: Vec<i32>,
@@ -532,7 +744,7 @@ fn proposal_request(
         must_fully_authorize: false,
         force_changes: force_flags,
         signed_by: vec![],
-        store: Some(temporary_store_id(store)),
+        store: Some(store),
         wait_to_become_effective: None,
     }
 }
@@ -623,6 +835,9 @@ async fn seed(
             .await
         {
             Ok(_) => accepted += 1,
+            // A lost connection is not a refusal, and must not be read as a
+            // history that does not replay.
+            Err(status) if is_transport_code(status.code()) => return Err(status.into()),
             // Unexpected, since the synchronizer accepted every one of these.
             // The run can still go on if the heads come out right.
             Err(status) => tracing::warn!(
@@ -804,6 +1019,16 @@ async fn ensure_seeded_to(
     let p2p = topology::fetch_p2p_mapping_at_head_in(config, temporary_store_id(store), party_id)
         .await
         .map(|(serial, _)| serial);
+    // A read that could not reach the participant says nothing about the
+    // store, so it goes back as it is rather than as a failed replay.
+    let unreachable = |read: Result<u32>| match read {
+        Err(e) if is_unreachable(&e) => {
+            Err(e.context(format!("Could not read the temporary store {store}")))
+        }
+        other => Ok(other),
+    };
+    let dns = unreachable(dns)?;
+    let p2p = unreachable(p2p)?;
     match (dns, p2p) {
         (Ok(dns), Ok(p2p)) if dns == head.dns_serial && p2p == head.p2p_serial => Ok(()),
         (dns, p2p) => anyhow::bail!(
@@ -1075,7 +1300,7 @@ mod tests {
     #[test]
     fn proposals_are_signed_in_the_temporary_store_at_the_pinned_serial() -> Result {
         let request = proposal_request(
-            "decman-proposals-run~1",
+            temporary_store_id("decman-proposals-run~1"),
             topology_mapping::Mapping::DecentralizedNamespaceDefinition(Default::default()),
             7,
             vec![ForceFlag::AllowUnvalidatedSigningKeys as i32],
@@ -1274,6 +1499,94 @@ mod tests {
             [(5, "nsd"), (1, "nsd"), (1, "dnd"), (1, "ptp"), (2, "ptp")]
         );
         Ok(())
+    }
+
+    // -- fallback --------------------------------------------------------
+
+    /// A rebuilt store is used at every threshold. Falling back here would
+    /// publish proposals the temporary store exists to hold back.
+    #[test]
+    fn a_rebuilt_store_is_always_used() {
+        for threshold in [1, 2, 3] {
+            assert_eq!(
+                signing_route(threshold, RebuildOutcome::Rebuilt),
+                Route::TemporaryStore,
+                "threshold {threshold}"
+            );
+        }
+    }
+
+    /// At threshold 1 the coordinator alone authorizes the namespace change,
+    /// so a proposal published early takes effect: a failed replay stops.
+    #[test]
+    fn a_failed_replay_at_threshold_one_refuses() {
+        for threshold in [1, 0] {
+            assert_eq!(
+                signing_route(threshold, RebuildOutcome::ReplayFailed),
+                Route::Refuse,
+                "threshold {threshold}"
+            );
+        }
+    }
+
+    /// Above threshold 1 the coordinator alone cannot meet the threshold, so
+    /// signing against the synchronizer, as before #448, is safe.
+    #[test]
+    fn a_failed_replay_above_threshold_one_falls_back() {
+        for threshold in [2, 3, 7] {
+            assert_eq!(
+                signing_route(threshold, RebuildOutcome::ReplayFailed),
+                Route::Synchronizer,
+                "threshold {threshold}"
+            );
+        }
+    }
+
+    /// An unreachable participant says nothing about the history, so the
+    /// step retries at every threshold and never falls back.
+    #[test]
+    fn an_unreachable_participant_never_falls_back() {
+        for threshold in [1, 2, 3] {
+            assert_eq!(
+                signing_route(threshold, RebuildOutcome::Unreachable),
+                Route::Retry,
+                "threshold {threshold}"
+            );
+        }
+    }
+
+    #[test]
+    fn transport_failures_read_as_unreachable_and_refusals_as_failed_replays() {
+        let unreachable: [Result<usize>; 3] = [
+            Err(tonic::Status::unavailable("connection refused").into()),
+            Err(
+                anyhow::Error::from(tonic::Status::deadline_exceeded("slow"))
+                    .context("list the party's history"),
+            ),
+            Err(tonic::Status::unknown("h2 protocol error").into()),
+        ];
+        for result in &unreachable {
+            assert_eq!(
+                rebuild_outcome(result),
+                RebuildOutcome::Unreachable,
+                "{result:?}"
+            );
+        }
+
+        let failed_replays: [Result<usize>; 3] = [
+            Err(tonic::Status::invalid_argument("unknown mapping code").into()),
+            Err(tonic::Status::failed_precondition("TOPOLOGY_SERIAL_MISMATCH").into()),
+            Err(anyhow::anyhow!("the store holds DNS serial none")),
+        ];
+        for result in &failed_replays {
+            assert_eq!(
+                rebuild_outcome(result),
+                RebuildOutcome::ReplayFailed,
+                "{result:?}"
+            );
+        }
+
+        assert_eq!(rebuild_outcome(&Ok(12)), RebuildOutcome::Rebuilt);
     }
 
     #[test]

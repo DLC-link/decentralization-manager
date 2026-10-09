@@ -263,12 +263,13 @@ pub async fn create_proposals(
     };
     let p2p_transaction = signed.p2p;
 
-    // The one proposal published before submit. The new member disconnects
-    // before the mapping that hosts it is authorized (#469), and its ACS
-    // import needs that mapping in its own synchronizer store, which holds
-    // only what was sequenced. Adding a host needs that host's own signature,
-    // so the proposal stays pending until the new member signs. The DNS stays
-    // unpublished until submit.
+    // Published before submit on purpose. The new member disconnects before
+    // the mapping that hosts it is authorized (#469), and its ACS import needs
+    // that mapping in its own synchronizer store, which holds only what was
+    // sequenced. Adding a host needs that host's own signature, so the
+    // proposal stays pending until the new member signs. The DNS stays
+    // unpublished until submit, unless the signing fell back to the
+    // synchronizer above threshold 1; Canton then ignores this repeat.
     tracing::info!("Publishing the add-party P2P proposal for the new member's store...");
     TopologyManagerWriteServiceClient::new(config.admin_channel().await?)
         .add_transactions(tonic::Request::new(topology::add_transactions_request(

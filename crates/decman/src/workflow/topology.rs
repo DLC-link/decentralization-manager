@@ -696,6 +696,11 @@ pub enum Standing {
 /// proposal must then not be published: Canton refuses a stale serial, and a
 /// DNS that goes in while its P2P is refused leaves the party half changed.
 ///
+/// A proposal already distributed while pending, by add-party or by the
+/// signing fallback above threshold 1, is not in the head state. It still
+/// reads as the next serial, and submit re-publishes it with the peers'
+/// signatures merged in.
+///
 /// `head` is `None` when the synchronizer holds no transaction for the
 /// mapping, which only a first serial can follow.
 ///
