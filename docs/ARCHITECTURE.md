@@ -514,7 +514,7 @@ suspends it only on the joining node.
 
 **Canton API calls:**
 - `VaultService.GenerateKey` / `ExportKeyPair` -- New member's keys (step 2)
-- `TopologyManagerWriteService.CreateTemporaryTopologyStore` / `AddTransactions` / `Authorize` / `DropTemporaryTopologyStore` -- Sign the coordinator's proposals without publishing them (step 4, see [Party Topology Proposals](#party-topology-proposals))
+- `TopologyManagerWriteService.CreateTemporaryTopologyStore` / `AddTransactions` / `Authorize` / `DropTemporaryTopologyStore` -- Sign the coordinator's proposals, then publish only the P2P proposal for the new member (step 4, see [Party Topology Proposals](#party-topology-proposals))
 - `TopologyManagerWriteService.SignTransactions` / `AddTransactions` -- Sign and submit the proposals (steps 5, 6)
 - `TopologyManagerWriteService.Authorize` / `AddTransactions` -- The onboarding-flag clearing proposal (steps 9, 11, 12)
 - `PartyManagementService.GetHighestOffsetByTimestamp` -- Capture the export offset (step 3)
@@ -554,7 +554,7 @@ Changes the signing threshold of an existing decentralized party's namespace.
 
 Kick, add-party and change-threshold each change two mappings: the party's
 `DecentralizedNamespaceDefinition` (DNS) and its `PartyToParticipant` (P2P).
-Nothing reaches the synchronizer until the submit step publishes both.
+Nothing that can take effect reaches the synchronizer before the submit step.
 
 - **Signing.** The coordinator authorizes each proposal in a temporary
   topology store. Canton keeps that store in the participant's memory and
@@ -566,6 +566,12 @@ Nothing reaches the synchronizer until the submit step publishes both.
   therefore replays the party's DNS and P2P history, and the namespace
   delegations behind their signatures, into the store. It signs only once the
   store's heads match the synchronizer's, at serial head + 1 for each.
+- **Add-party's P2P.** The new member disconnects before the mapping that
+  hosts it is authorized, and its ACS import needs that mapping in its own
+  synchronizer store. The coordinator therefore publishes the P2P proposal
+  with its own signature before the signing round. Canton requires an added
+  host's signature, so that proposal stays pending until the new member signs.
+  The add-party DNS still waits for submit.
 - **Submit.** Before it publishes anything, the coordinator compares both
   serials with the synchronizer's heads again. A serial that moved stops the
   run with nothing published. A proposal that is already the head is in force
