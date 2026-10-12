@@ -26,6 +26,7 @@ import { Header } from "./components/Header";
 import { Sidebar, SIDEBAR_WIDTH, SIDEBAR_WIDTH_COLLAPSED } from "./components/Sidebar";
 import { PartyList } from "./components/PartyList";
 import { PartyDetail } from "./components/PartyDetail";
+import { FormerPartyDetail } from "./components/FormerPartyDetail";
 import { NodeHealthCard } from "./components/NodeHealthCard";
 import { NetworkConfigAccordion } from "./components/NetworkConfigAccordion";
 import { useNodeHealth } from "./useNodeHealth";
@@ -47,6 +48,7 @@ import {
   nextAuditSnapshot,
   type AuditSnapshot,
 } from "./completedProposals";
+import { useFormerParties } from "./useFormerParties";
 import { TAB_HASHES, buildHash, parseHash, sharedWithSlug } from "./hashRoute";
 import { participantName, partiesSharedWith } from "./sharedParties";
 import { workflowKindLabel } from "./workflowSteps";
@@ -138,6 +140,14 @@ const App = () => {
   const sidebarWidth = sidebarCollapsed ? SIDEBAR_WIDTH_COLLAPSED : SIDEBAR_WIDTH;
   const [activeTab, setActiveTab] = useState(INITIAL_ROUTE.tab);
   const [parties, setParties] = useState<DecentralizedParty[]>([]);
+  // The prefix `parties` was last loaded with, so the former parties can be
+  // narrowed to match.
+  const [loadedPrefix, setLoadedPrefix] = useState("");
+  const {
+    formerParties,
+    loaded: formerPartiesLoaded,
+    reload: reloadFormerParties,
+  } = useFormerParties();
   const [partiesView, setPartiesView] = useState<"decentralized" | "external">(
     "decentralized",
   );
@@ -257,6 +267,15 @@ const App = () => {
     () => listedParties.filter((p) => isHidden(p.party_id)).length,
     [listedParties, isHidden],
   );
+  // A party hosted again leaves the former list on its next load; until then
+  // the hosted entry wins. The shared view lists hosted parties only.
+  const visibleFormerParties = useMemo(() => {
+    if (sharedWith) return [];
+    const hosted = new Set(parties.map((p) => p.party_id));
+    return formerParties.filter(
+      (p) => p.party_id.startsWith(loadedPrefix) && !hosted.has(p.party_id),
+    );
+  }, [formerParties, parties, loadedPrefix, sharedWith]);
   const lastScrollY = useRef(0);
   const savedScrollY = useRef(0);
   const pendingSlug = useRef<string | null>(INITIAL_ROUTE.partySlug);
@@ -278,6 +297,7 @@ const App = () => {
           const data: DecentralizedPartiesResponse = await res.json();
           setParties(data.parties);
           listPrefix.current = prefix;
+          setLoadedPrefix(prefix);
         } else {
           showSnackbar("Failed to refresh parties", "error");
         }
@@ -288,9 +308,12 @@ const App = () => {
         );
       } finally {
         setRefreshingParties(false);
+        // A refresh from Canton is what records a removal, so read the former
+        // parties after it.
+        void reloadFormerParties();
       }
     },
-    [showSnackbar],
+    [showSnackbar, reloadFormerParties],
   );
 
   // --- Hash-based routing ---
@@ -370,16 +393,18 @@ const App = () => {
     };
   }, [packagesPartyId, packagesParty]);
 
-  // Once parties are loaded, resolve pending slug → exact match opens detail
+  // Once parties are loaded, resolve pending slug → exact match opens detail.
+  // A former party is known only once its own list has loaded too.
   useEffect(() => {
     if (loading || !pendingSlug.current) return;
     const slug = pendingSlug.current;
+    const hosted = parties.some((p) => p.party_id === slug);
+    if (!hosted && !formerPartiesLoaded) return;
     pendingSlug.current = null;
-    const exactMatch = parties.find((p) => p.party_id === slug);
-    if (exactMatch) {
+    if (hosted || formerParties.some((p) => p.party_id === slug)) {
       setSelectedPartyId(slug);
     }
-  }, [loading, parties]);
+  }, [loading, parties, formerParties, formerPartiesLoaded]);
 
   // Listen for back/forward browser navigation
   useEffect(() => {
@@ -394,7 +419,9 @@ const App = () => {
           enterSharedView(sharedWith);
           return;
         }
-        const exactMatch = parties.find((p) => p.party_id === partySlug);
+        const exactMatch =
+          parties.some((p) => p.party_id === partySlug) ||
+          formerParties.some((p) => p.party_id === partySlug);
         if (exactMatch) {
           setSelectedPartyId(partySlug);
           setSharedWith(historyScope(event.state));
@@ -417,7 +444,7 @@ const App = () => {
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
-  }, [parties, enterSharedView, loadParties]);
+  }, [parties, formerParties, enterSharedView, loadParties]);
 
   useEffect(() => {
     if ("scrollRestoration" in history) {
@@ -549,6 +576,8 @@ const App = () => {
             await partiesRes.json();
           setParties(partiesData.parties);
           listPrefix.current = hashSlug ?? "";
+          setLoadedPrefix(hashSlug ?? "");
+          void reloadFormerParties();
         }
 
         if (authStatusRes.ok) {
@@ -568,7 +597,7 @@ const App = () => {
     };
 
     fetchData();
-  }, []);
+  }, [reloadFormerParties]);
 
   // Lazy-load parties when switching to parties tab (if not loaded on init)
   useEffect(() => {
@@ -991,6 +1020,23 @@ const App = () => {
     ) +
     workflowRuns.length;
 
+  const selectedParty = selectedPartyId
+    ? parties.find((p) => p.party_id === selectedPartyId)
+    : undefined;
+  const selectedFormerParty =
+    selectedPartyId && !selectedParty
+      ? formerParties.find((p) => p.party_id === selectedPartyId)
+      : undefined;
+  // A selected party that has left both lists falls back to the list, which
+  // then needs its search bar and FAB back.
+  const showingDetail = Boolean(selectedParty || selectedFormerParty);
+
+  const backToList = () => {
+    setSelectedPartyId(null);
+    navigate(0, sharedWith ? sharedWithSlug(sharedWith) : partyFilter || null);
+    window.scrollTo(0, savedScrollY.current);
+  };
+
   const buildInfo = nodeConfig
     ? {
         version: nodeConfig.version,
@@ -1022,7 +1068,7 @@ const App = () => {
         <Header buildInfo={buildInfo} />
       )}
 
-      {isLargeScreen && activeTab === 0 && !selectedPartyId && !error && (
+      {isLargeScreen && activeTab === 0 && !showingDetail && !error && (
         <Box
           sx={{
             position: "fixed",
@@ -1288,17 +1334,10 @@ const App = () => {
             flexDirection: "column",
           }}
         >
-          {selectedPartyId && parties.find((p) => p.party_id === selectedPartyId) ? (
+          {selectedParty ? (
             <PartyDetail
-              party={parties.find((p) => p.party_id === selectedPartyId)!}
-              onBack={() => {
-                setSelectedPartyId(null);
-                navigate(
-                  0,
-                  sharedWith ? sharedWithSlug(sharedWith) : partyFilter || null,
-                );
-                window.scrollTo(0, savedScrollY.current);
-              }}
+              party={selectedParty}
+              onBack={backToList}
               onRefresh={() => refreshParties(true)}
               onNavigateToNotifications={goToNotifications}
               selfParticipantId={nodeConfig?.node.participant_id}
@@ -1311,6 +1350,12 @@ const App = () => {
               onCheckDars={() => navigate(1, selectedPartyId)}
               onOpenPeerConfig={(participantId) => navigate(2, participantId)}
               onShowSharedParties={showSharedParties}
+            />
+          ) : selectedFormerParty ? (
+            <FormerPartyDetail
+              party={selectedFormerParty}
+              onBack={backToList}
+              onChanged={() => void reloadFormerParties()}
             />
           ) : (
             <>
@@ -1422,6 +1467,7 @@ const App = () => {
                   onToggleHidden={toggleHidden}
                   isFavorite={isFavorite}
                   onToggleFavorite={toggleFavorite}
+                  formerParties={visibleFormerParties}
                 />
               ) : (
                 <ExternalPartyList {...externalParties} />
@@ -1429,7 +1475,7 @@ const App = () => {
             </>
           )}
 
-          {ADMIN_ACCESS && !selectedPartyId && partiesView === "decentralized" && (
+          {ADMIN_ACCESS && !showingDetail && partiesView === "decentralized" && (
             <Tooltip title="Create Party" arrow>
               <Fab
                 color="primary"
