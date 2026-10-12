@@ -1,0 +1,251 @@
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+import { authenticatedFetch } from "../api";
+import { SnackbarProvider } from "../contexts";
+import { FormerPartyDetail } from "./FormerPartyDetail";
+import type { FormerParty, PurgePreview, PurgeStatus } from "../types";
+
+const access = vi.hoisted(() => ({ admin: true }));
+
+vi.mock("../api", () => ({ authenticatedFetch: vi.fn() }));
+vi.mock("../constants", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../constants")>()),
+  get ADMIN_ACCESS() {
+    return access.admin;
+  },
+}));
+
+const fetchMock = vi.mocked(authenticatedFetch);
+
+const PARTY_ID = `old-pool::1220${"c".repeat(64)}`;
+const ENCODED = encodeURIComponent(PARTY_ID);
+const PREVIEW_URL = `/former-parties/purge-preview?party_id=${ENCODED}`;
+const PURGE_URL = "/former-parties/purge";
+const DISMISS_URL = `/former-parties?party_id=${ENCODED}`;
+
+const formerParty = (
+  purge_status: PurgeStatus,
+  over: Partial<FormerParty> = {},
+): FormerParty => ({
+  party_id: PARTY_ID,
+  removed_at: 1_791_000_000,
+  detected_at: 1_791_000_060,
+  purge_status,
+  ...over,
+});
+
+const json = (body: unknown, status = 200) =>
+  Promise.resolve(new Response(JSON.stringify(body), { status }));
+
+const serve = ({
+  preview = { party_id: PARTY_ID, purge_count: 37, keep_count: 2 },
+  previewStatus = 200,
+  purgeStatus = 202,
+  purgeBody = { message: "Purge started" },
+}: {
+  preview?: PurgePreview | { error: string };
+  previewStatus?: number;
+  purgeStatus?: number;
+  purgeBody?: unknown;
+} = {}) =>
+  fetchMock.mockImplementation((input, init) => {
+    const url = String(input);
+    if (url === PREVIEW_URL) return json(preview, previewStatus);
+    if (url === PURGE_URL && init?.method === "POST") {
+      return json(purgeBody, purgeStatus);
+    }
+    if (url === DISMISS_URL && init?.method === "DELETE") {
+      return json({ message: "dismissed" });
+    }
+    return json({ error: `unexpected ${init?.method ?? "GET"} ${url}` }, 500);
+  });
+
+const callsTo = (url: string, method?: string) =>
+  fetchMock.mock.calls.filter(
+    ([input, init]) =>
+      String(input) === url && (method === undefined || init?.method === method),
+  );
+
+const renderDetail = (party: FormerParty) => {
+  const onBack = vi.fn();
+  const onChanged = vi.fn();
+  render(
+    <FormerPartyDetail party={party} onBack={onBack} onChanged={onChanged} />,
+    { wrapper: SnackbarProvider },
+  );
+  return { onBack, onChanged };
+};
+
+const openPurge = async () => {
+  fireEvent.click(screen.getByRole("button", { name: "Purge" }));
+  await screen.findByRole("dialog");
+};
+
+beforeEach(() => {
+  fetchMock.mockReset();
+  access.admin = true;
+});
+
+describe("FormerPartyDetail", () => {
+  it("counts the contracts when the purge dialog opens, and only then", async () => {
+    let answer!: (response: Response) => void;
+    fetchMock.mockImplementation(
+      () => new Promise<Response>((resolve) => (answer = resolve)),
+    );
+    renderDetail(formerParty("none"));
+    expect(screen.getByTestId("former-party-title").textContent).toBe("old-pool");
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    await openPurge();
+    expect(callsTo(PREVIEW_URL)).toHaveLength(1);
+    expect(screen.getByText("Counting contracts…")).toBeTruthy();
+    const pending = screen.getByRole("button", { name: "Purge" }) as HTMLButtonElement;
+    expect(pending.closest("[role=dialog]")).toBeTruthy();
+    expect(pending.disabled).toBe(true);
+
+    answer(
+      new Response(
+        JSON.stringify({ party_id: PARTY_ID, purge_count: 37, keep_count: 2 }),
+      ),
+    );
+    expect(
+      await screen.findByText(
+        "This removes 37 contracts of old-pool from this node. It keeps 2 contracts that another party on this node is a stakeholder of.",
+      ),
+    ).toBeTruthy();
+    expect(screen.getByText(/leaves the synchronizer while the purge runs/)).toBeTruthy();
+    const confirm = screen.getByRole("button", {
+      name: "Purge 37 contracts",
+    }) as HTMLButtonElement;
+    expect(confirm.disabled).toBe(false);
+  });
+
+  it("sends no purge when the operator cancels", async () => {
+    serve();
+    renderDetail(formerParty("none"));
+    await openPurge();
+    await screen.findByRole("button", { name: "Purge 37 contracts" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(callsTo(PURGE_URL)).toHaveLength(0);
+  });
+
+  it("starts the purge on confirm", async () => {
+    serve();
+    const { onChanged } = renderDetail(formerParty("none"));
+    await openPurge();
+    fireEvent.click(await screen.findByRole("button", { name: "Purge 37 contracts" }));
+
+    expect(await screen.findByText("Purge started")).toBeTruthy();
+    const posts = callsTo(PURGE_URL, "POST");
+    expect(posts).toHaveLength(1);
+    expect(JSON.parse(String(posts[0][1]?.body))).toEqual({ party_id: PARTY_ID });
+    expect(onChanged).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("shows the server's reason when the purge is refused, and stays open", async () => {
+    const reason =
+      "workflows are running on this node (Kick k-1). A purge takes the participant off the synchronizer, so wait for them to finish";
+    serve({ purgeStatus: 409, purgeBody: { error: reason } });
+    const { onChanged } = renderDetail(formerParty("none"));
+    await openPurge();
+    fireEvent.click(await screen.findByRole("button", { name: "Purge 37 contracts" }));
+
+    expect(await screen.findByText(reason)).toBeTruthy();
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(onChanged).not.toHaveBeenCalled();
+    const confirm = screen.getByRole("button", {
+      name: "Purge 37 contracts",
+    }) as HTMLButtonElement;
+    await waitFor(() => expect(confirm.disabled).toBe(false));
+  });
+
+  it("offers to mark the party purged when nothing is left to remove", async () => {
+    serve({ preview: { party_id: PARTY_ID, purge_count: 0, keep_count: 5 } });
+    const { onChanged } = renderDetail(formerParty("none"));
+    await openPurge();
+
+    expect(
+      await screen.findByText(
+        "Nothing to purge. Every contract of this party is shared with a party this node still hosts.",
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByText(/leaves the synchronizer/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Mark as purged" }));
+
+    await screen.findByText("Purge started");
+    expect(callsTo(PURGE_URL, "POST")).toHaveLength(1);
+    expect(onChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows why the count failed and keeps confirm disabled", async () => {
+    serve({
+      preview: { error: "This node has no ledger credentials for old-pool" },
+      previewStatus: 409,
+    });
+    renderDetail(formerParty("none"));
+    await openPurge();
+
+    expect(
+      await screen.findByText("This node has no ledger credentials for old-pool"),
+    ).toBeTruthy();
+    const confirm = screen.getByRole("button", { name: "Purge" }) as HTMLButtonElement;
+    expect(confirm.closest("[role=dialog]")).toBeTruthy();
+    expect(confirm.disabled).toBe(true);
+  });
+
+  it.each(["none", "running", "failed"] as const)(
+    "offers no Dismiss while the purge status is %s",
+    (status) => {
+      renderDetail(formerParty(status, { purge_error: "boom" }));
+      expect(screen.queryByRole("button", { name: "Dismiss" })).toBeNull();
+    },
+  );
+
+  it("dismisses a purged party and returns to the list", async () => {
+    serve();
+    const { onBack, onChanged } = renderDetail(
+      formerParty("succeeded", { purged_count: 128, kept_count: 4 }),
+    );
+    expect(
+      screen.getByText(
+        "Purged 128 contracts. Kept 4 that another party on this node is a stakeholder of.",
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /purge/i })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+
+    expect(await screen.findByText("Dismissed")).toBeTruthy();
+    const deletes = callsTo(DISMISS_URL, "DELETE");
+    expect(deletes).toHaveLength(1);
+    expect(String(deletes[0][0])).toContain("old-pool%3A%3A1220");
+    expect(onChanged).toHaveBeenCalledTimes(1);
+    expect(onBack).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a running purge without a way to start another", () => {
+    renderDetail(formerParty("running"));
+    expect(screen.getByText(/Purge in progress/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Purge" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry purge" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Dismiss" })).toBeNull();
+  });
+
+  it("offers a retry after a failed purge, with the error", () => {
+    renderDetail(formerParty("failed", { purge_error: "reconnect timed out" }));
+    expect(screen.getByText("The last purge failed: reconnect timed out")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Retry purge" })).toBeTruthy();
+  });
+
+  it("disables the actions without admin access", () => {
+    access.admin = false;
+    renderDetail(formerParty("none"));
+    const purge = screen.getByRole("button", { name: "Purge" }) as HTMLButtonElement;
+    expect(purge.disabled).toBe(true);
+  });
+});
