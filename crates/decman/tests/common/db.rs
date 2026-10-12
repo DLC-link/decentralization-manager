@@ -399,6 +399,24 @@ pub async fn count_artifacts(db_path: &Path, instance_name: &str) -> anyhow::Res
     Ok(n)
 }
 
+/// `kind instance_name` of every workflow run the node has in progress, in
+/// any role.
+pub async fn in_progress_runs(db_path: &Path) -> anyhow::Result<Vec<String>> {
+    let pool = open(db_path).await?;
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT kind, instance_name FROM workflow_runs WHERE status = 'inprogress' \
+         ORDER BY created_at",
+    )
+    .fetch_all(&pool)
+    .await
+    .context("in_progress_runs")?;
+    pool.close().await;
+    Ok(rows
+        .into_iter()
+        .map(|(kind, instance)| format!("{kind} {instance}"))
+        .collect())
+}
+
 /// Whether the node's dec-party membership CACHE lists `participant_uid` as
 /// a member of `dec_party_id`. Start handlers (kick, add-party) consult this
 /// cache — not live Canton — so phases asserting on their member guards must
