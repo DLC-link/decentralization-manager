@@ -1,6 +1,6 @@
 use super::rows::{
     ChainAuditCacheRow, DecPartyContractRow, DecPartyParticipantRow, DecPartyRow,
-    GovernanceAuditRow,
+    FormerDecPartyRow, GovernanceAuditRow,
 };
 use crate::{
     canton_id::{CantonId, Fingerprint},
@@ -50,6 +50,16 @@ pub trait SchemaRead {
         party_id: &CantonId,
         participant_id: &CantonId,
     ) -> Result<Option<String>>;
+
+    /// Former parties an operator has not dismissed, oldest removal first.
+    async fn get_former_dec_parties(&self) -> Result<Vec<FormerDecPartyRow>>;
+
+    /// One former party, dismissed or not.
+    async fn get_former_dec_party(&self, party_id: &CantonId) -> Result<Option<FormerDecPartyRow>>;
+
+    /// Every recorded former party, dismissed ones included, so a refresh
+    /// does not read their topology history again.
+    async fn get_former_dec_party_ids(&self) -> Result<Vec<String>>;
 
     /// Get owner keys for a decentralized party
     async fn get_dec_party_owners(&self, party_id: &CantonId) -> Result<Vec<String>>;
@@ -204,6 +214,40 @@ pub trait SchemaWrite {
         party_id: &CantonId,
         participant_id: &CantonId,
     ) -> Result<bool>;
+
+    /// Record that this participant no longer hosts `party_id`. Idempotent:
+    /// the first detection is kept. Returns whether a row was added.
+    async fn record_former_dec_party(&self, party_id: &CantonId, removed_at: i64) -> Result<bool>;
+
+    /// Forget former parties this participant hosts again. A row whose purge
+    /// is running is kept, so the purge can record its outcome.
+    async fn forget_former_dec_parties(&self, party_ids: &[String]) -> Result<u64>;
+
+    /// Mark a purge of `party_id` as running. Returns `false`, and changes
+    /// nothing, when the party is not a visible former party or when any
+    /// purge is already running on this node: a purge takes the participant
+    /// off the synchronizer, so two must never overlap.
+    async fn claim_former_party_purge(&self, party_id: &CantonId) -> Result<bool>;
+
+    /// Record a purge that finished and left only shared contracts behind.
+    async fn complete_former_party_purge(
+        &self,
+        party_id: &CantonId,
+        purged: i64,
+        kept: i64,
+    ) -> Result<()>;
+
+    /// Record a purge that failed.
+    async fn fail_former_party_purge(&self, party_id: &CantonId, error: &str) -> Result<()>;
+
+    /// Mark every running purge as failed with `error`. Run at startup: a
+    /// purge runs inside this process, so one still marked running there was
+    /// cut off by the restart.
+    async fn fail_interrupted_purges(&self, error: &str) -> Result<u64>;
+
+    /// Hide a former party whose purge succeeded. Returns whether a row
+    /// changed.
+    async fn dismiss_former_dec_party(&self, party_id: &CantonId) -> Result<bool>;
 }
 
 /// A transaction that can be committed

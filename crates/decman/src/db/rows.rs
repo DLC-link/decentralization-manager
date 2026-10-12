@@ -172,6 +172,22 @@ pub struct DecPartyContractRow {
     pub created_at: String,
 }
 
+/// A party this participant hosted once and no longer hosts. See
+/// `000021_former_dec_party.up.sql`.
+#[derive(Debug, sqlx::FromRow)]
+pub struct FormerDecPartyRow {
+    pub party_id: String,
+    pub removed_at: i64,
+    pub detected_at: i64,
+    pub purge_status: String,
+    pub purge_started_at: Option<i64>,
+    pub purge_finished_at: Option<i64>,
+    pub purged_count: Option<i64>,
+    pub kept_count: Option<i64>,
+    pub purge_error: Option<String>,
+    pub dismissed_at: Option<i64>,
+}
+
 #[derive(Debug, sqlx::FromRow)]
 pub struct GovernanceAuditRow {
     pub id: i64,

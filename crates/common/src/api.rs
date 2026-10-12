@@ -191,6 +191,83 @@ pub struct DecentralizedPartiesResponse {
     pub refreshing: bool,
 }
 
+/// Where the cleanup of a former party's leftover contracts stands.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub enum PurgeStatus {
+    /// No purge has run.
+    #[default]
+    None,
+    Running,
+    Succeeded,
+    Failed,
+}
+
+/// A decentralized party this participant hosted once and no longer hosts.
+///
+/// The participant keeps the contracts it held for the party, and stops
+/// seeing their archives the moment it is removed, so they go stale.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct FormerParty {
+    pub party_id: CantonId,
+    /// When the first hosting mapping without this participant took effect,
+    /// in seconds since the epoch.
+    pub removed_at: i64,
+    /// When this node noticed the removal, in seconds since the epoch.
+    pub detected_at: i64,
+    pub purge_status: PurgeStatus,
+    #[cfg_attr(feature = "typegen", ts(type = "number | null"))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purge_started_at: Option<i64>,
+    #[cfg_attr(feature = "typegen", ts(type = "number | null"))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purge_finished_at: Option<i64>,
+    /// Contracts the last successful purge removed.
+    #[cfg_attr(feature = "typegen", ts(type = "number | null"))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purged_count: Option<i64>,
+    /// Contracts of the party the participant keeps, because another party
+    /// it still hosts is a stakeholder of them.
+    #[cfg_attr(feature = "typegen", ts(type = "number | null"))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kept_count: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purge_error: Option<String>,
+}
+
+/// Response for the former parties endpoint
+#[derive(Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct FormerPartiesResponse {
+    pub parties: Vec<FormerParty>,
+}
+
+/// What a purge of a former party would do right now.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct PurgePreview {
+    pub party_id: CantonId,
+    /// Contracts no party this participant still hosts is a stakeholder of.
+    pub purge_count: usize,
+    /// Contracts another party this participant hosts is a stakeholder of.
+    pub keep_count: usize,
+}
+
+/// Request to purge a former party's leftover contracts from this participant
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+#[serde(deny_unknown_fields)]
+pub struct PurgeFormerPartyRequest {
+    pub party_id: String,
+}
+
 /// Request to kick a participant from a decentralized party.
 /// `deny_unknown_fields` rejects pre-fix requests carrying
 /// `namespace_fingerprint` instead of silently ignoring it (the server now
