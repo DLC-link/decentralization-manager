@@ -1,4 +1,5 @@
 import { Box, Collapse } from "@mui/material";
+import { alpha } from "@mui/material/styles";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import { useState, type ReactNode } from "react";
 import { EXPANDER_SLOT } from "../styles";
@@ -18,6 +19,7 @@ export const RowCard = ({
   detail,
   detailLabel,
   dimmed = false,
+  tone,
   ariaLabel,
   dataAttrs,
 }: {
@@ -28,8 +30,10 @@ export const RowCard = ({
   detail?: ReactNode;
   /** Accessible name for the expander, when `detail` is set. */
   detailLabel?: string;
-  /** Hidden parties stay readable but recede. */
+  /** Hidden parties and purged former ones stay readable but recede. */
   dimmed?: boolean;
+  /** `warning` marks a row that needs attention: a warning border and left accent. */
+  tone?: "warning";
   ariaLabel?: string;
   /** `data-*` hooks for the e2e suite to select by. */
   dataAttrs?: Record<string, string>;
@@ -37,12 +41,20 @@ export const RowCard = ({
   const [open, setOpen] = useState(false);
   const expandable = detail != null;
   const activate = expandable ? () => setOpen((o) => !o) : onActivate;
+  const warning = tone === "warning";
   return (
     <Box
       {...dataAttrs}
       sx={{
         border: "1px solid",
-        borderColor: "divider",
+        borderColor: warning
+          ? (t) => alpha(t.palette.warning.main, 0.5)
+          : "divider",
+        // An inset shadow rather than a wider left border, so the row's
+        // columns stay aligned with the rows around it.
+        ...(warning && {
+          boxShadow: (t) => `inset 3px 0 0 ${t.palette.warning.main}`,
+        }),
         borderRadius: "8px",
         bgcolor: "background.paper",
         opacity: dimmed ? 0.45 : 1,
@@ -51,14 +63,18 @@ export const RowCard = ({
         // Every row lifts on hover, whether or not it is clickable: the lists
         // are read across, and the tint is what tracks the eye along one row.
         "&:hover": {
-          borderColor: (t) => (t.palette.mode === "dark" ? "#3A332E" : "#C9C2BE"),
+          borderColor: warning
+            ? "warning.main"
+            : (t) => (t.palette.mode === "dark" ? "#3A332E" : "#C9C2BE"),
           bgcolor: (t) =>
             t.palette.mode === "dark"
               ? "rgba(255, 255, 255, 0.035)"
               : "rgba(0, 0, 0, 0.022)",
         },
         "&:focus-within": {
-          borderColor: (t) => (t.palette.mode === "dark" ? "#3A332E" : "#C9C2BE"),
+          borderColor: warning
+            ? "warning.main"
+            : (t) => (t.palette.mode === "dark" ? "#3A332E" : "#C9C2BE"),
         },
       }}
     >
