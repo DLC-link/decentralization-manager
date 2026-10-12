@@ -43,7 +43,7 @@ use crate::{
         send_noise_message_with_retry,
     },
     server::{
-        AppState,
+        AppState, former_parties,
         health::classify_health_reply,
         package_inventory::{TopologyReader, expected_splice_versions, fetch_vetted_packages},
         queries::{
@@ -344,6 +344,15 @@ pub(crate) async fn discover_and_cache(
         Ok(response) => {
             record_discovery(&gate.completed, prefix, &response.parties).await;
 
+            // Read before the store below deletes the parties this discovery
+            // did not return from the cache.
+            let returned: Vec<String> = response
+                .parties
+                .iter()
+                .map(|party| party.party_id.to_string())
+                .collect();
+            let unreturned = unreturned_parties(db, party_credentials, prefix, &returned).await;
+
             match store_parties_to_db(db, prefix, &response.parties).await {
                 Ok(()) => {
                     // Signalled last, while the claim still stands, so a
@@ -369,6 +378,8 @@ pub(crate) async fn discover_and_cache(
                 }
             }
 
+            former_parties::reconcile(config, db, &unreturned, &returned).await;
+
             Discovery::Done(response)
         }
         Err(e) => Discovery::Failed(e),
@@ -376,6 +387,39 @@ pub(crate) async fn discover_and_cache(
 
     gate.claims.write().await.remove(prefix);
     outcome
+}
+
+/// The parties this node knew under `prefix` that a discovery did not return.
+///
+/// Best effort: a failed read only delays noticing a removal until the next
+/// discovery.
+async fn unreturned_parties(
+    db: &SqlitePool,
+    party_credentials: &[PartyCredentials],
+    prefix: &str,
+    returned: &[String],
+) -> Vec<String> {
+    let (runs, cached) = match (
+        db.get_visible_workflow_runs().await,
+        db.get_dec_parties_by_prefix("").await,
+    ) {
+        (Ok(runs), Ok(cached)) => (runs, cached),
+        (Err(e), _) | (_, Err(e)) => {
+            tracing::warn!("Could not list the known parties to check for removals: {e}");
+            return Vec::new();
+        }
+    };
+    let returned: HashSet<&String> = returned.iter().collect();
+    known_party_filters(
+        party_credentials,
+        runs.into_iter()
+            .filter_map(|run| run.dec_party_id.map(|party_id| party_id.to_string())),
+        cached.into_iter().map(|party| party.party_id),
+        Some(prefix).filter(|prefix| !prefix.is_empty()),
+    )
+    .into_iter()
+    .filter(|party_id| !returned.contains(party_id))
+    .collect()
 }
 
 /// One discovery under [`DISCOVERY_BUDGET`].
