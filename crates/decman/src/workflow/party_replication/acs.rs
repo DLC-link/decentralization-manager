@@ -648,7 +648,7 @@ async fn reconnect_and_verify_healthy(config: &NodeConfig) -> Result {
 
 /// Poll `ListConnectedSynchronizers` until the configured synchronizer reports
 /// healthy, or give up after the topology retry budget. Never reconnects.
-async fn verify_healthy(config: &NodeConfig) -> Result {
+pub(crate) async fn verify_healthy(config: &NodeConfig) -> Result {
     let alias = config.synchronizer();
     let max_attempts = topology_retry_max_attempts();
     let retry_delay = Duration::from_secs(topology_retry_delay_secs());
@@ -711,7 +711,7 @@ async fn verify_healthy(config: &NodeConfig) -> Result {
 /// or an accepted `ReconnectSynchronizers` request. Reporting a half-reconnected
 /// (or crash-looping) participant as success is exactly the failure this fix
 /// exists to prevent.
-fn synchronizer_healthy(
+pub(crate) fn synchronizer_healthy(
     connected: &[list_connected_synchronizers_response::Result],
     alias: &str,
 ) -> bool {

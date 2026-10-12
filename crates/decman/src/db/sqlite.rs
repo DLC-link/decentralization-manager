@@ -11,8 +11,8 @@ use super::{
     crypto,
     rows::{
         ChainAuditCacheRow, DecPartyContractRow, DecPartyIdentityRow, DecPartyParticipantRow,
-        DecPartyRow, GovernanceAuditRow, HandledInvitationRow, PartyCredentialsRow, PeerRow,
-        PendingInvitationRow, WorkflowArtifactRow, WorkflowRunRow,
+        DecPartyRow, FormerDecPartyRow, GovernanceAuditRow, HandledInvitationRow,
+        PartyCredentialsRow, PeerRow, PendingInvitationRow, WorkflowArtifactRow, WorkflowRunRow,
     },
     schema::{Commitable, SchemaRead, SchemaWrite},
 };
@@ -195,6 +195,31 @@ impl SchemaRead for SqlitePool {
         .fetch_optional(self)
         .await?;
         Ok(row.map(|(reason,)| reason))
+    }
+
+    async fn get_former_dec_parties(&self) -> Result<Vec<FormerDecPartyRow>> {
+        Ok(sqlx::query_as::<_, FormerDecPartyRow>(
+            "SELECT * FROM former_dec_party WHERE dismissed_at IS NULL \
+             ORDER BY removed_at, party_id",
+        )
+        .fetch_all(self)
+        .await?)
+    }
+
+    async fn get_former_dec_party(&self, party_id: &CantonId) -> Result<Option<FormerDecPartyRow>> {
+        Ok(sqlx::query_as::<_, FormerDecPartyRow>(
+            "SELECT * FROM former_dec_party WHERE party_id = ?",
+        )
+        .bind(party_id.to_string())
+        .fetch_optional(self)
+        .await?)
+    }
+
+    async fn get_former_dec_party_ids(&self) -> Result<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as("SELECT party_id FROM former_dec_party")
+            .fetch_all(self)
+            .await?;
+        Ok(rows.into_iter().map(|(party_id,)| party_id).collect())
     }
 
     async fn get_dec_parties_by_prefix(&self, prefix: &str) -> Result<Vec<DecPartyRow>> {
@@ -644,6 +669,112 @@ impl SchemaWrite for SqlitePool {
         )
         .bind(party_id.to_string())
         .bind(participant_id.to_string())
+        .execute(self)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn record_former_dec_party(&self, party_id: &CantonId, removed_at: i64) -> Result<bool> {
+        let result = sqlx::query(
+            "INSERT OR IGNORE INTO former_dec_party (party_id, removed_at, detected_at) \
+             VALUES (?, ?, ?)",
+        )
+        .bind(party_id.to_string())
+        .bind(removed_at)
+        .bind(chrono::Utc::now().timestamp())
+        .execute(self)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn forget_former_dec_parties(&self, party_ids: &[String]) -> Result<u64> {
+        if party_ids.is_empty() {
+            return Ok(0);
+        }
+        let placeholders = vec!["?"; party_ids.len()].join(",");
+        let query = format!(
+            "DELETE FROM former_dec_party \
+             WHERE purge_status != 'running' AND party_id IN ({placeholders})"
+        );
+        let mut q = sqlx::query(&query);
+        for party_id in party_ids {
+            q = q.bind(party_id);
+        }
+        Ok(q.execute(self).await?.rows_affected())
+    }
+
+    async fn claim_former_party_purge(&self, party_id: &CantonId) -> Result<bool> {
+        // One statement, so the "nothing else is running" check and the claim
+        // cannot interleave with a second request's.
+        let result = sqlx::query(
+            "UPDATE former_dec_party \
+             SET purge_status = 'running', purge_started_at = ?, purge_finished_at = NULL, \
+                 purged_count = NULL, kept_count = NULL, purge_error = NULL \
+             WHERE party_id = ? AND dismissed_at IS NULL \
+               AND NOT EXISTS (SELECT 1 FROM former_dec_party WHERE purge_status = 'running')",
+        )
+        .bind(chrono::Utc::now().timestamp())
+        .bind(party_id.to_string())
+        .execute(self)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn complete_former_party_purge(
+        &self,
+        party_id: &CantonId,
+        purged: i64,
+        kept: i64,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE former_dec_party \
+             SET purge_status = 'succeeded', purge_finished_at = ?, purged_count = ?, \
+                 kept_count = ?, purge_error = NULL \
+             WHERE party_id = ?",
+        )
+        .bind(chrono::Utc::now().timestamp())
+        .bind(purged)
+        .bind(kept)
+        .bind(party_id.to_string())
+        .execute(self)
+        .await?;
+        Ok(())
+    }
+
+    async fn fail_former_party_purge(&self, party_id: &CantonId, error: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE former_dec_party \
+             SET purge_status = 'failed', purge_finished_at = ?, purge_error = ? \
+             WHERE party_id = ?",
+        )
+        .bind(chrono::Utc::now().timestamp())
+        .bind(error)
+        .bind(party_id.to_string())
+        .execute(self)
+        .await?;
+        Ok(())
+    }
+
+    async fn fail_interrupted_purges(&self, error: &str) -> Result<u64> {
+        let result = sqlx::query(
+            "UPDATE former_dec_party \
+             SET purge_status = 'failed', purge_finished_at = ?, purge_error = ? \
+             WHERE purge_status = 'running'",
+        )
+        .bind(chrono::Utc::now().timestamp())
+        .bind(error)
+        .execute(self)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    async fn dismiss_former_dec_party(&self, party_id: &CantonId) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE former_dec_party SET dismissed_at = ? \
+             WHERE party_id = ? AND purge_status = 'succeeded' AND dismissed_at IS NULL",
+        )
+        .bind(chrono::Utc::now().timestamp())
+        .bind(party_id.to_string())
         .execute(self)
         .await?;
         Ok(result.rows_affected() > 0)
@@ -1629,6 +1760,146 @@ mod tests {
             !pool.clear_acs_import_quarantine(&party, &target).await?,
             "lifting an absent quarantine reports no row removed rather than failing"
         );
+        Ok(())
+    }
+
+    fn former(prefix: &str) -> CantonId {
+        CantonId::parse(&format!("{prefix}::{TEST_NS}")).unwrap()
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn former_party_keeps_its_first_detection(pool: SqlitePool) -> Result {
+        let party = former("left");
+        assert!(pool.record_former_dec_party(&party, 100).await?);
+        assert!(
+            !pool.record_former_dec_party(&party, 200).await?,
+            "a later refresh must not move the removal time"
+        );
+
+        let rows = pool.get_former_dec_parties().await?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].party_id, party.to_string());
+        assert_eq!(rows[0].removed_at, 100);
+        assert_eq!(rows[0].purge_status, "none");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn only_one_purge_runs_at_a_time(pool: SqlitePool) -> Result {
+        let (a, b) = (former("a"), former("b"));
+        pool.record_former_dec_party(&a, 1).await?;
+        pool.record_former_dec_party(&b, 1).await?;
+
+        assert!(pool.claim_former_party_purge(&a).await?);
+        assert!(
+            !pool.claim_former_party_purge(&a).await?,
+            "a running purge cannot be claimed twice"
+        );
+        assert!(
+            !pool.claim_former_party_purge(&b).await?,
+            "a purge disconnects the participant, so a second party must wait"
+        );
+
+        pool.complete_former_party_purge(&a, 7, 3).await?;
+        assert!(pool.claim_former_party_purge(&b).await?);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn unknown_party_cannot_be_claimed(pool: SqlitePool) -> Result {
+        assert!(!pool.claim_former_party_purge(&former("never")).await?);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn purge_outcomes_are_recorded(pool: SqlitePool) -> Result {
+        let party = former("left");
+        pool.record_former_dec_party(&party, 1).await?;
+
+        pool.claim_former_party_purge(&party).await?;
+        pool.fail_former_party_purge(&party, "participant unhealthy")
+            .await?;
+        let row = pool.get_former_dec_party(&party).await?.unwrap();
+        assert_eq!(row.purge_status, "failed");
+        assert_eq!(row.purge_error.as_deref(), Some("participant unhealthy"));
+
+        // A retry clears the previous failure.
+        pool.claim_former_party_purge(&party).await?;
+        let row = pool.get_former_dec_party(&party).await?.unwrap();
+        assert_eq!(row.purge_status, "running");
+        assert_eq!(row.purge_error, None);
+
+        pool.complete_former_party_purge(&party, 3028, 11438)
+            .await?;
+        let row = pool.get_former_dec_party(&party).await?.unwrap();
+        assert_eq!(row.purge_status, "succeeded");
+        assert_eq!(
+            (row.purged_count, row.kept_count, row.purge_error),
+            (Some(3028), Some(11438), None)
+        );
+        assert!(row.purge_finished_at.is_some());
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn restart_fails_only_running_purges(pool: SqlitePool) -> Result {
+        let (running, done) = (former("running"), former("done"));
+        pool.record_former_dec_party(&done, 1).await?;
+        pool.claim_former_party_purge(&done).await?;
+        pool.complete_former_party_purge(&done, 1, 0).await?;
+        pool.record_former_dec_party(&running, 1).await?;
+        pool.claim_former_party_purge(&running).await?;
+
+        assert_eq!(pool.fail_interrupted_purges("restarted").await?, 1);
+        let row = pool.get_former_dec_party(&running).await?.unwrap();
+        assert_eq!(row.purge_status, "failed");
+        assert_eq!(row.purge_error.as_deref(), Some("restarted"));
+        let row = pool.get_former_dec_party(&done).await?.unwrap();
+        assert_eq!(row.purge_status, "succeeded");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn only_a_purged_party_can_be_dismissed(pool: SqlitePool) -> Result {
+        let party = former("left");
+        pool.record_former_dec_party(&party, 1).await?;
+        assert!(
+            !pool.dismiss_former_dec_party(&party).await?,
+            "dismissing before the purge would hide stale contracts"
+        );
+
+        pool.claim_former_party_purge(&party).await?;
+        pool.complete_former_party_purge(&party, 1, 0).await?;
+        assert!(pool.dismiss_former_dec_party(&party).await?);
+        assert!(pool.get_former_dec_parties().await?.is_empty());
+        assert_eq!(
+            pool.get_former_dec_party_ids().await?,
+            [party.to_string()],
+            "a dismissed party stays recorded, so a refresh does not detect it again"
+        );
+        assert!(
+            !pool.claim_former_party_purge(&party).await?,
+            "a dismissed party is not purged again"
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn rehosted_party_is_forgotten_unless_purging(pool: SqlitePool) -> Result {
+        let (back, purging, other) = (former("back"), former("purging"), former("other"));
+        for party in [&back, &purging, &other] {
+            pool.record_former_dec_party(party, 1).await?;
+        }
+        pool.claim_former_party_purge(&purging).await?;
+
+        let removed = pool
+            .forget_former_dec_parties(&[back.to_string(), purging.to_string()])
+            .await?;
+        assert_eq!(removed, 1);
+        let mut left = pool.get_former_dec_party_ids().await?;
+        left.sort();
+        assert_eq!(left, [other.to_string(), purging.to_string()]);
+        assert_eq!(pool.forget_former_dec_parties(&[]).await?, 0);
         Ok(())
     }
 
