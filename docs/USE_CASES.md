@@ -125,8 +125,13 @@ Adding a 4th custodian involves both governance and topology:
     ```
 
    If the party has active contracts, the workflow replicates them to the new
-   custodian itself (ACS export/import around a brief synchronizer disconnect on
-   the joining node only). No participant restart is needed.
+   custodian itself. The joining node leaves the synchronizer for the copy, and
+   the other members keep running. No participant restart is needed.
+
+   `new_threshold` may not exceed the current number of owners, because the
+   joining node cannot sign yet. Raise it afterwards with change-threshold. See
+   [Adding a Member to a Decentralized Party](ADDING_A_MEMBER_TO_A_DECENTRALIZED_PARTY.md)
+   for the prerequisites and recovery steps.
 
 #### Remove a Custodian
 
