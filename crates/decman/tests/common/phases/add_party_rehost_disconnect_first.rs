@@ -64,7 +64,7 @@ use canton_proto_rs::com::digitalasset::canton::{
 };
 use chrono::Utc;
 use common::{
-    api::DecentralizedPartiesResponse,
+    api::{DecentralizedPartiesResponse, FormerPartiesResponse},
     canton_id::CantonId,
     types::{DecentralizedParty, InvitationType, WorkflowKind, WorkflowProgress, WorkflowRole},
 };
@@ -248,6 +248,19 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 {
                     Ok(false) => Some(Ok(())),
                     Ok(true) => None,
+                    Err(e) => Some(Err(e)),
+                }
+            })
+        },
+    )
+    .then(
+        "P3 lists the party as one it removed itself from",
+        Duration::from_secs(90),
+        |f, _| {
+            Box::pin(async move {
+                match p3_lists_as_former(f).await? {
+                    Ok(true) => Some(Ok(())),
+                    Ok(false) => None,
                     Err(e) => Some(Err(e)),
                 }
             })
@@ -531,6 +544,19 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         },
     )
     .then(
+        "P3 no longer lists the party as former once it hosts it again",
+        Duration::from_secs(90),
+        |f, _| {
+            Box::pin(async move {
+                match p3_lists_as_former(f).await? {
+                    Ok(false) => Some(Ok(())),
+                    Ok(true) => None,
+                    Err(e) => Some(Err(e)),
+                }
+            })
+        },
+    )
+    .then(
         "P3 left the synchronizer before the mapping hosting it took effect",
         Duration::from_secs(5),
         |_, ctx| {
@@ -785,8 +811,24 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     .await
 }
 
+/// Whether P3 lists the party among those it no longer hosts, after a refresh
+/// on P3, which is what notices a removal. `None` while P3 cannot answer.
+async fn p3_lists_as_former(f: &Fixture) -> Option<anyhow::Result<bool>> {
+    let (prefix, party_id) = match (f.party_prefix(), f.party_id()) {
+        (Ok(prefix), Ok(party_id)) => (prefix.to_string(), party_id.to_string()),
+        (Err(e), _) | (_, Err(e)) => return Some(Err(e)),
+    };
+    let path = format!("/decentralized-parties?prefix={prefix}&refresh=true");
+    let _: Value = f.probe_get_json(f.p3.http, &path).await?;
+    let former: FormerPartiesResponse = f.probe_get_json(f.p3.http, "/former-parties").await?;
+    Some(Ok(former
+        .parties
+        .iter()
+        .any(|p| p.party_id.to_string() == party_id)))
+}
+
 /// Admin-API view of participant `n`, the way the harness reaches Canton.
-fn admin_config(f: &Fixture, n: u8) -> anyhow::Result<NodeConfig> {
+pub(super) fn admin_config(f: &Fixture, n: u8) -> anyhow::Result<NodeConfig> {
     let (port_var, participant_id) = match n {
         1 => ("P1_CANTON_ADMIN", &f.p1.participant_id),
         3 => ("P3_CANTON_ADMIN", &f.p3.participant_id),
@@ -867,7 +909,7 @@ async fn read_hosting(
 }
 
 /// Parties the head state has `participant_uid` hosting.
-async fn hosted_parties(
+pub(super) async fn hosted_parties(
     config: &NodeConfig,
     synchronizer_id: &str,
     participant_uid: &str,
@@ -923,7 +965,7 @@ fn to_system_time(ts: prost_types::Timestamp) -> SystemTime {
 }
 
 /// `(connected and healthy, manual_connect)` for the participant's synchronizer.
-async fn connection_state(config: &NodeConfig) -> anyhow::Result<(bool, bool)> {
+pub(super) async fn connection_state(config: &NodeConfig) -> anyhow::Result<(bool, bool)> {
     let mut client = SynchronizerConnectivityServiceClient::new(config.admin_channel().await?);
     let connected = client
         .list_connected_synchronizers(tonic::Request::new(ListConnectedSynchronizersRequest {}))
