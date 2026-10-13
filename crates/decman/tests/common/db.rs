@@ -4,8 +4,8 @@
 //! Mirrors the bash tests' `sqlite3 "$DEV_DIR/participant-N/data/decpm.db"`
 //! invocations. All helpers open a fresh connection per call so tests don't
 //! have to share a pool across phases (the queries are infrequent). Everything
-//! is read-only except [`inject_workflow_run_failure`], which chaos phases use
-//! to fabricate a Failed run while the owning process is down.
+//! is read-only except the `inject_*` helpers, which chaos phases use to
+//! fabricate state while the owning process is down.
 
 use std::path::{Path, PathBuf};
 
@@ -117,6 +117,30 @@ pub async fn inject_workflow_run_failure(
     anyhow::ensure!(
         result.rows_affected() == 1,
         "expected to flip exactly 1 row to failed for {instance_name} ({role}), affected {}",
+        result.rows_affected()
+    );
+    Ok(())
+}
+
+/// Mark `party_id`'s former-party row as purging, the state a purge leaves
+/// behind when DecMan dies during it. Call only while the owning process is
+/// killed; the restart then marks the purge as failed.
+pub async fn inject_running_purge(db_path: &Path, party_id: &str) -> anyhow::Result<()> {
+    let pool = open_rw(db_path).await?;
+    let result = sqlx::query(
+        "UPDATE former_dec_party \
+         SET purge_status = 'running', purge_started_at = strftime('%s', 'now'), \
+             purge_finished_at = NULL, purge_error = NULL \
+         WHERE party_id = ?1 AND dismissed_at IS NULL",
+    )
+    .bind(party_id)
+    .execute(&pool)
+    .await
+    .context("inject_running_purge")?;
+    pool.close().await;
+    anyhow::ensure!(
+        result.rows_affected() == 1,
+        "expected to mark exactly 1 former party as purging, affected {}",
         result.rows_affected()
     );
     Ok(())
