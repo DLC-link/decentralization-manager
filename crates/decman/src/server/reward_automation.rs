@@ -1962,17 +1962,33 @@ mod tests {
     }
 
     #[test]
-    fn newest_delegation_wins_regardless_of_read_order() {
-        // The ACS read order is not creation order, so the newest must be picked
-        // by offset. Feed the newest first to catch a take-the-first bug.
-        let gov = CantonId::parse(GOV).unwrap();
-        let records = vec![
-            ("00new".to_string(), 900, delegation_of(GOV)),
-            ("00old".to_string(), 100, delegation_of(GOV)),
-            ("00mid".to_string(), 500, delegation_of(GOV)),
-        ];
-        let (cid, _) = newest_delegation_for(records, &gov).expect("one is selected");
-        assert_eq!(cid, "00new");
+    fn newest_delegation_wins_regardless_of_read_order() -> anyhow::Result<()> {
+        // The ACS read order is not creation order. Acting on an older
+        // delegation pays rewards to a split a later vote replaced, so every
+        // read order must pick the newest. The six orders of three records are
+        // the three rotations of the list and of its reverse.
+        let gov = CantonId::parse(GOV)?;
+        let delegations = [("00old", 100), ("00mid", 500), ("00new", 900)];
+        for reversed in [false, true] {
+            for rotation in 0..delegations.len() {
+                let mut order = delegations.to_vec();
+                if reversed {
+                    order.reverse();
+                }
+                order.rotate_left(rotation);
+                let records = order
+                    .iter()
+                    .map(|(cid, offset)| (cid.to_string(), *offset, delegation_of(GOV)))
+                    .collect();
+                let (cid, _) = newest_delegation_for(records, &gov)
+                    .ok_or_else(|| anyhow!("no delegation selected from {order:?}"))?;
+                assert_eq!(
+                    cid, "00new",
+                    "read order {order:?} acted on a superseded split"
+                );
+            }
+        }
+        Ok(())
     }
 
     #[test]
@@ -2893,6 +2909,35 @@ mod tests {
         let d = delegation_naming(&[]);
         let me = CantonId::parse(ALICE).expect("ALICE is a valid canton id");
         assert_eq!(role_for(&d, &me), Role::ReportOnly);
+    }
+
+    /// Shares ALICE's namespace, as every party allocated on one participant
+    /// does.
+    const ALICE_SIBLING: &str =
+        "alice-ops::1220aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    /// Shares ALICE's hint under a different participant's namespace.
+    const ALICE_ON_ANOTHER_PARTICIPANT: &str =
+        "alice::1220ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+
+    #[test]
+    fn only_the_exact_named_party_may_assign() -> anyhow::Result<()> {
+        // `Delegation_Assign` requires the assigner to be an element of
+        // `assigners`, which compares whole party ids. A node that matched on
+        // namespace or hint alone would submit an assignment the ledger refuses
+        // on every sweep.
+        let d = delegation_naming(&[ALICE]);
+        assert_eq!(role_for(&d, &CantonId::parse(ALICE)?), Role::Assign);
+        assert_eq!(
+            role_for(&d, &CantonId::parse(ALICE_SIBLING)?),
+            Role::ReportOnly,
+            "a sibling party on the assigner's participant is not the named assigner"
+        );
+        assert_eq!(
+            role_for(&d, &CantonId::parse(ALICE_ON_ANOTHER_PARTICIPANT)?),
+            Role::ReportOnly,
+            "a namesake on another participant is not the named assigner"
+        );
+        Ok(())
     }
 
     #[test]
