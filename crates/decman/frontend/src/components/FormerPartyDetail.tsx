@@ -1,19 +1,27 @@
 import { useRef, useState } from "react";
 import {
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
   Alert,
+  AlertTitle,
   Box,
   Button,
+  Checkbox,
   CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
   DialogTitle,
+  FormControlLabel,
   IconButton,
+  TextField,
   Tooltip,
   Typography,
 } from "@mui/material";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import DeleteSweepIcon from "@mui/icons-material/DeleteSweep";
+import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 import { CopyableText } from "./CopyableText";
 import { StatCard } from "./StatCard";
@@ -44,6 +52,9 @@ const formatTime = (epochSeconds: number) =>
   });
 
 const contracts = (n: number) => `${n} ${n === 1 ? "contract" : "contracts"}`;
+
+const OFFLINE_NOTE =
+  "The participant leaves the synchronizer while the purge runs, usually for about a minute. Every party this node hosts is offline for that time. DecMan reconnects the participant when the purge ends, also when the purge fails.";
 
 const StatusAlert = ({ party }: { party: FormerParty }) => {
   switch (party.purge_status) {
@@ -103,6 +114,9 @@ export const FormerPartyDetail = ({
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [posting, setPosting] = useState(false);
   const [dismissing, setDismissing] = useState(false);
+  // The operator confirms a purge twice: a tick, and the party's name typed.
+  const [acknowledged, setAcknowledged] = useState(false);
+  const [typedName, setTypedName] = useState("");
   // Each opening of the dialog counts afresh; a late count from an earlier
   // opening must not land in a later one.
   const previewSeq = useRef(0);
@@ -110,11 +124,16 @@ export const FormerPartyDetail = ({
   const prefix = party.party_id.split("::")[0];
   const status = party.purge_status;
   const nothingToPurge = preview?.purge_count === 0;
+  // Nothing is deleted and nothing goes offline when the count is 0.
+  const confirmed =
+    nothingToPurge || (acknowledged && typedName.trim() === prefix);
 
   const openPurge = async () => {
     const seq = ++previewSeq.current;
     setPreview(null);
     setPreviewError(null);
+    setAcknowledged(false);
+    setTypedName("");
     setPurgeOpen(true);
     try {
       const res = await authenticatedFetch(
@@ -227,18 +246,6 @@ export const FormerPartyDetail = ({
           </Box>
         </Box>
         <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap" }}>
-          {(status === "none" || status === "failed") && (
-            <Button
-              variant="contained"
-              color="error"
-              size="small"
-              startIcon={<DeleteSweepIcon fontSize="small" />}
-              onClick={openPurge}
-              disabled={!ADMIN_ACCESS}
-            >
-              {status === "failed" ? "Retry purge" : "Purge"}
-            </Button>
-          )}
           {status === "succeeded" && (
             <Button
               variant="outlined"
@@ -277,6 +284,54 @@ export const FormerPartyDetail = ({
 
       <StatusAlert party={party} />
 
+      {(status === "none" || status === "failed") && (
+        <Accordion
+          disableGutters
+          variant="outlined"
+          slotProps={{ transition: { unmountOnExit: true } }}
+        >
+          <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+            <Typography sx={{ fontWeight: 600 }}>Advanced</Typography>
+          </AccordionSummary>
+          <AccordionDetails>
+            <Box
+              sx={{
+                border: 1,
+                borderColor: "error.main",
+                borderRadius: 1,
+                p: 2,
+                display: "flex",
+                flexDirection: "column",
+                gap: 1.5,
+              }}
+            >
+              <Typography sx={{ color: "error.main", fontWeight: 600 }}>
+                Danger zone
+              </Typography>
+              <Typography variant="subtitle2">
+                Purge leftover contracts
+              </Typography>
+              <Typography variant="body2">
+                {`The purge permanently deletes the contracts this node still holds for ${prefix}. It keeps those that another party on this node is a stakeholder of. A deleted contract cannot be brought back.`}
+              </Typography>
+              <Typography variant="body2">{OFFLINE_NOTE}</Typography>
+              <Box>
+                <Button
+                  variant="contained"
+                  color="error"
+                  size="small"
+                  startIcon={<DeleteSweepIcon fontSize="small" />}
+                  onClick={openPurge}
+                  disabled={!ADMIN_ACCESS}
+                >
+                  {status === "failed" ? "Retry purge" : "Purge"}
+                </Button>
+              </Box>
+            </Box>
+          </AccordionDetails>
+        </Accordion>
+      )}
+
       <Dialog
         open={purgeOpen}
         onClose={() => !posting && setPurgeOpen(false)}
@@ -302,14 +357,35 @@ export const FormerPartyDetail = ({
               </Typography>
             ) : (
               <>
-                <Typography variant="body2">
-                  {`This removes ${contracts(preview.purge_count)} of ${prefix} from this node. It keeps ${contracts(preview.keep_count)} that another party on this node is a stakeholder of.`}
-                </Typography>
-                <Alert severity="warning">
-                  The participant leaves the synchronizer while the purge runs,
-                  usually for about a minute. Every party this node hosts is
-                  offline for that time. This cannot be undone.
+                <Alert severity="error" variant="filled">
+                  <AlertTitle>
+                    {`This permanently deletes ${contracts(preview.purge_count)} of ${prefix} from this node`}
+                  </AlertTitle>
+                  {`It keeps ${contracts(preview.keep_count)} that another party on this node is a stakeholder of. A deleted contract cannot be brought back.`}
                 </Alert>
+                <Alert severity="warning">
+                  {OFFLINE_NOTE} Do not purge right after the participant
+                  recovers from downtime.
+                </Alert>
+                <FormControlLabel
+                  control={
+                    <Checkbox
+                      checked={acknowledged}
+                      onChange={(e) => setAcknowledged(e.target.checked)}
+                      disabled={posting}
+                    />
+                  }
+                  label={`I understand that this deletes ${contracts(preview.purge_count)} from this node and takes it offline.`}
+                />
+                <TextField
+                  label={`Type ${prefix} to confirm`}
+                  value={typedName}
+                  onChange={(e) => setTypedName(e.target.value)}
+                  disabled={posting}
+                  size="small"
+                  autoComplete="off"
+                  fullWidth
+                />
               </>
             )}
           </Box>
@@ -322,7 +398,7 @@ export const FormerPartyDetail = ({
             variant="contained"
             color={nothingToPurge ? "primary" : "error"}
             onClick={handlePurge}
-            disabled={!preview || posting}
+            disabled={!preview || !confirmed || posting}
             startIcon={posting ? <CircularProgress size={16} /> : undefined}
           >
             {!preview
