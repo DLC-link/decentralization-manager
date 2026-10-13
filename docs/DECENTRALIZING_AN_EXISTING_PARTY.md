@@ -176,9 +176,13 @@ second host to use the failover.
 3. **Add the hosts** as in [Failover](#failover) steps 1 to 5, with
    `"permission": "confirmation"`. Read the serial again first: the conversion
    moved it.
-4. **Raise the threshold** on the owner node, after every marker has cleared:
+4. **Raise the threshold** on the owner node, after every marker has cleared.
+   Read the serial again first. The add and each marker clear moved it, and
+   the old value answers `409`.
 
    ```bash
+   SERIAL=$(curl -sS "$OWNER/v0/tenant/$PARTY/state" \
+     -H "Authorization: Bearer $OWNER_KEY" | jq .serial)
    curl -sS -X POST "$OWNER/v0/tenant/threshold/authorize" \
      -H "Authorization: Bearer $OWNER_KEY" -H 'Content-Type: application/json' \
      -d "$(jq -n --arg p "$PARTY" --argjson s "$SERIAL" \

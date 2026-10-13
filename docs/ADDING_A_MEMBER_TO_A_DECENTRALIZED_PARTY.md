@@ -16,8 +16,9 @@ invitation on its own DecMan node.
 For a party that is not a decentralized party, use a different guide:
 
 - A party with its own key, held by a wallet:
+  [Decentralizing an external party](DECENTRALIZING_AN_EXTERNAL_PARTY.md).
+- A party local to one participant:
   [Decentralizing an existing party](DECENTRALIZING_AN_EXISTING_PARTY.md).
-- A party local to one participant: the same guide.
 
 ## Before you start
 

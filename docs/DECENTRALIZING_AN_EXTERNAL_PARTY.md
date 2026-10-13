@@ -67,6 +67,9 @@ The operator of each host does this once.
    participant ID. The participant ID is on the **Configuration** page, under
    **Node**.
 
+Each host accepts only its own keys. So the wallet keeps one key per host, and
+it sends each host that host's key.
+
 ## Sign a hash
 
 Every write takes two calls. The `prepare` call returns `transaction_hashes`.
@@ -146,12 +149,13 @@ The party gets 2 or more hosts and starts with no contracts.
    `hosting_peers`:
 
    ```bash
-   # hosts.txt holds one "DECMAN_URL PARTICIPANT_ID" line per host.
+   # hosts.txt holds one "DECMAN_URL PARTICIPANT_ID TENANT_KEY" line per host.
+   # It holds the keys, so keep it private: chmod 600 hosts.txt
    HINT=alice
-   while read -r url pid; do
+   while read -r url pid key; do
      peers=$(awk -v me="$pid" '$2 != me {print $2}' hosts.txt | jq -R . | jq -s .)
      curl -sS -X POST "$url/v0/tenant/prepare" \
-       -H "Authorization: Bearer $TENANT_KEY" -H 'Content-Type: application/json' \
+       -H "Authorization: Bearer $key" -H 'Content-Type: application/json' \
        -d "$(jq -n --arg h "$HINT" --arg k "$PUB" --argjson p "$peers" \
              '{party_hint:$h, public_key:$k, hosting_peers:$p}')" \
        > "prepare-${pid%%::*}.json"
@@ -175,9 +179,9 @@ The party gets 2 or more hosts and starts with no contracts.
      '{party_hint:$h, public_key:$k,
        topology_transactions:$p[0].topology_transactions,
        signatures:$s[0].signatures, signed_by:$s[0].signed_by}' > execute.json
-   while read -r url pid; do
+   while read -r url pid key; do
      curl -sS -X POST "$url/v0/tenant/execute" \
-       -H "Authorization: Bearer $TENANT_KEY" -H 'Content-Type: application/json' \
+       -H "Authorization: Bearer $key" -H 'Content-Type: application/json' \
        -d @execute.json
    done < hosts.txt
    ```
@@ -213,10 +217,12 @@ joining host with a current host, and distribute what is missing.
 
 ### Steps
 
-1. **Read the serial.** Every write pins the serial it builds on:
+1. **Read the serial** from one current host. This guide calls that host the
+   source: `$SOURCE`, with the key `$SOURCE_KEY`. Every write pins the serial
+   it builds on:
 
    ```bash
-   curl -sS "$CURRENT_HOST/v0/tenant/$PARTY/state" -H "Authorization: Bearer $TENANT_KEY"
+   curl -sS "$SOURCE/v0/tenant/$PARTY/state" -H "Authorization: Bearer $SOURCE_KEY"
    # {"party_id": "...", "serial": 1, "threshold": 1, "host_count": 2,
    #  "onboarding_hosts": 0, "has_signing_key": true}
    ```
@@ -224,13 +230,13 @@ joining host with a current host, and distribute what is missing.
 2. **Prepare on every host,** current and joining, with the same body:
 
    ```bash
-   # all-hosts.txt: every current and joining host. NEW_HOSTS: a JSON array
-   # of the joining hosts' participant IDs.
+   # all-hosts.txt: every current and joining host, in the hosts.txt format.
+   # NEW_HOSTS: a JSON array of the joining hosts' participant IDs.
    jq -n --arg p "$PARTY" --argjson s "$SERIAL" --argjson n "$NEW_HOSTS" \
      '{party_id:$p, permission:"confirmation", new_hosts:$n, base_serial:$s}' > add.json
-   while read -r url pid; do
+   while read -r url pid key; do
      curl -sS -X POST "$url/v0/tenant/add-hosts/prepare" \
-       -H "Authorization: Bearer $TENANT_KEY" -H 'Content-Type: application/json' \
+       -H "Authorization: Bearer $key" -H 'Content-Type: application/json' \
        -d @add.json > "prepare-${pid%%::*}.json"
    done < all-hosts.txt
    ```
@@ -240,7 +246,7 @@ joining host with a current host, and distribute what is missing.
 
 3. **Execute on each joining host only.** Canton needs the party's signature and
    each joining host's signature. The current hosts add nothing. Send the same
-   body to every joining host.
+   body to every joining host, with that host's own key.
 
    ```bash
    jq -n --arg p "$PARTY" --argjson s "$SERIAL" \
@@ -248,28 +254,28 @@ joining host with a current host, and distribute what is missing.
      '{party_id:$p, base_serial:$s, topology_transactions:$x[0].topology_transactions,
        signatures:$g[0].signatures, signed_by:$g[0].signed_by}' > execute.json
    curl -sS -X POST "$JOINER/v0/tenant/add-hosts/execute" \
-     -H "Authorization: Bearer $TENANT_KEY" -H 'Content-Type: application/json' \
+     -H "Authorization: Bearer $JOINER_KEY" -H 'Content-Type: application/json' \
      -d @execute.json
    ```
 
-4. **Wait for the change.** Poll `/state` on a current host until `host_count`
+4. **Wait for the change.** Poll `/state` on the source until `host_count`
    includes the joining hosts. `onboarding_hosts` then counts them too. A
    joining host holds the party now, but it does not confirm yet.
 
-5. **Copy the contracts to each joining host.** Read block N from one current
-   host and hand it to the joining host, until the import answers
+5. **Copy the contracts to each joining host.** Read block N from the source
+   and hand it to the joining host, until the import answers
    `"complete": true`:
 
    ```bash
    seq=1
    while :; do
-     curl -sS -H "Authorization: Bearer $TENANT_KEY" \
+     curl -sS -H "Authorization: Bearer $SOURCE_KEY" \
        "$SOURCE/v0/tenant/$PARTY/acs/$JOINER_ID?base_serial=$SERIAL&seq=$seq" > block.json
      jq --arg p "$PARTY" --argjson s "$SERIAL" \
        '{party_id:$p, base_serial:$s, seq, chunk, end, total_len, sha256, package_ids}' \
        block.json > import.json
      curl -sS -X POST "$JOINER/v0/tenant/add-hosts/import" \
-       -H "Authorization: Bearer $TENANT_KEY" -H 'Content-Type: application/json' \
+       -H "Authorization: Bearer $JOINER_KEY" -H 'Content-Type: application/json' \
        -d @import.json > result.json
      jq -e .complete result.json > /dev/null && break
      seq=$((seq + 1))
@@ -327,7 +333,7 @@ party and execute submissions for it. The host operator grants those rights.
 
 | Symptom | Cause | Do this |
 |---|---|---|
-| `401` | The tenant key is wrong, or the host has no keys set | Check `DECPM_TENANT_API_KEYS` on the host |
+| `401` | The key is not one of that host's keys, or the host has no keys set | Send that host its own key. Check `DECPM_TENANT_API_KEYS` on the host |
 | `409` from a prepare or execute call | The party's serial changed after you read it | Read `/state` again and restart from prepare |
 | `404` from a prepare or execute call | No host mapping exists for the party | Check the party ID. A joining host still answers `200`, because it reads the shared topology |
 | `400` that names a field | The bundle does not match what the host built itself | Do not retry it as it is. Restart from prepare |
