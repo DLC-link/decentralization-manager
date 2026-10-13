@@ -11,9 +11,15 @@
 //! Asserts: P3 lists the main party as one it was removed from, and P1 does
 //! not. A party P3 still hosts cannot be purged, and the main party cannot be
 //! dismissed before its purge. The preview counts exactly the contracts the
-//! test expects. The purge removes exactly the main party's contracts that no
-//! party P3 hosts is a stakeholder of. Every other contract P3 held is still
-//! there, unless the ledger itself archived it. P3 is connected and healthy
+//! test expects.
+//!
+//! A purge cut off by a DecMan restart leaves P3 off the synchronizer. The
+//! restart marks that purge as failed, a new purge is refused while P3 is
+//! off, and Reconnect brings P3 back.
+//!
+//! The purge then removes exactly the main party's contracts that no party P3
+//! hosts is a stakeholder of. Every other contract P3 held is still there,
+//! unless the ledger itself archived it. P3 is connected and healthy
 //! afterwards. A second purge removes nothing, and the party can then be
 //! dismissed.
 
@@ -23,6 +29,10 @@ use std::{
 };
 
 use anyhow::Context;
+use canton_proto_rs::com::digitalasset::canton::admin::participant::v30::{
+    DisconnectSynchronizerRequest,
+    synchronizer_connectivity_service_client::SynchronizerConnectivityServiceClient,
+};
 use chrono::Utc;
 use common::api::{
     DecentralizedPartiesResponse, FormerPartiesResponse, FormerParty, PurgePreview, PurgeStatus,
@@ -35,6 +45,7 @@ use super::add_party_rehost_disconnect_first::{admin_config, connection_state, h
 use crate::common::{
     Fixture, db,
     ledger_api::{P1_JSON_API, P3_JSON_API, SeedCoupon, reward_coupon_create_command},
+    processes,
     scenario::Scenario,
 };
 
@@ -317,6 +328,113 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             })
         },
     )
+    .when(
+        "a purge of the main party is cut off by a restart of P3's DecMan",
+        |f, _| {
+            Box::pin(async move {
+                let party = f.party_id()?.to_string();
+                processes::kill_node(f, 3).await?;
+                // The state a purge leaves when DecMan dies during it: the
+                // participant off the synchronizer, the purge still running.
+                let p3 = admin_config(f, 3)?;
+                SynchronizerConnectivityServiceClient::new(p3.admin_channel().await?)
+                    .disconnect_synchronizer(tonic::Request::new(DisconnectSynchronizerRequest {
+                        synchronizer_alias: p3.synchronizer().to_string(),
+                    }))
+                    .await
+                    .context("disconnect P3")?;
+                db::inject_running_purge(&f.db_path(3), &party).await?;
+                processes::spawn_only(f, 3).await?;
+                Ok(())
+            })
+        },
+    )
+    .then(
+        "P3 lists the purge as cut off by the restart",
+        Duration::from_secs(60),
+        |f, _| {
+            Box::pin(async move {
+                let party = f.party_id().ok()?.to_string();
+                let former: FormerPartiesResponse =
+                    f.probe_get_json(f.p3.http, "/former-parties").await?;
+                let entry = former_entry(&former, &party)?;
+                if entry.purge_status != PurgeStatus::Failed {
+                    return None;
+                }
+                let error = entry.purge_error.clone().unwrap_or_default();
+                if !error.contains("restarted") {
+                    return Some(Err(anyhow::anyhow!("unexpected purge error: {error}")));
+                }
+                Some(Ok(()))
+            })
+        },
+    )
+    .then(
+        "a purge is refused while P3's participant is off the synchronizer",
+        Duration::from_secs(30),
+        |f, _| {
+            Box::pin(async move {
+                let party = f.party_id().ok()?.to_string();
+                let (status, body) = f
+                    .post_expect_status(
+                        f.p3.http,
+                        "/former-parties/purge",
+                        &json!({ "party_id": party }),
+                    )
+                    .await
+                    .ok()?;
+                if status == StatusCode::CONFLICT && body.contains("not connected and healthy") {
+                    Some(Ok(()))
+                } else {
+                    Some(Err(anyhow::anyhow!(
+                        "a purge while P3 is off returned {status}: {body}"
+                    )))
+                }
+            })
+        },
+    )
+    .when(
+        "the operator reconnects P3 from the main party's page",
+        |f, _| {
+            Box::pin(async move {
+                let (status, body) = reconnect(f).await?;
+                anyhow::ensure!(
+                    status == StatusCode::OK,
+                    "reconnect returned {status}: {body}"
+                );
+                Ok(())
+            })
+        },
+    )
+    .then(
+        "P3's participant is connected and healthy after the reconnect",
+        Duration::from_secs(90),
+        |f, _| {
+            Box::pin(async move {
+                let p3 = admin_config(f, 3).ok()?;
+                match connection_state(&p3).await {
+                    Ok((true, false)) => Some(Ok(())),
+                    _ => None,
+                }
+            })
+        },
+    )
+    .then(
+        "a second reconnect is refused while P3 is connected",
+        Duration::from_secs(30),
+        |f, _| {
+            Box::pin(async move {
+                let (status, body) = reconnect(f).await.ok()?;
+                if status == StatusCode::CONFLICT && body.contains("already connected") {
+                    Some(Ok(()))
+                } else {
+                    Some(Err(anyhow::anyhow!(
+                        "a reconnect while P3 is connected returned {status}: {body}"
+                    )))
+                }
+            })
+        },
+    )
     .when("the operator purges the main party on P3", |f, _| {
         Box::pin(async move { start_purge(f).await })
     })
@@ -487,6 +605,16 @@ async fn start_purge(f: &Fixture) -> anyhow::Result<()> {
         "purge returned {status}: {body}"
     );
     Ok(())
+}
+
+async fn reconnect(f: &Fixture) -> anyhow::Result<(StatusCode, String)> {
+    let party = f.party_id()?.to_string();
+    f.post_expect_status(
+        f.p3.http,
+        "/former-parties/reconnect",
+        &json!({ "party_id": party }),
+    )
+    .await
 }
 
 /// The main party's entry once its purge has finished. `None` while it runs;
