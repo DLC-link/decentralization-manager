@@ -195,6 +195,16 @@ The party gets 2 or more hosts and starts with no contracts.
 The party ID is `alice::<fingerprint>`. Each host also lists it on its
 **Parties → External Parties** tab, within a few minutes.
 
+The tab and `GET /external-parties` read a cached list. A request for a list
+older than five minutes starts a new scan in the background.
+`DECPM_EXTERNAL_PARTIES_TTL_SECS` changes that age. In the answer, `fetched_at`
+says when the last scan finished, and `refreshing` says whether a scan runs
+now. To read a fresh list, repeat the request until `refreshing` is `false`.
+
+After a restart, the first scan can take minutes. Until it ends, `fetched_at`
+is `null` and `parties` is empty. An empty list then does not mean that the
+host has no external parties.
+
 ## Add hosts to an existing party
 
 > [!WARNING]
