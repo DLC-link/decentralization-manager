@@ -1,13 +1,6 @@
 use canton_proto_rs::com::digitalasset::canton::{
     crypto::v30::SigningKeysWithThreshold,
-    protocol::v30::{
-        DecentralizedNamespaceDefinition, PartyToParticipant, TopologyMapping, enums,
-        topology_mapping,
-    },
-    topology::admin::v30::{
-        AuthorizeRequest, authorize_request,
-        topology_manager_write_service_client::TopologyManagerWriteServiceClient,
-    },
+    protocol::v30::{DecentralizedNamespaceDefinition, PartyToParticipant},
 };
 use sqlx::SqlitePool;
 
@@ -18,6 +11,7 @@ use crate::{
     utils,
     workflow::{
         kick::KickConfig,
+        proposal_store,
         signing_keys::{
             adopt_legacy_signing_keys, known_signing_keys_by_member, signing_keys_without_member,
         },
@@ -114,8 +108,11 @@ pub async fn create_proposals(
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 
-    // Get current P2P mapping
-    let current_p2p = topology::fetch_p2p_mapping(config, &synchronizer_id, &party_id).await?;
+    // The serials the proposals are pinned to, read with the mappings they
+    // are built on so the two cannot disagree.
+    let head = proposal_store::fetch_party_head(config, &synchronizer_id, &party_id).await?;
+    head.ensure_namespace_is(&current_namespace_def)?;
+    let current_p2p = head.p2p.clone();
 
     tracing::info!(
         "Current P2P mapping has {count} participant(s)",
@@ -197,58 +194,24 @@ pub async fn create_proposals(
         }),
     };
 
-    // Create proposals using topology manager
-    let mut topology_client = TopologyManagerWriteServiceClient::new(config.admin_channel().await?);
-
-    // Create DNS proposal
-    tracing::info!("Creating DNS kick proposal...");
-    let dns_request = tonic::Request::new(AuthorizeRequest {
-        r#type: Some(authorize_request::Type::Proposal(
-            authorize_request::Proposal {
-                change: enums::TopologyChangeOp::AddReplace as i32,
-                serial: 0,
-                mapping: Some(authorize_request::proposal::Mapping::V30(TopologyMapping {
-                    mapping: Some(topology_mapping::Mapping::DecentralizedNamespaceDefinition(
-                        new_namespace_def.clone(),
-                    )),
-                })),
-            },
-        )),
-        must_fully_authorize: false,
-        force_changes: vec![],
-        signed_by: vec![],
-        store: Some(topology::synchronizer_store_id(&synchronizer_id)),
-        wait_to_become_effective: None,
-    });
-
-    let dns_response = topology_client.authorize(dns_request).await?.into_inner();
-    let dns_transaction = dns_response
-        .transaction
-        .ok_or_else(|| anyhow::anyhow!("No DNS transaction returned"))?;
-
-    // Create P2P kick proposal
-    tracing::info!("Creating P2P kick proposal...");
-    let p2p_request = tonic::Request::new(AuthorizeRequest {
-        r#type: Some(authorize_request::Type::Proposal(
-            authorize_request::Proposal {
-                change: enums::TopologyChangeOp::AddReplace as i32,
-                serial: 0,
-                mapping: Some(authorize_request::proposal::Mapping::V30(TopologyMapping {
-                    mapping: Some(topology_mapping::Mapping::PartyToParticipant(new_p2p)),
-                })),
-            },
-        )),
-        must_fully_authorize: false,
-        force_changes: vec![],
-        signed_by: vec![],
-        store: Some(topology::synchronizer_store_id(&synchronizer_id)),
-        wait_to_become_effective: None,
-    });
-
-    let p2p_response = topology_client.authorize(p2p_request).await?.into_inner();
-    let p2p_transaction = p2p_response
-        .transaction
-        .ok_or_else(|| anyhow::anyhow!("No P2P transaction returned"))?;
+    // Signed without being published: nothing reaches the synchronizer until
+    // submit, so a member that never signs leaves the party unchanged (#448).
+    tracing::info!("Signing kick proposals...");
+    let signed = proposal_store::sign_party_proposals(
+        config,
+        &synchronizer_id,
+        instance_name,
+        &party_id,
+        &head,
+        Some(new_namespace_def.clone()),
+        new_p2p,
+        topology::party_proposal_force_flags(),
+    )
+    .await?;
+    let dns_transaction = signed
+        .dns
+        .ok_or_else(|| anyhow::anyhow!("No DNS kick proposal was signed"))?;
+    let p2p_transaction = signed.p2p;
 
     // Persist proposals + supporting data to workflow storage. Each protobuf
     // is written with the same `varint(len)||proto` framing the original file

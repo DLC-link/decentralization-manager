@@ -35,6 +35,11 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: change_threshold");
 
     round("lower the threshold to 1", 2, 1).run(f).await?;
+    // Threshold 1 is where a proposal published early takes effect at once
+    // (#448). The phase changes topology directly, so it stays off devnet.
+    if matches!(f.target, crate::common::TestTarget::Localnet) {
+        super::no_early_publish::run(f).await?;
+    }
     let legacy = if matches!(f.target, crate::common::TestTarget::Localnet) {
         Some(super::legacy_key_retirement::seed(f).await?)
     } else {
