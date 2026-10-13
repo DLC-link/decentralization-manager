@@ -81,8 +81,10 @@ interface FormerPartyDetailProps {
   party: FormerParty;
   /** Back to the list; also called once the party is dismissed. */
   onBack: () => void;
-  /** Re-read the former parties, after a purge starts or a dismiss. */
+  /** Re-read the former parties, after a dismiss. */
   onChanged: () => void;
+  /** The server accepted the purge, so the party now counts as running. */
+  onPurgeStarted: () => void;
 }
 
 /**
@@ -93,6 +95,7 @@ export const FormerPartyDetail = ({
   party,
   onBack,
   onChanged,
+  onPurgeStarted,
 }: FormerPartyDetailProps) => {
   const { showSnackbar } = useSnackbar();
   const [purgeOpen, setPurgeOpen] = useState(false);
@@ -144,7 +147,7 @@ export const FormerPartyDetail = ({
       if (res.ok) {
         showSnackbar("Purge started");
         setPurgeOpen(false);
-        onChanged();
+        onPurgeStarted();
       } else {
         const data = await res.json().catch(() => ({}));
         showSnackbar(data.error || "Failed to start the purge", "error");

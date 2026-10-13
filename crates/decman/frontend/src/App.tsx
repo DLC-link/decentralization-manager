@@ -147,6 +147,7 @@ const App = () => {
     formerParties,
     loaded: formerPartiesLoaded,
     reload: reloadFormerParties,
+    markPurging,
   } = useFormerParties();
   const [partiesView, setPartiesView] = useState<"decentralized" | "external">(
     "decentralized",
@@ -1356,6 +1357,7 @@ const App = () => {
               party={selectedFormerParty}
               onBack={backToList}
               onChanged={() => void reloadFormerParties()}
+              onPurgeStarted={() => markPurging(selectedFormerParty.party_id)}
             />
           ) : (
             <>
