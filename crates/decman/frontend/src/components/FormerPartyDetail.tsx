@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import {
   Accordion,
   AccordionDetails,
@@ -28,11 +28,13 @@ import { StatCard } from "./StatCard";
 import { ADMIN_ACCESS, API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
 import { useSnackbar } from "../contexts";
+import { useNodeHealth } from "../useNodeHealth";
 import type {
   FormerParty,
   PurgeFormerPartyRequest,
   PurgePreview,
   PurgeStatus,
+  ReconnectFormerPartyRequest,
 } from "../types";
 
 const STATUS_LABEL: Record<PurgeStatus, string> = {
@@ -56,7 +58,14 @@ const contracts = (n: number) => `${n} ${n === 1 ? "contract" : "contracts"}`;
 const OFFLINE_NOTE =
   "The participant leaves the synchronizer while the purge runs, usually for about a minute. Every party this node hosts is offline for that time. DecMan reconnects the participant when the purge ends, also when the purge fails.";
 
-const StatusAlert = ({ party }: { party: FormerParty }) => {
+const StatusAlert = ({
+  party,
+  reconnect,
+}: {
+  party: FormerParty;
+  /** Shown on a failed purge while the participant is off its synchronizer. */
+  reconnect?: ReactNode;
+}) => {
   switch (party.purge_status) {
     case "none":
       return (
@@ -81,7 +90,7 @@ const StatusAlert = ({ party }: { party: FormerParty }) => {
       );
     case "failed":
       return (
-        <Alert severity="error">
+        <Alert severity="error" action={reconnect}>
           {`The last purge failed: ${party.purge_error || "Unknown error"}`}
         </Alert>
       );
@@ -114,6 +123,7 @@ export const FormerPartyDetail = ({
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [posting, setPosting] = useState(false);
   const [dismissing, setDismissing] = useState(false);
+  const [reconnecting, setReconnecting] = useState(false);
   // The operator confirms a purge twice: a tick, and the party's name typed.
   const [acknowledged, setAcknowledged] = useState(false);
   const [typedName, setTypedName] = useState("");
@@ -127,6 +137,11 @@ export const FormerPartyDetail = ({
   // Nothing is deleted and nothing goes offline when the count is 0.
   const confirmed =
     nothingToPurge || (acknowledged && typedName.trim() === prefix);
+
+  // Only a failed purge can leave the participant off its synchronizer.
+  const health = useNodeHealth(status === "failed" && ADMIN_ACCESS);
+  const offline =
+    health !== null && !health.synchronizers.some((s) => s.healthy);
 
   const openPurge = async () => {
     const seq = ++previewSeq.current;
@@ -178,6 +193,37 @@ export const FormerPartyDetail = ({
       );
     } finally {
       setPosting(false);
+    }
+  };
+
+  const handleReconnect = async () => {
+    setReconnecting(true);
+    try {
+      const body: ReconnectFormerPartyRequest = { party_id: party.party_id };
+      const res = await authenticatedFetch(
+        `${API_BASE}/former-parties/reconnect`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      );
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        showSnackbar(data.message || "The participant is connected again");
+      } else {
+        showSnackbar(
+          data.error || "Failed to reconnect the participant",
+          "error",
+        );
+      }
+    } catch (e) {
+      showSnackbar(
+        e instanceof Error ? e.message : "Failed to reconnect the participant",
+        "error",
+      );
+    } finally {
+      setReconnecting(false);
     }
   };
 
@@ -282,7 +328,24 @@ export const FormerPartyDetail = ({
         <StatCard label="Purge" value={STATUS_LABEL[status]} />
       </Box>
 
-      <StatusAlert party={party} />
+      <StatusAlert
+        party={party}
+        reconnect={
+          offline && (
+            <Button
+              color="inherit"
+              size="small"
+              onClick={handleReconnect}
+              disabled={!ADMIN_ACCESS || reconnecting}
+              startIcon={
+                reconnecting ? <CircularProgress size={16} /> : undefined
+              }
+            >
+              Reconnect
+            </Button>
+          )
+        }
+      />
 
       {(status === "none" || status === "failed") && (
         <Accordion
