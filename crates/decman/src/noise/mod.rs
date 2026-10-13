@@ -1582,6 +1582,121 @@ mod tests {
         ));
     }
 
+    /// Ciphertext bytes the link delivers at a time: five 2 KiB Noise frames.
+    /// Their 10,150 plaintext bytes overrun hyper's initial 8 KiB read buffer
+    /// partway into the fifth frame, so tokio-noise keeps the rest of that
+    /// frame back, and the pause after the burst leaves the socket empty.
+    const BURST: usize = 5 * 2048;
+
+    /// Forward one connection to `server`, delivering the server's bytes in
+    /// bursts with a pause between them, the way a real link does. Over plain
+    /// loopback the body arrives faster than the client reads it, so the client
+    /// never finds its socket empty mid-response.
+    async fn paced_relay(
+        mut client: TcpStream,
+        server: std::net::SocketAddr,
+    ) -> std::io::Result<()> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut server = TcpStream::connect(server).await?;
+        let (mut client_read, mut client_write) = client.split();
+        let (mut server_read, mut server_write) = server.split();
+        let upstream = async {
+            tokio::io::copy(&mut client_read, &mut server_write).await?;
+            server_write.shutdown().await
+        };
+        let downstream = async {
+            let mut burst = vec![0u8; BURST];
+            loop {
+                let n = server_read.read(&mut burst).await?;
+                if n == 0 {
+                    return client_write.shutdown().await;
+                }
+                client_write.write_all(&burst[..n]).await?;
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        };
+        tokio::try_join!(upstream, downstream).map(|_| ())
+    }
+
+    /// Accept connections until aborted, handing each to `handle`.
+    fn accept_loop<C, Fut>(
+        listener: tokio::net::TcpListener,
+        handle: C,
+    ) -> tokio::task::JoinHandle<()>
+    where
+        C: Fn(TcpStream) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                tokio::spawn(handle(socket));
+            }
+        })
+    }
+
+    /// A chunk-sized response arrives whole over a real Noise connection
+    /// whose link delivers it in bursts (#441). tokio-noise used to return
+    /// `Pending` after copying leftover plaintext into the caller's buffer,
+    /// and hyper discarded those bytes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn chunk_sized_responses_arrive_whole() -> Result {
+        const ROUNDS: usize = 16;
+        let psk = [7u8; 32];
+        // Position-dependent bytes, so a lost or repeated span cannot compare equal.
+        let payload = (0..CHUNK_SIZE).map(|i| (i % 251) as u8).collect();
+        let response = Bytes::from(Message::new(MessageType::Chunk, payload).to_bytes());
+
+        let server = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let server_addr = server.local_addr()?;
+        let served = response.clone();
+        let server = accept_loop(server, move |socket| {
+            let body = served.clone();
+            async move {
+                let respond = move |_: &[u8], _: Request<Body>| {
+                    let body = body.clone();
+                    async move { Ok::<_, hyper::Error>(hyper::Response::new(Body::from(body))) }
+                };
+                let responder =
+                    tokio_noise::handshakes::nn_psk2::Responder::new(move |_: &[u8]| Some(psk));
+                if let Err(e) = hyper_noise::server::serve_http(
+                    socket,
+                    responder,
+                    respond,
+                    Some(NOISE_HANDLER_TIMEOUT),
+                )
+                .await
+                {
+                    tracing::warn!("test server connection failed: {e}");
+                }
+            }
+        });
+        let relay = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let port = relay.local_addr()?.port();
+        let relay = accept_loop(relay, move |socket| async move {
+            if let Err(e) = paced_relay(socket, server_addr).await {
+                tracing::warn!("test relay failed: {e}");
+            }
+        });
+
+        let request = Message::new(MessageType::GetChunk, 0u32.to_be_bytes().to_vec());
+        let mut failures = Vec::new();
+        for round in 0..ROUNDS {
+            match send_noise_message("127.0.0.1", port, &psk, b"peer", &request).await {
+                Ok(bytes) if bytes == response => {}
+                Ok(bytes) => failures.push(format!("round {round}: {} bytes", bytes.len())),
+                Err(e) => failures.push(format!("round {round}: {e}")),
+            }
+        }
+        server.abort();
+        relay.abort();
+        assert!(
+            failures.is_empty(),
+            "{} of {ROUNDS} rounds failed: {failures:?}",
+            failures.len()
+        );
+        Ok(())
+    }
+
     // Compile-time guard: the secret-bearing types must not expose Debug,
     // Clone, or Copy. Removing any of these breaks the security invariant.
     static_assertions::assert_not_impl_any!(NoiseKeypair: std::fmt::Debug, Clone, Copy);
