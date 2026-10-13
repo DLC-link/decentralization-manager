@@ -22,6 +22,8 @@ const PARTY_ID = `old-pool::1220${"c".repeat(64)}`;
 const ENCODED = encodeURIComponent(PARTY_ID);
 const PREVIEW_URL = `/former-parties/purge-preview?party_id=${ENCODED}`;
 const PURGE_URL = "/former-parties/purge";
+const RECONNECT_URL = "/former-parties/reconnect";
+const HEALTH_URL = "/node-health";
 const DISMISS_URL = `/former-parties?party_id=${ENCODED}`;
 
 const formerParty = (
@@ -43,17 +45,33 @@ const serve = ({
   previewStatus = 200,
   purgeStatus = 202,
   purgeBody = { message: "Purge started" },
+  connected = true,
+  reconnectStatus = 200,
+  reconnectBody = { message: "The participant is connected and healthy again" },
 }: {
   preview?: PurgePreview | { error: string };
   previewStatus?: number;
   purgeStatus?: number;
   purgeBody?: unknown;
+  connected?: boolean;
+  reconnectStatus?: number;
+  reconnectBody?: unknown;
 } = {}) =>
   fetchMock.mockImplementation((input, init) => {
     const url = String(input);
     if (url === PREVIEW_URL) return json(preview, previewStatus);
     if (url === PURGE_URL && init?.method === "POST") {
       return json(purgeBody, purgeStatus);
+    }
+    if (url === HEALTH_URL) {
+      return json({
+        synchronizers: connected
+          ? [{ physical_synchronizer_id: "global::1220", healthy: true }]
+          : [],
+      });
+    }
+    if (url === RECONNECT_URL && init?.method === "POST") {
+      return json(reconnectBody, reconnectStatus);
     }
     if (url === DISMISS_URL && init?.method === "DELETE") {
       return json({ message: "dismissed" });
@@ -335,5 +353,45 @@ describe("FormerPartyDetail", () => {
       name: "Purge",
     })) as HTMLButtonElement;
     expect(purge.disabled).toBe(true);
+  });
+
+  it("offers a reconnect after a failed purge left the participant off", async () => {
+    serve({ connected: false });
+    renderDetail(formerParty("failed", { purge_error: "decman restarted" }));
+
+    fireEvent.click(await screen.findByRole("button", { name: "Reconnect" }));
+
+    expect(
+      await screen.findByText("The participant is connected and healthy again"),
+    ).toBeTruthy();
+    const posts = callsTo(RECONNECT_URL, "POST");
+    expect(posts).toHaveLength(1);
+    expect(JSON.parse(String(posts[0][1]?.body))).toEqual({ party_id: PARTY_ID });
+  });
+
+  it("shows why the server refused the reconnect", async () => {
+    const reason =
+      "Synchronizer 'global' is set to manual connection. DecMan sets that when it keeps the participant off on purpose";
+    serve({ connected: false, reconnectStatus: 409, reconnectBody: { error: reason } });
+    renderDetail(formerParty("failed"));
+
+    fireEvent.click(await screen.findByRole("button", { name: "Reconnect" }));
+
+    expect(await screen.findByText(reason)).toBeTruthy();
+  });
+
+  it("offers no reconnect while the participant is connected", async () => {
+    serve({ connected: true });
+    renderDetail(formerParty("failed"));
+    await waitFor(() => expect(callsTo(HEALTH_URL)).toHaveLength(1));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.queryByRole("button", { name: "Reconnect" })).toBeNull();
+  });
+
+  it("does not read the node's health unless a purge failed", () => {
+    serve({ connected: false });
+    renderDetail(formerParty("none"));
+    expect(callsTo(HEALTH_URL)).toHaveLength(0);
+    expect(screen.queryByRole("button", { name: "Reconnect" })).toBeNull();
   });
 });
