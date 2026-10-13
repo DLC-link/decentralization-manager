@@ -555,8 +555,10 @@ Most variables have a default that's only useful for local development (loopback
 
 External-party discovery is scoped to the configured synchronizer and local
 participant. It enumerates at most 5,000 hosted party IDs, then reads individual
-party mappings and namespace definitions sequentially. Each topology RPC has a
-60-second client timeout and sends a gRPC deadline. Enumeration still scans
+party mappings and namespace definitions sequentially. Hosted-party enumeration
+has a five-minute deadline; each individual topology read has a 60-second
+deadline. Both client timeouts and gRPC deadlines are set, and the complete scan
+is bounded to ten minutes. Enumeration still scans
 Canton's store in batches; this bounds retained topology data, not total database
 work. A full 5,000-party result or a failed read fails the refresh rather than
 publishing an incomplete list. The last successful snapshot stays visible with

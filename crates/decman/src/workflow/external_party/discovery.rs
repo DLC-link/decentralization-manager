@@ -26,6 +26,10 @@ use crate::{config::NodeConfig, utils};
 // ListParties has a limit but no cursor. Refuse a full result rather than
 // publish a snapshot that silently omits parties. Match decentralized discovery.
 const MAX_HOSTED_PARTIES: i32 = 5_000;
+// Hosted-party enumeration walks the synchronizer in batches: devnet took
+// 103s even with a small final response. Leave room for that work while the
+// cache still bounds the complete scan to ten minutes.
+const PARTY_ENUMERATION_TIMEOUT: Duration = Duration::from_secs(300);
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[async_trait::async_trait]
@@ -46,9 +50,9 @@ struct CantonReader {
     topology: TopologyManagerReadServiceClient<Channel>,
 }
 
-fn timed_request<T>(message: T) -> Request<T> {
+fn timed_request<T>(message: T, timeout: Duration) -> Request<T> {
     let mut request = Request::new(message);
-    request.set_timeout(READ_TIMEOUT);
+    request.set_timeout(timeout);
     request
 }
 
@@ -69,8 +73,9 @@ impl DiscoveryReader for CantonReader {
     async fn parties(&mut self, request: ListPartiesRequest) -> Result<ListPartiesResponse> {
         read(
             "ListParties",
-            READ_TIMEOUT,
-            self.aggregation.list_parties(timed_request(request)),
+            PARTY_ENUMERATION_TIMEOUT,
+            self.aggregation
+                .list_parties(timed_request(request, PARTY_ENUMERATION_TIMEOUT)),
         )
         .await
     }
@@ -83,7 +88,7 @@ impl DiscoveryReader for CantonReader {
             "ListPartyToParticipant",
             READ_TIMEOUT,
             self.topology
-                .list_party_to_participant(timed_request(request)),
+                .list_party_to_participant(timed_request(request, READ_TIMEOUT)),
         )
         .await
     }
@@ -96,7 +101,7 @@ impl DiscoveryReader for CantonReader {
             "ListDecentralizedNamespaceDefinition",
             READ_TIMEOUT,
             self.topology
-                .list_decentralized_namespace_definition(timed_request(request)),
+                .list_decentralized_namespace_definition(timed_request(request, READ_TIMEOUT)),
         )
         .await
     }
@@ -556,7 +561,7 @@ mod tests {
 
     #[test]
     fn topology_reads_send_a_server_deadline() -> Result<()> {
-        let request = timed_request(ListPartiesRequest::default());
+        let request = timed_request(ListPartyToParticipantRequest::default(), READ_TIMEOUT);
         assert_eq!(
             request
                 .metadata()
@@ -564,6 +569,20 @@ mod tests {
                 .context("missing gRPC deadline")?
                 .to_str()?,
             "60000000u"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn party_enumeration_sends_a_deadline_that_allows_devnet_scans() -> Result<()> {
+        let request = timed_request(ListPartiesRequest::default(), PARTY_ENUMERATION_TIMEOUT);
+        assert_eq!(
+            request
+                .metadata()
+                .get("grpc-timeout")
+                .context("missing enumeration deadline")?
+                .to_str()?,
+            "300000m"
         );
         Ok(())
     }
