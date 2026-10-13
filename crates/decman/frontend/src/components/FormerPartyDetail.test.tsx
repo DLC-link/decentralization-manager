@@ -70,11 +70,17 @@ const callsTo = (url: string, method?: string) =>
 const renderDetail = (party: FormerParty) => {
   const onBack = vi.fn();
   const onChanged = vi.fn();
+  const onPurgeStarted = vi.fn();
   render(
-    <FormerPartyDetail party={party} onBack={onBack} onChanged={onChanged} />,
+    <FormerPartyDetail
+      party={party}
+      onBack={onBack}
+      onChanged={onChanged}
+      onPurgeStarted={onPurgeStarted}
+    />,
     { wrapper: SnackbarProvider },
   );
-  return { onBack, onChanged };
+  return { onBack, onChanged, onPurgeStarted };
 };
 
 const openPurge = async () => {
@@ -135,7 +141,7 @@ describe("FormerPartyDetail", () => {
 
   it("starts the purge on confirm", async () => {
     serve();
-    const { onChanged } = renderDetail(formerParty("none"));
+    const { onChanged, onPurgeStarted } = renderDetail(formerParty("none"));
     await openPurge();
     fireEvent.click(await screen.findByRole("button", { name: "Purge 37 contracts" }));
 
@@ -143,7 +149,8 @@ describe("FormerPartyDetail", () => {
     const posts = callsTo(PURGE_URL, "POST");
     expect(posts).toHaveLength(1);
     expect(JSON.parse(String(posts[0][1]?.body))).toEqual({ party_id: PARTY_ID });
-    expect(onChanged).toHaveBeenCalledTimes(1);
+    expect(onPurgeStarted).toHaveBeenCalledTimes(1);
+    expect(onChanged).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
@@ -151,13 +158,13 @@ describe("FormerPartyDetail", () => {
     const reason =
       "workflows are running on this node (Kick k-1). A purge takes the participant off the synchronizer, so wait for them to finish";
     serve({ purgeStatus: 409, purgeBody: { error: reason } });
-    const { onChanged } = renderDetail(formerParty("none"));
+    const { onPurgeStarted } = renderDetail(formerParty("none"));
     await openPurge();
     fireEvent.click(await screen.findByRole("button", { name: "Purge 37 contracts" }));
 
     expect(await screen.findByText(reason)).toBeTruthy();
     expect(screen.getByRole("dialog")).toBeTruthy();
-    expect(onChanged).not.toHaveBeenCalled();
+    expect(onPurgeStarted).not.toHaveBeenCalled();
     const confirm = screen.getByRole("button", {
       name: "Purge 37 contracts",
     }) as HTMLButtonElement;
@@ -166,7 +173,7 @@ describe("FormerPartyDetail", () => {
 
   it("offers to mark the party purged when nothing is left to remove", async () => {
     serve({ preview: { party_id: PARTY_ID, purge_count: 0, keep_count: 5 } });
-    const { onChanged } = renderDetail(formerParty("none"));
+    const { onPurgeStarted } = renderDetail(formerParty("none"));
     await openPurge();
 
     expect(
@@ -179,7 +186,7 @@ describe("FormerPartyDetail", () => {
 
     await screen.findByText("Purge started");
     expect(callsTo(PURGE_URL, "POST")).toHaveLength(1);
-    expect(onChanged).toHaveBeenCalledTimes(1);
+    expect(onPurgeStarted).toHaveBeenCalledTimes(1);
   });
 
   it("shows why the count failed and keeps confirm disabled", async () => {

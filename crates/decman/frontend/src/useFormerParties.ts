@@ -36,6 +36,18 @@ export function useFormerParties() {
     }
   }, []);
 
+  // The server claims the purge before it answers 202, so the party runs from
+  // that moment. Marking it here starts the poll even if the next read fails.
+  const markPurging = useCallback((partyId: string) => {
+    // A read sent before the purge started would bring back the old status.
+    ++seq.current;
+    setFormerParties((parties) =>
+      parties.map((p) =>
+        p.party_id === partyId ? { ...p, purge_status: "running" } : p,
+      ),
+    );
+  }, []);
+
   const purging = formerParties.some((p) => p.purge_status === "running");
   useEffect(() => {
     if (!purging) return;
@@ -43,5 +55,5 @@ export function useFormerParties() {
     return () => clearInterval(interval);
   }, [purging, reload]);
 
-  return { formerParties, loaded, reload };
+  return { formerParties, loaded, reload, markPurging };
 }
