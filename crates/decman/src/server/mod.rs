@@ -1459,6 +1459,7 @@ pub async fn start_server(
             .service(handlers::list_former_parties)
             .service(handlers::preview_former_party_purge)
             .service(handlers::purge_former_party)
+            .service(handlers::reconnect_after_purge)
             .service(handlers::dismiss_former_party)
             .service(handlers::start_kick)
             .service(handlers::get_kick_status)

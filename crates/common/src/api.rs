@@ -268,6 +268,15 @@ pub struct PurgeFormerPartyRequest {
     pub party_id: String,
 }
 
+/// Request to reconnect this participant after a purge of a former party failed
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+#[serde(deny_unknown_fields)]
+pub struct ReconnectFormerPartyRequest {
+    pub party_id: String,
+}
+
 /// Request to kick a participant from a decentralized party.
 /// `deny_unknown_fields` rejects pre-fix requests carrying
 /// `namespace_fingerprint` instead of silently ignoring it (the server now

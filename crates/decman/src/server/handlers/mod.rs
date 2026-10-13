@@ -20,6 +20,7 @@ pub(crate) use config::{
 };
 pub(crate) use former_parties::{
     dismiss_former_party, list_former_parties, preview_former_party_purge, purge_former_party,
+    reconnect_after_purge,
 };
 pub(crate) use governance::{
     cancel_confirmation, cancel_proposal, confirm_action, execute_action, expire_confirmation,

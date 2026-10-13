@@ -149,6 +149,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         PurgeFormerPartyRequest,
         PurgePreview,
         PurgeStatus,
+        ReconnectFormerPartyRequest,
         RegistrarServiceInfo,
         RegistrarServiceRequestInfo,
         RegistrarServiceRequestsResponse,

@@ -50,10 +50,15 @@ use crate::{
     },
     utils,
     workflow::{
-        party_replication::acs::{synchronizer_healthy, verify_healthy},
+        party_replication::acs::{manual_connect_enabled, synchronizer_healthy, verify_healthy},
         topology::{head_state_query, history_query},
     },
 };
+
+/// Serializes the operations that take the participant off its synchronizer
+/// or put it back. A purge holds it from its start until it records its
+/// outcome. A reconnect takes it, or refuses while a purge holds it.
+static CONNECTIVITY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// How long the removal must have been in force before a purge.
 ///
@@ -77,8 +82,8 @@ const HOSTING_READ_CONCURRENCY: usize = 8;
 
 /// The error a purge that a restart cut off is left with.
 pub(crate) const INTERRUPTED_PURGE_ERROR: &str = "decman restarted while this purge was \
-     running. The participant may still be disconnected from its synchronizer: check it, \
-     reconnect it if needed, then run the purge again";
+     running. The participant may still be disconnected from its synchronizer. Reconnect it \
+     from this page if it is, then run the purge again";
 
 /// One serial of a party's hosting mapping.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -350,13 +355,26 @@ pub(crate) async fn plan_purge(
     Ok(split_leftovers(contracts, &hosted))
 }
 
-/// Why a purge may not start.
+/// Why a purge or a reconnect may not start.
 #[derive(Debug)]
-pub(crate) enum PurgeRefusal {
+pub(crate) enum Refusal {
     /// The party is not a former party of this node, or it was dismissed.
     NotFormer,
-    /// The node is in a state where a purge is unsafe; the text says which.
+    /// The node is in a state where the operation is unsafe; the text says
+    /// which.
     Unsafe(String),
+}
+
+/// The in-progress workflow runs, named for an operator, or `None` when there
+/// are none.
+async fn running_workflows(db: &SqlitePool) -> Result<Option<String>> {
+    let runs = db.get_in_progress_workflow_runs().await?;
+    Ok((!runs.is_empty()).then(|| {
+        runs.iter()
+            .map(|run| format!("{:?} {}", run.kind, run.instance_name))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }))
 }
 
 /// Check that a purge of `party` is safe to start now.
@@ -364,8 +382,8 @@ pub(crate) async fn check_purge_allowed(
     config: &NodeConfig,
     db: &SqlitePool,
     party: &CantonId,
-) -> Result<std::result::Result<(), PurgeRefusal>> {
-    let refuse = |why: String| Ok(Err(PurgeRefusal::Unsafe(why)));
+) -> Result<std::result::Result<(), Refusal>> {
+    let refuse = |why: String| Ok(Err(Refusal::Unsafe(why)));
 
     match db.get_former_dec_party(party).await? {
         Some(row) if row.dismissed_at.is_none() => {
@@ -373,21 +391,15 @@ pub(crate) async fn check_purge_allowed(
                 return refuse("A purge of this party is already running".to_string());
             }
         }
-        _ => return Ok(Err(PurgeRefusal::NotFormer)),
+        _ => return Ok(Err(Refusal::NotFormer)),
     }
 
     // Disconnecting would break a run in flight, and an add-party may be about
     // to host this very party again.
-    let runs = db.get_in_progress_workflow_runs().await?;
-    if !runs.is_empty() {
-        let names: Vec<String> = runs
-            .iter()
-            .map(|run| format!("{:?} {}", run.kind, run.instance_name))
-            .collect();
+    if let Some(runs) = running_workflows(db).await? {
         return refuse(format!(
-            "Workflows are running on this node ({}). A purge takes the participant off the \
-             synchronizer, so wait for them to finish",
-            names.join(", ")
+            "Workflows are running on this node ({runs}). A purge takes the participant off the \
+             synchronizer, so wait for them to finish"
         ));
     }
 
@@ -427,6 +439,7 @@ pub(crate) async fn check_purge_allowed(
 /// Purge the leftovers of `party` and record the outcome. Runs after
 /// [`check_purge_allowed`] passed and the purge was claimed.
 pub(crate) async fn run_purge(config: NodeConfig, db: SqlitePool, token: String, party: CantonId) {
+    let _connectivity = CONNECTIVITY.lock().await;
     tracing::info!(%party, "Purging the former party's leftover contracts");
     let outcome = purge_leftovers(&config, &token, &party).await;
     let recorded = match outcome {
@@ -514,6 +527,89 @@ async fn purge_leftovers(
         after.purge.len()
     );
     Ok((split.purge.len(), after.keep))
+}
+
+/// Reconnect the participant after a purge of `party` failed, and wait until
+/// its connection is healthy.
+///
+/// A purge reconnects on every outcome. This covers the cases it could not:
+/// decman stopped during the purge, or the reconnect itself failed. DecMan
+/// keeps a participant off on purpose in other cases, for example after a
+/// failed add-party run. It then sets manual connection, and this refuses.
+pub(crate) async fn reconnect_after_failed_purge(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    party: &CantonId,
+) -> Result<std::result::Result<(), Refusal>> {
+    let refuse = |why: String| Ok(Err(Refusal::Unsafe(why)));
+
+    match db.get_former_dec_party(party).await? {
+        Some(row) if row.dismissed_at.is_none() => {
+            if row.purge_status != "failed" {
+                return refuse(
+                    "Reconnect is for a purge that failed, and this party's last purge did not"
+                        .to_string(),
+                );
+            }
+        }
+        _ => return Ok(Err(Refusal::NotFormer)),
+    }
+    if let Some(runs) = running_workflows(db).await? {
+        return refuse(format!(
+            "Workflows are running on this node ({runs}). A workflow can keep the participant \
+             off the synchronizer on purpose, so wait for them to finish"
+        ));
+    }
+    let purge_running =
+        "A purge is running on this node. It reconnects the participant when it ends".to_string();
+    let Ok(connectivity) = CONNECTIVITY.try_lock() else {
+        return refuse(purge_running);
+    };
+    // A claimed purge takes the lock only once its task starts.
+    if db
+        .get_former_dec_parties()
+        .await?
+        .iter()
+        .any(|row| row.purge_status == "running")
+    {
+        return refuse(purge_running);
+    }
+
+    let alias = config.synchronizer().to_string();
+    let connected = SynchronizerConnectivityServiceClient::new(config.admin_channel().await?)
+        .list_connected_synchronizers(tonic::Request::new(ListConnectedSynchronizersRequest {}))
+        .await?
+        .into_inner()
+        .connected_synchronizers;
+    if synchronizer_healthy(&connected, &alias) {
+        return refuse(format!(
+            "The participant is already connected and healthy on synchronizer '{alias}'"
+        ));
+    }
+    if manual_connect_enabled(config).await? {
+        return refuse(format!(
+            "Synchronizer '{alias}' is set to manual connection. DecMan sets that when it keeps \
+             the participant off on purpose, for example after a failed add-party run. \
+             Reconnecting it here can crash the participant, so follow the guide for that case"
+        ));
+    }
+
+    tracing::info!(%party, "Reconnecting the participant after a failed purge");
+    // A spawned task finishes the reconnect even if the request is dropped.
+    let config = config.clone();
+    tokio::spawn(async move {
+        let _connectivity = connectivity;
+        SynchronizerConnectivityServiceClient::new(config.admin_channel().await?)
+            .reconnect_synchronizer(tonic::Request::new(ReconnectSynchronizerRequest {
+                synchronizer_alias: alias,
+                retry: true,
+            }))
+            .await?;
+        verify_healthy(&config).await
+    })
+    .await??;
+    tracing::info!(%party, "The participant is connected and healthy again");
+    Ok(Ok(()))
 }
 
 async fn purge_in_batches(config: &NodeConfig, alias: &str, contract_ids: &[String]) -> Result {
@@ -622,5 +718,90 @@ mod tests {
                 keep: 3,
             }
         );
+    }
+
+    fn former(prefix: &str) -> CantonId {
+        CantonId::parse(&format!("{prefix}::1220{}", "b".repeat(64))).unwrap()
+    }
+
+    async fn failed_purge(db: &SqlitePool, party: &CantonId) -> Result {
+        db.record_former_dec_party(party, 1).await?;
+        db.claim_former_party_purge(party).await?;
+        db.fail_former_party_purge(party, INTERRUPTED_PURGE_ERROR)
+            .await
+    }
+
+    fn refusal(outcome: std::result::Result<(), Refusal>) -> String {
+        match outcome {
+            Err(Refusal::Unsafe(why)) => why,
+            other => panic!("expected an unsafe refusal, got {other:?}"),
+        }
+    }
+
+    // The refusals below come before any call to the participant, so a
+    // default config never reaches one.
+
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn reconnect_is_only_for_a_failed_purge(db: SqlitePool) -> Result {
+        let config = NodeConfig::default();
+        let party = former("left");
+        assert!(matches!(
+            reconnect_after_failed_purge(&config, &db, &party).await?,
+            Err(Refusal::NotFormer)
+        ));
+
+        db.record_former_dec_party(&party, 1).await?;
+        let why = refusal(reconnect_after_failed_purge(&config, &db, &party).await?);
+        assert!(why.contains("did not"), "{why}");
+
+        db.claim_former_party_purge(&party).await?;
+        db.complete_former_party_purge(&party, 1, 0).await?;
+        db.dismiss_former_dec_party(&party).await?;
+        assert!(matches!(
+            reconnect_after_failed_purge(&config, &db, &party).await?,
+            Err(Refusal::NotFormer)
+        ));
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn reconnect_waits_for_running_workflows(db: SqlitePool) -> Result {
+        let party = former("left");
+        failed_purge(&db, &party).await?;
+        sqlx::query(
+            "INSERT INTO workflow_runs (
+                 instance_name, kind, role, status, current_step, step_index, step_total,
+                 config_json, expected_peers_json, completed_peers_json, created_at, updated_at
+             ) VALUES ('add-1', 'AddParty', 'Peer', 'inprogress', 'Active', 0, 1, '{}', '[]',
+                       '[]', 0, 0)",
+        )
+        .execute(&db)
+        .await?;
+
+        let why = refusal(reconnect_after_failed_purge(&NodeConfig::default(), &db, &party).await?);
+        assert!(why.contains("AddParty add-1"), "{why}");
+        Ok(())
+    }
+
+    /// The only test that takes the connectivity lock, so the parallel tests
+    /// above never see it held.
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn reconnect_waits_for_a_running_purge(db: SqlitePool) -> Result {
+        let config = NodeConfig::default();
+        let (failed, other) = (former("failed"), former("other"));
+        failed_purge(&db, &failed).await?;
+
+        {
+            let _purge = CONNECTIVITY.lock().await;
+            let why = refusal(reconnect_after_failed_purge(&config, &db, &failed).await?);
+            assert!(why.contains("A purge is running"), "{why}");
+        }
+
+        // Claimed, but its task has not taken the lock yet.
+        db.record_former_dec_party(&other, 1).await?;
+        db.claim_former_party_purge(&other).await?;
+        let why = refusal(reconnect_after_failed_purge(&config, &db, &failed).await?);
+        assert!(why.contains("A purge is running"), "{why}");
+        Ok(())
     }
 }
