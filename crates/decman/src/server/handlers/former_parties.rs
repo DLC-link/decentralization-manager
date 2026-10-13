@@ -174,7 +174,9 @@ pub async fn purge_former_party(
         Ok(true) => {}
         Ok(false) => {
             return HttpResponse::Conflict().json(ErrorResponse {
-                error: "Another purge is running on this node".to_string(),
+                error: "Another purge or a workflow started on this node. Try again after it \
+                        finishes"
+                    .to_string(),
             });
         }
         Err(e) => return internal("Failed to start the purge", e),

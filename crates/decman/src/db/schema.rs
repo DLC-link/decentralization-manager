@@ -212,9 +212,10 @@ pub trait SchemaWrite {
     async fn forget_former_dec_parties(&self, party_ids: &[String]) -> Result<u64>;
 
     /// Mark a purge of `party_id` as running. Returns `false`, and changes
-    /// nothing, when the party is not a visible former party or when any
-    /// purge is already running on this node: a purge takes the participant
-    /// off the synchronizer, so two must never overlap.
+    /// nothing, when the party is not a visible former party, or when any
+    /// purge or workflow run is in progress on this node. A purge takes the
+    /// participant off the synchronizer, so it must overlap with neither.
+    /// While it runs, no workflow run can become in progress either.
     async fn claim_former_party_purge(&self, party_id: &CantonId) -> Result<bool>;
 
     /// Record a purge that finished and left only shared contracts behind.
@@ -328,7 +329,8 @@ pub trait Commitable {
     ) -> Result;
 
     /// Insert or replace a workflow run. Used on initial start, on every
-    /// state-machine advance, and on resume.
+    /// state-machine advance, and on resume. Fails for an in-progress run
+    /// while a purge of former-party contracts runs.
     async fn upsert_workflow_run(&mut self, run: &WorkflowRun) -> Result;
 
     /// Update the per-step progress fields without touching status.
@@ -341,7 +343,8 @@ pub trait Commitable {
         updated_at: i64,
     ) -> Result;
 
-    /// Flip the status (and optional error) of a workflow run.
+    /// Flip the status (and optional error) of a workflow run. Fails on a
+    /// flip to in progress while a purge of former-party contracts runs.
     async fn set_workflow_run_status(
         &mut self,
         instance_name: &str,

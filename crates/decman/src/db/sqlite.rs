@@ -28,6 +28,12 @@ use crate::{
 
 pub static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
+/// The refusal of a workflow run that would become in progress during a purge
+/// of former-party contracts. The purge takes the participant off its
+/// synchronizer, so a run would fail underneath it.
+const WORKFLOW_BLOCKED_BY_PURGE: &str = "A purge of former-party contracts is running on this \
+     node. Start the workflow again after the purge finishes";
+
 /// Checksum rewrites for migration files that were edited in place after
 /// operators had already applied them: (version, checksum recorded by the old
 /// file, checksum of the current file). Every entry must be a semantically
@@ -667,13 +673,14 @@ impl SchemaWrite for SqlitePool {
 
     async fn claim_former_party_purge(&self, party_id: &CantonId) -> Result<bool> {
         // One statement, so the "nothing else is running" check and the claim
-        // cannot interleave with a second request's.
+        // cannot interleave with another purge or with a workflow start.
         let result = sqlx::query(
             "UPDATE former_dec_party \
              SET purge_status = 'running', purge_started_at = ?, purge_finished_at = NULL, \
                  purged_count = NULL, kept_count = NULL, purge_error = NULL \
              WHERE party_id = ? AND dismissed_at IS NULL \
-               AND NOT EXISTS (SELECT 1 FROM former_dec_party WHERE purge_status = 'running')",
+               AND NOT EXISTS (SELECT 1 FROM former_dec_party WHERE purge_status = 'running') \
+               AND NOT EXISTS (SELECT 1 FROM workflow_runs WHERE status = 'inprogress')",
         )
         .bind(chrono::Utc::now().timestamp())
         .bind(party_id.to_string())
@@ -1180,7 +1187,8 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         // step advance, etc.) replaces in place. Migration 000013 dropped the
         // partial unique index that once forbade two InProgress runs per
         // (kind, role) — concurrency is governed by the in-memory registry.
-        sqlx::query(
+        // The WHERE refuses an in-progress run while a purge runs.
+        let result = sqlx::query(
             r"
             INSERT INTO workflow_runs (
                 instance_name,
@@ -1200,7 +1208,10 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 dismissed,
                 created_at,
                 updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            )
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            WHERE ? != 'inprogress'
+               OR NOT EXISTS (SELECT 1 FROM former_dec_party WHERE purge_status = 'running')
             ON CONFLICT(instance_name) DO UPDATE SET
                 kind                     = excluded.kind,
                 role                     = excluded.role,
@@ -1236,9 +1247,11 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         .bind(row.dismissed)
         .bind(row.created_at)
         .bind(row.updated_at)
+        .bind(&row.status)
         .execute(&mut **self)
         .await?;
 
+        anyhow::ensure!(result.rows_affected() > 0, WORKFLOW_BLOCKED_BY_PURGE);
         Ok(())
     }
 
@@ -1289,21 +1302,34 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
             WorkflowProgress::Cancelled => "cancelled",
         };
 
-        sqlx::query(
+        let result = sqlx::query(
             r"
             UPDATE workflow_runs
             SET status = ?,
                 error = ?,
                 updated_at = ?
             WHERE instance_name = ?
+              AND (? != 'inprogress'
+                   OR NOT EXISTS (SELECT 1 FROM former_dec_party WHERE purge_status = 'running'))
             ",
         )
         .bind(status_str)
         .bind(error)
         .bind(updated_at)
         .bind(instance_name)
+        .bind(status_str)
         .execute(&mut **self)
         .await?;
+        if result.rows_affected() == 0 && status == WorkflowProgress::InProgress {
+            // No row changed: either the run is missing, which stays a no-op,
+            // or a purge refused it.
+            let (purging,): (bool,) = sqlx::query_as(
+                "SELECT EXISTS (SELECT 1 FROM former_dec_party WHERE purge_status = 'running')",
+            )
+            .fetch_one(&mut **self)
+            .await?;
+            anyhow::ensure!(!purging, WORKFLOW_BLOCKED_BY_PURGE);
+        }
 
         // Clean up `workflow_artifacts` rows when the run reaches a clean
         // terminal state — they're transient working data, the long-lived
@@ -1641,6 +1667,74 @@ mod tests {
 
         pool.complete_former_party_purge(&a, 7, 3).await?;
         assert!(pool.claim_former_party_purge(&b).await?);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_purge_waits_for_running_workflows(pool: SqlitePool) -> Result {
+        let party = former("left");
+        pool.record_former_dec_party(&party, 1).await?;
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_workflow_run(&test_run("kick-1", "Kick", "Peer"))
+            .await?;
+        Commitable::commit(tx).await?;
+
+        assert!(
+            !pool.claim_former_party_purge(&party).await?,
+            "the purge would take the participant off the synchronizer under the run"
+        );
+
+        let mut tx = pool.begin_transaction().await?;
+        tx.set_workflow_run_status("kick-1", WorkflowProgress::Completed, None, 2)
+            .await?;
+        Commitable::commit(tx).await?;
+        assert!(pool.claim_former_party_purge(&party).await?);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn no_workflow_run_starts_during_a_purge(pool: SqlitePool) -> Result {
+        let mut failed = test_run("kick-1", "Kick", "Peer");
+        failed.status = WorkflowProgress::Failed;
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_workflow_run(&failed).await?;
+        Commitable::commit(tx).await?;
+        let party = former("left");
+        pool.record_former_dec_party(&party, 1).await?;
+        assert!(pool.claim_former_party_purge(&party).await?);
+
+        let mut tx = pool.begin_transaction().await?;
+        let start = tx
+            .upsert_workflow_run(&test_run("add-1", "AddParty", "Coordinator"))
+            .await;
+        assert!(start.is_err(), "a new run must not start during the purge");
+        let retry = tx
+            .set_workflow_run_status("kick-1", WorkflowProgress::InProgress, None, 2)
+            .await;
+        assert!(
+            retry.is_err(),
+            "a failed run must not be retried during the purge"
+        );
+        // Runs that do not become in progress are still recorded.
+        tx.set_workflow_run_status("kick-1", WorkflowProgress::Cancelled, None, 3)
+            .await?;
+        Commitable::commit(tx).await?;
+        assert!(pool.get_workflow_run("add-1").await?.is_none());
+        assert_eq!(
+            pool.get_workflow_run("kick-1").await?.unwrap().status,
+            WorkflowProgress::Cancelled
+        );
+
+        pool.complete_former_party_purge(&party, 1, 0).await?;
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_workflow_run(&test_run("add-1", "AddParty", "Coordinator"))
+            .await?;
+        tx.set_workflow_run_status("kick-1", WorkflowProgress::InProgress, None, 4)
+            .await?;
+        // Flipping a missing run stays a no-op.
+        tx.set_workflow_run_status("missing", WorkflowProgress::InProgress, None, 4)
+            .await?;
+        Commitable::commit(tx).await?;
         Ok(())
     }
 
