@@ -110,3 +110,44 @@ it("counts a failed load as loaded and keeps the last list", async () => {
   expect(result.current.loaded).toBe(true);
   expect(result.current.formerParties.map((p) => p.party_id)).toEqual([PARTY_ID]);
 });
+
+it("polls after a purge starts, even when the next read fails", async () => {
+  fetchMock
+    .mockImplementationOnce(() => list(former("none")))
+    .mockImplementationOnce(() => Promise.reject(new Error("offline")))
+    .mockImplementation(() => list(former("succeeded")));
+  const { result } = renderHook(() => useFormerParties());
+  await act(() => result.current.reload());
+
+  act(() => result.current.markPurging(PARTY_ID));
+  expect(result.current.formerParties[0].purge_status).toBe("running");
+
+  await tick();
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+  expect(result.current.formerParties[0].purge_status).toBe("running");
+  await tick();
+  expect(fetchMock).toHaveBeenCalledTimes(3);
+  expect(result.current.formerParties[0].purge_status).toBe("succeeded");
+});
+
+it("ignores a read sent before the purge started", async () => {
+  let answerOlder!: (response: Response) => void;
+  fetchMock
+    .mockImplementationOnce(() => list(former("none")))
+    .mockImplementationOnce(
+      () => new Promise<Response>((resolve) => (answerOlder = resolve)),
+    );
+  const { result } = renderHook(() => useFormerParties());
+  await act(() => result.current.reload());
+  let older!: Promise<void>;
+  act(() => {
+    older = result.current.reload();
+  });
+
+  act(() => result.current.markPurging(PARTY_ID));
+  await act(async () => {
+    answerOlder(Response.json({ parties: [former("none")] }));
+    await older;
+  });
+  expect(result.current.formerParties[0].purge_status).toBe("running");
+});
