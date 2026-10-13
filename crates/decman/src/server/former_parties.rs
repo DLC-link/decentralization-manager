@@ -457,6 +457,7 @@ async fn purge_leftovers(
     }
 
     let alias = config.synchronizer().to_string();
+    let synchronizer_id = utils::get_synchronizer_id(config).await?;
     let mut connectivity =
         SynchronizerConnectivityServiceClient::new(config.admin_channel().await?);
     // Disconnect and purge as one fallible unit. The reconnect below runs on
@@ -467,6 +468,16 @@ async fn purge_leftovers(
                 synchronizer_alias: alias.clone(),
             }))
             .await?;
+        // The participant's topology stops changing once it is off the
+        // synchronizer. A rehost since the plan makes the planned contracts
+        // current again, so check for one here, before anything is removed.
+        anyhow::ensure!(
+            live_removal_time(config, &synchronizer_id, party)
+                .await?
+                .is_some(),
+            "this participant hosts the party again, so the purge stopped before removing \
+             anything"
+        );
         purge_in_batches(config, &alias, &split.purge).await
     }
     .await;
