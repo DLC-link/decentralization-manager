@@ -9,11 +9,11 @@ use crate::{
     db::schema::{SchemaRead, SchemaWrite},
     server::{
         AppState,
-        former_parties::{self, PurgeRefusal},
+        former_parties::{self, Refusal},
         middleware::require_admin,
         types::{
             ErrorResponse, FormerPartiesResponse, MessageResponse, PurgeFormerPartyRequest,
-            PurgePreview,
+            PurgePreview, ReconnectFormerPartyRequest,
         },
     },
 };
@@ -160,8 +160,8 @@ pub async fn purge_former_party(
 
     match former_parties::check_purge_allowed(&data.config, &data.db, &party_id).await {
         Ok(Ok(())) => {}
-        Ok(Err(PurgeRefusal::NotFormer)) => return not_former(&party_id),
-        Ok(Err(PurgeRefusal::Unsafe(why))) => {
+        Ok(Err(Refusal::NotFormer)) => return not_former(&party_id),
+        Ok(Err(Refusal::Unsafe(why))) => {
             tracing::warn!(%party_id, "Purge refused: {why}");
             return HttpResponse::Conflict().json(ErrorResponse { error: why });
         }
@@ -191,6 +191,49 @@ pub async fn purge_former_party(
     HttpResponse::Accepted().json(MessageResponse {
         message: format!("Purge of {party_id} started"),
     })
+}
+
+/// Reconnect this participant to its synchronizer after a purge failed.
+///
+/// A purge reconnects the participant on every outcome. This covers the cases
+/// it could not: decman stopped during the purge, or the reconnect failed.
+/// Answers once the connection is healthy.
+#[utoipa::path(
+    tag = "Parties",
+    request_body = ReconnectFormerPartyRequest,
+    responses(
+        (status = 200, description = "Connected and healthy again", body = MessageResponse),
+        (status = 400, description = "Malformed party id", body = ErrorResponse),
+        (status = 401, description = "Authentication required", body = ErrorResponse),
+        (status = 403, description = "Admin role required", body = ErrorResponse),
+        (status = 404, description = "Not a former party of this participant", body = ErrorResponse),
+        (status = 409, description = "A reconnect is unsafe right now; the error says why", body = ErrorResponse),
+        (status = 500, description = "The reconnect failed", body = ErrorResponse)
+    )
+)]
+#[post("/former-parties/reconnect")]
+pub async fn reconnect_after_purge(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    body: web::Json<ReconnectFormerPartyRequest>,
+) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
+    let Ok(party_id) = CantonId::parse(&body.party_id) else {
+        return bad_party_id();
+    };
+    match former_parties::reconnect_after_failed_purge(&data.config, &data.db, &party_id).await {
+        Ok(Ok(())) => HttpResponse::Ok().json(MessageResponse {
+            message: "The participant is connected and healthy again".to_string(),
+        }),
+        Ok(Err(Refusal::NotFormer)) => not_former(&party_id),
+        Ok(Err(Refusal::Unsafe(why))) => {
+            tracing::warn!(%party_id, "Reconnect refused: {why}");
+            HttpResponse::Conflict().json(ErrorResponse { error: why })
+        }
+        Err(e) => internal("Failed to reconnect the participant", format!("{e:#}")),
+    }
 }
 
 /// Hide a former party from the list once its leftovers are purged.
