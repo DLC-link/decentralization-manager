@@ -181,7 +181,8 @@ Adding a 4th custodian involves both governance and topology:
    runs, usually for about a minute, so every party it hosts is offline for
    that time. The purge refuses to start while any workflow runs on the node,
    while the participant is not connected and healthy, and in the first minute
-   after the removal.
+   after the removal. While the purge runs, the node starts no workflow and
+   accepts no invitation.
 
 ### Querying Governance State
 
