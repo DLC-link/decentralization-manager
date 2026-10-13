@@ -21,6 +21,7 @@ A web application for managing decentralized parties in Canton blockchain networ
 - [Adding a Member to a Decentralized Party](docs/ADDING_A_MEMBER_TO_A_DECENTRALIZED_PARTY.md) -- Running the add-party workflow: prerequisites, downtime, and recovery
 - [Decentralizing an External Party](docs/DECENTRALIZING_AN_EXTERNAL_PARTY.md) -- Hosting a wallet-held party on several participants with the tenant API
 - [Decentralizing an Existing Party](docs/DECENTRALIZING_AN_EXISTING_PARTY.md) -- Adding hosts to a local party for failover or co-validation
+- [Purging a Former Party](docs/PURGING_A_FORMER_PARTY.md) -- Deleting the stale contracts a participant keeps after it leaves a party, and recovering from a failed purge
 - [Custom Daml Templates](docs/CUSTOM_DAML_TEMPLATES.md) -- Authoring and deploying your own Daml governance templates
 - [Deployment Guide](docs/DEPLOYMENT_GUIDE.md) -- Deploying a node to Kubernetes from scratch: manifests, identity-provider setup, and configuration reference
 - [Use Cases](docs/USE_CASES.md) -- Joint custody governance, FAR rewards, multi-sig wallet, and utility service walkthroughs

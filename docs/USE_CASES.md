@@ -162,35 +162,11 @@ Adding a 4th custodian involves both governance and topology:
 
 3. **Cleanup on the removed node**: The removed participant keeps every
    contract it held for the party. It no longer sees the party's archives, so
-   those contracts go stale on it. Its DecMan lists the party with a "Removed"
-   chip. The party's page there has a **Purge** button. The operator of the
-   removed node can also call the API:
-
-    ```bash
-    # What the purge would remove and keep
-    curl "http://custodian-c:8080/former-parties/purge-preview?party_id=joint-custody::1220..."
-
-    # Run it; GET /former-parties reports the outcome
-    curl -X POST http://custodian-c:8080/former-parties/purge \
-      -H "Content-Type: application/json" \
-      -d '{"party_id": "joint-custody::1220..."}'
-    ```
-
-   The purge removes only contracts that no party the node still hosts is a
-   stakeholder of. The participant leaves its synchronizer while the purge
-   runs, usually for about a minute, so every party it hosts is offline for
-   that time. The purge refuses to start while any workflow runs on the node,
-   while the participant is not connected and healthy, and in the first minute
-   after the removal. While the purge runs, the node starts no workflow and
-   accepts no invitation. A party that the node hosts again and then leaves
-   again shows up once more, because it holds new stale contracts.
-
-   Do not purge right after the participant recovers from downtime. The
-   one-minute check counts wall-clock time, not how far the participant has
-   processed. A participant that still catches up can have the archive of a
-   stale contract in its backlog. The purge then removes that contract, and
-   the replay of the archive on reconnect crashes the participant. Wait until
-   the participant has caught up with its synchronizer.
+   those contracts go stale on it. Its DecMan lists the party under **No
+   longer hosted by this node**. The operator of the removed node purges the
+   stale contracts there. The purge takes that participant offline for about a
+   minute. See
+   [Purging the leftover contracts of a former party](PURGING_A_FORMER_PARTY.md).
 
 ### Querying Governance State
 
