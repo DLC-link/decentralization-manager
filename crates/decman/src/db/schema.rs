@@ -57,10 +57,6 @@ pub trait SchemaRead {
     /// One former party, dismissed or not.
     async fn get_former_dec_party(&self, party_id: &CantonId) -> Result<Option<FormerDecPartyRow>>;
 
-    /// Every recorded former party, dismissed ones included, so a refresh
-    /// does not read their topology history again.
-    async fn get_former_dec_party_ids(&self) -> Result<Vec<String>>;
-
     /// Get owner keys for a decentralized party
     async fn get_dec_party_owners(&self, party_id: &CantonId) -> Result<Vec<String>>;
 
@@ -215,8 +211,11 @@ pub trait SchemaWrite {
         participant_id: &CantonId,
     ) -> Result<bool>;
 
-    /// Record that this participant no longer hosts `party_id`. Idempotent:
-    /// the first detection is kept. Returns whether a row was added.
+    /// Record that this participant no longer hosts `party_id`, as of
+    /// `removed_at`. The same removal seen again changes nothing. A newer
+    /// removal resets the row, because a rehost and a second removal leave new
+    /// leftovers: the old purge and dismissal no longer cover them. A row with
+    /// a running purge is left alone. Returns whether a row was added or reset.
     async fn record_former_dec_party(&self, party_id: &CantonId, removed_at: i64) -> Result<bool>;
 
     /// Forget former parties this participant hosts again. A row whose purge

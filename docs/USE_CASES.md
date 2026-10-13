@@ -182,7 +182,8 @@ Adding a 4th custodian involves both governance and topology:
    that time. The purge refuses to start while any workflow runs on the node,
    while the participant is not connected and healthy, and in the first minute
    after the removal. While the purge runs, the node starts no workflow and
-   accepts no invitation.
+   accepts no invitation. A party that the node hosts again and then leaves
+   again shows up once more, because it holds new stale contracts.
 
 ### Querying Governance State
 
