@@ -544,6 +544,7 @@ Most variables have a default that's only useful for local development (loopback
 | `DECPM_ADMIN_ROLE` | unset | recommended | IdP role required for privileged endpoints. If unset, every authenticated caller is treated as admin. |
 | `DECPM_ALLOWED_ORIGIN` | same-origin | optional | CORS origin if UI host ≠ API host |
 | `DECPM_DB_ENCRYPTION_KEY` | unset | recommended | Random passphrase (hashed via SHA-256) protecting party secrets at rest. If unset, secrets are stored in plaintext in the SQLite DB. |
+| `DECPM_TENANT_API_KEYS` | unset | optional | Comma-separated bearer keys for the tenant API (`/v0/tenant/*`). Set it only on a node that hosts external parties, or that adds hosts to a local party. Unset turns the tenant API off. Keep the keys in the Secret |
 | `DECPM_TIMEOUT_HANDSHAKE` | `30` | optional | Noise handshake timeout (seconds) |
 | `DECPM_TIMEOUT_MESSAGE` | `120` | optional | Noise message timeout (seconds) |
 | `DECPM_TIMEOUT_RETRY_ATTEMPTS` | `3` | optional | Connection retry attempts |

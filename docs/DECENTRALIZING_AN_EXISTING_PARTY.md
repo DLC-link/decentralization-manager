@@ -1,287 +1,262 @@
 # Decentralizing an existing party
 
-How to give a party that already exists more hosts, and how to give a local
-party a key its owner holds.
+This guide adds hosts to a **local party** that already exists and holds
+contracts. A local party lives on one participant, the owner node. Its
+namespace is the owner node's key. The owner node signs the party's topology,
+and applications submit for the party through that node.
 
-The wallet-facing `/v0/tenant/*` API uses `prepare` then `execute`. Clients of
-the earlier API must replace the final `/onboard` path segment with `/execute`
-for allocation, add-hosts, threshold changes, and adopt-key. The wallet library's
-matching methods and DTOs use `execute`/`Execute` too. This is a breaking rename
-of the v0 API; the decentralized-party `/onboarding` workflow is unchanged.
+After this guide, other participants host the party too. Two outcomes are
+possible:
 
-This is the operator's counterpart to the scoping study. It covers what to run,
-in what order, what each step can fail with, and how to recover. For why the
-design is shaped this way, read the module docs in
-[`crates/decman/src/workflow/external_party/`](../crates/decman/src/workflow/external_party/).
+- **Failover.** Any host can submit for the party. Nothing changes in the
+  party's application.
+- **Co-validation.** The party gets its own signing key, and several hosts
+  must confirm each transaction.
 
-## Which path applies
+Other kinds of party use a different guide:
 
-The party's namespace decides it, and the namespace is the half of the party id
-after `::`.
+- A party with its own key, held by a wallet:
+  [Decentralizing an external party](DECENTRALIZING_AN_EXTERNAL_PARTY.md).
+- A decentralized party:
+  [Adding a member](ADDING_A_MEMBER_TO_A_DECENTRALIZED_PARTY.md).
 
-| The namespace is | The party is | Path |
-|---|---|---|
-| Its own key, held by a wallet | External | [Add hosts](#adding-hosts-to-an-external-party) |
-| A participant's root key | Local | Add hosts with [`authorize`](#when-the-namespace-is-a-participants-key); [convert](#converting-a-local-party) too if the party must sign for itself |
-| A `DecentralizedNamespaceDefinition` | A decparty | Use the add-party workflow, not this |
+## Is the party local?
 
-To tell a local party from an external one, compare the party's namespace with
-the hosting participant's:
+A party ID has two halves, `hint::namespace`. A participant ID has the same
+shape. The party is local to a participant when the two namespaces are equal.
+The **Configuration** page shows the node's **Participant ID**.
+
+The owner node's `/state` call tells you whether the party has its own key yet:
 
 ```bash
-curl -s "$HOST/external-parties" | jq '.parties[] | {party_id, fingerprint, host_count, threshold}'
+curl -sS "$OWNER/v0/tenant/$PARTY/state" -H "Authorization: Bearer $OWNER_KEY"
+# {"party_id": "...", "serial": 1, "threshold": 1, "host_count": 1,
+#  "onboarding_hosts": 0, "has_signing_key": false}
 ```
 
-A party listed there is external. One whose namespace equals a participant's own
-namespace is local to that participant.
+`has_signing_key: false` means a plain local party. `true` means that someone
+has already converted it.
 
-The node answers from its last topology scan. A request for a list older than
-five minutes starts a new scan in the background.
-`DECPM_EXTERNAL_PARTIES_TTL_SECS` changes that age. `fetched_at` says when the
-last scan finished, and `refreshing` says whether a new one runs now. To read a
-fresh list, repeat the request until `refreshing` is `false`.
+## Choose failover or co-validation
 
-After a restart, the first scan can take minutes. Until it finishes,
-`fetched_at` is `null` and `parties` is empty. An empty list then does not mean
-that the node hosts nothing.
-
-**A party can never change its namespace.** The party id embeds it. Converting a
-local party gives it a signing key; it does not make it a decentralized-namespace
-party, and no sequence of operations will.
-
-## Two offers: co-validation or failover
-
-`add-hosts/prepare` takes a `permission`, and it is the choice between the two
-products rather than a tuning knob.
-
-| `permission` | What the partner gets | What it costs them |
+| | Failover | Co-validation |
 |---|---|---|
-| `confirmation` (default) | Co-validation. Several hosts confirm for the party, and the threshold can rise above 1 afterwards | The party must sign its own submissions, so their application changes |
-| `submission` | Failover hosting. Any one host can submit for the party, so uptime improves | Nothing. Their application is untouched |
+| The party's own key | None | A new Ed25519 key that the party owner holds |
+| Permission of each host | Submission | Confirmation |
+| Threshold | Stays 1. Each host acts alone | Can rise above 1. No single host acts alone |
+| Change to the application | None | It must switch to interactive submission and sign with the new key |
+| Steps | Add hosts, copy contracts | Convert, add hosts, copy contracts, raise the threshold |
 
-**Lead with `submission` when the partner cannot change their application.** It
-is also a step toward the other one: add failover hosts now, convert and raise
-the threshold later.
+**Choose failover when the application cannot change.**
 
-Its limit is real, not a detail. Threshold 1 means each host acts alone — that
-is hosting redundancy, not multi-party validation. And Canton refuses a
-Submission host once the threshold is above 1 (`topology.proto`: "if threshold >
-1, must be Confirmation or Observation"), so raising the threshold means moving
-those hosts to Confirmation first.
+Choose with care, because DecMan cannot move a party from failover to
+co-validation yet. Canton refuses a Submission host above threshold 1, and
+DecMan has no call that changes the permission of an existing host. Do not
+convert a party that already has failover hosts.
 
-## Adding hosts to an external party
+## What never changes
 
-Three phases, in the order Canton forces. Do not skip ahead: the export in
-phase 2 needs the joiner's activation from phase 1 to exist.
+The party ID includes the namespace, and the namespace never changes. So the
+party keeps its ID and its contracts in both outcomes.
 
-### Phase 1 — topology
+The owner node also keeps control of the party's topology for good. It can add
+or remove hosts and change the threshold, on its own signature. After a
+conversion, it can even remove the party's key and act as the party again.
+Converting gives the party a signing key, not control of its own topology. Tell
+the party owner this before you start.
 
-The wallet calls `/v0/tenant/add-hosts/prepare` on **every** host, current and
-joining, and requires byte-identical answers before it signs. That comparison is
-the only thing standing between the wallet and a host that returns the hash of a
-mapping it never showed, so a wallet that prepares on one host is not doing this
-safely.
+## Before you start
 
-`base_serial` is the serial the wallet last read for the party. Pin it: without
-it, two hosts reading head state a moment apart build different transactions and
-the comparison fails for a reason that is not an attack.
+1. **Every node runs DecMan with the tenant API on.** That covers the owner node
+   and each joining node. Set `DECPM_TENANT_API_KEYS` on each one. You call
+   every node's tenant API with its key.
+2. **The joining nodes have every DAR the party uses.** DecMan cannot check
+   this before the copy for a local party. Compare the vetted packages on each
+   node's **Packages** page, and distribute what is missing.
+3. **The application can pause.** See the warning below.
+4. **You can take each joining participant offline for a while.** It leaves the
+   synchronizer during its copy. Every party it hosts pauses for that time.
+5. **For failover:** each joining participant needs a Ledger API user for the
+   application, with the rights to act and read as the party. The joining
+   node's operator grants them.
+6. **For co-validation:** the party owner is ready to sign, and the application
+   is ready for interactive submission.
 
-The wallet signs each `transaction_hash` exactly as returned, base64-decoded
-whole, with the party's own key. The host reads that key's type off the party's
-mapping and labels the signature for Canton accordingly. An Ed25519 key sends
-its 64 bytes as they are. An ECDSA key (secp256k1, P-256 or P-384) signs with
-the curve's SHA-2 digest and may send either the fixed-width `r || s` pair,
-which the host re-encodes as DER, or DER itself.
+> [!WARNING]
+> **Keep the party idle from the add-hosts call until the last copy ends.** A
+> joining node starts to receive the party's traffic as soon as the change takes
+> effect. It leaves the synchronizer only when its copy starts. If the party
+> archives an older contract in between, the joining node records an archive for
+> a contract it never held. A replay of that record crashed a MainNet
+> participant on 2026-09-16. So pause every application that acts as the party.
 
-Then `/v0/tenant/add-hosts/execute` on **each joining host only**. Canton needs
-the party namespace plus each new participant; existing hosts are neither and
-have nothing to add.
+## The calls
 
-#### When the namespace is a participant's key
+All calls go to the tenant API and send the node's key as
+`Authorization: Bearer <key>`. Every write answers `202 Accepted`. The change
+takes effect a moment later, so poll the owner's `/state` after each one.
 
-A party that is, or once was, local takes a different call. Its namespace is a
-participant's root key, that key lives in Canton's vault, and no admin RPC signs
-a hash with a vault key — so no wallet signature can ever satisfy `execute`.
-**Converting the party does not change this.** The adopted key is a
-`party_signing_keys` entry with no `NamespaceDelegation` behind it: it signs the
-party's transactions and authorizes none of its topology.
+Each write pins `base_serial`, the serial you last read from `/state`. A node
+whose serial has moved answers `409`. Then read `/state` again and repeat the
+call.
 
-Use `/v0/tenant/add-hosts/authorize` instead, with the same request body as
-`prepare`. Call it on the node owning the party's namespace **and** on each
-joining node. A vault key signs only through `Authorize`, and Canton wants both
-halves for an add, so the change stays a proposal until the last call lands.
-Order does not matter and a repeat is harmless. There is no hash to compare
-here, because there is nothing for anyone outside Canton to sign: each node
-builds the mapping from its own head-state read.
-
-A node that owns neither half is refused rather than made to spend its key on a
-signature Canton has no use for.
-
-### Phase 2 — state
-
-`GET /v0/tenant/{party}/acs/{target}?seq=N` on a host that already holds the
-party, then `POST /v0/tenant/add-hosts/import` on the joiner, in a loop until
-the import reports `complete`. The wallet carries the snapshot: there is no
-host-to-host channel, because a partner's node is generally not in anyone else's
-mesh and the wallet already talks to all of them.
-
-**Relay block by block, and store nothing.** The source keeps its
-`ExportPartyAcs` stream open between requests and hands out successive blocks;
-the joiner keeps its `ImportPartyAcs` stream open and feeds each block straight
-in. The wallet is a dumb relay carrying one block at a time. This is the same
-pipe the add-party path runs between two nodes over Noise — the wallet only
-stands in for the channel these two nodes do not have.
-
-- **Nothing lands on disk or in memory at either end**, so the size of the party
-  stops deciding whether the transfer is possible. The staged alternative needs a
-  terabyte of scratch on two nodes for a terabyte ACS, on volumes sized for a
-  SQLite file and a keypair.
-- **The import returns when Canton has taken the block**, which is what paces the
-  wallet. There is no readahead, because a readahead is a buffer.
-- **There is no resume.** The export stream cannot rewind and Canton offers no
-  offset into `ImportPartyAcs`, so a break means a fresh export from block 1.
-  What is bounded is a single block failing: the source replays the block it
-  served last, so one transport retry is safe. Asking for block 1 again is the
-  signal to discard both sessions and start over, not an error.
-- **A block out of order is refused**, not fed to Canton. Neither stream can
-  seek, so a gap would only surface mid-import with the participant already
-  disconnected.
-
-**The joiner is off the synchronizer for the whole relay.** `ImportPartyAcs`
-requires it, and that window is now paced by the wallet rather than by the node.
-A relay session left idle for five minutes is reaped: the import fails and the
-participant is reconnected. A wallet that stalls therefore costs a restarted
-transfer, not a stranded participant.
-
-### Phase 3 — activation
-
-The import endpoint clears the onboarding marker itself. Its response says
-whether that succeeded. **`marker_cleared: false` means the party is hosted
-there and still suspended** — it holds none of the party's contracts and
-confirms nothing.
-
-### Phase 4 — threshold, optional
-
-`/v0/tenant/threshold/{prepare,execute}`, and only after the markers clear. A
-marked host cannot confirm, so a threshold raised to count one is a threshold
-the party cannot meet.
-
-When the party's namespace is a participant's key, use
-`/v0/tenant/threshold/authorize` instead, for the reason the host add uses
-`authorize`: `execute` submits the caller's signature untouched and no node
-co-signs, so nothing outside Canton can authorize it. Canton wants the party
-namespace alone for a threshold change, so this is one call on the node owning
-that namespace, and no second signature is awaited. Any other node refuses.
-
-The call supplies the authorization; it does not wait for the change to take
-effect. The response reports `InProgress` until this node sees the new serial, so
-poll `/state` before pinning anything to it.
-
-Raising the threshold above 1 is what makes the party **co-validated** rather
-than merely redundant. Below that each host still acts alone.
-
-## Converting a local party
-
-`/v0/tenant/local-party/adopt-key/{prepare,execute}` on the party's own node.
-
-The owner must sign. Canton requires "party namespace + all the new signing key"
-for adding a signing key, so the node's signature alone is not enough — the
-owner's signature over the prepared hash is the proof they hold the key. Plan an
-interaction with them; this is not an operator-only action.
-
-The conversion also demotes the host from Submission to Confirmation, because
-Canton refuses Submission once a party signs its own transactions. **The
-partner's application must switch to interactive submission at this point.**
-Coordinate the cutover: between the conversion landing and their application
-being updated, the party cannot transact.
-
-Converting is **not** a prerequisite for adding hosts, and it does not change how
-hosts are added: both before and after, the party's topology is authorized by the
-source participant's namespace key through
-[`add-hosts/authorize`](#when-the-namespace-is-a-participants-key). Convert when
-the party must sign for itself — which co-validation requires, because Canton
-forbids a Submission host above threshold 1. Skip it for failover-only hosting at
-threshold 1, where the partner's application is left untouched.
-
-Afterwards the party is external in every respect except one: its namespace is
-still the source participant's key, so **that node can unilaterally change the
-party's topology forever**, including removing hosts. That is not only an
-availability risk. By Canton's authorization table, removing a signing key needs
-the party namespace and re-promoting a host to Submission needs the party
-namespace plus the participant namespace — and for a converted local party those
-are the same key. So the node can revoke the owner's key and resume acting as
-the party, on its own signature alone. Say this to the partner plainly rather
-than letting them infer symmetry that is not there.
-
-## What the partner's own node has to run
-
-For an **external** party the partner runs nothing. Their key is in their
-wallet, they sign hashes, and the hosting nodes do the topology work.
-
-For a **local** party they cannot avoid it. The conversion is authorized by
-their participant's namespace key, that key lives inside their Canton node's
-vault, and the only way to use it is `TopologyManagerWriteService.SignTransactions`
-over their Admin API. So something with Admin API access has to issue the write.
-
-**That something is DecMan, not a script.** The write is a versioned protobuf
-`TopologyTransaction` that Canton itself generates, then co-signs, then accepts —
-three round trips carrying binary payloads. `grpcurl` cannot realistically
-assemble them, so "Admin API access plus a short script" is not a viable
-substitute for running the binary, even briefly.
-
-The minimum is therefore:
-
-1. The partner runs DecMan against their participant's Admin API, long enough to
-   perform the conversion. It needs no ledger credential and no IdP — the whole
-   tenant path is tokenless on the Admin API.
-2. They call `local-party/adopt-key/prepare`, sign the returned hash with the key
-   they intend the party to answer to, and call `adopt-key/execute`.
-3. After that they can stop it. Adding hosts and replicating the ACS are driven
-   by the wallet against the *hosting* nodes, not theirs.
-
-There is no `decman-cli` path for this. The CLI is an HTTP client for a DecMan
-API and holds no Canton client, so giving it one would mean a second
-implementation of the topology write. Running DecMan briefly is cheaper and has
-one code path.
-
-## What can go wrong
-
-| Symptom | Cause | Do |
+| Call | Where | Signed by |
 |---|---|---|
-| `409` from prepare or execute | The party's serial moved between the wallet's read and the call | Re-read the party and retry with the new `base_serial` |
-| `404` from any of these | No authorized mapping for this party on this host | Not the same as "this host does not hold it": a joiner that does not host the party still reads the mapping from the shared synchronizer store and answers 200. A 404 means the store has nothing for the party at all |
-| `400` naming a field | The submitted bundle failed validation against the host's own head state | Do not retry as-is. Something built a different mapping than the host would |
-| `marker_cleared: false` | The ACS imported but the flag has not cleared | Canton clears it past a safe time. Poll `/v0/tenant/{party}/status`; `InProgress` with the marker reason means wait |
-| `package_preflight: false` | The source cannot read the party's contracts over the Ledger API, which is normal for an external party | Confirm the joiner has the party's DARs vetted **before** importing. Without it the import fails after disconnecting |
-| Import fails mid-window | The joiner disconnected and the import did not complete | The import reconnects and verifies health on its own. Retry it; the durable marker makes re-entry safe |
-| Joiner crash-loops after an import | Orphan ACS rows from an unclean shutdown | Manual repair. See `RepairCommitmentsUsingAcs` below |
-| `409` from the ACS block or import endpoint | The two ends disagree about which block comes next | Neither stream can rewind. Restart the transfer from block 1; a fresh export is opened for it |
-| Import fails with the participant reconnected | The relay stalled and its session was reaped, or a block failed | Restart from block 1. The participant is put back on the synchronizer before the error is returned |
+| `local-party/adopt-key/prepare` and `/execute` | The owner node | The owner node and the new party key |
+| `add-hosts/authorize` | The owner node and each joining node | Each node, with its own key |
+| `threshold/authorize` | The owner node only | The owner node |
+| `{party}/acs/{joiner}` and `add-hosts/import` | The owner node, then the joining node | Nobody. This copies the contracts |
 
-### Commitment mismatches after an import
+A local party takes `authorize`, not the wallet's `execute`. Its namespace key
+sits in the owner node's Canton vault, and no wallet can sign with it. This
+stays true after a conversion.
 
-If the joiner reports commitment mismatches once it starts confirming, its ACS
-and its peers' view of it disagree. Canton's `RepairCommitmentsUsingAcs` takes
-the imported ACS as the truth and recomputes from it. Run it on the joiner only,
-and only after confirming the import itself completed — using it to paper over a
-partial import replaces one inconsistency with a different one.
+## Failover
 
-## What this does not do
+1. **Read the serial** from the owner's `/state`. Call it `$SERIAL`.
+2. **Authorize the add on the owner node and on each joining node,** with the
+   same body:
 
-- **Replicate a party onto a node outside the mesh without the wallet.** The
-  wallet is the transport by design.
-- **Resume a broken transfer.** A break restarts from block 1 with a fresh
-  export. Canton offers no offset into `ImportPartyAcs`, and re-exporting to skip
-  forward would depend on an export byte-ordering it does not document. The
-  add-party path accepts the same limit for the same reason.
-- **Survive a terabyte-scale ACS.** At that size the wall is the import, not the
-  transfer: Canton re-authenticates every contract while the joiner is
-  disconnected, which no transport change touches. Sequencer retention and the
-  node's volume size become the binding constraints, and shrinking the ACS beats
-  moving it faster.
-- **Prove a converted party can submit.** #388 proved Canton accepts the key.
-  Whether the party then transacts with it is a different runtime path and is
-  not yet covered by a test.
-- **Undo a conversion.** Removing a signing key is a topology write nobody has
-  built or tried here. Unimplemented, not forbidden: the source node's own key
-  authorizes it, per the paragraph above.
+   ```bash
+   jq -n --arg p "$PARTY" --argjson s "$SERIAL" --argjson n "$NEW_HOSTS" \
+     '{party_id:$p, permission:"submission", new_hosts:$n, base_serial:$s}' > add.json
+   curl -sS -X POST "$NODE/v0/tenant/add-hosts/authorize" \
+     -H "Authorization: Bearer $NODE_KEY" -H 'Content-Type: application/json' \
+     -d @add.json
+   ```
+
+   `$NEW_HOSTS` is a JSON array of the joining participant IDs. The order of the
+   calls does not matter. The change takes effect after the last one.
+
+3. **Wait for the change.** Poll the owner's `/state` until `host_count`
+   includes the joining nodes and `onboarding_hosts` counts them.
+4. **Copy the contracts** from the owner node to each joining node. See
+   [Copy the contracts](#copy-the-contracts).
+5. **Wait for the markers to clear.** Poll the owner's `/state` until
+   `onboarding_hosts` is 0. The application can run again.
+
+The application now submits through any host, the normal way. Point it at a
+second host to use the failover.
+
+## Co-validation
+
+1. **Make the party's key.** The party owner does this and keeps the private
+   key. The Python helper in
+   [Sign a hash](DECENTRALIZING_AN_EXTERNAL_PARTY.md#sign-a-hash) makes one:
+
+   ```bash
+   python3 key.py new party.key
+   PUB=$(python3 key.py pub party.key | jq -r .public_key)
+   ```
+
+2. **Convert the party** on the owner node. Read `$SERIAL` from `/state`
+   first.
+
+   ```bash
+   curl -sS -X POST "$OWNER/v0/tenant/local-party/adopt-key/prepare" \
+     -H "Authorization: Bearer $OWNER_KEY" -H 'Content-Type: application/json' \
+     -d "$(jq -n --arg p "$PARTY" --arg k "$PUB" --argjson s "$SERIAL" \
+           '{party_id:$p, public_key:$k, base_serial:$s}')" > adopt.json
+   python3 key.py sign party.key adopt.json > signed.json
+   jq -n --arg p "$PARTY" --arg k "$PUB" --argjson s "$SERIAL" \
+     --slurpfile a adopt.json --slurpfile g signed.json \
+     '{party_id:$p, base_serial:$s, public_key:$k,
+       topology_transactions:$a[0].topology_transactions,
+       signatures:$g[0].signatures, signed_by:$g[0].signed_by}' > adopt-execute.json
+   curl -sS -X POST "$OWNER/v0/tenant/local-party/adopt-key/execute" \
+     -H "Authorization: Bearer $OWNER_KEY" -H 'Content-Type: application/json' \
+     -d @adopt-execute.json
+   ```
+
+   Poll `/state` until `has_signing_key` is `true`. **From this moment the party
+   must sign every submission with its key.** The owner node moves from
+   Submission to Confirmation, so a normal submission for the party now fails.
+   Plan the application's cutover for this moment.
+
+3. **Add the hosts** as in [Failover](#failover) steps 1 to 5, with
+   `"permission": "confirmation"`. Read the serial again first: the conversion
+   moved it.
+4. **Raise the threshold** on the owner node, after every marker has cleared.
+   Read the serial again first. The add and each marker clear moved it, and
+   the old value answers `409`.
+
+   ```bash
+   SERIAL=$(curl -sS "$OWNER/v0/tenant/$PARTY/state" \
+     -H "Authorization: Bearer $OWNER_KEY" | jq .serial)
+   curl -sS -X POST "$OWNER/v0/tenant/threshold/authorize" \
+     -H "Authorization: Bearer $OWNER_KEY" -H 'Content-Type: application/json' \
+     -d "$(jq -n --arg p "$PARTY" --argjson s "$SERIAL" \
+           '{party_id:$p, new_threshold:2, base_serial:$s}')"
+   ```
+
+   Poll `/state` until `threshold` shows the new value.
+
+The party now transacts with interactive submission through any host, signing
+each transaction with its key. See
+[Transact as the party](DECENTRALIZING_AN_EXTERNAL_PARTY.md#transact-as-the-party).
+
+## Copy the contracts
+
+Read block N from the owner node and hand it to the joining node, until the
+import answers `"complete": true`. Do this once per joining node, one node at a
+time.
+
+```bash
+seq=1
+while :; do
+  curl -sS -H "Authorization: Bearer $OWNER_KEY" \
+    "$OWNER/v0/tenant/$PARTY/acs/$JOINER_ID?base_serial=$SERIAL&seq=$seq" > block.json
+  jq --arg p "$PARTY" --argjson s "$SERIAL" \
+    '{party_id:$p, base_serial:$s, seq, chunk, end, total_len, sha256, package_ids}' \
+    block.json > import.json
+  curl -sS -X POST "$JOINER/v0/tenant/add-hosts/import" \
+    -H "Authorization: Bearer $JOINER_KEY" -H 'Content-Type: application/json' \
+    -d @import.json > result.json
+  jq -e .complete result.json > /dev/null && break
+  seq=$((seq + 1))
+done
+```
+
+`$SERIAL` is the serial that the add-hosts call pinned, not a later one. The
+joining node leaves the synchronizer when block 1 arrives, and it reconnects
+after the last block.
+[How the copy works](DECENTRALIZING_AN_EXTERNAL_PARTY.md#how-the-copy-works)
+explains restarts and time-outs.
+
+## What the owner node has to run
+
+The owner node signs with its participant's namespace key. That key lives in
+the participant's Canton vault, and only the Admin API can use it. So the owner
+node runs DecMan next to its participant, at least for the duration of this
+work. DecMan needs no ledger credential for these calls.
+
+A script cannot replace DecMan here. Each write is a versioned protobuf
+transaction that Canton generates, then signs, then accepts. There is also no
+`decman-cli` command for it.
+
+## If something goes wrong
+
+| Symptom | Cause | Do this |
+|---|---|---|
+| `409` | The party's serial changed after you read it | Read `/state` again and repeat the call |
+| `400` "not local to this participant" from adopt-key | The call went to a node that does not own the party | Call the owner node |
+| `400` "already carries party signing keys" | The party is already converted | Skip the conversion |
+| `400` "this node neither owns … namespace nor is joining it" | The call went to an unrelated node | Call only the owner node and the joining nodes |
+| `400` "a Submission host needs the party's threshold to be 1" | The party's threshold is above 1 | Use `"permission": "confirmation"` |
+| `404` from `/status` on a failover host | `/status` checks Confirmation hosts only | Use the owner's `/state` instead |
+| `500` "Imported the ACS, but could not request the marker clear" on the last block | Canton already has its own marker clear pending | Nothing. Poll `/state` until `onboarding_hosts` is 0 |
+| `"package_preflight": false` in block 1 | The owner node cannot list the party's packages before the copy | Normal for a local party. Check the DARs yourself first |
+| A normal submission for the party fails after the conversion | The party now signs for itself | Switch the application to interactive submission |
+
+The copy fails the same way for every kind of party. See
+[If something goes wrong](DECENTRALIZING_AN_EXTERNAL_PARTY.md#if-something-goes-wrong)
+in the external-party guide for those errors, and for commitment mismatches
+after an import.
+
+## Limits
+
+- **No undo of a conversion.** DecMan has no call that removes the party's key.
+  The owner node's key could authorize it, but nobody has built or tested it.
+- **One conversion per party.** A converted party cannot adopt a second key.
+- **No change of namespace.** No sequence of calls turns a local party into a
+  decentralized party.

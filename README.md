@@ -17,8 +17,10 @@ A web application for managing decentralized parties in Canton blockchain networ
 ## Documentation
 
 - [Architecture Overview](docs/ARCHITECTURE.md) -- System architecture, core concepts, communication protocol, and technical constraints
-- [User Guide](USER_GUIDE.md) -- Walkthrough of the web UI for day-to-day party and governance operations
-- [Decentralizing an Existing Party](docs/DECENTRALIZING_AN_EXISTING_PARTY.md) -- Adding hosts to a party that already exists, and converting a local party
+- [User Guide](USER_GUIDE.md) -- Running a single node with Docker: images, ports, and the main settings
+- [Adding a Member to a Decentralized Party](docs/ADDING_A_MEMBER_TO_A_DECENTRALIZED_PARTY.md) -- Running the add-party workflow: prerequisites, downtime, and recovery
+- [Decentralizing an External Party](docs/DECENTRALIZING_AN_EXTERNAL_PARTY.md) -- Hosting a wallet-held party on several participants with the tenant API
+- [Decentralizing an Existing Party](docs/DECENTRALIZING_AN_EXISTING_PARTY.md) -- Adding hosts to a local party for failover or co-validation
 - [Custom Daml Templates](docs/CUSTOM_DAML_TEMPLATES.md) -- Authoring and deploying your own Daml governance templates
 - [Deployment Guide](docs/DEPLOYMENT_GUIDE.md) -- Deploying a node to Kubernetes from scratch: manifests, identity-provider setup, and configuration reference
 - [Use Cases](docs/USE_CASES.md) -- Joint custody governance, FAR rewards, multi-sig wallet, and utility service walkthroughs
@@ -195,6 +197,9 @@ The database file path can be overridden with the `--db` CLI flag.
 | `DECPM_AUTH0_DOMAIN` | Auth0 tenant domain for frontend auth (mutually exclusive with `DECPM_KEYCLOAK_*`) | _(none)_ |
 | `DECPM_AUTH0_CLIENT_ID` | Auth0 SPA client ID for frontend auth | _(none)_ |
 | `DECPM_AUTH0_AUDIENCE` | Auth0 API audience the SPA's access tokens target | _(none)_ |
+| `DECPM_AUTH0_SCOPE` | Extra space-separated scopes the SPA requests. Needed only when the admin role arrives as an Auth0 RBAC scope | _(none)_ |
+| `DECPM_JWT_ROLE_CLAIM` | JWT claim that holds an array of role names. Needed only when the IdP puts roles in a namespaced custom claim | _(none)_ |
+| `DECPM_TENANT_API_KEYS` | Comma-separated bearer keys for the tenant API (`/v0/tenant/*`). Unset turns the tenant API off, except in insecure mode | _(none)_ |
 | `DECPM_INSECURE` | Run without an IdP: accept any inbound token and present an unsafe HS256 token to Canton (CLI flag `--insecure`). **Never use in production.** See [Insecure mode](#insecure-mode-local-development-without-an-idp) | `false` |
 | `DECPM_CANTON_HMAC_SECRET` | HS256 secret decman signs the unsafe Canton token with, in insecure mode. Must match Canton's unsafe auth-service secret | `unsafe` |
 | `DECPM_CANTON_HMAC_AUDIENCE` | `aud` claim for the unsafe Canton token, in insecure mode. Must match Canton's `target-audience` | `https://canton.network.global` |
@@ -390,11 +395,16 @@ curl http://localhost:8081/party-config/decparty::1220abc...
 
 ### Adding a Participant (Add Party)
 
-1. From a party card, click **Add member** and choose the participant to add
+1. Open the party, click **Add member** in the Participants section, and choose
+   the participant to add
 2. The coordinator orchestrates:
    - Key generation on the new member
    - Updated topology proposals (added owner + P2P mapping) signed by all members
    - ACS replication to the new member and clearing of its onboarding flag
+
+The new member's participant is off the synchronizer during the replication.
+See [Adding a Member to a Decentralized Party](docs/ADDING_A_MEMBER_TO_A_DECENTRALIZED_PARTY.md)
+for the prerequisites and for what to do when a run fails.
 
 ### Changing the Threshold (Change Threshold)
 
@@ -468,18 +478,23 @@ The table below is a curated subset. A complete, interactive API reference is av
 | `/v0/tenant/execute` | POST | Wallet-facing: validates the wallet's signed topology, co-signs, and submits it |
 | `/v0/tenant/{party}/status` | GET | Wallet-facing: reports whether this host has the party hosted yet |
 | `/v0/tenant/{party}/state` | GET | Wallet-facing: the party's current serial, threshold and host count, so a caller can pin `base_serial` on the next write |
-| `/v0/tenant/add-hosts/prepare` | POST | Wallet-facing: builds the serial-N+1 topology that adds hosts to an existing external party |
+| `/v0/tenant/add-hosts/prepare` | POST | Wallet-facing: builds the serial-N+1 topology that adds hosts to an existing party |
 | `/v0/tenant/add-hosts/execute` | POST | Wallet-facing: validates the wallet-signed add-hosts topology, co-signs, and submits it |
+| `/v0/tenant/add-hosts/authorize` | POST | Adds hosts to a party whose namespace is a participant's key (a local or converted party). The owning node and each joining node authorize with their own keys |
 | `/v0/tenant/{party}/acs/{target}` | GET | Wallet-facing: serves one block of the party's ACS scoped to a joining host (`?seq=`), for the wallet to relay. The host keeps the Canton export stream open between blocks |
 | `/v0/tenant/add-hosts/import` | POST | Wallet-facing: feeds one relayed block straight into this host's open Canton import, clearing the onboarding marker when the final block lands |
 | `/v0/tenant/threshold/prepare` | POST | Wallet-facing: builds a confirmation-threshold change |
 | `/v0/tenant/threshold/execute` | POST | Wallet-facing: submits the wallet-signed threshold change |
+| `/v0/tenant/threshold/authorize` | POST | Changes the threshold of a party whose namespace is a participant's key. Only the owning node can authorize it |
 | `/v0/tenant/local-party/adopt-key/prepare` | POST | Wallet-facing: builds the conversion that gives a local party an owner-held signing key |
 | `/v0/tenant/local-party/adopt-key/execute` | POST | Wallet-facing: co-signs and submits the owner-signed conversion |
 
 The `/v0/tenant/*` endpoints are the tenant API. They authenticate with a
 separate tenant API key rather than the operator JWT, and are driven by
-[`decman-wallet`](crates/decman-wallet/README.md).
+[`decman-wallet`](crates/decman-wallet/README.md). A caller sends the key as
+`Authorization: Bearer <key>`. The node reads its keys from
+`DECPM_TENANT_API_KEYS`. With no keys set, it refuses every tenant call
+outside insecure mode.
 
 ## Development
 

@@ -121,3 +121,7 @@ For P2P to work, the Noise port must be reachable by the other participants.
 
 - **Walk through onboarding, deploying contracts, and kicking a participant** —
   [Use Cases](docs/USE_CASES.md)
+- **Add a participant to a decentralized party that already exists** —
+  [Adding a Member to a Decentralized Party](docs/ADDING_A_MEMBER_TO_A_DECENTRALIZED_PARTY.md)
+- **Host a wallet-held party on several participants** —
+  [Decentralizing an External Party](docs/DECENTRALIZING_AN_EXTERNAL_PARTY.md)

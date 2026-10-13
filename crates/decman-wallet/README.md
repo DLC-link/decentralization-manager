@@ -134,15 +134,17 @@ import failed — the party is hosted there and holds no contracts.
 check their vetted packages up front, so their import validated after
 disconnecting rather than before. Empty is the good case.
 
-### Failover-only hosting
+### Failover
 
-`HostPermission::Submission` offers the other shape. Every host can submit for
-the party alone, so the party survives one node being down without its
-application changing — but nothing is co-validated: each host acts by itself and
-the threshold must stay 1. Canton refuses Submission hosting above threshold 1,
-so `raise_threshold` has no counterpart here. Use it when a partner wants uptime
-without changing how their party transacts; use `Confirmation` when the point is
-that no single host can act alone.
+A party this crate drives signs its own transactions, so it gets failover from
+`HostPermission::Confirmation` alone: the wallet can submit through any host.
+Raising the threshold above 1 then adds co-validation.
+
+`HostPermission::Submission` is for a party with no key of its own, whose host
+submits on its behalf. That is a local party, and its namespace is a
+participant's key, so no wallet signature can authorize its topology. Its hosts
+are added with `/v0/tenant/add-hosts/authorize` instead. See
+[Decentralizing an existing party](../../docs/DECENTRALIZING_AN_EXISTING_PARTY.md).
 
 ## Keys the wallet does not hold
 

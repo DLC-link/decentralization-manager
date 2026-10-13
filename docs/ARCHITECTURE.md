@@ -442,7 +442,8 @@ Removes a participant from an existing decentralized party.
 | 3 | CreateProposals | Coordinator | Create new DNS (reduced owners) and P2P (removed member) proposals |
 | 4 | SignProposals | All remaining | Each remaining member signs the kick proposals |
 | 5 | SubmitKick | Coordinator | Submit signed proposals to Canton |
-| 6 | Complete | All | Disconnect peers |
+| 6 | RetireLegacyKeys | All | Remove the party's obsolete `PartyToKeyMapping`, if it has one (see [Legacy party-key retirement](DEPLOYMENT_GUIDE.md#legacy-party-key-retirement)) |
+| 7 | Complete | All | Disconnect peers |
 
 **Canton API calls:**
 - `TopologyManagerReadService.ListDecentralizedNamespaceDefinition` -- Read current DNS (step 2)
@@ -497,7 +498,9 @@ Uploads DAR packages to all participants without deploying contracts.
 Adds a hosting participant to a decentralized party that already exists, and
 replicates the party's active contracts to it. The party keeps transacting on
 its existing hosts throughout: Canton's `HostingParticipant.Onboarding` marker
-suspends it only on the joining node.
+suspends it only on the joining node. The joining participant is off the
+synchronizer from step 5 until step 7 ends, so every other party it hosts
+pauses for that time too.
 
 **Steps:**
 
@@ -507,15 +510,16 @@ suspends it only on the joining node.
 | 2 | GenerateNewMemberKeys | New member | Generate namespace + Daml signing keys and upload the public halves |
 | 3 | ExportState | Coordinator | Read the current DNS + P2P state, validate the add, capture the ledger offset |
 | 4 | CreateProposals | Coordinator | Build the updated DNS + P2P proposals, with the joiner marked `Onboarding` |
-| 5 | SignProposals | All | Every member signs both proposals with its namespace key |
+| 5 | SignProposals | All | Every member signs both proposals with its namespace key. The new member then waits for the proposal to reach its own store and disconnects from the synchronizer, before the mapping that hosts it can take effect |
 | 6 | SubmitProposals | Coordinator | Submit DNS then P2P, then export the party's ACS |
-| 7 | SyncAcs | New member | Disconnect from the synchronizer, import the ACS, reconnect (skipped when the ACS is empty) |
+| 7 | SyncAcs | New member | Import the ACS while still disconnected, then reconnect. An empty ACS skips the import |
 | 8 | PrepareClearOnboarding | Coordinator | Swap the command payload for the clear-flag phase |
 | 9 | ProposeClearOnboarding | New member | Author the `ClearPartyOnboardingFlag` transaction past Canton's safe time |
 | 10 | PrepareClearSign | Coordinator | Turn the authored proposal into a signing round (or a skip marker) |
 | 11 | SignClearOnboarding | All | Every member signs the clearing proposal |
 | 12 | SubmitClearOnboarding | Coordinator | Submit it and wait for the marker to drop |
-| 13 | Complete | All | Disconnect peers, workflow finished |
+| 13 | RetireLegacyKeys | All | Remove the party's obsolete `PartyToKeyMapping`, if it has one |
+| 14 | Complete | All | Disconnect peers, workflow finished |
 
 **Canton API calls:**
 - `VaultService.GenerateKey` / `ExportKeyPair` -- New member's keys (step 2)
@@ -524,7 +528,7 @@ suspends it only on the joining node.
 - `TopologyManagerWriteService.Authorize` / `AddTransactions` -- The onboarding-flag clearing proposal (steps 9, 11, 12)
 - `PartyManagementService.GetHighestOffsetByTimestamp` -- Capture the export offset (step 3)
 - `PartyManagementService.ExportPartyAcs` -- Export the snapshot, scoped to the joiner (step 6)
-- `SynchronizerConnectivityService.DisconnectSynchronizer` / `ReconnectSynchronizers` -- Bracket the import (step 7)
+- `SynchronizerConnectivityService.DisconnectSynchronizer` / `ReconnectSynchronizers` -- Disconnect the new member before its hosting takes effect, reconnect it after the import (steps 5, 7)
 - `PartyManagementService.ImportPartyAcs` -- Import the snapshot (step 7)
 - `PackageService.ListPackages` -- Preflight the joiner's vetted packages before the import (step 7)
 - `PartyManagementService.ClearPartyOnboardingFlag` -- Clear the marker (steps 9, 12)
@@ -548,7 +552,8 @@ Changes the signing threshold of an existing decentralized party's namespace.
 | 3 | CreateProposals | Coordinator | Build the new-threshold DNS + P2P proposals |
 | 4 | SignProposals | All | Every member signs the proposals |
 | 5 | Submit | Coordinator | Submit the change and wait for propagation |
-| 6 | Complete | All | Disconnect peers |
+| 6 | RetireLegacyKeys | All | Remove the party's obsolete `PartyToKeyMapping`, if it has one |
+| 7 | Complete | All | Disconnect peers |
 
 **Canton API calls:**
 - `TopologyManagerWriteService.CreateTemporaryTopologyStore` / `AddTransactions` / `Authorize` / `DropTemporaryTopologyStore` -- Sign the coordinator's proposals without publishing them (step 3, see [Party Topology Proposals](#party-topology-proposals))
@@ -625,8 +630,10 @@ through `InteractiveSubmissionService` rather than plain submission.
 bypasses the operator JWT. Read-only `/external-parties` lists the external
 parties a node hosts.
 
-**Scope:** this flow replicates identity only, never state. It creates a new
-party; it cannot decentralize a party that already holds contracts. See
+**Scope:** this flow creates a new party, which holds no contracts yet. The
+tenant API also adds hosts to a party that already exists and copies its
+contracts to them. See
+[Decentralizing an existing party](DECENTRALIZING_AN_EXISTING_PARTY.md) and
 [crates/decman-wallet/README.md](../crates/decman-wallet/README.md).
 
 ## Governance System

@@ -269,17 +269,6 @@ pub struct NodeConfig {
     /// How long (seconds) the external-parties snapshot serves requests before
     /// a request starts the next topology scan. Default 300s.
     pub external_parties_ttl_secs: u64,
-    /// Ceiling on an ACS snapshot the wallet relays over the tenant API, in
-    /// bytes.
-    ///
-    /// Distinct from the Noise chunked-transfer limit, which bounds the decparty
-    /// add-party path because that snapshot really does cross a Noise
-    /// connection. The tenant path goes over HTTP, so the Noise limit never
-    /// applied to it and only constrained it by accident of shared code.
-    ///
-    /// Still bounded: the snapshot is assembled in memory on both ends, so this
-    /// is a real memory commitment on the exporting and importing nodes. Raise
-    /// it deliberately.
     /// Output contracts one `Delegation_Assign` may create, which bounds the
     /// coupons per transaction (`/ beneficiary_count`). The ledger's real
     /// ceiling for this transaction shape is unmeasured — configurable so it can
