@@ -185,6 +185,13 @@ Adding a 4th custodian involves both governance and topology:
    accepts no invitation. A party that the node hosts again and then leaves
    again shows up once more, because it holds new stale contracts.
 
+   Do not purge right after the participant recovers from downtime. The
+   one-minute check counts wall-clock time, not how far the participant has
+   processed. A participant that still catches up can have the archive of a
+   stale contract in its backlog. The purge then removes that contract, and
+   the replay of the archive on reconnect crashes the participant. Wait until
+   the participant has caught up with its synchronizer.
+
 ### Querying Governance State
 
 **Get governance state:**
