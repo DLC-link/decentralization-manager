@@ -83,10 +83,27 @@ const renderDetail = (party: FormerParty) => {
   return { onBack, onChanged, onPurgeStarted };
 };
 
-const openPurge = async () => {
-  fireEvent.click(screen.getByRole("button", { name: "Purge" }));
+const openAdvanced = () =>
+  fireEvent.click(screen.getByRole("button", { name: "Advanced" }));
+
+const openPurge = async (label = "Purge") => {
+  openAdvanced();
+  fireEvent.click(await screen.findByRole("button", { name: label }));
   await screen.findByRole("dialog");
 };
+
+/** Tick the box and type the party's name. */
+const confirmTwice = (name = "old-pool") => {
+  fireEvent.click(screen.getByRole("checkbox"));
+  fireEvent.change(screen.getByLabelText("Type old-pool to confirm"), {
+    target: { value: name },
+  });
+};
+
+const purgeButton = () =>
+  screen.getByRole("button", {
+    name: "Purge 37 contracts",
+  }) as HTMLButtonElement;
 
 beforeEach(() => {
   fetchMock.mockReset();
@@ -117,14 +134,68 @@ describe("FormerPartyDetail", () => {
     );
     expect(
       await screen.findByText(
-        "This removes 37 contracts of old-pool from this node. It keeps 2 contracts that another party on this node is a stakeholder of.",
+        "This permanently deletes 37 contracts of old-pool from this node",
       ),
     ).toBeTruthy();
-    expect(screen.getByText(/leaves the synchronizer while the purge runs/)).toBeTruthy();
-    const confirm = screen.getByRole("button", {
-      name: "Purge 37 contracts",
-    }) as HTMLButtonElement;
-    expect(confirm.disabled).toBe(false);
+    expect(
+      screen.getByText(
+        "It keeps 2 contracts that another party on this node is a stakeholder of. A deleted contract cannot be brought back.",
+      ),
+    ).toBeTruthy();
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.textContent).toMatch(/DecMan reconnects the participant when the purge ends/);
+    expect(dialog.textContent).toMatch(/Do not purge right after the participant recovers/);
+  });
+
+  it("keeps the purge in the collapsed Advanced section", async () => {
+    renderDetail(formerParty("none"));
+    expect(screen.queryByRole("button", { name: "Purge" })).toBeNull();
+    expect(screen.queryByText("Danger zone")).toBeNull();
+
+    openAdvanced();
+
+    expect(await screen.findByText("Danger zone")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Purge" })).toBeTruthy();
+  });
+
+  it("starts the purge only after the box is ticked and the name typed", async () => {
+    serve();
+    renderDetail(formerParty("none"));
+    await openPurge();
+    await screen.findByRole("button", { name: "Purge 37 contracts" });
+    expect(purgeButton().disabled).toBe(true);
+
+    fireEvent.click(screen.getByRole("checkbox"));
+    expect(purgeButton().disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText("Type old-pool to confirm"), {
+      target: { value: "old-poo" },
+    });
+    expect(purgeButton().disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText("Type old-pool to confirm"), {
+      target: { value: "old-pool" },
+    });
+    expect(purgeButton().disabled).toBe(false);
+
+    fireEvent.click(screen.getByRole("checkbox"));
+    expect(purgeButton().disabled).toBe(true);
+  });
+
+  it("asks for both confirmations again on each opening", async () => {
+    serve();
+    renderDetail(formerParty("none"));
+    await openPurge();
+    await screen.findByRole("button", { name: "Purge 37 contracts" });
+    confirmTwice();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    fireEvent.click(screen.getByRole("button", { name: "Purge" }));
+    await screen.findByRole("button", { name: "Purge 37 contracts" });
+    expect((screen.getByRole("checkbox") as HTMLInputElement).checked).toBe(false);
+    expect(
+      (screen.getByLabelText("Type old-pool to confirm") as HTMLInputElement).value,
+    ).toBe("");
+    expect(purgeButton().disabled).toBe(true);
   });
 
   it("sends no purge when the operator cancels", async () => {
@@ -143,7 +214,9 @@ describe("FormerPartyDetail", () => {
     serve();
     const { onChanged, onPurgeStarted } = renderDetail(formerParty("none"));
     await openPurge();
-    fireEvent.click(await screen.findByRole("button", { name: "Purge 37 contracts" }));
+    await screen.findByRole("button", { name: "Purge 37 contracts" });
+    confirmTwice();
+    fireEvent.click(purgeButton());
 
     expect(await screen.findByText("Purge started")).toBeTruthy();
     const posts = callsTo(PURGE_URL, "POST");
@@ -160,7 +233,9 @@ describe("FormerPartyDetail", () => {
     serve({ purgeStatus: 409, purgeBody: { error: reason } });
     const { onPurgeStarted } = renderDetail(formerParty("none"));
     await openPurge();
-    fireEvent.click(await screen.findByRole("button", { name: "Purge 37 contracts" }));
+    await screen.findByRole("button", { name: "Purge 37 contracts" });
+    confirmTwice();
+    fireEvent.click(purgeButton());
 
     expect(await screen.findByText(reason)).toBeTruthy();
     expect(screen.getByRole("dialog")).toBeTruthy();
@@ -181,7 +256,8 @@ describe("FormerPartyDetail", () => {
         "Nothing to purge. Every contract of this party is shared with a party this node still hosts.",
       ),
     ).toBeTruthy();
-    expect(screen.queryByText(/leaves the synchronizer/)).toBeNull();
+    expect(screen.getByRole("dialog").textContent).not.toMatch(/leaves the synchronizer/);
+    expect(screen.queryByRole("checkbox")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Mark as purged" }));
 
     await screen.findByText("Purge started");
@@ -243,16 +319,21 @@ describe("FormerPartyDetail", () => {
     expect(screen.queryByRole("button", { name: "Dismiss" })).toBeNull();
   });
 
-  it("offers a retry after a failed purge, with the error", () => {
+  it("offers a retry after a failed purge, with the error", async () => {
+    serve();
     renderDetail(formerParty("failed", { purge_error: "reconnect timed out" }));
     expect(screen.getByText("The last purge failed: reconnect timed out")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Retry purge" })).toBeTruthy();
+    openAdvanced();
+    expect(await screen.findByRole("button", { name: "Retry purge" })).toBeTruthy();
   });
 
-  it("disables the actions without admin access", () => {
+  it("disables the actions without admin access", async () => {
     access.admin = false;
     renderDetail(formerParty("none"));
-    const purge = screen.getByRole("button", { name: "Purge" }) as HTMLButtonElement;
+    openAdvanced();
+    const purge = (await screen.findByRole("button", {
+      name: "Purge",
+    })) as HTMLButtonElement;
     expect(purge.disabled).toBe(true);
   });
 });
