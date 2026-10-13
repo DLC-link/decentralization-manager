@@ -159,6 +159,10 @@ async fn live_removal_time(
 /// not get back. A party that is merely missing is never recorded: a failed
 /// read also returns nothing. Only a hosting history that lists this
 /// participant, followed by a serial that does not, counts as a removal.
+///
+/// Recorded parties are read again too. A rehost and a second removal can
+/// both fall between two discoveries, and only the history shows the newer
+/// removal.
 pub(crate) async fn reconcile(
     config: &NodeConfig,
     db: &SqlitePool,
@@ -169,18 +173,7 @@ pub(crate) async fn reconcile(
         tracing::warn!("Could not clear former parties this node hosts again: {e}");
     }
 
-    let recorded: HashSet<String> = match db.get_former_dec_party_ids().await {
-        Ok(ids) => ids.into_iter().collect(),
-        Err(e) => {
-            tracing::warn!("Could not read the recorded former parties: {e}");
-            return;
-        }
-    };
-    let candidates: Vec<&String> = unreturned
-        .iter()
-        .filter(|party_id| !recorded.contains(*party_id))
-        .collect();
-    if candidates.is_empty() {
+    if unreturned.is_empty() {
         return;
     }
 
@@ -191,7 +184,7 @@ pub(crate) async fn reconcile(
             return;
         }
     };
-    for party_id in candidates {
+    for party_id in unreturned {
         let Ok(party) = CantonId::parse(party_id) else {
             continue;
         };

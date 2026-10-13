@@ -213,13 +213,6 @@ impl SchemaRead for SqlitePool {
         .await?)
     }
 
-    async fn get_former_dec_party_ids(&self) -> Result<Vec<String>> {
-        let rows: Vec<(String,)> = sqlx::query_as("SELECT party_id FROM former_dec_party")
-            .fetch_all(self)
-            .await?;
-        Ok(rows.into_iter().map(|(party_id,)| party_id).collect())
-    }
-
     async fn get_dec_parties_by_prefix(&self, prefix: &str) -> Result<Vec<DecPartyRow>> {
         let rows = if prefix.is_empty() {
             sqlx::query_as::<_, DecPartyRow>("SELECT * FROM dec_party")
@@ -644,8 +637,14 @@ impl SchemaWrite for SqlitePool {
 
     async fn record_former_dec_party(&self, party_id: &CantonId, removed_at: i64) -> Result<bool> {
         let result = sqlx::query(
-            "INSERT OR IGNORE INTO former_dec_party (party_id, removed_at, detected_at) \
-             VALUES (?, ?, ?)",
+            "INSERT INTO former_dec_party (party_id, removed_at, detected_at) VALUES (?, ?, ?) \
+             ON CONFLICT(party_id) DO UPDATE SET \
+                 removed_at = excluded.removed_at, detected_at = excluded.detected_at, \
+                 purge_status = 'none', purge_started_at = NULL, purge_finished_at = NULL, \
+                 purged_count = NULL, kept_count = NULL, purge_error = NULL, \
+                 dismissed_at = NULL \
+             WHERE excluded.removed_at > former_dec_party.removed_at \
+               AND former_dec_party.purge_status != 'running'",
         )
         .bind(party_id.to_string())
         .bind(removed_at)
@@ -1636,16 +1635,58 @@ mod tests {
     async fn former_party_keeps_its_first_detection(pool: SqlitePool) -> Result {
         let party = former("left");
         assert!(pool.record_former_dec_party(&party, 100).await?);
+        let detected_at = pool
+            .get_former_dec_party(&party)
+            .await?
+            .unwrap()
+            .detected_at;
         assert!(
-            !pool.record_former_dec_party(&party, 200).await?,
-            "a later refresh must not move the removal time"
+            !pool.record_former_dec_party(&party, 100).await?,
+            "a later refresh of the same removal changes nothing"
         );
+        assert!(!pool.record_former_dec_party(&party, 50).await?);
 
         let rows = pool.get_former_dec_parties().await?;
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].party_id, party.to_string());
         assert_eq!(rows[0].removed_at, 100);
+        assert_eq!(rows[0].detected_at, detected_at);
         assert_eq!(rows[0].purge_status, "none");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_newer_removal_starts_the_party_over(pool: SqlitePool) -> Result {
+        let party = former("left");
+        pool.record_former_dec_party(&party, 100).await?;
+        pool.claim_former_party_purge(&party).await?;
+        pool.complete_former_party_purge(&party, 7, 3).await?;
+        pool.dismiss_former_dec_party(&party).await?;
+
+        // A rehost and a second removal between two refreshes.
+        assert!(pool.record_former_dec_party(&party, 200).await?);
+        let row = pool.get_former_dec_party(&party).await?.unwrap();
+        assert_eq!(row.removed_at, 200);
+        assert_eq!(row.purge_status, "none");
+        assert_eq!(
+            (row.purged_count, row.kept_count, row.purge_finished_at),
+            (None, None, None)
+        );
+        assert_eq!(
+            row.dismissed_at, None,
+            "the new leftovers must show again, so the party needs a new purge"
+        );
+
+        pool.claim_former_party_purge(&party).await?;
+        assert!(
+            !pool.record_former_dec_party(&party, 300).await?,
+            "a running purge keeps its row until it records its outcome"
+        );
+        let row = pool.get_former_dec_party(&party).await?.unwrap();
+        assert_eq!(
+            (row.removed_at, row.purge_status.as_str()),
+            (200, "running")
+        );
         Ok(())
     }
 
@@ -1805,11 +1846,11 @@ mod tests {
         pool.complete_former_party_purge(&party, 1, 0).await?;
         assert!(pool.dismiss_former_dec_party(&party).await?);
         assert!(pool.get_former_dec_parties().await?.is_empty());
-        assert_eq!(
-            pool.get_former_dec_party_ids().await?,
-            [party.to_string()],
-            "a dismissed party stays recorded, so a refresh does not detect it again"
+        assert!(
+            !pool.record_former_dec_party(&party, 1).await?,
+            "a refresh that sees the same removal leaves the party dismissed"
         );
+        assert!(pool.get_former_dec_parties().await?.is_empty());
         assert!(
             !pool.claim_former_party_purge(&party).await?,
             "a dismissed party is not purged again"
@@ -1829,9 +1870,9 @@ mod tests {
             .forget_former_dec_parties(&[back.to_string(), purging.to_string()])
             .await?;
         assert_eq!(removed, 1);
-        let mut left = pool.get_former_dec_party_ids().await?;
-        left.sort();
-        assert_eq!(left, [other.to_string(), purging.to_string()]);
+        assert!(pool.get_former_dec_party(&back).await?.is_none());
+        assert!(pool.get_former_dec_party(&purging).await?.is_some());
+        assert!(pool.get_former_dec_party(&other).await?.is_some());
         assert_eq!(pool.forget_former_dec_parties(&[]).await?, 0);
         Ok(())
     }
