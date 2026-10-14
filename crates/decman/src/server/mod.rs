@@ -2339,6 +2339,10 @@ async fn run_peer_ping_loop(
                         peer_status::bump(&mut map, id.clone(), now);
                     }
 
+                    let verdict = {
+                        let map = last_seen.read().await;
+                        peer_status::settle_probe(&map, &id, std::time::Instant::now(), verdict)
+                    };
                     (id, verdict)
                 }
             })

@@ -22,6 +22,21 @@ pub fn should_probe(map: &HashMap<String, Instant>, id: &str, now: Instant) -> b
     }
 }
 
+/// Settles a probe's verdict against `map` read at `now`. A probe can stay in
+/// flight for the Noise timeout, and traffic heard meanwhile proves the peer
+/// reachable. A failed probe then yields to that fresher evidence.
+pub fn settle_probe(
+    map: &HashMap<String, Instant>,
+    id: &str,
+    now: Instant,
+    probe: Result<(), String>,
+) -> Result<(), String> {
+    match probe {
+        Err(_) if !should_probe(map, id, now) => Ok(()),
+        verdict => verdict,
+    }
+}
+
 /// Conditionally write `now` into the entry for `id`, but only if it would advance the timestamp.
 /// Prevents a stale `now` (captured before a long-running probe) from overwriting a fresher value
 /// written by a concurrent receive path.
@@ -185,6 +200,35 @@ mod tests {
         map.insert("alice".to_string(), t1);
         bump(&mut map, "alice".to_string(), t0);
         assert_eq!(map.get("alice"), Some(&t1));
+    }
+
+    #[test]
+    fn a_failed_probe_yields_to_traffic_heard_while_it_ran() {
+        let mut map = HashMap::new();
+        let now = Instant::now();
+        map.insert("alice".to_string(), now);
+        let verdict = settle_probe(&map, "alice", now, Err("timed out".to_string()));
+        assert_eq!(verdict, Ok(()));
+    }
+
+    #[test]
+    fn a_failed_probe_stands_without_fresh_traffic() {
+        let mut map = HashMap::new();
+        let now = Instant::now();
+        map.insert("alice".to_string(), now);
+        let later = now + STALE_AFTER;
+        let stale = settle_probe(&map, "alice", later, Err("timed out".to_string()));
+        assert_eq!(stale, Err("timed out".to_string()));
+        let unheard = settle_probe(&map, "bob", now, Err("refused".to_string()));
+        assert_eq!(unheard, Err("refused".to_string()));
+    }
+
+    #[test]
+    fn a_successful_probe_stands_without_any_traffic() {
+        assert_eq!(
+            settle_probe(&HashMap::new(), "alice", Instant::now(), Ok(())),
+            Ok(())
+        );
     }
 
     #[test]
