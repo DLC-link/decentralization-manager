@@ -14,21 +14,32 @@ pub struct ProposalCycleCtx {
     pending_before: HashSet<String>,
 }
 
-/// The confirmations read that finds this cycle's proposal. It asks for the
+/// The confirmations read every step of the cycle uses. It asks for the
 /// endpoint's largest page, so one read lists every pending proposal.
 /// [`whole_page`] fails the read when it does not.
-fn all_pending_path(party_id: &str) -> String {
+pub fn all_pending_path(party_id: &str) -> String {
     format!("/governance/confirmations?party_id={party_id}&limit=200")
 }
 
 /// The pending proposals in `s`. Errors when the page was cut short, because a
-/// partial list cannot show which proposal is new.
+/// partial list cannot show whether a proposal is pending or new.
 fn whole_page(s: GovernanceResponse) -> anyhow::Result<Vec<DomainGovernanceAction>> {
     anyhow::ensure!(
         s.next_cursor.is_none(),
         "more proposals are pending than one /governance/confirmations page holds"
     );
     Ok(s.domain_actions)
+}
+
+/// Every pending proposal for `party_id` on the node at `port`. `None` while
+/// the read fails, so the calling step polls again.
+pub async fn probe_all_pending(
+    f: &Fixture,
+    port: u16,
+    party_id: &str,
+) -> Option<anyhow::Result<Vec<DomainGovernanceAction>>> {
+    let s: GovernanceResponse = f.probe_get_json(port, &all_pending_path(party_id)).await?;
+    Some(whole_page(s))
 }
 
 /// The cid of the one proposal labelled `label` that `before` lacks.
@@ -165,15 +176,12 @@ pub fn propose_confirm_execute_on(
                             Ok((p, _)) => p,
                             Err(e) => return Some(Err(e)),
                         };
-                        let s: GovernanceResponse = f
-                            .probe_get_json(f.p1.http, &all_pending_path(&party_id))
-                            .await?;
                         // THIS cycle's proposal is the one with our label that
                         // was not pending before we proposed. A prior phase (e.g.
                         // notification_feed) can leave an unrelated proposal
                         // pending, so neither `len() == 1` nor the label alone is
                         // a safe gate.
-                        let pending = match whole_page(s) {
+                        let pending = match probe_all_pending(f, f.p1.http, &party_id).await? {
                             Ok(p) => p,
                             Err(e) => return Some(Err(e)),
                         };
@@ -206,9 +214,11 @@ pub fn propose_confirm_execute_on(
                         Ok((p, _)) => p,
                         Err(e) => return Some(Err(e)),
                     };
-                    let path = format!("/governance/confirmations?party_id={party_id}");
-                    let s: GovernanceResponse = f.probe_get_json(f.p2.http, &path).await?;
-                    s.domain_actions
+                    let pending = match probe_all_pending(f, f.p2.http, &party_id).await? {
+                        Ok(p) => p,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    pending
                         .iter()
                         .any(|a| a.proposal_cid == cid)
                         .then_some(Ok(()))
@@ -245,11 +255,12 @@ pub fn propose_confirm_execute_on(
                         Ok((p, _)) => p,
                         Err(e) => return Some(Err(e)),
                     };
-                    let path = format!("/governance/confirmations?party_id={party_id}");
-                    let s: GovernanceResponse = f.probe_get_json(f.p1.http, &path).await?;
+                    let pending = match probe_all_pending(f, f.p1.http, &party_id).await? {
+                        Ok(p) => p,
+                        Err(e) => return Some(Err(e)),
+                    };
                     let our_cid = ctx.proposal_cid.clone();
-                    let action = s
-                        .domain_actions
+                    let action = pending
                         .into_iter()
                         .find(|a| Some(&a.proposal_cid) == our_cid.as_ref() && a.can_execute)?;
                     ctx.confirmation_cids = action
@@ -281,10 +292,11 @@ pub fn propose_confirm_execute_on(
                             Ok((p, _)) => p,
                             Err(e) => return Some(Err(e)),
                         };
-                        let path = format!("/governance/confirmations?party_id={party_id}");
-                        let s: GovernanceResponse = f.probe_get_json(f.p3.http, &path).await?;
-                        let action = s
-                            .domain_actions
+                        let pending = match probe_all_pending(f, f.p3.http, &party_id).await? {
+                            Ok(p) => p,
+                            Err(e) => return Some(Err(e)),
+                        };
+                        let action = pending
                             .into_iter()
                             .find(|a| a.proposal_cid == cid && a.can_execute)?;
                         ctx.confirmation_cids = action
@@ -332,13 +344,17 @@ pub fn propose_confirm_execute_on(
                             Ok((p, _)) => p,
                             Err(e) => return Some(Err(e)),
                         };
-                        let path = format!("/governance/confirmations?party_id={party_id}");
-                        let s: GovernanceResponse = f.probe_get_json(f.p1.http, &path).await?;
+                        // A cut-short page fails the step: a cid missing from it
+                        // would read as executed.
+                        let pending = match probe_all_pending(f, f.p1.http, &party_id).await? {
+                            Ok(p) => p,
+                            Err(e) => return Some(Err(e)),
+                        };
                         // This cycle is done when ITS proposal is gone (executed).
                         // Don't assert a globally empty slate — an unrelated prior
                         // proposal may still be pending (see the P1 visibility note).
                         let our_cid = ctx.proposal_cid.clone();
-                        (!s.domain_actions
+                        (!pending
                             .iter()
                             .any(|a| Some(&a.proposal_cid) == our_cid.as_ref()))
                         .then_some(Ok(()))
