@@ -211,17 +211,28 @@ impl AppState {
     }
 
     /// As [`Self::for_test`], on a database the test prepared, such as an
-    /// `#[sqlx::test]` pool that already has the migrations applied.
+    /// `#[sqlx::test]` pool that already has the migrations applied. Nothing
+    /// listens for peer jobs, so an accept fails at the enqueue.
     pub(crate) fn for_test_on(
         auth: Option<crate::auth::WorkflowAuth>,
         db: SqlitePool,
     ) -> actix_web::web::Data<Self> {
-        actix_web::web::Data::new(Self {
+        Self::for_test_with_peer_jobs(auth, db).0
+    }
+
+    /// As [`Self::for_test_on`], also returning the peer-job queue, so an
+    /// accept succeeds the way it does with the peer listener running.
+    pub(crate) fn for_test_with_peer_jobs(
+        auth: Option<crate::auth::WorkflowAuth>,
+        db: SqlitePool,
+    ) -> (actix_web::web::Data<Self>, mpsc::UnboundedReceiver<PeerJob>) {
+        let (peer_job_sender, peer_jobs) = mpsc::unbounded_channel();
+        let state = actix_web::web::Data::new(Self {
             db,
             config: NodeConfig::default(),
             peer_status: Arc::new(RwLock::new(HashMap::new())),
             last_seen: Arc::new(RwLock::new(HashMap::new())),
-            peer_job_sender: mpsc::unbounded_channel().0,
+            peer_job_sender,
             workflows: WorkflowRegistry::new(),
             pending_invitations: Arc::new(RwLock::new(Vec::new())),
             auth: Arc::new(RwLock::new(auth)),
@@ -244,7 +255,8 @@ impl AppState {
             http_client: reqwest::Client::new(),
             health_cache: HealthCache::new(),
             external_parties: Default::default(),
-        })
+        });
+        (state, peer_jobs)
     }
 }
 

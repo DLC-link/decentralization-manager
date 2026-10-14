@@ -36,11 +36,15 @@ pub(crate) const MAX_HANDLED_INVITATIONS: i64 = 200;
 
 /// Keep an accepted or declined invitation as history instead of deleting it,
 /// and trim the history to [`MAX_HANDLED_INVITATIONS`] in the same transaction.
+///
+/// A database failure is logged and the answer goes ahead, as it did when
+/// this step only deleted the row.
 async fn persist_handled_invitation(
     data: &web::Data<AppState>,
-    id: &str,
+    invitation: &PendingInvitation,
     outcome: InvitationOutcome,
 ) {
+    let id = &invitation.id;
     let handled_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -52,7 +56,23 @@ async fn persist_handled_invitation(
             return;
         }
     };
-    if let Err(e) = tx.mark_invitation_handled(id, outcome, handled_at).await {
+    let marked = match tx.mark_invitation_handled(id, outcome, handled_at).await {
+        Ok(marked) => marked,
+        Err(e) => {
+            tracing::warn!(
+                "Failed to record invitation {id} as {}: {e}",
+                outcome.as_str()
+            );
+            return;
+        }
+    };
+    // No pending row: persisting the invitation on receipt failed, and only
+    // the in-memory card was left. Write the answered invitation in full.
+    if !marked
+        && let Err(e) = tx
+            .insert_handled_invitation(invitation, outcome, handled_at)
+            .await
+    {
         tracing::warn!(
             "Failed to record invitation {id} as {}: {e}",
             outcome.as_str()
@@ -328,7 +348,7 @@ pub async fn accept_invitation(
         }
     };
 
-    persist_handled_invitation(&data, &invitation.id, InvitationOutcome::Accepted).await;
+    persist_handled_invitation(&data, &invitation, InvitationOutcome::Accepted).await;
 
     // Refuse a second accept for a run we're already driving: a resurrected
     // card (e.g. an in-flight invite delivered after a scoped cancel, or a
@@ -440,7 +460,7 @@ pub async fn decline_invitation(
         }
     };
 
-    persist_handled_invitation(&data, &invitation.id, InvitationOutcome::Declined).await;
+    persist_handled_invitation(&data, &invitation, InvitationOutcome::Declined).await;
 
     // Best-effort: tell the coordinator we declined so they can fail their
     // matching in-progress run immediately instead of waiting until timeout.
@@ -985,6 +1005,100 @@ mod handled_invitation_tests {
         );
         assert_eq!(newest["invitations"].as_array().map(Vec::len), Some(1));
         assert_eq!(newest["invitations"][0]["invitation"]["id"], json!("inv-2"));
+        Ok(())
+    }
+
+    /// A card whose persist failed on receipt lives only in memory. Its
+    /// answer must still reach the history.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_answer_to_a_card_kept_only_in_memory_reaches_the_history(
+        pool: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let (state, mut peer_jobs) = AppState::for_test_with_peer_jobs(None, pool.clone());
+        state
+            .pending_invitations
+            .write()
+            .await
+            .extend([invitation("inv-a"), invitation("inv-d")]);
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(state)
+                .service(accept_invitation)
+                .service(decline_invitation)
+                .service(list_handled_invitations),
+        )
+        .await;
+
+        let accepted = actix_test::call_service(&app, post!("/invitations/accept", "inv-a")).await;
+        let declined = actix_test::call_service(&app, post!("/invitations/decline", "inv-d")).await;
+
+        assert_eq!(accepted.status(), StatusCode::OK);
+        assert_eq!(declined.status(), StatusCode::OK);
+        assert!(
+            peer_jobs.try_recv().is_ok(),
+            "the accept enqueued no peer job"
+        );
+        let listed: Value = actix_test::call_and_read_body_json(
+            &app,
+            actix_test::TestRequest::get()
+                .uri("/invitations/handled")
+                .to_request(),
+        )
+        .await;
+        let mut answers: Vec<(String, String, String)> = listed["invitations"]
+            .as_array()
+            .map(|list| {
+                list.iter()
+                    .map(|h| {
+                        (
+                            h["invitation"]["id"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_string(),
+                            h["outcome"].as_str().unwrap_or_default().to_string(),
+                            h["invitation"]["prefix"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_string(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        answers.sort();
+        assert_eq!(
+            answers,
+            vec![
+                ("inv-a".into(), "accepted".into(), "party-x".into()),
+                ("inv-d".into(), "declined".into(), "party-x".into()),
+            ]
+        );
+        assert!(pool.get_all_pending_invitations().await?.is_empty());
+        Ok(())
+    }
+
+    /// Before history, a failed delete was logged and the decline went ahead.
+    /// A failed history write must not fail the decline either.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_database_failure_does_not_fail_the_decline(pool: SqlitePool) -> anyhow::Result<()> {
+        let state = AppState::for_test_on(None, pool.clone());
+        state
+            .pending_invitations
+            .write()
+            .await
+            .push(invitation("inv-1"));
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(state.clone())
+                .service(decline_invitation),
+        )
+        .await;
+        pool.close().await;
+
+        let declined = actix_test::call_service(&app, post!("/invitations/decline", "inv-1")).await;
+
+        assert_eq!(declined.status(), StatusCode::OK);
+        assert!(state.pending_invitations.read().await.is_empty());
         Ok(())
     }
 

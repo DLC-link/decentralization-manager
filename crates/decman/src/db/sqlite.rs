@@ -2,7 +2,7 @@ use std::{path::Path, str::FromStr, time::Duration};
 
 use anyhow::Context;
 use sqlx::{
-    SqlitePool,
+    SqliteConnection, SqlitePool,
     migrate::Migrator,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
 };
@@ -650,6 +650,64 @@ impl SchemaWrite for SqlitePool {
     }
 }
 
+/// Insert or replace an invitation row with the given status. A pending row
+/// has no `handled_at`; an accepted or declined one has the time of the answer.
+async fn write_invitation(
+    conn: &mut SqliteConnection,
+    inv: &PendingInvitation,
+    status: &str,
+    handled_at: Option<i64>,
+) -> Result {
+    let row = PendingInvitationRow::from_domain(inv)?;
+
+    sqlx::query(
+        r"
+        INSERT OR REPLACE INTO pending_invitations (
+            id,
+            invitation_type,
+            coordinator_pubkey,
+            received_at,
+            prefix,
+            participants,
+            dar_filenames,
+            dar_hashes,
+            kicked_participant,
+            new_participant,
+            new_threshold,
+            previous_threshold,
+            dec_party_id,
+            package_names,
+            contract_intents,
+            workflow_instance,
+            status,
+            handled_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ",
+    )
+    .bind(&row.id)
+    .bind(&row.invitation_type)
+    .bind(&row.coordinator_pubkey)
+    .bind(row.received_at)
+    .bind(&row.prefix)
+    .bind(&row.participants)
+    .bind(&row.dar_filenames)
+    .bind(&row.dar_hashes)
+    .bind(&row.kicked_participant)
+    .bind(&row.new_participant)
+    .bind(row.new_threshold)
+    .bind(row.previous_threshold)
+    .bind(&row.dec_party_id)
+    .bind(&row.package_names)
+    .bind(&row.contract_intents)
+    .bind(&row.workflow_instance)
+    .bind(status)
+    .bind(handled_at)
+    .execute(conn)
+    .await?;
+
+    Ok(())
+}
+
 impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
     async fn commit(self) -> Result {
         Ok(self.commit().await?)
@@ -997,52 +1055,16 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
     }
 
     async fn upsert_pending_invitation(&mut self, inv: &PendingInvitation) -> Result {
-        let row = PendingInvitationRow::from_domain(inv)?;
+        write_invitation(self, inv, "pending", None).await
+    }
 
-        sqlx::query(
-            r"
-            INSERT OR REPLACE INTO pending_invitations (
-                id,
-                invitation_type,
-                coordinator_pubkey,
-                received_at,
-                prefix,
-                participants,
-                dar_filenames,
-                dar_hashes,
-                kicked_participant,
-                new_participant,
-                new_threshold,
-                previous_threshold,
-                dec_party_id,
-                package_names,
-                contract_intents,
-                workflow_instance,
-                status,
-                handled_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL)
-            ",
-        )
-        .bind(&row.id)
-        .bind(&row.invitation_type)
-        .bind(&row.coordinator_pubkey)
-        .bind(row.received_at)
-        .bind(&row.prefix)
-        .bind(&row.participants)
-        .bind(&row.dar_filenames)
-        .bind(&row.dar_hashes)
-        .bind(&row.kicked_participant)
-        .bind(&row.new_participant)
-        .bind(row.new_threshold)
-        .bind(row.previous_threshold)
-        .bind(&row.dec_party_id)
-        .bind(&row.package_names)
-        .bind(&row.contract_intents)
-        .bind(&row.workflow_instance)
-        .execute(&mut **self)
-        .await?;
-
-        Ok(())
+    async fn insert_handled_invitation(
+        &mut self,
+        inv: &PendingInvitation,
+        outcome: InvitationOutcome,
+        handled_at: i64,
+    ) -> Result {
+        write_invitation(self, inv, outcome.as_str(), Some(handled_at)).await
     }
 
     async fn delete_pending_invitation(&mut self, id: &str) -> Result {
@@ -2754,6 +2776,52 @@ mod tests {
 
     /// A coordinator that sends the same invitation again (same run, so same
     /// id) after a decline gets a fresh pending card, as before history.
+    /// The fallback for a card that was never persisted: the answered
+    /// invitation is written in full, replacing any older row with its id.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_insert_handled_invitation_writes_the_answer(pool: SqlitePool) -> Result {
+        save_invitations(&pool, &[test_invitation("old", "coord-1", 1000)]).await?;
+        mark_handled(&pool, "old", InvitationOutcome::Declined, 2000).await?;
+
+        let mut tx = pool.begin_transaction().await?;
+        tx.insert_handled_invitation(
+            &test_invitation("new", "coord-1", 3000),
+            InvitationOutcome::Accepted,
+            3500,
+        )
+        .await?;
+        tx.insert_handled_invitation(
+            &test_invitation("old", "coord-1", 4000),
+            InvitationOutcome::Accepted,
+            4500,
+        )
+        .await?;
+        Commitable::commit(tx).await?;
+
+        let handled = pool.get_handled_invitations(50).await?;
+        let summary: Vec<(&str, InvitationOutcome, i64, i64)> = handled
+            .iter()
+            .map(|h| {
+                (
+                    h.invitation.id.as_str(),
+                    h.outcome,
+                    h.invitation.received_at,
+                    h.handled_at,
+                )
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("old", InvitationOutcome::Accepted, 4000, 4500),
+                ("new", InvitationOutcome::Accepted, 3000, 3500),
+            ]
+        );
+        assert_eq!(handled[1].invitation.prefix.as_deref(), Some("party-new"));
+        assert!(pool.get_all_pending_invitations().await?.is_empty());
+        Ok(())
+    }
+
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn test_reinvite_after_decline_is_pending_again(pool: SqlitePool) -> Result {
         save_invitations(&pool, &[test_invitation("a", "coord-1", 1000)]).await?;

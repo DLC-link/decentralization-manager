@@ -298,6 +298,16 @@ pub trait Commitable {
         coordinator_pubkey: &str,
     ) -> Result;
 
+    /// Insert or replace an invitation as answered with `outcome`. Used for a
+    /// card that lived only in memory because persisting it on receipt
+    /// failed, so its answer still reaches the history.
+    async fn insert_handled_invitation(
+        &mut self,
+        inv: &PendingInvitation,
+        outcome: InvitationOutcome,
+        handled_at: i64,
+    ) -> Result;
+
     /// Record that the operator accepted or declined a pending invitation.
     /// Returns false, and changes nothing, when no pending invitation has
     /// this id.
