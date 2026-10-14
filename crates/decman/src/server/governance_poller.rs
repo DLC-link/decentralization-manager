@@ -432,6 +432,8 @@ mod tests {
             proposer: None,
             proposer_not_authorized: false,
             created_at: None,
+            proposal_template_id: None,
+            proposal_payload: None,
         })
     }
 
