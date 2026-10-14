@@ -544,25 +544,33 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     .iter()
                     .filter(|e| e.action_summary == "purge_former_party")
                     .collect();
-                // The cut-off purge left a start row too, so the trail holds
-                // two starts and the one end of the purge that finished.
-                let ends: Vec<&&AuditLogEntry> = purges
-                    .iter()
-                    .filter(|e| e.event_type == "purge_end")
-                    .collect();
-                let [end] = ends[..] else {
-                    return Some(Err(anyhow::anyhow!(
-                        "expected one purge_end row, found {}: {purges:?}",
-                        ends.len()
-                    )));
-                };
+                // The cut-off purge was injected into the database, not
+                // started through the API, so only this purge wrote a start
+                // row. The restart wrote a failed end row for the cut-off one.
                 let starts = purges
                     .iter()
                     .filter(|e| e.event_type == "purge_start")
                     .count();
-                if starts != 2 {
+                if starts != 1 {
                     return Some(Err(anyhow::anyhow!(
-                        "expected two purge_start rows, found {starts}: {purges:?}"
+                        "expected one purge_start row, found {starts}: {purges:?}"
+                    )));
+                }
+                let ends: Vec<&&AuditLogEntry> = purges
+                    .iter()
+                    .filter(|e| e.event_type == "purge_end")
+                    .collect();
+                // Newest first.
+                let [end, interrupted] = ends[..] else {
+                    return Some(Err(anyhow::anyhow!(
+                        "expected two purge_end rows, found {}: {purges:?}",
+                        ends.len()
+                    )));
+                };
+                if interrupted.status != "failed" {
+                    return Some(Err(anyhow::anyhow!(
+                        "the cut-off purge's end row is {}, not failed: {interrupted:?}",
+                        interrupted.status
                     )));
                 }
                 if end.status != "success" {
