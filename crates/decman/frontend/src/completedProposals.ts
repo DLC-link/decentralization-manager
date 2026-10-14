@@ -125,17 +125,24 @@ const labelFor = (identity: Identity, rows: AuditLogEntry[]): string => {
  * open as far as this node knows. It is shown only when the party's pending
  * feed is loaded in full and does not list it. Without that feed nobody can
  * tell "finished" from "not loaded", so such a proposal stays out.
+ *
+ * `pendingLive` is false while the pending feed is not being refreshed, as
+ * after a load-more. A stale feed proves nothing about what is still open, so
+ * only executed and cancelled proposals show then.
  */
 export const completedProposals = (
   audit: AuditLogEntry[],
   pending: PendingProposals[],
+  pendingLive = true,
 ): CompletedProposal[] => {
   const pendingKeys = new Set<string>();
   const selfKnown = new Set<string>();
   const domainKnown = new Set<string>();
   for (const party of pending) {
-    selfKnown.add(party.partyId);
-    if (party.nextCursor === null) domainKnown.add(party.partyId);
+    if (pendingLive) {
+      selfKnown.add(party.partyId);
+      if (party.nextCursor === null) domainKnown.add(party.partyId);
+    }
     for (const a of party.actions) pendingKeys.add(selfKey(party.partyId, a.action));
     for (const d of party.domainActions) {
       pendingKeys.add(domainKey(party.partyId, d.proposal_cid));

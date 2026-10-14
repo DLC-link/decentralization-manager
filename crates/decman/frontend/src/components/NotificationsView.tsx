@@ -95,6 +95,9 @@ interface NotificationsViewProps {
   /** This node's newest governance audit rows across every party. The
    *  Completed section reads finished proposals from them. */
   governanceAudit?: AuditLogEntry[];
+  /** False while `partyActions` is not being refreshed, as after a load-more.
+   *  Completed then shows only executed and cancelled proposals. */
+  pendingLive?: boolean;
   /** True while any feed source is still loading its initial response. */
   loading: boolean;
   /** True while a refetch is in flight, initial or not. Keeps an empty list
@@ -2205,6 +2208,7 @@ export const NotificationsView = ({
   partyActions,
   workflowRuns,
   governanceAudit = [],
+  pendingLive = true,
   loading,
   fetching = false,
   onLoadMore,
@@ -2366,7 +2370,7 @@ export const NotificationsView = ({
 
   // A proposal leaves the pending feed once it is finished, so the Completed
   // section reads it from this node's audit log instead.
-  for (const proposal of completedProposals(governanceAudit, partyActions)) {
+  for (const proposal of completedProposals(governanceAudit, partyActions, pendingLive)) {
     entries.push({
       partyId: proposal.partyId,
       key: `done-${proposal.key}`,

@@ -98,6 +98,25 @@ describe("completedProposals", () => {
     expect(result[0]).toMatchObject({ partyId: otherParty, outcome: "executed" });
   });
 
+  it("trusts a stale pending feed only for executed and cancelled proposals", () => {
+    const rows = [
+      domain("confirm", "00open"),
+      domain("execute", "00done"),
+      domain("cancel_proposal", "00gone"),
+    ];
+
+    // The feed stops refreshing after a load-more. A proposal it no longer
+    // lists may have closed since, or may never have been reloaded.
+    const result = completedProposals(rows, [loaded()], false);
+
+    expect(result.map((p) => p.outcome)).toEqual(["executed", "cancelled"]);
+    expect(completedProposals(rows, [loaded()]).map((p) => p.outcome)).toEqual([
+      "confirmed",
+      "executed",
+      "cancelled",
+    ]);
+  });
+
   it("skips a propose row logged before the row carried its proposal cid", () => {
     const legacy = row({
       event_type: "propose",

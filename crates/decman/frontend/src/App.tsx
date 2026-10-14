@@ -1303,6 +1303,7 @@ const App = () => {
             partyActions={partyActions}
             workflowRuns={workflowRuns}
             governanceAudit={governanceAudit}
+            pendingLive={!actionsAccumulated}
             fetching={partyActionsFetching}
             onLoadMore={loadMoreActions}
             hasMore={hasMoreActions}
