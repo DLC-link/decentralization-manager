@@ -23,8 +23,8 @@ use super::steps::{
 };
 use crate::{config::NodeConfig, utils};
 
-// ListParties has no cursor; reject a full result to avoid omitting parties.
-// Unlike decentralized discovery, this list has no exact-ID fallback.
+// Reject a full result to avoid an incomplete snapshot: unlike decentralized
+// discovery, known parties are not queried separately by exact ID.
 const MAX_HOSTED_PARTIES: i32 = 5_000;
 // Hosted-party enumeration walks the synchronizer in batches: devnet took
 // 103s even with a small final response. Leave room for that work while the
