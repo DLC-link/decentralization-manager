@@ -1187,11 +1187,28 @@ pub async fn start_server(
         .fail_interrupted_purges(former_parties::INTERRUPTED_PURGE_ERROR)
         .await
         .context("Could not mark the purges a restart interrupted as failed")?;
-    if interrupted > 0 {
+    if !interrupted.is_empty() {
         tracing::error!(
-            "{interrupted} purge(s) of former-party contracts were interrupted by a restart; \
-             the participant may still be disconnected from its synchronizer"
+            "{} purge(s) of former-party contracts were interrupted by a restart; \
+             the participant may still be disconnected from its synchronizer",
+            interrupted.len()
         );
+    }
+    for party_id in &interrupted {
+        match CantonId::parse(party_id) {
+            Ok(party) => {
+                audit::log_purge_audit(
+                    &db,
+                    audit::PurgeAuditEvent::End(Err(
+                        former_parties::INTERRUPTED_PURGE_ERROR.to_string()
+                    )),
+                    &party,
+                    None,
+                )
+                .await;
+            }
+            Err(e) => tracing::warn!("Skipping the audit row of an interrupted purge: {e}"),
+        }
     }
 
     // Boot-time workflow recovery. For any `workflow_runs` row that was
