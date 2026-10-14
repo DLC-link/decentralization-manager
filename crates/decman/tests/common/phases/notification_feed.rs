@@ -21,7 +21,11 @@ use dec_party_manager::server::GovernanceResponse;
 use serde_json::{Value, json};
 use tracing::info;
 
-use crate::common::{Fixture, db, scenario::Scenario};
+use crate::common::{
+    Fixture, db,
+    governance::{all_pending_path, probe_all_pending},
+    scenario::Scenario,
+};
 
 #[derive(Default)]
 struct Ctx {
@@ -32,6 +36,14 @@ struct Ctx {
 
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: notification_feed");
+
+    let probe_description = format!(
+        "notification-feed visibility probe {}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or_default()
+    );
 
     Scenario::with_ctx(
         "notification feed: shape + dismiss + multi-node",
@@ -184,45 +196,49 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     // The proposal is a GenericVote with a phase-unique description so it
     // never collides with the action token_custody already executed (which
     // is the same SetupCcPreapproval shape and would surface as a slow
-    // duplicate-contract creation against Canton).
-    .when(
-        "P1 proposes GenericVote for multi-node visibility check",
-        |f, _| {
+    // duplicate-contract creation against Canton). The next step finds the
+    // proposal by that description.
+    .when("P1 proposes GenericVote for multi-node visibility check", {
+        let description = probe_description.clone();
+        move |f, _| {
+            let description = description.clone();
             Box::pin(async move {
                 let req = json!({
                     "party_id": f.party_id()?,
                     "rules_contract_id": f.rules_contract_id()?,
                     "proposal": {
                         "type": "generic_vote",
-                        "description": format!(
-                            "notification-feed visibility probe {}",
-                            std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_millis())
-                                .unwrap_or_default()
-                        ),
+                        "description": description,
                     }
                 });
                 let _: Value = f.post_json(f.p1.http, "/governance/propose", &req).await?;
                 Ok(())
             })
-        },
-    )
+        }
+    })
     .then(
         "new proposal_cid surfaced on P1",
         Duration::from_secs(30),
-        |f, ctx| {
-            Box::pin(async move {
-                let party_id = match f.party_id() {
-                    Ok(v) => v.to_string(),
-                    Err(e) => return Some(Err(e)),
-                };
-                let path = format!("/governance/confirmations?party_id={party_id}");
-                let s: GovernanceResponse = f.probe_get_json(f.p1.http, &path).await?;
-                let last = s.domain_actions.last()?;
-                ctx.proposal_cid = Some(last.proposal_cid.clone());
-                Some(Ok(()))
-            })
+        {
+            let description = probe_description.clone();
+            move |f, ctx| {
+                let description = description.clone();
+                Box::pin(async move {
+                    let party_id = match f.party_id() {
+                        Ok(v) => v.to_string(),
+                        Err(e) => return Some(Err(e)),
+                    };
+                    let pending = match probe_all_pending(f, f.p1.http, &party_id).await? {
+                        Ok(p) => p,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    let ours = pending
+                        .iter()
+                        .find(|a| a.description.as_deref() == Some(description.as_str()))?;
+                    ctx.proposal_cid = Some(ours.proposal_cid.clone());
+                    Some(Ok(()))
+                })
+            }
         },
     )
     .then(
@@ -236,10 +252,12 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     Ok(v) => v.to_string(),
                     Err(e) => return Some(Err(e)),
                 };
-                let path = format!("/governance/confirmations?party_id={party_id}");
                 for port in [f.p1.http, f.p2.http, f.p3.http] {
-                    let s: GovernanceResponse = f.probe_get_json(port, &path).await?;
-                    if !s.domain_actions.iter().any(|a| a.proposal_cid == cid) {
+                    let pending = match probe_all_pending(f, port, &party_id).await? {
+                        Ok(p) => p,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    if !pending.iter().any(|a| a.proposal_cid == cid) {
                         return None;
                     }
                 }
@@ -281,8 +299,8 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Box::pin(async move {
                 let cid = cid.context("proposal_cid not set")?;
                 let party_id = f.party_id()?.to_string();
-                let path = format!("/governance/confirmations?party_id={party_id}");
-                let s: GovernanceResponse = f.get_json(f.p1.http, &path).await?;
+                let s: GovernanceResponse =
+                    f.get_json(f.p1.http, &all_pending_path(&party_id)).await?;
                 if let Some(action) = s.domain_actions.iter().find(|a| a.proposal_cid == cid)
                     && let Some(conf) = action.confirmations.first()
                 {
