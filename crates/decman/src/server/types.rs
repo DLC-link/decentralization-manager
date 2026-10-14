@@ -26,29 +26,31 @@ pub use common::api::{
     DiscoverMemberPartyRequest, DiscoverMemberPartyResponse, DistributePackageRequest,
     ErrorResponse, ExpireConfirmationRequest, ExternalPartiesResponse, ExternalPartyHost,
     ExternalPartyInfo, GovernanceState, GovernanceStateResponse, GovernanceType,
-    GrantRightsRequest, GrantRightsResponse, InstrumentInfo, InstrumentsResponse,
-    InvitationActionRequest, KeyStatusResponse, KickInvitePayload, KickRequest, KnownMember,
-    KnownMembersResponse, LocalPartyAdoptExecuteRequest, LocalPartyAdoptRequest, MessageResponse,
-    MissingEdgeKind, MissingPeerEdge, NetworkInfo, OnboardingInvitePayload,
-    OnboardingMeshErrorResponse, OnboardingRequest, OperatorInfo, PartyAuthStatus,
-    PartyConfigRequest, PartyConfigResponse, PendingInvitationsResponse, ProposalSummary,
-    ProposalsPageResponse, ProviderConfigurationInfo, ProviderConfigurationsResponse,
-    ProviderServiceInfo, ProviderServicesResponse, RegistrarServiceInfo,
-    RegistrarServiceRequestInfo, RegistrarServiceRequestsResponse, RegistrarServicesResponse,
-    RequestDarPayload, ResponseSource, RightsStatus, SuccessResponse, TenantAcsBlockResponse,
-    TenantAcsImportRequest, TenantAcsImportResponse, TenantAddHostsExecuteRequest,
-    TenantAddHostsExecuteResponse, TenantAddHostsPrepareResponse, TenantAddHostsRequest,
-    TenantExecuteRequest, TenantExecuteResponse, TenantPartyStateResponse, TenantPrepareRequest,
-    TenantPrepareResponse, TenantThresholdExecuteRequest, TenantThresholdRequest,
-    TransferFactoriesResponse, TransferFactoryInfo, TransferPreapprovalsResponse, UserServiceInfo,
-    UserServicesResponse, WorkflowResponse, WorkflowRunsResponse, WorkflowStatusResponse,
+    GrantRightsRequest, GrantRightsResponse, HandledInvitationsResponse, InstrumentInfo,
+    InstrumentsResponse, InvitationActionRequest, KeyStatusResponse, KickInvitePayload,
+    KickRequest, KnownMember, KnownMembersResponse, LocalPartyAdoptExecuteRequest,
+    LocalPartyAdoptRequest, MessageResponse, MissingEdgeKind, MissingPeerEdge, NetworkInfo,
+    OnboardingInvitePayload, OnboardingMeshErrorResponse, OnboardingRequest, OperatorInfo,
+    PartyAuthStatus, PartyConfigRequest, PartyConfigResponse, PendingInvitationsResponse,
+    ProposalSummary, ProposalsPageResponse, ProviderConfigurationInfo,
+    ProviderConfigurationsResponse, ProviderServiceInfo, ProviderServicesResponse,
+    RegistrarServiceInfo, RegistrarServiceRequestInfo, RegistrarServiceRequestsResponse,
+    RegistrarServicesResponse, RequestDarPayload, ResponseSource, RightsStatus, SuccessResponse,
+    TenantAcsBlockResponse, TenantAcsImportRequest, TenantAcsImportResponse,
+    TenantAddHostsExecuteRequest, TenantAddHostsExecuteResponse, TenantAddHostsPrepareResponse,
+    TenantAddHostsRequest, TenantExecuteRequest, TenantExecuteResponse, TenantPartyStateResponse,
+    TenantPrepareRequest, TenantPrepareResponse, TenantThresholdExecuteRequest,
+    TenantThresholdRequest, TransferFactoriesResponse, TransferFactoryInfo,
+    TransferPreapprovalsResponse, UserServiceInfo, UserServicesResponse, WorkflowResponse,
+    WorkflowRunsResponse, WorkflowStatusResponse,
 };
 pub use common::types::{
     AcsTransferProgress, AuditLogEntry, AuthConfigResponse, ConnectionStatus, ContractInfo,
-    DecentralizedParty, ExpectedPackageVersion, ExpectedVersionsResponse, InvitationType,
-    PackageInfo, ParticipantInfo, ParticipantStatus, ParticipantsStatusResponse, PartyMetadata,
-    PeerErrorKind, PeerPackageComparison, PeerPackageResult, PendingInvitation, Permission,
-    VettedPackageInfo, WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun,
+    DecentralizedParty, ExpectedPackageVersion, ExpectedVersionsResponse, HandledInvitation,
+    InvitationOutcome, InvitationType, PackageInfo, ParticipantInfo, ParticipantStatus,
+    ParticipantsStatusResponse, PartyMetadata, PeerErrorKind, PeerPackageComparison,
+    PeerPackageResult, PendingInvitation, Permission, VettedPackageInfo, WorkflowKind,
+    WorkflowProgress, WorkflowRole, WorkflowRun,
 };
 pub use decman_lib::catalog::types::{
     AcceptTransferDetails, AppRewardBeneficiary, BillingParams, ServiceRequestDetails,
@@ -635,7 +637,7 @@ pub struct DomainGovernanceAction {
     pub created_at: Option<i64>,
     /// Template of the proposal contract, as `package-id:Module:Entity`.
     /// Absent on an orphaned card, where the proposal contract is no longer
-    /// readable.
+    /// readable. Withheld like `proposal_payload`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposal_template_id: Option<String>,
     /// Every create argument of the proposal contract, so a member can read
@@ -643,8 +645,10 @@ pub struct DomainGovernanceAction {
     /// fields. Same JSON shape as the chain audit's `details`: record fields
     /// keep their labels, numerics and parties are strings, a variant is
     /// `{"_variant": ..., "value": ...}`. Absent on an orphaned card, where
-    /// the proposal contract is no longer readable, and for a caller without
-    /// the admin role, who cannot confirm or execute.
+    /// the proposal contract is no longer readable. When `DECPM_ADMIN_ROLE`
+    /// names a role, a caller that lacks that role gets neither this field
+    /// nor `proposal_template_id`. When it is unset, every authenticated
+    /// caller passes the admin check and gets both.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "typegen", ts(type = "unknown"))]
     pub proposal_payload: Option<serde_json::Value>,
@@ -898,8 +902,11 @@ pub struct HoldingsResponse {
 /// Query parameters for the governance audit endpoint
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
 pub struct AuditLogQuery {
-    /// Decentralized party ID to filter audit entries
-    pub party_id: CantonId,
+    /// Decentralized party ID to filter audit entries. Without it, the newest
+    /// entries across every party are returned, and `limit` is capped at
+    /// [`MAX_RECENT_AUDIT_LIMIT`].
+    #[serde(default)]
+    pub party_id: Option<CantonId>,
     /// Maximum number of entries to return (default 50)
     #[serde(default = "default_audit_limit")]
     pub limit: i64,
@@ -911,6 +918,10 @@ pub struct AuditLogQuery {
 fn default_audit_limit() -> i64 {
     50
 }
+
+/// Most entries one cross-party audit read returns. The table grows with every
+/// party on the node, so an unscoped read must not be able to ask for all of it.
+pub const MAX_RECENT_AUDIT_LIMIT: i64 = 500;
 
 // ============================================================================
 // Chain Audit Trail Types

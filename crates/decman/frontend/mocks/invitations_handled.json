@@ -1,0 +1,33 @@
+{
+  "invitations": [
+    {
+      "invitation": {
+        "id": "inv-1990",
+        "invitation_type": "AddParty",
+        "coordinator_pubkey": "0261982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae7629",
+        "coordinator_name": "cn-validator-07",
+        "received_at": 1782118000,
+        "dec_party_id": "ibtc-admin::12206b74fe7904ce2f7e9458941081a2cdbb85529f1ef1716d9a8a22efb46f15714c",
+        "new_participant": "cn-validator-07::122038baa36e80ce0d445f3b49b67e965ea5f847469f571b220fedc9d99aa86ba0",
+        "new_threshold": 3,
+        "previous_threshold": 2,
+        "workflow_instance": "add-party-1990"
+      },
+      "outcome": "accepted",
+      "handled_at": 1782119000
+    },
+    {
+      "invitation": {
+        "id": "inv-1989",
+        "invitation_type": "Dars",
+        "coordinator_pubkey": "02d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44eef8",
+        "coordinator_name": "relay-zrh",
+        "received_at": 1782110000,
+        "dar_filenames": ["governance-core-0.4.0.dar"],
+        "workflow_instance": "dars-1989"
+      },
+      "outcome": "declined",
+      "handled_at": 1782112000
+    }
+  ]
+}

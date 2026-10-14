@@ -39,6 +39,11 @@ import { columnSx } from "../styles";
 import { PaginationControls } from "./Pagination";
 import { usePagination } from "../usePagination";
 import {
+  completedProposals,
+  type CompletedProposal,
+  type ProposalOutcome,
+} from "../completedProposals";
+import {
   AcsTransferMeter,
   ApprovalCard,
   ConfirmAvatars,
@@ -54,6 +59,7 @@ import {
   workflowKindLabel,
 } from "../workflowSteps";
 import type {
+  AuditLogEntry,
   CancelConfirmationRequest,
   ConfirmActionRequest,
   DisclosedContractInput,
@@ -61,6 +67,7 @@ import type {
   ExecuteActionRequest,
   GovernanceAction,
   GovernanceType,
+  HandledInvitation,
   PendingInvitation,
   WorkflowRun,
 } from "../types";
@@ -87,6 +94,20 @@ interface NotificationsViewProps {
   partyActions: PartyActions[];
   /** Live + recently-terminal workflow runs (coordinator-side for now). */
   workflowRuns: WorkflowRun[];
+  /** This node's newest governance audit rows across every party. The
+   *  Completed section reads finished proposals from them. */
+  governanceAudit?: AuditLogEntry[];
+  /** Invitations this node accepted or declined, newest first. */
+  handledInvitations?: HandledInvitation[];
+  /** False while `partyActions` is not being refreshed, as after a load-more.
+   *  Completed then shows only executed and cancelled proposals. */
+  pendingLive?: boolean;
+  /** When the page first saw each audit row, by row id (`performance.now()`). */
+  auditFirstSeen?: ReadonlyMap<number, number>;
+  /** When the committed `partyActions` was requested (`performance.now()`).
+   *  With `auditFirstSeen`, Completed calls a proposal "no longer pending"
+   *  only from a pending feed requested after its audit row was seen. */
+  pendingRequestedAt?: number;
   /** True while any feed source is still loading its initial response. */
   loading: boolean;
   /** True while a refetch is in flight, initial or not. Keeps an empty list
@@ -2127,10 +2148,165 @@ const WorkflowRunCard = ({
   );
 };
 
+const OUTCOME_PILLS: Record<
+  ProposalOutcome,
+  { label: string; tone: "success" | "neutral" }
+> = {
+  executed: { label: "Executed", tone: "success" },
+  cancelled: { label: "Cancelled", tone: "neutral" },
+  proposed: { label: "You proposed", tone: "neutral" },
+  confirmed: { label: "You confirmed", tone: "neutral" },
+};
+
+/**
+ * A finished proposal in the Completed section, in the same row shape as a
+ * finished workflow run. "You proposed" and "You confirmed" are this node's
+ * last recorded action: the node logs only what it did itself, so an execute
+ * by another member, or an expiry, does not appear.
+ */
+const CompletedProposalRow = ({ proposal }: { proposal: CompletedProposal }) => {
+  const pill = OUTCOME_PILLS[proposal.outcome];
+  const endedElsewhere =
+    proposal.outcome === "proposed" || proposal.outcome === "confirmed";
+  return (
+    <RowCard
+      dataAttrs={{
+        "data-testid": "completed-proposal",
+        "data-outcome": proposal.outcome,
+      }}
+    >
+      <Typography
+        title={proposal.label}
+        sx={{
+          fontSize: 14,
+          fontWeight: 500,
+          whiteSpace: "nowrap",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          flexShrink: 0,
+          width: 168,
+        }}
+      >
+        {proposal.label}
+      </Typography>
+      <Typography
+        sx={{
+          fontFamily: "var(--font-mono)",
+          fontSize: 12,
+          color: "text.secondary",
+          flex: 1,
+          minWidth: 0,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {truncatePartyId(proposal.partyId)}
+        {endedElsewhere && " · no longer pending"}
+      </Typography>
+      <Box sx={{ width: 96, flexShrink: 0 }}>
+        <Pill label={pill.label} tone={pill.tone} />
+      </Box>
+      <Typography
+        sx={{
+          fontFamily: "var(--font-mono)",
+          fontSize: 12,
+          color: "text.secondary",
+          whiteSpace: "nowrap",
+          width: 52,
+          textAlign: "right",
+          flexShrink: 0,
+        }}
+      >
+        {formatRelativeTime(proposal.ts)}
+      </Typography>
+      {/* Empty actions column, so the row lines up with workflow rows. */}
+      <Box sx={{ width: 128, flexShrink: 0 }} />
+    </RowCard>
+  );
+};
+
+/**
+ * An accepted or declined invitation in the Completed section, in the same row
+ * shape as a finished workflow run.
+ */
+const HandledInvitationRow = ({ handled }: { handled: HandledInvitation }) => {
+  const { invitation, outcome } = handled;
+  const from = `from ${
+    invitation.coordinator_name ||
+    `${invitation.coordinator_pubkey.slice(0, 12)}…${invitation.coordinator_pubkey.slice(-6)}`
+  }`;
+  return (
+    <RowCard
+      dataAttrs={{
+        "data-testid": "handled-invitation",
+        "data-kind": invitation.invitation_type,
+        "data-outcome": outcome,
+      }}
+    >
+      <Typography
+        sx={{
+          fontSize: 14,
+          fontWeight: 500,
+          whiteSpace: "nowrap",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          flexShrink: 0,
+          width: 168,
+        }}
+      >
+        {workflowKindLabel(invitation.invitation_type)} invitation
+      </Typography>
+      <Typography
+        sx={{
+          fontFamily: "var(--font-mono)",
+          fontSize: 12,
+          color: "text.secondary",
+          flex: 1,
+          minWidth: 0,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {invitation.prefix ||
+          (invitation.dec_party_id ? truncatePartyId(invitation.dec_party_id) : from)}
+      </Typography>
+      <Box sx={{ width: 96, flexShrink: 0 }}>
+        {outcome === "accepted" ? (
+          <Pill label="Accepted" tone="success" />
+        ) : (
+          <Pill label="Declined" tone="neutral" />
+        )}
+      </Box>
+      <Typography
+        sx={{
+          fontFamily: "var(--font-mono)",
+          fontSize: 12,
+          color: "text.secondary",
+          whiteSpace: "nowrap",
+          width: 52,
+          textAlign: "right",
+          flexShrink: 0,
+        }}
+      >
+        {formatRelativeTime(handled.handled_at)}
+      </Typography>
+      {/* Empty actions column, so the row lines up with workflow rows. */}
+      <Box sx={{ width: 128, flexShrink: 0 }} />
+    </RowCard>
+  );
+};
+
 export const NotificationsView = ({
   pendingInvitations,
   partyActions,
   workflowRuns,
+  governanceAudit = [],
+  handledInvitations = [],
+  pendingLive = true,
+  auditFirstSeen,
+  pendingRequestedAt,
   loading,
   fetching = false,
   onLoadMore,
@@ -2287,6 +2463,45 @@ export const NotificationsView = ({
           compact={terminal}
         />
       ),
+    });
+  }
+
+  // A proposal leaves the pending feed once it is finished, so the Completed
+  // section reads it from this node's audit log instead.
+  const timing =
+    auditFirstSeen && pendingRequestedAt !== undefined
+      ? { firstSeen: auditFirstSeen, pendingRequestedAt }
+      : undefined;
+  for (const proposal of completedProposals(
+    governanceAudit,
+    partyActions,
+    pendingLive,
+    timing,
+  )) {
+    entries.push({
+      partyId: proposal.partyId,
+      key: `done-${proposal.key}`,
+      group: "done",
+      kind: "gov",
+      ts: proposal.ts,
+      node: <CompletedProposalRow proposal={proposal} />,
+    });
+  }
+
+  // An accepted invitation keeps its own entry beside the workflow run it
+  // started: one records the operator's answer, the other the run's outcome.
+  // Like a pending invitation it carries no partyId, so the party filter
+  // leaves it alone.
+  const pendingInvitationIds = new Set(pendingInvitations.map((i) => i.id));
+  for (const handled of handledInvitations) {
+    // Sent again since it was answered; the pending card stands for it now.
+    if (pendingInvitationIds.has(handled.invitation.id)) continue;
+    entries.push({
+      key: `inv-done-${handled.invitation.id}`,
+      group: "done",
+      kind: "inv",
+      ts: handled.handled_at,
+      node: <HandledInvitationRow handled={handled} />,
     });
   }
 

@@ -205,12 +205,35 @@ impl AppState {
     pub(crate) async fn for_test(
         auth: Option<crate::auth::WorkflowAuth>,
     ) -> anyhow::Result<actix_web::web::Data<Self>> {
-        Ok(actix_web::web::Data::new(Self {
-            db: SqlitePool::connect("sqlite::memory:").await?,
+        Ok(Self::for_test_on(
+            auth,
+            SqlitePool::connect("sqlite::memory:").await?,
+        ))
+    }
+
+    /// As [`Self::for_test`], on a database the test prepared, such as an
+    /// `#[sqlx::test]` pool that already has the migrations applied. Nothing
+    /// listens for peer jobs, so an accept fails at the enqueue.
+    pub(crate) fn for_test_on(
+        auth: Option<crate::auth::WorkflowAuth>,
+        db: SqlitePool,
+    ) -> actix_web::web::Data<Self> {
+        Self::for_test_with_peer_jobs(auth, db).0
+    }
+
+    /// As [`Self::for_test_on`], also returning the peer-job queue, so an
+    /// accept succeeds the way it does with the peer listener running.
+    pub(crate) fn for_test_with_peer_jobs(
+        auth: Option<crate::auth::WorkflowAuth>,
+        db: SqlitePool,
+    ) -> (actix_web::web::Data<Self>, mpsc::UnboundedReceiver<PeerJob>) {
+        let (peer_job_sender, peer_jobs) = mpsc::unbounded_channel();
+        let state = actix_web::web::Data::new(Self {
+            db,
             config: NodeConfig::default(),
             peer_status: Arc::new(RwLock::new(HashMap::new())),
             last_seen: Arc::new(RwLock::new(HashMap::new())),
-            peer_job_sender: mpsc::unbounded_channel().0,
+            peer_job_sender,
             workflows: WorkflowRegistry::new(),
             pending_invitations: Arc::new(RwLock::new(Vec::new())),
             auth: Arc::new(RwLock::new(auth)),
@@ -233,7 +256,8 @@ impl AppState {
             http_client: reqwest::Client::new(),
             health_cache: HealthCache::new(),
             external_parties: Default::default(),
-        }))
+        });
+        (state, peer_jobs)
     }
 }
 
@@ -1261,6 +1285,7 @@ pub async fn start_server(
     reward_automation::register_metrics();
     node_health::register_metrics();
     handlers::register_run_metrics();
+    peer_status::register_metrics();
     handlers::register_governance_metrics();
     governance_poller::register_metrics();
 
@@ -1428,6 +1453,7 @@ pub async fn start_server(
             .service(handlers::cancel_workflow_instance)
             .service(handlers::get_key_status)
             .service(handlers::get_invitations)
+            .service(handlers::list_handled_invitations)
             .service(handlers::get_invitation_dar)
             .service(handlers::accept_invitation)
             .service(handlers::decline_invitation)
@@ -2284,7 +2310,7 @@ async fn run_peer_ping_loop(
         let peers = match db.get_all_peers().await {
             Ok(p) => p,
             Err(e) => {
-                tracing::debug!("Failed to load peers from database for heartbeat: {e}");
+                tracing::warn!(error = %e, "Failed to load peers from database for heartbeat");
                 continue;
             }
         };
@@ -2308,10 +2334,7 @@ async fn run_peer_ping_loop(
                     // (Cannot rely on a startup-only cache: new peers must be probed.)
                     let peer_pubkey = match parse_public_key(&public_key_hex) {
                         Ok(pk) => pk,
-                        Err(e) => {
-                            tracing::debug!("Skipping probe of {id}: malformed public_key: {e}");
-                            return (id, false);
-                        }
+                        Err(e) => return (id, Err(format!("malformed public_key: {e}"))),
                     };
 
                     let now = std::time::Instant::now();
@@ -2321,7 +2344,7 @@ async fn run_peer_ping_loop(
                     };
 
                     if !stale {
-                        return (id, true);
+                        return (id, Ok(()));
                     }
 
                     let psk = keypair.derive_psk(&peer_pubkey);
@@ -2334,30 +2357,32 @@ async fn run_peer_ping_loop(
                     )
                     .await;
 
-                    let active = matches!(
-                        result,
-                        Ok(ref bytes) if Message::from_bytes(bytes)
-                            .map(|m| m.msg_type == MessageType::Pong)
-                            .unwrap_or(false)
-                    );
+                    let verdict = match result {
+                        Ok(bytes) => match Message::from_bytes(&bytes) {
+                            Ok(m) if m.msg_type == MessageType::Pong => Ok(()),
+                            Ok(m) => Err(format!("answered {:?} instead of Pong", m.msg_type)),
+                            Err(e) => Err(format!("unreadable reply: {e}")),
+                        },
+                        Err(e) => Err(e.to_string()),
+                    };
 
-                    if active {
+                    if verdict.is_ok() {
                         let now = std::time::Instant::now();
                         let mut map = last_seen.write().await;
                         peer_status::bump(&mut map, id.clone(), now);
                     }
 
-                    (id, active)
+                    let verdict = {
+                        let map = last_seen.read().await;
+                        peer_status::settle_probe(&map, &id, std::time::Instant::now(), verdict)
+                    };
+                    (id, verdict)
                 }
             })
             .collect();
 
-        let results = futures::future::join_all(futures).await;
-
-        let mut status_map = peer_status.write().await;
-        for (id, active) in results {
-            status_map.insert(id, active);
-        }
+        let verdicts = futures::future::join_all(futures).await;
+        peer_status::record_verdicts(&mut *peer_status.write().await, verdicts);
     }
 }
 
