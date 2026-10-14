@@ -208,6 +208,16 @@ data OnboardedRegistrarArtifacts = OnboardedRegistrarArtifacts
     allocationFactoryCid : ContractId AllocationFactory
   deriving (Eq, Show)
 
+-- | The credential id nonce `setupOnboardedRegistrar` puts on its
+-- OnboardRegistrar proposal.
+onboardRegistrarNonce : Optional Text
+onboardRegistrarNonce = Some "onboard-registrar"
+
+-- | The credential id nonce `setupProvisionedInstrument` puts on its
+-- ProvisionInstrument proposal.
+provisionInstrumentNonce : Optional Text
+provisionInstrumentNonce = Some "provision-instrument"
+
 -- | Walk the flow to an accepted RegistrarService: provider service +
 -- configuration, registrar request, then OnboardRegistrar through provider
 -- governance. Requirements must be self-issuable by the provider.
@@ -224,6 +234,7 @@ setupOnboardedRegistrar f registrarRequirements = do
     providerServiceCid
     registrarServiceRequestCid = requestCid
     providerConfigurationCid
+    credentialIdNonce = onboardRegistrarNonce
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
   _ <- confirmAndExecuteAs f.parties f.providerStack proposalInterfaceCid
   [(registrarServiceCid, _)] <- query @RegistrarService f.parties.registrarGov
@@ -252,6 +263,7 @@ setupProvisionedInstrument f issuerRequirements initialInstrumentIssuers = do
     issuerRequirements
     holderRequirements = []
     initialInstrumentIssuers
+    credentialIdNonce = provisionInstrumentNonce
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
   _ <- confirmAndExecuteAs f.parties f.registrarStack proposalInterfaceCid
   [(instrumentConfigurationCid, _)] <- query @InstrumentConfiguration f.parties.registrarGov
