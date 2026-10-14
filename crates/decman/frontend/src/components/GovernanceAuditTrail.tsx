@@ -48,6 +48,9 @@ interface GovernanceAuditTrailProps {
   /// Reports fetch in-flight state up so the parent can disable its Refresh
   /// icon while a request is pending.
   onLoadingChange?: (loading: boolean) => void;
+  /// Show only this node's own log. A former party has no on-ledger trail to
+  /// read any more, so the mode toggle is hidden.
+  localOnly?: boolean;
 }
 
 export const CHAIN_LIMIT = PAGE_SIZE;
@@ -131,7 +134,12 @@ const localRow = (entry: AuditLogEntry): AuditRow => ({
   eventType: entry.event_type,
   action: entry.action_summary,
   meta: entry.status,
-  metaTone: entry.status === "success" ? "success" : "error",
+  metaTone:
+    entry.status === "success"
+      ? "success"
+      : entry.status === "started"
+        ? undefined
+        : "error",
   ident: entry.member_party_id,
   details: entry.details,
   facts: [["Governance type", entry.governance_type]],
@@ -218,10 +226,12 @@ export const GovernanceAuditTrail = ({
   refreshNonce,
   onCountChange,
   onLoadingChange,
+  localOnly = false,
 }: GovernanceAuditTrailProps) => {
   const jsonTreeTheme = useJsonTreeTheme();
-  const [mode, setMode] = useState<AuditMode>("governance");
-  const modeRef = useRef<AuditMode>("governance");
+  const initialMode: AuditMode = localOnly ? "local" : "governance";
+  const [mode, setMode] = useState<AuditMode>(initialMode);
+  const modeRef = useRef<AuditMode>(initialMode);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [rows, setRows] = useState<AuditRow[]>([]);
@@ -426,7 +436,7 @@ export const GovernanceAuditTrail = ({
 
   // On the shared content inset, like the table below it — otherwise the
   // controls sit against the sidebar while the rows start a column in.
-  const modeToggle = (
+  const modeToggle = localOnly ? null : (
     <ToggleButtonGroup
       size="small"
       exclusive

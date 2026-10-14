@@ -2043,7 +2043,7 @@ pub struct WorkflowStatusResponse {
 }
 
 /// Response for the governance audit endpoint
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct AuditLogResponse {
