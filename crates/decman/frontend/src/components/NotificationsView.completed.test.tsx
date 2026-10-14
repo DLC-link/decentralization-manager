@@ -176,6 +176,38 @@ describe("Completed governance proposals", () => {
     expect(within(row).getByText(/no longer pending/)).toBeTruthy();
   });
 
+  it("waits for a pending feed newer than a fresh propose row", () => {
+    // The audit poll saw the propose at t=1000; the committed pending feed
+    // was requested at t=900, before the proposal existed.
+    const propose = domainRow("propose", "00fresh");
+    const feed = (pendingRequestedAt: number) => (
+      <SnackbarProvider>
+        <NotificationsView
+          pendingInvitations={[]}
+          partyActions={[loadedParty()]}
+          workflowRuns={[]}
+          governanceAudit={[propose]}
+          auditFirstSeen={new Map([[propose.id, 1_000]])}
+          pendingRequestedAt={pendingRequestedAt}
+          loading={false}
+          onInvitationsChanged={() => {}}
+          onActionsChanged={() => {}}
+          onWorkflowsChanged={() => {}}
+          onSelectParty={() => {}}
+        />
+      </SnackbarProvider>
+    );
+
+    const { rerender } = render(feed(900));
+    expect(screen.getByText("No pending notifications.")).toBeTruthy();
+
+    // A pending feed requested after the row was seen still lacks it.
+    rerender(feed(1_100));
+    expect(chipCount("Completed")).toBe("1");
+    showCompleted();
+    expect(within(completedRows()[0]).getByText("You proposed")).toBeTruthy();
+  });
+
   it("does not call a proposal finished while its party's feed is partly loaded", () => {
     renderFeed({
       partyActions: [loadedParty([], { nextCursor: "more" })],

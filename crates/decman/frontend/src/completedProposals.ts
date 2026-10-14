@@ -29,6 +29,43 @@ export interface PendingProposals {
   nextCursor?: string | null;
 }
 
+/**
+ * The committed audit rows, and when the page first saw each one. Times are
+ * `performance.now()` in the browser, never server time, so clock skew
+ * between the two machines cannot reorder them.
+ */
+export interface AuditSnapshot {
+  entries: AuditLogEntry[];
+  /** Row id → commit time of the first snapshot that held the row. */
+  firstSeen: ReadonlyMap<number, number>;
+}
+
+export const EMPTY_AUDIT_SNAPSHOT: AuditSnapshot = {
+  entries: [],
+  firstSeen: new Map(),
+};
+
+/**
+ * The snapshot after committing `entries` at `now`. A row keeps the time it
+ * was first seen; a row that left the window is forgotten.
+ */
+export const nextAuditSnapshot = (
+  previous: AuditSnapshot,
+  entries: AuditLogEntry[],
+  now: number,
+): AuditSnapshot => ({
+  entries,
+  firstSeen: new Map(entries.map((e) => [e.id, previous.firstSeen.get(e.id) ?? now])),
+});
+
+/** How the audit rows and the pending feed line up in time. */
+export interface SnapshotTiming {
+  /** When each audit row was first seen; see `AuditSnapshot`. */
+  firstSeen: ReadonlyMap<number, number>;
+  /** `performance.now()` when the committed pending feed was requested. */
+  pendingRequestedAt: number;
+}
+
 /** Events that end a proposal. Every later row belongs to a new one. */
 const TERMINAL_EVENTS = new Set(["execute", "cancel_proposal"]);
 
@@ -148,11 +185,16 @@ const labelFor = (identity: Identity, rows: AuditLogEntry[]): string => {
  * `pendingLive` is false while the pending feed is not being refreshed, as
  * after a load-more. A stale feed proves nothing about what is still open, so
  * only executed and cancelled proposals show then.
+ *
+ * With `timing`, the pending feed must also have been requested after the
+ * page first saw the newest row. A feed requested earlier can predate the
+ * action itself: right after a propose it does not list the new proposal yet.
  */
 export const completedProposals = (
   audit: AuditLogEntry[],
   pending: PendingProposals[],
   pendingLive = true,
+  timing?: SnapshotTiming,
 ): CompletedProposal[] => {
   const pendingKeys = new Set<string>();
   const selfKnown = new Set<string>();
@@ -206,6 +248,10 @@ export const completedProposals = (
       const known =
         identity.kind === "self" ? selfKnown.has(partyId) : domainKnown.has(partyId);
       if (!known) continue;
+      if (timing) {
+        const seen = timing.firstSeen.get(last.id);
+        if (seen === undefined || timing.pendingRequestedAt <= seen) continue;
+      }
       outcome = last.event_type === "propose" ? "proposed" : "confirmed";
     }
     completed.push({

@@ -102,6 +102,12 @@ interface NotificationsViewProps {
   /** False while `partyActions` is not being refreshed, as after a load-more.
    *  Completed then shows only executed and cancelled proposals. */
   pendingLive?: boolean;
+  /** When the page first saw each audit row, by row id (`performance.now()`). */
+  auditFirstSeen?: ReadonlyMap<number, number>;
+  /** When the committed `partyActions` was requested (`performance.now()`).
+   *  With `auditFirstSeen`, Completed calls a proposal "no longer pending"
+   *  only from a pending feed requested after its audit row was seen. */
+  pendingRequestedAt?: number;
   /** True while any feed source is still loading its initial response. */
   loading: boolean;
   /** True while a refetch is in flight, initial or not. Keeps an empty list
@@ -2299,6 +2305,8 @@ export const NotificationsView = ({
   governanceAudit = [],
   handledInvitations = [],
   pendingLive = true,
+  auditFirstSeen,
+  pendingRequestedAt,
   loading,
   fetching = false,
   onLoadMore,
@@ -2460,7 +2468,16 @@ export const NotificationsView = ({
 
   // A proposal leaves the pending feed once it is finished, so the Completed
   // section reads it from this node's audit log instead.
-  for (const proposal of completedProposals(governanceAudit, partyActions, pendingLive)) {
+  const timing =
+    auditFirstSeen && pendingRequestedAt !== undefined
+      ? { firstSeen: auditFirstSeen, pendingRequestedAt }
+      : undefined;
+  for (const proposal of completedProposals(
+    governanceAudit,
+    partyActions,
+    pendingLive,
+    timing,
+  )) {
     entries.push({
       partyId: proposal.partyId,
       key: `done-${proposal.key}`,

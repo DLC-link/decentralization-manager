@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { completedProposals, type PendingProposals } from "./completedProposals";
+import {
+  EMPTY_AUDIT_SNAPSHOT,
+  completedProposals,
+  nextAuditSnapshot,
+  type PendingProposals,
+} from "./completedProposals";
 import type { ActionType, AuditLogEntry } from "./types";
 
 const partyId = `shared::1220${"a".repeat(64)}`;
@@ -194,5 +199,89 @@ describe("completedProposals", () => {
 
     expect(entry.ts).toBe(execute.timestamp);
     expect(entry.outcome).toBe("executed");
+  });
+});
+
+describe("completedProposals with snapshot timing", () => {
+  const seenAt = (rows: AuditLogEntry[], at: number) =>
+    new Map(rows.map((r) => [r.id, at]));
+
+  it("guesses 'no longer pending' only from a pending feed requested after the row was seen", () => {
+    // Right after a propose the audit poll can show the new row while the
+    // committed pending feed was requested before the proposal existed.
+    const rows = [domain("propose", "00new")];
+    const firstSeen = seenAt(rows, 1_000);
+
+    const before = completedProposals(rows, [loaded()], true, {
+      firstSeen,
+      pendingRequestedAt: 900,
+    });
+    const same = completedProposals(rows, [loaded()], true, {
+      firstSeen,
+      pendingRequestedAt: 1_000,
+    });
+    const after = completedProposals(rows, [loaded()], true, {
+      firstSeen,
+      pendingRequestedAt: 1_100,
+    });
+
+    expect(before).toEqual([]);
+    expect(same).toEqual([]);
+    expect(after.map((p) => p.outcome)).toEqual(["proposed"]);
+  });
+
+  it("times the guess by the newest row of the proposal", () => {
+    const propose = domain("propose", "00p");
+    const confirm = domain("confirm", "00p");
+    const firstSeen = new Map([
+      [propose.id, 100],
+      [confirm.id, 2_000],
+    ]);
+
+    const result = completedProposals([propose, confirm], [loaded()], true, {
+      firstSeen,
+      pendingRequestedAt: 1_000,
+    });
+
+    expect(result).toEqual([]);
+  });
+
+  it("does not guess for a row it has no first-seen time for", () => {
+    const rows = [domain("confirm", "00p")];
+
+    const result = completedProposals(rows, [loaded()], true, {
+      firstSeen: new Map(),
+      pendingRequestedAt: 1_000,
+    });
+
+    expect(result).toEqual([]);
+  });
+
+  it("shows executed and cancelled proposals whatever the timing", () => {
+    const rows = [domain("execute", "00a"), domain("cancel_proposal", "00b")];
+
+    const result = completedProposals(rows, [loaded()], true, {
+      firstSeen: seenAt(rows, 1_000),
+      pendingRequestedAt: 0,
+    });
+
+    expect(result.map((p) => p.outcome)).toEqual(["executed", "cancelled"]);
+  });
+});
+
+describe("nextAuditSnapshot", () => {
+  it("keeps when a row was first seen and forgets rows that left the window", () => {
+    const old = domain("confirm", "00old");
+    const kept = domain("confirm", "00kept");
+    const fresh = domain("execute", "00kept");
+    const first = nextAuditSnapshot(EMPTY_AUDIT_SNAPSHOT, [kept, old], 100);
+
+    const second = nextAuditSnapshot(first, [fresh, kept], 250);
+
+    expect(second.entries).toEqual([fresh, kept]);
+    expect([...second.firstSeen]).toEqual([
+      [fresh.id, 250],
+      [kept.id, 100],
+    ]);
   });
 });
