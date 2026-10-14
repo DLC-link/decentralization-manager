@@ -614,13 +614,13 @@ pub async fn get_governance_chain_audit(
 static ACTIONS: LazyLock<IntCounterVec> = LazyLock::new(|| {
     prometheus::register_int_counter_vec!(
         "decman_governance_actions_total",
-        "Governance actions this node submitted to the ledger, by step and outcome. A request rejected before submission does not count.",
+        "Governance action attempts by step and outcome. error covers failures before and during ledger submission, not only ledger rejections. A request refused up front, such as by validation, does not count.",
         &["step", "outcome"]
     )
     .expect("metric name is a unique literal")
 });
 
-/// A governance write this node submits for its member party.
+/// A governance write this node attempts for its member party.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ActionStep {
     Propose,
@@ -679,7 +679,7 @@ impl ActionOutcome {
 }
 
 /// Exports every step and outcome at zero, so a rate query reads 0 rather than
-/// nothing before the first submission.
+/// nothing before the first attempt.
 pub(crate) fn register_metrics() {
     for step in ActionStep::ALL {
         for outcome in ActionOutcome::ALL {
@@ -690,9 +690,11 @@ pub(crate) fn register_metrics() {
     }
 }
 
-/// Counts one request that reached the ledger: from the `execute_*` call for a
-/// choice step, and from the Ledger API connect for propose. A request the
-/// handler refuses before that point is a caller error and does not count.
+/// Counts one attempt. An attempt starts at the `execute_*` call for a choice
+/// step, and at the Ledger API connect for propose. Its `error` can come before
+/// the submission itself: a failed connect, an unconfigured package, or a blob
+/// that does not decode. A request the handler refuses before that point is a
+/// caller error and does not count.
 fn count_action(step: ActionStep, outcome: ActionOutcome) {
     ACTIONS
         .with_label_values(&[step.label(), outcome.label()])
