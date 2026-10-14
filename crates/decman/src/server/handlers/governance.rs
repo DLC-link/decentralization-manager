@@ -50,8 +50,9 @@ use crate::{
         chain_audit,
         middleware::require_admin,
         queries::{
-            get_governance_confirmations, get_governance_state as query_governance_state,
-            resolve_contract_package_ref, select_input_holdings,
+            GovernanceQueue, get_governance_confirmations,
+            get_governance_state as query_governance_state, resolve_contract_package_ref,
+            select_input_holdings,
         },
         transfer_context::{
             AcceptTransferContext, ProposeTransferArgs, fetch as fetch_accept_transfer_context,
@@ -134,9 +135,14 @@ pub async fn get_governance(
     )
     .await
     {
-        Ok((actions, domain_actions, next)) => HttpResponse::Ok().json(GovernanceResponse {
+        Ok(GovernanceQueue {
             actions,
-            next_cursor: next.as_ref().and_then(encode_cursor),
+            domain_actions,
+            next_cursor,
+            ..
+        }) => HttpResponse::Ok().json(GovernanceResponse {
+            actions,
+            next_cursor: next_cursor.as_ref().and_then(encode_cursor),
             domain_actions,
             threshold,
             member_party_id,
