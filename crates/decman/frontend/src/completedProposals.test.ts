@@ -51,6 +51,49 @@ describe("completedProposals", () => {
     expect(result.map((p) => p.outcome)).toEqual(["confirmed"]);
   });
 
+  it("keeps a failed propose that created its proposal", () => {
+    // The proposal was created; only this node's own confirmation failed.
+    const createdButUnconfirmed = domain("propose", "00created", {
+      status: "failed",
+      action_summary: "transfer",
+    });
+
+    const result = completedProposals([createdButUnconfirmed], [loaded()]);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ outcome: "proposed", label: "Transfer" });
+  });
+
+  it("follows a failed propose with a cid to its later execute", () => {
+    const result = completedProposals(
+      [domain("propose", "00p", { status: "failed" }), domain("execute", "00p")],
+      [loaded()],
+    );
+
+    expect(result.map((p) => p.outcome)).toEqual(["executed"]);
+  });
+
+  it("drops every other failed row", () => {
+    const result = completedProposals(
+      [
+        // Creating the proposal failed, so there is no cid and no proposal.
+        row({
+          event_type: "propose",
+          status: "failed",
+          details: { proposal: { type: "transfer" } },
+        }),
+        domain("confirm", "00c", { status: "failed" }),
+        domain("cancel_proposal", "00x", { status: "failed" }),
+        self("confirm", { type: "governance_set_threshold", new_threshold: 3 }, {
+          status: "failed",
+        }),
+      ],
+      [loaded()],
+    );
+
+    expect(result).toEqual([]);
+  });
+
   it("matches a pending self action whatever the key order of its JSON", () => {
     const reordered = { new_threshold: 3, type: "governance_set_threshold" };
 

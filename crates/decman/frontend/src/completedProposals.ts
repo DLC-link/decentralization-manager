@@ -63,6 +63,24 @@ type Identity =
   | { key: string; kind: "domain"; proposalCid: string }
   | { key: string; kind: "self"; action: ActionType };
 
+/** The `proposal_cid` a row's details carry, or null. */
+const proposalCidOf = (row: AuditLogEntry): string | null => {
+  const details: unknown = row.details;
+  if (details === null || typeof details !== "object") return null;
+  const cid = (details as Record<string, unknown>).proposal_cid;
+  return typeof cid === "string" && cid !== "" ? cid : null;
+};
+
+/**
+ * Whether a row records something that happened. A failed row did nothing,
+ * with one exception: a propose that logs `failed` with a proposal cid
+ * created the proposal, and only this node's own confirmation of it failed.
+ * The proposal exists, and this node proposed it.
+ */
+const tookEffect = (row: AuditLogEntry): boolean =>
+  row.status === "success" ||
+  (row.event_type === "propose" && proposalCidOf(row) !== null);
+
 /**
  * Which proposal a row belongs to, or null when the row names none.
  *
@@ -77,8 +95,8 @@ const identify = (row: AuditLogEntry): Identity | null => {
   const fields = details as Record<string, unknown>;
   if (row.governance_type === "core_domain") {
     if (!DOMAIN_EVENTS.has(row.event_type)) return null;
-    const cid = fields.proposal_cid;
-    if (typeof cid !== "string" || cid === "") return null;
+    const cid = proposalCidOf(row);
+    if (cid === null) return null;
     return { key: domainKey(row.party_id, cid), kind: "domain", proposalCid: cid };
   }
   if (row.governance_type === "core_self") {
@@ -120,11 +138,12 @@ const labelFor = (identity: Identity, rows: AuditLogEntry[]): string => {
 /**
  * Turn this node's audit rows into one Completed entry per finished proposal.
  *
- * Only successful rows count. Rows group by proposal, and the newest row gives
- * the outcome. A proposal whose newest row is a propose or confirm is still
- * open as far as this node knows. It is shown only when the party's pending
- * feed is loaded in full and does not list it. Without that feed nobody can
- * tell "finished" from "not loaded", so such a proposal stays out.
+ * Only rows that took effect count (see `tookEffect`). Rows group by
+ * proposal, and the newest row gives the outcome. A proposal whose newest row
+ * is a propose or confirm is still open as far as this node knows. It is
+ * shown only when the party's pending feed is loaded in full and does not
+ * list it. Without that feed nobody can tell "finished" from "not loaded",
+ * so such a proposal stays out.
  *
  * `pendingLive` is false while the pending feed is not being refreshed, as
  * after a load-more. A stale feed proves nothing about what is still open, so
@@ -150,7 +169,7 @@ export const completedProposals = (
   }
 
   const chronological = audit
-    .filter((row) => row.status === "success")
+    .filter(tookEffect)
     .sort((a, b) => a.timestamp - b.timestamp || a.id - b.id);
 
   interface Group {
