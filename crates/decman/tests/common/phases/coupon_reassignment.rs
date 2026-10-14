@@ -77,6 +77,16 @@
 //! authorized assigner — so `run_negative_case` documents it as a manual
 //! pre-merge ops step rather than inventing a harness capability. See the
 //! module-level report note.
+//!
+//! ## Foreign-DSO coupon (localnet)
+//!
+//! `dso` is `RewardCouponV2`'s only signatory, so any party can mint a coupon
+//! that names itself `dso` and the decparty as `provider`. The seed phase mints
+//! one such coupon as a member party, while the delegation names a dedicated
+//! DSO party. The phase asserts that the drain assigns every other coupon and
+//! leaves that one active. It also asserts that the expiry gauge ignores it.
+//! Only the gauge check pins the coupon reader's dso filter: without the
+//! filter, the dso assert in `Delegation_Assign` would still reject the coupon.
 
 use std::{collections::HashSet, time::Duration};
 
@@ -87,8 +97,11 @@ use tracing::{info, warn};
 use crate::common::{
     Fixture,
     governance::propose_confirm_execute,
-    ledger_api::P1_JSON_API,
-    phases::seed_reward_coupons::{SEED_AMOUNT, SEED_COUPON_COUNT, UNASSIGNABLE_AMOUNT},
+    ledger_api::{ActiveCoupon, P1_JSON_API},
+    phases::seed_reward_coupons::{
+        FOREIGN_TTL_HOURS, SEED_AMOUNT, SEED_COUPON_COUNT, SEED_TTL_HOURS, SEEDED_SURVIVORS,
+        UNASSIGNABLE_AMOUNT,
+    },
     scenario::Scenario,
 };
 
@@ -297,6 +310,12 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: coupon_reassignment (CIP-104 Mode A delegation model)");
 
     let decparty = f.party_id()?.to_string();
+    // Localnet only: the seeded coupon a member minted as `dso`. No sweep may
+    // assign it (see `seed_reward_coupons::FOREIGN_TTL_HOURS`).
+    let foreign_cid = match f.target {
+        crate::common::TestTarget::Localnet => Some(f.reward_foreign_coupon_cid()?.to_string()),
+        crate::common::TestTarget::Devnet => None,
+    };
 
     // ------------------------------------------------------------------
     // Precondition check (the runtime half of the gate). Target-aware:
@@ -315,21 +334,30 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             // commits in several transactions, so an early read can return a
             // subset, and the "every seeded coupon archived" assertion below
             // would then be evaluated over that subset instead of all of them.
+            let seeded = SEED_COUPON_COUNT + SEEDED_SURVIVORS;
             let deadline = std::time::Instant::now() + Duration::from_secs(60);
             let cids = loop {
                 let cids = query_reward_coupons(f, &decparty).await?;
-                if cids.len() >= SEED_COUPON_COUNT || std::time::Instant::now() >= deadline {
+                if cids.len() >= seeded || std::time::Instant::now() >= deadline {
                     break cids;
                 }
                 tokio::time::sleep(Duration::from_secs(2)).await;
             };
             anyhow::ensure!(
-                cids.len() >= SEED_COUPON_COUNT,
+                cids.len() >= seeded,
                 "coupon_reassignment (localnet): saw {} unassigned RewardCouponV2 for {decparty}, \
-                 expected the {SEED_COUPON_COUNT} seeded — seed_reward_coupons must run first \
+                 expected the {seeded} seeded — seed_reward_coupons must run first \
                  and commit them all",
                 cids.len()
             );
+            if let Some(foreign) = &foreign_cid {
+                anyhow::ensure!(
+                    cids.contains(foreign),
+                    "coupon_reassignment (localnet): the foreign-DSO coupon {foreign} is not \
+                     among the {} coupons DecMan reports for {decparty}",
+                    cids.len()
+                );
+            }
             cids
         }
         crate::common::TestTarget::Devnet => {
@@ -359,28 +387,32 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     //   the two dedicated non-assigner parties the seed phase allocated
     //   ([reward_beneficiary_party @ 0.8, reward_operator_party @ 0.2]) — kept
     //   disjoint from the assigners so the split-by-value assertion below
-    //   observes each beneficiary's own coupons unambiguously.
+    //   observes each beneficiary's own coupons unambiguously. The dso is the
+    //   dedicated party the seed phase minted its coupons as. It differs from
+    //   p1_member, which minted the one foreign-DSO coupon.
     //
     //   On devnet (harness stand-ins; the live cbtc-network run uses the real
     //   devnet parties per the operational preconditions):
+    //     dso            = p1_member
     //     assigners      = [p1_member, p2_member]  -> attestor-1, attestor-2
     //     beneficiaries  = [p2_member @ 0.8, p3_member @ 0.2] -> cbtc-beneficiary,
     //                       operator
     //   p3_member is deliberately NOT an assigner — it is the non-assigner used
     //   by the security note below. (A beneficiary is not thereby an assigner.)
     // ------------------------------------------------------------------
-    let dso_party = f.p1_member_party()?.to_string(); // localnet DSO stand-in
     let assigner_a = f.p1_member_party()?.to_string();
     let assigner_b = f.p2_member_party()?.to_string();
     // Beneficiaries must be disjoint from assigners. On localnet the seed phase
     // allocated two dedicated non-assigner parties; on devnet keep the existing
     // stand-ins (issue #271 wires the real cbtc-beneficiary/operator).
-    let (benef_a, benef_b) = match f.target {
+    let (dso_party, benef_a, benef_b) = match f.target {
         crate::common::TestTarget::Localnet => (
+            f.reward_dso_party()?.to_string(),
             f.reward_beneficiary_party()?.to_string(),
             f.reward_operator_party()?.to_string(),
         ),
         crate::common::TestTarget::Devnet => (
+            f.p1_member_party()?.to_string(),
             f.p2_member_party()?.to_string(),
             f.p3_member_party()?.to_string(),
         ),
@@ -401,8 +433,8 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         "SetupCouponReassignmentDelegation",
         json!({
             "type": "setup_coupon_reassignment_delegation",
-            // On localnet the harness substitutes p1_member for the DSO, which is
-            // the party seed_reward_coupons mints the coupons as.
+            // On localnet, the party seed_reward_coupons minted every coupon as,
+            // except the foreign-DSO one.
             "dso": dso_party,
             "assigners": [assigner_a, assigner_b],
             "new_beneficiaries": [
@@ -518,17 +550,25 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     // requiring merely "one or more" would pass while the fan-out dropped a
     // whole chunk. Exempting exactly one is what proves a bad coupon costs only
     // itself.
+    //
+    // The seed plants one more survivor: a coupon a member minted as `dso`,
+    // while the delegation names another DSO. No sweep may assign it, so the bar
+    // also exempts it, by contract id. It is the most urgent coupon a reader
+    // could admit, so a sweep that wrongly assigns it does so before the rest
+    // drain. Its archival therefore fails this step at once, not at the deadline.
     let require_all_archived = f.target == crate::common::TestTarget::Localnet;
     let archived_criterion = if require_all_archived {
-        "every seeded coupon but the unassignable one archived (spans >1 chunk)"
+        "every seeded coupon but the unassignable and foreign-DSO ones archived (spans >1 chunk)"
     } else {
         "at least one candidate coupon archived by Delegation_Assign"
     };
     Scenario::new("delegation-model reassignment")
         .then(archived_criterion, REASSIGN_TIMEOUT, {
             let initial = initial_coupon_cids.clone();
+            let foreign = foreign_cid.clone();
             move |f, _| {
                 let initial = initial.clone();
+                let foreign = foreign.clone();
                 Box::pin(async move {
                     let party_id = match f.party_id() {
                         Ok(p) => p,
@@ -544,10 +584,21 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     // the 0.8 / 0.2 `amount` shares) require decoded reads not
                     // exposed by /contracts/query — verify them against devnet
                     // PQS `pqs_cbtc` on the real run.
+                    if let Some(foreign) = &foreign
+                        && !current.contains(foreign)
+                    {
+                        return Some(Err(anyhow::anyhow!(
+                            "the foreign-DSO coupon {foreign} was archived: a sweep assigned a \
+                             coupon whose dso is not the delegation's"
+                        )));
+                    }
                     let mut gone = initial.iter().filter(|c| !current.contains(*c));
                     if require_all_archived {
-                        // Every seeded coupon but the unassignable one.
-                        gone.count().eq(&(initial.len() - 1)).then_some(Ok(()))
+                        // Every seeded coupon but the unassignable and
+                        // foreign-DSO ones.
+                        gone.count()
+                            .eq(&(initial.len() - SEEDED_SURVIVORS))
+                            .then_some(Ok(()))
                     } else {
                         gone.next().map(|_| Ok(()))
                     }
@@ -585,10 +636,10 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                             "split assertion: read operator coupons",
                             f.active_reward_coupons(P1_JSON_API, &operator).await,
                         )?;
-                        let sum = |v: &[(Option<String>, String)], who: &str| -> f64 {
+                        let sum = |v: &[ActiveCoupon], who: &str| -> f64 {
                             v.iter()
-                                .filter(|(bene, _)| bene.as_deref() == Some(who))
-                                .filter_map(|(_, amt)| amt.parse::<f64>().ok())
+                                .filter(|c| c.beneficiary.as_deref() == Some(who))
+                                .filter_map(|c| c.amount.parse::<f64>().ok())
                                 .sum()
                         };
                         let b_total = sum(&b, &benef);
@@ -626,11 +677,15 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         // every healthy coupon was paid (asserted above, and by the split totals
         // which already reconcile to the full seeded amount), and this one is
         // still sitting there unassigned rather than having wedged the sweep.
+        // Only the delegation's DSO's coupons count: the foreign-DSO coupon is
+        // unassigned too, by design, and the drain step already pinned it.
+        let dso = dso_party.clone();
         Scenario::new("an unassignable coupon is isolated, not fatal")
             .then(
-                "exactly one coupon remains, unassigned, at the unassignable amount",
+                "exactly one of the DSO's coupons remains, unassigned, at the unassignable amount",
                 Duration::from_secs(120),
                 move |f, _| {
+                    let dso = dso.clone();
                     Box::pin(async move {
                         let party_id = match f.party_id() {
                             Ok(p) => p,
@@ -642,8 +697,8 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         )?;
                         let unassigned: Vec<&String> = all
                             .iter()
-                            .filter(|(bene, _)| bene.is_none())
-                            .map(|(_, amt)| amt)
+                            .filter(|c| c.dso == dso && c.beneficiary.is_none())
+                            .map(|c| &c.amount)
                             .collect();
                         // The drain may still be mid-sweep; keep polling until the
                         // healthy set has drained away.
@@ -665,6 +720,47 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                                 "the surviving unassigned coupon is {amount}, not the \
                                  unassignable {UNASSIGNABLE_AMOUNT} — a healthy coupon was \
                                  skipped instead"
+                            ))
+                        })
+                    })
+                },
+            )
+            .run(f)
+            .await?;
+
+        // The coupon reader drops the foreign-DSO coupon. The drain step cannot
+        // show that alone: if the reader admitted the coupon, the dso assert in
+        // `Delegation_Assign` would still reject it, and it would survive either
+        // way. The expiry gauge tells the two apart. The foreign coupon expires
+        // first, so a reader that admitted it would report its expiry. The
+        // DSO's own survivor, the unassignable coupon, expires much later.
+        let floor_secs = ((SEED_TTL_HOURS + FOREIGN_TTL_HOURS) * 3600 / 2) as f64;
+        Scenario::new("the coupon reader ignores a foreign-DSO coupon")
+            .then(
+                "every assigner's expiry gauge is past the foreign coupon's expiry",
+                Duration::from_secs(120),
+                move |f, _| {
+                    Box::pin(async move {
+                        let party_id = match f.party_id() {
+                            Ok(p) => p,
+                            Err(e) => return Some(Err(e)),
+                        };
+                        let metrics = f.probe_diag.ok(
+                            "foreign-DSO gauge assertion: read /metrics",
+                            assignment_metrics(f, party_id).await,
+                        )?;
+                        let mut expiries = Vec::with_capacity(metrics.len());
+                        for node in &metrics {
+                            // Wait for every assigner to publish the gauge.
+                            expiries.push(node.expiry?);
+                        }
+                        Some(if expiries.iter().all(|e| *e > floor_secs) {
+                            Ok(())
+                        } else {
+                            Err(anyhow::anyhow!(
+                                "oldest-unassigned gauge {expiries:?} is not past {floor_secs}s: \
+                                 the reader counted the foreign-DSO coupon, which expires \
+                                 {FOREIGN_TTL_HOURS}h after seeding"
                             ))
                         })
                     })

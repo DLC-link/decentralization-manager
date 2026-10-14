@@ -104,6 +104,10 @@ pub struct Fixture {
     pub p3_member_party: Option<String>,
     pub reward_beneficiary_party: Option<String>,
     pub reward_operator_party: Option<String>,
+    /// The DSO the reward seed mints its coupons as, and the delegation names.
+    pub reward_dso_party: Option<String>,
+    /// The one seeded coupon another party minted as `dso`.
+    pub reward_foreign_coupon_cid: Option<String>,
     pub provider_service_cid: Option<String>,
     pub allocation_factory_cid: Option<String>,
     pub instrument_configuration_cid: Option<String>,
@@ -266,6 +270,8 @@ impl Fixture {
             p3_member_party: None,
             reward_beneficiary_party: None,
             reward_operator_party: None,
+            reward_dso_party: None,
+            reward_foreign_coupon_cid: None,
             provider_service_cid: None,
             allocation_factory_cid: None,
             instrument_configuration_cid: None,
@@ -347,6 +353,16 @@ impl Fixture {
             .as_deref()
             .context("reward_operator_party not set — seed_reward_coupons must run first")
     }
+    pub fn reward_dso_party(&self) -> anyhow::Result<&str> {
+        self.reward_dso_party
+            .as_deref()
+            .context("reward_dso_party not set — seed_reward_coupons must run first")
+    }
+    pub fn reward_foreign_coupon_cid(&self) -> anyhow::Result<&str> {
+        self.reward_foreign_coupon_cid
+            .as_deref()
+            .context("reward_foreign_coupon_cid not set — seed_reward_coupons must run first")
+    }
 
     /// Build a `Fixture` with hardcoded test values, bypassing env vars entirely.
     /// Used by unit tests for the Scenario DSL — those tests don't make HTTP calls,
@@ -401,6 +417,8 @@ impl Fixture {
             p3_member_party: None,
             reward_beneficiary_party: None,
             reward_operator_party: None,
+            reward_dso_party: None,
+            reward_foreign_coupon_cid: None,
             provider_service_cid: None,
             allocation_factory_cid: None,
             instrument_configuration_cid: None,
