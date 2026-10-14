@@ -59,7 +59,7 @@ use crate::{
         },
     },
     utils,
-    workflow::topology::{MAX_HOSTED_PARTIES, read, timed_request},
+    workflow::topology::{MAX_HOSTED_PARTIES, logical_synchronizer_id, read, timed_request},
 };
 
 /// How many parties [`fetch_decentralized_parties`] reads at once.
@@ -1317,17 +1317,6 @@ fn build_list_parties_request(
         filter_party: prefix_filter.unwrap_or_default().to_string(),
         filter_participant: participant_id.to_string(),
     }
-}
-
-/// The logical synchronizer ID inside a physical one.
-///
-/// `ListParties` parses this field as a `SynchronizerId`, so the physical form
-/// `<name>::<fingerprint>::<protocol version>` is rejected outright. Returns
-/// `None` for anything that is not in that shape, and the caller then sends no
-/// synchronizer filter rather than a request Canton will refuse.
-fn logical_synchronizer_id(physical: &str) -> Option<&str> {
-    let (logical, _protocol_version) = physical.rsplit_once("::")?;
-    logical.contains("::").then_some(logical)
 }
 
 /// Keep the party IDs whose namespace is one of `namespaces`.

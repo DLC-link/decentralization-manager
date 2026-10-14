@@ -47,6 +47,14 @@ use crate::{
 /// Shared `ListParties` limit. Canton truncates results and provides no cursor.
 pub(crate) const MAX_HOSTED_PARTIES: i32 = 5_000;
 
+/// Extract the logical ID from `<name>::<fingerprint>::<protocol version>`.
+/// `ListParties` rejects the physical ID. Return `None` for other shapes so
+/// callers can omit the synchronizer filter.
+pub(crate) fn logical_synchronizer_id(physical: &str) -> Option<&str> {
+    let (logical, _protocol_version) = physical.rsplit_once("::")?;
+    logical.contains("::").then_some(logical)
+}
+
 /// Attach a server-side gRPC deadline to a topology request.
 pub(crate) fn timed_request<T>(message: T, timeout: Duration) -> Request<T> {
     let mut request = Request::new(message);

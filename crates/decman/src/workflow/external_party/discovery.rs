@@ -24,7 +24,7 @@ use super::steps::{
 use crate::{
     config::NodeConfig,
     utils,
-    workflow::topology::{MAX_HOSTED_PARTIES, read, timed_request},
+    workflow::topology::{MAX_HOSTED_PARTIES, logical_synchronizer_id, read, timed_request},
 };
 
 // Hosted-party enumeration walks the synchronizer in batches: devnet took
@@ -113,24 +113,26 @@ pub(super) async fn list_hosted_external_parties(
     .await
 }
 
-// Aggregation accepts a logical synchronizer ID, while the topology store
-// needs the physical ID (logical ID followed by the protocol version).
-fn logical_synchronizer_id(id: &str) -> &str {
-    id.rsplit_once("::")
-        .filter(|(logical, _)| logical.contains("::"))
-        .map_or(id, |(logical, _)| logical)
-}
-
 async fn discover(
     reader: &mut impl DiscoveryReader,
     synchronizer_id: &str,
     participant_id: &str,
 ) -> Result<Vec<HostedExternalParty>> {
+    let synchronizer_ids = match logical_synchronizer_id(synchronizer_id) {
+        Some(id) => vec![id.to_string()],
+        None => {
+            tracing::warn!(
+                "Cannot read a logical synchronizer ID out of '{synchronizer_id}', so external \
+                 party discovery asks across every connected synchronizer."
+            );
+            Vec::new()
+        }
+    };
     let response = reader
         .parties(ListPartiesRequest {
             as_of: None,
             limit: MAX_HOSTED_PARTIES,
-            synchronizer_ids: vec![logical_synchronizer_id(synchronizer_id).to_string()],
+            synchronizer_ids,
             filter_party: String::new(),
             filter_participant: participant_id.to_string(),
         })
@@ -538,12 +540,28 @@ mod tests {
     fn aggregation_uses_logical_ids_without_losing_the_namespace() {
         assert_eq!(
             logical_synchronizer_id(SYNCHRONIZER),
-            "global::synchronizer"
+            Some("global::synchronizer")
         );
-        assert_eq!(
-            logical_synchronizer_id("global::synchronizer"),
-            "global::synchronizer"
-        );
+        assert_eq!(logical_synchronizer_id("global::synchronizer"), None);
+        assert_eq!(logical_synchronizer_id("nonsense"), None);
+    }
+
+    #[tokio::test]
+    async fn discovery_omits_the_synchronizer_filter_for_nonphysical_ids() -> Result<()> {
+        for synchronizer_id in ["global::synchronizer", "nonsense"] {
+            let mut reader = Reader::default();
+            assert!(
+                discover(&mut reader, synchronizer_id, PARTICIPANT)
+                    .await?
+                    .is_empty()
+            );
+            assert_eq!(reader.party_requests.len(), 1);
+            let request = &reader.party_requests[0];
+            assert!(request.synchronizer_ids.is_empty());
+            assert_eq!(request.filter_participant, PARTICIPANT);
+            assert_eq!(request.limit, MAX_HOSTED_PARTIES);
+        }
+        Ok(())
     }
 
     #[test]
