@@ -186,22 +186,33 @@ pub fn active_contracts_request(party: &str, template_id: &str, offset: i64) -> 
     })
 }
 
-/// Extract `(beneficiary, amount)` from each active `RewardCouponV2` in an ACS
-/// response. `beneficiary` is `None` for an unassigned coupon.
-pub fn parse_coupon_amounts(acs_response: &Value) -> Vec<(Option<String>, String)> {
+/// The decoded fields of one active `RewardCouponV2`.
+pub struct ActiveCoupon {
+    pub contract_id: String,
+    pub dso: String,
+    /// `None` for an unassigned coupon.
+    pub beneficiary: Option<String>,
+    pub amount: String,
+}
+
+/// Decode each active `RewardCouponV2` in an ACS response.
+pub fn parse_active_coupons(acs_response: &Value) -> Vec<ActiveCoupon> {
     acs_response
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(|entry| {
-            let payload =
-                entry.pointer("/contractEntry/JsActiveContract/createdEvent/createArgument")?;
-            let amount = payload.get("amount")?.as_str()?.to_string();
-            let beneficiary = payload
-                .get("beneficiary")
-                .and_then(|b| b.as_str())
-                .map(|s| s.to_string());
-            Some((beneficiary, amount))
+            let created = entry.pointer("/contractEntry/JsActiveContract/createdEvent")?;
+            let payload = created.get("createArgument")?;
+            Some(ActiveCoupon {
+                contract_id: created.get("contractId")?.as_str()?.to_string(),
+                dso: payload.get("dso")?.as_str()?.to_string(),
+                beneficiary: payload
+                    .get("beneficiary")
+                    .and_then(|b| b.as_str())
+                    .map(|s| s.to_string()),
+                amount: payload.get("amount")?.as_str()?.to_string(),
+            })
         })
         .collect()
 }
@@ -218,7 +229,7 @@ pub fn split_ok(beneficiary_total: f64, operator_total: f64, tolerance: f64) -> 
 /// Normalize the `/v2/state/active-contracts` response body into a JSON array.
 /// The endpoint may return a JSON array or newline-delimited JSON objects
 /// depending on the Canton version; both become a `Value::Array` here so
-/// `parse_coupon_amounts` has one shape to read.
+/// `parse_active_coupons` has one shape to read.
 fn normalize_acs_body(text: &str) -> anyhow::Result<Value> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -295,14 +306,14 @@ impl Fixture {
     }
 
     /// Read the decoded active `RewardCouponV2` coupons visible to `party` as of
-    /// the current ledger end, returning `(beneficiary, amount)` pairs. Fetches
-    /// the raw body and normalizes array-or-NDJSON before parsing, so a
-    /// Canton-version difference in the response framing does not break it.
+    /// the current ledger end. Fetches the raw body and normalizes
+    /// array-or-NDJSON before parsing, so a Canton-version difference in the
+    /// response framing does not break it.
     pub async fn active_reward_coupons(
         &self,
         port: u16,
         party: &str,
-    ) -> anyhow::Result<Vec<(Option<String>, String)>> {
+    ) -> anyhow::Result<Vec<ActiveCoupon>> {
         let offset = self.ledger_end(port).await?;
         let body = active_contracts_request(party, REWARD_COUPON_V2_TEMPLATE, offset);
         let (status, text) = self
@@ -312,7 +323,7 @@ impl Fixture {
         if !status.is_success() {
             anyhow::bail!("POST /v2/state/active-contracts returned {status}: {text}");
         }
-        Ok(parse_coupon_amounts(&normalize_acs_body(&text)?))
+        Ok(parse_active_coupons(&normalize_acs_body(&text)?))
     }
 }
 
@@ -380,25 +391,38 @@ mod tests {
     }
 
     #[test]
-    fn parse_coupon_amounts_reads_beneficiary_and_amount() {
+    fn parse_active_coupons_reads_id_dso_beneficiary_and_amount() {
         // Mirrors the /v2/state/active-contracts POST response: an array of
         // entries, each { contractEntry: { JsActiveContract: { createdEvent:
-        // { createArgument: <payload> } } } }.
+        // { contractId, createArgument: <payload> } } } }.
         let resp = serde_json::json!([
             {"contractEntry": {"JsActiveContract": {"createdEvent": {
-                "createArgument": {"beneficiary": "benef::1220", "amount": "80.0"}
+                "contractId": "00a1",
+                "createArgument": {"dso": "dso::1220", "beneficiary": "benef::1220", "amount": "80.0"}
             }}}},
             {"contractEntry": {"JsActiveContract": {"createdEvent": {
-                "createArgument": {"beneficiary": "op::1220", "amount": "20.0"}
+                "contractId": "00b2",
+                "createArgument": {"dso": "other::1220", "beneficiary": null, "amount": "20.0"}
             }}}}
         ]);
-        let mut got = parse_coupon_amounts(&resp);
-        got.sort();
-        let mut want = vec![
-            (Some("benef::1220".to_string()), "80.0".to_string()),
-            (Some("op::1220".to_string()), "20.0".to_string()),
+        let got: Vec<_> = parse_active_coupons(&resp)
+            .into_iter()
+            .map(|c| (c.contract_id, c.dso, c.beneficiary, c.amount))
+            .collect();
+        let want = vec![
+            (
+                "00a1".to_string(),
+                "dso::1220".to_string(),
+                Some("benef::1220".to_string()),
+                "80.0".to_string(),
+            ),
+            (
+                "00b2".to_string(),
+                "other::1220".to_string(),
+                None,
+                "20.0".to_string(),
+            ),
         ];
-        want.sort();
         assert_eq!(got, want);
     }
 
@@ -410,7 +434,7 @@ mod tests {
 
     #[test]
     fn normalize_acs_body_handles_array_and_ndjson() {
-        let entry = r#"{"contractEntry":{"JsActiveContract":{"createdEvent":{"createArgument":{"beneficiary":"b::1","amount":"80.0"}}}}}"#;
+        let entry = r#"{"contractEntry":{"JsActiveContract":{"createdEvent":{"contractId":"00a1","createArgument":{"dso":"d::1","beneficiary":"b::1","amount":"80.0"}}}}}"#;
         // JSON array form
         let arr = format!("[{entry}]");
         let v = normalize_acs_body(&arr).unwrap();
@@ -419,8 +443,8 @@ mod tests {
         let ndjson = format!("{entry}\n\n{entry}\n");
         let v = normalize_acs_body(&ndjson).unwrap();
         assert_eq!(v.as_array().unwrap().len(), 2);
-        // both parse into the same shape parse_coupon_amounts expects
-        assert_eq!(parse_coupon_amounts(&v).len(), 2);
+        // both parse into the same shape parse_active_coupons expects
+        assert_eq!(parse_active_coupons(&v).len(), 2);
         // empty / whitespace-only body normalizes to an empty array
         assert!(
             normalize_acs_body("")
