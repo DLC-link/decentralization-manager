@@ -45,7 +45,7 @@ use crate::{
     noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
     server::{
         AppState,
-        audit::{AuditEvent, AuditParams, spawn_audit_log},
+        audit::{AuditEvent, AuditParams, spawn_audit_log, with_proposal_cid},
         chain_audit,
         middleware::require_admin,
         queries::{
@@ -1066,7 +1066,7 @@ pub async fn propose_action(
                     member_party_id: audit_member,
                     governance_type: GovernanceType::CoreDomain,
                     action_summary: audit_summary,
-                    details: audit_details,
+                    details: with_proposal_cid(&audit_details, &proposal_cid),
                     status: "success",
                     error_message: None,
                 },
@@ -1085,7 +1085,7 @@ pub async fn propose_action(
                     member_party_id: audit_member,
                     governance_type: GovernanceType::CoreDomain,
                     action_summary: audit_summary,
-                    details: audit_details,
+                    details: with_proposal_cid(&audit_details, &proposal_cid),
                     status: "failed",
                     error_message: Some(format!("Proposal created but confirmation failed: {e}")),
                 },

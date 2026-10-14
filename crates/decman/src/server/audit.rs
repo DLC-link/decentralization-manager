@@ -89,6 +89,22 @@ pub fn spawn_audit_log(pool: SqlitePool, params: AuditParams) {
     });
 }
 
+/// Add the created proposal's contract id to a propose row's details.
+///
+/// The propose request has no contract id yet, while the confirm, execute and
+/// cancel-proposal rows of the same proposal carry one as `proposal_cid`. With
+/// it here too, a reader can group every row this node logged for a proposal.
+/// Details that are not a JSON object are returned unchanged.
+pub fn with_proposal_cid(details: &str, proposal_cid: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(details) {
+        Ok(serde_json::Value::Object(mut fields)) => {
+            fields.insert("proposal_cid".to_string(), proposal_cid.into());
+            serde_json::Value::Object(fields).to_string()
+        }
+        _ => details.to_string(),
+    }
+}
+
 /// Derive an action_summary label from an ActionType by extracting the serde "type" tag
 pub fn action_summary(action: &super::types::ActionType) -> String {
     serde_json::to_value(action)
@@ -103,4 +119,34 @@ pub fn proposal_summary(proposal: &super::types::ProposalType) -> String {
         .ok()
         .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(String::from))
         .unwrap_or_else(|| "unknown_proposal".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::*;
+
+    #[test]
+    fn propose_details_gain_the_proposal_cid_and_keep_the_request() -> anyhow::Result<()> {
+        let request = json!({
+            "party_id": "dec::1220ab",
+            "rules_contract_id": "00rules",
+            "proposal": { "type": "generic_vote", "description": "hi" },
+        });
+
+        let details: Value =
+            serde_json::from_str(&with_proposal_cid(&request.to_string(), "00proposal"))?;
+
+        let mut expected = request;
+        expected["proposal_cid"] = json!("00proposal");
+        assert_eq!(details, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn details_that_are_not_an_object_are_left_alone() {
+        assert_eq!(with_proposal_cid("", "00proposal"), "");
+        assert_eq!(with_proposal_cid("[1,2]", "00proposal"), "[1,2]");
+    }
 }
