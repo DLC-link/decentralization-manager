@@ -3104,6 +3104,8 @@ async fn cancel_persisted_run(
     // On write failure the row stays InProgress (recovery may resume it) — 500.
     match mark_run_cancelled(&data.db, kind, &run.instance_name).await {
         Ok(true) => {}
+        // Another write ended the run after it was loaded, and no task is left
+        // to stop, so this cancel did nothing.
         Ok(false) => {
             return HttpResponse::Conflict().json(ErrorResponse {
                 error: format!("No {label} workflow in progress"),
@@ -3134,7 +3136,8 @@ async fn cancel_persisted_run(
 
 /// Cancel exactly one registered coordinator run: abort its task, notify its
 /// invitees with an instance-stamped CancelInvite (sibling runs on the peers
-/// survive), and mirror Cancelled onto the persisted row.
+/// survive), and mirror Cancelled onto the persisted row. A row that already
+/// records an outcome keeps it, and the task is still stopped.
 async fn cancel_instance(
     data: &web::Data<AppState>,
     instance: &Arc<WorkflowInstance>,
@@ -3174,13 +3177,19 @@ async fn cancel_instance(
     // recovery only resumes InProgress rows.
     match mark_run_cancelled(&data.db, instance.kind, &instance.instance_name).await {
         Ok(true) => {}
-        // The run recorded its own outcome first, so nothing is cancelled. Its task
-        // has nothing durable left to do, and after a peer's decline it can wait
-        // indefinitely, so it is stopped anyway.
+        // The row already records an outcome, which it keeps, but the task can
+        // still be alive: a declined run idles in WaitingForPeers. Operators reap
+        // that task with this cancel, so it stops the task and answers like a
+        // normal cancel. Its peers either got the decline's CancelInvite or
+        // finished, so none is sent.
         Ok(false) => {
             handle.abort();
-            return HttpResponse::Conflict().json(ErrorResponse {
-                error: format!("{label} workflow already finished"),
+            tracing::info!(
+                "{label} workflow {} had already ended; stopped its task",
+                instance.instance_name
+            );
+            return HttpResponse::Ok().json(MessageResponse {
+                message: format!("{label} workflow had already ended; its task is stopped"),
             });
         }
         Err(e) => {
@@ -4612,13 +4621,11 @@ mod tests {
     /// counts.
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn a_cancel_counts_only_once_it_is_written(pool: SqlitePool) -> Result {
-        insert_run(&pool, &in_progress_run("add-party-1", &pid(13)?)).await?;
-        let before = finished(WorkflowKind::AddParty, RunOutcome::Cancelled);
-        assert!(mark_run_cancelled(&pool, WorkflowKind::AddParty, "add-party-1").await?);
-        assert_eq!(
-            finished(WorkflowKind::AddParty, RunOutcome::Cancelled),
-            before + 1
-        );
+        let kind = WorkflowKind::ChangeThreshold;
+        insert_run(&pool, &in_progress_run("change-threshold-2", &pid(13)?)).await?;
+        let before = finished(kind, RunOutcome::Cancelled);
+        assert!(mark_run_cancelled(&pool, kind, "change-threshold-2").await?);
+        assert_eq!(finished(kind, RunOutcome::Cancelled), before + 1);
 
         let no_tables = SqlitePool::connect("sqlite::memory:").await?;
         let before = finished(WorkflowKind::Kick, RunOutcome::Cancelled);
@@ -4674,42 +4681,96 @@ mod tests {
         }
     }
 
-    /// A run whose own outcome landed first cannot be cancelled. The cancel
-    /// answers 409 and keeps the outcome, and it still stops the run's task.
+    /// POSTs the per-instance cancel for a live coordinator run. Its in-memory
+    /// status reads InProgress and its task never ends on its own, like a
+    /// declined run idling in WaitingForPeers. Returns the status and the task.
+    async fn cancel_live_run(
+        pool: SqlitePool,
+        instance: &str,
+        kind: WorkflowKind,
+    ) -> Result<(StatusCode, tokio::task::JoinHandle<()>)> {
+        let data = state_on(pool).await?;
+        let run = WorkflowInstance::new(instance.to_string(), kind, WorkflowRole::Coordinator);
+        *run.http.status.write().await = WorkflowProgress::InProgress;
+        let task = tokio::spawn(std::future::pending::<()>());
+        *run.http.abort_handle.lock().await = Some(task.abort_handle());
+        anyhow::ensure!(
+            data.workflows.insert(run),
+            "{instance} is already registered"
+        );
+        let app =
+            actix_test::init_service(App::new().app_data(data).service(cancel_workflow_instance))
+                .await;
+        let request = actix_test::TestRequest::post()
+            .uri(&format!("/workflows/{instance}/cancel"))
+            .to_request();
+        request.extensions_mut().insert(admin());
+        Ok((actix_test::call_service(&app, request).await.status(), task))
+    }
+
+    /// A run whose own outcome landed first keeps it. The cancel still stops
+    /// the run's task and answers like a normal cancel.
     #[sqlx::test(migrator = "MIGRATOR")]
-    async fn cancelling_a_run_that_already_finished_is_a_conflict(pool: SqlitePool) -> Result {
+    async fn cancelling_a_finished_run_stops_its_task_and_keeps_its_outcome(
+        pool: SqlitePool,
+    ) -> Result {
         let kind = WorkflowKind::Contracts;
         let run = WorkflowRun {
             status: WorkflowProgress::Completed,
             ..in_progress_run("contracts-3", &pid(17)?)
         };
         insert_run(&pool, &run).await?;
-        let data = state_on(pool.clone()).await?;
-        // The in-memory status still reads InProgress, as it does for a durable-first
-        // run between its row write and its in-memory flip.
-        let instance =
-            WorkflowInstance::new("contracts-3".to_string(), kind, WorkflowRole::Coordinator);
-        *instance.http.status.write().await = WorkflowProgress::InProgress;
-        let task = tokio::spawn(std::future::pending::<()>());
-        *instance.http.abort_handle.lock().await = Some(task.abort_handle());
-        assert!(data.workflows.insert(instance));
-        let app =
-            actix_test::init_service(App::new().app_data(data).service(cancel_workflow_instance))
-                .await;
         let before = finished(kind, RunOutcome::Cancelled);
 
-        let request = actix_test::TestRequest::post()
-            .uri("/workflows/contracts-3/cancel")
-            .to_request();
-        request.extensions_mut().insert(admin());
-        let response = actix_test::call_service(&app, request).await;
+        let (status, task) = cancel_live_run(pool.clone(), "contracts-3", kind).await?;
 
-        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(status, StatusCode::OK);
         assert_eq!(
             status_of(&pool, "contracts-3").await?,
             Some(WorkflowProgress::Completed)
         );
         assert_eq!(finished(kind, RunOutcome::Cancelled), before);
+        assert!(task.await.is_err_and(|e| e.is_cancelled()));
+        Ok(())
+    }
+
+    /// A peer's decline records Failed while the run's task idles. The
+    /// operator's cancel then reaps the task: it answers 200, keeps the row
+    /// Failed and counts nothing more.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_cancel_after_a_decline_reaps_the_task_and_keeps_failed(pool: SqlitePool) -> Result {
+        let kind = WorkflowKind::AddParty;
+        let run = WorkflowRun {
+            kind,
+            ..in_progress_run("add-party-2", &pid(18)?)
+        };
+        insert_run(&pool, &run).await?;
+        let failed = finished(kind, RunOutcome::Failed);
+        let cancelled = finished(kind, RunOutcome::Cancelled);
+
+        let state = workflow::state::WorkflowState::new(
+            pool.clone(),
+            "add-party-2".to_string(),
+            AddPartyStep::WaitingForPeers,
+            Vec::new(),
+            None,
+        );
+        state.mark_failed("Peer p3 declined the invitation").await;
+        assert_eq!(
+            status_of(&pool, "add-party-2").await?,
+            Some(WorkflowProgress::Failed)
+        );
+        assert_eq!(finished(kind, RunOutcome::Failed), failed + 1);
+
+        let (status, task) = cancel_live_run(pool.clone(), "add-party-2", kind).await?;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            status_of(&pool, "add-party-2").await?,
+            Some(WorkflowProgress::Failed)
+        );
+        assert_eq!(finished(kind, RunOutcome::Failed), failed + 1);
+        assert_eq!(finished(kind, RunOutcome::Cancelled), cancelled);
         assert!(task.await.is_err_and(|e| e.is_cancelled()));
         Ok(())
     }
