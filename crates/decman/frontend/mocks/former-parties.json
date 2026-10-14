@@ -1,0 +1,20 @@
+{
+  "parties": [
+    {
+      "party_id": "cbtc-legacy-pool::12207c3e9a41d0b85f2e6c14a9d3b7e0f15c8a62d94e3b0717f5a8c2d6e9b41f03ab",
+      "removed_at": 1791555120,
+      "detected_at": 1791555631,
+      "purge_status": "none"
+    },
+    {
+      "party_id": "ibtc-pilot::1220e51b8d3a7f9026c4e1d5b8a3f60c92e7d41b5a8c3f0e6d29b74a1c5e8f3d2b60",
+      "removed_at": 1790582580,
+      "detected_at": 1790582712,
+      "purge_status": "succeeded",
+      "purge_started_at": 1790676004,
+      "purge_finished_at": 1790676077,
+      "purged_count": 128,
+      "kept_count": 4
+    }
+  ]
+}

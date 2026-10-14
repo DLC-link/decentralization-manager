@@ -246,10 +246,17 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
         }
     }
 
-    // Runs dead last: kicks P3, seeds contracts of a package P3 lacks, and
-    // drives a re-add that the DAR-preflight must reject — leaving P3 out of the
-    // party, so nothing may run after it (the CIP-104 phases above need P3 in).
+    // Kicks P3, seeds contracts of a package P3 lacks, and drives a re-add
+    // that the DAR-preflight must reject — leaving P3 out of the party, so only
+    // phases that want P3 out may run after it (the CIP-104 phases above need
+    // P3 in).
     phases::add_party_missing_dar::run(&mut f).await?;
+    // Purges what P3 still holds for the party it was just kicked from. It
+    // reads P3's JSON Ledger API, which only localnet exposes, and relies on
+    // the registrar party that dual_governance_onboarding creates there.
+    if matches!(f.target, common::TestTarget::Localnet) {
+        phases::purge_former_party::run(&mut f).await?;
+    }
     Ok(())
 }
 
@@ -298,5 +305,28 @@ async fn dual_governance_e2e() -> anyhow::Result<()> {
     phases::deploy_gov_core::run(&mut f).await?;
     phases::utility_onboarding::run(&mut f).await?;
     phases::dual_governance_onboarding::run(&mut f).await?;
+    Ok(())
+}
+
+/// Runs ONLY the former-party purge, plus the shortest chain that reaches it:
+/// the chain that `dual_governance_e2e` uses, then a kick of P3. The kick
+/// leaves P3 holding the main party's contracts while it still hosts the
+/// registrar party, which is the state the purge phase needs.
+///
+/// Invoke with `DECPM_E2E_TEST=purge_former_party_e2e ./integration-tests/run.sh`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires running localnet — invoke via integration-tests/run.sh"]
+async fn purge_former_party_e2e() -> anyhow::Result<()> {
+    init_tracing();
+
+    let mut f = Fixture::from_env()?;
+    f.discover_network_parties().await?;
+    phases::create_dec_party::run(&mut f).await?;
+    phases::distribute_dars::run(&mut f).await?;
+    phases::deploy_gov_core::run(&mut f).await?;
+    phases::utility_onboarding::run(&mut f).await?;
+    phases::dual_governance_onboarding::run(&mut f).await?;
+    phases::kick::run(&mut f).await?;
+    phases::purge_former_party::run(&mut f).await?;
     Ok(())
 }

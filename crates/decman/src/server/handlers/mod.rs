@@ -1,5 +1,6 @@
 mod auth;
 mod config;
+mod former_parties;
 mod governance;
 mod invitations;
 mod keys;
@@ -16,6 +17,10 @@ pub(crate) use auth::{get_auth_config, get_auth_status, grant_rights, test_auth}
 pub use config::NodeConfigResponse;
 pub(crate) use config::{
     get_network_config, get_node_config, get_node_health, healthz, metrics, save_network_config,
+};
+pub(crate) use former_parties::{
+    dismiss_former_party, list_former_parties, preview_former_party_purge, purge_former_party,
+    reconnect_after_purge,
 };
 pub(crate) use governance::{
     cancel_confirmation, cancel_proposal, confirm_action, execute_action, expire_confirmation,

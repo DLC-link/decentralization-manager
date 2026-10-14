@@ -160,6 +160,14 @@ Adding a 4th custodian involves both governance and topology:
       }'
     ```
 
+3. **Cleanup on the removed node**: The removed participant keeps every
+   contract it held for the party. It no longer sees the party's archives, so
+   those contracts go stale on it. Its DecMan lists the party under **No
+   longer hosted by this node**. The operator of the removed node purges the
+   stale contracts there. The purge takes that participant offline for about a
+   minute. See
+   [Purging the leftover contracts of a former party](PURGING_A_FORMER_PARTY.md).
+
 ### Querying Governance State
 
 **Get governance state:**
