@@ -2,7 +2,7 @@
 //! only those mappings. A participant filter on ListPartyToParticipant is
 //! applied after the entire synchronizer's mappings have been materialized.
 
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashSet, time::Duration};
 
 use anyhow::{Context, Result};
 use canton_proto_rs::com::digitalasset::canton::{
@@ -149,8 +149,20 @@ async fn discover(
     let mut party_ids: Vec<_> = response.results.into_iter().map(|r| r.party).collect();
     party_ids.sort();
     party_ids.dedup();
+    if party_ids.is_empty() {
+        return Ok(Vec::new());
+    }
 
-    let mut decentralized = HashMap::new();
+    let decentralized_namespaces: HashSet<_> = reader
+        .namespace(ListDecentralizedNamespaceDefinitionRequest {
+            base_query: Some(party_query(synchronizer_id, false)),
+            filter_namespace: String::new(),
+        })
+        .await?
+        .results
+        .into_iter()
+        .filter_map(|result| result.item.map(|item| item.decentralized_namespace))
+        .collect();
     let mut parties = Vec::new();
     // Sequential reads retain only one party's topology response at a time.
     for party_id in party_ids {
@@ -160,24 +172,7 @@ async fn discover(
         if namespace.is_empty() || Some(namespace) == own_namespace {
             continue;
         }
-        let is_decentralized = match decentralized.get(namespace) {
-            Some(value) => *value,
-            None => {
-                let response = reader
-                    .namespace(ListDecentralizedNamespaceDefinitionRequest {
-                        base_query: Some(party_query(synchronizer_id, false)),
-                        filter_namespace: namespace.to_string(),
-                    })
-                    .await?;
-                let value = response.results.into_iter().any(|r| {
-                    r.item
-                        .is_some_and(|item| item.decentralized_namespace == namespace)
-                });
-                decentralized.insert(namespace.to_string(), value);
-                value
-            }
-        };
-        if is_decentralized {
+        if decentralized_namespaces.contains(namespace) {
             continue;
         }
         let response = reader
@@ -228,6 +223,8 @@ async fn discover(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use tonic::Response;
 
     use super::*;
@@ -249,11 +246,12 @@ mod tests {
     struct Reader {
         ids: Vec<String>,
         mappings: HashMap<String, ListPartyToParticipantResponse>,
-        definitions: HashMap<String, ListDecentralizedNamespaceDefinitionResponse>,
+        definitions: ListDecentralizedNamespaceDefinitionResponse,
         party_requests: Vec<ListPartiesRequest>,
         mapping_requests: Vec<ListPartyToParticipantRequest>,
         namespace_requests: Vec<ListDecentralizedNamespaceDefinitionRequest>,
         fail_mapping: Option<String>,
+        fail_namespace: bool,
     }
 
     #[async_trait::async_trait]
@@ -294,12 +292,12 @@ mod tests {
             request: ListDecentralizedNamespaceDefinitionRequest,
         ) -> Result<ListDecentralizedNamespaceDefinitionResponse> {
             anyhow::ensure!(
-                !request.filter_namespace.is_empty(),
-                "network-wide namespace read"
+                request.filter_namespace.is_empty(),
+                "namespace read must enumerate all decentralized namespaces"
             );
-            let namespace = request.filter_namespace.clone();
             self.namespace_requests.push(request);
-            Ok(self.definitions.remove(&namespace).unwrap_or_default())
+            anyhow::ensure!(!self.fail_namespace, "namespaces unavailable");
+            Ok(std::mem::take(&mut self.definitions))
         }
     }
 
@@ -330,15 +328,13 @@ mod tests {
         }
     }
 
-    fn definition(namespace: &str) -> ListDecentralizedNamespaceDefinitionResponse {
-        ListDecentralizedNamespaceDefinitionResponse {
-            results: vec![list_decentralized_namespace_definition_response::Result {
-                item: Some(DecentralizedNamespaceDefinition {
-                    decentralized_namespace: namespace.to_string(),
-                    ..Default::default()
-                }),
+    fn definition(namespace: &str) -> list_decentralized_namespace_definition_response::Result {
+        list_decentralized_namespace_definition_response::Result {
+            item: Some(DecentralizedNamespaceDefinition {
+                decentralized_namespace: namespace.to_string(),
                 ..Default::default()
-            }],
+            }),
+            ..Default::default()
         }
     }
 
@@ -364,6 +360,7 @@ mod tests {
                 "bob::external",
                 "alice::external",
                 "dec::shared",
+                "dec::shared-two",
                 "local::own",
                 "observer::observed",
                 "foreign::other",
@@ -415,13 +412,11 @@ mod tests {
                 },
             );
         }
-        reader
-            .definitions
-            .insert("shared".into(), definition("shared"));
-        // A namespace prefix match is not the requested definition.
-        reader
-            .definitions
-            .insert("external".into(), definition("external-extra"));
+        reader.definitions.results = vec![
+            definition("shared"),
+            definition("shared-two"),
+            definition("external-extra"),
+        ];
         let parties = discover(&mut reader, SYNCHRONIZER, PARTICIPANT).await?;
         assert_eq!(
             parties
@@ -452,25 +447,13 @@ mod tests {
         assert_eq!(request.limit, MAX_HOSTED_PARTIES);
         assert_eq!(request.synchronizer_ids, ["global::synchronizer"]);
         assert_eq!(request.filter_participant, PARTICIPANT);
-        assert_eq!(
-            reader
-                .namespace_requests
-                .iter()
-                .filter(|r| r.filter_namespace == "external")
-                .count(),
-            1
-        );
-        assert!(
-            !reader
-                .namespace_requests
-                .iter()
-                .any(|r| r.filter_namespace == "own")
-        );
+        assert_eq!(reader.namespace_requests.len(), 1);
+        assert!(reader.namespace_requests[0].filter_namespace.is_empty());
         assert!(
             !reader
                 .mapping_requests
                 .iter()
-                .any(|r| r.filter_party == "dec::shared")
+                .any(|r| r.filter_party == "dec::shared" || r.filter_party == "dec::shared-two")
         );
         for request in &reader.mapping_requests {
             assert_eq!(request.filter_participant, PARTICIPANT);
@@ -511,6 +494,19 @@ mod tests {
         assert!(matches!(result, Err(e) if e.to_string().contains("incomplete snapshot")));
         assert!(reader.mapping_requests.is_empty());
         assert!(reader.namespace_requests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_failed_namespace_read_stops_before_reading_party_mappings() {
+        let mut reader = Reader {
+            ids: vec!["alice::external".into()],
+            fail_namespace: true,
+            ..Default::default()
+        };
+        let result = discover(&mut reader, SYNCHRONIZER, PARTICIPANT).await;
+        assert!(matches!(result, Err(e) if e.to_string() == "namespaces unavailable"));
+        assert_eq!(reader.namespace_requests.len(), 1);
+        assert!(reader.mapping_requests.is_empty());
     }
 
     #[tokio::test]
