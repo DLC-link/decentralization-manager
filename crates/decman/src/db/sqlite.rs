@@ -382,7 +382,7 @@ impl SchemaRead for SqlitePool {
             r"
             SELECT * FROM governance_audit
             WHERE party_id = ?
-            ORDER BY created_at DESC
+            ORDER BY created_at DESC, id DESC
             LIMIT ? OFFSET ?
             ",
         )

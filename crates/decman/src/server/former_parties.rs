@@ -463,7 +463,12 @@ pub(crate) async fn run_purge(
     // The audit row must not claim a success the party's record does not hold.
     let end = match (outcome, recorded) {
         (Ok(counts), Ok(())) => Ok(counts),
-        (Err(e), _) => Err(format!("{e:#}")),
+        (Err(e), recorded) => {
+            if let Err(e) = recorded {
+                tracing::error!(%party, "Could not record the purge outcome: {e}");
+            }
+            Err(format!("{e:#}"))
+        }
         (Ok(_), Err(e)) => {
             tracing::error!(%party, "Could not record the purge outcome: {e}");
             Err(format!(
