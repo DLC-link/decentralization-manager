@@ -15,9 +15,9 @@ use crate::canton_id::CantonId;
 
 use super::{
     AppState,
-    handlers::{get_party_credentials, packages, rules_and_threshold},
+    handlers::{get_party_credentials, packages},
     ledger_paging::FETCH_CHUNK,
-    queries::{GovernanceQueue, get_governance_confirmations},
+    queries::{GovernanceQueue, get_governance_confirmations, read_governance_state},
 };
 
 /// How often each served decparty's queue is read. An open approvals feed reads
@@ -148,6 +148,10 @@ fn summarize(queue: &GovernanceQueue, now: i64) -> PendingSummary {
 /// Reads one decparty's queue the way the approvals feed does. The feed shows
 /// an incomplete read as a shorter queue; this returns it as an error, so an
 /// outage cannot read as an empty queue.
+///
+/// The rules read is stricter than the feed's for the same reason. The feed
+/// falls back to the topology threshold when the rules contract is unreadable.
+/// That threshold is a different value, so counts split by it would be wrong.
 async fn read_queue(
     data: &web::Data<AppState>,
     decparty: &CantonId,
@@ -156,12 +160,24 @@ async fn read_queue(
         anyhow::bail!("no auth registered for this decparty");
     };
     let pkgs = packages();
-    let (rules, threshold) = rules_and_threshold(data, decparty, Some(token.clone()), &pkgs).await;
+    // Every confirm and execute choice runs on the rules contract, so a party
+    // without one has nothing to approve or execute. The notifications feed
+    // skips such a party as well.
+    let Some(rules) =
+        read_governance_state(&data.config, decparty, Some(token.clone()), &pkgs).await?
+    else {
+        return Ok(GovernanceQueue {
+            actions: Vec::new(),
+            domain_actions: Vec::new(),
+            next_cursor: None,
+            complete: true,
+        });
+    };
     let queue = get_governance_confirmations(
         &data.config,
         decparty,
-        threshold,
-        rules.as_ref(),
+        rules.threshold as usize,
+        Some(&rules),
         Some(token),
         &pkgs,
         READ_LIMIT,
@@ -525,11 +541,12 @@ mod tests {
         Ok(())
     }
 
-    /// The query layer turns a failed ledger read into a shorter queue. Here
-    /// the Ledger and Admin APIs sit on port 1, where nothing listens, and the
-    /// pass must report a failure, not an empty queue.
+    /// The query layer turns a failed ledger read into a shorter queue, and the
+    /// feed turns a failed rules read into the topology threshold. Here the
+    /// Ledger and Admin APIs sit on port 1, where nothing listens. The rules
+    /// read fails first, and the pass must fail rather than publish counts.
     #[tokio::test]
-    async fn a_ledger_outage_reads_as_a_failure_not_an_empty_queue() -> anyhow::Result<()> {
+    async fn a_failed_rules_read_fails_the_pass_and_keeps_the_gauges() -> anyhow::Result<()> {
         let decparty = party("outage")?;
         let mut data = AppState::for_test(None).await?.into_inner();
         let canton = &mut Arc::get_mut(&mut data)
@@ -554,6 +571,14 @@ mod tests {
         let expires_at = chrono::Utc::now().timestamp() + 600;
         state.apply(&decparty, &summary(3, 0, Some(expires_at)));
 
+        let error = read_queue(&data, &decparty)
+            .await
+            .err()
+            .context("an unreachable ledger must fail the read")?;
+        assert!(
+            !error.to_string().contains("behind the queue"),
+            "the rules read must fail before the queue read: {error:#}"
+        );
         let outcome = poll_once(&data, &mut state).await;
 
         assert_eq!(outcome, PollOutcome::Error);

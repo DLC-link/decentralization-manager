@@ -1060,12 +1060,45 @@ fn compute_action_hash(action: &ActionType) -> String {
 // ============================================================================
 
 /// Get the state of the GovernanceRules contract for a party
+///
+/// A failed read is logged and reads as no contract, which is what the feed
+/// shows. [`read_governance_state`] keeps the failure for a caller that must
+/// tell the two apart.
 pub async fn get_governance_state(
     config: &NodeConfig,
     party_id: &CantonId,
     token: Option<String>,
     packages: &PackageConfig,
 ) -> Result<Option<GovernanceState>> {
+    Ok(find_governance_state(config, party_id, token, packages, &mut None).await)
+}
+
+/// The GovernanceRules contract for a party. `Ok(None)` means every read
+/// succeeded and found none; `Err` means a failed read left that unknown.
+pub(crate) async fn read_governance_state(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    packages: &PackageConfig,
+) -> Result<Option<GovernanceState>> {
+    let mut failure = None;
+    let found = find_governance_state(config, party_id, token, packages, &mut failure).await;
+    match (found, failure) {
+        (Some(state), _) => Ok(Some(state)),
+        (None, Some(e)) => Err(e),
+        (None, None) => Ok(None),
+    }
+}
+
+/// Searches the configured package, then older ones. Keeps the first failed
+/// read in `failure`.
+async fn find_governance_state(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    packages: &PackageConfig,
+    failure: &mut Option<anyhow::Error>,
+) -> Option<GovernanceState> {
     // Try each governance template until we find a match
     for template in decman_lib::catalog::templates::governance_state_templates(packages) {
         match fetch_governance_state_for_template(config, party_id, token.clone(), &template).await
@@ -1074,7 +1107,7 @@ pub async fn get_governance_state(
                 // Found under the configured package — not out of date.
                 state.package_ref = Some(template.package_ref.clone());
                 state.out_of_date = false;
-                return Ok(Some(state));
+                return Some(state);
             }
             Ok(None) => continue,
             Err(e) => {
@@ -1087,13 +1120,14 @@ pub async fn get_governance_state(
                     template.module,
                     template.entity
                 );
+                failure.get_or_insert(e);
             }
         }
     }
     // Nothing under the configured packages — look for a GovernanceRules
     // contract under an older governance-core package version still
     // uploaded to the participant.
-    fetch_governance_state_fallback(config, party_id, token, packages).await
+    fetch_governance_state_fallback(config, party_id, token, packages, failure).await
 }
 
 /// Look for a GovernanceRules contract under any OLDER governance-core
@@ -1105,15 +1139,15 @@ async fn fetch_governance_state_fallback(
     party_id: &CantonId,
     token: Option<String>,
     packages: &PackageConfig,
-) -> Result<Option<GovernanceState>> {
-    let Some(configured) = packages.governance_core.as_deref() else {
-        return Ok(None);
-    };
+    failure: &mut Option<anyhow::Error>,
+) -> Option<GovernanceState> {
+    let configured = packages.governance_core.as_deref()?;
     let names = match fetch_package_names(config).await {
         Ok(names) => names,
         Err(e) => {
             tracing::warn!("Fallback gov-core discovery: cannot list packages: {e:#}");
-            return Ok(None);
+            failure.get_or_insert(e);
+            return None;
         }
     };
     let prefix = package_name_prefix(configured);
@@ -1137,7 +1171,7 @@ async fn fetch_governance_state_fallback(
                 );
                 state.package_ref = Some(template.package_ref);
                 state.out_of_date = true;
-                return Ok(Some(state));
+                return Some(state);
             }
             Ok(None) => continue,
             Err(e) => {
@@ -1150,16 +1184,18 @@ async fn fetch_governance_state_fallback(
                     tracing::debug!(
                         "Fallback gov-core query for #{name} not attempted further:                          no credentials for {party_id}"
                     );
-                    return Ok(None);
+                    failure.get_or_insert(e);
+                    return None;
                 }
                 if !e.to_string().contains("PACKAGE_NAMES_NOT_FOUND") {
                     tracing::warn!("Fallback gov-core query for #{name} failed: {e}");
+                    failure.get_or_insert(e);
                 }
                 continue;
             }
         }
     }
-    Ok(None)
+    None
 }
 
 /// Whether an error is the participant refusing the caller's credentials.
@@ -3703,5 +3739,29 @@ mod tests {
             serde_json::to_value(&contract).expect("serializes"),
             serde_json::json!({ "contract_id": "cid", "blob": "YmxvYg==" })
         );
+    }
+
+    /// With both APIs on port 1, where nothing listens, every rules read fails.
+    /// The feed's read still shows no contract; the strict read reports the
+    /// failure, so the poller cannot mistake an outage for a party without rules.
+    #[tokio::test]
+    async fn a_failed_rules_read_is_an_error_only_to_the_strict_read() -> Result {
+        let mut config = NodeConfig::default();
+        config.canton.ledger_api_port = 1;
+        config.canton.admin_api_port = 1;
+        let party = CantonId::parse(&format!("gov::{}", "0".repeat(68)))?;
+        let packages = crate::config::default_package_config();
+
+        assert!(
+            get_governance_state(&config, &party, None, &packages)
+                .await?
+                .is_none()
+        );
+        assert!(
+            read_governance_state(&config, &party, None, &packages)
+                .await
+                .is_err()
+        );
+        Ok(())
     }
 }
