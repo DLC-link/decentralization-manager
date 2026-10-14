@@ -186,14 +186,14 @@ where
 
 /// Flip the persisted run's status to Completed. Errors are logged and
 /// swallowed — the spawned task can't usefully react to a DB error here.
-async fn mark_run_completed(db: &SqlitePool, instance_name: &str) {
+pub(crate) async fn mark_run_completed(db: &SqlitePool, instance_name: &str) {
     if let Err(e) = mark_run_status(db, instance_name, WorkflowProgress::Completed, None).await {
         tracing::warn!("Failed to mark run {instance_name} completed: {e:#}");
     }
 }
 
 /// Flip the persisted run's status to Failed with a message.
-async fn mark_run_failed(db: &SqlitePool, instance_name: &str, error: &str) {
+pub(crate) async fn mark_run_failed(db: &SqlitePool, instance_name: &str, error: &str) {
     if let Err(e) = mark_run_status(
         db,
         instance_name,

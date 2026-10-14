@@ -387,7 +387,7 @@ pub(crate) async fn respawn_coordinator(
     };
     if let Err(e) = parsed {
         tracing::warn!("respawn_coordinator: bad {kind:?} config_json for {instance_name}: {e}");
-        mark_failed_via_pool(&db, &instance_name, "Resume failed: invalid config").await;
+        handlers::mark_run_failed(&db, &instance_name, "Resume failed: invalid config").await;
         return;
     }
 
@@ -498,7 +498,7 @@ fn spawn_coordinator_run(
             Ok(_) => {
                 *instance.http.status.write().await = WorkflowProgress::Completed;
                 tracing::info!("{kind:?} workflow {instance_name} completed");
-                mark_completed_via_pool(&db, &instance_name).await;
+                handlers::mark_run_completed(&db, &instance_name).await;
             }
             Err(e) => {
                 let msg = format!("{e}");
@@ -509,7 +509,7 @@ fn spawn_coordinator_run(
                     *error = Some(msg.clone());
                 }
                 tracing::error!("{kind:?} workflow {instance_name} failed: {e:#}");
-                mark_failed_via_pool(&db, &instance_name, &msg).await;
+                handlers::mark_run_failed(&db, &instance_name, &msg).await;
             }
         }
     })
@@ -548,12 +548,6 @@ pub(crate) fn refire_peer(run: &WorkflowRun, peer_job_sender: &mpsc::UnboundedSe
             run.kind,
             run.instance_name
         );
-    }
-}
-
-async fn mark_completed_via_pool(db: &SqlitePool, instance_name: &str) {
-    if let Err(e) = set_run_status(db, instance_name, WorkflowProgress::Completed, None).await {
-        tracing::warn!("Failed to mark resumed run {instance_name} completed: {e:#}");
     }
 }
 
