@@ -23,8 +23,10 @@ use super::steps::{
 };
 use crate::{config::NodeConfig, utils};
 
-// ListParties has a limit but no cursor. Refuse a full result rather than
-// publish a snapshot that silently omits parties. Match decentralized discovery.
+// ListParties has a limit but no cursor. Decentralized discovery warns and
+// continues at the limit because its exact-ID path covers parties known
+// locally. This list has no such path, so refuse a full result rather than
+// publish a snapshot that silently omits parties.
 const MAX_HOSTED_PARTIES: i32 = 5_000;
 // Hosted-party enumeration walks the synchronizer in batches: devnet took
 // 103s even with a small final response. Leave room for that work while the
