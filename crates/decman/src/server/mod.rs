@@ -1255,6 +1255,7 @@ pub async fn start_server(
 
     reward_automation::register_metrics();
     node_health::register_metrics();
+    peer_status::register_metrics();
 
     // Separate from the API server, whose ingress forwards every path. 0 disables it.
     let metrics_port = config.metrics_port;
@@ -2276,7 +2277,7 @@ async fn run_peer_ping_loop(
         let peers = match db.get_all_peers().await {
             Ok(p) => p,
             Err(e) => {
-                tracing::debug!("Failed to load peers from database for heartbeat: {e}");
+                tracing::warn!(error = %e, "Failed to load peers from database for heartbeat");
                 continue;
             }
         };
@@ -2300,10 +2301,7 @@ async fn run_peer_ping_loop(
                     // (Cannot rely on a startup-only cache: new peers must be probed.)
                     let peer_pubkey = match parse_public_key(&public_key_hex) {
                         Ok(pk) => pk,
-                        Err(e) => {
-                            tracing::debug!("Skipping probe of {id}: malformed public_key: {e}");
-                            return (id, false);
-                        }
+                        Err(e) => return (id, Err(format!("malformed public_key: {e}"))),
                     };
 
                     let now = std::time::Instant::now();
@@ -2313,7 +2311,7 @@ async fn run_peer_ping_loop(
                     };
 
                     if !stale {
-                        return (id, true);
+                        return (id, Ok(()));
                     }
 
                     let psk = keypair.derive_psk(&peer_pubkey);
@@ -2326,30 +2324,28 @@ async fn run_peer_ping_loop(
                     )
                     .await;
 
-                    let active = matches!(
-                        result,
-                        Ok(ref bytes) if Message::from_bytes(bytes)
-                            .map(|m| m.msg_type == MessageType::Pong)
-                            .unwrap_or(false)
-                    );
+                    let verdict = match result {
+                        Ok(bytes) => match Message::from_bytes(&bytes) {
+                            Ok(m) if m.msg_type == MessageType::Pong => Ok(()),
+                            Ok(m) => Err(format!("answered {:?} instead of Pong", m.msg_type)),
+                            Err(e) => Err(format!("unreadable reply: {e}")),
+                        },
+                        Err(e) => Err(e.to_string()),
+                    };
 
-                    if active {
+                    if verdict.is_ok() {
                         let now = std::time::Instant::now();
                         let mut map = last_seen.write().await;
                         peer_status::bump(&mut map, id.clone(), now);
                     }
 
-                    (id, active)
+                    (id, verdict)
                 }
             })
             .collect();
 
-        let results = futures::future::join_all(futures).await;
-
-        let mut status_map = peer_status.write().await;
-        for (id, active) in results {
-            status_map.insert(id, active);
-        }
+        let verdicts = futures::future::join_all(futures).await;
+        peer_status::record_verdicts(&mut *peer_status.write().await, verdicts);
     }
 }
 
