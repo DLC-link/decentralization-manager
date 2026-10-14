@@ -57,6 +57,7 @@ pub(crate) use workflows::{
     cancel_onboarding, cancel_workflow_instance, dismiss_workflow, get_add_party_status,
     get_change_threshold_status, get_contracts_status, get_dars_status, get_kick_status,
     get_onboarding_status, list_external_parties, list_workflows, mark_run_completed,
-    mark_run_failed, retry_workflow, start_add_party, start_change_threshold, start_contracts,
-    start_dars, start_dars_for_package, start_kick, start_onboarding, upload_dars_local,
+    mark_run_failed, register_run_metrics, retry_workflow, start_add_party, start_change_threshold,
+    start_contracts, start_dars, start_dars_for_package, start_kick, start_onboarding,
+    upload_dars_local,
 };

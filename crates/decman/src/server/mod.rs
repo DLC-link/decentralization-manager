@@ -387,7 +387,7 @@ pub(crate) async fn respawn_coordinator(
     };
     if let Err(e) = parsed {
         tracing::warn!("respawn_coordinator: bad {kind:?} config_json for {instance_name}: {e}");
-        handlers::mark_run_failed(&db, &instance_name, "Resume failed: invalid config").await;
+        handlers::mark_run_failed(&db, kind, &instance_name, "Resume failed: invalid config").await;
         return;
     }
 
@@ -498,7 +498,7 @@ fn spawn_coordinator_run(
             Ok(_) => {
                 *instance.http.status.write().await = WorkflowProgress::Completed;
                 tracing::info!("{kind:?} workflow {instance_name} completed");
-                handlers::mark_run_completed(&db, &instance_name).await;
+                handlers::mark_run_completed(&db, kind, &instance_name).await;
             }
             Err(e) => {
                 let msg = format!("{e}");
@@ -509,7 +509,7 @@ fn spawn_coordinator_run(
                     *error = Some(msg.clone());
                 }
                 tracing::error!("{kind:?} workflow {instance_name} failed: {e:#}");
-                handlers::mark_run_failed(&db, &instance_name, &msg).await;
+                handlers::mark_run_failed(&db, kind, &instance_name, &msg).await;
             }
         }
     })
@@ -1249,6 +1249,7 @@ pub async fn start_server(
 
     reward_automation::register_metrics();
     node_health::register_metrics();
+    handlers::register_run_metrics();
 
     // Separate from the API server, whose ingress forwards every path. 0 disables it.
     let metrics_port = config.metrics_port;
